@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::DevError;
+use crate::project::Project;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -11,7 +12,6 @@ use crate::error::DevError;
 
 #[derive(Debug)]
 pub struct DevConfig {
-    pub project: String,
     pub hosts: HashMap<String, HostConfig>,
 }
 
@@ -63,7 +63,10 @@ pub struct ResolvedPaths {
 // ---------------------------------------------------------------------------
 
 /// Load `brokkr.toml` from the project root directory.
-pub fn load(project_root: &Path) -> Result<DevConfig, DevError> {
+///
+/// Returns both the detected `Project` and the parsed `DevConfig`.
+/// This is the **single code path** that reads and parses `brokkr.toml`.
+pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let path = project_root.join("brokkr.toml");
     let text = std::fs::read_to_string(&path).map_err(|e| {
         DevError::Config(format!("{}: {e}", path.display()))
@@ -75,34 +78,43 @@ pub fn load(project_root: &Path) -> Result<DevConfig, DevError> {
         .as_table()
         .ok_or_else(|| DevError::Config("brokkr.toml root is not a table".into()))?;
 
-    let project = table
+    let project_str = table
         .get("project")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             DevError::Config("brokkr.toml missing required 'project' field".into())
-        })?
-        .to_owned();
+        })?;
+
+    let project = match project_str {
+        "pbfhogg" => Project::Pbfhogg,
+        "elivagar" => Project::Elivagar,
+        "nidhogg" => Project::Nidhogg,
+        other => {
+            return Err(DevError::Config(format!(
+                "unknown project '{other}' in brokkr.toml (expected: pbfhogg, elivagar, nidhogg)"
+            )));
+        }
+    };
 
     let hosts = parse_hosts(table)?;
 
-    Ok(DevConfig {
-        project,
-        hosts,
-    })
+    Ok((project, DevConfig { hosts }))
 }
 
-/// Every top-level key that is a table and is not `project` is
+/// Every top-level key that is a table and is not `datasets` is
 /// treated as a hostname section.
 fn parse_hosts(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
     for (key, value) in table {
-        if key == "project" {
+        if key == "project" || key == "datasets" {
             continue;
         }
         if !value.is_table() {
-            continue;
+            return Err(DevError::Config(format!(
+                "unknown key '{key}' in brokkr.toml"
+            )));
         }
         let hc: HostConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
             DevError::Config(format!("{key}: {e}"))

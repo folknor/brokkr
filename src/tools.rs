@@ -159,6 +159,12 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     let version_file = data_dir.join(".jdk-version");
     let java = jdk_dir.join("bin/java");
 
+    // Cache-first: if both the java binary and version marker exist, the JDK
+    // is already installed. Skip the network call entirely.
+    if java.exists() && version_file.exists() {
+        return Ok(java);
+    }
+
     let arch = detect_arch()?;
     let os = detect_os()?;
     let api_url = format!(
@@ -191,13 +197,6 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
         .ok_or_else(|| {
             DevError::Config("adoptium API missing binary.package.link".into())
         })?;
-
-    // Check cached version.
-    if java.exists()
-        && let Ok(cached) = fs::read_to_string(&version_file)
-            && cached.trim() == release_name {
-                return Ok(java);
-            }
 
     // Download.
     let tarball = data_dir.join("jdk-download.tar.gz");
@@ -248,6 +247,12 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
     let jar_path = data_dir.join("planetiler.jar");
     let version_file = data_dir.join(".planetiler-version");
 
+    // Cache-first: if both the jar and version marker exist, the jar is
+    // already installed. Skip the network call entirely.
+    if jar_path.exists() && version_file.exists() {
+        return Ok(jar_path);
+    }
+
     let api_url =
         "https://api.github.com/repos/onthegomap/planetiler/releases/latest";
 
@@ -281,13 +286,6 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
                 "github API: no planetiler.jar asset found in release".into(),
             )
         })?;
-
-    // Check cached version.
-    if jar_path.exists()
-        && let Ok(cached) = fs::read_to_string(&version_file)
-            && cached.trim() == tag_name {
-                return Ok(jar_path);
-            }
 
     // Download.
     let jar_str = jar_path.display().to_string();

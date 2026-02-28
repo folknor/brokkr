@@ -63,7 +63,7 @@ pub fn project_info() -> Result<ProjectInfo, DevError> {
     let captured = output::run_captured(
         "cargo",
         &["metadata", "--format-version", "1", "--no-deps"],
-        Path::new("."),
+        &project_root,
     )?;
 
     if !captured.status.success() {

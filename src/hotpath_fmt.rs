@@ -285,12 +285,11 @@ fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
 }
 
 /// Get an optional string field, returning "-" if null/missing.
-fn json_str_opt(value: &serde_json::Value, key: &str) -> String {
+fn json_str_opt<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
     value
         .get(key)
         .and_then(serde_json::Value::as_str)
         .unwrap_or("-")
-        .to_owned()
 }
 
 /// Format the `calls` field (u64 in JSON, display as string).

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::build;
 use crate::error::DevError;
 use crate::output;
 
@@ -13,41 +14,24 @@ use crate::output;
 // ---------------------------------------------------------------------------
 
 pub fn run(
-    target_dir: &Path,
+    _target_dir: &Path,
     project_root: &Path,
     file_a: &str,
     file_b: &str,
     sample: Option<usize>,
 ) -> Result<(), DevError> {
     // Build the example.
-    output::build_msg("cargo build --release --example compare_tiles");
-
-    let captured = output::run_captured(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "--example",
-            "compare_tiles",
-        ],
+    let binary = build::cargo_build(
+        &build::BuildConfig {
+            package: None,
+            bin: None,
+            example: Some("compare_tiles".into()),
+            features: Vec::new(),
+            default_features: true,
+            profile: "release",
+        },
         project_root,
     )?;
-
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "compare_tiles build failed: {stderr}"
-        )));
-    }
-
-    // Run the example binary.
-    let binary = target_dir.join("release/examples/compare_tiles");
-    if !binary.exists() {
-        return Err(DevError::Build(format!(
-            "compare_tiles binary not found at {}",
-            binary.display()
-        )));
-    }
 
     let mut args: Vec<String> = vec![file_a.into(), file_b.into()];
     if let Some(n) = sample {

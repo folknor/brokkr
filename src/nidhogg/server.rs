@@ -103,13 +103,15 @@ pub fn stop(project_root: &Path) -> Result<(), DevError> {
         std::fs::remove_file(&pid_path).ok();
     }
 
-    // Fallback: pkill any remaining nidhogg serve processes.
-    Command::new("pkill")
-        .args(["-f", "nidhogg serve"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok();
+    if !stopped {
+        // Fallback: pkill any remaining nidhogg serve processes.
+        Command::new("pkill")
+            .args(["-f", "nidhogg serve"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok();
+    }
 
     if stopped {
         output::run_msg("nidhogg server stopped");
@@ -137,11 +139,31 @@ fn stop_pid(pid: i32) -> bool {
         }
     }
 
-    // Still alive after 5s — escalate to SIGKILL.
+    // Still alive after 5s — check if the PID was recycled before escalating.
+    if !is_nidhogg_process(pid) {
+        // PID was recycled to a different process; the original nidhogg exited.
+        return true;
+    }
+
     output::run_msg(&format!("PID {pid} did not exit after SIGTERM, sending SIGKILL"));
     unsafe { libc::kill(pid, libc::SIGKILL) };
     std::thread::sleep(std::time::Duration::from_millis(100));
     true
+}
+
+/// Check whether the given PID is still a nidhogg process by reading
+/// `/proc/{pid}/cmdline`. Returns `false` if the PID doesn't exist or
+/// belongs to a different program (i.e., was recycled).
+fn is_nidhogg_process(pid: i32) -> bool {
+    let cmdline_path = format!("/proc/{pid}/cmdline");
+    match std::fs::read(&cmdline_path) {
+        Ok(bytes) => {
+            // /proc/pid/cmdline uses NUL as argument separator.
+            let cmdline = String::from_utf8_lossy(&bytes);
+            cmdline.contains("nidhogg")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Check if the server is responding to API requests.

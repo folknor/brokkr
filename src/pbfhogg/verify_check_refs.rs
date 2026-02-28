@@ -86,7 +86,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     }
 
     if !ways_match || !relations_match {
-        return Err(DevError::Config(
+        return Err(DevError::Verify(
             "check-refs: pbfhogg and osmium output differ".into(),
         ));
     }

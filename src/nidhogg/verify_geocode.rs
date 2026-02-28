@@ -6,9 +6,6 @@
 use crate::error::DevError;
 use crate::output;
 
-/// Default set of geocode test queries (Danish cities).
-const DEFAULT_QUERIES: &[&str] = &["Kobenhavn", "Aarhus", "Odense"];
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -21,7 +18,7 @@ pub fn run(port: u16, queries: &[&str]) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
     let queries = if queries.is_empty() {
-        DEFAULT_QUERIES
+        super::GEOCODE_TEST_QUERIES
     } else {
         queries
     };
@@ -77,22 +74,11 @@ fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
     let encoded = super::url_encode(query);
     let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
 
-    let result = std::process::Command::new("curl")
-        .args(["-s", "--compressed", &url])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
+    let stdout = match super::curl_get(&url) {
+        Ok(s) => s,
+        Err(_) => return Ok(GeoResult::Error("curl request failed".into())),
+    };
 
-    if !result.status.success() {
-        return Ok(GeoResult::Error("curl request failed".into()));
-    }
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
 
     match parsed {

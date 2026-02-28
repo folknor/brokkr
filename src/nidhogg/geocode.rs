@@ -20,27 +20,7 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
 
     output::run_msg(&format!("GET {url}"));
 
-    let result = std::process::Command::new("curl")
-        .args(["-s", "--compressed", &url])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
-
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            code: result.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stdout = super::curl_get(&url)?;
     let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
 
     let arr = parsed.as_array();
@@ -70,8 +50,3 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-

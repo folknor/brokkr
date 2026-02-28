@@ -118,7 +118,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     harness.check_sorted("roundtrip-pbfhogg", &rt_pbfhogg)?;
 
     if !all_pass {
-        return Err(DevError::Config(
+        return Err(DevError::Verify(
             "derive-changes: roundtrip produced differences".into(),
         ));
     }

@@ -78,10 +78,40 @@ pub fn run(port: u16) -> Result<(), DevError> {
         }
     }
 
+    // --- Batch vs individual comparison ---
+    output::verify_msg("=== batch vs individual comparison ===");
+    for (ind_name, ind_count, _) in &individual_results {
+        let batch_count = batch_result
+            .filter_counts
+            .iter()
+            .find(|(name, _)| name == ind_name)
+            .map(|(_, c)| *c);
+
+        match batch_count {
+            Some(bc) if bc == *ind_count => {
+                output::verify_msg(&format!(
+                    "  PASS  {ind_name}: batch={bc}, individual={ind_count}"
+                ));
+            }
+            Some(bc) => {
+                output::error(&format!(
+                    "{ind_name}: count mismatch — batch={bc}, individual={ind_count}"
+                ));
+                failures += 1;
+            }
+            None => {
+                output::error(&format!(
+                    "{ind_name}: missing from batch response"
+                ));
+                failures += 1;
+            }
+        }
+    }
+
     // --- Summary ---
     if failures > 0 {
-        return Err(DevError::Config(format!(
-            "batch verification failed: {failures} check(s) returned 0 elements"
+        return Err(DevError::Verify(format!(
+            "batch verification failed: {failures} check(s) failed"
         )));
     }
 
@@ -105,37 +135,9 @@ fn run_batch_query(port: u16) -> Result<BatchResult, DevError> {
     let body = batch_body();
 
     let start = Instant::now();
-
-    let result = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--compressed",
-            "-X", "POST",
-            &url,
-            "-H", "Content-Type: application/json",
-            "-d", &body,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
-
+    let stdout = super::curl_post(&url, &body)?;
     let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            code: result.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
 
     let mut filter_counts = Vec::new();
@@ -181,37 +183,9 @@ fn run_individual_queries(port: u16) -> Result<Vec<(String, usize, i64)>, DevErr
 
     for &(name, body) in INDIVIDUAL_QUERIES {
         let start = Instant::now();
-
-        let result = std::process::Command::new("curl")
-            .args([
-                "-s",
-                "--compressed",
-                "-X", "POST",
-                &url,
-                "-H", "Content-Type: application/json",
-                "-d", body,
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| DevError::Subprocess {
-                program: "curl".into(),
-                code: None,
-                stderr: e.to_string(),
-            })?;
-
+        let stdout = super::curl_post(&url, body)?;
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            return Err(DevError::Subprocess {
-                program: "curl".into(),
-                code: result.status.code(),
-                stderr: stderr.into_owned(),
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&result.stdout);
         let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
 
         let count = parsed

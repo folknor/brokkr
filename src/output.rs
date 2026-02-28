@@ -23,6 +23,12 @@ pub fn is_quiet() -> bool {
 // --- Prefixed output ---
 // All output goes to stdout (stderr reserved for panics only).
 // Prefix column is 10 chars wide: "[tag]" + padding to align the message.
+//
+// Quiet mode split: `run_msg`, `verify_msg`, and `download_msg` always print
+// because they represent user-facing actions that should be visible even in
+// non-verbose mode. The others (`build_msg`, `bench_msg`, `result_msg`,
+// `hotpath_msg`) are suppressed in quiet mode because they are internal
+// progress messages. Errors are never suppressed.
 
 pub fn build_msg(msg: &str) {
     if !is_quiet() {

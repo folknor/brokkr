@@ -139,11 +139,8 @@ fn available_bytes(path: &Path) -> Option<u64> {
 fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<String> {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => {
-            return Some(format!(
-                "{description}: could not read {path}"
-            ));
-        }
+        // Not on Linux, or procfs not mounted — skip the check.
+        Err(_) => return None,
     };
 
     let trimmed = content.trim();
@@ -343,6 +340,9 @@ fn read_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64) -> Op
 }
 
 /// Append a cache entry. Overwrites stale entries for the same path.
+///
+/// Uses atomic write (write to `.tmp`, then rename) to avoid races between
+/// concurrent `brokkr env` processes.
 fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex: &str) {
     let path_str = path.display().to_string();
 
@@ -360,6 +360,12 @@ fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex
 
     lines.push(format!("{path_str}\t{mtime}\t{size}\t{hex}"));
 
-    // Best-effort write; don't fail the whole command if cache write fails.
-    std::fs::write(cache_path, lines.join("\n") + "\n").ok();
+    // Atomic write: write to a temp file in the same directory, then rename.
+    // Rename is atomic on the same filesystem, preventing partial reads by
+    // concurrent processes.
+    let tmp_path = cache_path.with_extension("tmp");
+    if std::fs::write(&tmp_path, lines.join("\n") + "\n").is_ok() {
+        // Best-effort rename; don't fail the whole command if cache write fails.
+        std::fs::rename(&tmp_path, cache_path).ok();
+    }
 }

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::config::{self, DevConfig};
 use crate::error::DevError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,43 +40,17 @@ impl std::fmt::Display for Project {
 
 /// Detect the project from `./brokkr.toml` in the current working directory.
 ///
-/// Returns the project type and the project root directory (cwd).
-pub fn detect() -> Result<(Project, PathBuf), DevError> {
+/// Returns the project type, the parsed config, and the project root directory
+/// (cwd). This is the single entry point — `brokkr.toml` is read and parsed
+/// exactly once via [`config::load`].
+pub fn detect() -> Result<(Project, DevConfig, PathBuf), DevError> {
     let cwd = std::env::current_dir().map_err(|e| {
         DevError::Config(format!("cannot determine current directory: {e}"))
     })?;
 
-    let toml_path = cwd.join("brokkr.toml");
-    let text = std::fs::read_to_string(&toml_path).map_err(|e| {
-        DevError::Config(format!(
-            "brokkr.toml not found in {}: {e}\nRun brokkr from the project root directory.",
-            cwd.display()
-        ))
-    })?;
+    let (project, dev_config) = config::load(&cwd)?;
 
-    let root: toml::Value = text.parse().map_err(|e: toml::de::Error| {
-        DevError::Config(format!("brokkr.toml parse error: {e}"))
-    })?;
-
-    let project_str = root
-        .get("project")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            DevError::Config("brokkr.toml missing required 'project' field".into())
-        })?;
-
-    let project = match project_str {
-        "pbfhogg" => Project::Pbfhogg,
-        "elivagar" => Project::Elivagar,
-        "nidhogg" => Project::Nidhogg,
-        other => {
-            return Err(DevError::Config(format!(
-                "unknown project '{other}' in brokkr.toml (expected: pbfhogg, elivagar, nidhogg)"
-            )));
-        }
-    };
-
-    Ok((project, cwd))
+    Ok((project, dev_config, cwd))
 }
 
 /// Require the current project matches the expected project.

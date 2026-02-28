@@ -34,10 +34,11 @@ fn read_commit_hash(workspace_root: &Path) -> Result<String, DevError> {
         .map_err(DevError::Io)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DevError::Build(format!(
-            "git rev-parse failed: {stderr}"
-        )));
+        return Err(DevError::Subprocess {
+            program: "git".to_owned(),
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
@@ -51,8 +52,11 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
         .map_err(DevError::Io)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DevError::Build(format!("git log failed: {stderr}")));
+        return Err(DevError::Subprocess {
+            program: "git".to_owned(),
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())

@@ -13,8 +13,8 @@ use super::{
 /// Run all verify commands sequentially.
 ///
 /// Each command is wrapped so that a failure is logged but does not prevent
-/// the remaining commands from running. Returns `Ok(())` unconditionally —
-/// individual failures are reported inline via `verify_msg`.
+/// the remaining commands from running. Returns `Err` when one or more
+/// commands failed; individual failures are reported inline via `verify_msg`.
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
@@ -126,5 +126,8 @@ pub fn run(
         "===== all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ====="
     ));
 
+    if failed > 0 {
+        return Err(DevError::Verify(format!("{failed} verify command(s) failed")));
+    }
     Ok(())
 }

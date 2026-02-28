@@ -43,5 +43,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     // --- Sort flag ---
     harness.check_sorted("pbfhogg sort", &pbfhogg_out)?;
 
+    if !identical {
+        return Err(DevError::Verify(
+            "sort: pbfhogg and osmium output differ".into(),
+        ));
+    }
+
     Ok(())
 }

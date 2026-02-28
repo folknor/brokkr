@@ -22,8 +22,8 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    data_dir: &Path,
-    scratch_dir: &Path,
+    _data_dir: &Path,
+    _scratch_dir: &Path,
 ) -> Result<(), DevError> {
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
@@ -34,8 +34,8 @@ pub fn run(
         pbf_path,
         file_mb,
         runs,
-        data_dir,
-        scratch_dir,
+        &paths.data_dir,
+        &paths.scratch_dir,
         project_root,
         None,    // skip_to
         false,   // no_ocean
@@ -50,7 +50,7 @@ pub fn run(
         file_mb,
         runs,
         &paths.data_dir,
-        scratch_dir,
+        &paths.scratch_dir,
         project_root,
     ) {
         Ok(()) => {}

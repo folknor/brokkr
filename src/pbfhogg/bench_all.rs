@@ -66,11 +66,7 @@ pub fn run(
 
     // 3. bench write -- sync + pipelined x default compressions
     output::bench_msg("=== bench write ===");
-    let write_compressions = vec![
-        ("none".into(), "none".into()),
-        ("zlib:6".into(), "zlib:6".into()),
-        ("zstd:3".into(), "zstd:3".into()),
-    ];
+    let write_compressions = super::parse_compressions("none,zlib,zstd", true)?;
     bench_write::run(
         harness,
         &binary,
@@ -112,10 +108,7 @@ fn run_dataset_dependent(
 
     if let Some(ref osc_path) = osc_path {
         output::bench_msg("=== bench merge ===");
-        let merge_compressions = vec![
-            ("zlib".into(), "zlib".into()),
-            ("none".into(), "none".into()),
-        ];
+        let merge_compressions = super::parse_compressions("zlib,none", false)?;
         bench_merge::run(
             harness, binary, pbf_path, osc_path, file_mb, runs,
             &merge_compressions, false, &paths.scratch_dir, project_root,

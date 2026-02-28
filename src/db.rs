@@ -85,6 +85,11 @@ CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_runs_uuid ON runs(uuid);
 ";
 
+const SELECT_COLS: &str = "\
+id, timestamp, hostname, [commit], subject, command, variant, \
+input_file, input_mb, elapsed_ms, cargo_features, cargo_profile, \
+kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid";
+
 const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, variant, \
@@ -98,12 +103,12 @@ INSERT INTO runs (\
 
 impl ResultsDb {
     /// Open (or create) the database at `path`. Creates schema and enables WAL
-    /// mode. Migrates existing databases to add the uuid column.
+    /// mode. Runs any pending migrations based on `PRAGMA user_version`.
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
-        migrate_uuid(&conn)?;
+        run_migrations(&conn)?;
         Ok(Self { conn })
     }
 
@@ -138,8 +143,8 @@ impl ResultsDb {
 
     /// Query rows by UUID prefix.
     pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
-        let sql = "SELECT * FROM runs WHERE uuid LIKE ?1||'%' ORDER BY id DESC";
-        let mut stmt = self.conn.prepare(sql)?;
+        let sql = format!("SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1||'%' ORDER BY id DESC");
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![prefix], map_stored_row)?;
         collect_rows(rows)
     }
@@ -162,10 +167,12 @@ impl ResultsDb {
         a: &str,
         b: &str,
     ) -> Result<(Vec<StoredRow>, Vec<StoredRow>), DevError> {
-        let sql = "SELECT * FROM runs WHERE [commit] LIKE ?1||'%' \
-                   ORDER BY command, variant";
-        let rows_a = query_commit(&self.conn, sql, a)?;
-        let rows_b = query_commit(&self.conn, sql, b)?;
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM runs WHERE [commit] LIKE ?1||'%' \
+             ORDER BY command, variant, id DESC"
+        );
+        let rows_a = query_commit(&self.conn, &sql, a)?;
+        let rows_b = query_commit(&self.conn, &sql, b)?;
         Ok((rows_a, rows_b))
     }
 }
@@ -195,30 +202,30 @@ fn collect_rows(
 }
 
 fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
-    let extra_raw: Option<String> = row.get(16)?;
+    let extra_raw: Option<String> = row.get("extra")?;
     let extra = match extra_raw {
         Some(s) => serde_json::from_str(&s).ok(),
         None => None,
     };
     Ok(StoredRow {
-        id: row.get(0)?,
-        timestamp: row.get(1)?,
-        hostname: row.get(2)?,
-        commit: row.get(3)?,
-        subject: row.get(4)?,
-        command: row.get(5)?,
-        variant: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-        input_file: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-        input_mb: row.get(8)?,
-        elapsed_ms: row.get(9)?,
-        cargo_features: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-        cargo_profile: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-        kernel: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-        cpu_governor: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
-        avail_memory_mb: row.get(14)?,
-        storage_notes: row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+        id: row.get("id")?,
+        timestamp: row.get("timestamp")?,
+        hostname: row.get("hostname")?,
+        commit: row.get("commit")?,
+        subject: row.get("subject")?,
+        command: row.get("command")?,
+        variant: row.get::<_, Option<String>>("variant")?.unwrap_or_default(),
+        input_file: row.get::<_, Option<String>>("input_file")?.unwrap_or_default(),
+        input_mb: row.get("input_mb")?,
+        elapsed_ms: row.get("elapsed_ms")?,
+        cargo_features: row.get::<_, Option<String>>("cargo_features")?.unwrap_or_default(),
+        cargo_profile: row.get::<_, Option<String>>("cargo_profile")?.unwrap_or_default(),
+        kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),
+        cpu_governor: row.get::<_, Option<String>>("cpu_governor")?.unwrap_or_default(),
+        avail_memory_mb: row.get("avail_memory_mb")?,
+        storage_notes: row.get::<_, Option<String>>("storage_notes")?.unwrap_or_default(),
         extra,
-        uuid: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
+        uuid: row.get::<_, Option<String>>("uuid")?.unwrap_or_default(),
     })
 }
 
@@ -248,7 +255,7 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         clauses.push(format!("variant = ?{}", params.len()));
     }
 
-    let mut sql = String::from("SELECT * FROM runs");
+    let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
     if !clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&clauses.join(" AND "));
@@ -282,18 +289,35 @@ pub fn short_uuid(uuid: &str) -> String {
     uuid[..8.min(uuid.len())].to_owned()
 }
 
-/// Migrate existing databases: add uuid column and backfill.
+/// Current schema version. Increment when adding new migrations.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Run all pending migrations based on `PRAGMA user_version`.
+fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+
+    if current >= SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    if current < 1 {
+        migrate_uuid(conn)?;
+    }
+
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Migration v0 -> v1: add uuid column and backfill.
 fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
     let has_uuid = conn
         .prepare("PRAGMA table_info(runs)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .any(|name| name.as_deref() == Ok("uuid"));
 
-    if has_uuid {
-        return Ok(());
+    if !has_uuid {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN uuid TEXT")?;
     }
-
-    conn.execute_batch("ALTER TABLE runs ADD COLUMN uuid TEXT")?;
 
     // Backfill existing rows with generated UUIDs.
     let mut stmt = conn.prepare("SELECT id FROM runs WHERE uuid IS NULL")?;
@@ -568,17 +592,19 @@ fn build_comparison_pairs(
 
     for row in rows_a {
         let key = pair_key(&row.command, &row.variant);
-        if !a_map.contains_key(&key) {
-            keys.push(key.clone());
+        if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
+            keys.push(key);
+            e.insert(row.elapsed_ms);
         }
-        a_map.insert(key, row.elapsed_ms);
     }
     for row in rows_b {
         let key = pair_key(&row.command, &row.variant);
-        if !a_map.contains_key(&key) && !b_map.contains_key(&key) {
-            keys.push(key.clone());
+        if !b_map.contains_key(&key) {
+            if !a_map.contains_key(&key) {
+                keys.push(key.clone());
+            }
+            b_map.insert(key, row.elapsed_ms);
         }
-        b_map.insert(key, row.elapsed_ms);
     }
 
     keys.into_iter()

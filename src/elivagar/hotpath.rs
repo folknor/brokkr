@@ -115,6 +115,14 @@ pub fn run(
             ],
         )?;
 
+        if !captured.status.success() {
+            return Err(DevError::Subprocess {
+                program: binary_str.to_owned(),
+                code: captured.status.code(),
+                stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
+            });
+        }
+
         let ms = harness::elapsed_to_ms(&captured.elapsed);
 
         // Read and parse the JSON hotpath report.

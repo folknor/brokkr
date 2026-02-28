@@ -85,7 +85,7 @@ fn run_tests(
     let mut failed = 0u32;
 
     // Geocode tests.
-    let geocode_queries = &["Kobenhavn", "Aarhus", "Odense"];
+    let geocode_queries = super::GEOCODE_TEST_QUERIES;
     for query in geocode_queries {
         match run_geocode_check(port, query) {
             Ok(true) => {
@@ -138,22 +138,11 @@ fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
     let encoded = super::url_encode(query);
     let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
 
-    let result = std::process::Command::new("curl")
-        .args(["-s", "--compressed", &url])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
+    let stdout = match super::curl_get(&url) {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
 
-    if !result.status.success() {
-        return Ok(false);
-    }
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
 
     match parsed {
@@ -170,31 +159,13 @@ fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
 /// Check a single API query returns non-empty elements.
 fn run_query_check(port: u16) -> Result<bool, DevError> {
     let url = format!("http://localhost:{port}/api/query");
-    let body = r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#;
+    let body = super::DEFAULT_API_QUERY;
 
-    let result = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--compressed",
-            "-X", "POST",
-            &url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
+    let stdout = match super::curl_post(&url, body) {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
 
-    if !result.status.success() {
-        return Ok(false);
-    }
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
 
     match parsed {
@@ -215,7 +186,7 @@ fn set_permissions(
     writable: bool,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let mode_arg = if writable { "u+w" } else { "a-w" };
+    let mode_arg = if writable { "u+w" } else { "u-w" };
     let dir_str = dir.display().to_string();
 
     let result = std::process::Command::new("chmod")

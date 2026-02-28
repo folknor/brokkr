@@ -3,8 +3,6 @@
 //! Replaces `bench-api.sh`. Runs 4 hardcoded spatial queries against the
 //! running nidhogg server, collecting timing distributions via curl.
 
-use std::time::Instant;
-
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -93,15 +91,17 @@ pub fn run(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Run a single curl request and return the elapsed time in milliseconds.
+/// Run a single curl request and return the HTTP round-trip time in milliseconds.
+///
+/// Uses curl's `--write-out '%{time_total}'` to measure actual HTTP timing,
+/// excluding process spawn overhead.
 fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
-    let start = Instant::now();
-
     let output = std::process::Command::new("curl")
         .args([
             "-s",
             "--compressed",
             "-o", "/dev/null",
+            "-w", "\n%{time_total}",
             "-X", "POST",
             url,
             "-H", "Content-Type: application/json",
@@ -116,9 +116,6 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
             stderr: e.to_string(),
         })?;
 
-    let elapsed = start.elapsed();
-    let ms = i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX);
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DevError::Subprocess {
@@ -127,6 +124,14 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
             stderr: stderr.into_owned(),
         });
     }
+
+    // curl writes the time_total after a newline in stdout (via -w).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let time_str = stdout.trim();
+
+    // time_total is in seconds with fractional part (e.g., "0.042367").
+    let seconds: f64 = time_str.parse().unwrap_or(0.0);
+    let ms = (seconds * 1000.0) as i64;
 
     Ok(ms)
 }

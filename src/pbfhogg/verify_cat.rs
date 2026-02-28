@@ -11,6 +11,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let outdir = harness.subdir("cat")?;
 
     let pbf_str = pbf.display().to_string();
+    let mut all_identical = true;
 
     for elem_type in &["node", "way", "relation"] {
         verify_msg(&format!("=== verify cat -t {elem_type} ==="));
@@ -43,10 +44,17 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
             verify_msg(&format!("  diff ({elem_type}): PASS (identical)"));
         } else {
             verify_msg(&format!("  diff ({elem_type}): FAIL (differences found)"));
+            all_identical = false;
         }
 
         // --- Sort feature comparison ---
         harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?;
+    }
+
+    if !all_identical {
+        return Err(DevError::Verify(
+            "cat: pbfhogg and osmium output differ".into(),
+        ));
     }
 
     Ok(())

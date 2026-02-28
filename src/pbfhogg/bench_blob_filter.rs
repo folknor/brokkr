@@ -14,7 +14,7 @@ fn command_args(name: &str, pbf: &str) -> Vec<String> {
         "cat-relation" => vec!["cat".into(), pbf.into(), "--type".into(), "relation".into(), "-o".into(), "/dev/null".into()],
         "tags-count-way" => vec!["tags-count".into(), pbf.into(), "--type".into(), "way".into(), "--min-count".into(), "999999999".into()],
         "node-stats" => vec!["node-stats".into(), pbf.into()],
-        _ => Vec::new(),
+        _ => unreachable!("unknown command: {name}"),
     }
 }
 

@@ -34,41 +34,31 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     verify_msg("--- pbfhogg diff ---");
     let captured = harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str])?;
 
-    let pbfhogg_diff_path = outdir.join("pbfhogg-diff.txt");
-    let pbfhogg_summary_path = outdir.join("pbfhogg-summary.txt");
-    fs::write(&pbfhogg_diff_path, &captured.stdout)?;
-    fs::write(&pbfhogg_summary_path, &captured.stderr)?;
+    fs::write(outdir.join("pbfhogg-diff.txt"), &captured.stdout)?;
+    fs::write(outdir.join("pbfhogg-summary.txt"), &captured.stderr)?;
+    let pbfhogg_diff = String::from_utf8_lossy(&captured.stdout);
+    let pbfhogg_summary = String::from_utf8_lossy(&captured.stderr);
 
     // osmium diff — exits non-zero when differences exist, so do NOT check_exit.
     verify_msg("--- osmium diff ---");
     let captured =
         harness.run_tool("osmium", &["diff", &pbf_str, &new_pbf_str, "--summary"])?;
 
-    let osmium_diff_path = outdir.join("osmium-diff.txt");
-    let osmium_summary_path = outdir.join("osmium-summary.txt");
-    fs::write(&osmium_diff_path, &captured.stdout)?;
-    fs::write(&osmium_summary_path, &captured.stderr)?;
+    fs::write(outdir.join("osmium-diff.txt"), &captured.stdout)?;
+    fs::write(outdir.join("osmium-summary.txt"), &captured.stderr)?;
+    let osmium_diff = String::from_utf8_lossy(&captured.stdout);
+    let osmium_summary = String::from_utf8_lossy(&captured.stderr);
 
     // Print summaries (from stderr).
     verify_msg("=== pbfhogg diff summary ===");
-    let pbfhogg_summary_bytes = fs::read(&pbfhogg_summary_path)?;
-    let pbfhogg_summary = String::from_utf8_lossy(&pbfhogg_summary_bytes);
     for line in pbfhogg_summary.lines() {
         verify_msg(&format!("  {line}"));
     }
 
     verify_msg("=== osmium diff summary ===");
-    let osmium_summary_bytes = fs::read(&osmium_summary_path)?;
-    let osmium_summary = String::from_utf8_lossy(&osmium_summary_bytes);
     for line in osmium_summary.lines() {
         verify_msg(&format!("  {line}"));
     }
-
-    // Line counts from stdout files.
-    let pbfhogg_diff_bytes = fs::read(&pbfhogg_diff_path)?;
-    let pbfhogg_diff = String::from_utf8_lossy(&pbfhogg_diff_bytes);
-    let osmium_diff_bytes = fs::read(&osmium_diff_path)?;
-    let osmium_diff = String::from_utf8_lossy(&osmium_diff_bytes);
 
     let pbfhogg_lines = pbfhogg_diff.lines().count();
     let osmium_lines = osmium_diff.lines().count();
@@ -81,7 +71,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
         verify_msg("  PASS (line counts match)");
     } else {
         verify_msg("  FAIL (line counts differ)");
-        return Err(DevError::Config(format!(
+        return Err(DevError::Verify(format!(
             "diff line count mismatch: pbfhogg={pbfhogg_lines}, osmium={osmium_lines}"
         )));
     }

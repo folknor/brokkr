@@ -25,6 +25,8 @@ pub enum DevError {
     Lock(String),
     /// Database error (SQLite operations).
     Database(String),
+    /// A verification check found a mismatch or unexpected result.
+    Verify(String),
 }
 
 impl fmt::Display for DevError {
@@ -57,6 +59,7 @@ impl fmt::Display for DevError {
             }
             DevError::Lock(msg) => write!(f, "lock: {msg}"),
             DevError::Database(msg) => write!(f, "database: {msg}"),
+            DevError::Verify(msg) => write!(f, "verify: {msg}"),
         }
     }
 }
@@ -70,7 +73,8 @@ impl StdError for DevError {
             | DevError::Preflight(_)
             | DevError::Subprocess { .. }
             | DevError::Lock(_)
-            | DevError::Database(_) => None,
+            | DevError::Database(_)
+            | DevError::Verify(_) => None,
         }
     }
 }

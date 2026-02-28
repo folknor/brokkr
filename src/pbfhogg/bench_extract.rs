@@ -26,7 +26,7 @@ fn strategy_args(name: &str, pbf: &str, bbox: &str) -> Vec<String> {
         "simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), bbox.into(), "-o".into(), "/dev/null".into()],
         "complete" => vec!["extract".into(), pbf.into(), "-b".into(), bbox.into(), "-o".into(), "/dev/null".into()],
         "smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), bbox.into(), "-o".into(), "/dev/null".into()],
-        _ => Vec::new(),
+        _ => unreachable!("unknown strategy: {name}"),
     }
 }
 

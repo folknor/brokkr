@@ -46,8 +46,8 @@ pub fn parse_command(input: &str) -> Result<Vec<&'static str>, DevError> {
     )))
 }
 
-fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>) -> Vec<String> {
-    match name {
+fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>) -> Result<Vec<String>, DevError> {
+    let args = match name {
         "fileinfo" => vec!["fileinfo".into(), "--extended".into(), pbf.into()],
         "check-refs" => vec!["check-refs".into(), pbf.into()],
         "sort" => vec!["sort".into(), pbf.into(), "-o".into(), "/dev/null".into()],
@@ -66,15 +66,16 @@ fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>) -> Vec<String> 
         "extract-smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), "/dev/null".into()],
         "node-stats" => vec!["node-stats".into(), pbf.into()],
         "diff" => {
-            let m = merged_pbf.expect("diff requires merged PBF");
+            let m = merged_pbf.ok_or_else(|| DevError::Config("diff requires merged PBF".into()))?;
             vec!["diff".into(), pbf.into(), m.into(), "-c".into()]
         }
         "derive-changes" => {
-            let m = merged_pbf.expect("derive-changes requires merged PBF");
+            let m = merged_pbf.ok_or_else(|| DevError::Config("derive-changes requires merged PBF".into()))?;
             vec!["derive-changes".into(), pbf.into(), m.into(), "-o".into(), "/dev/null".into()]
         }
-        _ => Vec::new(),
-    }
+        _ => unreachable!("unknown command: {name}"),
+    };
+    Ok(args)
 }
 
 /// Check whether any of the requested commands need a merged PBF.
@@ -162,7 +163,7 @@ pub fn run(
 
     for &name in commands {
         output::bench_msg(&format!("command: {name}"));
-        let args = command_args(name, pbf_str, merged_str);
+        let args = command_args(name, pbf_str, merged_str)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {

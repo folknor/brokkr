@@ -6,9 +6,6 @@
 use crate::error::DevError;
 use crate::output;
 
-/// Default query: Copenhagen highways.
-const DEFAULT_QUERY: &str = r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#;
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -17,39 +14,12 @@ const DEFAULT_QUERY: &str = r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"high
 pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
-    let body = query_json.unwrap_or(DEFAULT_QUERY);
+    let body = query_json.unwrap_or(super::DEFAULT_API_QUERY);
     let url = format!("http://localhost:{port}/api/query");
 
     output::run_msg(&format!("POST {url}"));
 
-    let result = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--compressed",
-            "-X", "POST",
-            &url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
-
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            code: result.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stdout = super::curl_post(&url, body)?;
     let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
 
     let elements = parsed

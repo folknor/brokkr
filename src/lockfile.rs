@@ -1,18 +1,19 @@
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 use crate::error::DevError;
 
-/// RAII lock guard. Releases the flock and closes the fd on drop.
+/// RAII lock guard. Releases the flock on drop; `OwnedFd` closes the fd.
 pub struct LockGuard {
-    fd: RawFd,
+    fd: OwnedFd,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
+        // The flock is released automatically when the fd is closed, but
+        // unlock explicitly for clarity. OwnedFd handles close.
         unsafe {
-            libc::flock(self.fd, libc::LOCK_UN);
-            libc::close(self.fd);
+            libc::flock(self.fd.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
@@ -28,12 +29,16 @@ pub fn acquire(dir: &Path) -> Result<LockGuard, DevError> {
 
     match try_flock(fd) {
         Ok(()) => {
-            write_pid(fd);
-            Ok(LockGuard { fd })
+            // SAFETY: `fd` is a valid open file descriptor returned by `open_lock_file`,
+            // and we take unique ownership here — it is not used elsewhere.
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            write_pid(owned.as_raw_fd());
+            Ok(LockGuard { fd: owned })
         }
         Err(held_by) => {
             // flock failed — close the fd before returning the error.
-            unsafe { libc::close(fd) };
+            // SAFETY: same as above — valid fd, unique ownership.
+            let _close = unsafe { OwnedFd::from_raw_fd(fd) };
             Err(held_by)
         }
     }
@@ -129,13 +134,21 @@ fn read_holder_command(pid: &str) -> String {
 }
 
 /// Truncate the lock file and write the current PID.
+///
+/// Best-effort for diagnostics — if any step fails we simply return early.
 fn write_pid(fd: RawFd) {
     let pid = std::process::id().to_string();
 
     unsafe {
-        libc::ftruncate(fd, 0);
-        libc::lseek(fd, 0, libc::SEEK_SET);
-        libc::write(fd, pid.as_ptr().cast(), pid.len());
+        if libc::ftruncate(fd, 0) == -1 {
+            return;
+        }
+        if libc::lseek(fd, 0, libc::SEEK_SET) == -1 {
+            return;
+        }
+        if libc::write(fd, pid.as_ptr().cast(), pid.len()) == -1 {
+            return;
+        }
     }
 }
 
