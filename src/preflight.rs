@@ -221,13 +221,41 @@ pub fn profile_checks(tool: &str) -> Vec<Check> {
     ]
 }
 
-/// Preflight checks for io_uring (RLIMIT_MEMLOCK must be >= 16 MB).
+/// Preflight checks for io_uring.
+///
+/// Four tunables can block io_uring:
+/// 1. `/proc/sys/kernel/io_uring_disabled` must be 0 (upstream kill switch, kernel ≥6.6)
+/// 2. `/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring` must be 0 (Ubuntu/Debian)
+/// 3. `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` must be 0 (Ubuntu/Debian)
+/// 4. `RLIMIT_MEMLOCK` >= 16 MB (for pinned ring buffers)
+///
+/// The kernel param checks pass when the file is absent (older kernels, non-Ubuntu).
 pub fn uring_checks() -> Vec<Check> {
-    vec![Check::Rlimit {
-        resource: libc::RLIMIT_MEMLOCK,
-        min_bytes: 16 * 1024 * 1024,
-        description: "RLIMIT_MEMLOCK too low for io_uring (try: ulimit -l 65536)",
-    }]
+    vec![
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/io_uring_disabled",
+            max_value: 0,
+            description: "io_uring is disabled by kernel\n\
+                          Fix: echo 0 | sudo tee /proc/sys/kernel/io_uring_disabled",
+        },
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring",
+            max_value: 0,
+            description: "AppArmor restricts unprivileged io_uring\n\
+                          Fix: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_io_uring",
+        },
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+            max_value: 0,
+            description: "AppArmor restricts unprivileged user namespaces\n\
+                          Fix: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        },
+        Check::Rlimit {
+            resource: libc::RLIMIT_MEMLOCK,
+            min_bytes: 16 * 1024 * 1024,
+            description: "RLIMIT_MEMLOCK too low for io_uring (try: ulimit -l 65536)",
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------
