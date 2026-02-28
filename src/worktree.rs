@@ -2,6 +2,9 @@
 //!
 //! Creates a temporary worktree at a specific commit so we can build old code
 //! while keeping data paths and the results DB in the main tree.
+//!
+//! The worktree is placed as a sibling to the project root (not inside it)
+//! so that relative path dependencies (e.g. `../pbfhogg`) still resolve.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,8 +27,9 @@ pub struct Worktree {
 impl Worktree {
     /// Create a worktree at the given commit ref (hash, branch, tag, HEAD~N, etc.).
     ///
-    /// The worktree is placed at `<project_root>/.brokkr/worktree/<short_hash>`.
-    /// Returns an error if the commit doesn't exist or the worktree can't be created.
+    /// The worktree is placed at `<parent>/.brokkr-worktree-<project>-<short_hash>`
+    /// as a sibling to the project root, so that relative path dependencies
+    /// (e.g. `../pbfhogg`) resolve correctly.
     pub fn create(project_root: &Path, commit_ref: &str) -> Result<Self, DevError> {
         // Validate the commit exists.
         let full_hash = run_git(project_root, &["rev-parse", "--verify", commit_ref])?;
@@ -34,10 +38,15 @@ impl Worktree {
         let short = run_git(project_root, &["rev-parse", "--short", commit_ref])?;
         let subject = run_git(project_root, &["log", "-1", "--format=%s", commit_ref])?;
 
-        let worktree_dir = project_root
-            .join(".brokkr")
-            .join("worktree")
-            .join(&short);
+        // Place worktree as a sibling so relative path deps still work.
+        let parent = project_root.parent().ok_or_else(|| {
+            DevError::Config("project root has no parent directory".into())
+        })?;
+        let project_name = project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project");
+        let worktree_dir = parent.join(format!(".brokkr-worktree-{project_name}-{short}"));
 
         // Clean up stale worktree at this path if it exists.
         if worktree_dir.exists() {
