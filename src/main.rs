@@ -596,8 +596,11 @@ fn run_tests(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let mut args = vec!["test"];
-    let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();
-    args.extend_from_slice(&extra_refs);
+    if !extra_args.is_empty() {
+        args.push("--");
+        let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();
+        args.extend_from_slice(&extra_refs);
+    }
 
     output::run_msg(&format!("cargo {}", args.join(" ")));
 
@@ -1078,7 +1081,18 @@ fn cmd_bench_commands(
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
-    pbfhogg::bench_commands::run(&harness, &binary, &pbf_path, file_mb, runs, &commands, project_root)
+    let osc_path = resolve_osc_path(None, dataset, &dev_config, &paths, project_root).ok();
+    pbfhogg::bench_commands::run(
+        &harness,
+        &binary,
+        &pbf_path,
+        osc_path.as_deref(),
+        Some(&paths.scratch_dir),
+        file_mb,
+        runs,
+        &commands,
+        project_root,
+    )
 }
 
 fn cmd_bench_extract(

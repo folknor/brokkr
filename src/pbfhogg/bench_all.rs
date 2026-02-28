@@ -29,13 +29,21 @@ pub fn run(
     runs: usize,
     dataset: &str,
 ) -> Result<(), DevError> {
-    // 1. bench commands -- all 14
+    // 1. bench commands -- all
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
+    let osc_path = dev_config
+        .datasets
+        .get(dataset)
+        .and_then(|ds| ds.osc.as_ref())
+        .map(|osc_file| paths.data_dir.join(osc_file))
+        .filter(|p| p.exists());
     bench_commands::run(
         harness,
         &binary,
         pbf_path,
+        osc_path.as_deref(),
+        Some(&paths.scratch_dir),
         file_mb,
         runs,
         bench_commands::ALL_COMMANDS,
