@@ -9,6 +9,7 @@ mod lockfile;
 mod output;
 mod pbfhogg;
 mod elivagar;
+mod nidhogg;
 #[allow(dead_code)]
 mod preflight;
 mod project;
@@ -140,6 +141,51 @@ enum Command {
     },
     /// Download ocean shapefiles (elivagar)
     DownloadOcean,
+    /// Start the nidhogg server (nidhogg only)
+    Serve {
+        /// Data directory (ingested disk format)
+        #[arg(long)]
+        data_dir: Option<String>,
+
+        /// Dataset name from dev.toml (default: denmark)
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+
+        /// Path to PMTiles file for tile serving
+        #[arg(long)]
+        tiles: Option<String>,
+    },
+    /// Stop the nidhogg server (nidhogg only)
+    Stop,
+    /// Check nidhogg server status (nidhogg only)
+    Status,
+    /// Ingest a PBF into nidhogg disk format (nidhogg only)
+    Ingest {
+        /// Explicit PBF file path
+        #[arg(long)]
+        pbf: Option<String>,
+
+        /// Dataset name from dev.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+    },
+    /// Run nidhogg-update for diff application (nidhogg only)
+    Update {
+        /// Arguments passed to nidhogg-update
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Send a test query to the nidhogg server (nidhogg only)
+    Query {
+        /// JSON query body (default: Copenhagen highways)
+        json: Option<String>,
+    },
+    /// Test geocoding on the nidhogg server (nidhogg only)
+    Geocode {
+        /// Search term (default: Kobenhavn)
+        #[arg(default_value = "København")]
+        term: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -308,6 +354,27 @@ enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
+
+    // ----- Nidhogg bench variants -----
+
+    /// Nidhogg: API query benchmark
+    Api {
+        /// Run count
+        #[arg(long, default_value = "10")]
+        runs: usize,
+        /// Only run this specific query (cph_highways, cph_large, cph_small_nofilter, cph_buildings)
+        #[arg(long)]
+        query: Option<String>,
+    },
+    /// Nidhogg: ingest benchmark
+    NidIngest {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long)]
+        pbf: Option<String>,
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -401,6 +468,23 @@ enum VerifyCommand {
         #[arg(long)]
         bbox: Option<String>,
     },
+
+    // ----- Nidhogg verify variants -----
+
+    /// Nidhogg: batch query verification
+    Batch,
+    /// Nidhogg: geocode verification
+    NidGeocode {
+        /// Search terms to test
+        #[arg(trailing_var_arg = true)]
+        queries: Vec<String>,
+    },
+    /// Nidhogg: read-only filesystem verification
+    Readonly {
+        /// Dataset name from dev.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+    },
 }
 
 fn main() {
@@ -447,6 +531,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
             cmd_compare_tiles(project, &project_root, &file_a, &file_b, sample)
         }
         Command::DownloadOcean => cmd_download_ocean(project, &project_root),
+        Command::Serve { data_dir, dataset, tiles } => {
+            cmd_serve(project, &project_root, data_dir, dataset, tiles)
+        }
+        Command::Stop => cmd_stop(project, &project_root),
+        Command::Status => cmd_status(project, &project_root),
+        Command::Ingest { pbf, dataset } => {
+            cmd_ingest(project, &project_root, pbf, dataset)
+        }
+        Command::Update { args } => cmd_update(project, &project_root, &args),
+        Command::Query { json } => cmd_query(project, &project_root, json),
+        Command::Geocode { term } => cmd_geocode(project, &project_root, &term),
     }
 }
 
@@ -612,6 +707,18 @@ fn cmd_clean(project: Project, project_root: &Path) -> Result<(), DevError> {
             std::fs::remove_dir_all(&paths.scratch_dir)?;
             std::fs::create_dir_all(&paths.scratch_dir)?;
             output::run_msg("cleaned tilegen_tmp");
+        } else if project == Project::Nidhogg {
+            // Clean nidhogg scratch temp files
+            let ingest_tmp = project_root.join(".ingest_tmp");
+            if ingest_tmp.exists() {
+                std::fs::remove_dir_all(&ingest_tmp)?;
+                output::run_msg("cleaned .ingest_tmp");
+            }
+            let tilegen_tmp = project_root.join(".tilegen_tmp");
+            if tilegen_tmp.exists() {
+                std::fs::remove_dir_all(&tilegen_tmp)?;
+                output::run_msg("cleaned .tilegen_tmp");
+            }
         } else {
             let mut removed = 0u32;
             if let Ok(entries) = std::fs::read_dir(&paths.scratch_dir) {
@@ -834,6 +941,16 @@ fn cmd_bench(project: Project, project_root: &Path, bench: BenchCommand) -> Resu
         BenchCommand::ElivAll { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-all")?;
             cmd_bench_eliv_all(project, project_root, dataset, pbf, runs)
+        }
+
+        // ----- nidhogg bench variants -----
+        BenchCommand::Api { runs, query } => {
+            project::require(project, Project::Nidhogg, "bench api")?;
+            cmd_bench_api(project, project_root, runs, query)
+        }
+        BenchCommand::NidIngest { dataset, pbf, runs } => {
+            project::require(project, Project::Nidhogg, "bench ingest")?;
+            cmd_bench_nid_ingest(project, project_root, dataset, pbf, runs)
         }
     }
 }
@@ -1125,8 +1242,29 @@ fn cmd_download_ocean(project: Project, project_root: &Path) -> Result<(), DevEr
 // ---------------------------------------------------------------------------
 
 fn cmd_verify(project: Project, project_root: &Path, verify: VerifyCommand) -> Result<(), DevError> {
-    project::require(project, Project::Pbfhogg, "verify")?;
+    match verify {
+        // ----- nidhogg verify variants -----
+        VerifyCommand::Batch => {
+            project::require(project, Project::Nidhogg, "verify batch")?;
+            cmd_verify_batch(project, project_root)
+        }
+        VerifyCommand::NidGeocode { queries } => {
+            project::require(project, Project::Nidhogg, "verify geocode")?;
+            cmd_verify_geocode(project, project_root, queries)
+        }
+        VerifyCommand::Readonly { dataset } => {
+            project::require(project, Project::Nidhogg, "verify readonly")?;
+            cmd_verify_readonly(project, project_root, dataset)
+        }
+        // ----- pbfhogg verify variants -----
+        _ => {
+            project::require(project, Project::Pbfhogg, "verify")?;
+            cmd_verify_pbfhogg(project, project_root, verify)
+        }
+    }
+}
 
+fn cmd_verify_pbfhogg(_project: Project, project_root: &Path, verify: VerifyCommand) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
 
@@ -1203,6 +1341,10 @@ fn cmd_verify(project: Project, project_root: &Path, verify: VerifyCommand) -> R
                 project_root,
             )
         }
+        // Nidhogg variants are handled above in cmd_verify().
+        VerifyCommand::Batch
+        | VerifyCommand::NidGeocode { .. }
+        | VerifyCommand::Readonly { .. } => unreachable!(),
     }
 }
 
@@ -1234,6 +1376,33 @@ fn cmd_hotpath(
                 &binary,
                 &pbf_path,
                 &paths.data_dir,
+                &paths.scratch_dir,
+                alloc,
+                project_root,
+            )
+        }
+        Project::Nidhogg => {
+            let pi = bootstrap(project_root)?;
+            let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
+            let binary = build::cargo_build(
+                &build::BuildConfig::release_with_features(Some("nidhogg"), &[feature]),
+                project_root,
+            )?;
+
+            // Resolve data_dir for ingest
+            let data_dir_str = dev_config
+                .datasets
+                .get(&dataset)
+                .and_then(|ds| ds.data_dir.as_ref())
+                .map(|d| paths.data_dir.join(d).display().to_string())
+                .unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string());
+
+            nidhogg::hotpath::run(
+                &binary,
+                &pbf_path,
+                &data_dir_str,
                 &paths.scratch_dir,
                 alloc,
                 project_root,
@@ -1301,6 +1470,27 @@ fn cmd_profile(
                 project_root,
             )
         }
+        Project::Nidhogg => {
+            let tool_name = tool.as_deref().unwrap_or("perf");
+            let pi = bootstrap(project_root)?;
+            let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+
+            let data_dir_str = dev_config
+                .datasets
+                .get(&dataset)
+                .and_then(|ds| ds.data_dir.as_ref())
+                .map(|d| paths.data_dir.join(d).display().to_string())
+                .unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string());
+
+            nidhogg::profile::run(
+                &pbf_path,
+                &data_dir_str,
+                &paths.scratch_dir,
+                tool_name,
+                project_root,
+            )
+        }
         _ => {
             project::require(project, Project::Pbfhogg, "profile")?;
 
@@ -1348,4 +1538,184 @@ fn cmd_download(
         &paths.data_dir,
         project_root,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Nidhogg commands
+// ---------------------------------------------------------------------------
+
+fn resolve_nidhogg_port(project_root: &Path, _target_dir: &Path) -> u16 {
+    // Check PORT env var first
+    if let Ok(port_str) = std::env::var("PORT") {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return port;
+        }
+    }
+    // Try dev.toml host config
+    if let Ok(hostname) = config::hostname() {
+        if let Ok(dev_config) = config::load(project_root) {
+            if let Some(host) = dev_config.hosts.get(&hostname) {
+                if let Some(port) = host.port {
+                    return port;
+                }
+            }
+        }
+    }
+    nidhogg::server::DEFAULT_PORT
+}
+
+fn cmd_serve(
+    project: Project,
+    project_root: &Path,
+    data_dir: Option<String>,
+    dataset: String,
+    tiles: Option<String>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "serve")?;
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+
+    let data_dir_str = match data_dir {
+        Some(d) => d,
+        None => {
+            let ds = dev_config.datasets.get(&dataset).ok_or_else(|| {
+                DevError::Config(format!("unknown dataset: {dataset}"))
+            })?;
+            let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
+                DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
+            })?;
+            paths.data_dir.join(dir_name).display().to_string()
+        }
+    };
+
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    nidhogg::server::serve(&binary, &data_dir_str, tiles.as_deref(), port, project_root)
+}
+
+fn cmd_stop(project: Project, project_root: &Path) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "stop")?;
+    nidhogg::server::stop(project_root)
+}
+
+fn cmd_status(project: Project, project_root: &Path) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "status")?;
+    let pi = bootstrap(project_root)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    let running = nidhogg::server::status(port)?;
+    if running {
+        output::run_msg(&format!("server running on port {port}"));
+    } else {
+        output::run_msg(&format!("server not running on port {port}"));
+    }
+    Ok(())
+}
+
+fn cmd_ingest(
+    project: Project,
+    project_root: &Path,
+    pbf: Option<String>,
+    dataset: String,
+) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "ingest")?;
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+
+    let ds = dev_config.datasets.get(&dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+    let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
+        DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
+    })?;
+    let data_dir = paths.data_dir.join(dir_name);
+
+    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    nidhogg::ingest::run(&binary, &pbf_path, &data_dir, project_root)
+}
+
+fn cmd_update(project: Project, project_root: &Path, args: &[String]) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "update")?;
+    let mut config = build::BuildConfig::release(Some("nidhogg"));
+    config.bin = Some("nidhogg-update".into());
+    let binary = build::cargo_build(&config, project_root)?;
+    nidhogg::update::run(&binary, args, project_root)
+}
+
+fn cmd_query(project: Project, project_root: &Path, json: Option<String>) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "query")?;
+    let pi = bootstrap(project_root)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    nidhogg::query::run(port, json.as_deref())
+}
+
+fn cmd_geocode(project: Project, project_root: &Path, term: &str) -> Result<(), DevError> {
+    project::require(project, Project::Nidhogg, "geocode")?;
+    let pi = bootstrap(project_root)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    nidhogg::geocode::run(port, term)
+}
+
+fn cmd_bench_api(
+    project: Project,
+    project_root: &Path,
+    runs: usize,
+    query: Option<String>,
+) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
+    nidhogg::bench_api::run(&harness, port, runs, query.as_deref())
+}
+
+fn cmd_bench_nid_ingest(
+    project: Project,
+    project_root: &Path,
+    dataset: String,
+    pbf: Option<String>,
+    runs: usize,
+) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let file_mb = file_size_mb(&pbf_path);
+    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
+    nidhogg::bench_ingest::run(&harness, &binary, &pbf_path, file_mb, runs, &paths.scratch_dir, project_root)
+}
+
+fn cmd_verify_batch(_project: Project, project_root: &Path) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    nidhogg::verify_batch::run(port)
+}
+
+fn cmd_verify_geocode(_project: Project, project_root: &Path, queries: Vec<String>) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+    let default_queries = ["Kobenhavn", "Aarhus", "Odense"];
+    let query_refs: Vec<&str> = if queries.is_empty() {
+        default_queries.to_vec()
+    } else {
+        queries.iter().map(String::as_str).collect()
+    };
+    nidhogg::verify_geocode::run(port, &query_refs)
+}
+
+fn cmd_verify_readonly(_project: Project, project_root: &Path, dataset: String) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+
+    let ds = dev_config.datasets.get(&dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+    let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
+        DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
+    })?;
+    let data_dir_str = paths.data_dir.join(dir_name).display().to_string();
+
+    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    nidhogg::verify_readonly::run(&binary, &data_dir_str, port, project_root)
 }

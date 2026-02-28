@@ -10,6 +10,7 @@ use crate::output;
 
 pub struct BuildConfig {
     pub package: Option<String>,
+    pub bin: Option<String>,
     pub features: Vec<String>,
     pub default_features: bool,
     pub profile: &'static str,
@@ -19,6 +20,7 @@ impl BuildConfig {
     pub fn release(package: Option<&str>) -> Self {
         Self {
             package: package.map(|s| s.to_owned()),
+            bin: None,
             features: Vec::new(),
             default_features: true,
             profile: "release",
@@ -28,6 +30,7 @@ impl BuildConfig {
     pub fn release_with_features(package: Option<&str>, features: &[&str]) -> Self {
         Self {
             package: package.map(|s| s.to_owned()),
+            bin: None,
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: true,
             profile: "release",
@@ -142,6 +145,11 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
     if let Some(ref pkg) = config.package {
         args.push("-p".into());
         args.push(pkg.clone());
+    }
+
+    if let Some(ref bin) = config.bin {
+        args.push("--bin".into());
+        args.push(bin.clone());
     }
 
     if config.profile == "release" {

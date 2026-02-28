@@ -1,7 +1,7 @@
-//! Sampling profiler support for elivagar.
+//! Sampling profiler support for nidhogg.
 //!
-//! Replaces `run-perf.sh` and `run-samply.sh`. Builds with `--profile profiling`
-//! (release + debug symbols), then runs under `perf record` or `samply record`.
+//! Builds with `--profile profiling` (release + debug symbols), then runs
+//! under `perf record` or `samply record`.
 
 use std::path::Path;
 
@@ -10,18 +10,16 @@ use crate::error::DevError;
 use crate::git;
 use crate::output;
 
-use super::bench_self::detect_ocean;
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run elivagar under a sampling profiler.
+/// Run nidhogg under a sampling profiler.
 ///
 /// `tool` must be `"perf"` or `"samply"`.
 pub fn run(
     pbf_path: &Path,
-    data_dir: &Path,
+    data_dir: &str,
     scratch_dir: &Path,
     tool: &str,
     project_root: &Path,
@@ -35,7 +33,7 @@ pub fn run(
         }
     }
 
-    // Check perf_event_paranoid on Linux (both perf and samply need it).
+    // Check perf_event_paranoid on Linux.
     check_perf_paranoid()?;
 
     // Check that the tool is installed.
@@ -49,7 +47,7 @@ pub fn run(
     output::build_msg("building with profiling profile (release + debug symbols)");
 
     let config = build::BuildConfig {
-        package: None,
+        package: Some("nidhogg".into()),
         bin: None,
         features: Vec::new(),
         default_features: true,
@@ -59,30 +57,15 @@ pub fn run(
     let binary_str = binary.display().to_string();
 
     std::fs::create_dir_all(scratch_dir)?;
-    let output_pmtiles = scratch_dir.join("profile-output.pmtiles");
-    let output_pmtiles_str = output_pmtiles.display().to_string();
+    let output_dir = scratch_dir.join("profile-output");
+    let output_str = output_dir.display().to_string();
 
-    let tmp_dir = data_dir.join("tilegen_tmp");
-    let tmp_dir_str = tmp_dir.display().to_string();
-
-    // Build elivagar argument list.
-    let mut elivagar_args: Vec<String> = vec![
+    // Build nidhogg argument list: nidhogg ingest <pbf> <output_dir>
+    let nidhogg_args: Vec<String> = vec![
+        "ingest".into(),
         pbf_str.into(),
-        output_pmtiles_str,
-        "--tmp-dir".into(),
-        tmp_dir_str,
+        output_str,
     ];
-
-    // Ocean flags.
-    let (ocean, simplified) = detect_ocean(data_dir);
-    if let Some(ref shp) = ocean {
-        elivagar_args.push("--ocean".into());
-        elivagar_args.push(shp.display().to_string());
-    }
-    if let Some(ref shp) = simplified {
-        elivagar_args.push("--ocean-simplified".into());
-        elivagar_args.push(shp.display().to_string());
-    }
 
     // Collect git info for naming.
     let git_info = git::collect(project_root)?;
@@ -91,7 +74,7 @@ pub fn run(
     match tool {
         "perf" => run_perf(
             &binary_str,
-            &elivagar_args,
+            &nidhogg_args,
             &hostname,
             &git_info.commit,
             data_dir,
@@ -99,7 +82,7 @@ pub fn run(
         ),
         "samply" => run_samply(
             &binary_str,
-            &elivagar_args,
+            &nidhogg_args,
             &hostname,
             &git_info.commit,
             data_dir,
@@ -108,8 +91,8 @@ pub fn run(
         _ => unreachable!(),
     }?;
 
-    // Clean up output PMTiles.
-    let _ = std::fs::remove_file(output_pmtiles);
+    // Clean up output directory.
+    let _ = std::fs::remove_dir_all(output_dir);
 
     Ok(())
 }
@@ -120,13 +103,14 @@ pub fn run(
 
 fn run_perf(
     binary_str: &str,
-    elivagar_args: &[String],
+    nidhogg_args: &[String],
     hostname: &str,
     commit: &str,
-    data_dir: &Path,
+    data_dir: &str,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let perf_data = data_dir.join(format!("perf-{hostname}-{commit}.data"));
+    let data_path = Path::new(data_dir);
+    let perf_data = data_path.join(format!("perf-{hostname}-{commit}.data"));
     let perf_data_str = perf_data.display().to_string();
 
     output::run_msg(&format!("perf record -> {}", perf_data.display()));
@@ -143,7 +127,7 @@ fn run_perf(
         perf_data_str.clone(),
         binary_str.into(),
     ];
-    args.extend(elivagar_args.iter().cloned());
+    args.extend(nidhogg_args.iter().cloned());
 
     let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -179,13 +163,14 @@ fn run_perf(
 
 fn run_samply(
     binary_str: &str,
-    elivagar_args: &[String],
+    nidhogg_args: &[String],
     hostname: &str,
     commit: &str,
-    data_dir: &Path,
+    data_dir: &str,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let profile_out = data_dir.join(format!("samply-{hostname}-{commit}.json.gz"));
+    let data_path = Path::new(data_dir);
+    let profile_out = data_path.join(format!("samply-{hostname}-{commit}.json.gz"));
     let profile_out_str = profile_out.display().to_string();
 
     output::run_msg(&format!("samply record -> {}", profile_out.display()));
@@ -198,7 +183,7 @@ fn run_samply(
         profile_out_str.clone(),
         binary_str.into(),
     ];
-    args.extend(elivagar_args.iter().cloned());
+    args.extend(nidhogg_args.iter().cloned());
 
     let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -232,7 +217,6 @@ fn run_samply(
 fn check_perf_paranoid() -> Result<(), DevError> {
     let path = Path::new("/proc/sys/kernel/perf_event_paranoid");
     if !path.exists() {
-        // Not on Linux, or procfs not mounted -- skip the check.
         return Ok(());
     }
 
