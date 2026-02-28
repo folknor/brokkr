@@ -180,18 +180,32 @@ impl ResultsDb {
     }
 
     /// Query two commits for side-by-side comparison. Each commit is matched
-    /// by prefix.
+    /// by prefix. Optional command/variant filters narrow the results.
     pub fn query_compare(
         &self,
         a: &str,
         b: &str,
+        command: Option<&str>,
+        variant: Option<&str>,
     ) -> Result<(Vec<StoredRow>, Vec<StoredRow>), DevError> {
+        let mut clauses = vec!["[commit] LIKE ?1||'%'".to_owned()];
+        let mut params: Vec<String> = Vec::new();
+        // ?1 is the commit, filled per-call below.
+        params.push(String::new());
+        if let Some(cmd) = command {
+            params.push(cmd.to_owned());
+            clauses.push(format!("command = ?{}", params.len()));
+        }
+        if let Some(v) = variant {
+            params.push(v.to_owned());
+            clauses.push(format!("variant LIKE ?{}||'%'", params.len()));
+        }
         let sql = format!(
-            "SELECT {SELECT_COLS} FROM runs WHERE [commit] LIKE ?1||'%' \
-             ORDER BY command, variant, id DESC"
+            "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, variant, id DESC",
+            clauses.join(" AND ")
         );
-        let rows_a = query_commit(&self.conn, &sql, a)?;
-        let rows_b = query_commit(&self.conn, &sql, b)?;
+        let rows_a = query_commit_filtered(&self.conn, &sql, a, &params)?;
+        let rows_b = query_commit_filtered(&self.conn, &sql, b, &params)?;
         Ok((rows_a, rows_b))
     }
 
@@ -232,7 +246,7 @@ impl ResultsDb {
             return Ok(None);
         }
 
-        let (rows_a, rows_b) = self.query_compare(&commits[1], &commits[0])?;
+        let (rows_a, rows_b) = self.query_compare(&commits[1], &commits[0], command, variant)?;
         Ok(Some((commits[1].clone(), rows_a, commits[0].clone(), rows_b)))
     }
 }
@@ -241,13 +255,18 @@ impl ResultsDb {
 // Query helpers
 // ---------------------------------------------------------------------------
 
-fn query_commit(
+fn query_commit_filtered(
     conn: &rusqlite::Connection,
     sql: &str,
     commit: &str,
+    params: &[String],
 ) -> Result<Vec<StoredRow>, DevError> {
+    let mut bound = params.to_vec();
+    bound[0] = commit.to_owned();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        bound.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(rusqlite::params![commit], map_stored_row)?;
+    let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
     collect_rows(rows)
 }
 

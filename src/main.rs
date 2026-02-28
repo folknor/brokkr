@@ -871,7 +871,7 @@ fn cmd_results(
     } else if let Some(commits) = compare {
         let commit_a = commits.first().map_or("", String::as_str);
         let commit_b = commits.get(1).map_or("", String::as_str);
-        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b)?;
+        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, command.as_deref(), variant.as_deref())?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b);
         println!("{table}");
     } else if compare_last {
