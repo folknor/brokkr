@@ -98,7 +98,10 @@ pub fn run(
     };
 
     harness.run_internal(&config, |_i| {
-        harness::run_hotpath_capture(binary_str, &args_refs, scratch_dir, project_root)
+        harness::run_hotpath_capture(
+            binary_str, &args_refs, scratch_dir, project_root,
+            &[("ELIVAGAR_NODE_STATS", "1")],
+        )
     })?;
 
     // Clean up output file.

@@ -80,7 +80,7 @@ pub fn run(
     };
 
     harness.run_internal(&config, |_i| {
-        harness::run_hotpath_capture(binary_str, &args, scratch_dir, project_root)
+        harness::run_hotpath_capture(binary_str, &args, scratch_dir, project_root, &[])
     })?;
 
     // Clean up output directory.

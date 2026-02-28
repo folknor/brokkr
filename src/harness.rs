@@ -396,19 +396,23 @@ pub fn run_hotpath_capture(
     args: &[&str],
     scratch_dir: &std::path::Path,
     project_root: &std::path::Path,
+    extra_env: &[(&str, &str)],
 ) -> Result<BenchResult, crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
+
+    let mut env: Vec<(&str, &str)> = vec![
+        ("HOTPATH_METRICS_SERVER_OFF", "true"),
+        ("HOTPATH_OUTPUT_FORMAT", "json"),
+        ("HOTPATH_OUTPUT_PATH", &json_file_str),
+    ];
+    env.extend_from_slice(extra_env);
 
     let captured = output::run_captured_with_env(
         binary,
         args,
         project_root,
-        &[
-            ("HOTPATH_METRICS_SERVER_OFF", "true"),
-            ("HOTPATH_OUTPUT_FORMAT", "json"),
-            ("HOTPATH_OUTPUT_PATH", &json_file_str),
-        ],
+        &env,
     )?;
 
     captured.check_success(binary)?;
