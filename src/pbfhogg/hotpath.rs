@@ -154,11 +154,11 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
+    let feature = crate::harness::hotpath_feature(alloc);
     let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, pbf_raw_str);
 
     for test in &tests {
-        let variant_suffix = if alloc { "/alloc" } else { "" };
+        let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
         let variant = format!("{}{variant_suffix}", test.label);
 
         // Build args without the binary path (first element) for the subprocess.

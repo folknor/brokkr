@@ -46,26 +46,11 @@ The comparison pairing (`build_comparison_pairs`), metric parsing (`parse_metric
 
 Commands appear to run twice (two "Finished... Running..." blocks in output). The rtk PreToolUse hook may be executing the command in addition to the original — investigate hook configuration.
 
-### `resolve_pbf_with_size` helper
-
-`resolve_pbf_path()` and `file_size_mb()` are always called together (19 call sites in `main.rs`). Merge into a single `resolve_pbf_with_size()` returning `(PathBuf, f64)`.
-
 ### `HarnessContext` for no-build commands
 
 7 handlers in `main.rs` manually expand `bootstrap + bootstrap_config + BenchHarness::new` because they don't need a cargo build (allocator, planetiler, bench-all). `BenchContext::new()` always builds. Add a lighter `HarnessContext` (or make the build step optional in `BenchContext`).
-
-### Shared `alloc` mode constants
-
-The `alloc` bool → feature/variant_suffix/label tri-state is repeated in all 3 `hotpath.rs` modules + `main.rs`. Extract to a small helper or constants.
-
-### Shared dataset `data_dir` lookup
-
-The 6-line `data_dir` resolution pattern (get dataset → get `data_dir` field → join with `paths.data_dir`) appears in 3 nidhogg commands (`cmd_serve`, `cmd_ingest`, `cmd_verify_readonly`). Extract to a helper.
 
 ### `Worktree` has no `Drop` impl
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper — probably not worth the complexity.
 
-### Nidhogg `.gitignore` ignores `results.db`
-
-Nidhogg uses `.brokkr/` (ignores everything) instead of `.brokkr/*` + `!.brokkr/results.db` like pbfhogg and elivagar. This means `results.db` is not tracked in git for nidhogg.

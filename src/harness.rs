@@ -371,6 +371,16 @@ fn maybe_quote(s: &str) -> String {
     }
 }
 
+/// Return the cargo feature name for hotpath mode: `"hotpath"` or `"hotpath-alloc"`.
+pub fn hotpath_feature(alloc: bool) -> &'static str {
+    if alloc { "hotpath-alloc" } else { "hotpath" }
+}
+
+/// Return the variant suffix for hotpath mode: `"/alloc"` or `""`.
+pub fn hotpath_variant_suffix(alloc: bool) -> &'static str {
+    if alloc { "/alloc" } else { "" }
+}
+
 /// Convert a `Duration` to milliseconds as `i64`.
 pub fn elapsed_to_ms(duration: &Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)

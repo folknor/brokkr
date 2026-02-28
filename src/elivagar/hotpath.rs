@@ -61,7 +61,7 @@ pub fn run(
     // Ocean flags.
     super::push_ocean_args(&mut args, data_dir, no_ocean);
 
-    let label = if alloc { "hotpath-alloc" } else { "hotpath" };
+    let label = crate::harness::hotpath_feature(alloc);
     output::hotpath_msg(&format!("=== elivagar {label} ==="));
 
     if alloc {
@@ -76,8 +76,8 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
-    let variant_suffix = if alloc { "/alloc" } else { "" };
+    let feature = crate::harness::hotpath_feature(alloc);
+    let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
     let variant = format!("tilegen{variant_suffix}");
 
     let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();

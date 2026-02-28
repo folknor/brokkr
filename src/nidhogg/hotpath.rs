@@ -46,7 +46,7 @@ pub fn run(
     // Build argument list: nidhogg ingest <pbf> <output_dir>
     let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
 
-    let label = if alloc { "hotpath-alloc" } else { "hotpath" };
+    let label = crate::harness::hotpath_feature(alloc);
     output::hotpath_msg(&format!("=== nidhogg {label} ==="));
 
     if alloc {
@@ -61,8 +61,8 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
-    let variant_suffix = if alloc { "/alloc" } else { "" };
+    let feature = crate::harness::hotpath_feature(alloc);
+    let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
     let variant = format!("ingest{variant_suffix}");
 
     let config = BenchConfig {
