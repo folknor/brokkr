@@ -33,8 +33,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run clippy + tests
+    #[command(long_about = "\
+Run clippy + tests. Extra args are forwarded raw to `cargo test`.
+
+Examples:
+  brokkr check                                     # clippy + all tests
+  brokkr check -- --test read_paths                # run one test file
+  brokkr check -- -- --ignored                     # run ignored tests
+  brokkr check -- --test read_paths -- --ignored   # one file, ignored only")]
     Check {
-        /// Extra arguments passed to cargo test
+        /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -667,7 +675,6 @@ fn run_tests(
 ) -> Result<(), DevError> {
     let mut args = vec!["test"];
     if !extra_args.is_empty() {
-        args.push("--");
         let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&extra_refs);
     }
@@ -687,8 +694,14 @@ fn run_tests(
     };
 
     if !captured.status.success() {
+        let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        output::error(&stderr);
+        if !stdout.is_empty() {
+            output::error(&stdout);
+        }
+        if !stderr.is_empty() {
+            output::error(&stderr);
+        }
         return Err(DevError::Build("tests failed".into()));
     }
 
