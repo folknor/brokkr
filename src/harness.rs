@@ -51,9 +51,14 @@ impl BenchHarness {
         paths: &crate::config::ResolvedPaths,
         project_root: &Path,
         project: crate::project::Project,
+        lock_command: &str,
     ) -> Result<Self, DevError> {
         std::fs::create_dir_all(&paths.scratch_dir)?;
-        let lock = crate::lockfile::acquire(&paths.scratch_dir)?;
+        let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
+            project: project.name(),
+            command: lock_command,
+            project_root: &project_root.display().to_string(),
+        })?;
         let env = crate::env::collect(paths, project, project_root);
         let git = crate::git::collect(project_root)?;
         let db_dir = project_root.join(".brokkr");
@@ -391,13 +396,18 @@ fn percentile(sorted: &[i64], pct: usize) -> i64 {
         return sorted[0];
     }
     // Fractional index into the sorted array.
+    #[allow(clippy::cast_precision_loss)]
     let pos = (pct as f64 / 100.0) * (len - 1) as f64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let lo = pos as usize;
     let hi = (lo + 1).min(len - 1);
+    #[allow(clippy::cast_precision_loss)]
     let frac = pos - lo as f64;
     // Linear interpolation: sorted[lo] + frac * (sorted[hi] - sorted[lo])
+    #[allow(clippy::cast_precision_loss)]
     let result = sorted[lo] as f64 + frac * (sorted[hi] - sorted[lo]) as f64;
-    result.round() as i64
+    #[allow(clippy::cast_possible_truncation)]
+    { result.round() as i64 }
 }
 
 /// Pick the `BenchResult` with the smaller `elapsed_ms`.

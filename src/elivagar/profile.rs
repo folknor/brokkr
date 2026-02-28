@@ -37,7 +37,11 @@ pub fn run(
     }
 
     // Acquire exclusive lock to prevent conflicts with concurrent benchmarks.
-    let _lock = crate::lockfile::acquire(scratch_dir)?;
+    let _lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
+        project: "elivagar",
+        command: "profile",
+        project_root: project_root.to_str().unwrap_or("unknown"),
+    })?;
 
     // Check perf_event_paranoid and tool availability.
     crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;

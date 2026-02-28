@@ -189,5 +189,5 @@ pub fn run(
 
 /// Check that a file exists and is not empty (guards against partial downloads).
 fn is_nonempty(path: &Path) -> bool {
-    std::fs::metadata(path).map_or(false, |m| m.len() > 0)
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }

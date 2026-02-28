@@ -74,6 +74,8 @@ enum Command {
     },
     /// Clean build artifacts and scratch data
     Clean,
+    /// Show lock status (who holds the benchmark lock)
+    Lock,
     /// Run benchmarks
     Bench {
         /// Print full build/bench/result output
@@ -518,9 +520,15 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), DevError> {
+    // `lock` works without a project root (global lock file).
+    if matches!(cli.command, Command::Lock) {
+        return cmd_lock();
+    }
+
     let (project, dev_config, project_root) = project::detect()?;
 
     match cli.command {
+        Command::Lock => unreachable!(),
         Command::Check { args } => cmd_check(project, &project_root, &args),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::Run { args } => cmd_run(&dev_config, project, &project_root, &args),
@@ -612,6 +620,7 @@ impl BenchContext {
         project_root: &Path,
         package: Option<&str>,
         features: &[&str],
+        lock_command: &str,
     ) -> Result<Self, DevError> {
         let pi = bootstrap()?;
         let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -621,7 +630,7 @@ impl BenchContext {
             build::BuildConfig::release_with_features(package, features)
         };
         let binary = build::cargo_build(&build_config, project_root)?;
-        let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+        let harness = harness::BenchHarness::new(&paths, project_root, project, lock_command)?;
         Ok(Self { paths, harness, binary })
     }
 }
@@ -916,6 +925,21 @@ fn cmd_clean(dev_config: &config::DevConfig, project: Project, project_root: &Pa
     Ok(())
 }
 
+fn cmd_lock() -> Result<(), DevError> {
+    match lockfile::status()? {
+        Some(info) => {
+            println!(
+                "[lock]    held by PID {}: {} {} ({})",
+                info.pid, info.project, info.command, info.project_root,
+            );
+        }
+        None => {
+            println!("[lock]    no active lock");
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution helpers
 // ---------------------------------------------------------------------------
@@ -1114,14 +1138,14 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             project::require(project, Project::Elivagar, "bench node-store")?;
             let pi = bootstrap()?;
             let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+            let harness = harness::BenchHarness::new(&paths, project_root, project, "bench node-store")?;
             elivagar::bench_node_store::run(&harness, project_root, nodes, runs)
         }
         BenchCommand::Pmtiles { tiles, runs } => {
             project::require(project, Project::Elivagar, "bench pmtiles")?;
             let pi = bootstrap()?;
             let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+            let harness = harness::BenchHarness::new(&paths, project_root, project, "bench pmtiles")?;
             elivagar::bench_pmtiles::run(&harness, project_root, tiles, runs)
         }
         BenchCommand::ElivPlanetiler { dataset, pbf, runs } => {
@@ -1158,7 +1182,7 @@ fn cmd_bench_commands(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[], "bench commands")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let commands = pbfhogg::bench_commands::parse_command(command)?;
     let file_mb = file_size_mb(&pbf_path)?;
@@ -1176,6 +1200,7 @@ fn cmd_bench_commands(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bench_extract(
     dev_config: &config::DevConfig,
     project: Project,
@@ -1186,7 +1211,7 @@ fn cmd_bench_extract(
     bbox: Option<&str>,
     strategies_str: &str,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[], "bench extract")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let bbox = resolve_bbox(bbox, dataset, &ctx.paths)?;
     let strategies = pbfhogg::bench_extract::parse_strategies(strategies_str)?;
@@ -1206,7 +1231,7 @@ fn cmd_bench_allocator(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
-    let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+    let harness = harness::BenchHarness::new(&paths, project_root, project, "bench allocator")?;
     pbfhogg::bench_allocator::run(&harness, &pbf_path, file_mb, runs, project_root)
 }
 
@@ -1219,7 +1244,7 @@ fn cmd_bench_blob_filter(
     pbf_raw: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[], "bench blob-filter")?;
     let indexed_path = resolve_pbf_path(pbf_indexed, dataset, &ctx.paths, project_root)?;
     let raw_path = resolve_raw_pbf_path(pbf_raw, dataset, &ctx.paths)?;
     let file_mb = file_size_mb(&indexed_path)?;
@@ -1238,7 +1263,7 @@ fn cmd_bench_planetiler(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
-    let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+    let harness = harness::BenchHarness::new(&paths, project_root, project, "bench planetiler")?;
     pbfhogg::bench_planetiler::run(&harness, &pbf_path, file_mb, runs, &paths.data_dir, project_root)
 }
 
@@ -1251,7 +1276,7 @@ fn cmd_bench_read(
     runs: usize,
     modes_str: &str,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[], "bench read")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let modes = pbfhogg::bench_read::parse_modes(modes_str)?;
     let file_mb = file_size_mb(&pbf_path)?;
@@ -1267,7 +1292,7 @@ fn cmd_bench_write(
     runs: usize,
     compression_str: &str,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[], "bench write")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, true)?;
     let file_mb = file_size_mb(&pbf_path)?;
@@ -1290,7 +1315,7 @@ fn cmd_bench_merge(
         preflight::run_preflight(&preflight::uring_checks())?;
     }
 
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[], "bench merge")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, false)?;
@@ -1321,7 +1346,7 @@ fn cmd_bench_all(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
-    let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+    let harness = harness::BenchHarness::new(&paths, project_root, project, "bench all")?;
     pbfhogg::bench_all::run(&harness, &paths, project_root, &pbf_path, file_mb, runs, dataset)
 }
 
@@ -1341,7 +1366,7 @@ fn cmd_bench_eliv_self(
     no_ocean: bool,
     compression_level: Option<u32>,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, None, &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, None, &[], "bench self")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
     elivagar::bench_self::run(
@@ -1371,7 +1396,7 @@ fn cmd_bench_eliv_planetiler(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
-    let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+    let harness = harness::BenchHarness::new(&paths, project_root, project, "bench planetiler")?;
     elivagar::bench_planetiler::run(
         &harness,
         &pbf_path,
@@ -1395,7 +1420,7 @@ fn cmd_bench_eliv_all(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
-    let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+    let harness = harness::BenchHarness::new(&paths, project_root, project, "bench all")?;
     elivagar::bench_all::run(
         &harness,
         &paths,
@@ -1462,7 +1487,7 @@ fn cmd_verify_pbfhogg(dev_config: &config::DevConfig, _project: Project, project
     let pi = bootstrap()?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let harness = pbfhogg::verify::VerifyHarness::new(&paths, project_root, &pi.target_dir)?;
+    let harness = pbfhogg::verify::VerifyHarness::new(project_root, &pi.target_dir)?;
 
     match verify {
         VerifyCommand::Sort { dataset, pbf } => {
@@ -1556,7 +1581,7 @@ fn cmd_hotpath(
 
     match project {
         Project::Elivagar => {
-            let ctx = BenchContext::new(dev_config, project, project_root, None, &[feature])?;
+            let ctx = BenchContext::new(dev_config, project, project_root, None, &[feature], "hotpath")?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
             let file_mb = file_size_mb(&pbf_path)?;
             elivagar::hotpath::run(
@@ -1573,7 +1598,7 @@ fn cmd_hotpath(
             )
         }
         Project::Nidhogg => {
-            let ctx = BenchContext::new(dev_config, project, project_root, Some("nidhogg"), &[feature])?;
+            let ctx = BenchContext::new(dev_config, project, project_root, Some("nidhogg"), &[feature], "hotpath")?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
             let file_mb = file_size_mb(&pbf_path)?;
             nidhogg::hotpath::run(
@@ -1590,7 +1615,7 @@ fn cmd_hotpath(
         _ => {
             project::require(project, Project::Pbfhogg, "hotpath")?;
 
-            let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[feature])?;
+            let ctx = BenchContext::new(dev_config, project, project_root, Some("pbfhogg-cli"), &[feature], "hotpath")?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
             let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
             let file_mb = file_size_mb(&pbf_path)?;
@@ -1619,6 +1644,7 @@ fn cmd_hotpath(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_profile(
     dev_config: &config::DevConfig,
     project: Project,
@@ -1682,7 +1708,7 @@ fn cmd_profile(
                 .map(|raw_file| paths.data_dir.join(raw_file))
                 .filter(|p| p.exists());
 
-            let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+            let harness = harness::BenchHarness::new(&paths, project_root, project, "profile")?;
             pbfhogg::profile::run(
                 &harness,
                 &pbf_path,
@@ -1846,7 +1872,7 @@ fn cmd_bench_api(
         .and_then(|n| n.to_str());
     let input_mb = pbf_path.as_ref().map(|p| file_size_mb(p)).transpose()?;
 
-    let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+    let harness = harness::BenchHarness::new(&paths, project_root, project, "bench api")?;
     nidhogg::bench_api::run(&harness, port, runs, query, input_file, input_mb)
 }
 
@@ -1858,7 +1884,7 @@ fn cmd_bench_nid_ingest(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, Some("nidhogg"), &[])?;
+    let ctx = BenchContext::new(dev_config, project, project_root, Some("nidhogg"), &[], "bench ingest")?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &ctx.paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path)?;
     nidhogg::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &ctx.paths.scratch_dir, project_root)

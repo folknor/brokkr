@@ -136,6 +136,7 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
 
     // time_total is in seconds with fractional part (e.g., "0.042367").
     let seconds: f64 = time_str.parse().unwrap_or(0.0);
+    #[allow(clippy::cast_possible_truncation)]
     let ms = (seconds * 1000.0) as i64;
 
     Ok(ms)

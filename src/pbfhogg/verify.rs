@@ -8,7 +8,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::build;
-use crate::config::ResolvedPaths;
 use crate::error::DevError;
 use crate::output;
 use crate::output::CapturedOutput;
@@ -39,11 +38,14 @@ impl VerifyHarness {
     /// Acquires an exclusive lock via [`crate::lockfile::acquire`] so that
     /// no other dev/bench/verify process runs concurrently.
     pub fn new(
-        paths: &ResolvedPaths,
         project_root: &Path,
         target_dir: &Path,
     ) -> Result<Self, DevError> {
-        let lock = crate::lockfile::acquire(&paths.scratch_dir)?;
+        let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
+            project: "pbfhogg",
+            command: "verify",
+            project_root: &project_root.display().to_string(),
+        })?;
         let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
         let output_dir = target_dir.join("verify");
 

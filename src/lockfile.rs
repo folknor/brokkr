@@ -1,5 +1,5 @@
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::Path;
+use std::path::PathBuf;
 
 use crate::error::DevError;
 
@@ -18,13 +18,46 @@ impl Drop for LockGuard {
     }
 }
 
-/// Acquire an exclusive non-blocking lock on `{dir}/.brokkr.lock`.
+/// Context written to the lock file so `brokkr lock` can explain who holds it.
+pub struct LockContext<'a> {
+    pub project: &'a str,
+    pub command: &'a str,
+    pub project_root: &'a str,
+}
+
+/// Info read back from the lock file.
+pub struct LockInfo {
+    pub pid: u32,
+    pub project: String,
+    pub command: String,
+    pub project_root: String,
+}
+
+/// Resolve the global lock file path.
 ///
-/// On success, writes the current PID to the lock file.
-/// On `EWOULDBLOCK`, reads the file to report which PID holds the lock.
-pub fn acquire(dir: &Path) -> Result<LockGuard, DevError> {
-    let lock_path = dir.join(".brokkr.lock");
-    let c_path = path_to_cstring(&lock_path)?;
+/// Uses `$XDG_RUNTIME_DIR/brokkr.lock` (typically `/run/user/$UID/brokkr.lock`).
+/// Falls back to `$HOME/.cache/brokkr/brokkr.lock` if `XDG_RUNTIME_DIR` is unset.
+fn lock_path() -> Result<PathBuf, DevError> {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        return Ok(PathBuf::from(dir).join("brokkr.lock"));
+    }
+
+    // Fallback: ~/.cache/brokkr/
+    let home = std::env::var("HOME").map_err(|_| {
+        DevError::Lock("neither XDG_RUNTIME_DIR nor HOME is set".into())
+    })?;
+    let dir = PathBuf::from(home).join(".cache").join("brokkr");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("brokkr.lock"))
+}
+
+/// Acquire an exclusive non-blocking lock on the global lock file.
+///
+/// On success, writes PID + context to the lock file.
+/// On `EWOULDBLOCK`, reads the file to report who holds the lock.
+pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+    let path = lock_path()?;
+    let c_path = path_to_cstring(&path)?;
     let fd = open_lock_file(&c_path)?;
 
     match try_flock(fd) {
@@ -32,7 +65,7 @@ pub fn acquire(dir: &Path) -> Result<LockGuard, DevError> {
             // SAFETY: `fd` is a valid open file descriptor returned by `open_lock_file`,
             // and we take unique ownership here — it is not used elsewhere.
             let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-            write_pid(owned.as_raw_fd());
+            write_lock_contents(owned.as_raw_fd(), ctx);
             Ok(LockGuard { fd: owned })
         }
         Err(held_by) => {
@@ -42,6 +75,63 @@ pub fn acquire(dir: &Path) -> Result<LockGuard, DevError> {
             Err(held_by)
         }
     }
+}
+
+/// Check the global lock status. Returns `None` if no lock is held.
+///
+/// If the lock file exists and a flock is held, reads the context.
+/// If the PID in the file is dead, releases the stale lock and returns `None`.
+pub fn status() -> Result<Option<LockInfo>, DevError> {
+    let path = lock_path()?;
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let c_path = path_to_cstring(&path)?;
+    let fd = open_lock_file(&c_path)?;
+
+    // Try to acquire — if we succeed, no one holds it.
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+
+    if ret == 0 {
+        // We got the lock → no one was holding it. Release and close.
+        // SAFETY: valid fd from open_lock_file, unique ownership.
+        let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+        return Ok(None);
+    }
+
+    // Someone holds it. Read the contents.
+    let info = read_lock_contents(fd);
+    // SAFETY: valid fd from open_lock_file, unique ownership.
+    let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let Some(info) = info else {
+        // Could not parse — report as unknown holder.
+        return Ok(Some(LockInfo {
+            pid: 0,
+            project: "unknown".into(),
+            command: "unknown".into(),
+            project_root: "unknown".into(),
+        }));
+    };
+
+    // Check if the PID is still alive.
+    if info.pid > 0 && !pid_alive(info.pid) {
+        // Stale lock — the holder crashed. Remove the file so the next
+        // flock attempt can succeed (the dead process's flock is already
+        // released by the kernel, but removing the file is cleaner).
+        std::fs::remove_file(&path).ok();
+        return Ok(None);
+    }
+
+    Ok(Some(info))
+}
+
+/// Check whether a PID is still running.
+fn pid_alive(pid: u32) -> bool {
+    // kill(pid, 0) checks existence without sending a signal.
+    unsafe { libc::kill(pid.cast_signed(), 0) == 0 }
 }
 
 /// Open (or create) the lock file, returning the raw fd.
@@ -75,69 +165,35 @@ fn try_flock(fd: RawFd) -> Result<(), DevError> {
 
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        let pid = read_holder_pid(fd);
-        let cmd = read_holder_command(&pid);
-        if cmd.is_empty() {
-            Err(DevError::Lock(format!("already locked by PID {pid}")))
-        } else {
-            Err(DevError::Lock(format!(
-                "already locked by PID {pid}: {cmd}"
-            )))
+        let info = read_lock_contents(fd);
+        match info {
+            Some(info) => Err(DevError::Lock(format!(
+                "already locked by PID {} — {} {} ({})",
+                info.pid, info.project, info.command, info.project_root
+            ))),
+            None => Err(DevError::Lock("already locked by unknown process".into())),
         }
     } else {
         Err(DevError::Lock(format!("flock failed: {err}")))
     }
 }
 
-/// Read the existing file contents to discover the PID of the current holder.
-fn read_holder_pid(fd: RawFd) -> String {
-    let mut buf = [0u8; 32];
-
-    // Seek to start before reading.
-    unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
-
-    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if n <= 0 {
-        return "unknown".to_owned();
-    }
-
-    // n is positive here, so the cast is safe.
-    let len: usize = match usize::try_from(n) {
-        Ok(v) => v,
-        Err(_) => return "unknown".to_owned(),
-    };
-
-    let s = String::from_utf8_lossy(&buf[..len]);
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        "unknown".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
-/// Read the command line of a process from `/proc/{pid}/cmdline`.
-fn read_holder_command(pid: &str) -> String {
-    let path = format!("/proc/{pid}/cmdline");
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            // cmdline is nul-separated; join args with spaces.
-            bytes
-                .split(|&b| b == 0)
-                .filter(|s| !s.is_empty())
-                .map(|s| String::from_utf8_lossy(s))
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        Err(_) => String::new(),
-    }
-}
-
-/// Truncate the lock file and write the current PID.
+/// Write PID + context to the lock file as newline-separated fields:
 ///
-/// Best-effort for diagnostics — if any step fails we simply return early.
-fn write_pid(fd: RawFd) {
-    let pid = std::process::id().to_string();
+/// ```text
+/// pid=12345
+/// project=pbfhogg
+/// command=bench read
+/// root=/home/user/Projects/pbfhogg
+/// ```
+fn write_lock_contents(fd: RawFd, ctx: &LockContext<'_>) {
+    let contents = format!(
+        "pid={}\nproject={}\ncommand={}\nroot={}\n",
+        std::process::id(),
+        ctx.project,
+        ctx.command,
+        ctx.project_root,
+    );
 
     unsafe {
         if libc::ftruncate(fd, 0) == -1 {
@@ -146,14 +202,56 @@ fn write_pid(fd: RawFd) {
         if libc::lseek(fd, 0, libc::SEEK_SET) == -1 {
             return;
         }
-        if libc::write(fd, pid.as_ptr().cast(), pid.len()) == -1 {
-            return;
-        }
+        // Best-effort write; ignore failure.
+        let _ = libc::write(fd, contents.as_ptr().cast(), contents.len());
     }
 }
 
+/// Read lock file contents and parse the key=value fields.
+fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
+    let mut buf = [0u8; 512];
+
+    unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
+
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if n <= 0 {
+        return None;
+    }
+
+    let len = usize::try_from(n).ok()?;
+    let text = std::str::from_utf8(&buf[..len]).ok()?;
+
+    let mut pid: u32 = 0;
+    let mut project = String::new();
+    let mut command = String::new();
+    let mut root = String::new();
+
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("pid=") {
+            pid = v.trim().parse().unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("project=") {
+            project = v.trim().to_owned();
+        } else if let Some(v) = line.strip_prefix("command=") {
+            command = v.trim().to_owned();
+        } else if let Some(v) = line.strip_prefix("root=") {
+            root = v.trim().to_owned();
+        }
+    }
+
+    if pid == 0 && project.is_empty() {
+        return None;
+    }
+
+    Some(LockInfo {
+        pid,
+        project,
+        command,
+        project_root: root,
+    })
+}
+
 /// Convert a `Path` to a `CString`.
-fn path_to_cstring(path: &Path) -> Result<std::ffi::CString, DevError> {
+fn path_to_cstring(path: &std::path::Path) -> Result<std::ffi::CString, DevError> {
     use std::os::unix::ffi::OsStrExt;
 
     std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {

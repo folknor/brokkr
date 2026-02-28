@@ -93,7 +93,6 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs([commit]);
 CREATE INDEX IF NOT EXISTS idx_runs_command ON runs(command);
 CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp);
-CREATE INDEX IF NOT EXISTS idx_runs_uuid ON runs(uuid);
 ";
 
 const SELECT_COLS: &str = "\
@@ -656,11 +655,11 @@ fn build_comparison_pairs(
     }
     for row in rows_b {
         let key = pair_key(&row.command, &row.variant);
-        if !b_map.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
             }
-            b_map.insert(key, row.elapsed_ms);
+            e.insert(row.elapsed_ms);
         }
     }
 
