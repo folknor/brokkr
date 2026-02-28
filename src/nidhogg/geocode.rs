@@ -55,8 +55,8 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
                     .get("displayName")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(unknown)");
-                let lat = top.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let lon = top.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let lat = top.get("lat").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                let lon = top.get("lon").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                 output::result_msg(&format!("  top: {display_name} ({lat:.4}, {lon:.4})"));
             }
         }

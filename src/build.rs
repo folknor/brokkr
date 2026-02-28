@@ -19,7 +19,7 @@ pub struct BuildConfig {
 impl BuildConfig {
     pub fn release(package: Option<&str>) -> Self {
         Self {
-            package: package.map(|s| s.to_owned()),
+            package: package.map(std::borrow::ToOwned::to_owned),
             bin: None,
             features: Vec::new(),
             default_features: true,
@@ -29,7 +29,7 @@ impl BuildConfig {
 
     pub fn release_with_features(package: Option<&str>, features: &[&str]) -> Self {
         Self {
-            package: package.map(|s| s.to_owned()),
+            package: package.map(std::borrow::ToOwned::to_owned),
             bin: None,
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: true,

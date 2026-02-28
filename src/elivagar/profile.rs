@@ -109,7 +109,7 @@ pub fn run(
     }?;
 
     // Clean up output PMTiles.
-    let _ = std::fs::remove_file(output_pmtiles);
+    std::fs::remove_file(output_pmtiles).ok();
 
     Ok(())
 }

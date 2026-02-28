@@ -283,7 +283,7 @@ fn which_exists(name: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map_or(false, |s| s.success())
+        .is_ok_and(|s| s.success())
 }
 
 /// Parse `---` delimited blocks from stderr output.
@@ -298,28 +298,25 @@ fn parse_stderr_blocks(stderr: &str) -> Vec<HashMap<String, String>> {
         let trimmed = line.trim();
         if trimmed == "---" {
             // Start a new block, pushing the previous one if it exists.
-            if let Some(block) = current.take() {
-                if !block.is_empty() {
+            if let Some(block) = current.take()
+                && !block.is_empty() {
                     blocks.push(block);
                 }
-            }
             current = Some(HashMap::new());
             continue;
         }
 
-        if let Some(ref mut block) = current {
-            if let Some((key, value)) = trimmed.split_once('=') {
+        if let Some(ref mut block) = current
+            && let Some((key, value)) = trimmed.split_once('=') {
                 block.insert(key.to_owned(), value.to_owned());
             }
-        }
     }
 
     // Push the final block.
-    if let Some(block) = current {
-        if !block.is_empty() {
+    if let Some(block) = current
+        && !block.is_empty() {
             blocks.push(block);
         }
-    }
 
     blocks
 }

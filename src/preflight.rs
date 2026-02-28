@@ -226,7 +226,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn file_mtime(meta: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     // mtime() returns i64; files with valid timestamps are non-negative.
-    meta.mtime().max(0) as u64
+    #[allow(clippy::cast_sign_loss)]
+    let t = meta.mtime().max(0) as u64;
+    t
 }
 
 /// Look up a cache entry matching path, mtime, and size.
@@ -256,7 +258,7 @@ fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex
         .unwrap_or_default()
         .lines()
         .filter(|line| {
-            line.splitn(2, '\t')
+            line.split('\t')
                 .next()
                 .is_none_or(|p| p != path_str)
         })
@@ -266,5 +268,5 @@ fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex
     lines.push(format!("{path_str}\t{mtime}\t{size}\t{hex}"));
 
     // Best-effort write; don't fail the whole command if cache write fails.
-    let _ = std::fs::write(cache_path, lines.join("\n") + "\n");
+    std::fs::write(cache_path, lines.join("\n") + "\n").ok();
 }

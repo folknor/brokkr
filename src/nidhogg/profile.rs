@@ -92,7 +92,7 @@ pub fn run(
     }?;
 
     // Clean up output directory.
-    let _ = std::fs::remove_dir_all(output_dir);
+    std::fs::remove_dir_all(output_dir).ok();
 
     Ok(())
 }

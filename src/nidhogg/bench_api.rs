@@ -51,11 +51,10 @@ pub fn run(
     let url = format!("http://localhost:{port}/api/query");
 
     for &(name, body) in QUERIES {
-        if let Some(filter) = only {
-            if name != filter {
+        if let Some(filter) = only
+            && name != filter {
                 continue;
             }
-        }
 
         output::bench_msg(&format!("=== {name} ==="));
 

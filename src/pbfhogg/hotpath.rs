@@ -251,7 +251,7 @@ pub fn run(
     }
 
     // Clean up merged output file (ignore errors if it doesn't exist).
-    let _ = std::fs::remove_file(&merged_path);
+    std::fs::remove_file(&merged_path).ok();
 
     Ok(())
 }

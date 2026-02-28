@@ -160,7 +160,7 @@ fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
         Ok(val) => {
             let non_empty = val
                 .as_array()
-                .map_or(false, |arr| !arr.is_empty());
+                .is_some_and(|arr| !arr.is_empty());
             Ok(non_empty)
         }
         Err(_) => Ok(false),
@@ -202,7 +202,7 @@ fn run_query_check(port: u16) -> Result<bool, DevError> {
             let non_empty = val
                 .get("elements")
                 .and_then(|v| v.as_array())
-                .map_or(false, |arr| !arr.is_empty());
+                .is_some_and(|arr| !arr.is_empty());
             Ok(non_empty)
         }
         Err(_) => Ok(false),

@@ -80,13 +80,11 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
     let osmosis_bin = osmosis_dir.join("bin/osmosis");
 
     // Check cached version.
-    if osmosis_bin.exists() {
-        if let Ok(cached) = fs::read_to_string(&version_file) {
-            if cached.trim() == OSMOSIS_VERSION {
+    if osmosis_bin.exists()
+        && let Ok(cached) = fs::read_to_string(&version_file)
+            && cached.trim() == OSMOSIS_VERSION {
                 return Ok(osmosis_bin);
             }
-        }
-    }
 
     let download_url = format!(
         "https://github.com/openstreetmap/osmosis/releases/download/{OSMOSIS_VERSION}/osmosis-{OSMOSIS_VERSION}.tgz"
@@ -127,7 +125,7 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
     fs::write(&version_file, OSMOSIS_VERSION)?;
 
     // Clean up tarball.
-    let _ = fs::remove_file(&tarball);
+    fs::remove_file(&tarball).ok();
 
     output::verify_msg(&format!("installed Osmosis {OSMOSIS_VERSION}"));
     Ok(osmosis_bin)
@@ -195,13 +193,11 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
         })?;
 
     // Check cached version.
-    if java.exists() {
-        if let Ok(cached) = fs::read_to_string(&version_file) {
-            if cached.trim() == release_name {
+    if java.exists()
+        && let Ok(cached) = fs::read_to_string(&version_file)
+            && cached.trim() == release_name {
                 return Ok(java);
             }
-        }
-    }
 
     // Download.
     let tarball = data_dir.join("jdk-download.tar.gz");
@@ -238,7 +234,7 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     fs::write(&version_file, release_name)?;
 
     // Clean up tarball.
-    let _ = fs::remove_file(&tarball);
+    fs::remove_file(&tarball).ok();
 
     output::bench_msg(&format!("installed JDK {release_name}"));
     Ok(java)
@@ -276,8 +272,7 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
         .iter()
         .find(|a| {
             a.get("name")
-                .and_then(serde_json::Value::as_str)
-                .map_or(false, |n| n == "planetiler.jar")
+                .and_then(serde_json::Value::as_str) == Some("planetiler.jar")
         })
         .and_then(|a| a.get("browser_download_url"))
         .and_then(serde_json::Value::as_str)
@@ -288,13 +283,11 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
         })?;
 
     // Check cached version.
-    if jar_path.exists() {
-        if let Ok(cached) = fs::read_to_string(&version_file) {
-            if cached.trim() == tag_name {
+    if jar_path.exists()
+        && let Ok(cached) = fs::read_to_string(&version_file)
+            && cached.trim() == tag_name {
                 return Ok(jar_path);
             }
-        }
-    }
 
     // Download.
     let jar_str = jar_path.display().to_string();
@@ -327,11 +320,10 @@ fn compile_bench(
     let class_file = class_dir.join("BenchPbfRead.class");
 
     // Check if recompilation is needed.
-    if class_file.exists() {
-        if let Some(false) = needs_recompile(&class_file, &bench_src, planetiler_jar) {
+    if class_file.exists()
+        && let Some(false) = needs_recompile(&class_file, &bench_src, planetiler_jar) {
             return Ok(class_dir);
         }
-    }
 
     fs::create_dir_all(&class_dir)?;
 

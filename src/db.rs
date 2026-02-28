@@ -359,7 +359,7 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
 
 fn append_table_header(out: &mut String, w: &TableWidths) {
     use std::fmt::Write;
-    let _ = write!(
+    write!(
         out,
         "{:>id_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}",
         "id",
@@ -376,14 +376,15 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         var_w = w.variant,
         el_w = w.elapsed,
         in_w = w.input,
-    );
+    )
+    .expect("write to String is infallible");
 }
 
 fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
     use std::fmt::Write;
     let elapsed_str = format_elapsed(row.elapsed_ms);
     let input_str = format_input(&row.input_file, row.input_mb);
-    let _ = write!(
+    write!(
         out,
         "{:>id_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}",
         row.id,
@@ -400,7 +401,8 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
         var_w = w.variant,
         el_w = w.elapsed,
         in_w = w.input,
-    );
+    )
+    .expect("write to String is infallible");
 }
 
 fn format_elapsed(ms: i64) -> String {
@@ -544,7 +546,7 @@ fn append_compare_header(
     w: &CompareWidths,
 ) {
     use std::fmt::Write;
-    let _ = write!(
+    write!(
         out,
         "{:<cmd_w$}  {:<var_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         "command",
@@ -557,7 +559,8 @@ fn append_compare_header(
         a_w = w.col_a,
         b_w = w.col_b,
         ch_w = w.change,
-    );
+    )
+    .expect("write to String is infallible");
 }
 
 fn append_compare_row(
@@ -572,7 +575,7 @@ fn append_compare_row(
     let a_str = format_ms_or_dash(a_ms);
     let b_str = format_ms_or_dash(b_ms);
     let ch = format_change(a_ms, b_ms);
-    let _ = write!(
+    write!(
         out,
         "{:<cmd_w$}  {:<var_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         cmd,
@@ -585,7 +588,8 @@ fn append_compare_row(
         a_w = w.col_a,
         b_w = w.col_b,
         ch_w = w.change,
-    );
+    )
+    .expect("write to String is infallible");
 }
 
 fn format_ms_or_dash(ms: Option<i64>) -> String {

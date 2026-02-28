@@ -145,7 +145,7 @@ pub fn run(
 
     output::hotpath_msg(&format!("=== {dataset_name} COMPLETE ==="));
 
-    let _ = std::fs::remove_file(&merged);
+    std::fs::remove_file(&merged).ok();
 
     Ok(())
 }

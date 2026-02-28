@@ -98,6 +98,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     let pt = tools::ensure_planetiler(data_dir, project_root)?;
 
+    #[allow(clippy::cast_possible_truncation)]
     let heap_mb = std::cmp::max((file_mb as i64) * 2, 2048);
     let classpath = format!("{}:{}", pt.planetiler_jar.display(), pt.bench_class_dir.display());
 

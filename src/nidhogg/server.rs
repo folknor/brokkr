@@ -96,20 +96,20 @@ pub fn stop(project_root: &Path) -> Result<(), DevError> {
 
     // Try PID file first.
     if pid_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = content.trim().parse::<i32>() {
+        if let Ok(content) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = content.trim().parse::<i32>() {
                 stopped = stop_pid(pid);
             }
-        }
-        let _ = std::fs::remove_file(&pid_path);
+        std::fs::remove_file(&pid_path).ok();
     }
 
     // Fallback: pkill any remaining nidhogg serve processes.
-    let _ = Command::new("pkill")
+    Command::new("pkill")
         .args(["-f", "nidhogg serve"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .ok();
 
     if stopped {
         output::run_msg("nidhogg server stopped");

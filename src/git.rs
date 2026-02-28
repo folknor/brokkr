@@ -72,12 +72,12 @@ fn check_clean(workspace_root: &Path) -> bool {
     let unstaged_ok = unstaged
         .as_ref()
         .ok()
-        .map_or(false, |o| o.status.success());
+        .is_some_and(|o| o.status.success());
 
     let staged_ok = staged
         .as_ref()
         .ok()
-        .map_or(false, |o| o.status.success());
+        .is_some_and(|o| o.status.success());
 
     unstaged_ok && staged_ok
 }

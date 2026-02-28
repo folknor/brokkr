@@ -63,7 +63,7 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
     }
 
     // Clean up zip file.
-    let _ = std::fs::remove_file(&zip_path);
+    std::fs::remove_file(&zip_path).ok();
 
     let final_path = data_dir.join(OCEAN_DIR).join("water_polygons.shp");
     output::download_msg(&format!("done: {}", final_path.display()));

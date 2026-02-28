@@ -119,7 +119,7 @@ pub fn run(
     harness.run_external_with_kv(&config, binary, &arg_refs, project_root)?;
 
     // Clean up output.
-    let _ = std::fs::remove_file(&output_path);
+    std::fs::remove_file(&output_path).ok();
 
     Ok(())
 }

@@ -95,7 +95,7 @@ pub fn run(
     }
 
     // Clean up output file.
-    let _ = std::fs::remove_file(&output_path);
+    std::fs::remove_file(&output_path).ok();
 
     Ok(())
 }
