@@ -20,25 +20,26 @@ Single crate, single binary. No workspace.
 
 ### Source layout
 
-- `src/main.rs` — CLI definition (clap derive), command dispatch, all handler functions
-- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), detection from `brokkr.toml`, `require()` gating
-- `src/config.rs` — `DevConfig`, `Dataset`, `HostConfig`, `ResolvedPaths`, TOML parsing, hostname via libc
+- `src/main.rs` — CLI definition (clap derive), command dispatch, `BenchContext` struct, all handler functions
+- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), `detect()` (delegates to `config::load()`), `require()` gating
+- `src/config.rs` — `DevConfig`, `Dataset`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/db.rs` — `ResultsDb` (SQLite), schema creation, insert/query/compare
+- `src/db.rs` — `ResultsDb` (SQLite), schema creation with versioned migrations, insert/query/compare
 - `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_streamed`, `run_timed`)
-- `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database)
+- `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/env.rs` — `EnvInfo` collection (hostname, kernel, governor, memory, drives, tool versions)
 - `src/git.rs` — `GitInfo` (commit hash, dirty flag, branch)
-- `src/lockfile.rs` — `LockGuard` for exclusive bench/verify/hotpath access
-- `src/preflight.rs` — Pre-benchmark system checks
-- `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis)
+- `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive bench/verify/hotpath access
+- `src/hotpath_fmt.rs` — Hotpath JSON report formatting
+- `src/preflight.rs` — Pre-benchmark system checks (`Check` enum framework)
+- `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis), cache-first network checks
 
 ### Project-specific modules
 
 - `src/pbfhogg/` — 25 modules: benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), hotpath, profile, download
 - `src/elivagar/` — 11 modules: benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), compare-tiles, download-ocean, hotpath, profile
-- `src/nidhogg/` — 13 modules: server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath, profile
+- `src/nidhogg/` — 13 modules: server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath, profile. `mod.rs` has shared curl helpers and query constants.
 
 ## brokkr.toml format
 
@@ -62,7 +63,7 @@ drives.source = "/dev/nvme0n1p2"
 drives.data = "/dev/sda1"
 ```
 
-Top-level keys that aren't `project` or `datasets` are treated as hostname sections. Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
+Top-level keys that aren't `project` or `datasets` are treated as hostname sections (unknown non-table keys are rejected). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
 
 ## Shared commands (all projects)
 
