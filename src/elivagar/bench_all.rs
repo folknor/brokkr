@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::config::{DevConfig, ResolvedPaths};
+use crate::config::ResolvedPaths;
 use crate::build;
 use crate::error::DevError;
 use crate::harness::BenchHarness;
@@ -21,7 +21,6 @@ use super::{bench_planetiler, bench_self, bench_tilemaker};
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
-    _dev_config: &DevConfig,
     paths: &ResolvedPaths,
     project_root: &Path,
     pbf_path: &Path,

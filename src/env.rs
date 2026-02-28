@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{DevConfig, ResolvedPaths};
+use std::collections::HashMap;
+
+use crate::config::{Dataset, ResolvedPaths};
 use crate::project::Project;
 
 /// Environment information for the `dev env` subcommand.
@@ -33,7 +35,6 @@ pub enum DatasetStatus {
 
 /// Collect all environment information.
 pub fn collect(
-    config: &DevConfig,
     paths: &ResolvedPaths,
     project: Project,
     project_root: &Path,
@@ -49,7 +50,7 @@ pub fn collect(
         io_uring_status: read_io_uring_status(),
         drives: collect_drives(paths),
         tools: collect_tools(project),
-        datasets: check_datasets(config, &paths.data_dir, project_root),
+        datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
     }
 }
 
@@ -311,12 +312,11 @@ fn read_git_rev() -> String {
 // ---------------------------------------------------------------------------
 
 fn check_datasets(
-    config: &DevConfig,
+    datasets: &HashMap<String, Dataset>,
     data_dir: &Path,
     project_root: &Path,
 ) -> Vec<(String, DatasetStatus)> {
-    let mut out: Vec<(String, DatasetStatus)> = config
-        .datasets
+    let mut out: Vec<(String, DatasetStatus)> = datasets
         .iter()
         .map(|(name, ds)| {
             let status = match &ds.pbf {

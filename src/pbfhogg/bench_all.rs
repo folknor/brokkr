@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::build;
-use crate::config::{DevConfig, ResolvedPaths};
+use crate::config::ResolvedPaths;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
@@ -21,7 +21,6 @@ use crate::pbfhogg::{bench_commands, bench_merge, bench_planetiler, bench_read, 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
-    dev_config: &DevConfig,
     paths: &ResolvedPaths,
     project_root: &Path,
     pbf_path: &Path,
@@ -32,7 +31,7 @@ pub fn run(
     // 1. bench commands -- all
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
-    let osc_path = dev_config
+    let osc_path = paths
         .datasets
         .get(dataset)
         .and_then(|ds| ds.osc.as_ref())
@@ -80,7 +79,7 @@ pub fn run(
     )?;
 
     // 4. bench merge -- if osc is available for this dataset
-    let osc_path = dev_config
+    let osc_path = paths
         .datasets
         .get(dataset)
         .and_then(|ds| ds.osc.as_ref())

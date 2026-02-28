@@ -46,13 +46,12 @@ pub struct BenchHarness {
 impl BenchHarness {
     /// Create a new harness, acquiring the lockfile and collecting environment.
     pub fn new(
-        config: &crate::config::DevConfig,
         paths: &crate::config::ResolvedPaths,
         project_root: &Path,
         project: crate::project::Project,
     ) -> Result<Self, DevError> {
         let lock = crate::lockfile::acquire(&paths.scratch_dir)?;
-        let env = crate::env::collect(config, paths, project, project_root);
+        let env = crate::env::collect(paths, project, project_root);
         let git = crate::git::collect(project_root)?;
         let db_dir = project_root.join(".brokkr");
         std::fs::create_dir_all(&db_dir)?;

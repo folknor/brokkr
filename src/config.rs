@@ -12,11 +12,10 @@ use crate::error::DevError;
 #[derive(Debug)]
 pub struct DevConfig {
     pub project: String,
-    pub datasets: HashMap<String, Dataset>,
     pub hosts: HashMap<String, HostConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct Dataset {
     pub pbf: Option<String>,
@@ -38,6 +37,8 @@ pub struct HostConfig {
     pub target: Option<String>,
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
+    #[serde(default)]
+    pub datasets: HashMap<String, Dataset>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +56,7 @@ pub struct ResolvedPaths {
     pub scratch_dir: PathBuf,
     pub target_dir: PathBuf,
     pub drives: Option<DriveConfig>,
+    pub datasets: HashMap<String, Dataset>,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,46 +84,22 @@ pub fn load(project_root: &Path) -> Result<DevConfig, DevError> {
         })?
         .to_owned();
 
-    let datasets = parse_datasets(table)?;
     let hosts = parse_hosts(table)?;
 
     Ok(DevConfig {
         project,
-        datasets,
         hosts,
     })
 }
 
-/// Extract the `[datasets]` section and deserialize each entry.
-fn parse_datasets(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<HashMap<String, Dataset>, DevError> {
-    let Some(datasets_val) = table.get("datasets") else {
-        return Ok(HashMap::new());
-    };
-
-    let datasets_table = datasets_val
-        .as_table()
-        .ok_or_else(|| DevError::Config("[datasets] is not a table".into()))?;
-
-    let mut out = HashMap::with_capacity(datasets_table.len());
-    for (name, value) in datasets_table {
-        let ds: Dataset = value.clone().try_into().map_err(|e: toml::de::Error| {
-            DevError::Config(format!("datasets.{name}: {e}"))
-        })?;
-        out.insert(name.clone(), ds);
-    }
-    Ok(out)
-}
-
-/// Every top-level key that is a table and is not `datasets` or `project` is
+/// Every top-level key that is a table and is not `project` is
 /// treated as a hostname section.
 fn parse_hosts(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
     for (key, value) in table {
-        if key == "datasets" || key == "project" {
+        if key == "project" {
             continue;
         }
         if !value.is_table() {
@@ -189,6 +167,7 @@ pub fn resolve_paths(
     };
 
     let drives = host.and_then(|h| h.drives.clone());
+    let datasets = host.map(|h| h.datasets.clone()).unwrap_or_default();
 
     ResolvedPaths {
         hostname: hostname.to_owned(),
@@ -196,6 +175,7 @@ pub fn resolve_paths(
         scratch_dir,
         target_dir,
         drives,
+        datasets,
     }
 }
 
