@@ -24,7 +24,7 @@ use error::DevError;
 use project::Project;
 
 #[derive(Parser)]
-#[command(name = "dev", about = "Shared development tooling")]
+#[command(name = "brokkr", about = "Shared development tooling")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -82,7 +82,7 @@ enum Command {
     },
     /// Run hotpath profiling (timing or allocation instrumentation)
     Hotpath {
-        /// Dataset name from dev.toml (default: denmark)
+        /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
         dataset: String,
 
@@ -104,7 +104,7 @@ enum Command {
     },
     /// Run two-pass profiling (timing + allocation) for a dataset
     Profile {
-        /// Dataset name from dev.toml (default: denmark)
+        /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
         dataset: String,
 
@@ -147,7 +147,7 @@ enum Command {
         #[arg(long)]
         data_dir: Option<String>,
 
-        /// Dataset name from dev.toml (default: denmark)
+        /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
         dataset: String,
 
@@ -165,7 +165,7 @@ enum Command {
         #[arg(long)]
         pbf: Option<String>,
 
-        /// Dataset name from dev.toml
+        /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
@@ -481,7 +481,7 @@ enum VerifyCommand {
     },
     /// Nidhogg: read-only filesystem verification
     Readonly {
-        /// Dataset name from dev.toml
+        /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
@@ -979,7 +979,7 @@ fn file_size_mb(path: &Path) -> f64 {
 
 /// Path to the results database for the current project.
 fn results_db_path(project_root: &Path) -> PathBuf {
-    project_root.join(".dev").join("results.db")
+    project_root.join(".brokkr").join("results.db")
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,7 +1672,7 @@ fn resolve_nidhogg_port(project_root: &Path, _target_dir: &Path) -> u16 {
         && let Ok(port) = port_str.parse::<u16>() {
             return port;
         }
-    // Try dev.toml host config
+    // Try brokkr.toml host config
     if let Ok(hostname) = config::hostname()
         && let Ok(dev_config) = config::load(project_root)
             && let Some(host) = dev_config.hosts.get(&hostname)

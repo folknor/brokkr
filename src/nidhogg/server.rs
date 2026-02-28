@@ -19,7 +19,7 @@ pub const DEFAULT_PORT: u16 = 3033;
 /// Start the nidhogg server as a background process.
 ///
 /// Kills any existing server first, spawns the binary with stdout/stderr
-/// redirected to `logs/serve.log`, saves the PID to `.dev/nidhogg.pid`,
+/// redirected to `logs/serve.log`, saves the PID to `.brokkr/nidhogg.pid`,
 /// and polls the HTTP health endpoint until ready (6s timeout).
 pub fn serve(
     binary: &Path,
@@ -31,10 +31,10 @@ pub fn serve(
     // Kill any existing server first.
     stop(project_root)?;
 
-    // Ensure logs/ and .dev/ directories exist.
+    // Ensure logs/ and .brokkr/ directories exist.
     let logs_dir = project_root.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
-    let dev_dir = project_root.join(".dev");
+    let dev_dir = project_root.join(".brokkr");
     std::fs::create_dir_all(&dev_dir)?;
 
     let log_path = logs_dir.join("serve.log");
@@ -87,10 +87,10 @@ pub fn serve(
 
 /// Stop the nidhogg server.
 ///
-/// Reads PID from `.dev/nidhogg.pid`, sends SIGTERM, waits up to 5s for
+/// Reads PID from `.brokkr/nidhogg.pid`, sends SIGTERM, waits up to 5s for
 /// the process to exit, then escalates to SIGKILL if still alive.
 pub fn stop(project_root: &Path) -> Result<(), DevError> {
-    let pid_path = project_root.join(".dev").join("nidhogg.pid");
+    let pid_path = project_root.join(".brokkr").join("nidhogg.pid");
 
     let mut stopped = false;
 
@@ -181,7 +181,7 @@ pub fn check_running(port: u16) -> Result<(), DevError> {
     if !running {
         return Err(DevError::Config(format!(
             "nidhogg server is not running on port {port}\n\
-             Start it with: dev serve"
+             Start it with: brokkr serve"
         )));
     }
     Ok(())

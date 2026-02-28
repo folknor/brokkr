@@ -17,12 +17,12 @@ impl Drop for LockGuard {
     }
 }
 
-/// Acquire an exclusive non-blocking lock on `{dir}/.dev.lock`.
+/// Acquire an exclusive non-blocking lock on `{dir}/.brokkr.lock`.
 ///
 /// On success, writes the current PID to the lock file.
 /// On `EWOULDBLOCK`, reads the file to report which PID holds the lock.
 pub fn acquire(dir: &Path) -> Result<LockGuard, DevError> {
-    let lock_path = dir.join(".dev.lock");
+    let lock_path = dir.join(".brokkr.lock");
     let c_path = path_to_cstring(&lock_path)?;
     let fd = open_lock_file(&c_path)?;
 

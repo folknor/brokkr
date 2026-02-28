@@ -1,12 +1,12 @@
 [package]
-name = "dev"
+name = "brokkr"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Shared development tooling for pbfhogg, elivagar, and nidhogg"
 
 [[bin]]
-name = "dev"
+name = "brokkr"
 path = "src/main.rs"
 
 [dependencies]

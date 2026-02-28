@@ -1,6 +1,6 @@
-# dev
+# brokkr
 
-Shared development tooling for pbfhogg, elivagar, and nidhogg. Single Rust binary installed via `cargo install --path ~/Programs/dev`.
+Shared development tooling for pbfhogg, elivagar, and nidhogg. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
 
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
@@ -10,9 +10,9 @@ Shared development tooling for pbfhogg, elivagar, and nidhogg. Single Rust binar
 
 ## How it works
 
-Invoked as `dev` from any project root. Reads `./dev.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg"`). Commands are gated by project — running a pbfhogg-only command from elivagar's root produces an error.
+Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg"`). Commands are gated by project — running a pbfhogg-only command from elivagar's root produces an error.
 
-Install: `cargo install --path ~/Programs/dev`
+Install: `cargo install --path ~/Programs/brokkr`
 
 ## Architecture
 
@@ -21,7 +21,7 @@ Single crate, single binary. No workspace.
 ### Source layout
 
 - `src/main.rs` — CLI definition (clap derive), command dispatch, all handler functions
-- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), detection from `dev.toml`, `require()` gating
+- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), detection from `brokkr.toml`, `require()` gating
 - `src/config.rs` — `DevConfig`, `Dataset`, `HostConfig`, `ResolvedPaths`, TOML parsing, hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
@@ -40,9 +40,9 @@ Single crate, single binary. No workspace.
 - `src/elivagar/` — 11 modules: benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), compare-tiles, download-ocean, hotpath, profile
 - `src/nidhogg/` — 13 modules: server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath, profile
 
-## dev.toml format
+## brokkr.toml format
 
-Each project has a `dev.toml` in its root:
+Each project has a `brokkr.toml` in its root:
 
 ```toml
 project = "pbfhogg"
@@ -69,7 +69,7 @@ Top-level keys that aren't `project` or `datasets` are treated as hostname secti
 - `check` — clippy + tests (extra args forwarded to cargo test)
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
 - `run` — build release binary and run with passthrough args
-- `results` — query `.dev/results.db` (SQLite)
+- `results` — query `.brokkr/results.db` (SQLite)
 - `clean` — remove scratch/temp files
 - `hotpath` — function-level timing/allocation profiling via `hotpath` feature
 - `profile` — sampling profiler (perf/samply)
@@ -83,7 +83,7 @@ Top-level keys that aren't `project` or `datasets` are treated as hostname secti
 - `run_external(config, binary, args)` — subprocess timing
 - `run_distribution(config, closure)` — distribution timing (min/p50/p95/max)
 
-Results in `.dev/results.db` per project (gitignored).
+Results in `.brokkr/results.db` per project (gitignored).
 
 ## Conventions
 

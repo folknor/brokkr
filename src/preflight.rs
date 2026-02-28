@@ -147,7 +147,7 @@ fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
 
 /// Verify that a file matches the expected SHA256 hash.
 ///
-/// Results are cached in `{project_root}/.dev/sha256_cache` keyed on path,
+/// Results are cached in `{project_root}/.brokkr/sha256_cache` keyed on path,
 /// mtime, and size. Re-hashing only happens when the file changes.
 pub fn verify_file_hash(
     path: &Path,
@@ -177,7 +177,7 @@ pub fn cached_sha256(path: &Path, project_root: &Path) -> Result<String, DevErro
     let mtime = file_mtime(&meta);
     let size = meta.len();
 
-    let cache_dir = project_root.join(".dev");
+    let cache_dir = project_root.join(".brokkr");
     let cache_path = cache_dir.join("sha256_cache");
 
     // Check cache.

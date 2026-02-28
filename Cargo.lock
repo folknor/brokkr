@@ -80,6 +80,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "brokkr"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -158,19 +171,6 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
-]
-
-[[package]]
-name = "dev"
-version = "0.1.0"
-dependencies = [
- "clap",
- "libc",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "toml",
 ]
 
 [[package]]

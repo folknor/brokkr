@@ -54,7 +54,7 @@ impl BenchHarness {
         let lock = crate::lockfile::acquire(&paths.scratch_dir)?;
         let env = crate::env::collect(config, paths, project, project_root);
         let git = crate::git::collect(project_root)?;
-        let db_dir = project_root.join(".dev");
+        let db_dir = project_root.join(".brokkr");
         std::fs::create_dir_all(&db_dir)?;
         let db = ResultsDb::open(&db_dir.join("results.db"))?;
         let storage_notes = format_storage_notes(&paths.drives);

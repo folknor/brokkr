@@ -61,9 +61,9 @@ pub struct ResolvedPaths {
 // Loading
 // ---------------------------------------------------------------------------
 
-/// Load `dev.toml` from the project root directory.
+/// Load `brokkr.toml` from the project root directory.
 pub fn load(project_root: &Path) -> Result<DevConfig, DevError> {
-    let path = project_root.join("dev.toml");
+    let path = project_root.join("brokkr.toml");
     let text = std::fs::read_to_string(&path).map_err(|e| {
         DevError::Config(format!("{}: {e}", path.display()))
     })?;
@@ -72,13 +72,13 @@ pub fn load(project_root: &Path) -> Result<DevConfig, DevError> {
 
     let table = root
         .as_table()
-        .ok_or_else(|| DevError::Config("dev.toml root is not a table".into()))?;
+        .ok_or_else(|| DevError::Config("brokkr.toml root is not a table".into()))?;
 
     let project = table
         .get("project")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            DevError::Config("dev.toml missing required 'project' field".into())
+            DevError::Config("brokkr.toml missing required 'project' field".into())
         })?
         .to_owned();
 

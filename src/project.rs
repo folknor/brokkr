@@ -1,4 +1,4 @@
-//! Project detection from dev.toml in the current working directory.
+//! Project detection from brokkr.toml in the current working directory.
 
 use std::path::PathBuf;
 
@@ -37,7 +37,7 @@ impl std::fmt::Display for Project {
     }
 }
 
-/// Detect the project from `./dev.toml` in the current working directory.
+/// Detect the project from `./brokkr.toml` in the current working directory.
 ///
 /// Returns the project type and the project root directory (cwd).
 pub fn detect() -> Result<(Project, PathBuf), DevError> {
@@ -45,23 +45,23 @@ pub fn detect() -> Result<(Project, PathBuf), DevError> {
         DevError::Config(format!("cannot determine current directory: {e}"))
     })?;
 
-    let toml_path = cwd.join("dev.toml");
+    let toml_path = cwd.join("brokkr.toml");
     let text = std::fs::read_to_string(&toml_path).map_err(|e| {
         DevError::Config(format!(
-            "dev.toml not found in {}: {e}\nRun dev from the project root directory.",
+            "brokkr.toml not found in {}: {e}\nRun brokkr from the project root directory.",
             cwd.display()
         ))
     })?;
 
     let root: toml::Value = text.parse().map_err(|e: toml::de::Error| {
-        DevError::Config(format!("dev.toml parse error: {e}"))
+        DevError::Config(format!("brokkr.toml parse error: {e}"))
     })?;
 
     let project_str = root
         .get("project")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            DevError::Config("dev.toml missing required 'project' field".into())
+            DevError::Config("brokkr.toml missing required 'project' field".into())
         })?;
 
     let project = match project_str {
@@ -70,7 +70,7 @@ pub fn detect() -> Result<(Project, PathBuf), DevError> {
         "nidhogg" => Project::Nidhogg,
         other => {
             return Err(DevError::Config(format!(
-                "unknown project '{other}' in dev.toml (expected: pbfhogg, elivagar, nidhogg)"
+                "unknown project '{other}' in brokkr.toml (expected: pbfhogg, elivagar, nidhogg)"
             )));
         }
     };
@@ -83,7 +83,7 @@ pub fn detect() -> Result<(Project, PathBuf), DevError> {
 pub fn require(current: Project, expected: Project, command: &str) -> Result<(), DevError> {
     if current != expected {
         return Err(DevError::Config(format!(
-            "'dev {command}' is only available in {expected} projects (current: {current})"
+            "'brokkr {command}' is only available in {expected} projects (current: {current})"
         )));
     }
     Ok(())
