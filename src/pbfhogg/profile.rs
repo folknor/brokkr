@@ -24,6 +24,7 @@ pub fn run(
     dataset_name: &str,
     file_mb: f64,
     scratch_dir: &Path,
+    extra_features: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
     output::hotpath_msg(&format!("=== {dataset_name} ({file_mb:.0} MB) ==="));
@@ -34,8 +35,10 @@ pub fn run(
 
     output::hotpath_msg("=== TIMING PASS ===");
 
+    let mut timing_features: Vec<&str> = vec!["hotpath"];
+    timing_features.extend(extra_features.iter().map(String::as_str));
     let binary = build::cargo_build(
-        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &["hotpath"]),
+        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &timing_features),
         project_root,
     )?;
 
@@ -61,8 +64,10 @@ pub fn run(
         "NOTE: alloc profiling -- wall-clock times are not meaningful",
     );
 
+    let mut alloc_features: Vec<&str> = vec!["hotpath-alloc"];
+    alloc_features.extend(extra_features.iter().map(String::as_str));
     let binary = build::cargo_build(
-        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &["hotpath-alloc"]),
+        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &alloc_features),
         project_root,
     )?;
 

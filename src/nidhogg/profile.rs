@@ -26,6 +26,7 @@ pub fn run(
     data_dir: &Path,
     scratch_dir: &Path,
     tool: &str,
+    extra_features: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
     match tool {
@@ -54,7 +55,7 @@ pub fn run(
         package: Some("nidhogg".into()),
         bin: None,
         example: None,
-        features: Vec::new(),
+        features: extra_features.to_vec(),
         default_features: true,
         profile: "profiling",
     };

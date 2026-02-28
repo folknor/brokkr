@@ -40,13 +40,15 @@ impl VerifyHarness {
     pub fn new(
         project_root: &Path,
         target_dir: &Path,
+        build_root: Option<&Path>,
     ) -> Result<Self, DevError> {
         let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
             project: "pbfhogg",
             command: "verify",
             project_root: &project_root.display().to_string(),
         })?;
-        let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
+        let effective = build_root.unwrap_or(project_root);
+        let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), effective)?;
         let output_dir = target_dir.join("verify");
 
         Ok(Self {

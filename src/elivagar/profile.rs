@@ -28,6 +28,7 @@ pub fn run(
     scratch_dir: &Path,
     tool: &str,
     no_ocean: bool,
+    extra_features: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
     match tool {
@@ -56,7 +57,7 @@ pub fn run(
         package: None,
         bin: None,
         example: None,
-        features: Vec::new(),
+        features: extra_features.to_vec(),
         default_features: true,
         profile: "profiling",
     };

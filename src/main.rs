@@ -126,6 +126,14 @@ Examples:
     },
     /// Cross-validate pbfhogg output against reference tools
     Verify {
+        /// Print full build/verify output
+        #[arg(long, short = 'v')]
+        verbose: bool,
+
+        /// Build and verify an old commit via git worktree
+        #[arg(long)]
+        commit: Option<String>,
+
         #[command(subcommand)]
         verify: VerifyCommand,
     },
@@ -138,6 +146,10 @@ Examples:
         /// Build and benchmark an old commit via git worktree
         #[arg(long)]
         commit: Option<String>,
+
+        /// Cargo features to enable (e.g. linux-io-uring)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
 
         /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
@@ -172,6 +184,10 @@ Examples:
         /// Build and profile an old commit via git worktree
         #[arg(long)]
         commit: Option<String>,
+
+        /// Cargo features to enable (e.g. linux-io-uring)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
 
         /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
@@ -596,10 +612,16 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 cmd_bench(&dev_config, project, &project_root, build_root, bench)
             })
         }
-        Command::Verify { verify } => cmd_verify(&dev_config, project, &project_root, verify),
+        Command::Verify { verbose, commit, verify } => {
+            output::set_quiet(!verbose);
+            with_worktree(&project_root, commit.as_deref(), |build_root| {
+                cmd_verify(&dev_config, project, &project_root, build_root, verify)
+            })
+        }
         Command::Hotpath {
             verbose,
             commit,
+            features,
             dataset,
             pbf,
             osc,
@@ -608,14 +630,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
             runs,
         } => {
             output::set_quiet(!verbose);
+            if features.iter().any(|f| f == "linux-io-uring") {
+                preflight::run_preflight(&preflight::uring_checks())?;
+            }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs)
+                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs, &features)
             })
         }
-        Command::Profile { verbose, commit, dataset, pbf, osc, tool, no_ocean } => {
+        Command::Profile { verbose, commit, features, dataset, pbf, osc, tool, no_ocean } => {
             output::set_quiet(!verbose);
+            if features.iter().any(|f| f == "linux-io-uring") {
+                preflight::run_preflight(&preflight::uring_checks())?;
+            }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_profile(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref(), no_ocean)
+                cmd_profile(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref(), no_ocean, &features)
             })
         }
         Command::Download { region, osc_url } => {
@@ -1635,7 +1663,7 @@ fn cmd_download_ocean(dev_config: &config::DevConfig, project: Project, project_
 // Verify commands (pbfhogg-specific)
 // ---------------------------------------------------------------------------
 
-fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &Path, verify: VerifyCommand) -> Result<(), DevError> {
+fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand) -> Result<(), DevError> {
     match verify {
         // ----- nidhogg verify variants -----
         VerifyCommand::Batch => {
@@ -1653,16 +1681,16 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
         // ----- pbfhogg verify variants -----
         _ => {
             project::require(project, Project::Pbfhogg, "verify")?;
-            cmd_verify_pbfhogg(dev_config, project, project_root, verify)
+            cmd_verify_pbfhogg(dev_config, project, project_root, build_root, verify)
         }
     }
 }
 
-fn cmd_verify_pbfhogg(dev_config: &config::DevConfig, _project: Project, project_root: &Path, verify: VerifyCommand) -> Result<(), DevError> {
-    let pi = bootstrap(None)?;
+fn cmd_verify_pbfhogg(dev_config: &config::DevConfig, _project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand) -> Result<(), DevError> {
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let harness = pbfhogg::verify::VerifyHarness::new(project_root, &pi.target_dir)?;
+    let harness = pbfhogg::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root)?;
 
     match verify {
         VerifyCommand::Sort { dataset, pbf } => {
@@ -1752,12 +1780,15 @@ fn cmd_hotpath(
     alloc: bool,
     no_ocean: bool,
     runs: usize,
+    features: &[String],
 ) -> Result<(), DevError> {
     let feature = harness::hotpath_feature(alloc);
+    let mut all_features: Vec<&str> = vec![feature];
+    all_features.extend(features.iter().map(String::as_str));
 
     match project {
         Project::Elivagar => {
-            let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &[feature], "hotpath")?;
+            let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &all_features, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             elivagar::hotpath::run(
                 &ctx.harness,
@@ -1773,7 +1804,7 @@ fn cmd_hotpath(
             )
         }
         Project::Nidhogg => {
-            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &[feature], "hotpath")?;
+            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &all_features, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             nidhogg::hotpath::run(
                 &ctx.harness,
@@ -1789,7 +1820,7 @@ fn cmd_hotpath(
         _ => {
             project::require(project, Project::Pbfhogg, "hotpath")?;
 
-            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[feature], "hotpath")?;
+            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &all_features, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
 
@@ -1828,6 +1859,7 @@ fn cmd_profile(
     osc: Option<&str>,
     tool: Option<&str>,
     no_ocean: bool,
+    features: &[String],
 ) -> Result<(), DevError> {
     match project {
         Project::Elivagar => {
@@ -1847,6 +1879,7 @@ fn cmd_profile(
                 &paths.scratch_dir,
                 tool_name,
                 no_ocean,
+                features,
                 effective,
             )
         }
@@ -1874,6 +1907,7 @@ fn cmd_profile(
                 &data_dir,
                 &paths.scratch_dir,
                 tool_name,
+                features,
                 effective,
             )
         }
@@ -1904,6 +1938,7 @@ fn cmd_profile(
                 dataset,
                 file_mb,
                 &paths.scratch_dir,
+                features,
                 effective,
             )
         }
