@@ -185,3 +185,124 @@ pub fn run(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_returns_every_command() {
+        let result = parse_command("all").unwrap();
+        assert_eq!(result, ALL_COMMANDS);
+    }
+
+    #[test]
+    fn exact_match_fileinfo() {
+        let result = parse_command("fileinfo").unwrap();
+        assert_eq!(result, vec!["fileinfo"]);
+    }
+
+    #[test]
+    fn exact_match_diff() {
+        let result = parse_command("diff").unwrap();
+        assert_eq!(result, vec!["diff"]);
+    }
+
+    #[test]
+    fn exact_match_derive_changes() {
+        let result = parse_command("derive-changes").unwrap();
+        assert_eq!(result, vec!["derive-changes"]);
+    }
+
+    #[test]
+    fn prefix_tags_filter_expands() {
+        let result = parse_command("tags-filter").unwrap();
+        assert_eq!(
+            result,
+            vec!["tags-filter-way", "tags-filter-amenity", "tags-filter-twopass"]
+        );
+    }
+
+    #[test]
+    fn prefix_extract_expands() {
+        let result = parse_command("extract").unwrap();
+        assert_eq!(
+            result,
+            vec!["extract-simple", "extract-complete", "extract-smart"]
+        );
+    }
+
+    #[test]
+    fn prefix_cat_expands() {
+        let result = parse_command("cat").unwrap();
+        assert_eq!(result, vec!["cat-way", "cat-relation"]);
+    }
+
+    #[test]
+    fn exact_match_tags_count() {
+        // "tags-count" is an exact match — exact match wins over prefix expansion.
+        let result = parse_command("tags-count").unwrap();
+        assert_eq!(result, vec!["tags-count"]);
+    }
+
+    #[test]
+    fn prefix_tags_expands_to_all_tags_commands() {
+        // "tags" is not an exact match, so prefix expansion kicks in.
+        let result = parse_command("tags").unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "tags-count",
+                "tags-count-way",
+                "tags-filter-way",
+                "tags-filter-amenity",
+                "tags-filter-twopass",
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_command_errors() {
+        let err = parse_command("nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown command"), "got: {msg}");
+        assert!(msg.contains("nonexistent"), "got: {msg}");
+    }
+
+    #[test]
+    fn prefix_does_not_match_diff_for_d() {
+        // "d" matches diff and derive-changes — both should appear.
+        let result = parse_command("d").unwrap();
+        assert!(result.contains(&"diff"));
+        assert!(result.contains(&"derive-changes"));
+    }
+
+    #[test]
+    fn prefix_sort_is_exact_not_prefix() {
+        // "sort" is an exact match — should return just ["sort"].
+        let result = parse_command("sort").unwrap();
+        assert_eq!(result, vec!["sort"]);
+    }
+
+    #[test]
+    fn prefix_check_matches_check_refs() {
+        let result = parse_command("check").unwrap();
+        assert_eq!(result, vec!["check-refs"]);
+    }
+
+    #[test]
+    fn exact_match_takes_priority_over_prefix() {
+        // "getid" is both an exact match and a prefix of itself.
+        // The function checks exact match first, returning a single-element vec.
+        let result = parse_command("getid").unwrap();
+        assert_eq!(result, vec!["getid"]);
+    }
+
+    #[test]
+    fn all_commands_individually_parseable() {
+        for &cmd in ALL_COMMANDS {
+            let result = parse_command(cmd).unwrap();
+            assert_eq!(result, vec![cmd], "failed for command: {cmd}");
+        }
+    }
+}

@@ -362,3 +362,99 @@ fn read_trimmed(path: &str) -> String {
         Err(_) => "unknown".to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // extract_version_from_stdout
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn version_from_cargo_output() {
+        let stdout = b"cargo 1.95.0-nightly (abc123 2025-01-01)";
+        assert_eq!(extract_version_from_stdout(stdout), "1.95.0-nightly");
+    }
+
+    #[test]
+    fn version_from_osmium_output() {
+        let stdout = b"osmium version 1.19.0\n";
+        assert_eq!(extract_version_from_stdout(stdout), "1.19.0");
+    }
+
+    #[test]
+    fn version_from_samply_output() {
+        let stdout = b"samply 0.12.0";
+        assert_eq!(extract_version_from_stdout(stdout), "0.12.0");
+    }
+
+    #[test]
+    fn version_from_empty_output() {
+        assert_eq!(extract_version_from_stdout(b""), "unknown");
+    }
+
+    #[test]
+    fn version_from_no_digit_word() {
+        // No word starts with a digit — should fall back to "unknown".
+        let stdout = b"some tool running fine";
+        assert_eq!(extract_version_from_stdout(stdout), "unknown");
+    }
+
+    #[test]
+    fn version_picks_first_digit_word_not_later() {
+        // Two digit-words: should return the first one.
+        let stdout = b"tool 2.0.0 built 3.1.4";
+        assert_eq!(extract_version_from_stdout(stdout), "2.0.0");
+    }
+
+    #[test]
+    fn version_only_uses_first_line() {
+        // Second line has a version, first line does not.
+        let stdout = b"Welcome to tool\n1.2.3 is the version";
+        assert_eq!(extract_version_from_stdout(stdout), "unknown");
+    }
+
+    #[test]
+    fn version_from_single_version_word() {
+        let stdout = b"3.14.159";
+        assert_eq!(extract_version_from_stdout(stdout), "3.14.159");
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_kernel_version
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kernel_version_typical() {
+        let content = "Linux version 6.18.0-9-generic (builder@host) (gcc 14.2.0)";
+        assert_eq!(extract_kernel_version(content), "6.18.0-9-generic");
+    }
+
+    #[test]
+    fn kernel_version_empty() {
+        assert_eq!(extract_kernel_version(""), "unknown");
+    }
+
+    #[test]
+    fn kernel_version_only_two_words() {
+        assert_eq!(extract_kernel_version("Linux version"), "unknown");
+    }
+
+    #[test]
+    fn kernel_version_exactly_three_words() {
+        assert_eq!(extract_kernel_version("Linux version 5.4.0"), "5.4.0");
+    }
+
+    #[test]
+    fn kernel_version_extra_whitespace() {
+        // split_whitespace handles multiple spaces/tabs.
+        let content = "Linux   version\t6.1.0-rc1  rest";
+        assert_eq!(extract_kernel_version(content), "6.1.0-rc1");
+    }
+
+    #[test]
+    fn kernel_version_single_word() {
+        assert_eq!(extract_kernel_version("Linux"), "unknown");
+    }
+}

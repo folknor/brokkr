@@ -78,3 +78,96 @@ pub fn parse_compressions(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_none() {
+        let result = parse_compressions("none", true).unwrap();
+        assert_eq!(result, vec!["none"]);
+    }
+
+    #[test]
+    fn default_level_zlib() {
+        let result = parse_compressions("zlib", true).unwrap();
+        assert_eq!(result, vec!["zlib:6"]);
+    }
+
+    #[test]
+    fn default_level_zstd() {
+        let result = parse_compressions("zstd", true).unwrap();
+        assert_eq!(result, vec!["zstd:3"]);
+    }
+
+    #[test]
+    fn no_default_levels_zlib() {
+        let result = parse_compressions("zlib", false).unwrap();
+        assert_eq!(result, vec!["zlib"]);
+    }
+
+    #[test]
+    fn no_default_levels_zstd() {
+        let result = parse_compressions("zstd", false).unwrap();
+        assert_eq!(result, vec!["zstd"]);
+    }
+
+    #[test]
+    fn explicit_level_passes_through() {
+        let result = parse_compressions("zlib:9", true).unwrap();
+        assert_eq!(result, vec!["zlib:9"]);
+    }
+
+    #[test]
+    fn explicit_zstd_level() {
+        let result = parse_compressions("zstd:19", false).unwrap();
+        assert_eq!(result, vec!["zstd:19"]);
+    }
+
+    #[test]
+    fn multiple_mixed() {
+        let result = parse_compressions("none,zlib,zstd:5", true).unwrap();
+        assert_eq!(result, vec!["none", "zlib:6", "zstd:5"]);
+    }
+
+    #[test]
+    fn whitespace_trimmed() {
+        let result = parse_compressions("  none , zlib , zstd:3 ", true).unwrap();
+        assert_eq!(result, vec!["none", "zlib:6", "zstd:3"]);
+    }
+
+    #[test]
+    fn invalid_compression_name() {
+        let err = parse_compressions("lz4", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown compression"), "got: {msg}");
+        assert!(msg.contains("lz4"), "got: {msg}");
+    }
+
+    #[test]
+    fn invalid_level_not_a_number() {
+        let err = parse_compressions("zlib:abc", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid compression level"), "got: {msg}");
+    }
+
+    #[test]
+    fn negative_level_is_valid_i32() {
+        // Negative levels are valid i32 parses (zstd supports negative levels).
+        let result = parse_compressions("zstd:-1", true).unwrap();
+        assert_eq!(result, vec!["zstd:-1"]);
+    }
+
+    #[test]
+    fn explicit_level_with_defaults_off_still_works() {
+        let result = parse_compressions("zlib:1,zstd:7", false).unwrap();
+        assert_eq!(result, vec!["zlib:1", "zstd:7"]);
+    }
+
+    #[test]
+    fn all_three_with_defaults() {
+        let result = parse_compressions("none,zlib,zstd", true).unwrap();
+        assert_eq!(result, vec!["none", "zlib:6", "zstd:3"]);
+    }
+}

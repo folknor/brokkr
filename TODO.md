@@ -38,10 +38,6 @@ Rust rewrite of elivagar's `scripts/pmtiles-stats.py` (181 lines). New subcomman
 
 `parse_metric()` in `hotpath_fmt.rs` reverse-engineers formatted strings like `"59.2 MB"` and `"3.06 ms"` back into numbers to compute change %. Fragile — silently breaks if the hotpath crate changes formatting (new units, precision changes). The hotpath crate should emit raw numeric values alongside formatted strings in its JSON output so brokkr doesn't need to parse display text.
 
-### Tests for comparison and metric parsing
-
-The comparison pairing (`build_comparison_pairs`), metric parsing (`parse_metric`), and hotpath diff (`format_section_diff`) have no test coverage. `parse_metric` especially benefits from a table of test cases (various units, edge cases, unknown units).
-
 ### RTK double execution
 
 Commands appear to run twice (two "Finished... Running..." blocks in output). The rtk PreToolUse hook may be executing the command in addition to the original — investigate hook configuration.

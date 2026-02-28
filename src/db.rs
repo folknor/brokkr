@@ -898,3 +898,541 @@ fn format_change(a_ms: Option<i64>, b_ms: Option<i64>) -> String {
         _ => String::from("--"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helper: build a StoredRow with sensible defaults, overriding key fields
+    // -----------------------------------------------------------------------
+
+    fn row(command: &str, variant: &str, input_file: &str, elapsed_ms: i64) -> StoredRow {
+        StoredRow {
+            id: 0,
+            timestamp: String::from("2026-03-01 00:00:00"),
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test commit"),
+            command: command.to_owned(),
+            variant: variant.to_owned(),
+            input_file: input_file.to_owned(),
+            input_mb: None,
+            elapsed_ms,
+            cargo_features: String::new(),
+            cargo_profile: String::from("release"),
+            kernel: String::new(),
+            cpu_governor: String::new(),
+            avail_memory_mb: None,
+            storage_notes: String::new(),
+            extra: None,
+            uuid: String::from("abcdef1234567890"),
+            cli_args: String::new(),
+            metadata: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // pair_key / split_pair_key roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pair_key_roundtrip_normal() {
+        let key = pair_key("read", "mmap", "denmark.osm.pbf");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "read");
+        assert_eq!(var, "mmap");
+        assert_eq!(input, "denmark.osm.pbf");
+    }
+
+    #[test]
+    fn pair_key_roundtrip_empty_fields() {
+        let key = pair_key("read", "", "");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "read");
+        assert_eq!(var, "");
+        assert_eq!(input, "");
+    }
+
+    #[test]
+    fn pair_key_roundtrip_all_empty() {
+        let key = pair_key("", "", "");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "");
+        assert_eq!(var, "");
+        assert_eq!(input, "");
+    }
+
+    #[test]
+    fn pair_key_preserves_tabs_in_values() {
+        // If a field contained a tab, splitn(3, '\t') would mangle it.
+        // pair_key("a\tb", "c", "d") produces "a\tb\tc\td"
+        // splitn(3, '\t') splits into ["a", "b", "c\td"]
+        let key = pair_key("a\tb", "c", "d");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "a", "tab in command corrupts first field");
+        assert_eq!(var, "b", "original variant is lost");
+        assert_eq!(input, "c\td", "variant bleeds into input field");
+    }
+
+    #[test]
+    fn split_pair_key_no_tabs() {
+        let (cmd, var, input) = split_pair_key("notabs");
+        assert_eq!(cmd, "notabs");
+        assert_eq!(var, "");
+        assert_eq!(input, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_comparison_pairs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn comparison_pairs_both_have_same_benchmark() {
+        let a = vec![row("read", "mmap", "dk.pbf", 100)];
+        let b = vec![row("read", "mmap", "dk.pbf", 90)];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, Some(100));
+        assert_eq!(pairs[0].b_ms, Some(90));
+    }
+
+    #[test]
+    fn comparison_pairs_a_only() {
+        let a = vec![row("read", "mmap", "dk.pbf", 100)];
+        let b: Vec<StoredRow> = vec![];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, Some(100));
+        assert_eq!(pairs[0].b_ms, None);
+    }
+
+    #[test]
+    fn comparison_pairs_b_only() {
+        let a: Vec<StoredRow> = vec![];
+        let b = vec![row("write", "", "out.pbf", 200)];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, None);
+        assert_eq!(pairs[0].b_ms, Some(200));
+    }
+
+    #[test]
+    fn comparison_pairs_deduplication_first_entry_wins() {
+        // Two rows in A with the same key -- first one should win.
+        let a = vec![
+            row("read", "mmap", "dk.pbf", 100),
+            row("read", "mmap", "dk.pbf", 999),
+        ];
+        let b = vec![
+            row("read", "mmap", "dk.pbf", 50),
+            row("read", "mmap", "dk.pbf", 888),
+        ];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, Some(100), "first A entry should win, not 999");
+        assert_eq!(pairs[0].b_ms, Some(50), "first B entry should win, not 888");
+    }
+
+    #[test]
+    fn comparison_pairs_ordering_a_first_then_b_new() {
+        // A has benchmarks X and Y (in that order).
+        // B has benchmarks Y and Z (in that order).
+        // Expected key order: X, Y (from A), then Z (new from B).
+        let a = vec![
+            row("x-cmd", "", "", 10),
+            row("y-cmd", "", "", 20),
+        ];
+        let b = vec![
+            row("y-cmd", "", "", 25),
+            row("z-cmd", "", "", 30),
+        ];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 3);
+        let key_strings: Vec<String> = pairs
+            .iter()
+            .map(|p| split_pair_key(&p.key).0.to_owned())
+            .collect();
+        assert_eq!(key_strings, vec!["x-cmd", "y-cmd", "z-cmd"]);
+
+        // x-cmd: A-only
+        assert_eq!(pairs[0].a_ms, Some(10));
+        assert_eq!(pairs[0].b_ms, None);
+        // y-cmd: both
+        assert_eq!(pairs[1].a_ms, Some(20));
+        assert_eq!(pairs[1].b_ms, Some(25));
+        // z-cmd: B-only
+        assert_eq!(pairs[2].a_ms, None);
+        assert_eq!(pairs[2].b_ms, Some(30));
+    }
+
+    #[test]
+    fn comparison_pairs_variant_and_input_matter() {
+        // Same command but different variant/input should be separate pairs.
+        let a = vec![
+            row("read", "mmap", "dk.pbf", 100),
+            row("read", "stdio", "dk.pbf", 200),
+            row("read", "mmap", "se.pbf", 300),
+        ];
+        let b = vec![
+            row("read", "mmap", "dk.pbf", 90),
+        ];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 3);
+        // Only the first pair should have both sides.
+        assert!(pairs[0].a_ms.is_some() && pairs[0].b_ms.is_some());
+        assert!(pairs[1].a_ms.is_some() && pairs[1].b_ms.is_none());
+        assert!(pairs[2].a_ms.is_some() && pairs[2].b_ms.is_none());
+    }
+
+    #[test]
+    fn comparison_pairs_empty_both_sides() {
+        let pairs = build_comparison_pairs(&[], &[]);
+        assert!(pairs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // format_change
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_change_improvement() {
+        // 100 -> 80 = -20%
+        let result = format_change(Some(100), Some(80));
+        assert_eq!(result, "-20.0%");
+    }
+
+    #[test]
+    fn format_change_regression() {
+        // 100 -> 130 = +30%
+        let result = format_change(Some(100), Some(130));
+        assert_eq!(result, "+30.0%");
+    }
+
+    #[test]
+    fn format_change_same_value() {
+        let result = format_change(Some(500), Some(500));
+        assert_eq!(result, "+0.0%");
+    }
+
+    #[test]
+    fn format_change_zero_baseline() {
+        // a=0 falls through the guard `a != 0`, returns "--"
+        let result = format_change(Some(0), Some(100));
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_missing_a() {
+        let result = format_change(None, Some(100));
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_missing_b() {
+        let result = format_change(Some(100), None);
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_both_missing() {
+        let result = format_change(None, None);
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_large_regression() {
+        // 1 -> 1001 = +100000%
+        let result = format_change(Some(1), Some(1001));
+        assert_eq!(result, "+100000.0%");
+    }
+
+    #[test]
+    fn format_change_near_zero_result() {
+        // 1000 -> 999: -0.1%
+        let result = format_change(Some(1000), Some(999));
+        assert_eq!(result, "-0.1%");
+    }
+
+    #[test]
+    fn format_change_both_zero() {
+        // a=0 hits the guard, returns "--"
+        let result = format_change(Some(0), Some(0));
+        assert_eq!(result, "--");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_input
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_input_empty_filename() {
+        let result = format_input("", None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_input_empty_filename_with_mb() {
+        // Even if MB is provided, empty filename returns empty.
+        let result = format_input("", Some(42.0));
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_input_with_extension_no_mb() {
+        let result = format_input("denmark.osm.pbf", None);
+        // file_stem strips only the last extension: "denmark.osm"
+        assert_eq!(result, "denmark.osm");
+    }
+
+    #[test]
+    fn format_input_with_extension_and_mb() {
+        let result = format_input("denmark.osm.pbf", Some(123.4));
+        assert_eq!(result, "denmark.osm (123 MB)");
+    }
+
+    #[test]
+    fn format_input_no_extension() {
+        let result = format_input("rawfile", None);
+        assert_eq!(result, "rawfile");
+    }
+
+    #[test]
+    fn format_input_no_extension_with_mb() {
+        let result = format_input("rawfile", Some(0.5));
+        assert_eq!(result, "rawfile (0 MB)");
+    }
+
+    #[test]
+    fn format_input_path_with_directory() {
+        // file_stem should extract from the basename
+        let result = format_input("data/inputs/denmark.pbf", None);
+        assert_eq!(result, "denmark");
+    }
+
+    #[test]
+    fn format_input_single_extension() {
+        let result = format_input("test.csv", Some(10.0));
+        assert_eq!(result, "test (10 MB)");
+    }
+
+    // -----------------------------------------------------------------------
+    // short_uuid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn short_uuid_normal() {
+        let result = short_uuid("abcdef1234567890abcdef1234567890");
+        assert_eq!(result, "abcdef12");
+    }
+
+    #[test]
+    fn short_uuid_exactly_8() {
+        let result = short_uuid("12345678");
+        assert_eq!(result, "12345678");
+    }
+
+    #[test]
+    fn short_uuid_shorter_than_8() {
+        let result = short_uuid("abc");
+        assert_eq!(result, "abc");
+    }
+
+    #[test]
+    fn short_uuid_empty() {
+        let result = short_uuid("");
+        assert_eq!(result, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_query_sql
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_query_sql_no_filters() {
+        let filter = QueryFilter {
+            commit: None,
+            command: None,
+            variant: None,
+            limit: 50,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        // No WHERE clause, just ORDER BY + LIMIT
+        assert!(!sql.contains("WHERE"), "should have no WHERE clause");
+        assert!(sql.contains("ORDER BY id DESC LIMIT ?1"));
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0], "50");
+    }
+
+    #[test]
+    fn build_query_sql_all_filters() {
+        let filter = QueryFilter {
+            commit: Some(String::from("abc123")),
+            command: Some(String::from("read")),
+            variant: Some(String::from("mmap")),
+            limit: 10,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("[commit] LIKE ?1||'%'"), "commit should be ?1");
+        assert!(sql.contains("command = ?2"), "command should be ?2");
+        assert!(sql.contains("variant LIKE ?3||'%'"), "variant should be ?3");
+        assert!(sql.contains("LIMIT ?4"), "limit should be ?4");
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[0], "abc123");
+        assert_eq!(params[1], "read");
+        assert_eq!(params[2], "mmap");
+        assert_eq!(params[3], "10");
+    }
+
+    #[test]
+    fn build_query_sql_commit_only() {
+        let filter = QueryFilter {
+            commit: Some(String::from("deadbeef")),
+            command: None,
+            variant: None,
+            limit: 25,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        assert!(sql.contains("[commit] LIKE ?1||'%'"));
+        assert!(sql.contains("LIMIT ?2"));
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], "deadbeef");
+        assert_eq!(params[1], "25");
+    }
+
+    #[test]
+    fn build_query_sql_command_and_variant_no_commit() {
+        let filter = QueryFilter {
+            commit: None,
+            command: Some(String::from("write")),
+            variant: Some(String::from("direct")),
+            limit: 5,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        // Without commit, command becomes ?1, variant ?2, limit ?3
+        assert!(sql.contains("command = ?1"));
+        assert!(sql.contains("variant LIKE ?2||'%'"));
+        assert!(sql.contains("LIMIT ?3"));
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0], "write");
+        assert_eq!(params[1], "direct");
+        assert_eq!(params[2], "5");
+    }
+
+    #[test]
+    fn build_query_sql_selects_correct_columns() {
+        let filter = QueryFilter {
+            commit: None,
+            command: None,
+            variant: None,
+            limit: 1,
+        };
+        let (sql, _) = build_query_sql(&filter);
+        assert!(sql.starts_with(&format!("SELECT {SELECT_COLS} FROM runs")));
+    }
+
+    // -----------------------------------------------------------------------
+    // format_elapsed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_elapsed_positive() {
+        assert_eq!(format_elapsed(1234), "1234 ms");
+    }
+
+    #[test]
+    fn format_elapsed_zero() {
+        assert_eq!(format_elapsed(0), "0 ms");
+    }
+
+    #[test]
+    fn format_elapsed_negative() {
+        // Shouldn't happen in practice, but verify it doesn't panic.
+        assert_eq!(format_elapsed(-5), "-5 ms");
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration: ResultsDb open + insert + query (in-memory via tempfile)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn db_open_and_insert_roundtrip() {
+        let dir = std::env::temp_dir().join("brokkr_test_db_roundtrip");
+        drop(std::fs::create_dir_all(&dir));
+        let db_path = dir.join("test.db");
+        // Clean up from previous runs.
+        drop(std::fs::remove_file(&db_path));
+
+        let db = ResultsDb::open(&db_path).expect("open db");
+        let run = RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test subject"),
+            command: String::from("read"),
+            variant: Some(String::from("mmap")),
+            input_file: Some(String::from("denmark.osm.pbf")),
+            input_mb: Some(42.5),
+            elapsed_ms: 1234,
+            cargo_features: None,
+            cargo_profile: String::from("release"),
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            extra: None,
+            cli_args: Some(String::from("--fast")),
+            metadata: None,
+        };
+        let short = db.insert(&run).expect("insert");
+        assert_eq!(short.len(), 8, "short uuid should be 8 chars");
+
+        let rows = db
+            .query(&QueryFilter {
+                commit: Some(String::from("aabbccdd")),
+                command: None,
+                variant: None,
+                limit: 10,
+            })
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].command, "read");
+        assert_eq!(rows[0].variant, "mmap");
+        assert_eq!(rows[0].input_file, "denmark.osm.pbf");
+        assert_eq!(rows[0].elapsed_ms, 1234);
+        assert_eq!(rows[0].cli_args, "--fast");
+
+        // Clean up.
+        drop(std::fs::remove_file(&db_path));
+        drop(std::fs::remove_dir(&dir));
+    }
+
+    #[test]
+    fn db_migrations_are_idempotent() {
+        let dir = std::env::temp_dir().join("brokkr_test_db_migrations");
+        drop(std::fs::create_dir_all(&dir));
+        let db_path = dir.join("test.db");
+        drop(std::fs::remove_file(&db_path));
+
+        // Open twice -- second open should not fail on migrations.
+        {
+            let _db = ResultsDb::open(&db_path).expect("first open");
+        }
+        {
+            let _db = ResultsDb::open(&db_path).expect("second open");
+        }
+
+        drop(std::fs::remove_file(&db_path));
+        drop(std::fs::remove_dir(&dir));
+    }
+}
