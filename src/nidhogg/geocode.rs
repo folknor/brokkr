@@ -15,7 +15,7 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
     // URL-encode the query term.
-    let encoded = url_encode(query);
+    let encoded = super::url_encode(query);
     let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
 
     output::run_msg(&format!("GET {url}"));
@@ -75,26 +75,3 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Simple percent-encoding for URL query parameters.
-///
-/// Encodes spaces, non-ASCII, and reserved characters. This is intentionally
-/// minimal -- just enough for place names.
-fn url_encode(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len() * 2);
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => encoded.push(byte as char),
-            _ => {
-                encoded.push('%');
-                encoded.push_str(&format!("{byte:02X}"));
-            }
-        }
-    }
-    encoded
-}

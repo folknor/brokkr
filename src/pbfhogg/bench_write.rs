@@ -6,32 +6,6 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
-/// Parse a comma-separated list of compression specs into (label, spec_str) pairs.
-/// Accepted: none, zlib, zlib:N, zstd, zstd:N.
-pub fn parse_compressions(input: &str) -> Result<Vec<(String, String)>, DevError> {
-    let mut result = Vec::new();
-    for token in input.split(',') {
-        let trimmed = token.trim();
-        // Validate and normalize
-        let label = match trimmed {
-            "none" => "none".to_owned(),
-            "zlib" => "zlib:6".to_owned(),
-            "zstd" => "zstd:3".to_owned(),
-            s if s.starts_with("zlib:") || s.starts_with("zstd:") => {
-                let colon = s.find(':').unwrap_or(0);
-                let level_str = &s[colon + 1..];
-                if level_str.parse::<i32>().is_err() {
-                    return Err(DevError::Config(format!("invalid compression level: {trimmed}")));
-                }
-                trimmed.to_owned()
-            }
-            _ => return Err(DevError::Config(format!("unknown compression: {trimmed}"))),
-        };
-        result.push((label.clone(), label));
-    }
-    Ok(result)
-}
-
 /// Run the write benchmark for each compression mode (sync + pipelined).
 pub fn run(
     harness: &BenchHarness,

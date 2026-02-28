@@ -6,30 +6,6 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
-/// Parse compression specs (reuse same format as bench_write).
-pub fn parse_compressions(input: &str) -> Result<Vec<(String, String)>, DevError> {
-    let mut result = Vec::new();
-    for token in input.split(',') {
-        let trimmed = token.trim();
-        let label = match trimmed {
-            "none" => "none".to_owned(),
-            "zlib" => "zlib".to_owned(),
-            "zstd" => "zstd".to_owned(),
-            s if s.starts_with("zlib:") || s.starts_with("zstd:") => {
-                let colon = s.find(':').unwrap_or(0);
-                let level_str = &s[colon + 1..];
-                if level_str.parse::<i32>().is_err() {
-                    return Err(DevError::Config(format!("invalid compression level: {trimmed}")));
-                }
-                trimmed.to_owned()
-            }
-            _ => return Err(DevError::Config(format!("unknown compression: {trimmed}"))),
-        };
-        result.push((label.clone(), label));
-    }
-    Ok(result)
-}
-
 /// Check RLIMIT_MEMLOCK for io_uring.
 pub fn check_uring_preflight() -> Result<(), DevError> {
     let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };

@@ -4,11 +4,10 @@
 //! Results are stored in the database via the bench harness.
 
 use std::path::Path;
-use std::time::Duration;
 
 use crate::build;
 use crate::error::DevError;
-use crate::harness::{BenchConfig, BenchHarness, BenchResult};
+use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
 use crate::output;
 
 // ---------------------------------------------------------------------------
@@ -77,7 +76,7 @@ pub fn run(
             });
         }
 
-        let ms = elapsed_to_ms(&captured.elapsed);
+        let ms = harness::elapsed_to_ms(&captured.elapsed);
         let extra = serde_json::json!({
             "nodes_millions": nodes_millions,
             "internal_runs": runs,
@@ -90,8 +89,4 @@ pub fn run(
     })?;
 
     Ok(())
-}
-
-fn elapsed_to_ms(duration: &Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }

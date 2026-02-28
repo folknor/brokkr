@@ -75,7 +75,6 @@ pub struct CapturedOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    #[allow(dead_code)]
     pub elapsed: Duration,
 }
 

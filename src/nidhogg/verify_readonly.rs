@@ -135,7 +135,7 @@ fn run_tests(
 
 /// Check a single geocode query returns non-empty results.
 fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
-    let encoded = url_encode(query);
+    let encoded = super::url_encode(query);
     let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
 
     let result = std::process::Command::new("curl")
@@ -240,25 +240,4 @@ fn set_permissions(
     }
 
     Ok(())
-}
-
-/// Simple percent-encoding for URL query parameters.
-fn url_encode(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len() * 2);
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => encoded.push(byte as char),
-            _ => {
-                encoded.push('%');
-                encoded.push_str(&format!("{byte:02X}"));
-            }
-        }
-    }
-    encoded
 }

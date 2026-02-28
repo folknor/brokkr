@@ -1235,7 +1235,7 @@ fn cmd_bench_write(
     let pi = bootstrap(project_root)?;
     let paths = bootstrap_config(project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
-    let compressions = pbfhogg::bench_write::parse_compressions(compression_str)?;
+    let compressions = pbfhogg::parse_compressions(compression_str, true)?;
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
     let harness = harness::BenchHarness::new(&paths, project_root, project)?;
@@ -1257,7 +1257,7 @@ fn cmd_bench_merge(
     let paths = bootstrap_config(project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
     let osc_path = resolve_osc_path(osc, dataset, &paths, project_root)?;
-    let compressions = pbfhogg::bench_merge::parse_compressions(compression_str)?;
+    let compressions = pbfhogg::parse_compressions(compression_str, false)?;
     let file_mb = file_size_mb(&pbf_path);
 
     if uring {

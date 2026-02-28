@@ -74,7 +74,7 @@ enum GeoResult {
 
 /// Run a single geocode query and return the result.
 fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
-    let encoded = url_encode(query);
+    let encoded = super::url_encode(query);
     let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
 
     let result = std::process::Command::new("curl")
@@ -119,25 +119,4 @@ fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
         }
         Err(e) => Ok(GeoResult::Error(format!("JSON parse error: {e}"))),
     }
-}
-
-/// Simple percent-encoding for URL query parameters.
-fn url_encode(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len() * 2);
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => encoded.push(byte as char),
-            _ => {
-                encoded.push('%');
-                encoded.push_str(&format!("{byte:02X}"));
-            }
-        }
-    }
-    encoded
 }

@@ -120,7 +120,7 @@ pub fn run(
 
     // 6. osmium -- if available
     output::bench_msg("=== osmium baseline ===");
-    if which_exists("osmium") {
+    if super::verify::which_exists("osmium") {
         run_osmium_baseline(harness, pbf_path, file_mb, runs, project_root)?;
     }
 
@@ -282,16 +282,6 @@ fn run_osmium_baseline(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Check whether an executable exists on PATH.
-fn which_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
 
 /// Parse `---` delimited blocks from stderr output.
 ///

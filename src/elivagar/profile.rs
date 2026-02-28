@@ -39,10 +39,10 @@ pub fn run(
     let _lock = crate::lockfile::acquire(scratch_dir)?;
 
     // Check perf_event_paranoid on Linux (both perf and samply need it).
-    check_perf_paranoid()?;
+    crate::preflight::check_perf_paranoid()?;
 
     // Check that the tool is installed.
-    check_tool_installed(tool)?;
+    crate::preflight::check_tool_installed(tool)?;
 
     let pbf_str = pbf_path
         .to_str()
@@ -228,60 +228,3 @@ fn run_samply(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Checks
-// ---------------------------------------------------------------------------
-
-/// Check that perf_event_paranoid is <= 1 (required for perf and samply).
-fn check_perf_paranoid() -> Result<(), DevError> {
-    let path = Path::new("/proc/sys/kernel/perf_event_paranoid");
-    if !path.exists() {
-        // Not on Linux, or procfs not mounted -- skip the check.
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        DevError::Config(format!(
-            "cannot read /proc/sys/kernel/perf_event_paranoid: {e}"
-        ))
-    })?;
-
-    let value: i32 = content.trim().parse().map_err(|_| {
-        DevError::Config(format!(
-            "invalid perf_event_paranoid value: {content}"
-        ))
-    })?;
-
-    if value > 1 {
-        return Err(DevError::Preflight(vec![format!(
-            "/proc/sys/kernel/perf_event_paranoid is {value} (needs <= 1)\n\
-             Run:  echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid\n\
-             This is a runtime-only change that resets on reboot."
-        )]));
-    }
-
-    Ok(())
-}
-
-/// Check that a tool is installed and on PATH.
-fn check_tool_installed(tool: &str) -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg(tool)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => {
-            let install_hint = match tool {
-                "perf" => "sudo apt install linux-tools-common linux-tools-$(uname -r)",
-                "samply" => "cargo install samply",
-                _ => "",
-            };
-            Err(DevError::Preflight(vec![format!(
-                "'{tool}' not found in PATH. Install: {install_hint}"
-            )]))
-        }
-    }
-}
