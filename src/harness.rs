@@ -59,12 +59,26 @@ impl BenchHarness {
         project: crate::project::Project,
         lock_command: &str,
     ) -> Result<Self, DevError> {
-        std::fs::create_dir_all(&paths.scratch_dir)?;
         let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
             project: project.name(),
             command: lock_command,
             project_root: &project_root.display().to_string(),
         })?;
+        Self::new_with_lock(lock, paths, project_root, db_root, project)
+    }
+
+    /// Create a new harness with a pre-acquired lock.
+    ///
+    /// Use this when the lock must be held before other work (e.g. cargo build)
+    /// to prevent concurrent builds from contaminating timing.
+    pub fn new_with_lock(
+        lock: LockGuard,
+        paths: &crate::config::ResolvedPaths,
+        project_root: &Path,
+        db_root: Option<&Path>,
+        project: crate::project::Project,
+    ) -> Result<Self, DevError> {
+        std::fs::create_dir_all(&paths.scratch_dir)?;
         let env = crate::env::collect(paths, project, project_root);
         let git = crate::git::collect(project_root)?;
         let db_base = db_root.unwrap_or(project_root);

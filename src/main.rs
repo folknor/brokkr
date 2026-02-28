@@ -52,6 +52,9 @@ Examples:
     Env,
     /// Build and run the project binary
     Run {
+        /// Cargo features to enable (e.g. linux-io-uring)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
         /// Arguments passed to the binary
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -571,7 +574,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Lock => unreachable!(),
         Command::Check { args } => cmd_check(project, &project_root, &args),
         Command::Env => cmd_env(&dev_config, project, &project_root),
-        Command::Run { args } => cmd_run(&dev_config, project, &project_root, &args),
+        Command::Run { features, args } => cmd_run(&dev_config, project, &project_root, &features, &args),
         Command::Results {
             query,
             commit,
@@ -679,6 +682,13 @@ impl BenchContext {
         let effective_build_root = build_root.unwrap_or(project_root);
         let pi = bootstrap(build_root)?;
         let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+        // Acquire the lock BEFORE building so concurrent brokkr invocations
+        // block here instead of competing for CPU during cargo build.
+        let lock = lockfile::acquire(&lockfile::LockContext {
+            project: project.name(),
+            command: lock_command,
+            project_root: &project_root.display().to_string(),
+        })?;
         let build_config = if features.is_empty() {
             build::BuildConfig::release(package)
         } else {
@@ -686,7 +696,7 @@ impl BenchContext {
         };
         let binary = build::cargo_build(&build_config, effective_build_root)?;
         let db_root = build_root.map(|_| project_root);
-        let harness = harness::BenchHarness::new(&paths, effective_build_root, db_root, project, lock_command)?;
+        let harness = harness::BenchHarness::new_with_lock(lock, &paths, effective_build_root, db_root, project)?;
         Ok(Self { paths, harness, binary })
     }
 }
@@ -799,12 +809,15 @@ fn cmd_env(dev_config: &config::DevConfig, project: Project, project_root: &Path
     Ok(())
 }
 
-fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, args: &[String]) -> Result<(), DevError> {
+fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, features: &[String], args: &[String]) -> Result<(), DevError> {
     let package = project.cli_package();
-    let binary = build::cargo_build(
-        &build::BuildConfig::release(package),
-        project_root,
-    )?;
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let build_config = if feature_refs.is_empty() {
+        build::BuildConfig::release(package)
+    } else {
+        build::BuildConfig::release_with_features(package, &feature_refs)
+    };
+    let binary = build::cargo_build(&build_config, project_root)?;
 
     match project {
         Project::Elivagar => cmd_run_elivagar(dev_config, &binary, project_root, args),
