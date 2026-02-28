@@ -46,7 +46,6 @@ impl BuildConfig {
 // ---------------------------------------------------------------------------
 
 pub struct ProjectInfo {
-    pub project_root: PathBuf,
     pub target_dir: PathBuf,
 }
 
@@ -79,7 +78,6 @@ pub fn project_info() -> Result<ProjectInfo, DevError> {
     let target_dir = extract_string(&val, "target_directory")?;
 
     Ok(ProjectInfo {
-        project_root,
         target_dir: PathBuf::from(target_dir),
     })
 }

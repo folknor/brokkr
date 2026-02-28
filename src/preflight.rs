@@ -6,6 +6,10 @@ use sha2::{Digest, Sha256};
 use crate::error::DevError;
 
 /// A single requirement that must be satisfied before a subcommand runs.
+///
+/// Some variants (File, DiskSpace, KernelParam) are dispatched in `run_check`
+/// but not yet constructed by any caller — they exist for future preflight checks.
+#[allow(dead_code)]
 pub enum Check {
     /// Binary must exist in PATH.
     Binary {
