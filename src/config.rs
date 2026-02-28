@@ -22,7 +22,6 @@ pub struct Dataset {
     pub pbf_raw: Option<String>,
     pub osc: Option<String>,
     pub bbox: Option<String>,
-    pub ocean_shp: Option<String>,
     pub data_dir: Option<String>,
     pub origin: Option<String>,
     pub sha256_pbf: Option<String>,

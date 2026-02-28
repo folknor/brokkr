@@ -1,8 +1,4 @@
-//! Combined elivagar benchmark suite: self + planetiler (+ tilemaker when available).
-//!
-//! Replaces the combined benchmark invocation pattern. Runs bench_self first,
-//! then bench_planetiler as a comparison baseline, then bench_tilemaker (skipped
-//! with a message if not yet implemented).
+//! Combined elivagar benchmark suite: self, planetiler, node-store, pmtiles, tilemaker.
 
 use std::path::Path;
 
@@ -12,7 +8,7 @@ use crate::error::DevError;
 use crate::harness::BenchHarness;
 use crate::output;
 
-use super::{bench_planetiler, bench_self, bench_tilemaker};
+use super::{bench_node_store, bench_planetiler, bench_pmtiles, bench_self, bench_tilemaker};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -61,7 +57,15 @@ pub fn run(
         Err(e) => output::bench_msg(&format!("planetiler skipped: {e}")),
     }
 
-    // 3. bench tilemaker -- comparison baseline (stub)
+    // 3. bench node-store -- micro-benchmark
+    output::bench_msg("=== bench node-store ===");
+    bench_node_store::run(harness, project_root, 50, runs)?;
+
+    // 4. bench pmtiles -- micro-benchmark
+    output::bench_msg("=== bench pmtiles ===");
+    bench_pmtiles::run(harness, project_root, 500_000, runs)?;
+
+    // 5. bench tilemaker -- comparison baseline (stub)
     output::bench_msg("=== bench tilemaker ===");
     match bench_tilemaker::run() {
         Ok(()) => {}

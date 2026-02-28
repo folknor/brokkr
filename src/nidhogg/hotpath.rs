@@ -23,7 +23,6 @@ pub fn run(
     harness: &BenchHarness,
     binary: &Path,
     pbf_path: &Path,
-    _data_dir: &str,
     scratch_dir: &Path,
     file_mb: f64,
     runs: usize,

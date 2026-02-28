@@ -25,18 +25,9 @@ Meanwhile, ad-hoc preflight checks are scattered:
 
 All of these should use the `Check` system in `preflight.rs`, but they don't.
 
-### 4. `bench all` missing benchmarks
+### ~~4. `bench all` missing benchmarks~~ — Done
 
-**pbfhogg:** `bench_all.rs` runs commands, read, write, merge, osmpbf baseline, osmium baseline, planetiler baseline. Missing:
-- `bench extract`
-- `bench allocator`
-- `bench blob-filter`
-
-**elivagar:** `bench_all.rs` runs self, planetiler, tilemaker (stub). Missing:
-- `bench node-store`
-- `bench pmtiles`
-
-No `bench all` or `verify all` exists for nidhogg at all.
+pbfhogg bench_all now runs extract (if bbox configured), allocator, and blob-filter (if pbf_raw configured) alongside the original 7 benchmarks. elivagar bench_all now includes node-store and pmtiles micro-benchmarks. Nidhogg still has no bench all (only 2 benchmarks: api and ingest).
 
 ---
 
@@ -71,17 +62,17 @@ Requires new infrastructure in `tools.rs` (tilemaker build, shortbread config, E
 
 `detect_ocean()` in `bench_self.rs` checks for both full-resolution (`water-polygons-split-3857`) and simplified (`simplified-water-polygons-split-3857`) ocean shapefiles. The simplified shapefile is passed as `--ocean-simplified` to elivagar by bench_self, hotpath, and profile. But `download_ocean.rs` only downloads the full-resolution shapefile. No way to download the simplified one through brokkr.
 
-### 8. `nidhogg/bench_api.rs` — BenchConfig missing `input_file` and `input_mb`
+### ~~8. `nidhogg/bench_api.rs` — BenchConfig missing `input_file` and `input_mb`~~ — Done
 
-Both are `None`. Every other benchmark fills these in. The API benchmark queries against a server backed by a specific dataset, but the dataset name/size is never recorded. You can't tell which dataset was loaded when looking at results later.
+Added `--dataset` flag to `bench api` CLI (defaults to "denmark"). PBF filename and size are now resolved from dataset config and recorded in BenchConfig.
 
-### 9. `nidhogg/hotpath.rs` — unused `_data_dir` parameter
+### ~~9. `nidhogg/hotpath.rs` — unused `_data_dir` parameter~~ — Done
 
-The caller in `main.rs` resolves `data_dir_str` from dataset config and passes it, but the function ignores it. Elivagar hotpath uses its `data_dir` parameter (for `tilegen_tmp` and ocean shapefiles). The nidhogg version was adapted from elivagar but `data_dir` usage was never wired up.
+Removed the unused `_data_dir` parameter and its resolution in `main.rs`. Nidhogg hotpath doesn't need data_dir (unlike elivagar which uses it for ocean shapefiles).
 
-### 10. `config.rs` — `Dataset.ocean_shp` field defined but never read
+### ~~10. `config.rs` — `Dataset.ocean_shp` field defined but never read~~ — Done
 
-The field is deserialized from `brokkr.toml` but never accessed anywhere. Ocean shapefile detection is done ad-hoc by `elivagar::bench_self::detect_ocean()` which looks for hardcoded paths in the data directory. The config schema was extended but nothing reads it.
+Removed the dead `ocean_shp` field from `Dataset`. Ocean shapefiles are shared across datasets and detected by directory scanning in `detect_ocean()`, not per-dataset config.
 
 ### 11. Inconsistent `cargo_features` recording in BenchConfig
 

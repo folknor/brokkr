@@ -375,6 +375,9 @@ enum BenchCommand {
 
     /// Nidhogg: API query benchmark
     Api {
+        /// Dataset the server is loaded with (for metadata recording)
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
         /// Run count
         #[arg(long, default_value = "10")]
         runs: usize,
@@ -1098,9 +1101,9 @@ fn cmd_bench(project: Project, project_root: &Path, bench: BenchCommand) -> Resu
         }
 
         // ----- nidhogg bench variants -----
-        BenchCommand::Api { runs, query } => {
+        BenchCommand::Api { dataset, runs, query } => {
             project::require(project, Project::Nidhogg, "bench api")?;
-            cmd_bench_api(project, project_root, runs, query.as_deref())
+            cmd_bench_api(project, project_root, &dataset, runs, query.as_deref())
         }
         BenchCommand::NidIngest { dataset, pbf, runs } => {
             project::require(project, Project::Nidhogg, "bench ingest")?;
@@ -1561,20 +1564,11 @@ fn cmd_hotpath(
                 project_root,
             )?;
 
-            // Resolve data_dir for ingest
-            let data_dir_str = paths
-                .datasets
-                .get(dataset)
-                .and_then(|ds| ds.data_dir.as_ref())
-                .map(|d| paths.data_dir.join(d).display().to_string())
-                .unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string());
-
             let harness = harness::BenchHarness::new(&paths, project_root, project)?;
             nidhogg::hotpath::run(
                 &harness,
                 &binary,
                 &pbf_path,
-                &data_dir_str,
                 &paths.scratch_dir,
                 file_mb,
                 runs,
@@ -1831,14 +1825,23 @@ fn cmd_geocode(project: Project, project_root: &Path, term: &str) -> Result<(), 
 fn cmd_bench_api(
     project: Project,
     project_root: &Path,
+    dataset: &str,
     runs: usize,
     query: Option<&str>,
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let paths = bootstrap_config(project_root, &pi.target_dir)?;
     let port = resolve_nidhogg_port(project_root, &pi.target_dir);
+
+    // Resolve dataset PBF for metadata recording.
+    let pbf_path = resolve_pbf_path(None, dataset, &paths, project_root).ok();
+    let input_file = pbf_path.as_ref()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+    let input_mb = pbf_path.as_ref().map(|p| file_size_mb(p));
+
     let harness = harness::BenchHarness::new(&paths, project_root, project)?;
-    nidhogg::bench_api::run(&harness, port, runs, query)
+    nidhogg::bench_api::run(&harness, port, runs, query, input_file, input_mb)
 }
 
 fn cmd_bench_nid_ingest(

@@ -8,7 +8,10 @@ use crate::config::ResolvedPaths;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
-use crate::pbfhogg::{bench_commands, bench_merge, bench_planetiler, bench_read, bench_write};
+use crate::pbfhogg::{
+    bench_allocator, bench_blob_filter, bench_commands, bench_extract, bench_merge,
+    bench_planetiler, bench_read, bench_write,
+};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -78,11 +81,32 @@ pub fn run(
         project_root,
     )?;
 
-    // 4. bench merge -- if osc is available for this dataset
-    let osc_path = paths
-        .datasets
-        .get(dataset)
-        .and_then(|ds| ds.osc.as_ref())
+    run_dataset_dependent(harness, paths, dataset, &binary, pbf_path, file_mb, runs, project_root)?;
+
+    // bench allocator -- default, jemalloc, mimalloc
+    output::bench_msg("=== bench allocator ===");
+    bench_allocator::run(harness, pbf_path, file_mb, runs, project_root)?;
+
+    run_baselines(harness, paths, project_root, pbf_path, file_mb, runs)
+}
+
+/// Run benchmarks that depend on optional dataset config fields (osc, bbox, pbf_raw).
+#[allow(clippy::too_many_arguments)]
+fn run_dataset_dependent(
+    harness: &BenchHarness,
+    paths: &ResolvedPaths,
+    dataset: &str,
+    binary: &Path,
+    pbf_path: &Path,
+    file_mb: f64,
+    runs: usize,
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let ds = paths.datasets.get(dataset);
+
+    // bench merge -- if osc is available
+    let osc_path = ds
+        .and_then(|d| d.osc.as_ref())
         .map(|osc_file| paths.data_dir.join(osc_file))
         .filter(|p| p.exists());
 
@@ -93,22 +117,57 @@ pub fn run(
             ("none".into(), "none".into()),
         ];
         bench_merge::run(
-            harness,
-            &binary,
-            pbf_path,
-            osc_path,
-            file_mb,
-            runs,
-            &merge_compressions,
-            false,
-            &paths.scratch_dir,
-            project_root,
+            harness, binary, pbf_path, osc_path, file_mb, runs,
+            &merge_compressions, false, &paths.scratch_dir, project_root,
         )?;
     } else {
         output::bench_msg("=== bench merge === (skipped, no osc file)");
     }
 
-    // 5. osmpbf baseline -- build and run
+    // bench extract -- if bbox is available
+    let bbox = ds.and_then(|d| d.bbox.as_ref());
+
+    if let Some(bbox) = bbox {
+        output::bench_msg("=== bench extract ===");
+        bench_extract::run(
+            harness, binary, pbf_path, file_mb, runs,
+            bbox, bench_extract::ALL_STRATEGIES, project_root,
+        )?;
+    } else {
+        output::bench_msg("=== bench extract === (skipped, no bbox in dataset config)");
+    }
+
+    // bench blob-filter -- if raw PBF is available
+    let raw_pbf_path = ds
+        .and_then(|d| d.pbf_raw.as_ref())
+        .map(|raw_file| paths.data_dir.join(raw_file))
+        .filter(|p| p.exists());
+
+    if let Some(ref raw_path) = raw_pbf_path {
+        output::bench_msg("=== bench blob-filter ===");
+        bench_blob_filter::run(
+            harness, binary, pbf_path, raw_path, file_mb, runs, project_root,
+        )?;
+    } else {
+        output::bench_msg("=== bench blob-filter === (skipped, no pbf_raw in dataset config)");
+    }
+
+    Ok(())
+}
+
+/// Run external baselines: osmpbf, osmium, planetiler.
+///
+/// Errors from individual baselines are logged and skipped without failing the suite.
+#[allow(clippy::too_many_arguments)]
+fn run_baselines(
+    harness: &BenchHarness,
+    paths: &ResolvedPaths,
+    project_root: &Path,
+    pbf_path: &Path,
+    file_mb: f64,
+    runs: usize,
+) -> Result<(), DevError> {
+    // osmpbf baseline -- build and run
     output::bench_msg("=== osmpbf baseline ===");
     let manifest = project_root.join("bench/osmpbf-baseline/Cargo.toml");
     if manifest.exists() {
@@ -118,13 +177,13 @@ pub fn run(
         }
     }
 
-    // 6. osmium -- if available
+    // osmium -- if available
     output::bench_msg("=== osmium baseline ===");
     if super::verify::which_exists("osmium") {
         run_osmium_baseline(harness, pbf_path, file_mb, runs, project_root)?;
     }
 
-    // 7. planetiler -- if available
+    // planetiler -- if available
     output::bench_msg("=== planetiler baseline ===");
     match bench_planetiler::run(harness, pbf_path, file_mb, runs, &paths.data_dir, project_root)
     {

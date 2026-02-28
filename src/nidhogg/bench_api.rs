@@ -45,6 +45,8 @@ pub fn run(
     port: u16,
     runs: usize,
     only: Option<&str>,
+    input_file: Option<&str>,
+    input_mb: Option<f64>,
 ) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
@@ -65,8 +67,8 @@ pub fn run(
         let config = BenchConfig {
             command: "bench api".into(),
             variant: Some(name.into()),
-            input_file: None,
-            input_mb: None,
+            input_file: input_file.map(str::to_owned),
+            input_mb,
             cargo_features: None,
             cargo_profile: "release".into(),
             runs,
