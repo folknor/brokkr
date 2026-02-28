@@ -9,6 +9,7 @@ mod hotpath_fmt;
 mod lockfile;
 mod output;
 mod pbfhogg;
+mod pmtiles;
 mod elivagar;
 mod nidhogg;
 mod preflight;
@@ -230,6 +231,12 @@ Examples:
     },
     /// Download ocean shapefiles (elivagar)
     DownloadOcean,
+    /// Print PMTiles v3 file statistics
+    PmtilesStats {
+        /// PMTiles file(s) to analyze
+        #[arg(required = true)]
+        files: Vec<String>,
+    },
     /// Start the nidhogg server (nidhogg only)
     Serve {
         /// Data directory (ingested disk format)
@@ -653,6 +660,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             cmd_compare_tiles(project, &project_root, &file_a, &file_b, sample)
         }
         Command::DownloadOcean => cmd_download_ocean(&dev_config, project, &project_root),
+        Command::PmtilesStats { files } => cmd_pmtiles_stats(&files),
         Command::Serve { data_dir, dataset, tiles } => {
             cmd_serve(&dev_config, project, &project_root, data_dir.as_deref(), &dataset, tiles.as_deref())
         }
@@ -1657,6 +1665,13 @@ fn cmd_download_ocean(dev_config: &config::DevConfig, project: Project, project_
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     elivagar::download_ocean::run(&paths.data_dir)
+}
+
+fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
+    for file in files {
+        pmtiles::run(file)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
