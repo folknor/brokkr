@@ -47,9 +47,15 @@ pub struct BenchHarness {
 
 impl BenchHarness {
     /// Create a new harness, acquiring the lockfile and collecting environment.
+    ///
+    /// When `db_root` is `Some`, the results DB is opened from that directory
+    /// instead of `project_root`. This is used for worktree-based benchmarking
+    /// where git info comes from the worktree but results are stored in the
+    /// main tree's database.
     pub fn new(
         paths: &crate::config::ResolvedPaths,
         project_root: &Path,
+        db_root: Option<&Path>,
         project: crate::project::Project,
         lock_command: &str,
     ) -> Result<Self, DevError> {
@@ -61,7 +67,8 @@ impl BenchHarness {
         })?;
         let env = crate::env::collect(paths, project, project_root);
         let git = crate::git::collect(project_root)?;
-        let db_dir = project_root.join(".brokkr");
+        let db_base = db_root.unwrap_or(project_root);
+        let db_dir = db_base.join(".brokkr");
         std::fs::create_dir_all(&db_dir)?;
         let db = ResultsDb::open(&db_dir.join("results.db"))?;
         let storage_notes = format_storage_notes(&paths.drives);

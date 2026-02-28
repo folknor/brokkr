@@ -53,11 +53,16 @@ pub struct ProjectInfo {
 // project_info
 // ---------------------------------------------------------------------------
 
-/// Resolve project root from cwd and target directory via `cargo metadata`.
-pub fn project_info() -> Result<ProjectInfo, DevError> {
-    let project_root = std::env::current_dir().map_err(|e| {
-        DevError::Build(format!("cannot determine current directory: {e}"))
-    })?;
+/// Resolve target directory via `cargo metadata`.
+///
+/// Runs `cargo metadata` in the given directory (or cwd if `None`).
+pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
+    let project_root = match cwd {
+        Some(p) => p.to_owned(),
+        None => std::env::current_dir().map_err(|e| {
+            DevError::Build(format!("cannot determine current directory: {e}"))
+        })?,
+    };
 
     let captured = output::run_captured(
         "cargo",
