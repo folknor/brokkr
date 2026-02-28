@@ -433,7 +433,14 @@ enum BenchCommand {
         runs: usize,
     },
     /// Elivagar: Tilemaker comparison benchmark
-    Tilemaker,
+    Tilemaker {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long)]
+        pbf: Option<String>,
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
     /// Elivagar: full benchmark suite
     ElivAll {
         #[arg(long, default_value = "denmark")]
@@ -1348,9 +1355,9 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             project::require(project, Project::Elivagar, "bench eliv-planetiler")?;
             cmd_bench_eliv_planetiler(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
         }
-        BenchCommand::Tilemaker => {
+        BenchCommand::Tilemaker { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench tilemaker")?;
-            elivagar::bench_tilemaker::run()
+            cmd_bench_tilemaker(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
         }
         BenchCommand::ElivAll { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-all")?;
@@ -1607,6 +1614,32 @@ fn cmd_bench_eliv_planetiler(
     let db_root = build_root.map(|_| project_root);
     let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench planetiler")?;
     elivagar::bench_planetiler::run(
+        &harness,
+        &pbf_path,
+        file_mb,
+        runs,
+        &paths.data_dir,
+        &paths.scratch_dir,
+        project_root,
+    )
+}
+
+fn cmd_bench_tilemaker(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    build_root: Option<&Path>,
+    dataset: &str,
+    pbf: Option<&str>,
+    runs: usize,
+) -> Result<(), DevError> {
+    let pi = bootstrap(build_root)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
+    let effective = build_root.unwrap_or(project_root);
+    let db_root = build_root.map(|_| project_root);
+    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench tilemaker")?;
+    elivagar::bench_tilemaker::run(
         &harness,
         &pbf_path,
         file_mb,

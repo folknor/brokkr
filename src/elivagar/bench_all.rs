@@ -65,9 +65,17 @@ pub fn run(
     output::bench_msg("=== bench pmtiles ===");
     bench_pmtiles::run(harness, project_root, 500_000, runs)?;
 
-    // 5. bench tilemaker -- comparison baseline (stub)
+    // 5. bench tilemaker -- comparison baseline
     output::bench_msg("=== bench tilemaker ===");
-    match bench_tilemaker::run() {
+    match bench_tilemaker::run(
+        harness,
+        pbf_path,
+        file_mb,
+        runs,
+        &paths.data_dir,
+        &paths.scratch_dir,
+        project_root,
+    ) {
         Ok(()) => {}
         Err(e) => output::bench_msg(&format!("tilemaker skipped: {e}")),
     }

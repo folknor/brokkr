@@ -15,12 +15,6 @@ Functions genuinely need many parameters. `BenchContext` covers the common case;
 
 ## Backlog
 
-### `bench tilemaker` stub
-
-`src/elivagar/bench_tilemaker.rs` is 18 lines that immediately return an error.
-
-Requires new infrastructure in `tools.rs` (tilemaker build, shortbread config, EPSG:4326 ocean shapefiles, ogr2ogr reprojection).
-
 ### Hotpath JSON: emit raw numeric values
 
 `parse_metric()` in `hotpath_fmt.rs` reverse-engineers formatted strings like `"59.2 MB"` and `"3.06 ms"` back into numbers to compute change %. Fragile — silently breaks if the hotpath crate changes formatting (new units, precision changes). The hotpath crate should emit raw numeric values alongside formatted strings in its JSON output so brokkr doesn't need to parse display text.

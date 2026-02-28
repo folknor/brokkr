@@ -22,6 +22,12 @@ pub struct OsmosisTools {
     pub java_home: PathBuf,
 }
 
+pub struct TilemakerTools {
+    pub tilemaker: PathBuf,
+    pub config: PathBuf,
+    pub process: PathBuf,
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -410,4 +416,159 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tilemaker
+// ---------------------------------------------------------------------------
+
+fn check_build_tool(name: &str) -> Result<(), DevError> {
+    let result = std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err(DevError::Preflight(vec![
+            format!("'{name}' not found in PATH (required to build tilemaker)"),
+        ])),
+    }
+}
+
+/// Ensure tilemaker binary and shortbread config are ready.
+pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
+    // Preflight: check build tools.
+    check_build_tool("cmake")?;
+    check_build_tool("g++")?;
+    check_build_tool("make")?;
+
+    let tilemaker_dir = data_dir.join("tilemaker");
+    let version_file = data_dir.join(".tilemaker-version");
+    let build_dir = tilemaker_dir.join("build");
+    let tilemaker_bin = build_dir.join("tilemaker");
+
+    // Clone or update tilemaker source.
+    if !tilemaker_dir.exists() {
+        let tilemaker_dir_str = tilemaker_dir.display().to_string();
+        output::bench_msg("cloning tilemaker");
+        let captured = output::run_captured(
+            "git",
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "https://github.com/systemed/tilemaker.git",
+                &tilemaker_dir_str,
+            ],
+            data_dir,
+        )?;
+        captured.check_success("git")?;
+    } else {
+        let tilemaker_dir_str = tilemaker_dir.display().to_string();
+        // Tolerate failure — just use what's there.
+        drop(output::run_captured(
+            "git",
+            &["-C", &tilemaker_dir_str, "pull", "--ff-only"],
+            data_dir,
+        ));
+    }
+
+    // Get current commit hash.
+    let tilemaker_dir_str = tilemaker_dir.display().to_string();
+    let captured = output::run_captured(
+        "git",
+        &["-C", &tilemaker_dir_str, "rev-parse", "HEAD"],
+        data_dir,
+    )?;
+    captured.check_success("git")?;
+    let commit = String::from_utf8_lossy(&captured.stdout).trim().to_string();
+
+    // Check if build can be skipped.
+    if tilemaker_bin.exists()
+        && let Ok(cached) = fs::read_to_string(&version_file)
+            && cached.trim() == commit {
+                // Version matches and binary exists — skip build.
+                let shortbread_dir = ensure_shortbread_config(data_dir)?;
+                return Ok(TilemakerTools {
+                    tilemaker: tilemaker_bin,
+                    config: shortbread_dir.join("config.json"),
+                    process: shortbread_dir.join("process.lua"),
+                });
+            }
+
+    // CMake build.
+    fs::create_dir_all(&build_dir)?;
+
+    let build_dir_str = build_dir.display().to_string();
+    output::bench_msg("configuring tilemaker (cmake)");
+    let captured = output::run_captured(
+        "cmake",
+        &[
+            "-S",
+            &tilemaker_dir_str,
+            "-B",
+            &build_dir_str,
+            "-DCMAKE_BUILD_TYPE=Release",
+        ],
+        data_dir,
+    )?;
+    captured.check_success("cmake")?;
+
+    let nproc = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let jobs = format!("-j{nproc}");
+    output::bench_msg("building tilemaker");
+    let captured = output::run_captured(
+        "cmake",
+        &["--build", &build_dir_str, "--", &jobs],
+        data_dir,
+    )?;
+    captured.check_success("cmake")?;
+
+    // Write version file.
+    fs::write(&version_file, &commit)?;
+
+    let commit_short = &commit[..commit.len().min(8)];
+    output::bench_msg(&format!("built tilemaker ({commit_short})"));
+
+    // Ensure shortbread config.
+    let shortbread_dir = ensure_shortbread_config(data_dir)?;
+
+    Ok(TilemakerTools {
+        tilemaker: tilemaker_bin,
+        config: shortbread_dir.join("config.json"),
+        process: shortbread_dir.join("process.lua"),
+    })
+}
+
+fn ensure_shortbread_config(data_dir: &Path) -> Result<PathBuf, DevError> {
+    let shortbread_dir = data_dir.join("shortbread-tilemaker");
+
+    if !shortbread_dir.exists() {
+        let shortbread_dir_str = shortbread_dir.display().to_string();
+        output::bench_msg("cloning shortbread-tilemaker config");
+        let captured = output::run_captured(
+            "git",
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "https://github.com/shortbread-tiles/shortbread-tilemaker.git",
+                &shortbread_dir_str,
+            ],
+            data_dir,
+        )?;
+        captured.check_success("git")?;
+    } else {
+        let shortbread_dir_str = shortbread_dir.display().to_string();
+        // Tolerate failure — just use what's there.
+        drop(output::run_captured(
+            "git",
+            &["-C", &shortbread_dir_str, "pull", "--ff-only"],
+            data_dir,
+        ));
+    }
+
+    Ok(shortbread_dir)
 }

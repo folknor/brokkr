@@ -34,7 +34,7 @@ Single crate, single binary. No workspace.
 - `src/hotpath_fmt.rs` — Hotpath JSON report formatting
 - `src/pmtiles.rs` — PMTiles v3 parser (header, varint, directory decoding, stats)
 - `src/preflight.rs` — Pre-benchmark system checks (`Check` enum framework)
-- `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis), cache-first network checks
+- `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config), cache-first network checks
 
 ### Project-specific modules
 
