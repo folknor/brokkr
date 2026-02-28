@@ -32,6 +32,7 @@ Single crate, single binary. No workspace.
 - `src/git.rs` — `GitInfo` (commit hash, dirty flag, branch)
 - `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive bench/verify/hotpath access
 - `src/hotpath_fmt.rs` — Hotpath JSON report formatting
+- `src/pmtiles.rs` — PMTiles v3 parser (header, varint, directory decoding, stats)
 - `src/preflight.rs` — Pre-benchmark system checks (`Check` enum framework)
 - `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis), cache-first network checks
 
@@ -74,6 +75,7 @@ Top-level keys that aren't `project` or `datasets` are treated as hostname secti
 - `clean` — remove scratch/temp files
 - `hotpath` — function-level timing/allocation profiling via `hotpath` feature
 - `profile` — sampling profiler (perf/samply)
+- `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 
 ## Benchmark harness
 
