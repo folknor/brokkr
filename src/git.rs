@@ -59,13 +59,14 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
 }
 
 fn check_clean(workspace_root: &Path) -> bool {
+    // Exclude .dev/results.db — it's tracked in git but modified by benchmarks.
     let unstaged = Command::new("git")
-        .args(["diff", "--quiet", "HEAD"])
+        .args(["diff", "--quiet", "HEAD", "--", ":(exclude).dev/results.db"])
         .current_dir(workspace_root)
         .output();
 
     let staged = Command::new("git")
-        .args(["diff", "--quiet", "--cached", "HEAD"])
+        .args(["diff", "--quiet", "--cached", "HEAD", "--", ":(exclude).dev/results.db"])
         .current_dir(workspace_root)
         .output();
 
