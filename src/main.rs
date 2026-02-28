@@ -1832,12 +1832,17 @@ fn cmd_profile(
     match project {
         Project::Elivagar => {
             let tool_name = tool.unwrap_or("perf");
+            preflight::run_preflight(&preflight::profile_checks(tool_name))?;
             let pi = bootstrap(build_root)?;
             let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
+            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
             let effective = build_root.unwrap_or(project_root);
+            let db_root = build_root.map(|_| project_root);
+            let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "profile")?;
             elivagar::profile::run(
+                &harness,
                 &pbf_path,
+                file_mb,
                 &paths.data_dir,
                 &paths.scratch_dir,
                 tool_name,
@@ -1847,9 +1852,10 @@ fn cmd_profile(
         }
         Project::Nidhogg => {
             let tool_name = tool.unwrap_or("perf");
+            preflight::run_preflight(&preflight::profile_checks(tool_name))?;
             let pi = bootstrap(build_root)?;
             let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
+            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
 
             let data_dir = paths
                 .datasets
@@ -1859,8 +1865,12 @@ fn cmd_profile(
                 .unwrap_or_else(|| paths.data_dir.clone());
 
             let effective = build_root.unwrap_or(project_root);
+            let db_root = build_root.map(|_| project_root);
+            let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "profile")?;
             nidhogg::profile::run(
+                &harness,
                 &pbf_path,
+                file_mb,
                 &data_dir,
                 &paths.scratch_dir,
                 tool_name,

@@ -6,9 +6,11 @@
 use std::path::Path;
 
 use crate::error::DevError;
+use crate::harness;
 use crate::output;
 
 /// Run the application under `perf record` and save the profile data.
+/// Returns the elapsed wall-clock time in milliseconds.
 pub fn run_perf(
     binary_str: &str,
     app_args: &[String],
@@ -16,7 +18,7 @@ pub fn run_perf(
     commit: &str,
     data_dir: &Path,
     project_root: &Path,
-) -> Result<(), DevError> {
+) -> Result<i64, DevError> {
     let perf_data = data_dir.join(format!("perf-{hostname}-{commit}.data"));
     let perf_data_str = perf_data.display().to_string();
 
@@ -46,6 +48,8 @@ pub fn run_perf(
 
     captured.check_success("perf")?;
 
+    let elapsed_ms = harness::elapsed_to_ms(&captured.elapsed);
+
     output::run_msg(&format!("profile saved to {perf_data_str}"));
     output::run_msg("view with:");
     output::run_msg(&format!("  perf report -i {perf_data_str}"));
@@ -53,10 +57,11 @@ pub fn run_perf(
         "  perf report -i {perf_data_str} --no-children    (self time only)"
     ));
 
-    Ok(())
+    Ok(elapsed_ms)
 }
 
 /// Run the application under `samply record` and save the profile data.
+/// Returns the elapsed wall-clock time in milliseconds.
 pub fn run_samply(
     binary_str: &str,
     app_args: &[String],
@@ -64,7 +69,7 @@ pub fn run_samply(
     commit: &str,
     data_dir: &Path,
     project_root: &Path,
-) -> Result<(), DevError> {
+) -> Result<i64, DevError> {
     let profile_out = data_dir.join(format!("samply-{hostname}-{commit}.json.gz"));
     let profile_out_str = profile_out.display().to_string();
 
@@ -90,8 +95,10 @@ pub fn run_samply(
 
     captured.check_success("samply")?;
 
+    let elapsed_ms = harness::elapsed_to_ms(&captured.elapsed);
+
     output::run_msg(&format!("profile saved to {profile_out_str}"));
     output::run_msg(&format!("view with: samply load {profile_out_str}"));
 
-    Ok(())
+    Ok(elapsed_ms)
 }

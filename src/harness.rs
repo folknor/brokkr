@@ -249,7 +249,7 @@ impl BenchHarness {
 
     /// Record a result: always emit to stdout, store in DB if tree is clean.
     /// Prints the short UUID to stdout (always, regardless of quiet mode).
-    fn record_result(
+    pub fn record_result(
         &self,
         config: &BenchConfig,
         result: &BenchResult,

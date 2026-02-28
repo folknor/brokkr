@@ -2,12 +2,13 @@
 //!
 //! Replaces `run-perf.sh` and `run-samply.sh`. Builds with `--profile profiling`
 //! (release + debug symbols), then runs under `perf record` or `samply record`.
+//! Results (elapsed time) are stored in `.brokkr/results.db`.
 
 use std::path::Path;
 
 use crate::build;
 use crate::error::DevError;
-use crate::git;
+use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
 
 
@@ -18,8 +19,11 @@ use crate::output;
 /// Run elivagar under a sampling profiler.
 ///
 /// `tool` must be `"perf"` or `"samply"`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
+    harness: &BenchHarness,
     pbf_path: &Path,
+    file_mb: f64,
     data_dir: &Path,
     scratch_dir: &Path,
     tool: &str,
@@ -35,19 +39,15 @@ pub fn run(
         }
     }
 
-    // Check perf_event_paranoid and tool availability before acquiring lock.
-    crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;
-
-    // Acquire exclusive lock to prevent conflicts with concurrent benchmarks.
-    let _lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
-        project: "elivagar",
-        command: "profile",
-        project_root: project_root.to_str().unwrap_or("unknown"),
-    })?;
-
     let pbf_str = pbf_path
         .to_str()
         .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+
+    let basename = pbf_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_owned();
 
     // Build with profiling profile.
     output::build_msg("building with profiling profile (release + debug symbols)");
@@ -82,11 +82,11 @@ pub fn run(
     // Ocean flags.
     super::push_ocean_args(&mut elivagar_args, data_dir, no_ocean);
 
-    // Collect git info for naming.
-    let git_info = git::collect(project_root)?;
+    // Collect git info for profiler output naming.
+    let git_info = crate::git::collect(project_root)?;
     let hostname = crate::config::hostname()?;
 
-    match tool {
+    let elapsed_ms = match tool {
         "perf" => crate::profiler::run_perf(
             &binary_str,
             &elivagar_args,
@@ -105,6 +105,29 @@ pub fn run(
         ),
         _ => unreachable!(),
     }?;
+
+    // Store result in DB.
+    let bench_config = BenchConfig {
+        command: "profile".into(),
+        variant: Some(tool.into()),
+        input_file: Some(basename),
+        input_mb: Some(file_mb),
+        cargo_features: None,
+        cargo_profile: "profiling".into(),
+        runs: 1,
+        cli_args: None,
+        metadata: Some(serde_json::json!({
+            "tool": tool,
+            "ocean": !no_ocean,
+        })),
+    };
+
+    let result = BenchResult {
+        elapsed_ms,
+        extra: None,
+    };
+
+    harness.record_result(&bench_config, &result)?;
 
     // Clean up output PMTiles.
     std::fs::remove_file(output_pmtiles).ok();
