@@ -67,8 +67,8 @@ impl BenchHarness {
         let storage_notes = format_storage_notes(&paths.drives);
 
         if !git.is_clean {
-            output::bench_msg(
-                "dirty tree — results go to stdout only, not stored in database",
+            output::error(
+                "WARNING: dirty tree — results will NOT be stored in database",
             );
         }
 
@@ -243,6 +243,7 @@ impl BenchHarness {
             // Dirty tree: no DB insert, no UUID. Always print result line
             // since the data can't be looked up later.
             force_emit_result_lines(config, result, &self.git);
+            output::error("NOT STORED — tree is dirty (commit or stash changes)");
         }
 
         Ok(())
