@@ -10,13 +10,9 @@ Gaps found by auditing the implementation. Items marked ~~strikethrough~~ are do
 
 pbfhogg profile now uses BenchHarness and delegates to hotpath::run() for both timing and alloc passes, storing structured JSON results in DB. elivagar and nidhogg profile now acquire the exclusive lockfile.
 
-### 2. `elivagar/bench_node_store.rs` and `bench_pmtiles.rs` — completely bypass harness
+### ~~2. `elivagar/bench_node_store.rs` and `bench_pmtiles.rs` — completely bypass harness~~ — Done
 
-Both benchmarks build a cargo example, run it, `print!("{stdout}")`, and discard. No `BenchHarness`, no `BenchConfig`, no DB, no lockfile, no git/env snapshot. Pure fire-and-forget.
-
-- `bench_node_store.rs` lines 64-76: raw `run_captured_with_env` → bare `print!`
-- `bench_pmtiles.rs` lines 62-78: raw `run_captured` → bare `print!`
-- `main.rs` lines 1073-1081: dispatched without creating a harness
+Both now use BenchHarness with lockfile, git/env context, and SQLite storage. Added `example` field to BuildConfig for `--example` support.
 
 ### 3. `preflight.rs` — entire check system is dead code
 
