@@ -84,13 +84,15 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     harness.print_fileinfo("roundtrip-pbfhogg", &rt_pbfhogg)?;
     harness.print_fileinfo("roundtrip-osmium", &rt_osmium)?;
 
-    // Diffs (informational — differences are expected).
+    let mut all_pass = true;
+
     verify_msg("=== diff: pbfhogg roundtrip vs new ===");
     let identical = harness.diff_pbfs(&rt_pbfhogg, &new_pbf)?;
     if identical {
         verify_msg("  PASS (identical)");
     } else {
-        verify_msg("  differences found (see above)");
+        verify_msg("  FAIL (differences found)");
+        all_pass = false;
     }
 
     verify_msg("=== diff: osmium roundtrip vs new ===");
@@ -98,7 +100,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     if identical {
         verify_msg("  PASS (identical)");
     } else {
-        verify_msg("  differences found (see above)");
+        verify_msg("  FAIL (differences found)");
+        all_pass = false;
     }
 
     verify_msg("=== diff: pbfhogg roundtrip vs osmium roundtrip ===");
@@ -106,12 +109,19 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     if identical {
         verify_msg("  PASS (identical)");
     } else {
-        verify_msg("  differences found (see above)");
+        verify_msg("  FAIL (differences found)");
+        all_pass = false;
     }
 
     // Sort checks.
     harness.check_sorted("new", &new_pbf)?;
     harness.check_sorted("roundtrip-pbfhogg", &rt_pbfhogg)?;
+
+    if !all_pass {
+        return Err(DevError::Config(
+            "derive-changes: roundtrip produced differences".into(),
+        ));
+    }
 
     Ok(())
 }

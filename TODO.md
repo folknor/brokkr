@@ -58,9 +58,9 @@ The Run command in main.rs needs elivagar-specific args added to its CLI definit
 
 Requires new infrastructure in `tools.rs` (tilemaker build, shortbread config, EPSG:4326 ocean shapefiles, ogr2ogr reprojection).
 
-### 7. `elivagar/download_ocean.rs` — only downloads full-res ocean
+### ~~7. `elivagar/download_ocean.rs` — only downloads full-res ocean~~ — Done
 
-`detect_ocean()` in `bench_self.rs` checks for both full-resolution (`water-polygons-split-3857`) and simplified (`simplified-water-polygons-split-3857`) ocean shapefiles. The simplified shapefile is passed as `--ocean-simplified` to elivagar by bench_self, hotpath, and profile. But `download_ocean.rs` only downloads the full-resolution shapefile. No way to download the simplified one through brokkr.
+`download-ocean` now downloads both full-resolution (~765 MB) and simplified (~13 MB) ocean shapefiles. Idempotent per variant.
 
 ### ~~8. `nidhogg/bench_api.rs` — BenchConfig missing `input_file` and `input_mb`~~ — Done
 
@@ -74,29 +74,21 @@ Removed the unused `_data_dir` parameter and its resolution in `main.rs`. Nidhog
 
 Removed the dead `ocean_shp` field from `Dataset`. Ocean shapefiles are shared across datasets and detected by directory scanning in `detect_ocean()`, not per-dataset config.
 
-### 11. Inconsistent `cargo_features` recording in BenchConfig
+### ~~11. Inconsistent `cargo_features` recording in BenchConfig~~ — Done
 
-Benchmarks built with the same `BuildConfig::release(Some("pbfhogg-cli"))`:
-- `bench_read`, `bench_write`, `bench_merge` → `cargo_features: Some("zlib-ng")`
-- `bench_commands`, `bench_extract`, `bench_blob_filter` → `cargo_features: None`
+All pbfhogg benchmarks built via `BuildConfig::release(Some("pbfhogg-cli"))` now record `cargo_features: Some("zlib-ng")`. Fixed bench_commands, bench_extract, bench_blob_filter.
 
-Either some are under-reporting or some are over-reporting. Inconsistent metadata in the DB.
+### ~~12. `pbfhogg/verify_check_refs.rs` and `verify_diff.rs` — never assert PASS/FAIL~~ — Done
 
-### 12. `pbfhogg/verify_check_refs.rs` and `verify_diff.rs` — never assert PASS/FAIL
-
-All other verify modules print "PASS" or "FAIL". These two dump outputs side-by-side and return `Ok(())` regardless. `verify_all.rs` counts them as PASS even if the outputs disagree. `verify_derive_changes.rs` has a similar issue: reports "differences found" but still returns `Ok(())`.
+All three modules now compare outputs and return `Err` on mismatch: verify_check_refs compares pbfhogg vs osmium text, verify_diff compares line counts, verify_derive_changes fails on roundtrip differences.
 
 ### 13. DB stores fields never displayed to the user
 
 The harness stores `kernel`, `cpu_governor`, `avail_memory_mb`, `storage_notes`, `cargo_features`, `cargo_profile`, `hostname`, `subject` — but `brokkr results` only shows `uuid`, `timestamp`, `commit`, `command`, `variant`, `elapsed`, `input`. The 8 hidden fields are only accessible by manually querying SQLite.
 
-### 14. Nidhogg/elivagar dataset rename: remove `denmark-latest` fallbacks
+### ~~14. Nidhogg/elivagar dataset rename: remove `denmark-latest` fallbacks~~ — Done
 
-- [ ] Rename `nidhogg/data/denmark-latest/` directory on disk to `nidhogg/data/denmark-20260220-seq4704/` (or re-ingest from the new PBF)
-- [ ] Remove hardcoded `"denmark-latest"` fallbacks in `src/main.rs`:
-  - Line 1508: `.unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string())`
-  - Line 1592: same pattern
-  - Both should error if `data_dir` is missing from the dataset config instead of silently falling back to a stale name
+Removed hardcoded `"denmark-latest"` fallback in `main.rs` nidhogg profile. Falls back to `data_dir` instead of a stale dataset-specific path. Disk rename is a manual step outside brokkr.
 
 ---
 

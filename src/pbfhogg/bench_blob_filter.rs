@@ -50,7 +50,7 @@ pub fn run(
                 variant: Some(variant),
                 input_file: Some(basename.to_owned()),
                 input_mb: Some(file_mb),
-                cargo_features: None,
+                cargo_features: Some("zlib-ng".into()),
                 cargo_profile: "release".into(),
                 runs,
             };

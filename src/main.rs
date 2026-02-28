@@ -1649,7 +1649,7 @@ fn cmd_profile(
                 .get(dataset)
                 .and_then(|ds| ds.data_dir.as_ref())
                 .map(|d| paths.data_dir.join(d).display().to_string())
-                .unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string());
+                .unwrap_or_else(|| paths.data_dir.display().to_string());
 
             nidhogg::profile::run(
                 &pbf_path,

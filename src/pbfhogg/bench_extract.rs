@@ -54,7 +54,7 @@ pub fn run(
             variant: Some(name.into()),
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
-            cargo_features: None,
+            cargo_features: Some("zlib-ng".into()),
             cargo_profile: "release".into(),
             runs,
         };

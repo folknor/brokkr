@@ -14,34 +14,64 @@ use crate::tools;
 // Constants
 // ---------------------------------------------------------------------------
 
-const OCEAN_URL: &str = "https://osmdata.openstreetmap.de/download/water-polygons-split-3857.zip";
-const OCEAN_DIR: &str = "water-polygons-split-3857";
-const OCEAN_SHP: &str = "water-polygons-split-3857/water_polygons.shp";
+struct OceanVariant {
+    url: &'static str,
+    zip_name: &'static str,
+    dir_name: &'static str,
+    shp_name: &'static str,
+    label: &'static str,
+    size_hint: &'static str,
+}
+
+const FULL_RES: OceanVariant = OceanVariant {
+    url: "https://osmdata.openstreetmap.de/download/water-polygons-split-3857.zip",
+    zip_name: "water-polygons-split-3857.zip",
+    dir_name: "water-polygons-split-3857",
+    shp_name: "water_polygons.shp",
+    label: "full-resolution ocean polygons",
+    size_hint: "~765 MB",
+};
+
+const SIMPLIFIED: OceanVariant = OceanVariant {
+    url: "https://osmdata.openstreetmap.de/download/simplified-water-polygons-split-3857.zip",
+    zip_name: "simplified-water-polygons-split-3857.zip",
+    dir_name: "simplified-water-polygons-split-3857",
+    shp_name: "simplified_water_polygons.shp",
+    label: "simplified ocean polygons",
+    size_hint: "~13 MB",
+};
 
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 pub fn run(data_dir: &Path) -> Result<(), DevError> {
-    let shp_path = data_dir.join(OCEAN_SHP);
+    tools::check_curl()?;
+    check_unzip()?;
+    std::fs::create_dir_all(data_dir)?;
+
+    download_variant(data_dir, &FULL_RES)?;
+    download_variant(data_dir, &SIMPLIFIED)?;
+
+    Ok(())
+}
+
+fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevError> {
+    let shp_path = data_dir.join(variant.dir_name).join(variant.shp_name);
 
     if shp_path.exists() {
         output::download_msg(&format!(
-            "ocean shapefile already exists: {}",
+            "{} already exists: {}",
+            variant.label,
             shp_path.display()
         ));
         return Ok(());
     }
 
-    tools::check_curl()?;
-    check_unzip()?;
+    let zip_path = data_dir.join(variant.zip_name);
 
-    std::fs::create_dir_all(data_dir)?;
-
-    let zip_path = data_dir.join("water-polygons-split-3857.zip");
-
-    output::download_msg("downloading ocean polygons (~765 MB)");
-    tools::download_file(OCEAN_URL, &zip_path)?;
+    output::download_msg(&format!("downloading {} ({})", variant.label, variant.size_hint));
+    tools::download_file(variant.url, &zip_path)?;
 
     output::download_msg("extracting...");
     let zip_str = zip_path.display().to_string();
@@ -62,11 +92,9 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
         });
     }
 
-    // Clean up zip file.
     std::fs::remove_file(&zip_path).ok();
 
-    let final_path = data_dir.join(OCEAN_DIR).join("water_polygons.shp");
-    output::download_msg(&format!("done: {}", final_path.display()));
+    output::download_msg(&format!("done: {}", shp_path.display()));
 
     Ok(())
 }

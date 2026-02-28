@@ -77,5 +77,14 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     verify_msg(&format!("  pbfhogg: {pbfhogg_lines} lines"));
     verify_msg(&format!("  osmium:  {osmium_lines} lines"));
 
+    if pbfhogg_lines == osmium_lines {
+        verify_msg("  PASS (line counts match)");
+    } else {
+        verify_msg("  FAIL (line counts differ)");
+        return Err(DevError::Config(format!(
+            "diff line count mismatch: pbfhogg={pbfhogg_lines}, osmium={osmium_lines}"
+        )));
+    }
+
     Ok(())
 }

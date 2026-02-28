@@ -43,6 +43,13 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
         verify_msg(&format!("    {line}"));
     }
 
+    let ways_match = pbfhogg_text.trim() == osmium_text.trim();
+    if ways_match {
+        verify_msg("  PASS (ways only)");
+    } else {
+        verify_msg("  FAIL (ways only): output differs");
+    }
+
     // --- With relations ---
     verify_msg("--- check-refs (with relations) ---");
 
@@ -69,6 +76,19 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     verify_msg("  osmium (with relations):");
     for line in osmium_text.lines() {
         verify_msg(&format!("    {line}"));
+    }
+
+    let relations_match = pbfhogg_text.trim() == osmium_text.trim();
+    if relations_match {
+        verify_msg("  PASS (with relations)");
+    } else {
+        verify_msg("  FAIL (with relations): output differs");
+    }
+
+    if !ways_match || !relations_match {
+        return Err(DevError::Config(
+            "check-refs: pbfhogg and osmium output differ".into(),
+        ));
     }
 
     Ok(())
