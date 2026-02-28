@@ -541,6 +541,7 @@ pub fn format_compare(
     rows_a: &[StoredRow],
     commit_b: &str,
     rows_b: &[StoredRow],
+    top: usize,
 ) -> String {
     let pairs = build_comparison_pairs(rows_a, rows_b);
     if pairs.is_empty() {
@@ -561,7 +562,7 @@ pub fn format_compare(
     // Append hotpath diff tables for pairs that have extra data on both sides.
     for pair in &pairs {
         if let (Some(ea), Some(eb)) = (&pair.a_extra, &pair.b_extra)
-            && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ea, eb)
+            && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ea, eb, top)
         {
             let (cmd, var, _) = split_pair_key(&pair.key);
             let label = if var.is_empty() { cmd.to_owned() } else { format!("{cmd} {var}") };

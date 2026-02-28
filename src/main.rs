@@ -102,6 +102,10 @@ Examples:
         /// Maximum number of results to show
         #[arg(long, short = 'n', default_value = "20")]
         limit: usize,
+
+        /// Maximum number of functions shown in hotpath reports (0 = all)
+        #[arg(long, default_value = "10")]
+        top: usize,
     },
     /// Clean build artifacts and scratch data
     Clean,
@@ -583,7 +587,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             command,
             variant,
             limit,
-        } => cmd_results(&project_root, query, commit, compare, compare_last, command, variant, limit),
+            top,
+        } => cmd_results(&project_root, query, commit, compare, compare_last, command, variant, limit, top),
         Command::Clean => cmd_clean(&dev_config, project, &project_root),
         Command::Bench { verbose, commit, bench } => {
             output::set_quiet(!verbose);
@@ -928,6 +933,7 @@ fn cmd_results(
     command: Option<String>,
     variant: Option<String>,
     limit: usize,
+    top: usize,
 ) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
 
@@ -952,7 +958,7 @@ fn cmd_results(
                     println!("\n{details}");
                 }
                 if let Some(ref extra) = row.extra
-                    && let Some(report) = hotpath_fmt::format_hotpath_report(extra)
+                    && let Some(report) = hotpath_fmt::format_hotpath_report(extra, top)
                 {
                     println!("\n{report}");
                 }
@@ -962,12 +968,12 @@ fn cmd_results(
         let commit_a = commits.first().map_or("", String::as_str);
         let commit_b = commits.get(1).map_or("", String::as_str);
         let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, command.as_deref(), variant.as_deref())?;
-        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b);
+        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, top);
         println!("{table}");
     } else if compare_last {
         match results_db.query_compare_last(command.as_deref(), variant.as_deref())? {
             Some((commit_a, rows_a, commit_b, rows_b)) => {
-                let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b);
+                let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b, top);
                 println!("{table}");
             }
             None => {

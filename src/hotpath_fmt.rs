@@ -10,7 +10,7 @@ use std::fmt::Write;
 ///
 /// Returns `None` if `extra` doesn't contain hotpath data (no
 /// `functions_timing` or `functions_alloc` key).
-pub fn format_hotpath_report(extra: &serde_json::Value) -> Option<String> {
+pub fn format_hotpath_report(extra: &serde_json::Value, top: usize) -> Option<String> {
     let obj = extra.as_object()?;
 
     let has_timing = obj.contains_key("functions_timing");
@@ -23,14 +23,14 @@ pub fn format_hotpath_report(extra: &serde_json::Value) -> Option<String> {
     let mut out = String::new();
 
     if let Some(timing) = obj.get("functions_timing") {
-        format_functions_table(&mut out, timing, "timing");
+        format_functions_table(&mut out, timing, "timing", top);
     }
 
     if let Some(alloc) = obj.get("functions_alloc") {
         if !out.is_empty() {
             out.push('\n');
         }
-        format_functions_table(&mut out, alloc, "alloc");
+        format_functions_table(&mut out, alloc, "alloc", top);
     }
 
     if let Some(threads) = obj.get("threads") {
@@ -51,7 +51,7 @@ pub fn format_hotpath_report(extra: &serde_json::Value) -> Option<String> {
 // Functions table (timing or alloc)
 // ---------------------------------------------------------------------------
 
-fn format_functions_table(out: &mut String, value: &serde_json::Value, label: &str) {
+fn format_functions_table(out: &mut String, value: &serde_json::Value, label: &str, top: usize) {
     let Some(obj) = value.as_object() else {
         return;
     };
@@ -61,9 +61,15 @@ fn format_functions_table(out: &mut String, value: &serde_json::Value, label: &s
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let data = match obj.get("data").and_then(|v| v.as_array()) {
+    let all_data = match obj.get("data").and_then(|v| v.as_array()) {
         Some(arr) if !arr.is_empty() => arr,
         _ => return,
+    };
+
+    let data: &[serde_json::Value] = if top > 0 && top < all_data.len() {
+        &all_data[..top]
+    } else {
+        all_data
     };
 
     // Determine which percentile columns exist.
@@ -312,6 +318,7 @@ fn format_calls(entry: &serde_json::Value) -> String {
 pub fn format_hotpath_diff(
     extra_a: &serde_json::Value,
     extra_b: &serde_json::Value,
+    top: usize,
 ) -> Option<String> {
     let obj_a = extra_a.as_object();
     let obj_b = extra_b.as_object();
@@ -348,6 +355,7 @@ pub fn format_hotpath_diff(
                 .and_then(|v| v.get("data"))
                 .and_then(|v| v.as_array())
                 .map(Vec::as_slice),
+            top,
         );
         out.push_str(&section);
     }
@@ -374,6 +382,7 @@ pub fn format_hotpath_diff(
                 .and_then(|v| v.get("data"))
                 .and_then(|v| v.as_array())
                 .map(Vec::as_slice),
+            top,
         );
         out.push_str(&section);
     }
@@ -391,6 +400,7 @@ fn format_section_diff(
     desc_b: Option<&str>,
     data_a: Option<&[serde_json::Value]>,
     data_b: Option<&[serde_json::Value]>,
+    top: usize,
 ) -> String {
     use std::collections::HashMap;
 
@@ -432,6 +442,10 @@ fn format_section_diff(
                 names.push(name);
             }
         }
+    }
+
+    if top > 0 && names.len() > top {
+        names.truncate(top);
     }
 
     if names.is_empty() {
