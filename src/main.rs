@@ -76,7 +76,7 @@ enum Command {
     /// Run benchmarks
     Bench {
         /// Print full build/bench/result output
-        #[arg(long)]
+        #[arg(long, short = 'v')]
         verbose: bool,
 
         #[command(subcommand)]
@@ -90,7 +90,7 @@ enum Command {
     /// Run hotpath profiling (timing or allocation instrumentation)
     Hotpath {
         /// Print full build/bench/result output
-        #[arg(long)]
+        #[arg(long, short = 'v')]
         verbose: bool,
 
         /// Dataset name from brokkr.toml (default: denmark)
@@ -116,7 +116,7 @@ enum Command {
     /// Run two-pass profiling (timing + allocation) for a dataset
     Profile {
         /// Print full build/bench/result output
-        #[arg(long)]
+        #[arg(long, short = 'v')]
         verbose: bool,
 
         /// Dataset name from brokkr.toml (default: denmark)
