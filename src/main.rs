@@ -1348,7 +1348,7 @@ fn cmd_bench_allocator(
     let effective = build_root.unwrap_or(project_root);
     let db_root = build_root.map(|_| project_root);
     let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench allocator")?;
-    pbfhogg::bench_allocator::run(&harness, &pbf_path, file_mb, runs, project_root)
+    pbfhogg::bench_allocator::run(&harness, &pbf_path, file_mb, runs, effective)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1476,7 +1476,7 @@ fn cmd_bench_all(
     let effective = build_root.unwrap_or(project_root);
     let db_root = build_root.map(|_| project_root);
     let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench all")?;
-    pbfhogg::bench_all::run(&harness, &paths, project_root, &pbf_path, file_mb, runs, dataset)
+    pbfhogg::bench_all::run(&harness, &paths, effective, &pbf_path, file_mb, runs, dataset)
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,7 +1560,7 @@ fn cmd_bench_eliv_all(
     elivagar::bench_all::run(
         &harness,
         &paths,
-        project_root,
+        effective,
         &pbf_path,
         file_mb,
         runs,
@@ -1799,13 +1799,14 @@ fn cmd_profile(
             let pi = bootstrap(build_root)?;
             let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
+            let effective = build_root.unwrap_or(project_root);
             elivagar::profile::run(
                 &pbf_path,
                 &paths.data_dir,
                 &paths.scratch_dir,
                 tool_name,
                 no_ocean,
-                project_root,
+                effective,
             )
         }
         Project::Nidhogg => {
@@ -1821,12 +1822,13 @@ fn cmd_profile(
                 .map(|d| paths.data_dir.join(d))
                 .unwrap_or_else(|| paths.data_dir.clone());
 
+            let effective = build_root.unwrap_or(project_root);
             nidhogg::profile::run(
                 &pbf_path,
                 &data_dir,
                 &paths.scratch_dir,
                 tool_name,
-                project_root,
+                effective,
             )
         }
         _ => {
@@ -1857,7 +1859,7 @@ fn cmd_profile(
                 dataset,
                 file_mb,
                 &paths.scratch_dir,
-                project_root,
+                effective,
             )
         }
     }
