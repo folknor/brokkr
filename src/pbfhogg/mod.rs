@@ -1,4 +1,21 @@
+use std::path::Path;
+
 use crate::error::DevError;
+
+/// Extract the basename and UTF-8 string for a PBF (or similar) path.
+///
+/// Returns `(basename, path_str)` or an error if the path is not valid UTF-8.
+pub fn path_strs(path: &Path) -> Result<(String, &str), DevError> {
+    let basename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| DevError::Config(format!("path is not valid UTF-8: {}", path.display())))?;
+    Ok((basename, path_str))
+}
 
 pub mod bench_allocator;
 pub mod bench_all;
@@ -29,12 +46,10 @@ pub mod verify_tags_filter;
 ///
 /// When `add_default_levels` is true, bare `"zlib"` becomes `"zlib:6"` and
 /// bare `"zstd"` becomes `"zstd:3"`. When false, they pass through as-is.
-///
-/// Returns `(label, cli_arg)` pairs.
 pub fn parse_compressions(
     input: &str,
     add_default_levels: bool,
-) -> Result<Vec<(String, String)>, DevError> {
+) -> Result<Vec<String>, DevError> {
     let mut result = Vec::new();
     for token in input.split(',') {
         let trimmed = token.trim();
@@ -59,7 +74,7 @@ pub fn parse_compressions(
                 )));
             }
         };
-        result.push((label.clone(), label));
+        result.push(label);
     }
     Ok(result)
 }

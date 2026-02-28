@@ -15,7 +15,7 @@ pub fn run(
     osc_path: &Path,
     file_mb: f64,
     runs: usize,
-    compressions: &[(String, String)],
+    compressions: &[String],
     uring: bool,
     scratch_dir: &Path,
     project_root: &Path,
@@ -23,14 +23,7 @@ pub fn run(
     std::fs::create_dir_all(scratch_dir)?;
 
     let output_path = scratch_dir.join("bench-merge-output.osm.pbf");
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let (basename, pbf_str) = super::path_strs(pbf_path)?;
     let osc_str = osc_path
         .to_str()
         .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))?;
@@ -42,15 +35,15 @@ pub fn run(
         vec!["buffered"]
     };
 
-    for (label, spec) in compressions {
+    for compression in compressions {
         for io_mode in &io_modes {
-            let variant = format!("{io_mode}+{label}");
+            let variant = format!("{io_mode}+{compression}");
             output::bench_msg(&format!("variant: {variant}"));
 
             let bench_args: Vec<&str> = vec![
                 "bench-merge", pbf_str, osc_str,
                 "-o", &output_str,
-                "--compression", spec,
+                "--compression", compression,
                 "--io-mode", io_mode,
             ];
 
@@ -64,7 +57,7 @@ pub fn run(
                 runs,
                 cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
                 metadata: Some(serde_json::json!({
-                    "compression": spec,
+                    "compression": compression,
                     "io_mode": io_mode,
                 })),
             };

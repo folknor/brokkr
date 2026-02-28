@@ -125,9 +125,10 @@ fn check_disk_space(path: &Path, min_bytes: u64) -> Option<String> {
     }
 }
 
-/// Query available disk space via `libc::statvfs`.
+///// Query available disk space via `libc::statvfs`.
 fn available_bytes(path: &Path) -> Option<u64> {
-    let c_path = path_to_cstring(path)?;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
 
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
@@ -191,12 +192,6 @@ fn check_rlimit(resource: libc::__rlimit_resource_t, min_bytes: u64, description
     }
 }
 
-/// Convert a `PathBuf` to a `CString`, returning `None` if the path contains
-/// interior nul bytes.
-fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-    std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
-}
 
 // ---------------------------------------------------------------------------
 // Convenience check sets

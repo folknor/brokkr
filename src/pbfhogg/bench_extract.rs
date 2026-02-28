@@ -41,8 +41,7 @@ pub fn run(
     strategies: &[&str],
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let basename = pbf_path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
-    let pbf_str = pbf_path.to_str().ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
     for &name in strategies {
         output::bench_msg(&format!("strategy: {name}"));

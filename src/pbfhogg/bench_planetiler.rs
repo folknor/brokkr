@@ -102,7 +102,7 @@ pub fn run(
     let heap_mb = std::cmp::max((file_mb as i64) * 2, 2048);
     let classpath = format!("{}:{}", pt.planetiler_jar.display(), pt.bench_class_dir.display());
 
-    let basename = pbf_path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+    let (basename, _) = super::path_strs(pbf_path)?;
 
     output::bench_msg("running planetiler benchmark");
 

@@ -13,24 +13,17 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    compressions: &[(String, String)],
+    compressions: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
-    for (label, spec) in compressions {
+    for compression in compressions {
         for writer_mode in &["sync", "pipelined"] {
-            let variant = format!("{writer_mode}-{label}");
+            let variant = format!("{writer_mode}-{compression}");
             output::bench_msg(&format!("variant: {variant}"));
 
-            let bench_args: Vec<&str> = vec!["bench-write", pbf_str, "--compression", spec, "--writer", writer_mode];
+            let bench_args: Vec<&str> = vec!["bench-write", pbf_str, "--compression", compression, "--writer", writer_mode];
 
             let config = BenchConfig {
                 command: "bench write".into(),
@@ -42,7 +35,7 @@ pub fn run(
                 runs,
                 cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
                 metadata: Some(serde_json::json!({
-                    "compression": spec,
+                    "compression": compression,
                     "writer_mode": writer_mode,
                 })),
             };

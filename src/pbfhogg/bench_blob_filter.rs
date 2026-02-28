@@ -27,10 +27,8 @@ pub fn run(
     runs: usize,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let indexed_str = pbf_indexed.to_str().ok_or_else(|| DevError::Config("indexed PBF path is not valid UTF-8".into()))?;
-    let raw_str = pbf_raw.to_str().ok_or_else(|| DevError::Config("raw PBF path is not valid UTF-8".into()))?;
-    let indexed_basename = pbf_indexed.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
-    let raw_basename = pbf_raw.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+    let (indexed_basename, indexed_str) = super::path_strs(pbf_indexed)?;
+    let (raw_basename, raw_str) = super::path_strs(pbf_raw)?;
 
     let variants: &[(&str, &str, &str)] = &[
         ("indexed", indexed_str, &indexed_basename),

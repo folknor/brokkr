@@ -74,6 +74,11 @@ fn check_clean(workspace_root: &Path) -> bool {
         .current_dir(workspace_root)
         .output();
 
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(workspace_root)
+        .output();
+
     let unstaged_ok = unstaged
         .as_ref()
         .ok()
@@ -84,5 +89,10 @@ fn check_clean(workspace_root: &Path) -> bool {
         .ok()
         .is_some_and(|o| o.status.success());
 
-    unstaged_ok && staged_ok
+    let no_untracked = untracked
+        .as_ref()
+        .ok()
+        .is_some_and(|o| o.status.success() && o.stdout.is_empty());
+
+    unstaged_ok && staged_ok && no_untracked
 }
