@@ -12,6 +12,7 @@ mod pbfhogg;
 mod elivagar;
 mod nidhogg;
 mod preflight;
+mod profiler;
 mod project;
 mod tools;
 
@@ -798,7 +799,7 @@ fn cmd_run_elivagar(
     // Inject ocean shapefiles if not suppressed and not already provided.
     if !no_ocean {
         let (ocean_full, ocean_simplified) =
-            elivagar::bench_self::detect_ocean(&paths.data_dir);
+            elivagar::detect_ocean(&paths.data_dir);
 
         if !passthrough.iter().any(|a| a == "--ocean")
             && let Some(ref shp) = ocean_full

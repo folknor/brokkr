@@ -129,14 +129,7 @@ impl BenchHarness {
             )?;
             let ms = elapsed_to_ms(&start.elapsed());
 
-            if !captured.status.success() {
-                let stderr = String::from_utf8_lossy(&captured.stderr);
-                return Err(DevError::Subprocess {
-                    program: program.display().to_string(),
-                    code: captured.status.code(),
-                    stderr: stderr.into_owned(),
-                });
-            }
+            captured.check_success(&program.display().to_string())?;
 
             best_ms = Some(pick_best_ms(best_ms, ms));
         }
@@ -215,14 +208,7 @@ impl BenchHarness {
                 cwd,
             )?;
 
-            if !captured.status.success() {
-                let stderr = String::from_utf8_lossy(&captured.stderr);
-                return Err(DevError::Subprocess {
-                    program: program.display().to_string(),
-                    code: captured.status.code(),
-                    stderr: stderr.into_owned(),
-                });
-            }
+            captured.check_success(&program.display().to_string())?;
 
             let result = parse_kv_stderr(&captured.stderr)?;
             best = Some(pick_best(best, result));
@@ -380,6 +366,46 @@ fn maybe_quote(s: &str) -> String {
 /// Convert a `Duration` to milliseconds as `i64`.
 pub fn elapsed_to_ms(duration: &Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Run a binary with hotpath env vars, capture the JSON report, and return a `BenchResult`.
+///
+/// This is the shared inner loop for all hotpath profiling commands. Sets
+/// `HOTPATH_METRICS_SERVER_OFF`, `HOTPATH_OUTPUT_FORMAT`, and `HOTPATH_OUTPUT_PATH`,
+/// then reads and parses the resulting JSON report file.
+pub fn run_hotpath_capture(
+    binary: &str,
+    args: &[&str],
+    scratch_dir: &std::path::Path,
+    project_root: &std::path::Path,
+) -> Result<BenchResult, crate::error::DevError> {
+    let json_file = scratch_dir.join("hotpath-report.json");
+    let json_file_str = json_file.display().to_string();
+
+    let captured = output::run_captured_with_env(
+        binary,
+        args,
+        project_root,
+        &[
+            ("HOTPATH_METRICS_SERVER_OFF", "true"),
+            ("HOTPATH_OUTPUT_FORMAT", "json"),
+            ("HOTPATH_OUTPUT_PATH", &json_file_str),
+        ],
+    )?;
+
+    captured.check_success(binary)?;
+
+    let ms = elapsed_to_ms(&captured.elapsed);
+
+    let extra = std::fs::read_to_string(&json_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    std::fs::remove_file(&json_file).ok();
+
+    Ok(BenchResult {
+        elapsed_ms: ms,
+        extra,
+    })
 }
 
 /// Compute a percentile from a sorted slice using linear interpolation.

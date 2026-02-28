@@ -77,7 +77,7 @@ pub fn run(
     let hostname = crate::config::hostname()?;
 
     match tool {
-        "perf" => run_perf(
+        "perf" => crate::profiler::run_perf(
             &binary_str,
             &nidhogg_args,
             &hostname,
@@ -85,7 +85,7 @@ pub fn run(
             data_dir,
             project_root,
         ),
-        "samply" => run_samply(
+        "samply" => crate::profiler::run_samply(
             &binary_str,
             &nidhogg_args,
             &hostname,
@@ -101,114 +101,3 @@ pub fn run(
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// perf
-// ---------------------------------------------------------------------------
-
-fn run_perf(
-    binary_str: &str,
-    nidhogg_args: &[String],
-    hostname: &str,
-    commit: &str,
-    data_dir: &Path,
-    project_root: &Path,
-) -> Result<(), DevError> {
-    let perf_data = data_dir.join(format!("perf-{hostname}-{commit}.data"));
-    let perf_data_str = perf_data.display().to_string();
-
-    output::run_msg(&format!("perf record -> {}", perf_data.display()));
-
-    // Build the full perf command args.
-    let mut args: Vec<String> = vec![
-        "record".into(),
-        "-g".into(),
-        "--call-graph".into(),
-        "dwarf,16384".into(),
-        "-F".into(),
-        "997".into(),
-        "-o".into(),
-        perf_data_str.clone(),
-        binary_str.into(),
-    ];
-    args.extend(nidhogg_args.iter().cloned());
-
-    let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    let captured = output::run_captured("perf", &args_refs, project_root)?;
-
-    // Print stderr (perf progress output).
-    let stderr = String::from_utf8_lossy(&captured.stderr);
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
-    }
-
-    if !captured.status.success() {
-        return Err(DevError::Subprocess {
-            program: "perf".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
-
-    output::run_msg(&format!("profile saved to {perf_data_str}"));
-    output::run_msg("view with:");
-    output::run_msg(&format!("  perf report -i {perf_data_str}"));
-    output::run_msg(&format!(
-        "  perf report -i {perf_data_str} --no-children    (self time only)"
-    ));
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// samply
-// ---------------------------------------------------------------------------
-
-fn run_samply(
-    binary_str: &str,
-    nidhogg_args: &[String],
-    hostname: &str,
-    commit: &str,
-    data_dir: &Path,
-    project_root: &Path,
-) -> Result<(), DevError> {
-    let profile_out = data_dir.join(format!("samply-{hostname}-{commit}.json.gz"));
-    let profile_out_str = profile_out.display().to_string();
-
-    output::run_msg(&format!("samply record -> {}", profile_out.display()));
-
-    // Build the full samply command args.
-    let mut args: Vec<String> = vec![
-        "record".into(),
-        "--save-only".into(),
-        "-o".into(),
-        profile_out_str.clone(),
-        binary_str.into(),
-    ];
-    args.extend(nidhogg_args.iter().cloned());
-
-    let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    let captured = output::run_captured("samply", &args_refs, project_root)?;
-
-    // Print stderr (samply progress output).
-    let stderr = String::from_utf8_lossy(&captured.stderr);
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
-    }
-
-    if !captured.status.success() {
-        return Err(DevError::Subprocess {
-            program: "samply".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
-
-    output::run_msg(&format!("profile saved to {profile_out_str}"));
-    output::run_msg(&format!("view with: samply load {profile_out_str}"));
-
-    Ok(())
-}
-

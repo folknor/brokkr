@@ -4,32 +4,11 @@
 //! and parses self-reported kv metrics from stderr (total_ms, phase12_ms,
 //! ocean_ms, phase3_ms, phase4_ms, features, tiles, output_bytes).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
-
-// ---------------------------------------------------------------------------
-// Ocean shapefile detection (shared with hotpath.rs and profile.rs)
-// ---------------------------------------------------------------------------
-
-/// Detect ocean shapefiles in the data directory.
-///
-/// Returns (full-resolution, simplified) paths if they exist.
-pub fn detect_ocean(data_dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
-    let full = data_dir
-        .join("water-polygons-split-3857")
-        .join("water_polygons.shp");
-    let simplified = data_dir
-        .join("simplified-water-polygons-split-3857")
-        .join("simplified_water_polygons.shp");
-
-    (
-        full.exists().then_some(full),
-        simplified.exists().then_some(simplified),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -86,17 +65,7 @@ pub fn run(
     }
 
     // Add ocean shapefile paths if they exist.
-    if !no_ocean {
-        let (ocean, simplified) = detect_ocean(data_dir);
-        if let Some(ref shp) = ocean {
-            args.push("--ocean".into());
-            args.push(shp.display().to_string());
-        }
-        if let Some(ref shp) = simplified {
-            args.push("--ocean-simplified".into());
-            args.push(shp.display().to_string());
-        }
-    }
+    super::push_ocean_args(&mut args, data_dir, no_ocean);
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 

@@ -75,14 +75,7 @@ fn run_planetiler_subprocess(
 
     let captured = output::run_captured(java_str, &args, project_root)?;
 
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: java_str.to_owned(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success(java_str)?;
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
     Ok(parse_planetiler_output(&stderr))

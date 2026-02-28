@@ -43,13 +43,7 @@ pub fn run(
         eprint!("{stderr}");
     }
 
-    if !captured.status.success() {
-        return Err(DevError::Subprocess {
-            program: binary_str.to_owned(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success(binary_str)?;
 
     Ok(())
 }

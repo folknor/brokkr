@@ -73,13 +73,7 @@ pub fn run(
             eprint!("{stderr}");
         }
 
-        if !captured.status.success() {
-            return Err(DevError::Subprocess {
-                program: binary_str.clone(),
-                code: captured.status.code(),
-                stderr: stderr.into_owned(),
-            });
-        }
+        captured.check_success(&binary_str)?;
 
         let ms = harness::elapsed_to_ms(&captured.elapsed);
         let extra = serde_json::json!({

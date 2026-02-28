@@ -112,14 +112,7 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
         &["xzf", &tarball_str, "-C", &osmosis_dir_str],
         Path::new("."),
     )?;
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: "tar".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success("tar")?;
 
     // Write version file.
     fs::write(&version_file, OSMOSIS_VERSION)?;
@@ -220,14 +213,7 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
         &["xzf", &tarball_str, "-C", &jdk_dir_str, "--strip-components=1"],
         Path::new("."),
     )?;
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: "tar".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success("tar")?;
 
     // Write version file.
     fs::write(&version_file, release_name)?;
@@ -336,14 +322,7 @@ fn compile_bench(
         workspace_root,
     )?;
 
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: "javac".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success("javac")?;
 
     output::bench_msg("compiled planetiler benchmark");
     Ok(class_dir)
@@ -399,14 +378,7 @@ fn detect_os() -> Result<&'static str, DevError> {
 pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
     let captured = output::run_captured("curl", args, cwd)?;
 
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success("curl")?;
 
     Ok(captured.stdout)
 }

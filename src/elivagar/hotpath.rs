@@ -7,10 +7,9 @@
 use std::path::Path;
 
 use crate::error::DevError;
-use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
+use crate::harness::{self, BenchConfig, BenchHarness};
 use crate::output;
 
-use super::bench_self::detect_ocean;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -60,17 +59,7 @@ pub fn run(
     ];
 
     // Ocean flags.
-    if !no_ocean {
-        let (ocean, simplified) = detect_ocean(data_dir);
-        if let Some(ref shp) = ocean {
-            args.push("--ocean".into());
-            args.push(shp.display().to_string());
-        }
-        if let Some(ref shp) = simplified {
-            args.push("--ocean-simplified".into());
-            args.push(shp.display().to_string());
-        }
-    }
+    super::push_ocean_args(&mut args, data_dir, no_ocean);
 
     let label = if alloc { "hotpath-alloc" } else { "hotpath" };
     output::hotpath_msg(&format!("=== elivagar {label} ==="));
@@ -109,40 +98,7 @@ pub fn run(
     };
 
     harness.run_internal(&config, |_i| {
-        let json_file = scratch_dir.join("hotpath-report.json");
-        let json_file_str = json_file.display().to_string();
-
-        let captured = output::run_captured_with_env(
-            binary_str,
-            &args_refs,
-            project_root,
-            &[
-                ("HOTPATH_METRICS_SERVER_OFF", "true"),
-                ("HOTPATH_OUTPUT_FORMAT", "json"),
-                ("HOTPATH_OUTPUT_PATH", &json_file_str),
-            ],
-        )?;
-
-        if !captured.status.success() {
-            return Err(DevError::Subprocess {
-                program: binary_str.to_owned(),
-                code: captured.status.code(),
-                stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
-            });
-        }
-
-        let ms = harness::elapsed_to_ms(&captured.elapsed);
-
-        // Read and parse the JSON hotpath report.
-        let extra = std::fs::read_to_string(&json_file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
-        std::fs::remove_file(&json_file).ok();
-
-        Ok(BenchResult {
-            elapsed_ms: ms,
-            extra,
-        })
+        harness::run_hotpath_capture(binary_str, &args_refs, scratch_dir, project_root)
     })?;
 
     // Clean up output file.

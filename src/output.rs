@@ -84,6 +84,21 @@ pub struct CapturedOutput {
     pub elapsed: Duration,
 }
 
+impl CapturedOutput {
+    /// Return `Ok(())` if the process exited successfully, or a `DevError::Subprocess`
+    /// with the captured stderr if it failed.
+    pub fn check_success(&self, program: &str) -> Result<(), DevError> {
+        if self.status.success() {
+            return Ok(());
+        }
+        Err(DevError::Subprocess {
+            program: program.to_owned(),
+            code: self.status.code(),
+            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+        })
+    }
+}
+
 /// Run a subprocess, capturing stdout and stderr.
 ///
 /// Returns `CapturedOutput` on success (even if the process exited non-zero).

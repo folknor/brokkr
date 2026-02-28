@@ -83,14 +83,7 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
         data_dir,
     )?;
 
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Subprocess {
-            program: "unzip".into(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
+    captured.check_success("unzip")?;
 
     std::fs::remove_file(&zip_path).ok();
 

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::error::DevError;
-use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
+use crate::harness::{self, BenchConfig, BenchHarness};
 use crate::output;
 
 // ---------------------------------------------------------------------------
@@ -181,43 +181,8 @@ pub fn run(
 
         harness.run_internal(&config, |_i| {
             output::hotpath_msg(test.label);
-
-            // Run with JSON output to a temp file so we capture structured data.
-            let json_file = scratch_dir.join("hotpath-report.json");
-            let json_file_str = json_file.display().to_string();
             let program = binary.display().to_string();
-
-            let captured = output::run_captured_with_env(
-                &program,
-                &subprocess_args,
-                project_root,
-                &[
-                    ("HOTPATH_METRICS_SERVER_OFF", "true"),
-                    ("HOTPATH_OUTPUT_FORMAT", "json"),
-                    ("HOTPATH_OUTPUT_PATH", &json_file_str),
-                ],
-            )?;
-
-            if !captured.status.success() {
-                return Err(DevError::Subprocess {
-                    program,
-                    code: captured.status.code(),
-                    stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
-                });
-            }
-
-            let ms = harness::elapsed_to_ms(&captured.elapsed);
-
-            // Read and parse the JSON hotpath report.
-            let extra = std::fs::read_to_string(&json_file)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok());
-            std::fs::remove_file(&json_file).ok();
-
-            Ok(BenchResult {
-                elapsed_ms: ms,
-                extra,
-            })
+            harness::run_hotpath_capture(&program, &subprocess_args, scratch_dir, project_root)
         })?;
     }
 

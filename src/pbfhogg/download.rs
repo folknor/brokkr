@@ -166,14 +166,7 @@ pub fn run(
             project_root,
         )?;
 
-        if !captured.status.success() {
-            let stderr = String::from_utf8_lossy(&captured.stderr);
-            return Err(DevError::Subprocess {
-                program: binary_str,
-                code: captured.status.code(),
-                stderr: stderr.into_owned(),
-            });
-        }
+        captured.check_success(&binary_str)?;
     }
 
     // -- Summary --

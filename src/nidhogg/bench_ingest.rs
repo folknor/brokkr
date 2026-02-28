@@ -78,14 +78,7 @@ pub fn run(
 
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-        if !captured.status.success() {
-            let stderr = String::from_utf8_lossy(&captured.stderr);
-            return Err(DevError::Subprocess {
-                program: binary.display().to_string(),
-                code: captured.status.code(),
-                stderr: stderr.into_owned(),
-            });
-        }
+        captured.check_success(&binary.display().to_string())?;
 
         Ok(crate::harness::BenchResult {
             elapsed_ms,

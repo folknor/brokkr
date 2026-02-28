@@ -564,10 +564,11 @@ pub fn format_compare(
             && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ea, eb)
         {
             let (cmd, var, _) = split_pair_key(&pair.key);
+            let label = if var.is_empty() { cmd.to_owned() } else { format!("{cmd} {var}") };
             let heading = if pair.input_display.is_empty() {
-                format!("\n{cmd} {var} — {commit_a} vs {commit_b}")
+                format!("\n{label} — {commit_a} vs {commit_b}")
             } else {
-                format!("\n{cmd} {var} - {} — {commit_a} vs {commit_b}", pair.input_display)
+                format!("\n{label} - {} — {commit_a} vs {commit_b}", pair.input_display)
             };
             out.push_str(&heading);
             out.push('\n');
