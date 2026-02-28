@@ -28,6 +28,11 @@ pub struct RunRow {
 }
 
 /// A row read back from the database.
+///
+/// Nullable columns (`variant`, `input_file`, `cargo_features`, etc.) are
+/// mapped to `String` via `unwrap_or_default()` — `NULL` becomes `""`.
+/// This is intentional: all consumers use `.is_empty()` checks, so the
+/// distinction between NULL and empty string is not needed.
 #[allow(dead_code)]
 pub struct StoredRow {
     pub id: i64,

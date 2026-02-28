@@ -352,13 +352,27 @@ pub fn elapsed_to_ms(duration: &Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Compute a percentile from a sorted slice.
+/// Compute a percentile from a sorted slice using linear interpolation.
+///
+/// Uses the "C = 1" variant (linear interpolation between adjacent ranks).
+/// This avoids the systematic underestimation of high percentiles (e.g. p95)
+/// that nearest-rank with integer truncation produces on small sample counts.
 fn percentile(sorted: &[i64], pct: usize) -> i64 {
     if sorted.is_empty() {
         return 0;
     }
-    let idx = (pct * (sorted.len() - 1)) / 100;
-    sorted[idx]
+    let len = sorted.len();
+    if len == 1 {
+        return sorted[0];
+    }
+    // Fractional index into the sorted array.
+    let pos = (pct as f64 / 100.0) * (len - 1) as f64;
+    let lo = pos as usize;
+    let hi = (lo + 1).min(len - 1);
+    let frac = pos - lo as f64;
+    // Linear interpolation: sorted[lo] + frac * (sorted[hi] - sorted[lo])
+    let result = sorted[lo] as f64 + frac * (sorted[hi] - sorted[lo]) as f64;
+    result.round() as i64
 }
 
 /// Pick the `BenchResult` with the smaller `elapsed_ms`.

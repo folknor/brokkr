@@ -31,6 +31,7 @@ pub fn run(
     file_mb: f64,
     runs: usize,
     alloc: bool,
+    no_ocean: bool,
     project_root: &Path,
 ) -> Result<(), DevError> {
     let binary_str = binary
@@ -59,14 +60,16 @@ pub fn run(
     ];
 
     // Ocean flags.
-    let (ocean, simplified) = detect_ocean(data_dir);
-    if let Some(ref shp) = ocean {
-        args.push("--ocean".into());
-        args.push(shp.display().to_string());
-    }
-    if let Some(ref shp) = simplified {
-        args.push("--ocean-simplified".into());
-        args.push(shp.display().to_string());
+    if !no_ocean {
+        let (ocean, simplified) = detect_ocean(data_dir);
+        if let Some(ref shp) = ocean {
+            args.push("--ocean".into());
+            args.push(shp.display().to_string());
+        }
+        if let Some(ref shp) = simplified {
+            args.push("--ocean-simplified".into());
+            args.push(shp.display().to_string());
+        }
     }
 
     let label = if alloc { "hotpath-alloc" } else { "hotpath" };

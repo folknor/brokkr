@@ -29,17 +29,6 @@ The pattern `pbf_path.file_name().and_then(|n| n.to_str()).unwrap_or_default()` 
 ### `#[allow(clippy::too_many_arguments)]` proliferation
 Several pbfhogg bench/hotpath modules suppress this lint. BenchContext covers some cases but not all.
 
-### `RunRow` vs `StoredRow` nullable field mismatch
-`src/db.rs` — `RunRow` uses `Option<String>` for `variant`, `input_file`, `cargo_features`, etc. but `StoredRow` uses plain `String` via `unwrap_or_default()` on read-back. Loses the ability to distinguish "no variant" from "empty string variant". Could cause subtle filtering bugs.
-
-### `run_distribution` percentile truncates instead of interpolating
-`src/harness.rs` — percentile function uses integer division `(pct * (len - 1)) / 100`. With small sample counts, p95 on 10 samples maps to p88.9 by nearest-rank. Systematically underestimates high percentiles.
-
-### `pbfhogg/download.rs` doesn't validate partial downloads
-Skips files that `exists()` but doesn't check completeness. A partially downloaded file from an interrupted run passes the check and causes silent failures downstream. A size check or checksum would help.
-
-### Elivagar hotpath/profile missing `--no-ocean` flag
-`bench_self` accepts `no_ocean: bool` but `hotpath.rs` and `profile.rs` always add ocean flags with no opt-out. Inconsistent with bench_self.
 
 ---
 

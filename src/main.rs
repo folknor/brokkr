@@ -110,6 +110,10 @@ enum Command {
         #[arg(long)]
         alloc: bool,
 
+        /// Skip ocean shapefile detection (elivagar only)
+        #[arg(long)]
+        no_ocean: bool,
+
         /// Number of runs (default: 1 for profiling)
         #[arg(long, default_value = "1")]
         runs: usize,
@@ -135,6 +139,10 @@ enum Command {
         /// Profiling tool: perf or samply (elivagar only)
         #[arg(long)]
         tool: Option<String>,
+
+        /// Skip ocean shapefile detection (elivagar only)
+        #[arg(long)]
+        no_ocean: bool,
     },
     /// Download a region dataset from Geofabrik
     Download {
@@ -536,14 +544,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
             pbf,
             osc,
             alloc,
+            no_ocean,
             runs,
         } => {
             output::set_quiet(!verbose);
-            cmd_hotpath(&dev_config, project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, runs)
+            cmd_hotpath(&dev_config, project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs)
         }
-        Command::Profile { verbose, dataset, pbf, osc, tool } => {
+        Command::Profile { verbose, dataset, pbf, osc, tool, no_ocean } => {
             output::set_quiet(!verbose);
-            cmd_profile(&dev_config, project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref())
+            cmd_profile(&dev_config, project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref(), no_ocean)
         }
         Command::Download { region, osc_url } => {
             cmd_download(&dev_config, project, &project_root, &region, osc_url.as_deref())
@@ -1540,6 +1549,7 @@ fn cmd_hotpath(
     pbf: Option<&str>,
     osc: Option<&str>,
     alloc: bool,
+    no_ocean: bool,
     runs: usize,
 ) -> Result<(), DevError> {
     let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
@@ -1558,6 +1568,7 @@ fn cmd_hotpath(
                 file_mb,
                 runs,
                 alloc,
+                no_ocean,
                 project_root,
             )
         }
@@ -1616,6 +1627,7 @@ fn cmd_profile(
     pbf: Option<&str>,
     osc: Option<&str>,
     tool: Option<&str>,
+    no_ocean: bool,
 ) -> Result<(), DevError> {
     match project {
         Project::Elivagar => {
@@ -1628,6 +1640,7 @@ fn cmd_profile(
                 &paths.data_dir,
                 &paths.scratch_dir,
                 tool_name,
+                no_ocean,
                 project_root,
             )
         }

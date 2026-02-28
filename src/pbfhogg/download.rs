@@ -117,7 +117,7 @@ pub fn run(
     );
     let pbf_dest = data_dir.join(format!("{region}-latest.osm.pbf"));
 
-    if pbf_dest.exists() {
+    if pbf_dest.exists() && is_nonempty(&pbf_dest) {
         output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
     } else {
         output::download_msg(&format!("  GET: {pbf_url}"));
@@ -132,7 +132,7 @@ pub fn run(
             .ok_or_else(|| DevError::Config(format!("cannot extract filename from URL: {url}")))?;
         let dest = data_dir.join(filename);
 
-        if dest.exists() {
+        if dest.exists() && is_nonempty(&dest) {
             output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
         } else {
             output::download_msg(&format!("  GET: {url}"));
@@ -147,7 +147,7 @@ pub fn run(
     // -- Generate indexed PBF --
     let indexed_dest = data_dir.join(format!("{region}-latest-with-indexdata.osm.pbf"));
 
-    if indexed_dest.exists() {
+    if indexed_dest.exists() && is_nonempty(&indexed_dest) {
         output::download_msg(&format!(
             "  SKIP (exists): {}",
             indexed_dest.display()
@@ -185,4 +185,9 @@ pub fn run(
     output::download_msg(&format!("  Indexed: {}", indexed_dest.display()));
 
     Ok(())
+}
+
+/// Check that a file exists and is not empty (guards against partial downloads).
+fn is_nonempty(path: &Path) -> bool {
+    std::fs::metadata(path).map_or(false, |m| m.len() > 0)
 }

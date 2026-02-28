@@ -24,6 +24,7 @@ pub fn run(
     data_dir: &Path,
     scratch_dir: &Path,
     tool: &str,
+    no_ocean: bool,
     project_root: &Path,
 ) -> Result<(), DevError> {
     match tool {
@@ -75,14 +76,16 @@ pub fn run(
     ];
 
     // Ocean flags.
-    let (ocean, simplified) = detect_ocean(data_dir);
-    if let Some(ref shp) = ocean {
-        elivagar_args.push("--ocean".into());
-        elivagar_args.push(shp.display().to_string());
-    }
-    if let Some(ref shp) = simplified {
-        elivagar_args.push("--ocean-simplified".into());
-        elivagar_args.push(shp.display().to_string());
+    if !no_ocean {
+        let (ocean, simplified) = detect_ocean(data_dir);
+        if let Some(ref shp) = ocean {
+            elivagar_args.push("--ocean".into());
+            elivagar_args.push(shp.display().to_string());
+        }
+        if let Some(ref shp) = simplified {
+            elivagar_args.push("--ocean-simplified".into());
+            elivagar_args.push(shp.display().to_string());
+        }
     }
 
     // Collect git info for naming.
