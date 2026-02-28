@@ -143,3 +143,25 @@ pub fn run_passthrough(program: &Path, args: &[String]) -> Result<i32, DevError>
 
     Ok(status.code().unwrap_or(1))
 }
+
+/// Run a subprocess with inherited stdio (passthrough mode) and extra env vars.
+///
+/// Returns the process exit code, or 1 if the process was killed by a signal.
+pub fn run_passthrough_with_env(
+    program: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+) -> Result<i32, DevError> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    for &(key, value) in env {
+        cmd.env(key, value);
+    }
+    let status = cmd.status().map_err(|e| DevError::Subprocess {
+        program: program.display().to_string(),
+        code: None,
+        stderr: e.to_string(),
+    })?;
+
+    Ok(status.code().unwrap_or(1))
+}

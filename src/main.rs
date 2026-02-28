@@ -638,9 +638,99 @@ fn cmd_run(project: Project, project_root: &Path, args: &[String]) -> Result<(),
         project_root,
     )?;
 
-    output::run_msg(&format!("{} {}", binary.display(), args.join(" ")));
+    match project {
+        Project::Elivagar => cmd_run_elivagar(&binary, project_root, args),
+        _ => {
+            output::run_msg(&format!("{} {}", binary.display(), args.join(" ")));
+            let code = output::run_passthrough(&binary, args)?;
+            if code != 0 {
+                process::exit(code);
+            }
+            Ok(())
+        }
+    }
+}
 
-    let code = output::run_passthrough(&binary, args)?;
+fn cmd_run_elivagar(
+    binary: &Path,
+    project_root: &Path,
+    raw_args: &[String],
+) -> Result<(), DevError> {
+    // Parse dev-specific flags from raw args.
+    let mut no_ocean = false;
+    let mut mem_limit: Option<String> = None;
+    let mut passthrough: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < raw_args.len() {
+        match raw_args[i].as_str() {
+            "--no-ocean" => no_ocean = true,
+            "--mem" => {
+                i += 1;
+                if i >= raw_args.len() {
+                    return Err(DevError::Config("--mem requires a value (e.g. --mem 8G)".into()));
+                }
+                mem_limit = Some(raw_args[i].clone());
+            }
+            other => passthrough.push(other.to_owned()),
+        }
+        i += 1;
+    }
+
+    // Load config for data_dir and scratch_dir.
+    let pi = bootstrap(project_root)?;
+    let (_, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+
+    // Inject --tmp-dir if not already provided.
+    if !passthrough.iter().any(|a| a == "--tmp-dir") {
+        passthrough.push("--tmp-dir".into());
+        passthrough.push(paths.scratch_dir.display().to_string());
+    }
+
+    // Inject ocean shapefiles if not suppressed and not already provided.
+    if !no_ocean {
+        let (ocean_full, ocean_simplified) =
+            elivagar::bench_self::detect_ocean(&paths.data_dir);
+
+        if !passthrough.iter().any(|a| a == "--ocean") {
+            if let Some(ref shp) = ocean_full {
+                passthrough.push("--ocean".into());
+                passthrough.push(shp.display().to_string());
+            }
+        }
+        if !passthrough.iter().any(|a| a == "--ocean-simplified") {
+            if let Some(ref shp) = ocean_simplified {
+                passthrough.push("--ocean-simplified".into());
+                passthrough.push(shp.display().to_string());
+            }
+        }
+    }
+
+    let env = [("HOTPATH_METRICS_SERVER_OFF", "true")];
+
+    // Execute with optional systemd-run memory-limit wrapping.
+    let code = if let Some(ref mem) = mem_limit {
+        let systemd_run = PathBuf::from("systemd-run");
+        let mut wrapped = vec![
+            "--scope".into(),
+            "-p".into(),
+            format!("MemoryMax={mem}"),
+            binary.display().to_string(),
+        ];
+        wrapped.extend(passthrough.iter().cloned());
+
+        output::run_msg(&format!(
+            "systemd-run --scope -p MemoryMax={mem} {} {}",
+            binary.display(),
+            passthrough.join(" "),
+        ));
+
+        output::run_passthrough_with_env(&systemd_run, &wrapped, &env)?
+    } else {
+        output::run_msg(&format!("{} {}", binary.display(), passthrough.join(" ")));
+        output::run_passthrough_with_env(binary, &passthrough, &env)?
+    };
+
     if code != 0 {
         process::exit(code);
     }

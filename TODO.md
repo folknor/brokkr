@@ -43,20 +43,9 @@ The Run command in main.rs needs elivagar-specific args added to its CLI definit
 
 ---
 
-## 3. Dataset SHA256 verification
+## ~~3. Dataset SHA256 verification~~ — Done
 
-**config.rs**: Add `sha256_pbf: Option<String>` and `sha256_osc: Option<String>` to the `Dataset` struct.
-
-**dev.toml**: Add hash fields to dataset entries:
-```toml
-[datasets.denmark]
-pbf = "denmark-latest.osm.pbf"
-sha256_pbf = "a1b2c3..."
-```
-
-**preflight.rs**: Add a `Check::Sha256 { path, expected, description }` variant. When a benchmark subcommand resolves its dataset, if the dataset has a hash field, add a SHA256 check to preflight. Compute hash by reading the file in chunks (these are multi-GB files — can't read into memory). Use `std::io::Read` + a rolling hash. No new dependencies needed if we implement SHA256 manually, or add `sha2` crate.
-
-Hashes are optional — datasets without them skip the check. This keeps dev.toml backwards-compatible and lets you add hashes incrementally.
+Implemented: `sha256_pbf` and `sha256_osc` fields in config, verification in preflight. All three projects now have SHA256 hashes in their `dev.toml` dataset entries.
 
 ---
 
@@ -72,6 +61,25 @@ Rust rewrite of elivagar's `scripts/pmtiles-stats.py` (181 lines). New subcomman
 **Output**: tile count, total size, min/max/avg tile size, zoom level distribution, compression type, metadata summary. Match the Python tool's output format.
 
 **Dependencies**: None beyond std. PMTiles header is a fixed struct, varints are trivial to decode, and we're just computing stats not decompressing tiles.
+
+---
+
+## 5. Nidhogg/elivagar dataset rename: remove `denmark-latest` fallbacks
+
+The `denmark-latest.osm.pbf` files in elivagar and nidhogg were replaced with `denmark-20260220-seq4704.osm.pbf` (copied from pbfhogg — same file, same SHA256 `aa5bb865...`, just properly named with date and sequence number).
+
+**Done:**
+- [x] `elivagar/dev.toml`: `pbf = "denmark-20260220-seq4704.osm.pbf"`, origin updated to `"Geofabrik 2026-02-20 seq 4704"`
+- [x] `nidhogg/dev.toml`: `pbf = "denmark-20260220-seq4704.osm.pbf"`, `data_dir = "denmark-20260220-seq4704"`, origin added
+- [x] Deleted `denmark-latest.osm.pbf` from both elivagar and nidhogg data dirs
+- [x] Copied `denmark-20260220-seq4704.osm.pbf` from pbfhogg into both
+
+**Remaining:**
+- [ ] Rename `nidhogg/data/denmark-latest/` directory on disk to `nidhogg/data/denmark-20260220-seq4704/` (or re-ingest from the new PBF)
+- [ ] Remove hardcoded `"denmark-latest"` fallbacks in `src/main.rs`:
+  - Line 1508: `.unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string())`
+  - Line 1592: same pattern
+  - Both should error if `data_dir` is missing from the dataset config instead of silently falling back to a stale name
 
 ---
 
