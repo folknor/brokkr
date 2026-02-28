@@ -57,6 +57,11 @@ pub fn run(
             cargo_features: Some("zlib-ng".into()),
             cargo_profile: "release".into(),
             runs,
+            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
+            metadata: Some(serde_json::json!({
+                "strategy": name,
+                "bbox": bbox,
+            })),
         };
 
         harness.run_external(&config, binary, &args_refs, project_root)?;

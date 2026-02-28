@@ -128,6 +128,10 @@ pub fn run(
             cargo_features: None,
             cargo_profile: "java".into(),
             runs: 1,
+            cli_args: None,
+            metadata: Some(serde_json::json!({
+                "heap_mb": heap_mb,
+            })),
         };
 
         harness.run_internal(&config, |_| {

@@ -277,6 +277,8 @@ fn run_osmpbf_baseline(
             cargo_features: None,
             cargo_profile: "release".into(),
             runs: 1,
+            cli_args: None,
+            metadata: None,
         };
 
         harness.run_internal(&config, |_i| {
@@ -311,6 +313,8 @@ fn run_osmium_baseline(
         .unwrap_or_default()
         .to_owned();
 
+    let osmium_args: Vec<&str> = vec!["cat", pbf_str, "-o", "/dev/null", "-f", "opl", "--overwrite"];
+
     let config = BenchConfig {
         command: "bench baseline".into(),
         variant: Some("osmium/cat-opl".into()),
@@ -319,12 +323,14 @@ fn run_osmium_baseline(
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
+        cli_args: Some(crate::harness::format_cli_args("osmium", &osmium_args)),
+        metadata: None,
     };
 
     harness.run_external(
         &config,
         Path::new("osmium"),
-        &["cat", pbf_str, "-o", "/dev/null", "-f", "opl", "--overwrite"],
+        &osmium_args,
         project_root,
     )?;
 

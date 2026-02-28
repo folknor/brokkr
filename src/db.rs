@@ -25,6 +25,8 @@ pub struct RunRow {
     pub avail_memory_mb: Option<i64>,
     pub storage_notes: Option<String>,
     pub extra: Option<serde_json::Value>,
+    pub cli_args: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// A row read back from the database.
@@ -53,6 +55,8 @@ pub struct StoredRow {
     pub storage_notes: String,
     pub extra: Option<serde_json::Value>,
     pub uuid: String,
+    pub cli_args: String,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Filters for querying stored rows.
@@ -82,7 +86,9 @@ CREATE TABLE IF NOT EXISTS runs (
     avail_memory_mb INTEGER,
     storage_notes   TEXT,
     extra           TEXT,
-    uuid            TEXT
+    uuid            TEXT,
+    cli_args        TEXT,
+    metadata        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs([commit]);
 CREATE INDEX IF NOT EXISTS idx_runs_command ON runs(command);
@@ -93,17 +99,20 @@ CREATE INDEX IF NOT EXISTS idx_runs_uuid ON runs(uuid);
 const SELECT_COLS: &str = "\
 id, timestamp, hostname, [commit], subject, command, variant, \
 input_file, input_mb, elapsed_ms, cargo_features, cargo_profile, \
-kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid";
+kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid, \
+cli_args, metadata";
 
 const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, variant, \
     input_file, input_mb, elapsed_ms, cargo_features, cargo_profile, \
-    kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid\
+    kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid, \
+    cli_args, metadata\
 ) VALUES (\
     datetime('now'), ?1, ?2, ?3, ?4, ?5, \
     ?6, ?7, ?8, ?9, ?10, \
-    ?11, ?12, ?13, ?14, ?15, ?16\
+    ?11, ?12, ?13, ?14, ?15, ?16, \
+    ?17, ?18\
 )";
 
 impl ResultsDb {
@@ -121,6 +130,7 @@ impl ResultsDb {
     /// `datetime('now')`. Returns the short UUID prefix (8 hex chars).
     pub fn insert(&self, row: &RunRow) -> Result<String, DevError> {
         let extra_str = serialize_extra(&row.extra)?;
+        let metadata_str = serialize_extra(&row.metadata)?;
         let uuid = generate_uuid()?;
         self.conn.execute(
             INSERT_SQL,
@@ -141,6 +151,8 @@ impl ResultsDb {
                 row.storage_notes,
                 extra_str,
                 uuid,
+                row.cli_args,
+                metadata_str,
             ],
         )?;
         Ok(short_uuid(&uuid))
@@ -231,6 +243,14 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         storage_notes: row.get::<_, Option<String>>("storage_notes")?.unwrap_or_default(),
         extra,
         uuid: row.get::<_, Option<String>>("uuid")?.unwrap_or_default(),
+        cli_args: row.get::<_, Option<String>>("cli_args")?.unwrap_or_default(),
+        metadata: {
+            let raw: Option<String> = row.get::<_, Option<String>>("metadata")?;
+            match raw {
+                Some(s) => serde_json::from_str(&s).ok(),
+                None => None,
+            }
+        },
     })
 }
 
@@ -295,7 +315,7 @@ pub fn short_uuid(uuid: &str) -> String {
 }
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -307,6 +327,9 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
     if current < 1 {
         migrate_uuid(conn)?;
+    }
+    if current < 2 {
+        migrate_cli_args_metadata(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -338,6 +361,29 @@ fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
     }
 
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_runs_uuid ON runs(uuid)")?;
+    Ok(())
+}
+
+/// Migration v1 -> v2: add cli_args and metadata columns.
+fn migrate_cli_args_metadata(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let has_cli_args = conn
+        .prepare("PRAGMA table_info(runs)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.as_deref() == Ok("cli_args"));
+
+    if !has_cli_args {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN cli_args TEXT")?;
+    }
+
+    let has_metadata = conn
+        .prepare("PRAGMA table_info(runs)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.as_deref() == Ok("metadata"));
+
+    if !has_metadata {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN metadata TEXT")?;
+    }
+
     Ok(())
 }
 
@@ -402,6 +448,12 @@ pub fn format_details(row: &StoredRow) -> String {
     }
     if !row.storage_notes.is_empty() {
         fields.push(("storage", row.storage_notes.clone()));
+    }
+    if !row.cli_args.is_empty() {
+        fields.push(("cli args", row.cli_args.clone()));
+    }
+    if let Some(ref meta) = row.metadata {
+        fields.push(("metadata", serde_json::to_string_pretty(meta).unwrap_or_default()));
     }
 
     if fields.is_empty() {

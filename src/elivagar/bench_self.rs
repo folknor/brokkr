@@ -112,6 +112,12 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
+        cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &arg_refs)),
+        metadata: Some(serde_json::json!({
+            "ocean": !no_ocean,
+            "skip_to": skip_to,
+            "compression_level": compression_level,
+        })),
     };
 
     // Use kv parsing: elivagar emits elapsed_ms, phase12_ms, ocean_ms,

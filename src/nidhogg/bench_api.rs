@@ -70,6 +70,11 @@ pub fn run(
             cargo_features: None,
             cargo_profile: "release".into(),
             runs,
+            cli_args: None,
+            metadata: Some(serde_json::json!({
+                "port": port,
+                "query": name,
+            })),
         };
 
         let url_clone = url.clone();

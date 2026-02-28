@@ -161,6 +161,9 @@ pub fn run(
         let variant_suffix = if alloc { "/alloc" } else { "" };
         let variant = format!("{}{variant_suffix}", test.label);
 
+        // Build args without the binary path (first element) for the subprocess.
+        let subprocess_args: Vec<&str> = test.args[1..].iter().map(String::as_str).collect();
+
         let config = BenchConfig {
             command: "hotpath".into(),
             variant: Some(variant),
@@ -169,10 +172,12 @@ pub fn run(
             cargo_features: Some(feature.into()),
             cargo_profile: "release".into(),
             runs,
+            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &subprocess_args)),
+            metadata: Some(serde_json::json!({
+                "alloc": alloc,
+                "test": test.label,
+            })),
         };
-
-        // Build args without the binary path (first element) for the subprocess.
-        let subprocess_args: Vec<&str> = test.args[1..].iter().map(String::as_str).collect();
 
         harness.run_internal(&config, |_i| {
             output::hotpath_msg(test.label);

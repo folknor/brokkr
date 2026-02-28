@@ -48,6 +48,11 @@ pub fn run(
         cargo_features: Some("hotpath".into()),
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
+        cli_args: None,
+        metadata: Some(serde_json::json!({
+            "tiles": tiles,
+            "internal_runs": runs,
+        })),
     };
 
     harness.run_internal(&config, |_i| {

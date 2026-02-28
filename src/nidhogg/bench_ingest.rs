@@ -44,6 +44,8 @@ pub fn run(
         "nidhogg ingest: {basename} ({file_mb:.0} MB), {runs} run(s)"
     ));
 
+    let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
+
     let config = BenchConfig {
         command: "bench ingest".into(),
         variant: None,
@@ -52,9 +54,9 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
+        cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args)),
+        metadata: None,
     };
-
-    let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
 
     // Clean scratch before first run.
     clean_scratch(&output_dir)?;

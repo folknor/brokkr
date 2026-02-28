@@ -91,6 +91,8 @@ pub fn run(
     let variant_suffix = if alloc { "/alloc" } else { "" };
     let variant = format!("tilegen{variant_suffix}");
 
+    let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
     let config = BenchConfig {
         command: "hotpath".into(),
         variant: Some(variant),
@@ -99,9 +101,12 @@ pub fn run(
         cargo_features: Some(feature.into()),
         cargo_profile: "release".into(),
         runs,
+        cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
+        metadata: Some(serde_json::json!({
+            "alloc": alloc,
+            "ocean": !no_ocean,
+        })),
     };
-
-    let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     harness.run_internal(&config, |_i| {
         let json_file = scratch_dir.join("hotpath-report.json");

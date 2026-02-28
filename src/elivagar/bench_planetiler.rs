@@ -123,6 +123,10 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "java".into(),
         runs,
+        cli_args: Some(crate::harness::format_cli_args(&pt.java.display().to_string(), &args_refs)),
+        metadata: Some(serde_json::json!({
+            "heap_mb": heap_mb,
+        })),
     };
 
     harness.run_external(&config, &pt.java, &args_refs, project_root)?;

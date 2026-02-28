@@ -76,6 +76,8 @@ pub fn run(
     for &mode in modes {
         output::bench_msg(&format!("mode: {}", mode.name()));
 
+        let bench_args: Vec<&str> = vec!["bench-read", pbf_str, "--mode", mode.name()];
+
         let config = BenchConfig {
             command: "bench read".into(),
             variant: Some(mode.name().into()),
@@ -84,12 +86,16 @@ pub fn run(
             cargo_features: Some("zlib-ng".into()),
             cargo_profile: "release".into(),
             runs,
+            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
+            metadata: Some(serde_json::json!({
+                "mode": mode.name(),
+            })),
         };
 
         harness.run_external_with_kv(
             &config,
             binary,
-            &["bench-read", pbf_str, "--mode", mode.name()],
+            &bench_args,
             project_root,
         )?;
     }

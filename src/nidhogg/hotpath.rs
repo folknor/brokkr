@@ -73,6 +73,10 @@ pub fn run(
         cargo_features: Some(feature.into()),
         cargo_profile: "release".into(),
         runs,
+        cli_args: Some(crate::harness::format_cli_args(binary_str, &args)),
+        metadata: Some(serde_json::json!({
+            "alloc": alloc,
+        })),
     };
 
     harness.run_internal(&config, |_i| {

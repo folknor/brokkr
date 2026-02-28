@@ -30,6 +30,8 @@ pub fn run(
             let variant = format!("{writer_mode}-{label}");
             output::bench_msg(&format!("variant: {variant}"));
 
+            let bench_args: Vec<&str> = vec!["bench-write", pbf_str, "--compression", spec, "--writer", writer_mode];
+
             let config = BenchConfig {
                 command: "bench write".into(),
                 variant: Some(variant),
@@ -38,12 +40,17 @@ pub fn run(
                 cargo_features: Some("zlib-ng".into()),
                 cargo_profile: "release".into(),
                 runs,
+                cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
+                metadata: Some(serde_json::json!({
+                    "compression": spec,
+                    "writer_mode": writer_mode,
+                })),
             };
 
             harness.run_external_with_kv(
                 &config,
                 binary,
-                &["bench-write", pbf_str, "--compression", spec, "--writer", writer_mode],
+                &bench_args,
                 project_root,
             )?;
         }

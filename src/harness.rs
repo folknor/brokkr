@@ -22,6 +22,8 @@ pub struct BenchConfig {
     pub cargo_features: Option<String>,
     pub cargo_profile: String,
     pub runs: usize,
+    pub cli_args: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Result of a single benchmark measurement.
@@ -273,6 +275,8 @@ impl BenchHarness {
             avail_memory_mb: i64::try_from(self.env.memory_available_mb).ok(),
             storage_notes: self.storage_notes.clone(),
             extra: result.extra.clone(),
+            cli_args: config.cli_args.clone(),
+            metadata: config.metadata.clone(),
         }
     }
 }
@@ -345,6 +349,26 @@ fn format_json_value(value: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => "null".to_owned(),
         other => other.to_string(),
+    }
+}
+
+/// Format a program path and argument slice into a single command-line string.
+///
+/// Quotes arguments that contain spaces. Used to populate `BenchConfig.cli_args`.
+pub fn format_cli_args(program: &str, args: &[&str]) -> String {
+    let mut parts = Vec::with_capacity(1 + args.len());
+    parts.push(maybe_quote(program));
+    for arg in args {
+        parts.push(maybe_quote(arg));
+    }
+    parts.join(" ")
+}
+
+fn maybe_quote(s: &str) -> String {
+    if s.contains(' ') {
+        format!("\"{s}\"")
+    } else {
+        s.to_owned()
     }
 }
 

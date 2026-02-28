@@ -47,6 +47,13 @@ pub fn run(
             let variant = format!("{io_mode}+{label}");
             output::bench_msg(&format!("variant: {variant}"));
 
+            let bench_args: Vec<&str> = vec![
+                "bench-merge", pbf_str, osc_str,
+                "-o", &output_str,
+                "--compression", spec,
+                "--io-mode", io_mode,
+            ];
+
             let config = BenchConfig {
                 command: "bench merge".into(),
                 variant: Some(variant),
@@ -55,17 +62,17 @@ pub fn run(
                 cargo_features: Some("zlib-ng".into()),
                 cargo_profile: "release".into(),
                 runs,
+                cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
+                metadata: Some(serde_json::json!({
+                    "compression": spec,
+                    "io_mode": io_mode,
+                })),
             };
 
             harness.run_external_with_kv(
                 &config,
                 binary,
-                &[
-                    "bench-merge", pbf_str, osc_str,
-                    "-o", &output_str,
-                    "--compression", spec,
-                    "--io-mode", io_mode,
-                ],
+                &bench_args,
                 project_root,
             )?;
         }
