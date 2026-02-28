@@ -19,7 +19,7 @@ use crate::output;
 /// `tool` must be `"perf"` or `"samply"`.
 pub fn run(
     pbf_path: &Path,
-    data_dir: &str,
+    data_dir: &Path,
     scratch_dir: &Path,
     tool: &str,
     project_root: &Path,
@@ -107,11 +107,10 @@ fn run_perf(
     nidhogg_args: &[String],
     hostname: &str,
     commit: &str,
-    data_dir: &str,
+    data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let data_path = Path::new(data_dir);
-    let perf_data = data_path.join(format!("perf-{hostname}-{commit}.data"));
+    let perf_data = data_dir.join(format!("perf-{hostname}-{commit}.data"));
     let perf_data_str = perf_data.display().to_string();
 
     output::run_msg(&format!("perf record -> {}", perf_data.display()));
@@ -167,11 +166,10 @@ fn run_samply(
     nidhogg_args: &[String],
     hostname: &str,
     commit: &str,
-    data_dir: &str,
+    data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let data_path = Path::new(data_dir);
-    let profile_out = data_path.join(format!("samply-{hostname}-{commit}.json.gz"));
+    let profile_out = data_dir.join(format!("samply-{hostname}-{commit}.json.gz"));
     let profile_out_str = profile_out.display().to_string();
 
     output::run_msg(&format!("samply record -> {}", profile_out.display()));

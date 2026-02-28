@@ -26,24 +26,9 @@ pbfhogg bench_all now runs extract (if bbox configured), allocator, and blob-fil
 
 ## MEDIUM — Inconsistencies and partial implementations
 
-### 5. Smart elivagar `dev run`
+### ~~5. Smart elivagar `dev run`~~ — Done
 
-`cmd_run()` is a project-agnostic build-and-exec passthrough. When project is elivagar, it should do what `bench_self.rs` and `hotpath.rs` already do for their subcommands:
-
-**Ocean shapefile detection** (logic already exists in `bench_self.rs`):
-- Full resolution: `{data_dir}/water-polygons-split-3857/water_polygons.shp`
-- Simplified: `{data_dir}/simplified-water-polygons-split-3857/simplified_water_polygons.shp`
-- If found and `--no-ocean` not passed, add `--ocean {path}` and `--ocean-simplified {path}` to args.
-
-**`--tmp-dir` injection**: Auto-set to `{scratch_dir}/tilegen_tmp` from config so temp files go to the right drive. Currently `bench_self.rs` uses `{data_dir}/tilegen_tmp` — should use scratch instead.
-
-**`HOTPATH_METRICS_SERVER_OFF=true`**: Already set in `hotpath.rs` via `run_captured_with_env()`. Needs to be set for `dev run` too.
-
-**`--mem` cgroup wrapping**: Wrap the subprocess with `systemd-run --scope -p MemoryMax={value}` to prevent OOM on planet-scale runs. New flag, not in any existing module.
-
-**Elivagar-specific passthrough flags**: `--skip-to`, `--no-ocean`, `--compression-level` should be recognized by `dev run` (not just `bench self`). These are elivagar binary flags that `dev run` forwards after injecting the auto-detected ones.
-
-The Run command in main.rs needs elivagar-specific args added to its CLI definition (currently just `args: Vec<String>`), and `cmd_run()` needs an elivagar branch that loads config, detects ocean, injects flags, optionally wraps with systemd-run.
+`cmd_run()` now has an elivagar-specific branch (`cmd_run_elivagar`) that auto-detects ocean shapefiles, injects `--tmp-dir` from config, sets `HOTPATH_METRICS_SERVER_OFF=true`, and supports `--mem` for systemd-run cgroup wrapping. `--no-ocean` suppresses ocean injection.
 
 ### 6. `bench tilemaker` stub
 
@@ -75,9 +60,9 @@ All pbfhogg benchmarks built via `BuildConfig::release(Some("pbfhogg-cli"))` now
 
 All three modules now compare outputs and return `Err` on mismatch: verify_check_refs compares pbfhogg vs osmium text, verify_diff compares line counts, verify_derive_changes fails on roundtrip differences.
 
-### 13. DB stores fields never displayed to the user
+### ~~13. DB stores fields never displayed to the user~~ — Done
 
-The harness stores `kernel`, `cpu_governor`, `avail_memory_mb`, `storage_notes`, `cargo_features`, `cargo_profile`, `hostname`, `subject` — but `brokkr results` only shows `uuid`, `timestamp`, `commit`, `command`, `variant`, `elapsed`, `input`. The 8 hidden fields are only accessible by manually querying SQLite.
+`brokkr results <uuid>` now shows a details section below the summary table with hostname, subject, cargo features/profile, kernel, cpu governor, available memory, and storage notes (non-empty fields only).
 
 ### ~~14. Nidhogg/elivagar dataset rename: remove `denmark-latest` fallbacks~~ — Done
 
@@ -103,12 +88,12 @@ Removed stale annotations from `harness::run_distribution`, `harness::percentile
 
 Removed dead `run_hotpath_command()` and `extract_hotpath_block()`. Profile now uses the same JSON approach as hotpath.
 
-### 18. Minor inconsistencies
+### ~~18. Minor inconsistencies~~ — Done
 
-- `nidhogg/profile.rs` takes `data_dir: &str`, elivagar takes `data_dir: &Path` — inconsistent parameter types
-- `bench_planetiler.rs` sets `cargo_profile: "release"` in BenchConfig for a Java benchmark — meaningless metadata
-- `bench_planetiler.rs` hardcodes `runs: 1` in BenchConfig despite accepting a `runs` parameter (Java handles its own repetition internally)
-- `bench_node_store.rs` hardcodes `--features hotpath` in its cargo build but `bench_pmtiles.rs` does not
+- `nidhogg/profile.rs` `data_dir: &str` → `&Path` (consistent with elivagar)
+- Both `bench_planetiler.rs`: `cargo_profile: "release"` → `"java"` (honest metadata for Java benchmarks)
+- `bench_pmtiles.rs`: added `--features hotpath`, `HOTPATH_METRICS_SERVER_OFF` env, `cargo_features: Some("hotpath")` (consistent with `bench_node_store.rs`)
+- pbfhogg `bench_planetiler.rs` `runs: 1` is correct — Java handles repetition internally, harness stores each result once
 
 ---
 

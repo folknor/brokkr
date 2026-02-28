@@ -792,8 +792,12 @@ fn cmd_results(
         } else {
             let table = db::format_table(&rows);
             println!("{table}");
-            // Show detailed hotpath report for single-result lookups.
+            // Show detail fields and hotpath report for UUID lookups.
             for row in &rows {
+                let details = db::format_details(row);
+                if !details.is_empty() {
+                    println!("\n{details}");
+                }
                 if let Some(ref extra) = row.extra
                     && let Some(report) = hotpath_fmt::format_hotpath_report(extra)
                 {
@@ -1643,16 +1647,16 @@ fn cmd_profile(
             let paths = bootstrap_config(project_root, &pi.target_dir)?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
 
-            let data_dir_str = paths
+            let data_dir = paths
                 .datasets
                 .get(dataset)
                 .and_then(|ds| ds.data_dir.as_ref())
-                .map(|d| paths.data_dir.join(d).display().to_string())
-                .unwrap_or_else(|| paths.data_dir.display().to_string());
+                .map(|d| paths.data_dir.join(d))
+                .unwrap_or_else(|| paths.data_dir.clone());
 
             nidhogg::profile::run(
                 &pbf_path,
-                &data_dir_str,
+                &data_dir,
                 &paths.scratch_dir,
                 tool_name,
                 project_root,

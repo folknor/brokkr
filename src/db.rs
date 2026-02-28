@@ -342,6 +342,56 @@ pub fn format_table(rows: &[StoredRow]) -> String {
     out
 }
 
+/// Format the detail fields that aren't shown in the summary table.
+///
+/// Shows hostname, subject, cargo features/profile, kernel, cpu governor,
+/// available memory, and storage notes — only when non-empty.
+pub fn format_details(row: &StoredRow) -> String {
+    let mut out = String::new();
+    let mut fields: Vec<(&str, String)> = Vec::new();
+
+    if !row.hostname.is_empty() {
+        fields.push(("hostname", row.hostname.clone()));
+    }
+    if !row.subject.is_empty() {
+        fields.push(("subject", row.subject.clone()));
+    }
+    if !row.cargo_features.is_empty() {
+        fields.push(("cargo features", row.cargo_features.clone()));
+    }
+    if !row.cargo_profile.is_empty() {
+        fields.push(("cargo profile", row.cargo_profile.clone()));
+    }
+    if !row.kernel.is_empty() {
+        fields.push(("kernel", row.kernel.clone()));
+    }
+    if !row.cpu_governor.is_empty() {
+        fields.push(("cpu governor", row.cpu_governor.clone()));
+    }
+    if let Some(mb) = row.avail_memory_mb {
+        fields.push(("avail memory", format!("{mb} MB")));
+    }
+    if !row.storage_notes.is_empty() {
+        fields.push(("storage", row.storage_notes.clone()));
+    }
+
+    if fields.is_empty() {
+        return out;
+    }
+
+    let label_width = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    for (label, value) in &fields {
+        use std::fmt::Write;
+        writeln!(out, "  {label:<label_width$}  {value}").expect("write to String is infallible");
+    }
+
+    // Remove trailing newline.
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// Format side-by-side comparison of two commits.
 pub fn format_compare(
     commit_a: &str,

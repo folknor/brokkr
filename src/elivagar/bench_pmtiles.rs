@@ -25,7 +25,7 @@ pub fn run(
             package: None,
             bin: None,
             example: Some("bench_pmtiles".into()),
-            features: Vec::new(),
+            features: vec!["hotpath".into()],
             default_features: true,
             profile: "release",
         },
@@ -45,16 +45,17 @@ pub fn run(
         variant: None,
         input_file: None,
         input_mb: None,
-        cargo_features: None,
+        cargo_features: Some("hotpath".into()),
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
     };
 
     harness.run_internal(&config, |_i| {
-        let captured = output::run_captured(
+        let captured = output::run_captured_with_env(
             &binary_str,
             &["--tiles", &tiles_str, "--runs", &runs_str],
             project_root,
+            &[("HOTPATH_METRICS_SERVER_OFF", "true")],
         )?;
 
         // Print stdout (benchmark results) and stderr.

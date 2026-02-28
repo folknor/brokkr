@@ -126,7 +126,7 @@ pub fn run(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: "release".into(),
+            cargo_profile: "java".into(),
             runs: 1,
         };
 
