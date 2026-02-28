@@ -111,20 +111,17 @@ The harness stores `kernel`, `cpu_governor`, `avail_memory_mb`, `storage_notes`,
 
 ## LOW — Code quality, duplication, stale annotations
 
-### 15. Stale `#[allow(dead_code)]` annotations
+### ~~15. Stale `#[allow(dead_code)]` annotations~~ — Done
 
-- `harness::run_distribution` (line 149) — actually used by `nidhogg/bench_api.rs`
-- `harness::percentile` (line 357) — used by `run_distribution`
-- `output::CapturedOutput::elapsed` (line 78) — actually used by all 3 hotpath modules
-- Blanket `#[allow(dead_code)]` on `Dataset`, `HostConfig`, `StoredRow` structs masks genuinely dead fields
+Removed stale annotations from `harness::run_distribution`, `harness::percentile`, `output::CapturedOutput::elapsed`. Blanket `#[allow(dead_code)]` on `Dataset`/`HostConfig`/`StoredRow` still masks some dead fields.
 
-### 16. Duplicated code across projects
+### ~~16. Duplicated code across projects~~ — Done
 
-- `check_perf_paranoid` + `check_tool_installed` — identical in `elivagar/profile.rs` and `nidhogg/profile.rs`, missing from `pbfhogg/profile.rs`
-- `url_encode` — identical in 3 nidhogg modules (`geocode.rs`, `verify_geocode.rs`, `verify_readonly.rs`)
-- `which_exists` — identical in `pbfhogg/verify.rs` and `pbfhogg/bench_all.rs`
-- `parse_compressions` — in `bench_write.rs` and `bench_merge.rs` with silently different normalization (write adds default compression levels, merge doesn't)
-- `elapsed_to_ms` — identical in `harness.rs`, `elivagar/hotpath.rs`, `nidhogg/hotpath.rs`, `pbfhogg/hotpath.rs`
+- `elapsed_to_ms` → pub in `harness.rs`, 5 copies deleted
+- `check_perf_paranoid` + `check_tool_installed` → moved to `preflight.rs`
+- `url_encode` → moved to `nidhogg/mod.rs`
+- `which_exists` → `bench_all.rs` imports from `verify.rs`
+- `parse_compressions` → shared in `pbfhogg/mod.rs` with `add_default_levels` parameter
 
 ### ~~17. `pbfhogg/hotpath.rs` — two report extraction methods~~ — Done
 
