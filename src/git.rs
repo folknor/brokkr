@@ -75,7 +75,7 @@ fn check_clean(workspace_root: &Path) -> bool {
         .output();
 
     let untracked = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args(["ls-files", "--others", "--exclude-standard", "--", ":(exclude).brokkr/"])
         .current_dir(workspace_root)
         .output();
 
