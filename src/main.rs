@@ -8,6 +8,7 @@ mod harness;
 mod lockfile;
 mod output;
 mod pbfhogg;
+mod elivagar;
 #[allow(dead_code)]
 mod preflight;
 mod project;
@@ -113,6 +114,10 @@ enum Command {
         /// Explicit OSC diff file path (overrides --dataset)
         #[arg(long)]
         osc: Option<String>,
+
+        /// Profiling tool: perf or samply (elivagar only)
+        #[arg(long)]
+        tool: Option<String>,
     },
     /// Download a region dataset from Geofabrik
     Download {
@@ -123,6 +128,18 @@ enum Command {
         #[arg(long)]
         osc_url: Option<String>,
     },
+    /// Compare feature counts between two PMTiles archives (elivagar)
+    CompareTiles {
+        /// First PMTiles file
+        file_a: String,
+        /// Second PMTiles file
+        file_b: String,
+        /// Sample size per zoom level
+        #[arg(long)]
+        sample: Option<usize>,
+    },
+    /// Download ocean shapefiles (elivagar)
+    DownloadOcean,
 }
 
 #[derive(Subcommand)]
@@ -219,6 +236,71 @@ enum BenchCommand {
     },
     /// Run full benchmark suite (commands + baselines)
     All {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long)]
+        pbf: Option<String>,
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+
+    // ----- Elivagar bench variants -----
+
+    /// Elivagar: full pipeline benchmark
+    #[command(name = "self")]
+    ElivSelf {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long)]
+        pbf: Option<String>,
+        #[arg(long, default_value = "1")]
+        runs: usize,
+        /// Resume from checkpoint: ocean or sort
+        #[arg(long)]
+        skip_to: Option<String>,
+        /// Skip ocean processing
+        #[arg(long)]
+        no_ocean: bool,
+        /// Gzip compression level 0-10
+        #[arg(long)]
+        compression_level: Option<u32>,
+    },
+    /// Elivagar: SortedNodeStore benchmark
+    NodeStore {
+        /// Nodes in millions
+        #[arg(long, default_value = "50")]
+        nodes: usize,
+        #[arg(long, default_value = "5")]
+        runs: usize,
+    },
+    /// Elivagar: PMTiles writer benchmark
+    Pmtiles {
+        /// Number of tiles
+        #[arg(long, default_value = "500000")]
+        tiles: usize,
+        #[arg(long, default_value = "5")]
+        runs: usize,
+    },
+    /// Elivagar: Planetiler comparison benchmark
+    ElivPlanetiler {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long)]
+        pbf: Option<String>,
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+    /// Elivagar: Tilemaker comparison benchmark
+    Tilemaker {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long)]
+        pbf: Option<String>,
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+    /// Elivagar: full benchmark suite
+    ElivAll {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
@@ -355,12 +437,16 @@ fn run(cli: Cli) -> Result<(), DevError> {
             alloc,
             runs,
         } => cmd_hotpath(project, &project_root, dataset, pbf, osc, alloc, runs),
-        Command::Profile { dataset, pbf, osc } => {
-            cmd_profile(project, &project_root, dataset, pbf, osc)
+        Command::Profile { dataset, pbf, osc, tool } => {
+            cmd_profile(project, &project_root, dataset, pbf, osc, tool)
         }
         Command::Download { region, osc_url } => {
             cmd_download(project, &project_root, region, osc_url)
         }
+        Command::CompareTiles { file_a, file_b, sample } => {
+            cmd_compare_tiles(project, &project_root, &file_a, &file_b, sample)
+        }
+        Command::DownloadOcean => cmd_download_ocean(project, &project_root),
     }
 }
 
@@ -508,11 +594,11 @@ fn cmd_results(
     Ok(())
 }
 
-fn cmd_clean(_project: Project, project_root: &Path) -> Result<(), DevError> {
+fn cmd_clean(project: Project, project_root: &Path) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (_, paths) = bootstrap_config(project_root, &pi.target_dir)?;
 
-    // Clean verify output.
+    // Clean verify output (pbfhogg only).
     let verify_dir = paths.target_dir.join("verify");
     if verify_dir.exists() {
         std::fs::remove_dir_all(&verify_dir)?;
@@ -521,18 +607,25 @@ fn cmd_clean(_project: Project, project_root: &Path) -> Result<(), DevError> {
 
     // Clean scratch temp files.
     if paths.scratch_dir.exists() {
-        let mut removed = 0u32;
-        if let Ok(entries) = std::fs::read_dir(&paths.scratch_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
-                    let _ = std::fs::remove_file(&path);
-                    removed += 1;
+        if project == Project::Elivagar {
+            // Elivagar scratch is tilegen_tmp — remove all contents.
+            std::fs::remove_dir_all(&paths.scratch_dir)?;
+            std::fs::create_dir_all(&paths.scratch_dir)?;
+            output::run_msg("cleaned tilegen_tmp");
+        } else {
+            let mut removed = 0u32;
+            if let Ok(entries) = std::fs::read_dir(&paths.scratch_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
+                        let _ = std::fs::remove_file(&path);
+                        removed += 1;
+                    }
                 }
             }
-        }
-        if removed > 0 {
-            output::run_msg(&format!("removed {removed} scratch file(s)"));
+            if removed > 0 {
+                output::run_msg(&format!("removed {removed} scratch file(s)"));
+            }
         }
     }
 
@@ -676,35 +769,71 @@ fn results_db_path(project_root: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 fn cmd_bench(project: Project, project_root: &Path, bench: BenchCommand) -> Result<(), DevError> {
-    project::require(project, Project::Pbfhogg, "bench")?;
-
     match bench {
+        // ----- pbfhogg bench variants -----
         BenchCommand::Commands { command, dataset, pbf, runs } => {
+            project::require(project, Project::Pbfhogg, "bench commands")?;
             cmd_bench_commands(project, project_root, command, dataset, pbf, runs)
         }
         BenchCommand::Extract { dataset, pbf, runs, bbox, strategies } => {
+            project::require(project, Project::Pbfhogg, "bench extract")?;
             cmd_bench_extract(project, project_root, dataset, pbf, runs, bbox, strategies)
         }
         BenchCommand::Allocator { dataset, pbf, runs } => {
+            project::require(project, Project::Pbfhogg, "bench allocator")?;
             cmd_bench_allocator(project, project_root, dataset, pbf, runs)
         }
         BenchCommand::BlobFilter { dataset, pbf_indexed, pbf_raw, runs } => {
+            project::require(project, Project::Pbfhogg, "bench blob-filter")?;
             cmd_bench_blob_filter(project, project_root, dataset, pbf_indexed, pbf_raw, runs)
         }
         BenchCommand::Planetiler { dataset, pbf, runs } => {
+            project::require(project, Project::Pbfhogg, "bench planetiler")?;
             cmd_bench_planetiler(project, project_root, dataset, pbf, runs)
         }
         BenchCommand::Read { dataset, pbf, runs, modes } => {
+            project::require(project, Project::Pbfhogg, "bench read")?;
             cmd_bench_read(project, project_root, dataset, pbf, runs, modes)
         }
         BenchCommand::Write { dataset, pbf, runs, compression } => {
+            project::require(project, Project::Pbfhogg, "bench write")?;
             cmd_bench_write(project, project_root, dataset, pbf, runs, compression)
         }
         BenchCommand::Merge { dataset, pbf, osc, runs, uring, compression } => {
+            project::require(project, Project::Pbfhogg, "bench merge")?;
             cmd_bench_merge(project, project_root, dataset, pbf, osc, runs, uring, compression)
         }
         BenchCommand::All { dataset, pbf, runs } => {
+            project::require(project, Project::Pbfhogg, "bench all")?;
             cmd_bench_all(project, project_root, dataset, pbf, runs)
+        }
+
+        // ----- elivagar bench variants -----
+        BenchCommand::ElivSelf { dataset, pbf, runs, skip_to, no_ocean, compression_level } => {
+            project::require(project, Project::Elivagar, "bench self")?;
+            cmd_bench_eliv_self(project, project_root, dataset, pbf, runs, skip_to, no_ocean, compression_level)
+        }
+        BenchCommand::NodeStore { nodes, runs } => {
+            project::require(project, Project::Elivagar, "bench node-store")?;
+            let pi = bootstrap(project_root)?;
+            elivagar::bench_node_store::run(&pi.target_dir, project_root, Some(nodes), Some(runs))
+        }
+        BenchCommand::Pmtiles { tiles, runs } => {
+            project::require(project, Project::Elivagar, "bench pmtiles")?;
+            let pi = bootstrap(project_root)?;
+            elivagar::bench_pmtiles::run(&pi.target_dir, project_root, Some(tiles), Some(runs))
+        }
+        BenchCommand::ElivPlanetiler { dataset, pbf, runs } => {
+            project::require(project, Project::Elivagar, "bench eliv-planetiler")?;
+            cmd_bench_eliv_planetiler(project, project_root, dataset, pbf, runs)
+        }
+        BenchCommand::Tilemaker { dataset: _, pbf: _, runs: _ } => {
+            project::require(project, Project::Elivagar, "bench tilemaker")?;
+            elivagar::bench_tilemaker::run()
+        }
+        BenchCommand::ElivAll { dataset, pbf, runs } => {
+            project::require(project, Project::Elivagar, "bench eliv-all")?;
+            cmd_bench_eliv_all(project, project_root, dataset, pbf, runs)
         }
     }
 }
@@ -885,6 +1014,113 @@ fn cmd_bench_all(
 }
 
 // ---------------------------------------------------------------------------
+// Bench commands (elivagar-specific)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_bench_eliv_self(
+    project: Project,
+    project_root: &Path,
+    dataset: String,
+    pbf: Option<String>,
+    runs: usize,
+    skip_to: Option<String>,
+    no_ocean: bool,
+    compression_level: Option<u32>,
+) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let file_mb = file_size_mb(&pbf_path);
+    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+    let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
+    elivagar::bench_self::run(
+        &harness,
+        &binary,
+        &pbf_path,
+        file_mb,
+        runs,
+        &paths.data_dir,
+        &paths.scratch_dir,
+        project_root,
+        skip_to.as_deref(),
+        no_ocean,
+        compression_level,
+    )
+}
+
+fn cmd_bench_eliv_planetiler(
+    project: Project,
+    project_root: &Path,
+    dataset: String,
+    pbf: Option<String>,
+    runs: usize,
+) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let file_mb = file_size_mb(&pbf_path);
+    let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
+    elivagar::bench_planetiler::run(
+        &harness,
+        &pbf_path,
+        file_mb,
+        runs,
+        &paths.data_dir,
+        &paths.scratch_dir,
+        project_root,
+    )
+}
+
+fn cmd_bench_eliv_all(
+    project: Project,
+    project_root: &Path,
+    dataset: String,
+    pbf: Option<String>,
+    runs: usize,
+) -> Result<(), DevError> {
+    let pi = bootstrap(project_root)?;
+    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let file_mb = file_size_mb(&pbf_path);
+    let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
+    elivagar::bench_all::run(
+        &harness,
+        &dev_config,
+        &paths,
+        project_root,
+        &pbf_path,
+        file_mb,
+        runs,
+        &paths.data_dir,
+        &paths.scratch_dir,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Elivagar top-level commands
+// ---------------------------------------------------------------------------
+
+fn cmd_compare_tiles(
+    project: Project,
+    project_root: &Path,
+    file_a: &str,
+    file_b: &str,
+    sample: Option<usize>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "compare-tiles")?;
+    let pi = bootstrap(project_root)?;
+    elivagar::compare_tiles::run(&pi.target_dir, project_root, file_a, file_b, sample)
+}
+
+fn cmd_download_ocean(project: Project, project_root: &Path) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "download-ocean")?;
+    let pi = bootstrap(project_root)?;
+    let (_, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+    elivagar::download_ocean::run(&paths.data_dir)
+}
+
+// ---------------------------------------------------------------------------
 // Verify commands (pbfhogg-specific)
 // ---------------------------------------------------------------------------
 
@@ -971,7 +1207,7 @@ fn cmd_verify(project: Project, project_root: &Path, verify: VerifyCommand) -> R
 }
 
 // ---------------------------------------------------------------------------
-// Hotpath / Profile / Download (pbfhogg-specific)
+// Hotpath / Profile / Download
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -984,41 +1220,63 @@ fn cmd_hotpath(
     alloc: bool,
     runs: usize,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Pbfhogg, "hotpath")?;
+    match project {
+        Project::Elivagar => {
+            let pi = bootstrap(project_root)?;
+            let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
+            let binary = build::cargo_build(
+                &build::BuildConfig::release_with_features(None, &[feature]),
+                project_root,
+            )?;
+            elivagar::hotpath::run(
+                &binary,
+                &pbf_path,
+                &paths.data_dir,
+                &paths.scratch_dir,
+                alloc,
+                project_root,
+            )
+        }
+        _ => {
+            project::require(project, Project::Pbfhogg, "hotpath")?;
 
-    let pi = bootstrap(project_root)?;
-    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-    let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
-    let file_mb = file_size_mb(&pbf_path);
+            let pi = bootstrap(project_root)?;
+            let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let file_mb = file_size_mb(&pbf_path);
 
-    let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
-    let binary = build::cargo_build(
-        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &[feature]),
-        project_root,
-    )?;
+            let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
+            let binary = build::cargo_build(
+                &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &[feature]),
+                project_root,
+            )?;
 
-    // Try to get raw PBF path (optional).
-    let pbf_raw_path = dev_config
-        .datasets
-        .get(&dataset)
-        .and_then(|ds| ds.pbf_raw.as_ref())
-        .map(|raw_file| paths.data_dir.join(raw_file))
-        .filter(|p| p.exists());
+            // Try to get raw PBF path (optional).
+            let pbf_raw_path = dev_config
+                .datasets
+                .get(&dataset)
+                .and_then(|ds| ds.pbf_raw.as_ref())
+                .map(|raw_file| paths.data_dir.join(raw_file))
+                .filter(|p| p.exists());
 
-    let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
-    pbfhogg::hotpath::run(
-        &harness,
-        &binary,
-        &pbf_path,
-        pbf_raw_path.as_deref(),
-        &osc_path,
-        file_mb,
-        runs,
-        alloc,
-        &paths.scratch_dir,
-        project_root,
-    )
+            let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
+            pbfhogg::hotpath::run(
+                &harness,
+                &binary,
+                &pbf_path,
+                pbf_raw_path.as_deref(),
+                &osc_path,
+                file_mb,
+                runs,
+                alloc,
+                &paths.scratch_dir,
+                project_root,
+            )
+        }
+    }
 }
 
 fn cmd_profile(
@@ -1027,32 +1285,50 @@ fn cmd_profile(
     dataset: String,
     pbf: Option<String>,
     osc: Option<String>,
+    tool: Option<String>,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Pbfhogg, "profile")?;
+    match project {
+        Project::Elivagar => {
+            let tool_name = tool.as_deref().unwrap_or("perf");
+            let pi = bootstrap(project_root)?;
+            let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            elivagar::profile::run(
+                &pbf_path,
+                &paths.data_dir,
+                &paths.scratch_dir,
+                tool_name,
+                project_root,
+            )
+        }
+        _ => {
+            project::require(project, Project::Pbfhogg, "profile")?;
 
-    let pi = bootstrap(project_root)?;
-    let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-    let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
-    let file_mb = file_size_mb(&pbf_path);
+            let pi = bootstrap(project_root)?;
+            let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let file_mb = file_size_mb(&pbf_path);
 
-    // Try to get raw PBF path (optional).
-    let pbf_raw_path = dev_config
-        .datasets
-        .get(&dataset)
-        .and_then(|ds| ds.pbf_raw.as_ref())
-        .map(|raw_file| paths.data_dir.join(raw_file))
-        .filter(|p| p.exists());
+            // Try to get raw PBF path (optional).
+            let pbf_raw_path = dev_config
+                .datasets
+                .get(&dataset)
+                .and_then(|ds| ds.pbf_raw.as_ref())
+                .map(|raw_file| paths.data_dir.join(raw_file))
+                .filter(|p| p.exists());
 
-    pbfhogg::profile::run(
-        &pbf_path,
-        pbf_raw_path.as_deref(),
-        &osc_path,
-        &dataset,
-        file_mb,
-        &paths.scratch_dir,
-        project_root,
-    )
+            pbfhogg::profile::run(
+                &pbf_path,
+                pbf_raw_path.as_deref(),
+                &osc_path,
+                &dataset,
+                file_mb,
+                &paths.scratch_dir,
+                project_root,
+            )
+        }
+    }
 }
 
 fn cmd_download(
