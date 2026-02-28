@@ -31,9 +31,7 @@ pub fn build_msg(msg: &str) {
 }
 
 pub fn run_msg(msg: &str) {
-    if !is_quiet() {
-        println!("[run]     {msg}");
-    }
+    println!("[run]     {msg}");
 }
 
 pub fn result_msg(msg: &str) {
@@ -49,9 +47,7 @@ pub fn bench_msg(msg: &str) {
 }
 
 pub fn verify_msg(msg: &str) {
-    if !is_quiet() {
-        println!("[verify]  {msg}");
-    }
+    println!("[verify]  {msg}");
 }
 
 pub fn hotpath_msg(msg: &str) {
@@ -61,9 +57,7 @@ pub fn hotpath_msg(msg: &str) {
 }
 
 pub fn download_msg(msg: &str) {
-    if !is_quiet() {
-        println!("[download] {msg}");
-    }
+    println!("[download] {msg}");
 }
 
 /// Print an error message. Multi-line messages get each line prefixed.
