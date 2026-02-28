@@ -608,7 +608,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Lock => unreachable!(),
         Command::Check { args } => cmd_check(project, &project_root, &args),
         Command::Env => cmd_env(&dev_config, project, &project_root),
-        Command::Run { features, args } => cmd_run(&dev_config, project, &project_root, &features, &args),
+        Command::Run { features, args } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "run")?;
+            cmd_run(&dev_config, project, &project_root, &features, &args)
+        }
         Command::Results {
             query,
             commit,
@@ -619,7 +622,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             limit,
             top,
         } => cmd_results(&project_root, query, commit, compare, compare_last, command, variant, limit, top),
-        Command::Clean => cmd_clean(&dev_config, project, &project_root),
+        Command::Clean => {
+            let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
+            cmd_clean(&dev_config, project, &project_root)
+        }
         Command::Bench { verbose, commit, bench } => {
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
@@ -661,22 +667,31 @@ fn run(cli: Cli) -> Result<(), DevError> {
             })
         }
         Command::Download { region, osc_url } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "download")?;
             cmd_download(&dev_config, project, &project_root, &region, osc_url.as_deref())
         }
         Command::CompareTiles { file_a, file_b, sample } => {
             cmd_compare_tiles(project, &project_root, &file_a, &file_b, sample)
         }
-        Command::DownloadOcean => cmd_download_ocean(&dev_config, project, &project_root),
+        Command::DownloadOcean => {
+            let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
+            cmd_download_ocean(&dev_config, project, &project_root)
+        }
         Command::PmtilesStats { files } => cmd_pmtiles_stats(&files),
         Command::Serve { data_dir, dataset, tiles } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "serve")?;
             cmd_serve(&dev_config, project, &project_root, data_dir.as_deref(), &dataset, tiles.as_deref())
         }
         Command::Stop => cmd_stop(project, &project_root),
         Command::Status => cmd_status(&dev_config, project, &project_root),
         Command::Ingest { pbf, dataset } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "ingest")?;
             cmd_ingest(&dev_config, project, &project_root, pbf.as_deref(), &dataset)
         }
-        Command::Update { args } => cmd_update(project, &project_root, &args),
+        Command::Update { args } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "update")?;
+            cmd_update(project, &project_root, &args)
+        }
         Command::Query { json } => cmd_query(&dev_config, project, &project_root, json.as_deref()),
         Command::Geocode { term } => cmd_geocode(&dev_config, project, &project_root, &term),
     }
@@ -685,6 +700,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
 // ---------------------------------------------------------------------------
 // Bootstrap helpers
 // ---------------------------------------------------------------------------
+
+/// Acquire the global per-user lock for a non-bench command.
+///
+/// Commands that build, write to data/scratch dirs, or run long-lived
+/// processes should call this to prevent concurrent brokkr invocations
+/// from corrupting shared state. The returned guard is held (and the
+/// lock released) until the caller drops it.
+fn acquire_cmd_lock(
+    project: Project,
+    project_root: &Path,
+    command: &str,
+) -> Result<lockfile::LockGuard, DevError> {
+    lockfile::acquire(&lockfile::LockContext {
+        project: project.name(),
+        command,
+        project_root: &project_root.display().to_string(),
+    })
+}
 
 /// Resolve project info (target_dir) using cargo metadata.
 fn bootstrap(build_root: Option<&Path>) -> Result<build::ProjectInfo, DevError> {

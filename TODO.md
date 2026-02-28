@@ -31,7 +31,4 @@ Commands appear to run twice (two "Finished... Running..." blocks in output). Th
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper — probably not worth the complexity.
 
-### Global lock for all commands
-
-Every brokkr command that builds or writes to shared directories (scratch, data) should acquire the global lock immediately on startup. Currently only bench/hotpath/profile/verify lock. `brokkr run`, `brokkr ingest`, `brokkr serve`, and others don't lock, which allows concurrent writes to contaminate timing or corrupt scratch data. Simplest fix: acquire the lock unconditionally in `main()` dispatch before any command handler runs.
 
