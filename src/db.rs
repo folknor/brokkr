@@ -553,9 +553,26 @@ pub fn format_compare(
     append_compare_header(&mut out, commit_a, commit_b, &widths);
     out.push('\n');
 
-    for (key, a_ms, b_ms) in &pairs {
-        append_compare_row(&mut out, key, *a_ms, *b_ms, &widths);
+    for pair in &pairs {
+        append_compare_row(&mut out, pair, &widths);
         out.push('\n');
+    }
+
+    // Append hotpath diff tables for pairs that have extra data on both sides.
+    for pair in &pairs {
+        if let (Some(ea), Some(eb)) = (&pair.a_extra, &pair.b_extra)
+            && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ea, eb)
+        {
+            let (cmd, var, _) = split_pair_key(&pair.key);
+            let heading = if pair.input_display.is_empty() {
+                format!("\n{cmd} {var} — {commit_a} vs {commit_b}")
+            } else {
+                format!("\n{cmd} {var} - {} — {commit_a} vs {commit_b}", pair.input_display)
+            };
+            out.push_str(&heading);
+            out.push('\n');
+            out.push_str(&diff);
+        }
     }
 
     if out.ends_with('\n') {
@@ -690,64 +707,92 @@ fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
 struct CompareWidths {
     command: usize,
     variant: usize,
+    input: usize,
     col_a: usize,
     col_b: usize,
     change: usize,
 }
 
-/// (command_variant_key, a_elapsed_ms or None, b_elapsed_ms or None)
-type ComparisonPair = (String, Option<i64>, Option<i64>);
+struct ComparisonPair {
+    key: String,
+    a_ms: Option<i64>,
+    b_ms: Option<i64>,
+    a_extra: Option<serde_json::Value>,
+    b_extra: Option<serde_json::Value>,
+    /// Pre-formatted input string for display.
+    input_display: String,
+}
 
 fn build_comparison_pairs(
     rows_a: &[StoredRow],
     rows_b: &[StoredRow],
 ) -> Vec<ComparisonPair> {
-    // Use a Vec to preserve insertion order.
+    use std::collections::HashMap;
+
+    struct RowData {
+        elapsed_ms: i64,
+        extra: Option<serde_json::Value>,
+        input_display: String,
+    }
+
     let mut keys: Vec<String> = Vec::new();
-    let mut a_map: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
-    let mut b_map: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
+    let mut a_map: HashMap<String, RowData> = HashMap::new();
+    let mut b_map: HashMap<String, RowData> = HashMap::new();
 
     for row in rows_a {
-        let key = pair_key(&row.command, &row.variant);
+        let key = pair_key(&row.command, &row.variant, &row.input_file);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
-            e.insert(row.elapsed_ms);
+            e.insert(RowData {
+                elapsed_ms: row.elapsed_ms,
+                extra: row.extra.clone(),
+                input_display: format_input(&row.input_file, row.input_mb),
+            });
         }
     }
     for row in rows_b {
-        let key = pair_key(&row.command, &row.variant);
+        let key = pair_key(&row.command, &row.variant, &row.input_file);
         if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
             }
-            e.insert(row.elapsed_ms);
+            e.insert(RowData {
+                elapsed_ms: row.elapsed_ms,
+                extra: row.extra.clone(),
+                input_display: format_input(&row.input_file, row.input_mb),
+            });
         }
     }
 
     keys.into_iter()
         .map(|k| {
-            let a_ms = a_map.get(&k).copied();
-            let b_ms = b_map.get(&k).copied();
-            (k, a_ms, b_ms)
+            let a = a_map.remove(&k);
+            let b = b_map.remove(&k);
+            let input_display = a.as_ref().or(b.as_ref())
+                .map(|r| r.input_display.clone())
+                .unwrap_or_default();
+            ComparisonPair {
+                key: k,
+                a_ms: a.as_ref().map(|r| r.elapsed_ms),
+                b_ms: b.as_ref().map(|r| r.elapsed_ms),
+                a_extra: a.and_then(|r| r.extra),
+                b_extra: b.and_then(|r| r.extra),
+                input_display,
+            }
         })
         .collect()
 }
 
-fn pair_key(command: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        command.to_owned()
-    } else {
-        format!("{command}\t{variant}")
-    }
+fn pair_key(command: &str, variant: &str, input_file: &str) -> String {
+    format!("{command}\t{variant}\t{input_file}")
 }
 
-fn split_pair_key(key: &str) -> (&str, &str) {
-    match key.find('\t') {
-        Some(pos) => (&key[..pos], &key[pos + 1..]),
-        None => (key, ""),
-    }
+fn split_pair_key(key: &str) -> (&str, &str, &str) {
+    let mut parts = key.splitn(3, '\t');
+    let cmd = parts.next().unwrap_or("");
+    let var = parts.next().unwrap_or("");
+    let input = parts.next().unwrap_or("");
+    (cmd, var, input)
 }
 
 fn compute_compare_widths(
@@ -758,30 +803,19 @@ fn compute_compare_widths(
     let mut w = CompareWidths {
         command: 7,
         variant: 7,
+        input: 5,
         col_a: commit_a.len().max(2),
         col_b: commit_b.len().max(2),
         change: 6,
     };
-    for (key, a_ms, b_ms) in pairs {
-        let (cmd, var) = split_pair_key(key);
-        if cmd.len() > w.command {
-            w.command = cmd.len();
-        }
-        if var.len() > w.variant {
-            w.variant = var.len();
-        }
-        let a_str = format_ms_or_dash(*a_ms);
-        if a_str.len() > w.col_a {
-            w.col_a = a_str.len();
-        }
-        let b_str = format_ms_or_dash(*b_ms);
-        if b_str.len() > w.col_b {
-            w.col_b = b_str.len();
-        }
-        let ch = format_change(*a_ms, *b_ms);
-        if ch.len() > w.change {
-            w.change = ch.len();
-        }
+    for pair in pairs {
+        let (cmd, var, _) = split_pair_key(&pair.key);
+        w.command = w.command.max(cmd.len());
+        w.variant = w.variant.max(var.len());
+        w.input = w.input.max(pair.input_display.len());
+        w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms).len());
+        w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms).len());
+        w.change = w.change.max(format_change(pair.a_ms, pair.b_ms).len());
     }
     w
 }
@@ -795,14 +829,16 @@ fn append_compare_header(
     use std::fmt::Write;
     write!(
         out,
-        "{:<cmd_w$}  {:<var_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
+        "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         "command",
         "variant",
+        "input",
         commit_a,
         commit_b,
         "change",
         cmd_w = w.command,
         var_w = w.variant,
+        in_w = w.input,
         a_w = w.col_a,
         b_w = w.col_b,
         ch_w = w.change,
@@ -812,26 +848,26 @@ fn append_compare_header(
 
 fn append_compare_row(
     out: &mut String,
-    key: &str,
-    a_ms: Option<i64>,
-    b_ms: Option<i64>,
+    pair: &ComparisonPair,
     w: &CompareWidths,
 ) {
     use std::fmt::Write;
-    let (cmd, var) = split_pair_key(key);
-    let a_str = format_ms_or_dash(a_ms);
-    let b_str = format_ms_or_dash(b_ms);
-    let ch = format_change(a_ms, b_ms);
+    let (cmd, var, _) = split_pair_key(&pair.key);
+    let a_str = format_ms_or_dash(pair.a_ms);
+    let b_str = format_ms_or_dash(pair.b_ms);
+    let ch = format_change(pair.a_ms, pair.b_ms);
     write!(
         out,
-        "{:<cmd_w$}  {:<var_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
+        "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         cmd,
         var,
+        pair.input_display,
         a_str,
         b_str,
         ch,
         cmd_w = w.command,
         var_w = w.variant,
+        in_w = w.input,
         a_w = w.col_a,
         b_w = w.col_b,
         ch_w = w.change,

@@ -300,3 +300,256 @@ fn format_calls(entry: &serde_json::Value) -> String {
         .map(|n| n.to_string())
         .unwrap_or_default()
 }
+
+// ---------------------------------------------------------------------------
+// Diff formatting
+// ---------------------------------------------------------------------------
+
+/// Format a side-by-side diff of two hotpath JSON reports.
+///
+/// Returns `None` if neither side contains `functions_timing` or
+/// `functions_alloc` data.
+pub fn format_hotpath_diff(
+    extra_a: &serde_json::Value,
+    extra_b: &serde_json::Value,
+) -> Option<String> {
+    let obj_a = extra_a.as_object();
+    let obj_b = extra_b.as_object();
+
+    let has_timing = obj_a
+        .is_some_and(|o| o.contains_key("functions_timing"))
+        || obj_b.is_some_and(|o| o.contains_key("functions_timing"));
+    let has_alloc = obj_a
+        .is_some_and(|o| o.contains_key("functions_alloc"))
+        || obj_b.is_some_and(|o| o.contains_key("functions_alloc"));
+
+    if !has_timing && !has_alloc {
+        return None;
+    }
+
+    let mut out = String::new();
+
+    if has_timing {
+        let timing_a = obj_a.and_then(|o| o.get("functions_timing"));
+        let timing_b = obj_b.and_then(|o| o.get("functions_timing"));
+        let section = format_section_diff(
+            "timing",
+            timing_a
+                .and_then(|v| v.get("description"))
+                .and_then(|v| v.as_str()),
+            timing_b
+                .and_then(|v| v.get("description"))
+                .and_then(|v| v.as_str()),
+            timing_a
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.as_array())
+                .map(Vec::as_slice),
+            timing_b
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.as_array())
+                .map(Vec::as_slice),
+        );
+        out.push_str(&section);
+    }
+
+    if has_alloc {
+        let alloc_a = obj_a.and_then(|o| o.get("functions_alloc"));
+        let alloc_b = obj_b.and_then(|o| o.get("functions_alloc"));
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let section = format_section_diff(
+            "alloc",
+            alloc_a
+                .and_then(|v| v.get("description"))
+                .and_then(|v| v.as_str()),
+            alloc_b
+                .and_then(|v| v.get("description"))
+                .and_then(|v| v.as_str()),
+            alloc_a
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.as_array())
+                .map(Vec::as_slice),
+            alloc_b
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.as_array())
+                .map(Vec::as_slice),
+        );
+        out.push_str(&section);
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn format_section_diff(
+    label: &str,
+    desc_a: Option<&str>,
+    desc_b: Option<&str>,
+    data_a: Option<&[serde_json::Value]>,
+    data_b: Option<&[serde_json::Value]>,
+) -> String {
+    use std::collections::HashMap;
+
+    // Build name -> entry maps for each side.
+    let mut map_a: HashMap<&str, &serde_json::Value> = HashMap::new();
+    if let Some(entries) = data_a {
+        for entry in entries {
+            let name = json_str(entry, "name");
+            if !name.is_empty() {
+                map_a.insert(name, entry);
+            }
+        }
+    }
+
+    let mut map_b: HashMap<&str, &serde_json::Value> = HashMap::new();
+    if let Some(entries) = data_b {
+        for entry in entries {
+            let name = json_str(entry, "name");
+            if !name.is_empty() {
+                map_b.insert(name, entry);
+            }
+        }
+    }
+
+    // Union of function names: A's order first, then new-in-B functions.
+    let mut names: Vec<&str> = Vec::new();
+    if let Some(entries) = data_a {
+        for entry in entries {
+            let name = json_str(entry, "name");
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+    }
+    if let Some(entries) = data_b {
+        for entry in entries {
+            let name = json_str(entry, "name");
+            if !name.is_empty() && !map_a.contains_key(name) {
+                names.push(name);
+            }
+        }
+    }
+
+    if names.is_empty() {
+        return String::new();
+    }
+
+    // Precompute display values for each row.
+    let placeholder = "--";
+    let mut row_total_a: Vec<&str> = Vec::new();
+    let mut row_total_b: Vec<&str> = Vec::new();
+    let mut row_change: Vec<String> = Vec::new();
+
+    for &name in &names {
+        let ta = map_a.get(name).map(|e| json_str(e, "total"));
+        let tb = map_b.get(name).map(|e| json_str(e, "total"));
+        row_total_a.push(ta.unwrap_or(placeholder));
+        row_total_b.push(tb.unwrap_or(placeholder));
+        row_change.push(format_change_str(ta, tb));
+    }
+
+    // Compute column widths.
+    let mut w_name = "Function".len();
+    let mut w_total_a = "Total A".len();
+    let mut w_total_b = "Total B".len();
+    let mut w_change = "Change".len();
+
+    for (i, &name) in names.iter().enumerate() {
+        w_name = w_name.max(name.len());
+        w_total_a = w_total_a.max(row_total_a[i].len());
+        w_total_b = w_total_b.max(row_total_b[i].len());
+        w_change = w_change.max(row_change[i].len());
+    }
+
+    let mut out = String::new();
+
+    // Header line — prefer A's description, fall back to B's.
+    let description = desc_a.or(desc_b).unwrap_or("");
+    writeln!(out, "{label} - {description}").expect("write to String");
+
+    // Column headers.
+    writeln!(
+        out,
+        "{:<w_name$}  {:>w_total_a$}  {:>w_total_b$}  {:>w_change$}",
+        "Function", "Total A", "Total B", "Change",
+    )
+    .expect("write to String");
+
+    // Data rows.
+    for (i, &name) in names.iter().enumerate() {
+        writeln!(
+            out,
+            "{:<w_name$}  {:>w_total_a$}  {:>w_total_b$}  {:>w_change$}",
+            name, row_total_a[i], row_total_b[i], row_change[i],
+        )
+        .expect("write to String");
+    }
+
+    out
+}
+
+/// Parse a formatted metric string to a raw `f64` value.
+///
+/// Handles duration units (ns/µs/ms/s → result in ms), byte units
+/// (B/KB/MB/GB → result in bytes), and bare percentages.
+fn parse_metric(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Bare percentage: "42.5%"
+    if let Some(num_str) = s.strip_suffix('%') {
+        return num_str.trim().parse::<f64>().ok();
+    }
+
+    // Split on last space to get (number, unit).
+    let split_pos = s.rfind(' ')?;
+    let num_str = s[..split_pos].trim();
+    let unit = s[split_pos + 1..].trim();
+
+    let number: f64 = num_str.parse().ok()?;
+
+    let multiplier = match unit {
+        // Duration → ms
+        "ns" => 1e-6,
+        "µs" => 1e-3,
+        "ms" => 1.0,
+        "s" => 1e3,
+        // Bytes → bytes
+        "B" => 1.0,
+        "KB" => 1024.0,
+        "MB" => 1_048_576.0,
+        "GB" => 1_073_741_824.0,
+        _ => return None,
+    };
+
+    Some(number * multiplier)
+}
+
+/// Format a change string comparing two metric values.
+///
+/// Returns a percentage like "+1.0%" or "-3.2%", or a status string
+/// for missing/unparseable values.
+fn format_change_str(a: Option<&str>, b: Option<&str>) -> String {
+    match (a, b) {
+        (Some(sa), Some(sb)) => {
+            let va = parse_metric(sa);
+            let vb = parse_metric(sb);
+            match (va, vb) {
+                (Some(fa), Some(fb)) if fa.abs() > f64::EPSILON => {
+                    let pct = (fb - fa) / fa * 100.0;
+                    format!("{pct:+.1}%")
+                }
+                _ => "--".to_string(),
+            }
+        }
+        (Some(_), None) => "(gone)".to_string(),
+        (None, Some(_)) => "(new)".to_string(),
+        (None, None) => "--".to_string(),
+    }
+}

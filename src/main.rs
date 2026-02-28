@@ -55,6 +55,20 @@ Examples:
         args: Vec<String>,
     },
     /// Query benchmark results
+    #[command(long_about = "\
+Query benchmark results from .brokkr/results.db.
+
+Examples:
+  brokkr results                                    # last 20 results
+  brokkr results -n 50                              # last 50 results
+  brokkr results 0b74fb6f                           # look up by UUID prefix
+  brokkr results --commit a65a                      # filter by commit prefix
+  brokkr results --command 'bench read'             # filter by command
+  brokkr results --variant pipelined                # filter by variant prefix
+  brokkr results --compare a65a 911c                # compare two commits
+  brokkr results --compare a65a 911c --variant sync # compare, filtered
+  brokkr results --compare-last                     # compare two most recent commits
+  brokkr results --compare-last --command hotpath   # compare hotpath runs (shows function diff)")]
     Results {
         /// UUID prefix to look up specific result(s)
         #[arg(conflicts_with_all = ["commit", "compare"])]
