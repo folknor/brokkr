@@ -732,8 +732,10 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
     match project {
         Project::Elivagar => cmd_run_elivagar(dev_config, &binary, project_root, args),
         _ => {
-            output::run_msg(&format!("{} {}", binary.display(), args.join(" ")));
-            let code = output::run_passthrough(&binary, args)?;
+            let binary_str = binary.display().to_string();
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            output::run_msg(&format!("{binary_str} {}", args.join(" ")));
+            let code = output::run_passthrough(&binary_str, &arg_refs)?;
             if code != 0 {
                 process::exit(code);
             }
@@ -801,26 +803,23 @@ fn cmd_run_elivagar(
     let env = [("HOTPATH_METRICS_SERVER_OFF", "true")];
 
     // Execute with optional systemd-run memory-limit wrapping.
+    let binary_str = binary.display().to_string();
     let code = if let Some(ref mem) = mem_limit {
-        let systemd_run = PathBuf::from("systemd-run");
-        let mut wrapped = vec![
-            "--scope".into(),
-            "-p".into(),
-            format!("MemoryMax={mem}"),
-            binary.display().to_string(),
-        ];
-        wrapped.extend(passthrough.iter().cloned());
+        let mem_arg = format!("MemoryMax={mem}");
+        let mut wrapped: Vec<&str> = vec!["--scope", "-p", &mem_arg, &binary_str];
+        let pt_refs: Vec<&str> = passthrough.iter().map(String::as_str).collect();
+        wrapped.extend_from_slice(&pt_refs);
 
         output::run_msg(&format!(
-            "systemd-run --scope -p MemoryMax={mem} {} {}",
-            binary.display(),
+            "systemd-run --scope -p {mem_arg} {binary_str} {}",
             passthrough.join(" "),
         ));
 
-        output::run_passthrough_with_env(&systemd_run, &wrapped, &env)?
+        output::run_passthrough_with_env("systemd-run", &wrapped, &env)?
     } else {
-        output::run_msg(&format!("{} {}", binary.display(), passthrough.join(" ")));
-        output::run_passthrough_with_env(binary, &passthrough, &env)?
+        let pt_refs: Vec<&str> = passthrough.iter().map(String::as_str).collect();
+        output::run_msg(&format!("{binary_str} {}", passthrough.join(" ")));
+        output::run_passthrough_with_env(&binary_str, &pt_refs, &env)?
     };
 
     if code != 0 {
@@ -829,6 +828,7 @@ fn cmd_run_elivagar(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_results(
     project_root: &Path,
     query: Option<String>,

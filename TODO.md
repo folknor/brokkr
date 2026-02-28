@@ -1,19 +1,15 @@
 # TODO
 
-## Not addressed
+## Won't fix
 
 ### Inconsistent path-to-string conversion
-Codebase-wide — `.display().to_string()` (lossy, replaces invalid UTF-8 with replacement char) mixed with `.to_str().ok_or_else(...)` (strict, returns error). Even within single functions. For subprocess args, `.to_str()` is safer (clear error vs silent corruption).
-
-### Inconsistent `run_*` argument types
-`src/output.rs` — `run_captured` takes `args: &[&str]` and `program: &str`; `run_passthrough` takes `args: &[String]` and `program: &Path`. Forces unnecessary conversions at call sites.
+All paths are constructed from known UTF-8 components, so `.display().to_string()` won't corrupt in practice. 100+ occurrences across 30+ files — not worth the churn.
 
 ### Hand-rolled UUID via `/dev/urandom`
-`src/db.rs` — reads 16 bytes, manually sets version/variant bits. The `uuid` crate does this correctly with less code. Not a dependency currently.
+10 correct lines in `src/db.rs`. Not worth adding the `uuid` crate as a dependency.
 
 ### `#[allow(clippy::too_many_arguments)]` proliferation
-Several pbfhogg bench/hotpath modules suppress this lint. BenchContext covers some cases but not all.
-
+Functions genuinely need many parameters. `BenchContext` covers the common case; remaining allows are the pragmatic choice.
 
 ---
 

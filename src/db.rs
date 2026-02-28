@@ -59,6 +59,9 @@ pub struct StoredRow {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Two-commit comparison: (commit_a, rows_a, commit_b, rows_b).
+pub type CompareResult = (String, Vec<StoredRow>, String, Vec<StoredRow>);
+
 /// Filters for querying stored rows.
 pub struct QueryFilter {
     pub commit: Option<String>,
@@ -198,7 +201,7 @@ impl ResultsDb {
         &self,
         command: Option<&str>,
         variant: Option<&str>,
-    ) -> Result<Option<(String, Vec<StoredRow>, String, Vec<StoredRow>)>, DevError> {
+    ) -> Result<Option<CompareResult>, DevError> {
         // Find two most recent distinct commits matching the filters.
         let mut clauses = Vec::new();
         let mut params: Vec<String> = Vec::new();
