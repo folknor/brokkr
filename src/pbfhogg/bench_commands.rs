@@ -131,6 +131,7 @@ fn ensure_merged_pbf(
     Ok(merged_path)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,

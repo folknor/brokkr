@@ -241,11 +241,34 @@ pub fn run(
 
         harness.run_internal(&config, |_i| {
             output::hotpath_msg(test.label);
-            let captured = run_hotpath_command(binary, &subprocess_args, project_root)?;
+
+            // Run with JSON output to a temp file so we capture structured data.
+            let json_file = scratch_dir.join("hotpath-report.json");
+            let json_file_str = json_file.display().to_string();
+            let program = binary.display().to_string();
+
+            let captured = output::run_captured_with_env(
+                &program,
+                &subprocess_args,
+                project_root,
+                &[
+                    ("HOTPATH_METRICS_SERVER_OFF", "true"),
+                    ("HOTPATH_OUTPUT_FORMAT", "json"),
+                    ("HOTPATH_OUTPUT_PATH", &json_file_str),
+                ],
+            )?;
+
             let ms = elapsed_to_ms(&captured.elapsed);
+
+            // Read and parse the JSON hotpath report.
+            let extra = std::fs::read_to_string(&json_file)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
+            std::fs::remove_file(&json_file).ok();
+
             Ok(BenchResult {
                 elapsed_ms: ms,
-                extra: None,
+                extra,
             })
         })?;
     }

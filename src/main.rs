@@ -1522,16 +1522,21 @@ fn cmd_hotpath(
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &dev_config, &paths, project_root)?;
+            let file_mb = file_size_mb(&pbf_path);
             let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
             let binary = build::cargo_build(
                 &build::BuildConfig::release_with_features(None, &[feature]),
                 project_root,
             )?;
+            let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
             elivagar::hotpath::run(
+                &harness,
                 &binary,
                 &pbf_path,
                 &paths.data_dir,
                 &paths.scratch_dir,
+                file_mb,
+                runs,
                 alloc,
                 project_root,
             )
@@ -1540,6 +1545,7 @@ fn cmd_hotpath(
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
             let pbf_path = resolve_pbf_path(pbf, dataset, &dev_config, &paths, project_root)?;
+            let file_mb = file_size_mb(&pbf_path);
             let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
             let binary = build::cargo_build(
                 &build::BuildConfig::release_with_features(Some("nidhogg"), &[feature]),
@@ -1554,11 +1560,15 @@ fn cmd_hotpath(
                 .map(|d| paths.data_dir.join(d).display().to_string())
                 .unwrap_or_else(|| paths.data_dir.join("denmark-latest").display().to_string());
 
+            let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
             nidhogg::hotpath::run(
+                &harness,
                 &binary,
                 &pbf_path,
                 &data_dir_str,
                 &paths.scratch_dir,
+                file_mb,
+                runs,
                 alloc,
                 project_root,
             )
