@@ -6,17 +6,9 @@ Gaps found by auditing the implementation. Items marked ~~strikethrough~~ are do
 
 ## HIGH — Halfway-implemented (same class as the hotpath bug)
 
-### 1. `profile.rs` in all 3 projects — no harness, no DB, no lockfile
+### ~~1. `profile.rs` in all 3 projects — no harness, no DB, no lockfile~~ — Done
 
-All three profile modules are fire-and-forget. No `BenchHarness`, no result storage.
-
-- `pbfhogg/profile.rs` — acquires lockfile manually but no harness, no DB
-- `elivagar/profile.rs` — no lockfile, no harness, no DB
-- `nidhogg/profile.rs` — no lockfile, no harness, no DB
-
-Profile runs generate sampling profiles (perf.data, samply output), so DB storage of timing may be less critical than for benchmarks. But the lack of lockfile in elivagar/nidhogg means profile runs can stomp on concurrent benchmarks. At minimum, all three should acquire the lockfile.
-
-Additionally, `check_perf_paranoid()` and `check_tool_installed()` are copy-pasted identically in elivagar and nidhogg profile.rs, but **missing entirely from pbfhogg profile.rs**. Pbfhogg just runs without verifying perf/samply are available.
+pbfhogg profile now uses BenchHarness and delegates to hotpath::run() for both timing and alloc passes, storing structured JSON results in DB. elivagar and nidhogg profile now acquire the exclusive lockfile.
 
 ### 2. `elivagar/bench_node_store.rs` and `bench_pmtiles.rs` — completely bypass harness
 
@@ -138,9 +130,9 @@ The harness stores `kernel`, `cpu_governor`, `avail_memory_mb`, `storage_notes`,
 - `parse_compressions` — in `bench_write.rs` and `bench_merge.rs` with silently different normalization (write adds default compression levels, merge doesn't)
 - `elapsed_to_ms` — identical in `harness.rs`, `elivagar/hotpath.rs`, `nidhogg/hotpath.rs`, `pbfhogg/hotpath.rs`
 
-### 17. `pbfhogg/hotpath.rs` — two report extraction methods
+### ~~17. `pbfhogg/hotpath.rs` — two report extraction methods~~ — Done
 
-`run_hotpath_command()` (lines 22-41) parses stdout for `[hotpath]` text blocks — old approach, only used by `profile.rs`. The actual hotpath command uses the new JSON approach via `HOTPATH_OUTPUT_FORMAT=json`. Profile and hotpath use different extraction methods for the same underlying data.
+Removed dead `run_hotpath_command()` and `extract_hotpath_block()`. Profile now uses the same JSON approach as hotpath.
 
 ### 18. Minor inconsistencies
 
