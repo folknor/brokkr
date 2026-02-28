@@ -2,44 +2,72 @@ use std::path::Path;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
 use crate::error::DevError;
+
+// --- Quiet mode ---
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quiet(q: bool) {
+    QUIET.store(q, Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
 
 // --- Prefixed output ---
 // All output goes to stdout (stderr reserved for panics only).
 // Prefix column is 10 chars wide: "[tag]" + padding to align the message.
 
 pub fn build_msg(msg: &str) {
-    println!("[build]   {msg}");
+    if !is_quiet() {
+        println!("[build]   {msg}");
+    }
 }
 
 pub fn run_msg(msg: &str) {
-    println!("[run]     {msg}");
+    if !is_quiet() {
+        println!("[run]     {msg}");
+    }
 }
 
 pub fn result_msg(msg: &str) {
-    println!("[result]  {msg}");
+    if !is_quiet() {
+        println!("[result]  {msg}");
+    }
 }
 
 pub fn bench_msg(msg: &str) {
-    println!("[bench]   {msg}");
+    if !is_quiet() {
+        println!("[bench]   {msg}");
+    }
 }
 
 pub fn verify_msg(msg: &str) {
-    println!("[verify]  {msg}");
+    if !is_quiet() {
+        println!("[verify]  {msg}");
+    }
 }
 
 pub fn hotpath_msg(msg: &str) {
-    println!("[hotpath] {msg}");
+    if !is_quiet() {
+        println!("[hotpath] {msg}");
+    }
 }
 
 pub fn download_msg(msg: &str) {
-    println!("[download] {msg}");
+    if !is_quiet() {
+        println!("[download] {msg}");
+    }
 }
 
 /// Print an error message. Multi-line messages get each line prefixed.
+/// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
     for line in msg.lines() {
         println!("[error]   {line}");

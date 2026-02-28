@@ -48,6 +48,9 @@ enum Command {
     },
     /// Query benchmark results
     Results {
+        /// UUID prefix to look up specific result(s)
+        query: Option<String>,
+
         /// Show results for a specific commit (prefix match)
         #[arg(long)]
         commit: Option<String>,
@@ -72,6 +75,10 @@ enum Command {
     Clean,
     /// Run benchmarks
     Bench {
+        /// Print full build/bench/result output
+        #[arg(long)]
+        verbose: bool,
+
         #[command(subcommand)]
         bench: BenchCommand,
     },
@@ -82,6 +89,10 @@ enum Command {
     },
     /// Run hotpath profiling (timing or allocation instrumentation)
     Hotpath {
+        /// Print full build/bench/result output
+        #[arg(long)]
+        verbose: bool,
+
         /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -104,6 +115,10 @@ enum Command {
     },
     /// Run two-pass profiling (timing + allocation) for a dataset
     Profile {
+        /// Print full build/bench/result output
+        #[arg(long)]
+        verbose: bool,
+
         /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -505,23 +520,32 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Env => cmd_env(project, &project_root),
         Command::Run { args } => cmd_run(project, &project_root, &args),
         Command::Results {
+            query,
             commit,
             compare,
             command,
             variant,
             limit,
-        } => cmd_results(&project_root, commit, compare, command, variant, limit),
+        } => cmd_results(&project_root, query, commit, compare, command, variant, limit),
         Command::Clean => cmd_clean(project, &project_root),
-        Command::Bench { bench } => cmd_bench(project, &project_root, bench),
+        Command::Bench { verbose, bench } => {
+            output::set_quiet(!verbose);
+            cmd_bench(project, &project_root, bench)
+        }
         Command::Verify { verify } => cmd_verify(project, &project_root, verify),
         Command::Hotpath {
+            verbose,
             dataset,
             pbf,
             osc,
             alloc,
             runs,
-        } => cmd_hotpath(project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, runs),
-        Command::Profile { dataset, pbf, osc, tool } => {
+        } => {
+            output::set_quiet(!verbose);
+            cmd_hotpath(project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, runs)
+        }
+        Command::Profile { verbose, dataset, pbf, osc, tool } => {
+            output::set_quiet(!verbose);
             cmd_profile(project, &project_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref())
         }
         Command::Download { region, osc_url } => {
@@ -742,6 +766,7 @@ fn cmd_run_elivagar(
 
 fn cmd_results(
     project_root: &Path,
+    query: Option<String>,
     commit: Option<String>,
     compare: Option<Vec<String>>,
     command: Option<String>,
@@ -757,7 +782,15 @@ fn cmd_results(
 
     let results_db = db::ResultsDb::open(&db_path)?;
 
-    if let Some(commits) = compare {
+    if let Some(uuid_prefix) = query {
+        let rows = results_db.query_by_uuid(&uuid_prefix)?;
+        if rows.is_empty() {
+            output::result_msg("no matching results");
+        } else {
+            let table = db::format_table(&rows);
+            println!("{table}");
+        }
+    } else if let Some(commits) = compare {
         let commit_a = commits.first().map_or("", String::as_str);
         let commit_b = commits.get(1).map_or("", String::as_str);
         let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b)?;

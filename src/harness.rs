@@ -235,17 +235,22 @@ impl BenchHarness {
     // -----------------------------------------------------------------------
 
     /// Record a result: always emit to stdout, store in DB if tree is clean.
+    /// Prints the short UUID to stdout (always, regardless of quiet mode).
     fn record_result(
         &self,
         config: &BenchConfig,
         result: &BenchResult,
     ) -> Result<(), DevError> {
-        emit_result_lines(config, result, &self.git);
-
         if self.git.is_clean {
             let row = self.build_row(config, result);
-            self.db.insert(&row)?;
-            output::bench_msg("stored in results.db");
+            let short = self.db.insert(&row)?;
+            emit_result_lines(config, result, &self.git);
+            output::bench_msg(&format!("stored in results.db ({short})"));
+            println!("{short}");
+        } else {
+            // Dirty tree: no DB insert, no UUID. Always print result line
+            // since the data can't be looked up later.
+            force_emit_result_lines(config, result, &self.git);
         }
 
         Ok(())
@@ -277,12 +282,12 @@ impl BenchHarness {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// Emit a single `[result]` line with key=value pairs.
-fn emit_result_lines(
+/// Build a result summary string with key=value pairs.
+fn format_result_line(
     config: &BenchConfig,
     result: &BenchResult,
     git: &GitInfo,
-) {
+) -> String {
     let mut parts = Vec::with_capacity(8);
     parts.push(format!("command={}", config.command));
 
@@ -299,7 +304,26 @@ fn emit_result_lines(
 
     append_extra_fields(&mut parts, &result.extra);
 
-    output::result_msg(&parts.join("  "));
+    parts.join("  ")
+}
+
+/// Emit a `[result]` line (respects quiet mode).
+fn emit_result_lines(
+    config: &BenchConfig,
+    result: &BenchResult,
+    git: &GitInfo,
+) {
+    output::result_msg(&format_result_line(config, result, git));
+}
+
+/// Emit a `[result]` line unconditionally (ignores quiet mode).
+/// Used for dirty-tree results that can't be looked up later.
+fn force_emit_result_lines(
+    config: &BenchConfig,
+    result: &BenchResult,
+    git: &GitInfo,
+) {
+    println!("[result]  {}", format_result_line(config, result, git));
 }
 
 /// Flatten top-level keys from the extra JSON object into the result line.
