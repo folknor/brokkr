@@ -52,6 +52,7 @@ pub fn run(
     let config = build::BuildConfig {
         package: Some("nidhogg".into()),
         bin: None,
+        example: None,
         features: Vec::new(),
         default_features: true,
         profile: "profiling",

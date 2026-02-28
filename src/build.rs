@@ -11,6 +11,7 @@ use crate::output;
 pub struct BuildConfig {
     pub package: Option<String>,
     pub bin: Option<String>,
+    pub example: Option<String>,
     pub features: Vec<String>,
     pub default_features: bool,
     pub profile: &'static str,
@@ -21,6 +22,7 @@ impl BuildConfig {
         Self {
             package: package.map(std::borrow::ToOwned::to_owned),
             bin: None,
+            example: None,
             features: Vec::new(),
             default_features: true,
             profile: "release",
@@ -31,6 +33,7 @@ impl BuildConfig {
         Self {
             package: package.map(std::borrow::ToOwned::to_owned),
             bin: None,
+            example: None,
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: true,
             profile: "release",
@@ -150,6 +153,11 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
     if let Some(ref bin) = config.bin {
         args.push("--bin".into());
         args.push(bin.clone());
+    }
+
+    if let Some(ref example) = config.example {
+        args.push("--example".into());
+        args.push(example.clone());
     }
 
     if config.profile == "release" {

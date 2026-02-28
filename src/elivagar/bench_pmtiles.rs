@@ -1,11 +1,14 @@
 //! Benchmark: PMTiles writer micro-benchmark.
 //!
-//! Replaces `bench-pmtiles.sh`. Builds the `bench_pmtiles` example and runs it
-//! with passthrough output.
+//! Builds the `bench_pmtiles` example and runs it.
+//! Results are stored in the database via the bench harness.
 
 use std::path::Path;
+use std::time::Duration;
 
+use crate::build;
 use crate::error::DevError;
+use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
 
 // ---------------------------------------------------------------------------
@@ -13,77 +16,81 @@ use crate::output;
 // ---------------------------------------------------------------------------
 
 pub fn run(
-    target_dir: &Path,
+    harness: &BenchHarness,
     project_root: &Path,
-    tiles: Option<usize>,
-    runs: Option<usize>,
+    tiles: usize,
+    runs: usize,
 ) -> Result<(), DevError> {
-    let tile_count = tiles.unwrap_or(500_000);
-    let run_count = runs.unwrap_or(5);
-
-    // Build the example.
-    output::build_msg("cargo build --release --example bench_pmtiles");
-
-    let captured = output::run_captured(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "--example",
-            "bench_pmtiles",
-        ],
+    let binary = build::cargo_build(
+        &build::BuildConfig {
+            package: None,
+            bin: None,
+            example: Some("bench_pmtiles".into()),
+            features: Vec::new(),
+            default_features: true,
+            profile: "release",
+        },
         project_root,
     )?;
-
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "bench_pmtiles build failed: {stderr}"
-        )));
-    }
-
-    // Run the example binary.
-    let binary = target_dir.join("release/examples/bench_pmtiles");
-    if !binary.exists() {
-        return Err(DevError::Build(format!(
-            "bench_pmtiles binary not found at {}",
-            binary.display()
-        )));
-    }
-
-    let tiles_str = tile_count.to_string();
-    let runs_str = run_count.to_string();
     let binary_str = binary.display().to_string();
 
+    let tiles_str = tiles.to_string();
+    let runs_str = runs.to_string();
+
     output::bench_msg(&format!(
-        "bench_pmtiles: {tile_count} tiles, {run_count} runs"
+        "bench_pmtiles: {tiles} tiles, {runs} runs"
     ));
 
-    let captured = output::run_captured(
-        &binary_str,
-        &["--tiles", &tiles_str, "--runs", &runs_str],
-        project_root,
-    )?;
+    let config = BenchConfig {
+        command: "bench pmtiles".into(),
+        variant: None,
+        input_file: None,
+        input_mb: None,
+        cargo_features: None,
+        cargo_profile: "release".into(),
+        runs: 1, // example handles its own iterations
+    };
 
-    // Print stdout (the benchmark results).
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    if !stdout.is_empty() {
-        print!("{stdout}");
-    }
+    harness.run_internal(&config, |_i| {
+        let captured = output::run_captured(
+            &binary_str,
+            &["--tiles", &tiles_str, "--runs", &runs_str],
+            project_root,
+        )?;
 
-    // Print stderr.
-    let stderr = String::from_utf8_lossy(&captured.stderr);
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
-    }
+        // Print stdout (benchmark results) and stderr.
+        let stdout = String::from_utf8_lossy(&captured.stdout);
+        if !stdout.is_empty() {
+            print!("{stdout}");
+        }
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        if !stderr.is_empty() {
+            eprint!("{stderr}");
+        }
 
-    if !captured.status.success() {
-        return Err(DevError::Subprocess {
-            program: binary_str,
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
+        if !captured.status.success() {
+            return Err(DevError::Subprocess {
+                program: binary_str.clone(),
+                code: captured.status.code(),
+                stderr: stderr.into_owned(),
+            });
+        }
+
+        let ms = elapsed_to_ms(&captured.elapsed);
+        let extra = serde_json::json!({
+            "tiles": tiles,
+            "internal_runs": runs,
         });
-    }
+
+        Ok(BenchResult {
+            elapsed_ms: ms,
+            extra: Some(extra),
+        })
+    })?;
 
     Ok(())
+}
+
+fn elapsed_to_ms(duration: &Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }

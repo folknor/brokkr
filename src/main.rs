@@ -1073,12 +1073,16 @@ fn cmd_bench(project: Project, project_root: &Path, bench: BenchCommand) -> Resu
         BenchCommand::NodeStore { nodes, runs } => {
             project::require(project, Project::Elivagar, "bench node-store")?;
             let pi = bootstrap(project_root)?;
-            elivagar::bench_node_store::run(&pi.target_dir, project_root, Some(nodes), Some(runs))
+            let paths = bootstrap_config(project_root, &pi.target_dir)?;
+            let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+            elivagar::bench_node_store::run(&harness, project_root, nodes, runs)
         }
         BenchCommand::Pmtiles { tiles, runs } => {
             project::require(project, Project::Elivagar, "bench pmtiles")?;
             let pi = bootstrap(project_root)?;
-            elivagar::bench_pmtiles::run(&pi.target_dir, project_root, Some(tiles), Some(runs))
+            let paths = bootstrap_config(project_root, &pi.target_dir)?;
+            let harness = harness::BenchHarness::new(&paths, project_root, project)?;
+            elivagar::bench_pmtiles::run(&harness, project_root, tiles, runs)
         }
         BenchCommand::ElivPlanetiler { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-planetiler")?;

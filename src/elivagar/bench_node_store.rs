@@ -1,11 +1,14 @@
 //! Benchmark: node store micro-benchmark.
 //!
-//! Replaces `bench-node-store.sh`. Builds the `bench_node_store` example with
-//! the `hotpath` feature and runs it with passthrough output.
+//! Builds the `bench_node_store` example with the `hotpath` feature and runs it.
+//! Results are stored in the database via the bench harness.
 
 use std::path::Path;
+use std::time::Duration;
 
+use crate::build;
 use crate::error::DevError;
+use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
 
 // ---------------------------------------------------------------------------
@@ -13,80 +16,82 @@ use crate::output;
 // ---------------------------------------------------------------------------
 
 pub fn run(
-    target_dir: &Path,
+    harness: &BenchHarness,
     project_root: &Path,
-    nodes_millions: Option<usize>,
-    runs: Option<usize>,
+    nodes_millions: usize,
+    runs: usize,
 ) -> Result<(), DevError> {
-    let nodes_m = nodes_millions.unwrap_or(50);
-    let run_count = runs.unwrap_or(5);
-
-    // Build the example.
-    output::build_msg("cargo build --release --features hotpath --example bench_node_store");
-
-    let captured = output::run_captured(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "--features",
-            "hotpath",
-            "--example",
-            "bench_node_store",
-        ],
+    let binary = build::cargo_build(
+        &build::BuildConfig {
+            package: None,
+            bin: None,
+            example: Some("bench_node_store".into()),
+            features: vec!["hotpath".into()],
+            default_features: true,
+            profile: "release",
+        },
         project_root,
     )?;
 
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "bench_node_store build failed: {stderr}"
-        )));
-    }
-
-    // Run the example binary.
-    let binary = target_dir.join("release/examples/bench_node_store");
-    if !binary.exists() {
-        return Err(DevError::Build(format!(
-            "bench_node_store binary not found at {}",
-            binary.display()
-        )));
-    }
-
-    let nodes_str = nodes_m.to_string();
-    let runs_str = run_count.to_string();
     let binary_str = binary.display().to_string();
+    let nodes_str = nodes_millions.to_string();
+    let runs_str = runs.to_string();
 
     output::bench_msg(&format!(
-        "bench_node_store: {nodes_m}M nodes, {run_count} runs"
+        "bench_node_store: {nodes_millions}M nodes, {runs} runs"
     ));
 
-    let captured = output::run_captured_with_env(
-        &binary_str,
-        &["--nodes", &nodes_str, "--runs", &runs_str],
-        project_root,
-        &[("HOTPATH_METRICS_SERVER_OFF", "true")],
-    )?;
+    let config = BenchConfig {
+        command: "bench node-store".into(),
+        variant: None,
+        input_file: None,
+        input_mb: None,
+        cargo_features: Some("hotpath".into()),
+        cargo_profile: "release".into(),
+        runs: 1, // example handles its own iterations
+    };
 
-    // Print stdout (the benchmark results).
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    if !stdout.is_empty() {
-        print!("{stdout}");
-    }
+    harness.run_internal(&config, |_i| {
+        let captured = output::run_captured_with_env(
+            &binary_str,
+            &["--nodes", &nodes_str, "--runs", &runs_str],
+            project_root,
+            &[("HOTPATH_METRICS_SERVER_OFF", "true")],
+        )?;
 
-    // Print stderr (hotpath output).
-    let stderr = String::from_utf8_lossy(&captured.stderr);
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
-    }
+        // Print stdout (benchmark results) and stderr (hotpath output).
+        let stdout = String::from_utf8_lossy(&captured.stdout);
+        if !stdout.is_empty() {
+            print!("{stdout}");
+        }
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        if !stderr.is_empty() {
+            eprint!("{stderr}");
+        }
 
-    if !captured.status.success() {
-        return Err(DevError::Subprocess {
-            program: binary_str,
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
+        if !captured.status.success() {
+            return Err(DevError::Subprocess {
+                program: binary_str.clone(),
+                code: captured.status.code(),
+                stderr: stderr.into_owned(),
+            });
+        }
+
+        let ms = elapsed_to_ms(&captured.elapsed);
+        let extra = serde_json::json!({
+            "nodes_millions": nodes_millions,
+            "internal_runs": runs,
         });
-    }
+
+        Ok(BenchResult {
+            elapsed_ms: ms,
+            extra: Some(extra),
+        })
+    })?;
 
     Ok(())
+}
+
+fn elapsed_to_ms(duration: &Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }

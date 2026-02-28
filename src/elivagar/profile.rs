@@ -54,6 +54,7 @@ pub fn run(
     let config = build::BuildConfig {
         package: None,
         bin: None,
+        example: None,
         features: Vec::new(),
         default_features: true,
         profile: "profiling",
