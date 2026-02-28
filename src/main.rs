@@ -626,7 +626,7 @@ fn cmd_env(project: Project, project_root: &Path) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
 
-    let info = env::collect(&dev_config, &paths, project);
+    let info = env::collect(&dev_config, &paths, project, project_root);
     env::print(&info);
     Ok(())
 }
@@ -750,9 +750,10 @@ fn resolve_pbf_path(
     dataset: &str,
     dev_config: &config::DevConfig,
     paths: &config::ResolvedPaths,
+    project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let path = match pbf {
-        Some(p) => PathBuf::from(p),
+    let (path, hash, origin) = match pbf {
+        Some(p) => (PathBuf::from(p), None, None),
         None => {
             let ds = dev_config.datasets.get(dataset).ok_or_else(|| {
                 DevError::Config(format!("unknown dataset: {dataset}"))
@@ -760,7 +761,11 @@ fn resolve_pbf_path(
             let pbf_file = ds.pbf.as_ref().ok_or_else(|| {
                 DevError::Config(format!("dataset '{dataset}' has no pbf configured"))
             })?;
-            paths.data_dir.join(pbf_file)
+            (
+                paths.data_dir.join(pbf_file),
+                ds.sha256_pbf.as_deref(),
+                ds.origin.as_deref(),
+            )
         }
     };
 
@@ -769,6 +774,10 @@ fn resolve_pbf_path(
             "PBF file not found: {}",
             path.display()
         )));
+    }
+
+    if let Some(expected) = hash {
+        preflight::verify_file_hash(&path, expected, project_root, origin)?;
     }
 
     Ok(path)
@@ -780,9 +789,10 @@ fn resolve_osc_path(
     dataset: &str,
     dev_config: &config::DevConfig,
     paths: &config::ResolvedPaths,
+    project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let path = match osc {
-        Some(p) => PathBuf::from(p),
+    let (path, hash, origin) = match osc {
+        Some(p) => (PathBuf::from(p), None, None),
         None => {
             let ds = dev_config.datasets.get(dataset).ok_or_else(|| {
                 DevError::Config(format!("unknown dataset: {dataset}"))
@@ -792,7 +802,11 @@ fn resolve_osc_path(
                     "dataset '{dataset}' has no osc file configured"
                 ))
             })?;
-            paths.data_dir.join(osc_file)
+            (
+                paths.data_dir.join(osc_file),
+                ds.sha256_osc.as_deref(),
+                ds.origin.as_deref(),
+            )
         }
     };
 
@@ -801,6 +815,10 @@ fn resolve_osc_path(
             "OSC file not found: {}",
             path.display()
         )));
+    }
+
+    if let Some(expected) = hash {
+        preflight::verify_file_hash(&path, expected, project_root, origin)?;
     }
 
     Ok(path)
@@ -965,7 +983,7 @@ fn cmd_bench_commands(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let commands = pbfhogg::bench_commands::parse_command(&command)?;
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
@@ -984,7 +1002,7 @@ fn cmd_bench_extract(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let bbox = resolve_bbox(&bbox, &dataset, &dev_config)?;
     let strategies = pbfhogg::bench_extract::parse_strategies(&strategies_str)?;
     let file_mb = file_size_mb(&pbf_path);
@@ -1002,7 +1020,7 @@ fn cmd_bench_allocator(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
     pbfhogg::bench_allocator::run(&harness, &pbf_path, file_mb, runs, project_root)
@@ -1018,7 +1036,7 @@ fn cmd_bench_blob_filter(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let indexed_path = resolve_pbf_path(&pbf_indexed, &dataset, &dev_config, &paths)?;
+    let indexed_path = resolve_pbf_path(&pbf_indexed, &dataset, &dev_config, &paths, project_root)?;
     let raw_path = resolve_raw_pbf_path(&pbf_raw, &dataset, &dev_config, &paths)?;
     let file_mb = file_size_mb(&indexed_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
@@ -1035,7 +1053,7 @@ fn cmd_bench_planetiler(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
     pbfhogg::bench_planetiler::run(&harness, &pbf_path, file_mb, runs, &paths.data_dir, project_root)
@@ -1051,7 +1069,7 @@ fn cmd_bench_read(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let modes = pbfhogg::bench_read::parse_modes(&modes_str)?;
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
@@ -1069,7 +1087,7 @@ fn cmd_bench_write(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let compressions = pbfhogg::bench_write::parse_compressions(&compression_str)?;
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
@@ -1090,8 +1108,8 @@ fn cmd_bench_merge(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-    let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
+    let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root)?;
     let compressions = pbfhogg::bench_merge::parse_compressions(&compression_str)?;
     let file_mb = file_size_mb(&pbf_path);
 
@@ -1124,7 +1142,7 @@ fn cmd_bench_all(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
     pbfhogg::bench_all::run(&harness, &dev_config, &paths, project_root, &pbf_path, file_mb, runs, &dataset)
@@ -1147,7 +1165,7 @@ fn cmd_bench_eliv_self(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
@@ -1175,7 +1193,7 @@ fn cmd_bench_eliv_planetiler(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
     elivagar::bench_planetiler::run(
@@ -1198,7 +1216,7 @@ fn cmd_bench_eliv_all(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;
     elivagar::bench_all::run(
@@ -1272,37 +1290,37 @@ fn cmd_verify_pbfhogg(_project: Project, project_root: &Path, verify: VerifyComm
 
     match verify {
         VerifyCommand::Sort { dataset, pbf } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_sort::run(&harness, &pbf_path)
         }
         VerifyCommand::Cat { dataset, pbf } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_cat::run(&harness, &pbf_path)
         }
         VerifyCommand::Extract { dataset, pbf, bbox } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             let bbox = resolve_bbox(&bbox, &dataset, &dev_config)?;
             pbfhogg::verify_extract::run(&harness, &pbf_path, &bbox)
         }
         VerifyCommand::TagsFilter { dataset, pbf } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_tags_filter::run(&harness, &pbf_path)
         }
         VerifyCommand::GetidRemoveid { dataset, pbf } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_getid_removeid::run(&harness, &pbf_path)
         }
         VerifyCommand::AddLocationsToWays { dataset, pbf } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_add_locations::run(&harness, &pbf_path)
         }
         VerifyCommand::CheckRefs { dataset, pbf } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_check_refs::run(&harness, &pbf_path)
         }
         VerifyCommand::Merge { dataset, pbf, osc } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root)?;
             let osmosis = match tools::ensure_osmosis(&paths.data_dir, project_root) {
                 Ok(tools) => Some(tools),
                 Err(e) => {
@@ -1313,20 +1331,20 @@ fn cmd_verify_pbfhogg(_project: Project, project_root: &Path, verify: VerifyComm
             pbfhogg::verify_merge::run(&harness, &pbf_path, &osc_path, osmosis.as_ref())
         }
         VerifyCommand::DeriveChanges { dataset, pbf, osc } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_derive_changes::run(&harness, &pbf_path, &osc_path)
         }
         VerifyCommand::Diff { dataset, pbf, osc } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root)?;
             pbfhogg::verify_diff::run(&harness, &pbf_path, &osc_path)
         }
         VerifyCommand::All { dataset, pbf, osc, bbox } => {
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             let osc_path = osc
                 .as_ref()
-                .map(|_| resolve_osc_path(&osc, &dataset, &dev_config, &paths))
+                .map(|_| resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root))
                 .transpose()?;
             let bbox_str = bbox
                 .as_ref()
@@ -1366,7 +1384,7 @@ fn cmd_hotpath(
         Project::Elivagar => {
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
             let binary = build::cargo_build(
                 &build::BuildConfig::release_with_features(None, &[feature]),
@@ -1384,7 +1402,7 @@ fn cmd_hotpath(
         Project::Nidhogg => {
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
             let binary = build::cargo_build(
                 &build::BuildConfig::release_with_features(Some("nidhogg"), &[feature]),
@@ -1413,8 +1431,8 @@ fn cmd_hotpath(
 
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root)?;
             let file_mb = file_size_mb(&pbf_path);
 
             let feature = if alloc { "hotpath-alloc" } else { "hotpath" };
@@ -1461,7 +1479,7 @@ fn cmd_profile(
             let tool_name = tool.as_deref().unwrap_or("perf");
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
             elivagar::profile::run(
                 &pbf_path,
                 &paths.data_dir,
@@ -1474,7 +1492,7 @@ fn cmd_profile(
             let tool_name = tool.as_deref().unwrap_or("perf");
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
 
             let data_dir_str = dev_config
                 .datasets
@@ -1496,8 +1514,8 @@ fn cmd_profile(
 
             let pi = bootstrap(project_root)?;
             let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
-            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths)?;
+            let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
+            let osc_path = resolve_osc_path(&osc, &dataset, &dev_config, &paths, project_root)?;
             let file_mb = file_size_mb(&pbf_path);
 
             // Try to get raw PBF path (optional).
@@ -1620,7 +1638,7 @@ fn cmd_ingest(
     project::require(project, Project::Nidhogg, "ingest")?;
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
 
     let ds = dev_config.datasets.get(&dataset).ok_or_else(|| {
         DevError::Config(format!("unknown dataset: {dataset}"))
@@ -1678,7 +1696,7 @@ fn cmd_bench_nid_ingest(
 ) -> Result<(), DevError> {
     let pi = bootstrap(project_root)?;
     let (dev_config, paths) = bootstrap_config(project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths)?;
+    let pbf_path = resolve_pbf_path(&pbf, &dataset, &dev_config, &paths, project_root)?;
     let file_mb = file_size_mb(&pbf_path);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
     let harness = harness::BenchHarness::new(&dev_config, &paths, project_root, project)?;

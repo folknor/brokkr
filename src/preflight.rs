@@ -1,4 +1,7 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use crate::error::DevError;
 
@@ -136,4 +139,132 @@ fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<S
 fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
+}
+
+// ---------------------------------------------------------------------------
+// SHA256 file verification with mtime cache
+// ---------------------------------------------------------------------------
+
+/// Verify that a file matches the expected SHA256 hash.
+///
+/// Results are cached in `{project_root}/.dev/sha256_cache` keyed on path,
+/// mtime, and size. Re-hashing only happens when the file changes.
+pub fn verify_file_hash(
+    path: &Path,
+    expected_hex: &str,
+    project_root: &Path,
+    origin: Option<&str>,
+) -> Result<(), DevError> {
+    let actual = cached_sha256(path, project_root)?;
+
+    if actual.eq_ignore_ascii_case(expected_hex) {
+        Ok(())
+    } else {
+        let mut msg = format!(
+            "SHA256 mismatch for {}\n  expected: {expected_hex}\n  actual:   {actual}",
+            path.display(),
+        );
+        if let Some(o) = origin {
+            msg.push_str(&format!("\n  origin: {o}"));
+        }
+        Err(DevError::Preflight(vec![msg]))
+    }
+}
+
+/// Return the SHA256 hex digest of a file, using the mtime cache when possible.
+pub fn cached_sha256(path: &Path, project_root: &Path) -> Result<String, DevError> {
+    let meta = std::fs::metadata(path)?;
+    let mtime = file_mtime(&meta);
+    let size = meta.len();
+
+    let cache_dir = project_root.join(".dev");
+    let cache_path = cache_dir.join("sha256_cache");
+
+    // Check cache.
+    if let Some(hit) = read_cache_entry(&cache_path, path, mtime, size) {
+        return Ok(hit);
+    }
+
+    // Compute hash.
+    let hex = compute_sha256(path)?;
+
+    // Write to cache.
+    std::fs::create_dir_all(&cache_dir)?;
+    append_cache_entry(&cache_path, path, mtime, size, &hex);
+
+    Ok(hex)
+}
+
+/// Compute SHA256 of a file, reading in 64 KB chunks.
+fn compute_sha256(path: &Path) -> Result<String, DevError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    let digest = hasher.finalize();
+    Ok(hex_encode(&digest))
+}
+
+/// Encode bytes as lowercase hex.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Extract mtime as seconds since epoch from metadata.
+fn file_mtime(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    // mtime() returns i64; files with valid timestamps are non-negative.
+    meta.mtime().max(0) as u64
+}
+
+/// Look up a cache entry matching path, mtime, and size.
+fn read_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64) -> Option<String> {
+    let contents = std::fs::read_to_string(cache_path).ok()?;
+    let path_str = path.display().to_string();
+
+    for line in contents.lines() {
+        let parts: Vec<&str> = line.splitn(4, '\t').collect();
+        if parts.len() == 4
+            && parts[0] == path_str
+            && parts[1] == mtime.to_string()
+            && parts[2] == size.to_string()
+        {
+            return Some(parts[3].to_owned());
+        }
+    }
+    None
+}
+
+/// Append a cache entry. Overwrites stale entries for the same path.
+fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex: &str) {
+    let path_str = path.display().to_string();
+
+    // Read existing entries, drop any for the same path (stale).
+    let mut lines: Vec<String> = std::fs::read_to_string(cache_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            line.splitn(2, '\t')
+                .next()
+                .is_none_or(|p| p != path_str)
+        })
+        .map(String::from)
+        .collect();
+
+    lines.push(format!("{path_str}\t{mtime}\t{size}\t{hex}"));
+
+    // Best-effort write; don't fail the whole command if cache write fails.
+    let _ = std::fs::write(cache_path, lines.join("\n") + "\n");
 }

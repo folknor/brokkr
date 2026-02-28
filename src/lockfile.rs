@@ -71,7 +71,14 @@ fn try_flock(fd: RawFd) -> Result<(), DevError> {
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
         let pid = read_holder_pid(fd);
-        Err(DevError::Lock(format!("already locked by PID {pid}")))
+        let cmd = read_holder_command(&pid);
+        if cmd.is_empty() {
+            Err(DevError::Lock(format!("already locked by PID {pid}")))
+        } else {
+            Err(DevError::Lock(format!(
+                "already locked by PID {pid}: {cmd}"
+            )))
+        }
     } else {
         Err(DevError::Lock(format!("flock failed: {err}")))
     }
@@ -101,6 +108,23 @@ fn read_holder_pid(fd: RawFd) -> String {
         "unknown".to_owned()
     } else {
         trimmed.to_owned()
+    }
+}
+
+/// Read the command line of a process from `/proc/{pid}/cmdline`.
+fn read_holder_command(pid: &str) -> String {
+    let path = format!("/proc/{pid}/cmdline");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            // cmdline is nul-separated; join args with spaces.
+            bytes
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        Err(_) => String::new(),
     }
 }
 

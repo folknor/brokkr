@@ -17,9 +17,15 @@ pub struct EnvInfo {
     pub datasets: Vec<(String, DatasetStatus)>,
 }
 
-/// Whether a dataset PBF file exists on disk.
+/// Whether a dataset PBF file exists on disk and passes hash verification.
 pub enum DatasetStatus {
+    /// File exists and SHA256 matches (or no hash configured).
+    Verified,
+    /// File exists but no hash is configured.
     Present,
+    /// File exists but SHA256 does not match.
+    HashMismatch,
+    /// File does not exist.
     Missing,
     /// Dataset has no PBF path configured.
     NoPbf,
@@ -30,6 +36,7 @@ pub fn collect(
     config: &DevConfig,
     paths: &ResolvedPaths,
     project: Project,
+    project_root: &Path,
 ) -> EnvInfo {
     let (mem_total, mem_avail) = read_memory();
 
@@ -42,7 +49,7 @@ pub fn collect(
         io_uring_status: read_io_uring_status(),
         drives: collect_drives(paths),
         tools: collect_tools(project),
-        datasets: check_datasets(config, &paths.data_dir),
+        datasets: check_datasets(config, &paths.data_dir, project_root),
     }
 }
 
@@ -96,7 +103,9 @@ fn print_datasets(info: &EnvInfo) {
 
 fn format_dataset(name: &str, status: &DatasetStatus) -> String {
     match status {
-        DatasetStatus::Present => format!("{name} \u{2713}"),
+        DatasetStatus::Verified => format!("{name} \u{2713}"),
+        DatasetStatus::Present => format!("{name} \u{2713} (no hash)"),
+        DatasetStatus::HashMismatch => format!("{name} \u{2717} (hash mismatch)"),
         DatasetStatus::Missing => format!("{name} \u{2717} (missing)"),
         DatasetStatus::NoPbf => format!("{name} (no pbf)"),
     }
@@ -301,17 +310,22 @@ fn read_git_rev() -> String {
 // Datasets
 // ---------------------------------------------------------------------------
 
-fn check_datasets(config: &DevConfig, data_dir: &Path) -> Vec<(String, DatasetStatus)> {
+fn check_datasets(
+    config: &DevConfig,
+    data_dir: &Path,
+    project_root: &Path,
+) -> Vec<(String, DatasetStatus)> {
     let mut out: Vec<(String, DatasetStatus)> = config
         .datasets
         .iter()
         .map(|(name, ds)| {
             let status = match &ds.pbf {
                 Some(pbf) => {
-                    if data_dir.join(pbf).exists() {
-                        DatasetStatus::Present
-                    } else {
+                    let path = data_dir.join(pbf);
+                    if !path.exists() {
                         DatasetStatus::Missing
+                    } else {
+                        check_hash_status(&path, ds.sha256_pbf.as_deref(), project_root)
                     }
                 }
                 None => DatasetStatus::NoPbf,
@@ -322,6 +336,18 @@ fn check_datasets(config: &DevConfig, data_dir: &Path) -> Vec<(String, DatasetSt
 
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+fn check_hash_status(path: &Path, expected: Option<&str>, project_root: &Path) -> DatasetStatus {
+    match expected {
+        None => DatasetStatus::Present,
+        Some(hex) => {
+            match crate::preflight::verify_file_hash(path, hex, project_root, None) {
+                Ok(()) => DatasetStatus::Verified,
+                Err(_) => DatasetStatus::HashMismatch,
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

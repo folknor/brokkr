@@ -20,7 +20,7 @@ pub const DEFAULT_PORT: u16 = 3033;
 ///
 /// Kills any existing server first, spawns the binary with stdout/stderr
 /// redirected to `logs/serve.log`, saves the PID to `.dev/nidhogg.pid`,
-/// and polls the log file until "Listening" appears (6s timeout).
+/// and polls the HTTP health endpoint until ready (6s timeout).
 pub fn serve(
     binary: &Path,
     data_dir: &str,
@@ -73,8 +73,8 @@ pub fn serve(
     // Save PID to file.
     std::fs::write(&pid_path, pid.to_string())?;
 
-    // Poll log file for "Listening" text.
-    if !poll_for_listening(&log_path) {
+    // Poll HTTP health endpoint until the server is ready.
+    if !poll_for_ready(port) {
         return Err(DevError::Config(format!(
             "server did not start within 6s (check {})",
             log_path.display()
@@ -87,8 +87,8 @@ pub fn serve(
 
 /// Stop the nidhogg server.
 ///
-/// Reads PID from `.dev/nidhogg.pid` and sends SIGTERM. Falls back to
-/// pkill as a safety net. Sleeps 500ms for graceful shutdown.
+/// Reads PID from `.dev/nidhogg.pid`, sends SIGTERM, waits up to 5s for
+/// the process to exit, then escalates to SIGKILL if still alive.
 pub fn stop(project_root: &Path) -> Result<(), DevError> {
     let pid_path = project_root.join(".dev").join("nidhogg.pid");
 
@@ -98,12 +98,7 @@ pub fn stop(project_root: &Path) -> Result<(), DevError> {
     if pid_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&pid_path) {
             if let Ok(pid) = content.trim().parse::<i32>() {
-                // SAFETY: sending SIGTERM to a process is safe; the worst case
-                // is the PID no longer exists and we get ESRCH (ignored below).
-                let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-                if ret == 0 {
-                    stopped = true;
-                }
+                stopped = stop_pid(pid);
             }
         }
         let _ = std::fs::remove_file(&pid_path);
@@ -117,12 +112,36 @@ pub fn stop(project_root: &Path) -> Result<(), DevError> {
         .status();
 
     if stopped {
-        // Brief pause for graceful shutdown.
-        std::thread::sleep(std::time::Duration::from_millis(500));
         output::run_msg("nidhogg server stopped");
     }
 
     Ok(())
+}
+
+/// Send SIGTERM to a process, wait up to 5s for it to die, escalate to
+/// SIGKILL if it's still alive. Returns `true` if the process was running.
+fn stop_pid(pid: i32) -> bool {
+    // SAFETY: sending signals to a process is safe; the worst case is the
+    // PID no longer exists and we get ESRCH.
+    let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if ret != 0 {
+        return false;
+    }
+
+    // Poll for up to 5s (25 x 200ms) to see if the process exited.
+    for _ in 0..25 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let alive = unsafe { libc::kill(pid, 0) };
+        if alive != 0 {
+            return true;
+        }
+    }
+
+    // Still alive after 5s — escalate to SIGKILL.
+    output::run_msg(&format!("PID {pid} did not exit after SIGTERM, sending SIGKILL"));
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    true
 }
 
 /// Check if the server is responding to API requests.
@@ -172,14 +191,12 @@ pub fn check_running(port: u16) -> Result<(), DevError> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Poll the log file for "Listening" text, up to 30 attempts x 200ms = 6s.
-fn poll_for_listening(log_path: &Path) -> bool {
+/// Poll the HTTP health endpoint, up to 30 attempts x 200ms = 6s.
+fn poll_for_ready(port: u16) -> bool {
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_millis(200));
-        if let Ok(contents) = std::fs::read_to_string(log_path) {
-            if contents.contains("Listening") {
-                return true;
-            }
+        if let Ok(true) = status(port) {
+            return true;
         }
     }
     false

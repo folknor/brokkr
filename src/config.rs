@@ -26,6 +26,8 @@ pub struct Dataset {
     pub ocean_shp: Option<String>,
     pub data_dir: Option<String>,
     pub origin: Option<String>,
+    pub sha256_pbf: Option<String>,
+    pub sha256_osc: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

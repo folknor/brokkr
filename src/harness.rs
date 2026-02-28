@@ -52,7 +52,7 @@ impl BenchHarness {
         project: crate::project::Project,
     ) -> Result<Self, DevError> {
         let lock = crate::lockfile::acquire(&paths.scratch_dir)?;
-        let env = crate::env::collect(config, paths, project);
+        let env = crate::env::collect(config, paths, project, project_root);
         let git = crate::git::collect(project_root)?;
         let db_dir = project_root.join(".dev");
         std::fs::create_dir_all(&db_dir)?;
