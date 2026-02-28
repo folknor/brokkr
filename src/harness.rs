@@ -50,6 +50,7 @@ impl BenchHarness {
         project_root: &Path,
         project: crate::project::Project,
     ) -> Result<Self, DevError> {
+        std::fs::create_dir_all(&paths.scratch_dir)?;
         let lock = crate::lockfile::acquire(&paths.scratch_dir)?;
         let env = crate::env::collect(paths, project, project_root);
         let git = crate::git::collect(project_root)?;
@@ -426,7 +427,7 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             let value = value.trim();
-            if key == "elapsed_ms" {
+            if key == "elapsed_ms" || key == "total_ms" {
                 elapsed_ms = Some(value.parse().map_err(|_| {
                     DevError::Config(format!("invalid elapsed_ms value: {value}"))
                 })?);
@@ -445,7 +446,10 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
     }
 
     let elapsed_ms = elapsed_ms.ok_or_else(|| {
-        DevError::Config("subprocess stderr missing elapsed_ms=NNN".into())
+        let preview: String = text.chars().take(500).collect();
+        DevError::Config(format!(
+            "subprocess stderr missing elapsed_ms=NNN. stderr was:\n{preview}"
+        ))
     })?;
 
     Ok(BenchResult {
