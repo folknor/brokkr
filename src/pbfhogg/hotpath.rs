@@ -8,63 +8,7 @@ use std::time::Duration;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
-use crate::output::{self, CapturedOutput};
-
-// ---------------------------------------------------------------------------
-// Shared helper (used by hotpath.rs and profile.rs)
-// ---------------------------------------------------------------------------
-
-/// Run a hotpath-instrumented subprocess and extract the `[hotpath]` block.
-///
-/// Sets `HOTPATH_METRICS_SERVER_OFF=true` in the subprocess environment.
-/// Does NOT check exit status — commands like `check-refs` may exit non-zero
-/// when missing refs are found, which is expected.
-pub fn run_hotpath_command(
-    binary: &Path,
-    args: &[&str],
-    cwd: &Path,
-) -> Result<CapturedOutput, DevError> {
-    let program = binary.display().to_string();
-    let captured = output::run_captured_with_env(
-        &program,
-        args,
-        cwd,
-        &[("HOTPATH_METRICS_SERVER_OFF", "true")],
-    )?;
-
-    let block = extract_hotpath_block(&captured.stdout);
-    if !block.is_empty() {
-        print!("{block}");
-    }
-
-    Ok(captured)
-}
-
-// ---------------------------------------------------------------------------
-// Hotpath block extraction
-// ---------------------------------------------------------------------------
-
-/// Extract everything from the first `[hotpath]` line to end of stdout.
-fn extract_hotpath_block(stdout: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stdout);
-    let mut result = String::new();
-    let mut found = false;
-
-    for line in text.lines() {
-        if !found {
-            if line.starts_with("[hotpath]") {
-                found = true;
-                result.push_str(line);
-                result.push('\n');
-            }
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    result
-}
+use crate::output;
 
 // ---------------------------------------------------------------------------
 // Elapsed conversion

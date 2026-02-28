@@ -2,13 +2,13 @@
 //!
 //! Replaces `profile-region.sh`. Builds the CLI binary twice — once with
 //! `--features hotpath` for timing, once with `--features hotpath-alloc` for
-//! allocation metrics.
+//! allocation metrics. Results are stored in the database via the bench harness.
 
 use std::path::Path;
 
 use crate::build;
 use crate::error::DevError;
-use super::hotpath;
+use crate::harness::BenchHarness;
 use crate::output;
 
 // ---------------------------------------------------------------------------
@@ -17,6 +17,7 @@ use crate::output;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    harness: &BenchHarness,
     pbf_path: &Path,
     pbf_raw_path: Option<&Path>,
     osc_path: &Path,
@@ -25,13 +26,6 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let _lock = crate::lockfile::acquire(scratch_dir)?;
-
-    // Compute display sizes.
-    let raw_mb: Option<f64> = pbf_raw_path.and_then(|p| {
-        std::fs::metadata(p).ok().map(|m| m.len() as f64 / 1_000_000.0)
-    });
-
     output::hotpath_msg(&format!("=== {dataset_name} ({file_mb:.0} MB) ==="));
 
     // -----------------------------------------------------------------------
@@ -45,70 +39,16 @@ pub fn run(
         project_root,
     )?;
 
-    std::fs::create_dir_all(scratch_dir)?;
-    let merged = scratch_dir.join("profile-merged.osm.pbf");
-
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
-    let osc_str = osc_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))?;
-    let merged_str = merged
-        .to_str()
-        .ok_or_else(|| DevError::Config("merged path is not valid UTF-8".into()))?;
-
-    // --- tags-count ---
-    run_test(&binary, "tags-count", &["tags-count", pbf_str], project_root)?;
-
-    // --- check-refs ---
-    run_test(&binary, "check-refs", &["check-refs", pbf_str], project_root)?;
-
-    // --- cat --type ---
-    run_test(
+    super::hotpath::run(
+        harness,
         &binary,
-        "cat --type",
-        &["cat", pbf_str, "--type", "node,way,relation", "--compression", "zlib", "-o", "/dev/null"],
-        project_root,
-    )?;
-
-    // --- merge: no indexdata, zlib ---
-    match pbf_raw_path {
-        Some(raw_path) => {
-            let pbf_raw_str = raw_path
-                .to_str()
-                .ok_or_else(|| DevError::Config("raw PBF path is not valid UTF-8".into()))?;
-
-            let raw_mb_display = raw_mb
-                .map(|mb| format!(" ({mb:.0} MB)"))
-                .unwrap_or_default();
-
-            run_test(
-                &binary,
-                &format!("merge: no indexdata, zlib{raw_mb_display}"),
-                &["merge", pbf_raw_str, osc_str, "--compression", "zlib", "-o", merged_str],
-                project_root,
-            )?;
-        }
-        None => {
-            output::hotpath_msg("--- merge: no indexdata, zlib --- (skipped, no raw PBF)");
-            println!();
-        }
-    }
-
-    // --- merge: indexdata, zlib ---
-    run_test(
-        &binary,
-        "merge: indexdata, zlib",
-        &["merge", pbf_str, osc_str, "--compression", "zlib", "-o", merged_str],
-        project_root,
-    )?;
-
-    // --- merge: indexdata, none ---
-    run_test(
-        &binary,
-        "merge: indexdata, none",
-        &["merge", pbf_str, osc_str, "--compression", "none", "-o", merged_str],
+        pbf_path,
+        pbf_raw_path,
+        osc_path,
+        file_mb,
+        1, // single run per test for profiling
+        false,
+        scratch_dir,
         project_root,
     )?;
 
@@ -117,25 +57,25 @@ pub fn run(
     // -----------------------------------------------------------------------
 
     output::hotpath_msg("=== ALLOCATION PASS ===");
+    output::hotpath_msg(
+        "NOTE: alloc profiling -- wall-clock times are not meaningful",
+    );
 
     let binary = build::cargo_build(
         &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &["hotpath-alloc"]),
         project_root,
     )?;
 
-    // --- cat --type (alloc) ---
-    run_test(
+    super::hotpath::run(
+        harness,
         &binary,
-        "cat --type (alloc)",
-        &["cat", pbf_str, "--type", "node,way,relation", "--compression", "zlib", "-o", "/dev/null"],
-        project_root,
-    )?;
-
-    // --- merge: indexdata, none (alloc) ---
-    run_test(
-        &binary,
-        "merge: indexdata, none (alloc)",
-        &["merge", pbf_str, osc_str, "--compression", "none", "-o", merged_str],
+        pbf_path,
+        pbf_raw_path,
+        osc_path,
+        file_mb,
+        1, // single run per test for profiling
+        true,
+        scratch_dir,
         project_root,
     )?;
 
@@ -145,24 +85,5 @@ pub fn run(
 
     output::hotpath_msg(&format!("=== {dataset_name} COMPLETE ==="));
 
-    std::fs::remove_file(&merged).ok();
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Print a label, run a hotpath-instrumented command, and print an empty line.
-fn run_test(
-    binary: &Path,
-    label: &str,
-    args: &[&str],
-    project_root: &Path,
-) -> Result<(), DevError> {
-    output::hotpath_msg(&format!("--- {label} ---"));
-    hotpath::run_hotpath_command(binary, args, project_root)?;
-    println!();
     Ok(())
 }

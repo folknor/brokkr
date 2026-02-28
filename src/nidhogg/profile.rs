@@ -33,6 +33,9 @@ pub fn run(
         }
     }
 
+    // Acquire exclusive lock to prevent conflicts with concurrent benchmarks.
+    let _lock = crate::lockfile::acquire(scratch_dir)?;
+
     // Check perf_event_paranoid on Linux.
     check_perf_paranoid()?;
 

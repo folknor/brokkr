@@ -1678,7 +1678,9 @@ fn cmd_profile(
                 .map(|raw_file| paths.data_dir.join(raw_file))
                 .filter(|p| p.exists());
 
+            let harness = harness::BenchHarness::new(&paths, project_root, project)?;
             pbfhogg::profile::run(
+                &harness,
                 &pbf_path,
                 pbf_raw_path.as_deref(),
                 &osc_path,
