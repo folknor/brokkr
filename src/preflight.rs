@@ -9,8 +9,8 @@ use crate::error::DevError;
 pub enum Check {
     /// Binary must exist in PATH.
     Binary {
-        name: &'static str,
-        help: &'static str,
+        name: String,
+        help: String,
     },
     /// File must exist at path.
     File {
@@ -26,6 +26,18 @@ pub enum Check {
     KernelParam {
         path: &'static str,
         expected: &'static str,
+        description: &'static str,
+    },
+    /// Read an integer from /proc or /sys and check it is at most `max_value`.
+    KernelParamAtMost {
+        path: &'static str,
+        max_value: i32,
+        description: &'static str,
+    },
+    /// Resource limit (rlimit) must be at least `min_bytes`.
+    Rlimit {
+        resource: libc::__rlimit_resource_t,
+        min_bytes: u64,
         description: &'static str,
     },
 }
@@ -59,6 +71,16 @@ fn run_single(check: &Check) -> Option<String> {
             expected,
             description,
         } => check_kernel_param(path, expected, description),
+        Check::KernelParamAtMost {
+            path,
+            max_value,
+            description,
+        } => check_kernel_param_at_most(path, *max_value, description),
+        Check::Rlimit {
+            resource,
+            min_bytes,
+            description,
+        } => check_rlimit(*resource, *min_bytes, description),
     }
 }
 
@@ -134,6 +156,40 @@ fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<S
     }
 }
 
+fn check_kernel_param_at_most(path: &str, max_value: i32, description: &str) -> Option<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // Not on Linux, or procfs not mounted — skip the check.
+        Err(_) => return None,
+    };
+
+    let value: i32 = match content.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return Some(format!("{description}: could not parse {path}")),
+    };
+
+    if value <= max_value {
+        None
+    } else {
+        Some(format!("{description}: {path} is {value}, need <= {max_value}"))
+    }
+}
+
+fn check_rlimit(resource: libc::__rlimit_resource_t, min_bytes: u64, description: &str) -> Option<String> {
+    let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::getrlimit(resource, &mut rlim) };
+    if ret != 0 {
+        return Some(format!("{description}: could not read resource limit"));
+    }
+    if rlim.rlim_cur >= min_bytes {
+        None
+    } else {
+        let cur_mb = rlim.rlim_cur / (1024 * 1024);
+        let min_mb = min_bytes / (1024 * 1024);
+        Some(format!("{description}: current {cur_mb} MB, need >= {min_mb} MB"))
+    }
+}
+
 /// Convert a `PathBuf` to a `CString`, returning `None` if the path contains
 /// interior nul bytes.
 fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
@@ -142,61 +198,40 @@ fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
 }
 
 // ---------------------------------------------------------------------------
-// Profiler checks
+// Convenience check sets
 // ---------------------------------------------------------------------------
 
-/// Check that perf_event_paranoid is <= 1 (required for perf and samply).
-pub fn check_perf_paranoid() -> Result<(), DevError> {
-    let path = Path::new("/proc/sys/kernel/perf_event_paranoid");
-    if !path.exists() {
-        // Not on Linux, or procfs not mounted -- skip the check.
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        DevError::Config(format!(
-            "cannot read /proc/sys/kernel/perf_event_paranoid: {e}"
-        ))
-    })?;
-
-    let value: i32 = content.trim().parse().map_err(|_| {
-        DevError::Config(format!(
-            "invalid perf_event_paranoid value: {content}"
-        ))
-    })?;
-
-    if value > 1 {
-        return Err(DevError::Preflight(vec![format!(
-            "/proc/sys/kernel/perf_event_paranoid is {value} (needs <= 1)\n\
-             Run:  echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid\n\
-             This is a runtime-only change that resets on reboot."
-        )]));
-    }
-
-    Ok(())
+/// Preflight checks for sampling profilers (perf, samply).
+///
+/// Checks that `perf_event_paranoid` is permissive enough and that the tool
+/// binary is installed.
+pub fn profile_checks(tool: &str) -> Vec<Check> {
+    let help = match tool {
+        "perf" => "sudo apt install linux-tools-common linux-tools-$(uname -r)",
+        "samply" => "cargo install samply",
+        _ => "",
+    };
+    vec![
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/perf_event_paranoid",
+            max_value: 1,
+            description: "perf_event_paranoid must be <= 1 for profiling\n\
+                          Fix: echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid",
+        },
+        Check::Binary {
+            name: tool.into(),
+            help: help.into(),
+        },
+    ]
 }
 
-/// Check that a tool is installed and on PATH.
-pub fn check_tool_installed(tool: &str) -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg(tool)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => {
-            let install_hint = match tool {
-                "perf" => "sudo apt install linux-tools-common linux-tools-$(uname -r)",
-                "samply" => "cargo install samply",
-                _ => "",
-            };
-            Err(DevError::Preflight(vec![format!(
-                "'{tool}' not found in PATH. Install: {install_hint}"
-            )]))
-        }
-    }
+/// Preflight checks for io_uring (RLIMIT_MEMLOCK must be >= 16 MB).
+pub fn uring_checks() -> Vec<Check> {
+    vec![Check::Rlimit {
+        resource: libc::RLIMIT_MEMLOCK,
+        min_bytes: 16 * 1024 * 1024,
+        description: "RLIMIT_MEMLOCK too low for io_uring (try: ulimit -l 65536)",
+    }]
 }
 
 // ---------------------------------------------------------------------------

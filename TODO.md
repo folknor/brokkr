@@ -14,16 +14,9 @@ pbfhogg profile now uses BenchHarness and delegates to hotpath::run() for both t
 
 Both now use BenchHarness with lockfile, git/env context, and SQLite storage. Added `example` field to BuildConfig for `--example` support.
 
-### 3. `preflight.rs` — entire check system is dead code
+### ~~3. `preflight.rs` — entire check system is dead code~~ — Done
 
-`run_preflight()` and the `Check` enum (`Binary`, `File`, `DiskSpace`, `KernelParam`) were designed as a pre-benchmark validation framework but **never called from anywhere**. The module is `#[allow(dead_code)]` in main.rs (line 15). Only `verify_file_hash()` and `cached_sha256()` are actually used.
-
-Meanwhile, ad-hoc preflight checks are scattered:
-- `pbfhogg/bench_merge.rs`: `check_uring_preflight()` (manual RLIMIT_MEMLOCK check)
-- `elivagar/profile.rs`: `check_perf_paranoid()`, `check_tool_installed()`
-- `nidhogg/profile.rs`: identical copies of the above
-
-All of these should use the `Check` system in `preflight.rs`, but they don't.
+Added `KernelParamAtMost` and `Rlimit` variants to `Check` enum. All ad-hoc checks now use `run_preflight()`: profile checks via `profile_checks(tool)`, io_uring via `uring_checks()`. Removed standalone `check_perf_paranoid()`, `check_tool_installed()`, and `check_uring_preflight()`. Removed `#[allow(dead_code)]` from main.rs.
 
 ### ~~4. `bench all` missing benchmarks~~ — Done
 

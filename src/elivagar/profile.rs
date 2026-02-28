@@ -38,11 +38,8 @@ pub fn run(
     // Acquire exclusive lock to prevent conflicts with concurrent benchmarks.
     let _lock = crate::lockfile::acquire(scratch_dir)?;
 
-    // Check perf_event_paranoid on Linux (both perf and samply need it).
-    crate::preflight::check_perf_paranoid()?;
-
-    // Check that the tool is installed.
-    crate::preflight::check_tool_installed(tool)?;
+    // Check perf_event_paranoid and tool availability.
+    crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;
 
     let pbf_str = pbf_path
         .to_str()

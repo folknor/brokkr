@@ -11,7 +11,6 @@ mod output;
 mod pbfhogg;
 mod elivagar;
 mod nidhogg;
-#[allow(dead_code)]
 mod preflight;
 mod project;
 mod tools;
@@ -1264,7 +1263,7 @@ fn cmd_bench_merge(
     let file_mb = file_size_mb(&pbf_path);
 
     if uring {
-        pbfhogg::bench_merge::check_uring_preflight()?;
+        preflight::run_preflight(&preflight::uring_checks())?;
     }
 
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;

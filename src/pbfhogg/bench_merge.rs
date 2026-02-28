@@ -6,24 +6,6 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
-/// Check RLIMIT_MEMLOCK for io_uring.
-pub fn check_uring_preflight() -> Result<(), DevError> {
-    let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim) };
-    if ret != 0 {
-        return Err(DevError::Preflight(vec![
-            "could not read RLIMIT_MEMLOCK".into(),
-        ]));
-    }
-    let limit_mb = rlim.rlim_cur / (1024 * 1024);
-    if limit_mb < 16 {
-        return Err(DevError::Preflight(vec![format!(
-            "RLIMIT_MEMLOCK is {limit_mb} MB, need >= 16 MB (try: ulimit -l 65536)"
-        )]));
-    }
-    Ok(())
-}
-
 /// Run the merge benchmark for each compression x I/O variant.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
