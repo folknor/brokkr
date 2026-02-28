@@ -33,15 +33,15 @@ pub fn run(
         }
     }
 
+    // Check perf_event_paranoid and tool availability before acquiring lock.
+    crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;
+
     // Acquire exclusive lock to prevent conflicts with concurrent benchmarks.
     let _lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
         project: "nidhogg",
         command: "profile",
         project_root: project_root.to_str().unwrap_or("unknown"),
     })?;
-
-    // Check perf_event_paranoid and tool availability.
-    crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;
 
     let pbf_str = pbf_path
         .to_str()

@@ -35,15 +35,15 @@ pub fn run(
         }
     }
 
+    // Check perf_event_paranoid and tool availability before acquiring lock.
+    crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;
+
     // Acquire exclusive lock to prevent conflicts with concurrent benchmarks.
     let _lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
         project: "elivagar",
         command: "profile",
         project_root: project_root.to_str().unwrap_or("unknown"),
     })?;
-
-    // Check perf_event_paranoid and tool availability.
-    crate::preflight::run_preflight(&crate::preflight::profile_checks(tool))?;
 
     let pbf_str = pbf_path
         .to_str()
@@ -68,6 +68,7 @@ pub fn run(
     let output_pmtiles_str = output_pmtiles.display().to_string();
 
     let tmp_dir = data_dir.join("tilegen_tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
     let tmp_dir_str = tmp_dir.display().to_string();
 
     // Build elivagar argument list.

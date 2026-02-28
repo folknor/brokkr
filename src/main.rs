@@ -815,6 +815,11 @@ fn cmd_env(dev_config: &config::DevConfig, project: Project, project_root: &Path
 }
 
 fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, features: &[String], args: &[String]) -> Result<(), DevError> {
+    // Run uring preflight checks if io_uring feature is requested.
+    if features.iter().any(|f| f == "linux-io-uring") {
+        preflight::run_preflight(&preflight::uring_checks())?;
+    }
+
     let package = project.cli_package();
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     let build_config = if feature_refs.is_empty() {
@@ -824,8 +829,13 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
     };
     let binary = build::cargo_build(&build_config, project_root)?;
 
+    // Ensure scratch dir exists — binary commands often write output there.
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    std::fs::create_dir_all(&paths.scratch_dir)?;
+
     match project {
-        Project::Elivagar => cmd_run_elivagar(dev_config, &binary, project_root, args),
+        Project::Elivagar => cmd_run_elivagar(&paths, &binary, args),
         _ => {
             let binary_str = binary.display().to_string();
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -840,9 +850,8 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
 }
 
 fn cmd_run_elivagar(
-    dev_config: &config::DevConfig,
+    paths: &config::ResolvedPaths,
     binary: &Path,
-    project_root: &Path,
     raw_args: &[String],
 ) -> Result<(), DevError> {
     // Parse dev-specific flags from raw args.
@@ -865,10 +874,6 @@ fn cmd_run_elivagar(
         }
         i += 1;
     }
-
-    // Load config for data_dir and scratch_dir.
-    let pi = bootstrap(None)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
     // Inject --tmp-dir if not already provided.
     if !passthrough.iter().any(|a| a == "--tmp-dir") {

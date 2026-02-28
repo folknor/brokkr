@@ -54,3 +54,19 @@ Commands appear to run twice (two "Finished... Running..." blocks in output). Th
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper — probably not worth the complexity.
 
+### `hotpath` and `profile` commands have no `--features` flag
+
+Unlike `run` and `bench merge`, there's no way to hotpath-profile or sample-profile uring-enabled code paths. Should accept `--features` and thread it through the build config.
+
+### elivagar/nidhogg `profile` results not stored in DB
+
+pbfhogg profile creates a `BenchHarness` and stores results in `.brokkr/results.db`; elivagar/nidhogg profile don't. `brokkr results --command profile` only finds pbfhogg runs. Should use a harness for all three projects so profile runs are tracked.
+
+### `verify` doesn't support `--commit`
+
+Can't do retroactive verification against old commits, unlike bench/hotpath/profile. Would be useful for regression testing — build an old commit's binary and verify its output against reference tools.
+
+### `brokkr run` doesn't acquire a lock
+
+`cmd_run` writes to the scratch directory and the binary may write there too, but no lock is acquired. A concurrent benchmark could have its scratch data contaminated.
+

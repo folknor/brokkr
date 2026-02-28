@@ -44,6 +44,7 @@ pub fn run(
     let output_str = output_path.display().to_string();
 
     let tmp_dir = data_dir.join("tilegen_tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
     let tmp_dir_str = tmp_dir.display().to_string();
 
     // Build the command args: elivagar <pbf> <output> [flags]
