@@ -212,7 +212,7 @@ pub fn profile_checks(tool: &str) -> Vec<Check> {
             path: "/proc/sys/kernel/perf_event_paranoid",
             max_value: 1,
             description: "perf_event_paranoid must be <= 1 for profiling\n\
-                          Fix: echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid",
+                          Fix: sudo sysctl -w kernel.perf_event_paranoid=1",
         },
         Check::Binary {
             name: tool.into(),
@@ -236,24 +236,25 @@ pub fn uring_checks() -> Vec<Check> {
             path: "/proc/sys/kernel/io_uring_disabled",
             max_value: 0,
             description: "io_uring is disabled by kernel\n\
-                          Fix: echo 0 | sudo tee /proc/sys/kernel/io_uring_disabled",
+                          Fix: sudo sysctl -w kernel.io_uring_disabled=0",
         },
         Check::KernelParamAtMost {
             path: "/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring",
             max_value: 0,
             description: "AppArmor restricts unprivileged io_uring\n\
-                          Fix: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_io_uring",
+                          Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_io_uring=0",
         },
         Check::KernelParamAtMost {
             path: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
             max_value: 0,
             description: "AppArmor restricts unprivileged user namespaces\n\
-                          Fix: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+                          Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
         },
         Check::Rlimit {
             resource: libc::RLIMIT_MEMLOCK,
             min_bytes: 16 * 1024 * 1024,
-            description: "RLIMIT_MEMLOCK too low for io_uring (try: ulimit -l 65536)",
+            description: "RLIMIT_MEMLOCK too low for io_uring\n\
+                          Fix: sudo prlimit --pid=$$ --memlock=unlimited:unlimited",
         },
     ]
 }

@@ -1460,7 +1460,8 @@ fn cmd_bench_merge(
         preflight::run_preflight(&preflight::uring_checks())?;
     }
 
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], "bench merge")?;
+    let features: &[&str] = if uring { &["linux-io-uring"] } else { &[] };
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), features, "bench merge")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, false)?;
