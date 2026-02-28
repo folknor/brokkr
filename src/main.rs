@@ -5,6 +5,7 @@ mod env;
 mod error;
 mod git;
 mod harness;
+mod hotpath_fmt;
 mod lockfile;
 mod output;
 mod pbfhogg;
@@ -789,6 +790,14 @@ fn cmd_results(
         } else {
             let table = db::format_table(&rows);
             println!("{table}");
+            // Show detailed hotpath report for single-result lookups.
+            for row in &rows {
+                if let Some(ref extra) = row.extra
+                    && let Some(report) = hotpath_fmt::format_hotpath_report(extra)
+                {
+                    println!("\n{report}");
+                }
+            }
         }
     } else if let Some(commits) = compare {
         let commit_a = commits.first().map_or("", String::as_str);
