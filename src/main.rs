@@ -68,11 +68,15 @@ Examples:
         #[arg(long, num_args = 2, value_names = ["COMMIT_A", "COMMIT_B"])]
         compare: Option<Vec<String>>,
 
+        /// Compare the two most recent commits (use with --command/--variant to narrow)
+        #[arg(long, conflicts_with_all = ["query", "commit", "compare"])]
+        compare_last: bool,
+
         /// Filter by command name (e.g. "bench read", "bench merge")
         #[arg(long)]
         command: Option<String>,
 
-        /// Filter by variant (e.g. "buffered+zlib", "pipelined")
+        /// Filter by variant prefix (e.g. "tags-filter" matches all tags-filter-* variants)
         #[arg(long)]
         variant: Option<String>,
 
@@ -544,10 +548,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             query,
             commit,
             compare,
+            compare_last,
             command,
             variant,
             limit,
-        } => cmd_results(&project_root, query, commit, compare, command, variant, limit),
+        } => cmd_results(&project_root, query, commit, compare, compare_last, command, variant, limit),
         Command::Clean => cmd_clean(&dev_config, project, &project_root),
         Command::Bench { verbose, bench } => {
             output::set_quiet(!verbose);
@@ -829,6 +834,7 @@ fn cmd_results(
     query: Option<String>,
     commit: Option<String>,
     compare: Option<Vec<String>>,
+    compare_last: bool,
     command: Option<String>,
     variant: Option<String>,
     limit: usize,
@@ -868,6 +874,16 @@ fn cmd_results(
         let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b)?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b);
         println!("{table}");
+    } else if compare_last {
+        match results_db.query_compare_last(command.as_deref(), variant.as_deref())? {
+            Some((commit_a, rows_a, commit_b, rows_b)) => {
+                let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b);
+                println!("{table}");
+            }
+            None => {
+                output::result_msg("need at least two distinct commits to compare");
+            }
+        }
     } else {
         let filter = db::QueryFilter {
             commit,

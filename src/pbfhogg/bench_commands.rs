@@ -35,10 +35,20 @@ pub fn parse_command(input: &str) -> Result<Vec<&'static str>, DevError> {
     if input == "all" {
         return Ok(ALL_COMMANDS.to_vec());
     }
+    // Exact match first.
     for &cmd in ALL_COMMANDS {
         if cmd == input {
             return Ok(vec![cmd]);
         }
+    }
+    // Prefix match: e.g. "tags-filter" matches all "tags-filter-*" variants.
+    let prefix_matches: Vec<&str> = ALL_COMMANDS
+        .iter()
+        .copied()
+        .filter(|cmd| cmd.starts_with(input))
+        .collect();
+    if !prefix_matches.is_empty() {
+        return Ok(prefix_matches);
     }
     Err(DevError::Config(format!(
         "unknown command: {input}\nvalid commands: all, {}",

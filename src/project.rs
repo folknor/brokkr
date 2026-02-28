@@ -10,6 +10,7 @@ pub enum Project {
     Pbfhogg,
     Elivagar,
     Nidhogg,
+    Brokkr,
 }
 
 impl Project {
@@ -18,6 +19,7 @@ impl Project {
             Self::Pbfhogg => "pbfhogg",
             Self::Elivagar => "elivagar",
             Self::Nidhogg => "nidhogg",
+            Self::Brokkr => "brokkr",
         }
     }
 
@@ -28,6 +30,7 @@ impl Project {
             Self::Pbfhogg => Some("pbfhogg-cli"),
             Self::Elivagar => None,
             Self::Nidhogg => Some("nidhogg"),
+            Self::Brokkr => None,
         }
     }
 }

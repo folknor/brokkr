@@ -191,6 +191,47 @@ impl ResultsDb {
         let rows_b = query_commit(&self.conn, &sql, b)?;
         Ok((rows_a, rows_b))
     }
+
+    /// Find the two most recent distinct commits and compare them.
+    /// Optional command/variant filters narrow the search (variant uses prefix match).
+    pub fn query_compare_last(
+        &self,
+        command: Option<&str>,
+        variant: Option<&str>,
+    ) -> Result<Option<(String, Vec<StoredRow>, String, Vec<StoredRow>)>, DevError> {
+        // Find two most recent distinct commits matching the filters.
+        let mut clauses = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        if let Some(cmd) = command {
+            params.push(cmd.to_owned());
+            clauses.push(format!("command = ?{}", params.len()));
+        }
+        if let Some(v) = variant {
+            params.push(v.to_owned());
+            clauses.push(format!("variant LIKE ?{}||'%'", params.len()));
+        }
+        let mut sql = "SELECT DISTINCT [commit] FROM runs".to_owned();
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT 2");
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let commits: Vec<String> = stmt
+            .query_map(param_refs.as_slice(), |row| row.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+
+        if commits.len() < 2 {
+            return Ok(None);
+        }
+
+        let (rows_a, rows_b) = self.query_compare(&commits[1], &commits[0])?;
+        Ok(Some((commits[1].clone(), rows_a, commits[0].clone(), rows_b)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +317,7 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     }
     if let Some(ref v) = filter.variant {
         params.push(v.clone());
-        clauses.push(format!("variant = ?{}", params.len()));
+        clauses.push(format!("variant LIKE ?{}||'%'", params.len()));
     }
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");

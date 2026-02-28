@@ -89,9 +89,10 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "pbfhogg" => Project::Pbfhogg,
         "elivagar" => Project::Elivagar,
         "nidhogg" => Project::Nidhogg,
+        "brokkr" => Project::Brokkr,
         other => {
             return Err(DevError::Config(format!(
-                "unknown project '{other}' in brokkr.toml (expected: pbfhogg, elivagar, nidhogg)"
+                "unknown project '{other}' in brokkr.toml (expected: pbfhogg, elivagar, nidhogg, brokkr)"
             )));
         }
     };
