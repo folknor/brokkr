@@ -1,3 +1,4 @@
+pub(crate) mod cmd;
 pub mod bench_api;
 pub mod bench_ingest;
 pub mod geocode;

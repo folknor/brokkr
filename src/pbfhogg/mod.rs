@@ -17,6 +17,7 @@ pub fn path_strs(path: &Path) -> Result<(String, &str), DevError> {
     Ok((basename, path_str))
 }
 
+pub(crate) mod cmd;
 pub mod bench_allocator;
 pub mod bench_all;
 pub mod bench_blob_filter;
