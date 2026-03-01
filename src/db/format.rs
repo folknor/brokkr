@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use super::{
-    short_uuid, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, StoredRow,
-};
+use super::types::short_uuid;
+use super::{HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, StoredRow};
 
 // ---------------------------------------------------------------------------
 // Public formatting API

@@ -69,7 +69,7 @@ fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
     let mut update = conn.prepare("UPDATE runs SET uuid = ?1 WHERE id = ?2")?;
     for id in ids {
-        let uuid = super::generate_uuid()?;
+        let uuid = super::types::generate_uuid()?;
         update.execute(rusqlite::params![uuid, id])?;
     }
 
