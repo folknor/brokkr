@@ -1,0 +1,1036 @@
+use std::path::Path;
+
+use super::{
+    short_uuid, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, StoredRow,
+};
+
+// ---------------------------------------------------------------------------
+// Public formatting API
+// ---------------------------------------------------------------------------
+
+/// Format rows as a column-aligned table for stdout.
+pub fn format_table(rows: &[StoredRow]) -> String {
+    if rows.is_empty() {
+        return String::from("(no results)");
+    }
+
+    let widths = compute_table_widths(rows);
+    let mut out = String::new();
+
+    // Header line.
+    append_table_header(&mut out, &widths);
+    out.push('\n');
+
+    // Data lines.
+    for row in rows {
+        append_table_row(&mut out, row, &widths);
+        out.push('\n');
+    }
+
+    // Remove trailing newline.
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Format the detail fields that aren't shown in the summary table.
+///
+/// Shows hostname, subject, cargo features/profile, kernel, cpu governor,
+/// available memory, storage notes, kv pairs, and distribution stats.
+pub fn format_details(row: &StoredRow) -> String {
+    let mut out = String::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
+
+    if !row.hostname.is_empty() {
+        fields.push(("hostname".into(), row.hostname.clone()));
+    }
+    if !row.subject.is_empty() {
+        fields.push(("subject".into(), row.subject.clone()));
+    }
+    if !row.cargo_features.is_empty() {
+        fields.push(("cargo features".into(), row.cargo_features.clone()));
+    }
+    if !row.cargo_profile.is_empty() {
+        fields.push(("cargo profile".into(), row.cargo_profile.clone()));
+    }
+    if !row.kernel.is_empty() {
+        fields.push(("kernel".into(), row.kernel.clone()));
+    }
+    if !row.cpu_governor.is_empty() {
+        fields.push(("cpu governor".into(), row.cpu_governor.clone()));
+    }
+    if let Some(mb) = row.avail_memory_mb {
+        fields.push(("avail memory".into(), format!("{mb} MB")));
+    }
+    if let Some(mb) = row.peak_rss_mb {
+        fields.push(("peak rss".into(), format!("{mb:.1} MB")));
+    }
+    if !row.storage_notes.is_empty() {
+        fields.push(("storage".into(), row.storage_notes.clone()));
+    }
+    if !row.cli_args.is_empty() {
+        fields.push(("cli args".into(), row.cli_args.clone()));
+    }
+    if !row.project.is_empty() && row.project != "pbfhogg" {
+        fields.push(("project".into(), row.project.clone()));
+    }
+
+    // Distribution stats.
+    if let Some(ref dist) = row.distribution {
+        fields.push(("samples".into(), dist.samples.to_string()));
+        fields.push(("min".into(), format!("{} ms", dist.min_ms)));
+        fields.push(("p50".into(), format!("{} ms", dist.p50_ms)));
+        fields.push(("p95".into(), format!("{} ms", dist.p95_ms)));
+        fields.push(("max".into(), format!("{} ms", dist.max_ms)));
+    }
+
+    // Metadata kv pairs (meta. prefix).
+    let mut meta_kv: Vec<&KvPair> = row.kv.iter().filter(|kv| kv.key.starts_with("meta.")).collect();
+    meta_kv.sort_by_key(|kv| &kv.key);
+    for kv in &meta_kv {
+        let label = kv.key.strip_prefix("meta.").unwrap_or(&kv.key).replace('_', " ");
+        fields.push((label, kv.value.to_string()));
+    }
+
+    // Runtime kv pairs (non-meta, non-threads).
+    let mut runtime_kv: Vec<&KvPair> = row.kv.iter()
+        .filter(|kv| !kv.key.starts_with("meta.") && !kv.key.starts_with("threads."))
+        .collect();
+    runtime_kv.sort_by_key(|kv| &kv.key);
+    for kv in &runtime_kv {
+        let label = kv.key.replace('_', " ");
+        fields.push((label, kv.value.to_string()));
+    }
+
+    if fields.is_empty() {
+        return out;
+    }
+
+    let label_width = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    for (label, value) in &fields {
+        use std::fmt::Write;
+        writeln!(out, "  {label:<label_width$}  {value}").expect("write to String is infallible");
+    }
+
+    // Remove trailing newline.
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Format side-by-side comparison of two commits.
+pub fn format_compare(
+    commit_a: &str,
+    rows_a: &[StoredRow],
+    commit_b: &str,
+    rows_b: &[StoredRow],
+    top: usize,
+) -> String {
+    let pairs = build_comparison_pairs(rows_a, rows_b);
+    if pairs.is_empty() {
+        return String::from("(no results)");
+    }
+
+    let widths = compute_compare_widths(commit_a, commit_b, &pairs);
+    let mut out = String::new();
+
+    append_compare_header(&mut out, commit_a, commit_b, &widths);
+    out.push('\n');
+
+    for pair in &pairs {
+        append_compare_row(&mut out, pair, &widths);
+        out.push('\n');
+    }
+
+    // Append hotpath diff tables for pairs that have hotpath data on both sides.
+    for pair in &pairs {
+        if let (Some(ha), Some(hb)) = (&pair.a_hotpath, &pair.b_hotpath)
+            && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ha, hb, top)
+        {
+            let (cmd, var, _) = split_pair_key(&pair.key);
+            let label = if var.is_empty() { cmd.to_owned() } else { format!("{cmd} {var}") };
+            let heading = if pair.input_display.is_empty() {
+                format!("\n{label} — {commit_a} vs {commit_b}")
+            } else {
+                format!("\n{label} - {} — {commit_a} vs {commit_b}", pair.input_display)
+            };
+            out.push_str(&heading);
+            out.push('\n');
+            out.push_str(&diff);
+        }
+    }
+
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Table formatting internals
+// ---------------------------------------------------------------------------
+
+struct TableWidths {
+    uuid: usize,
+    timestamp: usize,
+    commit: usize,
+    command: usize,
+    variant: usize,
+    elapsed: usize,
+    input: usize,
+}
+
+fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
+    let mut w = TableWidths {
+        uuid: 4,
+        timestamp: 9,
+        commit: 6,
+        command: 7,
+        variant: 7,
+        elapsed: 7,
+        input: 5,
+    };
+    for row in rows {
+        let uuid_short = short_uuid(&row.uuid);
+        if uuid_short.len() > w.uuid {
+            w.uuid = uuid_short.len();
+        }
+        if row.timestamp.len() > w.timestamp {
+            w.timestamp = row.timestamp.len();
+        }
+        if row.commit.len() > w.commit {
+            w.commit = row.commit.len();
+        }
+        if row.command.len() > w.command {
+            w.command = row.command.len();
+        }
+        if row.variant.len() > w.variant {
+            w.variant = row.variant.len();
+        }
+        let elapsed_str = format_elapsed(row.elapsed_ms);
+        if elapsed_str.len() > w.elapsed {
+            w.elapsed = elapsed_str.len();
+        }
+        let input_str = format_input(&row.input_file, row.input_mb);
+        if input_str.len() > w.input {
+            w.input = input_str.len();
+        }
+    }
+    w
+}
+
+fn append_table_header(out: &mut String, w: &TableWidths) {
+    use std::fmt::Write;
+    write!(
+        out,
+        "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}",
+        "uuid",
+        "timestamp",
+        "commit",
+        "command",
+        "variant",
+        "elapsed",
+        "input",
+        uuid_w = w.uuid,
+        ts_w = w.timestamp,
+        cm_w = w.commit,
+        cmd_w = w.command,
+        var_w = w.variant,
+        el_w = w.elapsed,
+        in_w = w.input,
+    )
+    .expect("write to String is infallible");
+}
+
+fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
+    use std::fmt::Write;
+    let uuid_short = short_uuid(&row.uuid);
+    let elapsed_str = format_elapsed(row.elapsed_ms);
+    let input_str = format_input(&row.input_file, row.input_mb);
+    write!(
+        out,
+        "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}",
+        uuid_short,
+        row.timestamp,
+        row.commit,
+        row.command,
+        row.variant,
+        elapsed_str,
+        input_str,
+        uuid_w = w.uuid,
+        ts_w = w.timestamp,
+        cm_w = w.commit,
+        cmd_w = w.command,
+        var_w = w.variant,
+        el_w = w.elapsed,
+        in_w = w.input,
+    )
+    .expect("write to String is infallible");
+}
+
+fn format_elapsed(ms: i64) -> String {
+    format!("{ms} ms")
+}
+
+fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
+    if input_file.is_empty() {
+        return String::new();
+    }
+    let basename = Path::new(input_file)
+        .file_stem()
+        .map_or(input_file, |s| s.to_str().unwrap_or(input_file));
+    match input_mb {
+        Some(mb) => format!("{basename} ({mb:.0} MB)"),
+        None => basename.to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compare formatting internals
+// ---------------------------------------------------------------------------
+
+struct CompareWidths {
+    command: usize,
+    variant: usize,
+    input: usize,
+    col_a: usize,
+    col_b: usize,
+    change: usize,
+    has_output: bool,
+    output_a: usize,
+    output_b: usize,
+    output_change: usize,
+    has_rss: bool,
+    rss_a: usize,
+    rss_b: usize,
+    rss_change: usize,
+}
+
+struct ComparisonPair {
+    key: String,
+    a_ms: Option<i64>,
+    b_ms: Option<i64>,
+    a_hotpath: Option<HotpathData>,
+    b_hotpath: Option<HotpathData>,
+    a_output_bytes: Option<i64>,
+    b_output_bytes: Option<i64>,
+    a_rss_mb: Option<f64>,
+    b_rss_mb: Option<f64>,
+    /// Pre-formatted input string for display.
+    input_display: String,
+}
+
+/// Find output_bytes in a StoredRow's kv pairs.
+fn find_output_bytes(kv: &[KvPair]) -> Option<i64> {
+    kv.iter().find(|p| p.key == "output_bytes").and_then(|p| match &p.value {
+        KvValue::Int(v) => Some(*v),
+        _ => None,
+    })
+}
+
+fn build_comparison_pairs(
+    rows_a: &[StoredRow],
+    rows_b: &[StoredRow],
+) -> Vec<ComparisonPair> {
+    use std::collections::HashMap;
+
+    struct RowData {
+        elapsed_ms: i64,
+        hotpath: Option<HotpathData>,
+        output_bytes: Option<i64>,
+        peak_rss_mb: Option<f64>,
+        input_display: String,
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+    let mut a_map: HashMap<String, RowData> = HashMap::new();
+    let mut b_map: HashMap<String, RowData> = HashMap::new();
+
+    for row in rows_a {
+        let key = pair_key(&row.command, &row.variant, &row.input_file);
+        if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
+            keys.push(key);
+            e.insert(RowData {
+                elapsed_ms: row.elapsed_ms,
+                hotpath: take_hotpath_for_compare(row),
+                output_bytes: find_output_bytes(&row.kv),
+                peak_rss_mb: row.peak_rss_mb,
+                input_display: format_input(&row.input_file, row.input_mb),
+            });
+        }
+    }
+    for row in rows_b {
+        let key = pair_key(&row.command, &row.variant, &row.input_file);
+        if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
+            if !a_map.contains_key(&key) {
+                keys.push(key.clone());
+            }
+            e.insert(RowData {
+                elapsed_ms: row.elapsed_ms,
+                hotpath: take_hotpath_for_compare(row),
+                output_bytes: find_output_bytes(&row.kv),
+                peak_rss_mb: row.peak_rss_mb,
+                input_display: format_input(&row.input_file, row.input_mb),
+            });
+        }
+    }
+
+    keys.into_iter()
+        .map(|k| {
+            let a = a_map.remove(&k);
+            let b = b_map.remove(&k);
+            let input_display = a.as_ref().or(b.as_ref())
+                .map(|r| r.input_display.clone())
+                .unwrap_or_default();
+            let a_output_bytes = a.as_ref().and_then(|r| r.output_bytes);
+            let b_output_bytes = b.as_ref().and_then(|r| r.output_bytes);
+            let a_rss_mb = a.as_ref().and_then(|r| r.peak_rss_mb);
+            let b_rss_mb = b.as_ref().and_then(|r| r.peak_rss_mb);
+            ComparisonPair {
+                key: k,
+                a_ms: a.as_ref().map(|r| r.elapsed_ms),
+                b_ms: b.as_ref().map(|r| r.elapsed_ms),
+                a_hotpath: a.and_then(|r| r.hotpath),
+                b_hotpath: b.and_then(|r| r.hotpath),
+                a_output_bytes,
+                b_output_bytes,
+                a_rss_mb,
+                b_rss_mb,
+                input_display,
+            }
+        })
+        .collect()
+}
+
+/// Extract hotpath data for comparison. Uses a shallow reconstruction since
+/// StoredRow doesn't impl Clone. Returns None if no hotpath data.
+fn take_hotpath_for_compare(row: &StoredRow) -> Option<HotpathData> {
+    row.hotpath.as_ref()?;
+    // We need to reconstruct since HotpathData doesn't derive Clone.
+    // This is called only for compare pairs (a handful of rows).
+    let hp = row.hotpath.as_ref()?;
+    Some(HotpathData {
+        functions: hp.functions.iter().map(|f| HotpathFunction {
+            section: f.section.clone(),
+            description: f.description.clone(),
+            ordinal: f.ordinal,
+            name: f.name.clone(),
+            calls: f.calls,
+            avg: f.avg.clone(),
+            total: f.total.clone(),
+            percent_total: f.percent_total.clone(),
+            p50: f.p50.clone(),
+            p95: f.p95.clone(),
+            p99: f.p99.clone(),
+        }).collect(),
+        threads: hp.threads.iter().map(|t| HotpathThread {
+            name: t.name.clone(),
+            status: t.status.clone(),
+            cpu_percent: t.cpu_percent.clone(),
+            cpu_percent_max: t.cpu_percent_max.clone(),
+            cpu_user: t.cpu_user.clone(),
+            cpu_sys: t.cpu_sys.clone(),
+            cpu_total: t.cpu_total.clone(),
+            alloc_bytes: t.alloc_bytes.clone(),
+            dealloc_bytes: t.dealloc_bytes.clone(),
+            mem_diff: t.mem_diff.clone(),
+        }).collect(),
+        thread_summary: hp.thread_summary.iter().map(|kv| KvPair {
+            key: kv.key.clone(),
+            value: match &kv.value {
+                KvValue::Int(v) => KvValue::Int(*v),
+                KvValue::Real(v) => KvValue::Real(*v),
+                KvValue::Text(v) => KvValue::Text(v.clone()),
+            },
+        }).collect(),
+    })
+}
+
+fn pair_key(command: &str, variant: &str, input_file: &str) -> String {
+    format!("{command}\t{variant}\t{input_file}")
+}
+
+fn split_pair_key(key: &str) -> (&str, &str, &str) {
+    let mut parts = key.splitn(3, '\t');
+    let cmd = parts.next().unwrap_or("");
+    let var = parts.next().unwrap_or("");
+    let input = parts.next().unwrap_or("");
+    (cmd, var, input)
+}
+
+fn compute_compare_widths(
+    commit_a: &str,
+    commit_b: &str,
+    pairs: &[ComparisonPair],
+) -> CompareWidths {
+    let has_output = pairs.iter().any(|p| p.a_output_bytes.is_some() || p.b_output_bytes.is_some());
+    let has_rss = pairs.iter().any(|p| p.a_rss_mb.is_some() || p.b_rss_mb.is_some());
+    let mut w = CompareWidths {
+        command: 7,
+        variant: 7,
+        input: 5,
+        col_a: commit_a.len().max(2),
+        col_b: commit_b.len().max(2),
+        change: 6,
+        has_output,
+        output_a: if has_output { "output_a".len() } else { 0 },
+        output_b: if has_output { "output_b".len() } else { 0 },
+        output_change: if has_output { "out_chg".len() } else { 0 },
+        has_rss,
+        rss_a: if has_rss { "rss_a".len() } else { 0 },
+        rss_b: if has_rss { "rss_b".len() } else { 0 },
+        rss_change: if has_rss { "rss_chg".len() } else { 0 },
+    };
+    for pair in pairs {
+        let (cmd, var, _) = split_pair_key(&pair.key);
+        w.command = w.command.max(cmd.len());
+        w.variant = w.variant.max(var.len());
+        w.input = w.input.max(pair.input_display.len());
+        w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms).len());
+        w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms).len());
+        w.change = w.change.max(format_change(pair.a_ms, pair.b_ms).len());
+        if has_output {
+            w.output_a = w.output_a.max(format_bytes_or_dash(pair.a_output_bytes).len());
+            w.output_b = w.output_b.max(format_bytes_or_dash(pair.b_output_bytes).len());
+            w.output_change = w.output_change.max(format_change_bytes(pair.a_output_bytes, pair.b_output_bytes).len());
+        }
+        if has_rss {
+            w.rss_a = w.rss_a.max(format_rss_or_dash(pair.a_rss_mb).len());
+            w.rss_b = w.rss_b.max(format_rss_or_dash(pair.b_rss_mb).len());
+            w.rss_change = w.rss_change.max(format_change_rss(pair.a_rss_mb, pair.b_rss_mb).len());
+        }
+    }
+    w
+}
+
+fn append_compare_header(
+    out: &mut String,
+    commit_a: &str,
+    commit_b: &str,
+    w: &CompareWidths,
+) {
+    use std::fmt::Write;
+    write!(
+        out,
+        "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
+        "command",
+        "variant",
+        "input",
+        commit_a,
+        commit_b,
+        "change",
+        cmd_w = w.command,
+        var_w = w.variant,
+        in_w = w.input,
+        a_w = w.col_a,
+        b_w = w.col_b,
+        ch_w = w.change,
+    )
+    .expect("write to String is infallible");
+    if w.has_output {
+        write!(
+            out,
+            "  {:>oa_w$}  {:>ob_w$}  {:>oc_w$}",
+            "output_a",
+            "output_b",
+            "out_chg",
+            oa_w = w.output_a,
+            ob_w = w.output_b,
+            oc_w = w.output_change,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_rss {
+        write!(
+            out,
+            "  {:>ra_w$}  {:>rb_w$}  {:>rc_w$}",
+            "rss_a",
+            "rss_b",
+            "rss_chg",
+            ra_w = w.rss_a,
+            rb_w = w.rss_b,
+            rc_w = w.rss_change,
+        )
+        .expect("write to String is infallible");
+    }
+}
+
+fn append_compare_row(
+    out: &mut String,
+    pair: &ComparisonPair,
+    w: &CompareWidths,
+) {
+    use std::fmt::Write;
+    let (cmd, var, _) = split_pair_key(&pair.key);
+    let a_str = format_ms_or_dash(pair.a_ms);
+    let b_str = format_ms_or_dash(pair.b_ms);
+    let ch = format_change(pair.a_ms, pair.b_ms);
+    write!(
+        out,
+        "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
+        cmd,
+        var,
+        pair.input_display,
+        a_str,
+        b_str,
+        ch,
+        cmd_w = w.command,
+        var_w = w.variant,
+        in_w = w.input,
+        a_w = w.col_a,
+        b_w = w.col_b,
+        ch_w = w.change,
+    )
+    .expect("write to String is infallible");
+    if w.has_output {
+        let oa = format_bytes_or_dash(pair.a_output_bytes);
+        let ob = format_bytes_or_dash(pair.b_output_bytes);
+        let oc = format_change_bytes(pair.a_output_bytes, pair.b_output_bytes);
+        write!(
+            out,
+            "  {:>oa_w$}  {:>ob_w$}  {:>oc_w$}",
+            oa,
+            ob,
+            oc,
+            oa_w = w.output_a,
+            ob_w = w.output_b,
+            oc_w = w.output_change,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_rss {
+        let ra = format_rss_or_dash(pair.a_rss_mb);
+        let rb = format_rss_or_dash(pair.b_rss_mb);
+        let rc = format_change_rss(pair.a_rss_mb, pair.b_rss_mb);
+        write!(
+            out,
+            "  {:>ra_w$}  {:>rb_w$}  {:>rc_w$}",
+            ra,
+            rb,
+            rc,
+            ra_w = w.rss_a,
+            rb_w = w.rss_b,
+            rc_w = w.rss_change,
+        )
+        .expect("write to String is infallible");
+    }
+}
+
+fn format_ms_or_dash(ms: Option<i64>) -> String {
+    match ms {
+        Some(v) => format!("{v} ms"),
+        None => String::from("--"),
+    }
+}
+
+fn format_change(a_ms: Option<i64>, b_ms: Option<i64>) -> String {
+    match (a_ms, b_ms) {
+        (Some(a), Some(b)) if a != 0 => {
+            #[allow(clippy::cast_precision_loss)]
+            let pct = ((b - a) as f64 / a as f64) * 100.0;
+            if pct >= 0.0 {
+                format!("+{pct:.1}%")
+            } else {
+                format!("{pct:.1}%")
+            }
+        }
+        _ => String::from("--"),
+    }
+}
+
+fn format_bytes_or_dash(bytes: Option<i64>) -> String {
+    match bytes {
+        Some(b) => {
+            #[allow(clippy::cast_precision_loss)]
+            let mb = b as f64 / (1024.0 * 1024.0);
+            format!("{mb:.1} MB")
+        }
+        None => String::from("--"),
+    }
+}
+
+fn format_change_bytes(a: Option<i64>, b: Option<i64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) if a != 0 => {
+            #[allow(clippy::cast_precision_loss)]
+            let pct = ((b - a) as f64 / a as f64) * 100.0;
+            if pct >= 0.0 {
+                format!("+{pct:.1}%")
+            } else {
+                format!("{pct:.1}%")
+            }
+        }
+        _ => String::from("--"),
+    }
+}
+
+fn format_rss_or_dash(mb: Option<f64>) -> String {
+    match mb {
+        Some(v) => format!("{v:.1} MB"),
+        None => String::from("--"),
+    }
+}
+
+fn format_change_rss(a: Option<f64>, b: Option<f64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) if a > 0.0 => {
+            let pct = ((b - a) / a) * 100.0;
+            if pct >= 0.0 {
+                format!("+{pct:.1}%")
+            } else {
+                format!("{pct:.1}%")
+            }
+        }
+        _ => String::from("--"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::StoredRow;
+
+    // -----------------------------------------------------------------------
+    // Helper: build a StoredRow with sensible defaults, overriding key fields
+    // -----------------------------------------------------------------------
+
+    fn row(command: &str, variant: &str, input_file: &str, elapsed_ms: i64) -> StoredRow {
+        StoredRow {
+            id: 0,
+            timestamp: String::from("2026-03-01 00:00:00"),
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test commit"),
+            command: command.to_owned(),
+            variant: variant.to_owned(),
+            input_file: input_file.to_owned(),
+            input_mb: None,
+            elapsed_ms,
+            cargo_features: String::new(),
+            cargo_profile: String::from("release"),
+            kernel: String::new(),
+            cpu_governor: String::new(),
+            avail_memory_mb: None,
+            storage_notes: String::new(),
+            peak_rss_mb: None,
+            uuid: String::from("abcdef1234567890"),
+            cli_args: String::new(),
+            project: String::from("test"),
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // pair_key / split_pair_key roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pair_key_roundtrip_normal() {
+        let key = pair_key("read", "mmap", "denmark.osm.pbf");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "read");
+        assert_eq!(var, "mmap");
+        assert_eq!(input, "denmark.osm.pbf");
+    }
+
+    #[test]
+    fn pair_key_roundtrip_empty_fields() {
+        let key = pair_key("read", "", "");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "read");
+        assert_eq!(var, "");
+        assert_eq!(input, "");
+    }
+
+    #[test]
+    fn pair_key_roundtrip_all_empty() {
+        let key = pair_key("", "", "");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "");
+        assert_eq!(var, "");
+        assert_eq!(input, "");
+    }
+
+    #[test]
+    fn pair_key_preserves_tabs_in_values() {
+        // If a field contained a tab, splitn(3, '\t') would mangle it.
+        // pair_key("a\tb", "c", "d") produces "a\tb\tc\td"
+        // splitn(3, '\t') splits into ["a", "b", "c\td"]
+        let key = pair_key("a\tb", "c", "d");
+        let (cmd, var, input) = split_pair_key(&key);
+        assert_eq!(cmd, "a", "tab in command corrupts first field");
+        assert_eq!(var, "b", "original variant is lost");
+        assert_eq!(input, "c\td", "variant bleeds into input field");
+    }
+
+    #[test]
+    fn split_pair_key_no_tabs() {
+        let (cmd, var, input) = split_pair_key("notabs");
+        assert_eq!(cmd, "notabs");
+        assert_eq!(var, "");
+        assert_eq!(input, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_comparison_pairs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn comparison_pairs_both_have_same_benchmark() {
+        let a = vec![row("read", "mmap", "dk.pbf", 100)];
+        let b = vec![row("read", "mmap", "dk.pbf", 90)];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, Some(100));
+        assert_eq!(pairs[0].b_ms, Some(90));
+    }
+
+    #[test]
+    fn comparison_pairs_a_only() {
+        let a = vec![row("read", "mmap", "dk.pbf", 100)];
+        let b: Vec<StoredRow> = vec![];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, Some(100));
+        assert_eq!(pairs[0].b_ms, None);
+    }
+
+    #[test]
+    fn comparison_pairs_b_only() {
+        let a: Vec<StoredRow> = vec![];
+        let b = vec![row("write", "", "out.pbf", 200)];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, None);
+        assert_eq!(pairs[0].b_ms, Some(200));
+    }
+
+    #[test]
+    fn comparison_pairs_deduplication_first_entry_wins() {
+        // Two rows in A with the same key -- first one should win.
+        let a = vec![
+            row("read", "mmap", "dk.pbf", 100),
+            row("read", "mmap", "dk.pbf", 999),
+        ];
+        let b = vec![
+            row("read", "mmap", "dk.pbf", 50),
+            row("read", "mmap", "dk.pbf", 888),
+        ];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].a_ms, Some(100), "first A entry should win, not 999");
+        assert_eq!(pairs[0].b_ms, Some(50), "first B entry should win, not 888");
+    }
+
+    #[test]
+    fn comparison_pairs_ordering_a_first_then_b_new() {
+        // A has benchmarks X and Y (in that order).
+        // B has benchmarks Y and Z (in that order).
+        // Expected key order: X, Y (from A), then Z (new from B).
+        let a = vec![
+            row("x-cmd", "", "", 10),
+            row("y-cmd", "", "", 20),
+        ];
+        let b = vec![
+            row("y-cmd", "", "", 25),
+            row("z-cmd", "", "", 30),
+        ];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 3);
+        let key_strings: Vec<String> = pairs
+            .iter()
+            .map(|p| split_pair_key(&p.key).0.to_owned())
+            .collect();
+        assert_eq!(key_strings, vec!["x-cmd", "y-cmd", "z-cmd"]);
+
+        // x-cmd: A-only
+        assert_eq!(pairs[0].a_ms, Some(10));
+        assert_eq!(pairs[0].b_ms, None);
+        // y-cmd: both
+        assert_eq!(pairs[1].a_ms, Some(20));
+        assert_eq!(pairs[1].b_ms, Some(25));
+        // z-cmd: B-only
+        assert_eq!(pairs[2].a_ms, None);
+        assert_eq!(pairs[2].b_ms, Some(30));
+    }
+
+    #[test]
+    fn comparison_pairs_variant_and_input_matter() {
+        // Same command but different variant/input should be separate pairs.
+        let a = vec![
+            row("read", "mmap", "dk.pbf", 100),
+            row("read", "stdio", "dk.pbf", 200),
+            row("read", "mmap", "se.pbf", 300),
+        ];
+        let b = vec![
+            row("read", "mmap", "dk.pbf", 90),
+        ];
+        let pairs = build_comparison_pairs(&a, &b);
+
+        assert_eq!(pairs.len(), 3);
+        // Only the first pair should have both sides.
+        assert!(pairs[0].a_ms.is_some() && pairs[0].b_ms.is_some());
+        assert!(pairs[1].a_ms.is_some() && pairs[1].b_ms.is_none());
+        assert!(pairs[2].a_ms.is_some() && pairs[2].b_ms.is_none());
+    }
+
+    #[test]
+    fn comparison_pairs_empty_both_sides() {
+        let pairs = build_comparison_pairs(&[], &[]);
+        assert!(pairs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // format_change
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_change_improvement() {
+        // 100 -> 80 = -20%
+        let result = format_change(Some(100), Some(80));
+        assert_eq!(result, "-20.0%");
+    }
+
+    #[test]
+    fn format_change_regression() {
+        // 100 -> 130 = +30%
+        let result = format_change(Some(100), Some(130));
+        assert_eq!(result, "+30.0%");
+    }
+
+    #[test]
+    fn format_change_same_value() {
+        let result = format_change(Some(500), Some(500));
+        assert_eq!(result, "+0.0%");
+    }
+
+    #[test]
+    fn format_change_zero_baseline() {
+        // a=0 falls through the guard `a != 0`, returns "--"
+        let result = format_change(Some(0), Some(100));
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_missing_a() {
+        let result = format_change(None, Some(100));
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_missing_b() {
+        let result = format_change(Some(100), None);
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_both_missing() {
+        let result = format_change(None, None);
+        assert_eq!(result, "--");
+    }
+
+    #[test]
+    fn format_change_large_regression() {
+        // 1 -> 1001 = +100000%
+        let result = format_change(Some(1), Some(1001));
+        assert_eq!(result, "+100000.0%");
+    }
+
+    #[test]
+    fn format_change_near_zero_result() {
+        // 1000 -> 999: -0.1%
+        let result = format_change(Some(1000), Some(999));
+        assert_eq!(result, "-0.1%");
+    }
+
+    #[test]
+    fn format_change_both_zero() {
+        // a=0 hits the guard, returns "--"
+        let result = format_change(Some(0), Some(0));
+        assert_eq!(result, "--");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_input
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_input_empty_filename() {
+        let result = format_input("", None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_input_empty_filename_with_mb() {
+        // Even if MB is provided, empty filename returns empty.
+        let result = format_input("", Some(42.0));
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_input_with_extension_no_mb() {
+        let result = format_input("denmark.osm.pbf", None);
+        // file_stem strips only the last extension: "denmark.osm"
+        assert_eq!(result, "denmark.osm");
+    }
+
+    #[test]
+    fn format_input_with_extension_and_mb() {
+        let result = format_input("denmark.osm.pbf", Some(123.4));
+        assert_eq!(result, "denmark.osm (123 MB)");
+    }
+
+    #[test]
+    fn format_input_no_extension() {
+        let result = format_input("rawfile", None);
+        assert_eq!(result, "rawfile");
+    }
+
+    #[test]
+    fn format_input_no_extension_with_mb() {
+        let result = format_input("rawfile", Some(0.5));
+        assert_eq!(result, "rawfile (0 MB)");
+    }
+
+    #[test]
+    fn format_input_path_with_directory() {
+        // file_stem should extract from the basename
+        let result = format_input("data/inputs/denmark.pbf", None);
+        assert_eq!(result, "denmark");
+    }
+
+    #[test]
+    fn format_input_single_extension() {
+        let result = format_input("test.csv", Some(10.0));
+        assert_eq!(result, "test (10 MB)");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_elapsed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_elapsed_positive() {
+        assert_eq!(format_elapsed(1234), "1234 ms");
+    }
+
+    #[test]
+    fn format_elapsed_zero() {
+        assert_eq!(format_elapsed(0), "0 ms");
+    }
+
+    #[test]
+    fn format_elapsed_negative() {
+        // Shouldn't happen in practice, but verify it doesn't panic.
+        assert_eq!(format_elapsed(-5), "-5 ms");
+    }
+}
