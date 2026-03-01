@@ -59,7 +59,7 @@ pub(super) fn query_commit_filtered(
 pub(super) fn load_children(conn: &rusqlite::Connection, row: &mut StoredRow) -> Result<(), DevError> {
     row.distribution = load_distribution(conn, row.id)?;
     row.kv = load_kv(conn, row.id)?;
-    row.hotpath = load_hotpath(conn, row.id)?;
+    row.hotpath = load_hotpath(conn, row.id, &row.kv)?;
     Ok(())
 }
 
@@ -180,20 +180,21 @@ fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevE
     Ok(result)
 }
 
-fn load_hotpath(conn: &rusqlite::Connection, run_id: i64) -> Result<Option<HotpathData>, DevError> {
+fn load_hotpath(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    kv: &[KvPair],
+) -> Result<Option<HotpathData>, DevError> {
     let functions = load_hotpath_functions(conn, run_id)?;
     let threads = load_hotpath_threads(conn, run_id)?;
     if functions.is_empty() && threads.is_empty() {
         return Ok(None);
     }
     // Thread summary stats are stored in run_kv with "threads." prefix.
-    let mut thread_summary = Vec::new();
-    let kv = load_kv(conn, run_id)?;
-    for pair in kv {
-        if pair.key.starts_with("threads.") {
-            thread_summary.push(pair);
-        }
-    }
+    let thread_summary: Vec<KvPair> = kv.iter()
+        .filter(|p| p.key.starts_with("threads."))
+        .cloned()
+        .collect();
     Ok(Some(HotpathData { functions, threads, thread_summary }))
 }
 
@@ -488,6 +489,103 @@ mod tests {
         }).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].variant, "buffered+none");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Row hydration: load_children with distribution + kv + hotpath
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_children_hydrates_all_child_data() {
+        use crate::db::{Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair};
+
+        let (dir, db_path) = test_db("hydration");
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        let row = RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("hotpath"),
+            variant: Some(String::from("default")),
+            input_file: None, input_mb: None,
+            elapsed_ms: 500,
+            peak_rss_mb: None, cargo_features: None,
+            cargo_profile: String::from("release"),
+            kernel: None, cpu_governor: None, avail_memory_mb: None,
+            storage_notes: None, cli_args: None,
+            project: String::from("test"),
+            kv: vec![
+                KvPair::int("elapsed_ms", 500),
+                KvPair::text("threads.rss_bytes", "1024"),
+            ],
+            distribution: Some(Distribution {
+                samples: 5,
+                min_ms: 100,
+                p50_ms: 110,
+                p95_ms: 130,
+                max_ms: 150,
+            }),
+            hotpath: Some(HotpathData {
+                functions: vec![HotpathFunction {
+                    section: String::from("timing"),
+                    description: Some(String::from("main")),
+                    ordinal: 0,
+                    name: String::from("process"),
+                    calls: Some(10),
+                    avg: Some(String::from("50ms")),
+                    total: Some(String::from("500ms")),
+                    percent_total: Some(String::from("100%")),
+                    p50: None, p95: None, p99: None,
+                }],
+                threads: vec![HotpathThread {
+                    name: String::from("main"),
+                    status: Some(String::from("running")),
+                    cpu_percent: Some(String::from("95%")),
+                    cpu_percent_max: None, cpu_user: None, cpu_sys: None,
+                    cpu_total: None, alloc_bytes: None, dealloc_bytes: None,
+                    mem_diff: None,
+                }],
+                thread_summary: vec![
+                    KvPair::text("threads.rss_bytes", "1024"),
+                ],
+            }),
+        };
+
+        let short = db.insert(&row).expect("insert");
+
+        // query_by_uuid triggers load_children for each row.
+        let rows = db.query_by_uuid(&short).expect("query_by_uuid");
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+
+        // Distribution.
+        let dist = r.distribution.as_ref().expect("distribution should be loaded");
+        assert_eq!(dist.samples, 5);
+        assert_eq!(dist.min_ms, 100);
+        assert_eq!(dist.p50_ms, 110);
+        assert_eq!(dist.p95_ms, 130);
+        assert_eq!(dist.max_ms, 150);
+
+        // KV pairs.
+        assert!(r.kv.len() >= 2, "should have at least 2 kv pairs");
+        assert!(r.kv.iter().any(|p| p.key == "elapsed_ms"), "should have elapsed_ms kv");
+        assert!(r.kv.iter().any(|p| p.key == "threads.rss_bytes"), "should have threads.rss_bytes kv");
+
+        // Hotpath.
+        let hp = r.hotpath.as_ref().expect("hotpath should be loaded");
+        assert_eq!(hp.functions.len(), 1);
+        assert_eq!(hp.functions[0].name, "process");
+        assert_eq!(hp.functions[0].section, "timing");
+        assert_eq!(hp.threads.len(), 1);
+        assert_eq!(hp.threads[0].name, "main");
+
+        // Thread summary should be populated from KV (not a separate load).
+        assert_eq!(hp.thread_summary.len(), 1);
+        assert_eq!(hp.thread_summary[0].key, "threads.rss_bytes");
 
         drop(db);
         cleanup(&dir, &db_path);
