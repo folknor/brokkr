@@ -1433,6 +1433,10 @@ struct CompareWidths {
     output_a: usize,
     output_b: usize,
     output_change: usize,
+    has_rss: bool,
+    rss_a: usize,
+    rss_b: usize,
+    rss_change: usize,
 }
 
 struct ComparisonPair {
@@ -1443,6 +1447,8 @@ struct ComparisonPair {
     b_hotpath: Option<HotpathData>,
     a_output_bytes: Option<i64>,
     b_output_bytes: Option<i64>,
+    a_rss_mb: Option<f64>,
+    b_rss_mb: Option<f64>,
     /// Pre-formatted input string for display.
     input_display: String,
 }
@@ -1465,6 +1471,7 @@ fn build_comparison_pairs(
         elapsed_ms: i64,
         hotpath: Option<HotpathData>,
         output_bytes: Option<i64>,
+        peak_rss_mb: Option<f64>,
         input_display: String,
     }
 
@@ -1480,6 +1487,7 @@ fn build_comparison_pairs(
                 elapsed_ms: row.elapsed_ms,
                 hotpath: take_hotpath_for_compare(row),
                 output_bytes: find_output_bytes(&row.kv),
+                peak_rss_mb: row.peak_rss_mb,
                 input_display: format_input(&row.input_file, row.input_mb),
             });
         }
@@ -1494,6 +1502,7 @@ fn build_comparison_pairs(
                 elapsed_ms: row.elapsed_ms,
                 hotpath: take_hotpath_for_compare(row),
                 output_bytes: find_output_bytes(&row.kv),
+                peak_rss_mb: row.peak_rss_mb,
                 input_display: format_input(&row.input_file, row.input_mb),
             });
         }
@@ -1508,6 +1517,8 @@ fn build_comparison_pairs(
                 .unwrap_or_default();
             let a_output_bytes = a.as_ref().and_then(|r| r.output_bytes);
             let b_output_bytes = b.as_ref().and_then(|r| r.output_bytes);
+            let a_rss_mb = a.as_ref().and_then(|r| r.peak_rss_mb);
+            let b_rss_mb = b.as_ref().and_then(|r| r.peak_rss_mb);
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
@@ -1516,6 +1527,8 @@ fn build_comparison_pairs(
                 b_hotpath: b.and_then(|r| r.hotpath),
                 a_output_bytes,
                 b_output_bytes,
+                a_rss_mb,
+                b_rss_mb,
                 input_display,
             }
         })
@@ -1584,6 +1597,7 @@ fn compute_compare_widths(
     pairs: &[ComparisonPair],
 ) -> CompareWidths {
     let has_output = pairs.iter().any(|p| p.a_output_bytes.is_some() || p.b_output_bytes.is_some());
+    let has_rss = pairs.iter().any(|p| p.a_rss_mb.is_some() || p.b_rss_mb.is_some());
     let mut w = CompareWidths {
         command: 7,
         variant: 7,
@@ -1595,6 +1609,10 @@ fn compute_compare_widths(
         output_a: if has_output { "output_a".len() } else { 0 },
         output_b: if has_output { "output_b".len() } else { 0 },
         output_change: if has_output { "out_chg".len() } else { 0 },
+        has_rss,
+        rss_a: if has_rss { "rss_a".len() } else { 0 },
+        rss_b: if has_rss { "rss_b".len() } else { 0 },
+        rss_change: if has_rss { "rss_chg".len() } else { 0 },
     };
     for pair in pairs {
         let (cmd, var, _) = split_pair_key(&pair.key);
@@ -1608,6 +1626,11 @@ fn compute_compare_widths(
             w.output_a = w.output_a.max(format_bytes_or_dash(pair.a_output_bytes).len());
             w.output_b = w.output_b.max(format_bytes_or_dash(pair.b_output_bytes).len());
             w.output_change = w.output_change.max(format_change_bytes(pair.a_output_bytes, pair.b_output_bytes).len());
+        }
+        if has_rss {
+            w.rss_a = w.rss_a.max(format_rss_or_dash(pair.a_rss_mb).len());
+            w.rss_b = w.rss_b.max(format_rss_or_dash(pair.b_rss_mb).len());
+            w.rss_change = w.rss_change.max(format_change_rss(pair.a_rss_mb, pair.b_rss_mb).len());
         }
     }
     w
@@ -1647,6 +1670,19 @@ fn append_compare_header(
             oa_w = w.output_a,
             ob_w = w.output_b,
             oc_w = w.output_change,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_rss {
+        write!(
+            out,
+            "  {:>ra_w$}  {:>rb_w$}  {:>rc_w$}",
+            "rss_a",
+            "rss_b",
+            "rss_chg",
+            ra_w = w.rss_a,
+            rb_w = w.rss_b,
+            rc_w = w.rss_change,
         )
         .expect("write to String is infallible");
     }
@@ -1695,6 +1731,22 @@ fn append_compare_row(
         )
         .expect("write to String is infallible");
     }
+    if w.has_rss {
+        let ra = format_rss_or_dash(pair.a_rss_mb);
+        let rb = format_rss_or_dash(pair.b_rss_mb);
+        let rc = format_change_rss(pair.a_rss_mb, pair.b_rss_mb);
+        write!(
+            out,
+            "  {:>ra_w$}  {:>rb_w$}  {:>rc_w$}",
+            ra,
+            rb,
+            rc,
+            ra_w = w.rss_a,
+            rb_w = w.rss_b,
+            rc_w = w.rss_change,
+        )
+        .expect("write to String is infallible");
+    }
 }
 
 fn format_ms_or_dash(ms: Option<i64>) -> String {
@@ -1735,6 +1787,27 @@ fn format_change_bytes(a: Option<i64>, b: Option<i64>) -> String {
         (Some(a), Some(b)) if a != 0 => {
             #[allow(clippy::cast_precision_loss)]
             let pct = ((b - a) as f64 / a as f64) * 100.0;
+            if pct >= 0.0 {
+                format!("+{pct:.1}%")
+            } else {
+                format!("{pct:.1}%")
+            }
+        }
+        _ => String::from("--"),
+    }
+}
+
+fn format_rss_or_dash(mb: Option<f64>) -> String {
+    match mb {
+        Some(v) => format!("{v:.1} MB"),
+        None => String::from("--"),
+    }
+}
+
+fn format_change_rss(a: Option<f64>, b: Option<f64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) if a > 0.0 => {
+            let pct = ((b - a) / a) * 100.0;
             if pct >= 0.0 {
                 format!("+{pct:.1}%")
             } else {

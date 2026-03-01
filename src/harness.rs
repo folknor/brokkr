@@ -295,7 +295,9 @@ impl BenchHarness {
     fn build_row(&self, config: &BenchConfig, result: &BenchResult) -> RunRow {
         // Merge config metadata + result kv into a single Vec.
         // We can't move out of references so we must clone/reconstruct.
+        // Extract peak_rss_kb from result kv (promoted to the runs column).
         let mut kv = Vec::with_capacity(config.metadata.len() + result.kv.len());
+        let mut peak_rss_mb: Option<f64> = None;
         for pair in &config.metadata {
             kv.push(KvPair {
                 key: pair.key.clone(),
@@ -307,6 +309,13 @@ impl BenchHarness {
             });
         }
         for pair in &result.kv {
+            if pair.key == "peak_rss_kb" {
+                if let KvValue::Int(kb) = &pair.value {
+                    #[allow(clippy::cast_precision_loss)]
+                    { peak_rss_mb = Some(*kb as f64 / 1024.0); }
+                }
+                continue; // promoted to column, don't duplicate in run_kv
+            }
             kv.push(KvPair {
                 key: pair.key.clone(),
                 value: match &pair.value {
@@ -325,7 +334,7 @@ impl BenchHarness {
             variant: config.variant.clone(),
             input_file: config.input_file.clone(),
             input_mb: config.input_mb,
-            peak_rss_mb: None,
+            peak_rss_mb,
             cargo_features: config.cargo_features.clone().or_else(|| self.cargo_features.clone()),
             cargo_profile: config.cargo_profile.clone(),
             elapsed_ms: result.elapsed_ms,
@@ -418,6 +427,22 @@ fn format_result_line(
 
     append_kv_fields(&mut parts, &result.kv);
 
+    // Compute I/O throughput when input size and elapsed time are known.
+    if let Some(input_mb) = config.input_mb
+        && result.elapsed_ms > 0
+    {
+        #[allow(clippy::cast_precision_loss)]
+        let secs = result.elapsed_ms as f64 / 1000.0;
+        let read_mbs = input_mb / secs;
+        parts.push(format!("read_mbs={read_mbs:.1}"));
+        if let Some(output_bytes) = find_kv_int(&result.kv, "output_bytes") {
+            #[allow(clippy::cast_precision_loss)]
+            let output_mb = output_bytes as f64 / 1_000_000.0;
+            let write_mbs = output_mb / secs;
+            parts.push(format!("write_mbs={write_mbs:.1}"));
+        }
+    }
+
     if let Some(ref dist) = result.distribution {
         parts.push(format!("samples={}", dist.samples));
         parts.push(format!("min_ms={}", dist.min_ms));
@@ -446,6 +471,14 @@ fn force_emit_result_lines(
     git: &GitInfo,
 ) {
     println!("[result]  {}", format_result_line(config, result, git));
+}
+
+/// Look up an integer KV pair by key.
+fn find_kv_int(kv: &[KvPair], key: &str) -> Option<i64> {
+    kv.iter().find(|p| p.key == key).and_then(|p| match &p.value {
+        KvValue::Int(v) => Some(*v),
+        _ => None,
+    })
 }
 
 /// Flatten key-value pairs into the result line.
