@@ -356,8 +356,14 @@ impl ResultsDb {
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA)?;
+        // Migrate existing databases *before* applying SCHEMA so that
+        // indexes on columns added by migrations (e.g. `project`) exist
+        // by the time CREATE INDEX runs.
         run_migrations(&conn)?;
+        conn.execute_batch(SCHEMA)?;
+        // For fresh databases run_migrations was a no-op, so ensure
+        // user_version reflects the schema we just created.
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
@@ -810,6 +816,11 @@ const SCHEMA_VERSION: i64 = 3;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // Fresh database — no tables yet, nothing to migrate.
+    if !has_table(conn, "runs") {
+        return Ok(());
+    }
+
     let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
     if current >= SCHEMA_VERSION {
@@ -828,6 +839,17 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
+}
+
+/// Check whether a table exists in the database.
+fn has_table(conn: &rusqlite::Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .unwrap_or(false)
 }
 
 /// Check whether a column exists on a table.
