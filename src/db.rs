@@ -462,17 +462,19 @@ impl ResultsDb {
 }
 
 fn insert_kv_row(conn: &rusqlite::Connection, run_id: i64, kv: &KvPair) -> Result<(), DevError> {
+    // OR IGNORE: row.kv (stderr) is inserted first, thread_summary second.
+    // Duplicates (same run_id+key) are silently skipped, keeping the stderr value.
     match &kv.value {
         KvValue::Int(v) => conn.execute(
-            "INSERT INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)",
             rusqlite::params![run_id, kv.key, v],
         )?,
         KvValue::Real(v) => conn.execute(
-            "INSERT INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)",
             rusqlite::params![run_id, kv.key, v],
         )?,
         KvValue::Text(v) => conn.execute(
-            "INSERT INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
             rusqlite::params![run_id, kv.key, v],
         )?,
     };

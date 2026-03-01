@@ -179,7 +179,7 @@ Examples:
         #[arg(long)]
         no_ocean: bool,
 
-        /// Number of runs (default: 1 for profiling)
+        /// Number of runs; best-of-N is stored (default: 1)
         #[arg(long, default_value = "1")]
         runs: usize,
 
