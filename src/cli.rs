@@ -44,7 +44,7 @@ Examples:
   brokkr results 0b74fb6f                           # look up by UUID prefix
   brokkr results --commit a65a                      # filter by commit prefix
   brokkr results --command 'bench read'             # filter by command
-  brokkr results --variant pipelined                # filter by variant prefix
+  brokkr results --variant pipelined                # filter by variant (substring match)
   brokkr results --compare a65a 911c                # compare two commits
   brokkr results --compare a65a 911c --variant sync # compare, filtered
   brokkr results --compare-last                     # compare two most recent commits
@@ -66,11 +66,11 @@ Examples:
         #[arg(long, conflicts_with_all = ["query", "commit", "compare"])]
         compare_last: bool,
 
-        /// Filter by command name (e.g. "bench read", "bench merge")
+        /// Filter by command (substring match, e.g. "read" matches "bench read")
         #[arg(long)]
         command: Option<String>,
 
-        /// Filter by variant prefix (e.g. "tags-filter" matches all tags-filter-* variants)
+        /// Filter by variant (substring match, e.g. "zlib" matches "buffered+zlib")
         #[arg(long)]
         variant: Option<String>,
 
