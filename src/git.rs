@@ -63,19 +63,19 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
 }
 
 fn check_clean(workspace_root: &Path) -> bool {
-    // Exclude .brokkr/results.db — it's tracked in git but modified by benchmarks.
+    // Exclude .brokkr/results.db (modified by benchmarks) and *.md (docs).
     let unstaged = Command::new("git")
-        .args(["diff", "--quiet", "HEAD", "--", ":(exclude).brokkr/results.db"])
+        .args(["diff", "--quiet", "HEAD", "--", ":(exclude).brokkr/results.db", ":(exclude)*.md"])
         .current_dir(workspace_root)
         .output();
 
     let staged = Command::new("git")
-        .args(["diff", "--quiet", "--cached", "HEAD", "--", ":(exclude).brokkr/results.db"])
+        .args(["diff", "--quiet", "--cached", "HEAD", "--", ":(exclude).brokkr/results.db", ":(exclude)*.md"])
         .current_dir(workspace_root)
         .output();
 
     let untracked = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard", "--", ":(exclude).brokkr/"])
+        .args(["ls-files", "--others", "--exclude-standard", "--", ":(exclude).brokkr/", ":(exclude)*.md"])
         .current_dir(workspace_root)
         .output();
 
