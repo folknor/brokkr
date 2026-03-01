@@ -519,11 +519,11 @@ impl ResultsDb {
         params.push(String::new());
         if let Some(cmd) = command {
             params.push(cmd.to_owned());
-            clauses.push(format!("command = ?{}", params.len()));
+            clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
         }
         if let Some(v) = variant {
             params.push(v.to_owned());
-            clauses.push(format!("variant LIKE ?{}||'%'", params.len()));
+            clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
         }
         let sql = format!(
             "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, variant, id DESC",
@@ -549,11 +549,11 @@ impl ResultsDb {
         let mut params: Vec<String> = Vec::new();
         if let Some(cmd) = command {
             params.push(cmd.to_owned());
-            clauses.push(format!("command = ?{}", params.len()));
+            clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
         }
         if let Some(v) = variant {
             params.push(v.to_owned());
-            clauses.push(format!("variant LIKE ?{}||'%'", params.len()));
+            clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
         }
         let mut sql = "SELECT DISTINCT [commit] FROM runs".to_owned();
         if !clauses.is_empty() {
@@ -770,11 +770,11 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     }
     if let Some(ref cmd) = filter.command {
         params.push(cmd.clone());
-        clauses.push(format!("command = ?{}", params.len()));
+        clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
     }
     if let Some(ref v) = filter.variant {
         params.push(v.clone());
-        clauses.push(format!("variant LIKE ?{}||'%'", params.len()));
+        clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
     }
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
@@ -2130,8 +2130,8 @@ mod tests {
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("[commit] LIKE ?1||'%'"), "commit should be ?1");
-        assert!(sql.contains("command = ?2"), "command should be ?2");
-        assert!(sql.contains("variant LIKE ?3||'%'"), "variant should be ?3");
+        assert!(sql.contains("command LIKE '%'||?2||'%'"), "command should be ?2 contains");
+        assert!(sql.contains("variant LIKE '%'||?3||'%'"), "variant should be ?3 contains");
         assert!(sql.contains("LIMIT ?4"), "limit should be ?4");
         assert_eq!(params.len(), 4);
         assert_eq!(params[0], "abc123");
@@ -2168,8 +2168,8 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         // Without commit, command becomes ?1, variant ?2, limit ?3
-        assert!(sql.contains("command = ?1"));
-        assert!(sql.contains("variant LIKE ?2||'%'"));
+        assert!(sql.contains("command LIKE '%'||?1||'%'"));
+        assert!(sql.contains("variant LIKE '%'||?2||'%'"));
         assert!(sql.contains("LIMIT ?3"));
         assert_eq!(params.len(), 3);
         assert_eq!(params[0], "write");
