@@ -758,6 +758,7 @@ impl BenchContext {
         build_root: Option<&Path>,
         package: Option<&str>,
         features: &[&str],
+        default_features: bool,
         lock_command: &str,
     ) -> Result<Self, DevError> {
         let effective_build_root = build_root.unwrap_or(project_root);
@@ -770,10 +771,12 @@ impl BenchContext {
             command: lock_command,
             project_root: &project_root.display().to_string(),
         })?;
-        let build_config = if features.is_empty() {
+        let build_config = if features.is_empty() && default_features {
             build::BuildConfig::release(package)
-        } else {
+        } else if default_features {
             build::BuildConfig::release_with_features(package, features)
+        } else {
+            build::BuildConfig::release_no_defaults(package, features)
         };
         let binary = build::cargo_build(&build_config, effective_build_root)?;
         let db_root = build_root.map(|_| project_root);
@@ -1420,7 +1423,7 @@ fn cmd_bench_commands(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], "bench commands")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &["zlib-ng"], false, "bench commands")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let commands = pbfhogg::bench_commands::parse_command(command)?;
     let osc_path = resolve_osc_path(None, dataset, &ctx.paths, project_root).ok();
@@ -1449,7 +1452,7 @@ fn cmd_bench_extract(
     bbox: Option<&str>,
     strategies_str: &str,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], "bench extract")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &["zlib-ng"], false, "bench extract")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let bbox = resolve_bbox(bbox, dataset, &ctx.paths)?;
     let strategies = pbfhogg::bench_extract::parse_strategies(strategies_str)?;
@@ -1485,7 +1488,7 @@ fn cmd_bench_blob_filter(
     pbf_raw: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], "bench blob-filter")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], true, "bench blob-filter")?;
     let (indexed_path, file_mb) = resolve_pbf_with_size(pbf_indexed, dataset, &ctx.paths, project_root)?;
     let raw_path = resolve_raw_pbf_path(pbf_raw, dataset, &ctx.paths)?;
     pbfhogg::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, runs, project_root)
@@ -1520,7 +1523,7 @@ fn cmd_bench_read(
     runs: usize,
     modes_str: &str,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], "bench read")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &["zlib-ng"], false, "bench read")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let modes = pbfhogg::bench_read::parse_modes(modes_str)?;
     pbfhogg::bench_read::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &modes, project_root)
@@ -1537,7 +1540,7 @@ fn cmd_bench_write(
     runs: usize,
     compression_str: &str,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], "bench write")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &["zlib-ng"], false, "bench write")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, true)?;
     pbfhogg::bench_write::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &compressions, project_root)
@@ -1560,8 +1563,8 @@ fn cmd_bench_merge(
         preflight::run_preflight(&preflight::uring_checks())?;
     }
 
-    let features: &[&str] = if uring { &["linux-io-uring"] } else { &[] };
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), features, "bench merge")?;
+    let features: &[&str] = if uring { &["zlib-ng", "linux-io-uring"] } else { &["zlib-ng"] };
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), features, false, "bench merge")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, false)?;
@@ -1614,7 +1617,7 @@ fn cmd_bench_eliv_self(
     no_ocean: bool,
     compression_level: Option<u32>,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &[], "bench self")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &[], true, "bench self")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     elivagar::bench_self::run(
         &ctx.harness,
@@ -1869,7 +1872,7 @@ fn cmd_hotpath(
 
     match project {
         Project::Elivagar => {
-            let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &all_features, "hotpath")?;
+            let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             elivagar::hotpath::run(
                 &ctx.harness,
@@ -1885,7 +1888,7 @@ fn cmd_hotpath(
             )
         }
         Project::Nidhogg => {
-            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &all_features, "hotpath")?;
+            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             nidhogg::hotpath::run(
                 &ctx.harness,
@@ -1901,7 +1904,7 @@ fn cmd_hotpath(
         _ => {
             project::require(project, Project::Pbfhogg, "hotpath")?;
 
-            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &all_features, "hotpath")?;
+            let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
 
@@ -2177,7 +2180,7 @@ fn cmd_bench_nid_ingest(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &[], "bench ingest")?;
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &[], true, "bench ingest")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     nidhogg::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &ctx.paths.scratch_dir, project_root)
 }

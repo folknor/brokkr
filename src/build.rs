@@ -39,6 +39,17 @@ impl BuildConfig {
             profile: "release",
         }
     }
+
+    pub fn release_no_defaults(package: Option<&str>, features: &[&str]) -> Self {
+        Self {
+            package: package.map(std::borrow::ToOwned::to_owned),
+            bin: None,
+            example: None,
+            features: features.iter().map(|s| (*s).to_owned()).collect(),
+            default_features: false,
+            profile: "release",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
