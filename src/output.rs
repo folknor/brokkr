@@ -110,17 +110,18 @@ pub fn run_captured(
 ) -> Result<CapturedOutput, DevError> {
     let start = Instant::now();
 
-    let output = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: program.to_owned(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
+        .stderr(Stdio::piped());
+    crate::oom::protect_child(&mut cmd);
+
+    let output = cmd.output().map_err(|e| DevError::Subprocess {
+        program: program.to_owned(),
+        code: None,
+        stderr: e.to_string(),
+    })?;
 
     let elapsed = start.elapsed();
 
@@ -153,6 +154,7 @@ pub fn run_captured_with_env(
     for &(key, value) in env {
         cmd.env(key, value);
     }
+    crate::oom::protect_child(&mut cmd);
 
     let output = cmd.output().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),
@@ -174,14 +176,15 @@ pub fn run_captured_with_env(
 ///
 /// Returns the process exit code, or 1 if the process was killed by a signal.
 pub fn run_passthrough(program: &str, args: &[&str]) -> Result<i32, DevError> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .map_err(|e| DevError::Subprocess {
-            program: program.to_owned(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    crate::oom::protect_child(&mut cmd);
+
+    let status = cmd.status().map_err(|e| DevError::Subprocess {
+        program: program.to_owned(),
+        code: None,
+        stderr: e.to_string(),
+    })?;
 
     Ok(status.code().unwrap_or(1))
 }
@@ -199,6 +202,7 @@ pub fn run_passthrough_with_env(
     for &(key, value) in env {
         cmd.env(key, value);
     }
+    crate::oom::protect_child(&mut cmd);
     let status = cmd.status().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),
         code: None,

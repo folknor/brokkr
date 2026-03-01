@@ -142,7 +142,7 @@ fn read_governor() -> String {
 }
 
 /// Read total and available memory from `/proc/meminfo`, returning MB values.
-fn read_memory() -> (u64, u64) {
+pub(crate) fn read_memory() -> (u64, u64) {
     let content = match std::fs::read_to_string("/proc/meminfo") {
         Ok(s) => s,
         Err(_) => return (0, 0),

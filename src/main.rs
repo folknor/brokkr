@@ -7,6 +7,7 @@ mod git;
 mod harness;
 mod hotpath_fmt;
 mod lockfile;
+mod oom;
 mod output;
 mod pbfhogg;
 mod pmtiles;
@@ -190,6 +191,10 @@ Examples:
         /// Nodes in millions (node-store variant only)
         #[arg(long, default_value = "50")]
         nodes: usize,
+
+        /// Skip memory availability check
+        #[arg(long)]
+        no_mem_check: bool,
     },
     /// Run two-pass profiling (timing + allocation) for a dataset
     Profile {
@@ -224,6 +229,10 @@ Examples:
         /// Skip ocean shapefile detection (elivagar only)
         #[arg(long)]
         no_ocean: bool,
+
+        /// Skip memory availability check
+        #[arg(long)]
+        no_mem_check: bool,
     },
     /// Download a region dataset from Geofabrik
     Download {
@@ -666,22 +675,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
             runs,
             tiles,
             nodes,
+            no_mem_check,
         } => {
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
                 preflight::run_preflight(&preflight::uring_checks())?;
             }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs, &features, variant.as_deref(), tiles, nodes)
+                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs, &features, variant.as_deref(), tiles, nodes, no_mem_check)
             })
         }
-        Command::Profile { verbose, commit, features, dataset, pbf, osc, tool, no_ocean } => {
+        Command::Profile { verbose, commit, features, dataset, pbf, osc, tool, no_ocean, no_mem_check } => {
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
                 preflight::run_preflight(&preflight::uring_checks())?;
             }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_profile(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref(), no_ocean, &features)
+                cmd_profile(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref(), no_ocean, &features, no_mem_check)
             })
         }
         Command::Download { region, osc_url } => {
@@ -1922,6 +1932,7 @@ fn cmd_hotpath(
     variant: Option<&str>,
     tiles: usize,
     nodes: usize,
+    no_mem_check: bool,
 ) -> Result<(), DevError> {
     if variant.is_some() && project != Project::Elivagar {
         return Err(DevError::Config(
@@ -1956,6 +1967,8 @@ fn cmd_hotpath(
 
             let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            let risk = if alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
+            oom::check_memory(file_mb, &risk, no_mem_check)?;
             elivagar::hotpath::run(
                 &ctx.harness,
                 &ctx.binary,
@@ -1972,6 +1985,8 @@ fn cmd_hotpath(
         Project::Nidhogg => {
             let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            let risk = if alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
+            oom::check_memory(file_mb, &risk, no_mem_check)?;
             nidhogg::hotpath::run(
                 &ctx.harness,
                 &ctx.binary,
@@ -1988,6 +2003,8 @@ fn cmd_hotpath(
 
             let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            let risk = if alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
+            oom::check_memory(file_mb, &risk, no_mem_check)?;
             let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
 
             // Try to get raw PBF path (optional).
@@ -2026,6 +2043,7 @@ fn cmd_profile(
     tool: Option<&str>,
     no_ocean: bool,
     features: &[String],
+    no_mem_check: bool,
 ) -> Result<(), DevError> {
     match project {
         Project::Elivagar => {
@@ -2033,6 +2051,7 @@ fn cmd_profile(
             preflight::run_preflight(&preflight::profile_checks(tool_name))?;
             let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, no_mem_check)?;
             let effective = build_root.unwrap_or(project_root);
             elivagar::profile::run(
                 &ctx.harness,
@@ -2051,6 +2070,7 @@ fn cmd_profile(
             preflight::run_preflight(&preflight::profile_checks(tool_name))?;
             let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, no_mem_check)?;
 
             let data_dir = ctx.paths
                 .datasets
@@ -2075,6 +2095,7 @@ fn cmd_profile(
 
             let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, no_mem_check)?;
             let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
 
             // Try to get raw PBF path (optional).
