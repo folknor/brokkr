@@ -20,7 +20,10 @@ Single crate, single binary. No workspace.
 
 ### Source layout
 
-- `src/main.rs` — CLI definition (clap derive), command dispatch, `BenchContext` struct, all handler functions
+- `src/main.rs` — `main()`, command dispatch, all `cmd_*` handler functions
+- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command`, `BenchCommand`, `VerifyCommand`
+- `src/context.rs` — `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
+- `src/resolve.rs` — Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
 - `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), `detect()` (delegates to `config::load()`), `require()` gating
 - `src/config.rs` — `DevConfig`, `Dataset`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
