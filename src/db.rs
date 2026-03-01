@@ -2285,4 +2285,408 @@ mod tests {
         drop(std::fs::remove_file(&db_path));
         drop(std::fs::remove_dir(&dir));
     }
+
+    // -----------------------------------------------------------------------
+    // Old schema definitions for migration tests
+    // -----------------------------------------------------------------------
+
+    /// v0 schema: no uuid, cli_args, metadata, peak_rss_mb, or project columns.
+    const V0_SCHEMA: &str = "\
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, hostname TEXT NOT NULL,
+            [commit] TEXT NOT NULL, subject TEXT NOT NULL, command TEXT NOT NULL,
+            variant TEXT, input_file TEXT, input_mb REAL, elapsed_ms INTEGER NOT NULL,
+            cargo_features TEXT, cargo_profile TEXT DEFAULT 'release',
+            kernel TEXT, cpu_governor TEXT, avail_memory_mb INTEGER,
+            storage_notes TEXT, extra TEXT
+        )";
+
+    /// v2 schema: adds uuid, cli_args, metadata over v0.
+    const V2_SCHEMA: &str = "\
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, hostname TEXT NOT NULL,
+            [commit] TEXT NOT NULL, subject TEXT NOT NULL, command TEXT NOT NULL,
+            variant TEXT, input_file TEXT, input_mb REAL, elapsed_ms INTEGER NOT NULL,
+            cargo_features TEXT, cargo_profile TEXT DEFAULT 'release',
+            kernel TEXT, cpu_governor TEXT, avail_memory_mb INTEGER,
+            storage_notes TEXT, extra TEXT, uuid TEXT, cli_args TEXT, metadata TEXT
+        )";
+
+    const V0_INSERT: &str = "\
+        INSERT INTO runs (timestamp, hostname, [commit], subject, command, variant,
+            input_file, input_mb, elapsed_ms, extra)
+        VALUES ('2026-01-01 00:00:00', 'testhost', 'aabb', 'old commit', 'bench read',
+            'mmap', 'denmark.osm.pbf', 42.5, 1234, ?1)";
+
+    const V2_INSERT: &str = "\
+        INSERT INTO runs (timestamp, hostname, [commit], subject, command, variant,
+            input_file, input_mb, elapsed_ms, extra, uuid, cli_args, metadata)
+        VALUES ('2026-01-01 00:00:00', 'testhost', 'aabb', 'old commit', 'bench read',
+            'mmap', 'denmark.osm.pbf', 42.5, 1234, ?1, 'existing_uuid', '--fast', ?2)";
+
+    /// Create a temp directory and db path with a unique name per test.
+    fn test_db(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("brokkr_test_{name}"));
+        drop(std::fs::create_dir_all(&dir));
+        let db_path = dir.join("test.db");
+        drop(std::fs::remove_file(&db_path));
+        (dir, db_path)
+    }
+
+    fn cleanup(dir: &std::path::Path, db_path: &std::path::Path) {
+        drop(std::fs::remove_file(db_path));
+        // WAL/SHM files.
+        drop(std::fs::remove_file(db_path.with_extension("db-wal")));
+        drop(std::fs::remove_file(db_path.with_extension("db-shm")));
+        drop(std::fs::remove_dir(dir));
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v0 -> v3
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v0_to_v3() {
+        let (dir, db_path) = test_db("migrate_v0");
+
+        // Create v0 database with one row.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V0_SCHEMA).unwrap();
+            conn.execute(V0_INSERT, rusqlite::params![rusqlite::types::Null]).unwrap();
+        }
+
+        // Open via ResultsDb — triggers all migrations.
+        let db = ResultsDb::open(&db_path).expect("open should migrate v0 to v3");
+
+        // Row is preserved and queryable.
+        let rows = db.query(&QueryFilter {
+            commit: Some(String::from("aabb")),
+            command: None,
+            variant: None,
+            limit: 10,
+        }).expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].command, "bench read");
+        assert_eq!(rows[0].elapsed_ms, 1234);
+
+        // UUID was backfilled.
+        assert!(!rows[0].uuid.is_empty(), "uuid should be backfilled");
+
+        // project defaults to pbfhogg.
+        assert_eq!(rows[0].project, "pbfhogg");
+
+        // Schema version is 3.
+        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+
+        // Child tables exist (can query without error).
+        db.conn.execute_batch("SELECT COUNT(*) FROM run_distribution").unwrap();
+        db.conn.execute_batch("SELECT COUNT(*) FROM run_kv").unwrap();
+        db.conn.execute_batch("SELECT COUNT(*) FROM hotpath_functions").unwrap();
+        db.conn.execute_batch("SELECT COUNT(*) FROM hotpath_threads").unwrap();
+
+        // New columns exist.
+        assert!(has_column(&db.conn, "runs", "peak_rss_mb"));
+        assert!(has_column(&db.conn, "runs", "project"));
+        assert!(has_column(&db.conn, "runs", "cli_args"));
+        assert!(has_column(&db.conn, "runs", "metadata"));
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v2 -> v3 with distribution JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v2_distribution_json() {
+        let (dir, db_path) = test_db("migrate_v2_dist");
+
+        let extra = r#"{"samples":10,"min_ms":100,"p50_ms":150,"p95_ms":200,"max_ms":250,"output_bytes":999}"#;
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V2_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(V2_INSERT, rusqlite::params![extra, rusqlite::types::Null]).unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v2 to v3");
+
+        // project column added with default.
+        let rows = db.query(&QueryFilter {
+            commit: Some(String::from("aabb")),
+            command: None, variant: None, limit: 10,
+        }).expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].project, "pbfhogg");
+
+        // Distribution migrated to child table.
+        let dist: (i64, i64, i64, i64, i64) = db.conn.query_row(
+            "SELECT samples, min_ms, p50_ms, p95_ms, max_ms FROM run_distribution WHERE run_id = 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).expect("distribution row should exist");
+        assert_eq!(dist, (10, 100, 150, 200, 250));
+
+        // Extra kv (output_bytes) migrated to run_kv.
+        let val: i64 = db.conn.query_row(
+            "SELECT value_int FROM run_kv WHERE run_id = 1 AND key = 'output_bytes'",
+            [], |r| r.get(0),
+        ).expect("output_bytes kv should exist");
+        assert_eq!(val, 999);
+
+        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v2 -> v3 with hotpath JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v2_hotpath_json() {
+        let (dir, db_path) = test_db("migrate_v2_hotpath");
+
+        let extra = r#"{
+            "functions_timing": {
+                "description": "wall-clock timing",
+                "data": [
+                    {"name": "parse_header", "calls": 100, "avg": "1.2ms", "total": "120ms", "percent_total": "60%"},
+                    {"name": "parse_body", "calls": 50, "avg": "2.0ms", "total": "100ms", "percent_total": "40%"}
+                ]
+            },
+            "threads": {
+                "rss_bytes": "1048576",
+                "data": [
+                    {"name": "main", "status": "running", "cpu_percent": "95%"}
+                ]
+            }
+        }"#;
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V2_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(V2_INSERT, rusqlite::params![extra, rusqlite::types::Null]).unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate hotpath");
+
+        // Hotpath functions migrated.
+        let count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM hotpath_functions WHERE run_id = 1", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 2, "should have 2 hotpath function rows");
+
+        // Check first function.
+        let (name, calls, section): (String, i64, String) = db.conn.query_row(
+            "SELECT name, calls, section FROM hotpath_functions WHERE run_id = 1 AND ordinal = 0",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(name, "parse_header");
+        assert_eq!(calls, 100);
+        assert_eq!(section, "timing");
+
+        // Thread data migrated.
+        let thread_name: String = db.conn.query_row(
+            "SELECT name FROM hotpath_threads WHERE run_id = 1", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(thread_name, "main");
+
+        // Thread summary kv migrated.
+        let rss: String = db.conn.query_row(
+            "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'threads.rss_bytes'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(rss, "1048576");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v2 -> v3 with metadata JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v2_metadata_json() {
+        let (dir, db_path) = test_db("migrate_v2_meta");
+
+        let metadata = r#"{"compression":"zlib","io_mode":"buffered"}"#;
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V2_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(V2_INSERT, rusqlite::params![
+                rusqlite::types::Null, metadata
+            ]).unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate metadata");
+
+        // Metadata migrated to run_kv with meta. prefix.
+        let compression: String = db.conn.query_row(
+            "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.compression'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(compression, "zlib");
+
+        let io_mode: String = db.conn.query_row(
+            "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.io_mode'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(io_mode, "buffered");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fresh database gets schema version 3
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fresh_db_has_correct_schema_version() {
+        let (dir, db_path) = test_db("fresh_version");
+
+        let db = ResultsDb::open(&db_path).expect("open fresh db");
+
+        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Query: command and variant contains match
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn query_command_contains_match() {
+        let (dir, db_path) = test_db("query_cmd_contains");
+
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        let make_row = |cmd: &str, variant: &str| RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from(cmd),
+            variant: Some(String::from(variant)),
+            input_file: None, input_mb: None,
+            elapsed_ms: 100,
+            peak_rss_mb: None, cargo_features: None,
+            cargo_profile: String::from("release"),
+            kernel: None, cpu_governor: None, avail_memory_mb: None,
+            storage_notes: None, cli_args: None,
+            project: String::from("test"),
+            kv: vec![], distribution: None, hotpath: None,
+        };
+
+        db.insert(&make_row("bench merge", "buffered+zlib")).unwrap();
+        db.insert(&make_row("bench merge", "buffered+none")).unwrap();
+        db.insert(&make_row("bench read", "mmap")).unwrap();
+
+        // "merge" matches "bench merge" rows only.
+        let rows = db.query(&QueryFilter {
+            commit: None,
+            command: Some(String::from("merge")),
+            variant: None,
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 2, "merge should match 2 bench merge rows");
+
+        // "bench" matches all 3 rows.
+        let rows = db.query(&QueryFilter {
+            commit: None,
+            command: Some(String::from("bench")),
+            variant: None,
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 3, "bench should match all rows");
+
+        // "read" matches only bench read.
+        let rows = db.query(&QueryFilter {
+            commit: None,
+            command: Some(String::from("read")),
+            variant: None,
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].command, "bench read");
+
+        // Full exact value still works.
+        let rows = db.query(&QueryFilter {
+            commit: None,
+            command: Some(String::from("bench merge")),
+            variant: None,
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 2);
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    #[test]
+    fn query_variant_contains_match() {
+        let (dir, db_path) = test_db("query_var_contains");
+
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        let make_row = |variant: &str| RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("bench merge"),
+            variant: Some(String::from(variant)),
+            input_file: None, input_mb: None,
+            elapsed_ms: 100,
+            peak_rss_mb: None, cargo_features: None,
+            cargo_profile: String::from("release"),
+            kernel: None, cpu_governor: None, avail_memory_mb: None,
+            storage_notes: None, cli_args: None,
+            project: String::from("test"),
+            kv: vec![], distribution: None, hotpath: None,
+        };
+
+        db.insert(&make_row("buffered+zlib")).unwrap();
+        db.insert(&make_row("buffered+none")).unwrap();
+        db.insert(&make_row("direct+zlib")).unwrap();
+
+        // "zlib" matches buffered+zlib and direct+zlib.
+        let rows = db.query(&QueryFilter {
+            commit: None, command: None,
+            variant: Some(String::from("zlib")),
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 2, "zlib should match 2 rows");
+
+        // "buffered" matches both buffered variants.
+        let rows = db.query(&QueryFilter {
+            commit: None, command: None,
+            variant: Some(String::from("buffered")),
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 2, "buffered should match 2 rows");
+
+        // "none" matches only buffered+none.
+        let rows = db.query(&QueryFilter {
+            commit: None, command: None,
+            variant: Some(String::from("none")),
+            limit: 50,
+        }).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].variant, "buffered+none");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
 }

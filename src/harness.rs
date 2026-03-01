@@ -522,6 +522,7 @@ pub fn run_hotpath_capture(
     captured.check_success(binary)?;
 
     let ms = elapsed_to_ms(&captured.elapsed);
+    let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);
 
     let hotpath = std::fs::read_to_string(&json_file)
         .ok()
@@ -531,7 +532,7 @@ pub fn run_hotpath_capture(
 
     Ok(BenchResult {
         elapsed_ms: ms,
-        kv: Vec::new(),
+        kv,
         distribution: None,
         hotpath,
     })
@@ -607,7 +608,9 @@ fn push_drive_note(parts: &mut Vec<String>, label: &str, value: &Option<String>)
 
 /// Parse stderr bytes for `key=value` lines. Extracts `elapsed_ms` for timing,
 /// puts all other kv pairs into `BenchResult.kv`.
-fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
+/// Parse `key=value` lines from stderr, returning `(elapsed_ms, kv_pairs)`.
+/// `elapsed_ms` is `None` when no `elapsed_ms`/`total_ms` line is found.
+fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
     let text = String::from_utf8_lossy(stderr);
     let mut elapsed_ms: Option<i64> = None;
     let mut kv = Vec::new();
@@ -617,9 +620,9 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
             let key = key.trim();
             let value = value.trim();
             if key == "elapsed_ms" || key == "total_ms" {
-                elapsed_ms = Some(value.parse().map_err(|_| {
-                    DevError::Config(format!("invalid elapsed_ms value: {value}"))
-                })?);
+                if let Ok(ms) = value.parse::<i64>() {
+                    elapsed_ms = Some(ms);
+                }
             } else if let Ok(n) = value.parse::<i64>() {
                 kv.push(KvPair::int(key, n));
             } else if let Ok(f) = value.parse::<f64>() {
@@ -634,7 +637,14 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
         }
     }
 
+    (elapsed_ms, kv)
+}
+
+fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
+    let (elapsed_ms, kv) = parse_kv_lines(stderr);
+
     let elapsed_ms = elapsed_ms.ok_or_else(|| {
+        let text = String::from_utf8_lossy(stderr);
         let preview: String = text.chars().take(500).collect();
         DevError::Config(format!(
             "subprocess stderr missing elapsed_ms=NNN. stderr was:\n{preview}"
@@ -804,8 +814,8 @@ mod tests {
             Err(e) => {
                 let msg = format!("{e}");
                 assert!(
-                    msg.contains("invalid elapsed_ms value"),
-                    "should report invalid value, got: {msg}"
+                    msg.contains("missing elapsed_ms"),
+                    "should report missing elapsed_ms for unparseable value, got: {msg}"
                 );
             }
             Ok(_) => panic!("expected error for invalid elapsed_ms value, got Ok"),
