@@ -8,28 +8,21 @@ use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
+use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
 use crate::resolve::{
     resolve_bbox, resolve_osc_path, resolve_pbf_path, resolve_pbf_with_size, resolve_raw_pbf_path,
 };
 use crate::tools;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_commands(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
+    req: &BenchRequest,
     command: &str,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    features: &[String],
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench commands")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench commands")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
     let commands = super::bench_commands::parse_command(command)?;
-    let osc_path = resolve_osc_path(None, dataset, &ctx.paths, project_root).ok();
+    let osc_path = resolve_osc_path(None, req.dataset, &ctx.paths, req.project_root).ok();
     super::bench_commands::run(
         &ctx.harness,
         &ctx.binary,
@@ -37,146 +30,92 @@ pub(crate) fn bench_commands(
         osc_path.as_deref(),
         Some(&ctx.paths.scratch_dir),
         file_mb,
-        runs,
+        req.runs,
         &commands,
-        project_root,
+        req.project_root,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_extract(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
     bbox: Option<&str>,
     strategies_str: &str,
-    features: &[String],
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench extract")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let bbox = resolve_bbox(bbox, dataset, &ctx.paths)?;
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench extract")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let bbox = resolve_bbox(bbox, req.dataset, &ctx.paths)?;
     let strategies = super::bench_extract::parse_strategies(strategies_str)?;
-    super::bench_extract::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &bbox, &strategies, project_root)
+    super::bench_extract::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &bbox, &strategies, req.project_root)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_allocator(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    _features: &[String],
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench allocator")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let effective = build_root.unwrap_or(project_root);
-    super::bench_allocator::run(&ctx.harness, &pbf_path, file_mb, runs, effective)
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench allocator")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let effective = req.build_root.unwrap_or(req.project_root);
+    super::bench_allocator::run(&ctx.harness, &pbf_path, file_mb, req.runs, effective)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_blob_filter(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf_indexed: Option<&str>,
+    req: &BenchRequest,
     pbf_raw: Option<&str>,
-    runs: usize,
-    features: &[String],
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench blob-filter")?;
-    let (indexed_path, file_mb) = resolve_pbf_with_size(pbf_indexed, dataset, &ctx.paths, project_root)?;
-    let raw_path = resolve_raw_pbf_path(pbf_raw, dataset, &ctx.paths)?;
-    super::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, runs, project_root)
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench blob-filter")?;
+    let (indexed_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let raw_path = resolve_raw_pbf_path(pbf_raw, req.dataset, &ctx.paths)?;
+    super::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, req.runs, req.project_root)
 }
 
 pub(crate) fn bench_planetiler(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench planetiler")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    super::bench_planetiler::run(&ctx.harness, &pbf_path, file_mb, runs, &ctx.paths.data_dir, project_root)
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench planetiler")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    super::bench_planetiler::run(&ctx.harness, &pbf_path, file_mb, req.runs, &ctx.paths.data_dir, req.project_root)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_read(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
     modes_str: &str,
-    features: &[String],
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench read")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench read")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
-    super::bench_read::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &modes, project_root)
+    super::bench_read::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &modes, req.project_root)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_write(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
     compression_str: &str,
-    features: &[String],
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench write")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench write")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, true)?;
-    super::bench_write::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &compressions, project_root)
+    super::bench_write::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &compressions, req.project_root)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_merge(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
+    req: &BenchRequest,
     osc: Option<&str>,
-    runs: usize,
     uring: bool,
     compression_str: &str,
-    features: &[String],
 ) -> Result<(), DevError> {
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
 
-    let mut all_features: Vec<&str> = features.iter().map(String::as_str).collect();
+    let mut all_features: Vec<&str> = req.features.iter().map(String::as_str).collect();
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &all_features, true, "bench merge")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &all_features, true, "bench merge")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let osc_path = resolve_osc_path(osc, req.dataset, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, false)?;
     super::bench_merge::run(
         &ctx.harness,
@@ -184,29 +123,21 @@ pub(crate) fn bench_merge(
         &pbf_path,
         &osc_path,
         file_mb,
-        runs,
+        req.runs,
         &compressions,
         uring,
         &ctx.paths.scratch_dir,
-        project_root,
+        req.project_root,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_all(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    _features: &[String],
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench all")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let effective = build_root.unwrap_or(project_root);
-    super::bench_all::run(&ctx.harness, &ctx.paths, effective, &pbf_path, file_mb, runs, dataset)
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench all")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let effective = req.build_root.unwrap_or(req.project_root);
+    super::bench_all::run(&ctx.harness, &ctx.paths, effective, &pbf_path, file_mb, req.runs, req.dataset)
 }
 
 pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand) -> Result<(), DevError> {
@@ -307,30 +238,20 @@ pub(crate) fn download(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn hotpath(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
+    req: &HotpathRequest,
     osc: Option<&str>,
-    runs: usize,
-    all_features: &[&str],
-    no_mem_check: bool,
-    alloc: bool,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), all_features, true, "hotpath")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let risk = if alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
-    oom::check_memory(file_mb, &risk, no_mem_check)?;
-    let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), req.all_features, true, "hotpath")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
+    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
+    let osc_path = resolve_osc_path(osc, req.dataset, &ctx.paths, req.project_root)?;
 
     // Try to get raw PBF path (optional).
     let pbf_raw_path = ctx.paths
         .datasets
-        .get(dataset)
+        .get(req.dataset)
         .and_then(|ds| ds.pbf_raw.as_ref())
         .map(|raw_file| ctx.paths.data_dir.join(raw_file))
         .filter(|p| p.exists());
@@ -342,34 +263,26 @@ pub(crate) fn hotpath(
         pbf_raw_path.as_deref(),
         &osc_path,
         file_mb,
-        runs,
-        alloc,
+        req.runs,
+        req.alloc,
         &ctx.paths.scratch_dir,
-        project_root,
+        req.project_root,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn profile(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
+    req: &ProfileRequest,
     osc: Option<&str>,
-    features: &[String],
-    no_mem_check: bool,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, no_mem_check)?;
-    let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
+    let osc_path = resolve_osc_path(osc, req.dataset, &ctx.paths, req.project_root)?;
 
     // Try to get raw PBF path (optional).
     let pbf_raw_path = ctx.paths
         .datasets
-        .get(dataset)
+        .get(req.dataset)
         .and_then(|ds| ds.pbf_raw.as_ref())
         .map(|raw_file| ctx.paths.data_dir.join(raw_file))
         .filter(|p| p.exists());
@@ -379,10 +292,10 @@ pub(crate) fn profile(
         &pbf_path,
         pbf_raw_path.as_deref(),
         &osc_path,
-        dataset,
+        req.dataset,
         file_mb,
         &ctx.paths.scratch_dir,
-        features,
-        build_root.unwrap_or(project_root),
+        req.features,
+        req.build_root.unwrap_or(req.project_root),
     )
 }

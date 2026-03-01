@@ -8,6 +8,7 @@ use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
+use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
 use crate::resolve::resolve_pbf_with_size;
 
 pub(crate) fn run_elivagar(
@@ -121,32 +122,24 @@ pub(crate) fn bench_pmtiles(
     super::bench_pmtiles::run(&harness, effective, tiles, runs)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_self(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
     skip_to: Option<&str>,
     no_ocean: bool,
     compression_level: Option<u32>,
-    features: &[String],
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &feat_refs, true, "bench self")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, &feat_refs, true, "bench self")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
     super::bench_self::run(
         &ctx.harness,
         &ctx.binary,
         &pbf_path,
         file_mb,
-        runs,
+        req.runs,
         &ctx.paths.data_dir,
         &ctx.paths.scratch_dir,
-        project_root,
+        req.project_root,
         skip_to,
         no_ocean,
         compression_level,
@@ -154,70 +147,50 @@ pub(crate) fn bench_self(
 }
 
 pub(crate) fn bench_planetiler(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench planetiler")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench planetiler")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
     super::bench_planetiler::run(
         &ctx.harness,
         &pbf_path,
         file_mb,
-        runs,
+        req.runs,
         &ctx.paths.data_dir,
         &ctx.paths.scratch_dir,
-        project_root,
+        req.project_root,
     )
 }
 
 pub(crate) fn bench_tilemaker(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench tilemaker")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench tilemaker")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
     super::bench_tilemaker::run(
         &ctx.harness,
         &pbf_path,
         file_mb,
-        runs,
+        req.runs,
         &ctx.paths.data_dir,
         &ctx.paths.scratch_dir,
-        project_root,
+        req.project_root,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_all(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    _features: &[String],
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench all")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let effective = build_root.unwrap_or(project_root);
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench all")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let effective = req.build_root.unwrap_or(req.project_root);
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,
         effective,
         &pbf_path,
         file_mb,
-        runs,
+        req.runs,
         &ctx.paths.data_dir,
         &ctx.paths.scratch_dir,
     )
@@ -242,33 +215,23 @@ pub(crate) fn download_ocean(dev_config: &config::DevConfig, project: Project, p
     super::download_ocean::run(&paths.data_dir)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn hotpath(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    all_features: &[&str],
+    req: &HotpathRequest,
     variant: Option<&str>,
     tiles: usize,
     nodes: usize,
-    no_mem_check: bool,
-    alloc: bool,
     no_ocean: bool,
 ) -> Result<(), DevError> {
     // Micro-benchmark variants: build the example with hotpath and run it.
     if let Some(v) = variant {
         return match v {
             "pmtiles" => {
-                let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "hotpath pmtiles")?;
-                super::bench_pmtiles::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, build_root.unwrap_or(project_root), tiles, runs, alloc)
+                let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "hotpath pmtiles")?;
+                super::bench_pmtiles::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, req.build_root.unwrap_or(req.project_root), tiles, req.runs, req.alloc)
             }
             "node-store" => {
-                let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "hotpath node-store")?;
-                super::bench_node_store::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, build_root.unwrap_or(project_root), nodes, runs, alloc)
+                let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "hotpath node-store")?;
+                super::bench_node_store::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, req.build_root.unwrap_or(req.project_root), nodes, req.runs, req.alloc)
             }
             other => Err(DevError::Config(format!(
                 "unknown hotpath variant '{other}' for elivagar (expected: pmtiles, node-store)"
@@ -276,10 +239,10 @@ pub(crate) fn hotpath(
         };
     }
 
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, all_features, true, "hotpath")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let risk = if alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
-    oom::check_memory(file_mb, &risk, no_mem_check)?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, req.all_features, true, "hotpath")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
+    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
     super::hotpath::run(
         &ctx.harness,
         &ctx.binary,
@@ -287,32 +250,24 @@ pub(crate) fn hotpath(
         &ctx.paths.data_dir,
         &ctx.paths.scratch_dir,
         file_mb,
-        runs,
-        alloc,
+        req.runs,
+        req.alloc,
         no_ocean,
-        project_root,
+        req.project_root,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn profile(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
+    req: &ProfileRequest,
     tool: Option<&str>,
     no_ocean: bool,
-    features: &[String],
-    no_mem_check: bool,
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, no_mem_check)?;
-    let effective = build_root.unwrap_or(project_root);
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
+    let effective = req.build_root.unwrap_or(req.project_root);
     super::profile::run(
         &ctx.harness,
         &pbf_path,
@@ -321,7 +276,7 @@ pub(crate) fn profile(
         &ctx.paths.scratch_dir,
         tool_name,
         no_ocean,
-        features,
+        req.features,
         effective,
     )
 }

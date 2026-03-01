@@ -8,6 +8,7 @@ use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
+use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
 use crate::resolve::{file_size_mb, resolve_nidhogg_data_dir, resolve_pbf_path, resolve_pbf_with_size};
 
 fn resolve_port(dev_config: &config::DevConfig) -> u16 {
@@ -102,45 +103,30 @@ pub(crate) fn geocode(dev_config: &config::DevConfig, project: Project, _project
     super::geocode::run(port, term)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_api(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    runs: usize,
+    req: &BenchRequest,
     query: Option<&str>,
-    _features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench api")?;
-    let port = resolve_port(dev_config);
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench api")?;
+    let port = resolve_port(req.dev_config);
 
     // Resolve dataset PBF for metadata recording.
-    let pbf_path = resolve_pbf_path(None, dataset, &ctx.paths, project_root).ok();
+    let pbf_path = resolve_pbf_path(None, req.dataset, &ctx.paths, req.project_root).ok();
     let input_file = pbf_path.as_ref()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str());
     let input_mb = pbf_path.as_ref().map(|p| file_size_mb(p)).transpose()?;
 
-    super::bench_api::run(&ctx.harness, port, runs, query, input_file, input_mb)
+    super::bench_api::run(&ctx.harness, port, req.runs, query, input_file, input_mb)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench_ingest(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    features: &[String],
+    req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &feat_refs, true, "bench ingest")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    super::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &ctx.paths.scratch_dir, project_root)
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &feat_refs, true, "bench ingest")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    super::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &ctx.paths.scratch_dir, req.project_root)
 }
 
 pub(crate) fn verify_batch(dev_config: &config::DevConfig, _project: Project, _project_root: &Path) -> Result<(), DevError> {
@@ -170,56 +156,38 @@ pub(crate) fn verify_readonly(dev_config: &config::DevConfig, _project: Project,
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn hotpath(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    runs: usize,
-    all_features: &[&str],
-    no_mem_check: bool,
-    alloc: bool,
+    req: &HotpathRequest,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), all_features, true, "hotpath")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    let risk = if alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
-    oom::check_memory(file_mb, &risk, no_mem_check)?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), req.all_features, true, "hotpath")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
+    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
     super::hotpath::run(
         &ctx.harness,
         &ctx.binary,
         &pbf_path,
         &ctx.paths.scratch_dir,
         file_mb,
-        runs,
-        alloc,
-        project_root,
+        req.runs,
+        req.alloc,
+        req.project_root,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn profile(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
+    req: &ProfileRequest,
     tool: Option<&str>,
-    features: &[String],
-    no_mem_check: bool,
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, no_mem_check)?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
 
     let data_dir = ctx.paths
         .datasets
-        .get(dataset)
+        .get(req.dataset)
         .and_then(|ds| ds.data_dir.as_ref())
         .map(|d| ctx.paths.data_dir.join(d))
         .unwrap_or_else(|| ctx.paths.data_dir.clone());
@@ -231,7 +199,7 @@ pub(crate) fn profile(
         &data_dir,
         &ctx.paths.scratch_dir,
         tool_name,
-        features,
-        build_root.unwrap_or(project_root),
+        req.features,
+        req.build_root.unwrap_or(req.project_root),
     )
 }

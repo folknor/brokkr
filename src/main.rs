@@ -18,6 +18,7 @@ mod nidhogg;
 mod preflight;
 mod profiler;
 mod project;
+mod request;
 mod resolve;
 mod tools;
 mod worktree;
@@ -31,6 +32,7 @@ use cli::{BenchCommand, Cli, Command, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
+use request::{BenchRequest, HotpathRequest, ProfileRequest, ResultsQuery};
 use resolve::results_db_path;
 
 fn main() {
@@ -68,7 +70,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
             limit,
             top,
-        } => cmd_results(&project_root, query, commit, compare, compare_last, command, variant, limit, top),
+        } => {
+            let rq = ResultsQuery { query, commit, compare, compare_last, command, variant, limit, top };
+            cmd_results(&project_root, &rq)
+        }
         Command::Clean => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             cmd_clean(&dev_config, project, &project_root)
@@ -105,7 +110,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 preflight::run_preflight(&preflight::uring_checks())?;
             }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs, &features, variant.as_deref(), tiles, nodes, no_mem_check)
+                let feature = harness::hotpath_feature(alloc);
+                let mut all_features: Vec<&str> = vec![feature];
+                all_features.extend(features.iter().map(String::as_str));
+                let req = HotpathRequest {
+                    dev_config: &dev_config, project, project_root: &project_root, build_root,
+                    dataset: &dataset, pbf: pbf.as_deref(), runs,
+                    all_features: &all_features, alloc, no_mem_check,
+                };
+                cmd_hotpath(&req, osc.as_deref(), no_ocean, variant.as_deref(), tiles, nodes)
             })
         }
         Command::Profile { verbose, commit, features, dataset, pbf, osc, tool, no_ocean, no_mem_check } => {
@@ -114,7 +127,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 preflight::run_preflight(&preflight::uring_checks())?;
             }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_profile(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), tool.as_deref(), no_ocean, &features, no_mem_check)
+                let req = ProfileRequest {
+                    dev_config: &dev_config, project, project_root: &project_root, build_root,
+                    dataset: &dataset, pbf: pbf.as_deref(), features: &features, no_mem_check,
+                };
+                cmd_profile(&req, osc.as_deref(), tool.as_deref(), no_ocean)
             })
         }
         Command::Download { region, osc_url } => {
@@ -257,18 +274,7 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_results(
-    project_root: &Path,
-    query: Option<String>,
-    commit: Option<String>,
-    compare: Option<Vec<String>>,
-    compare_last: bool,
-    command: Option<String>,
-    variant: Option<String>,
-    limit: usize,
-    top: usize,
-) -> Result<(), DevError> {
+fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
 
     if !db_path.exists() {
@@ -278,8 +284,8 @@ fn cmd_results(
 
     let results_db = db::ResultsDb::open(&db_path)?;
 
-    if let Some(uuid_prefix) = query {
-        let rows = results_db.query_by_uuid(&uuid_prefix)?;
+    if let Some(ref uuid_prefix) = q.query {
+        let rows = results_db.query_by_uuid(uuid_prefix)?;
         if rows.is_empty() {
             output::result_msg("no matching results");
         } else {
@@ -292,22 +298,22 @@ fn cmd_results(
                     println!("\n{details}");
                 }
                 if let Some(ref hotpath) = row.hotpath
-                    && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, top)
+                    && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, q.top)
                 {
                     println!("\n{report}");
                 }
             }
         }
-    } else if let Some(commits) = compare {
+    } else if let Some(ref commits) = q.compare {
         let commit_a = commits.first().map_or("", String::as_str);
         let commit_b = commits.get(1).map_or("", String::as_str);
-        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, command.as_deref(), variant.as_deref())?;
-        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, top);
+        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, q.command.as_deref(), q.variant.as_deref())?;
+        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top);
         println!("{table}");
-    } else if compare_last {
-        match results_db.query_compare_last(command.as_deref(), variant.as_deref())? {
+    } else if q.compare_last {
+        match results_db.query_compare_last(q.command.as_deref(), q.variant.as_deref())? {
             Some((commit_a, rows_a, commit_b, rows_b)) => {
-                let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b, top);
+                let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b, q.top);
                 println!("{table}");
             }
             None => {
@@ -316,10 +322,10 @@ fn cmd_results(
         }
     } else {
         let filter = db::QueryFilter {
-            commit,
-            command,
-            variant,
-            limit,
+            commit: q.commit.clone(),
+            command: q.command.clone(),
+            variant: q.variant.clone(),
+            limit: q.limit,
         };
         let rows = results_db.query(&filter)?;
         if rows.is_empty() {
@@ -415,45 +421,55 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         // ----- pbfhogg bench variants -----
         BenchCommand::Commands { command, dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench commands")?;
-            pbfhogg::cmd::bench_commands(dev_config, project, project_root, build_root, &command, &dataset, pbf.as_deref(), runs, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_commands(&req, &command)
         }
         BenchCommand::Extract { dataset, pbf, runs, bbox, strategies } => {
             project::require(project, Project::Pbfhogg, "bench extract")?;
-            pbfhogg::cmd::bench_extract(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, bbox.as_deref(), &strategies, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_extract(&req, bbox.as_deref(), &strategies)
         }
         BenchCommand::Allocator { dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench allocator")?;
-            pbfhogg::cmd::bench_allocator(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_allocator(&req)
         }
         BenchCommand::BlobFilter { dataset, pbf_indexed, pbf_raw, runs } => {
             project::require(project, Project::Pbfhogg, "bench blob-filter")?;
-            pbfhogg::cmd::bench_blob_filter(dev_config, project, project_root, build_root, &dataset, pbf_indexed.as_deref(), pbf_raw.as_deref(), runs, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf_indexed.as_deref(), runs, features };
+            pbfhogg::cmd::bench_blob_filter(&req, pbf_raw.as_deref())
         }
         BenchCommand::Planetiler { dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench planetiler")?;
-            pbfhogg::cmd::bench_planetiler(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_planetiler(&req)
         }
         BenchCommand::Read { dataset, pbf, runs, modes } => {
             project::require(project, Project::Pbfhogg, "bench read")?;
-            pbfhogg::cmd::bench_read(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, &modes, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_read(&req, &modes)
         }
         BenchCommand::Write { dataset, pbf, runs, compression } => {
             project::require(project, Project::Pbfhogg, "bench write")?;
-            pbfhogg::cmd::bench_write(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, &compression, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_write(&req, &compression)
         }
         BenchCommand::Merge { dataset, pbf, osc, runs, uring, compression } => {
             project::require(project, Project::Pbfhogg, "bench merge")?;
-            pbfhogg::cmd::bench_merge(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), runs, uring, &compression, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_merge(&req, osc.as_deref(), uring, &compression)
         }
         BenchCommand::All { dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench all")?;
-            pbfhogg::cmd::bench_all(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            pbfhogg::cmd::bench_all(&req)
         }
 
         // ----- elivagar bench variants -----
         BenchCommand::ElivSelf { dataset, pbf, runs, skip_to, no_ocean, compression_level } => {
             project::require(project, Project::Elivagar, "bench self")?;
-            elivagar::cmd::bench_self(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, skip_to.as_deref(), no_ocean, compression_level, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            elivagar::cmd::bench_self(&req, skip_to.as_deref(), no_ocean, compression_level)
         }
         BenchCommand::NodeStore { nodes, runs } => {
             project::require(project, Project::Elivagar, "bench node-store")?;
@@ -465,25 +481,30 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         }
         BenchCommand::ElivPlanetiler { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-planetiler")?;
-            elivagar::cmd::bench_planetiler(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            elivagar::cmd::bench_planetiler(&req)
         }
         BenchCommand::Tilemaker { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench tilemaker")?;
-            elivagar::cmd::bench_tilemaker(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            elivagar::cmd::bench_tilemaker(&req)
         }
         BenchCommand::ElivAll { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-all")?;
-            elivagar::cmd::bench_all(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            elivagar::cmd::bench_all(&req)
         }
 
         // ----- nidhogg bench variants -----
         BenchCommand::Api { dataset, runs, query } => {
             project::require(project, Project::Nidhogg, "bench api")?;
-            nidhogg::cmd::bench_api(dev_config, project, project_root, build_root, &dataset, runs, query.as_deref(), features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: None, runs, features };
+            nidhogg::cmd::bench_api(&req, query.as_deref())
         }
         BenchCommand::NidIngest { dataset, pbf, runs } => {
             project::require(project, Project::Nidhogg, "bench ingest")?;
-            nidhogg::cmd::bench_ingest(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, pbf: pbf.as_deref(), runs, features };
+            nidhogg::cmd::bench_ingest(&req)
         }
     }
 }
@@ -519,64 +540,30 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
 // Hotpath / Profile dispatch
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_hotpath(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    osc: Option<&str>,
-    alloc: bool,
-    no_ocean: bool,
-    runs: usize,
-    features: &[String],
-    variant: Option<&str>,
-    tiles: usize,
-    nodes: usize,
-    no_mem_check: bool,
-) -> Result<(), DevError> {
-    if variant.is_some() && project != Project::Elivagar {
+fn cmd_hotpath(req: &HotpathRequest, osc: Option<&str>, no_ocean: bool, variant: Option<&str>, tiles: usize, nodes: usize) -> Result<(), DevError> {
+    if variant.is_some() && req.project != Project::Elivagar {
         return Err(DevError::Config(
             "hotpath variants (pmtiles, node-store) are only available for elivagar".into(),
         ));
     }
 
-    let feature = harness::hotpath_feature(alloc);
-    let mut all_features: Vec<&str> = vec![feature];
-    all_features.extend(features.iter().map(String::as_str));
-
-    match project {
-        Project::Elivagar => elivagar::cmd::hotpath(dev_config, project, project_root, build_root, dataset, pbf, runs, &all_features, variant, tiles, nodes, no_mem_check, alloc, no_ocean),
-        Project::Nidhogg => nidhogg::cmd::hotpath(dev_config, project, project_root, build_root, dataset, pbf, runs, &all_features, no_mem_check, alloc),
+    match req.project {
+        Project::Elivagar => elivagar::cmd::hotpath(req, variant, tiles, nodes, no_ocean),
+        Project::Nidhogg => nidhogg::cmd::hotpath(req),
         _ => {
-            project::require(project, Project::Pbfhogg, "hotpath")?;
-            pbfhogg::cmd::hotpath(dev_config, project, project_root, build_root, dataset, pbf, osc, runs, &all_features, no_mem_check, alloc)
+            project::require(req.project, Project::Pbfhogg, "hotpath")?;
+            pbfhogg::cmd::hotpath(req, osc)
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_profile(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    dataset: &str,
-    pbf: Option<&str>,
-    osc: Option<&str>,
-    tool: Option<&str>,
-    no_ocean: bool,
-    features: &[String],
-    no_mem_check: bool,
-) -> Result<(), DevError> {
-    match project {
-        Project::Elivagar => elivagar::cmd::profile(dev_config, project, project_root, build_root, dataset, pbf, tool, no_ocean, features, no_mem_check),
-        Project::Nidhogg => nidhogg::cmd::profile(dev_config, project, project_root, build_root, dataset, pbf, tool, features, no_mem_check),
+fn cmd_profile(req: &ProfileRequest, osc: Option<&str>, tool: Option<&str>, no_ocean: bool) -> Result<(), DevError> {
+    match req.project {
+        Project::Elivagar => elivagar::cmd::profile(req, tool, no_ocean),
+        Project::Nidhogg => nidhogg::cmd::profile(req, tool),
         _ => {
-            project::require(project, Project::Pbfhogg, "profile")?;
-            pbfhogg::cmd::profile(dev_config, project, project_root, build_root, dataset, pbf, osc, features, no_mem_check)
+            project::require(req.project, Project::Pbfhogg, "profile")?;
+            pbfhogg::cmd::profile(req, osc)
         }
     }
 }
