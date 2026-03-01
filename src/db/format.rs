@@ -305,6 +305,12 @@ struct CompareWidths {
     rss_a: usize,
     rss_b: usize,
     rss_change: usize,
+    has_rewrite: bool,
+    rewrite_a: usize,
+    rewrite_b: usize,
+    has_blobs: bool,
+    blobs_a: usize,
+    blobs_b: usize,
 }
 
 struct ComparisonPair {
@@ -317,16 +323,42 @@ struct ComparisonPair {
     b_output_bytes: Option<i64>,
     a_rss_mb: Option<f64>,
     b_rss_mb: Option<f64>,
+    a_rewrite_pct: Option<f64>,
+    b_rewrite_pct: Option<f64>,
+    a_blobs: Option<String>,
+    b_blobs: Option<String>,
     /// Pre-formatted input string for display.
     input_display: String,
 }
 
-/// Find output_bytes in a StoredRow's kv pairs.
-fn find_output_bytes(kv: &[KvPair]) -> Option<i64> {
-    kv.iter().find(|p| p.key == "output_bytes").and_then(|p| match &p.value {
+/// Find an integer KV pair by key name.
+fn find_kv_int(kv: &[KvPair], key: &str) -> Option<i64> {
+    kv.iter().find(|p| p.key == key).and_then(|p| match &p.value {
         KvValue::Int(v) => Some(*v),
         _ => None,
     })
+}
+
+/// Find output_bytes in a StoredRow's kv pairs.
+fn find_output_bytes(kv: &[KvPair]) -> Option<i64> {
+    find_kv_int(kv, "output_bytes")
+}
+
+/// Compute rewrite ratio percentage from bytes_passthrough and bytes_rewritten KV pairs.
+fn compute_rewrite_pct(kv: &[KvPair]) -> Option<f64> {
+    let pass = find_kv_int(kv, "bytes_passthrough")?;
+    let rw = find_kv_int(kv, "bytes_rewritten")?;
+    let total = pass + rw;
+    if total == 0 { return None; }
+    #[allow(clippy::cast_precision_loss)]
+    Some(rw as f64 / total as f64 * 100.0)
+}
+
+/// Format blob passthrough/rewritten counts from KV pairs.
+fn format_blob_counts(kv: &[KvPair]) -> Option<String> {
+    let pass = find_kv_int(kv, "blobs_passthrough")?;
+    let rw = find_kv_int(kv, "blobs_rewritten")?;
+    Some(format!("{pass}pt/{rw}rw"))
 }
 
 fn build_comparison_pairs(
@@ -340,6 +372,8 @@ fn build_comparison_pairs(
         hotpath: Option<HotpathData>,
         output_bytes: Option<i64>,
         peak_rss_mb: Option<f64>,
+        rewrite_pct: Option<f64>,
+        blobs: Option<String>,
         input_display: String,
     }
 
@@ -356,6 +390,8 @@ fn build_comparison_pairs(
                 hotpath: take_hotpath_for_compare(row),
                 output_bytes: find_output_bytes(&row.kv),
                 peak_rss_mb: row.peak_rss_mb,
+                rewrite_pct: compute_rewrite_pct(&row.kv),
+                blobs: format_blob_counts(&row.kv),
                 input_display: format_input(&row.input_file, row.input_mb),
             });
         }
@@ -371,6 +407,8 @@ fn build_comparison_pairs(
                 hotpath: take_hotpath_for_compare(row),
                 output_bytes: find_output_bytes(&row.kv),
                 peak_rss_mb: row.peak_rss_mb,
+                rewrite_pct: compute_rewrite_pct(&row.kv),
+                blobs: format_blob_counts(&row.kv),
                 input_display: format_input(&row.input_file, row.input_mb),
             });
         }
@@ -387,6 +425,10 @@ fn build_comparison_pairs(
             let b_output_bytes = b.as_ref().and_then(|r| r.output_bytes);
             let a_rss_mb = a.as_ref().and_then(|r| r.peak_rss_mb);
             let b_rss_mb = b.as_ref().and_then(|r| r.peak_rss_mb);
+            let a_rewrite_pct = a.as_ref().and_then(|r| r.rewrite_pct);
+            let b_rewrite_pct = b.as_ref().and_then(|r| r.rewrite_pct);
+            let a_blobs = a.as_ref().and_then(|r| r.blobs.clone());
+            let b_blobs = b.as_ref().and_then(|r| r.blobs.clone());
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
@@ -397,6 +439,10 @@ fn build_comparison_pairs(
                 b_output_bytes,
                 a_rss_mb,
                 b_rss_mb,
+                a_rewrite_pct,
+                b_rewrite_pct,
+                a_blobs,
+                b_blobs,
                 input_display,
             }
         })
@@ -466,6 +512,8 @@ fn compute_compare_widths(
 ) -> CompareWidths {
     let has_output = pairs.iter().any(|p| p.a_output_bytes.is_some() || p.b_output_bytes.is_some());
     let has_rss = pairs.iter().any(|p| p.a_rss_mb.is_some() || p.b_rss_mb.is_some());
+    let has_rewrite = pairs.iter().any(|p| p.a_rewrite_pct.is_some() || p.b_rewrite_pct.is_some());
+    let has_blobs = pairs.iter().any(|p| p.a_blobs.is_some() || p.b_blobs.is_some());
     let mut w = CompareWidths {
         command: 7,
         variant: 7,
@@ -481,6 +529,12 @@ fn compute_compare_widths(
         rss_a: if has_rss { "rss_a".len() } else { 0 },
         rss_b: if has_rss { "rss_b".len() } else { 0 },
         rss_change: if has_rss { "rss_chg".len() } else { 0 },
+        has_rewrite,
+        rewrite_a: if has_rewrite { "rewrite_a".len() } else { 0 },
+        rewrite_b: if has_rewrite { "rewrite_b".len() } else { 0 },
+        has_blobs,
+        blobs_a: if has_blobs { "blobs_a".len() } else { 0 },
+        blobs_b: if has_blobs { "blobs_b".len() } else { 0 },
     };
     for pair in pairs {
         let (cmd, var, _) = split_pair_key(&pair.key);
@@ -499,6 +553,14 @@ fn compute_compare_widths(
             w.rss_a = w.rss_a.max(format_rss_or_dash(pair.a_rss_mb).len());
             w.rss_b = w.rss_b.max(format_rss_or_dash(pair.b_rss_mb).len());
             w.rss_change = w.rss_change.max(format_change_rss(pair.a_rss_mb, pair.b_rss_mb).len());
+        }
+        if has_rewrite {
+            w.rewrite_a = w.rewrite_a.max(format_pct_or_dash(pair.a_rewrite_pct).len());
+            w.rewrite_b = w.rewrite_b.max(format_pct_or_dash(pair.b_rewrite_pct).len());
+        }
+        if has_blobs {
+            w.blobs_a = w.blobs_a.max(format_opt_str_or_dash(&pair.a_blobs).len());
+            w.blobs_b = w.blobs_b.max(format_opt_str_or_dash(&pair.b_blobs).len());
         }
     }
     w
@@ -551,6 +613,28 @@ fn append_compare_header(
             ra_w = w.rss_a,
             rb_w = w.rss_b,
             rc_w = w.rss_change,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_rewrite {
+        write!(
+            out,
+            "  {:>rwa_w$}  {:>rwb_w$}",
+            "rewrite_a",
+            "rewrite_b",
+            rwa_w = w.rewrite_a,
+            rwb_w = w.rewrite_b,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_blobs {
+        write!(
+            out,
+            "  {:>ba_w$}  {:>bb_w$}",
+            "blobs_a",
+            "blobs_b",
+            ba_w = w.blobs_a,
+            bb_w = w.blobs_b,
         )
         .expect("write to String is infallible");
     }
@@ -612,6 +696,32 @@ fn append_compare_row(
             ra_w = w.rss_a,
             rb_w = w.rss_b,
             rc_w = w.rss_change,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_rewrite {
+        let rwa = format_pct_or_dash(pair.a_rewrite_pct);
+        let rwb = format_pct_or_dash(pair.b_rewrite_pct);
+        write!(
+            out,
+            "  {:>rwa_w$}  {:>rwb_w$}",
+            rwa,
+            rwb,
+            rwa_w = w.rewrite_a,
+            rwb_w = w.rewrite_b,
+        )
+        .expect("write to String is infallible");
+    }
+    if w.has_blobs {
+        let ba = format_opt_str_or_dash(&pair.a_blobs);
+        let bb = format_opt_str_or_dash(&pair.b_blobs);
+        write!(
+            out,
+            "  {:>ba_w$}  {:>bb_w$}",
+            ba,
+            bb,
+            ba_w = w.blobs_a,
+            bb_w = w.blobs_b,
         )
         .expect("write to String is infallible");
     }
@@ -683,6 +793,20 @@ fn format_change_rss(a: Option<f64>, b: Option<f64>) -> String {
             }
         }
         _ => String::from("--"),
+    }
+}
+
+fn format_pct_or_dash(pct: Option<f64>) -> String {
+    match pct {
+        Some(v) => format!("{v:.1}%"),
+        None => String::from("--"),
+    }
+}
+
+fn format_opt_str_or_dash(s: &Option<String>) -> String {
+    match s {
+        Some(v) => v.clone(),
+        None => String::from("--"),
     }
 }
 
@@ -1031,5 +1155,126 @@ mod tests {
     fn format_elapsed_negative() {
         // Shouldn't happen in practice, but verify it doesn't panic.
         assert_eq!(format_elapsed(-5), "-5 ms");
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_rewrite_pct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_rewrite_pct_both_present() {
+        let kv = vec![
+            KvPair::int("bytes_passthrough", 920),
+            KvPair::int("bytes_rewritten", 80),
+        ];
+        let pct = compute_rewrite_pct(&kv).unwrap();
+        assert!((pct - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn compute_rewrite_pct_missing_key() {
+        let kv = vec![KvPair::int("bytes_passthrough", 920)];
+        assert!(compute_rewrite_pct(&kv).is_none());
+    }
+
+    #[test]
+    fn compute_rewrite_pct_zero_total() {
+        let kv = vec![
+            KvPair::int("bytes_passthrough", 0),
+            KvPair::int("bytes_rewritten", 0),
+        ];
+        assert!(compute_rewrite_pct(&kv).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // format_blob_counts
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_blob_counts_both_present() {
+        let kv = vec![
+            KvPair::int("blobs_passthrough", 1204),
+            KvPair::int("blobs_rewritten", 98),
+        ];
+        assert_eq!(format_blob_counts(&kv).unwrap(), "1204pt/98rw");
+    }
+
+    #[test]
+    fn format_blob_counts_missing_key() {
+        let kv = vec![KvPair::int("blobs_passthrough", 100)];
+        assert!(format_blob_counts(&kv).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // compare with merge-specific columns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn comparison_pairs_carry_rewrite_and_blobs() {
+        let mut a = row("bench merge", "buffered+zlib:6", "dk.pbf", 4500);
+        a.kv = vec![
+            KvPair::int("bytes_passthrough", 400_000_000),
+            KvPair::int("bytes_rewritten", 40_000_000),
+            KvPair::int("blobs_passthrough", 1200),
+            KvPair::int("blobs_rewritten", 100),
+        ];
+        let mut b = row("bench merge", "buffered+zlib:6", "dk.pbf", 4200);
+        b.kv = vec![
+            KvPair::int("bytes_passthrough", 410_000_000),
+            KvPair::int("bytes_rewritten", 35_000_000),
+            KvPair::int("blobs_passthrough", 1210),
+            KvPair::int("blobs_rewritten", 90),
+        ];
+        let pairs = build_comparison_pairs(&[a], &[b]);
+        assert_eq!(pairs.len(), 1);
+
+        let p = &pairs[0];
+        let a_rw = p.a_rewrite_pct.unwrap();
+        let b_rw = p.b_rewrite_pct.unwrap();
+        // A: 40M / 440M ≈ 9.09%
+        assert!((a_rw - 9.09).abs() < 0.1);
+        // B: 35M / 445M ≈ 7.87%
+        assert!((b_rw - 7.87).abs() < 0.1);
+
+        assert_eq!(p.a_blobs.as_deref(), Some("1200pt/100rw"));
+        assert_eq!(p.b_blobs.as_deref(), Some("1210pt/90rw"));
+    }
+
+    #[test]
+    fn format_compare_shows_rewrite_columns() {
+        let mut a = row("bench merge", "buffered+zlib:6", "dk.pbf", 4500);
+        a.commit = String::from("abc1234");
+        a.kv = vec![
+            KvPair::int("bytes_passthrough", 920),
+            KvPair::int("bytes_rewritten", 80),
+            KvPair::int("blobs_passthrough", 100),
+            KvPair::int("blobs_rewritten", 10),
+        ];
+        let mut b = row("bench merge", "buffered+zlib:6", "dk.pbf", 4200);
+        b.commit = String::from("def5678");
+        b.kv = vec![
+            KvPair::int("bytes_passthrough", 900),
+            KvPair::int("bytes_rewritten", 100),
+            KvPair::int("blobs_passthrough", 95),
+            KvPair::int("blobs_rewritten", 15),
+        ];
+        let output = format_compare("abc1234", &[a], "def5678", &[b], 10);
+        assert!(output.contains("rewrite_a"), "should have rewrite_a header");
+        assert!(output.contains("rewrite_b"), "should have rewrite_b header");
+        assert!(output.contains("blobs_a"), "should have blobs_a header");
+        assert!(output.contains("blobs_b"), "should have blobs_b header");
+        assert!(output.contains("8.0%"), "should show 8.0% rewrite ratio for A");
+        assert!(output.contains("10.0%"), "should show 10.0% rewrite ratio for B");
+        assert!(output.contains("100pt/10rw"), "should show blob counts for A");
+        assert!(output.contains("95pt/15rw"), "should show blob counts for B");
+    }
+
+    #[test]
+    fn format_compare_hides_rewrite_columns_when_absent() {
+        let a = row("read", "mmap", "dk.pbf", 100);
+        let b = row("read", "mmap", "dk.pbf", 90);
+        let output = format_compare("aaa", &[a], "bbb", &[b], 10);
+        assert!(!output.contains("rewrite_a"), "no rewrite columns for non-merge");
+        assert!(!output.contains("blobs_a"), "no blob columns for non-merge");
     }
 }
