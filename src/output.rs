@@ -66,6 +66,10 @@ pub fn download_msg(msg: &str) {
     println!("[download] {msg}");
 }
 
+pub fn lock_msg(msg: &str) {
+    println!("[lock]    {msg}");
+}
+
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {

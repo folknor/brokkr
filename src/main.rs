@@ -39,9 +39,13 @@ fn main() {
     let cli = Cli::parse();
 
     let result = run(cli);
-    if let Err(e) = result {
-        output::error(&e.to_string());
-        process::exit(1);
+    match result {
+        Ok(()) => {}
+        Err(DevError::ExitCode(code)) => process::exit(code),
+        Err(e) => {
+            output::error(&e.to_string());
+            process::exit(1);
+        }
     }
 }
 
@@ -267,7 +271,7 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
             output::run_msg(&format!("{binary_str} {}", args.join(" ")));
             let code = output::run_passthrough(&binary_str, &arg_refs)?;
             if code != 0 {
-                process::exit(code);
+                return Err(DevError::ExitCode(code));
             }
             Ok(())
         }
@@ -393,13 +397,13 @@ fn cmd_clean(dev_config: &config::DevConfig, project: Project, project_root: &Pa
 fn cmd_lock() -> Result<(), DevError> {
     match lockfile::status()? {
         Some(info) => {
-            println!(
-                "[lock]    held by PID {}: {} {} ({})",
+            output::lock_msg(&format!(
+                "held by PID {}: {} {} ({})",
                 info.pid, info.project, info.command, info.project_root,
-            );
+            ));
         }
         None => {
-            println!("[lock]    no active lock");
+            output::lock_msg("no active lock");
         }
     }
     Ok(())

@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process;
 
 use crate::config;
 use crate::context::{bootstrap, bootstrap_config, BenchContext, HarnessContext};
@@ -85,7 +84,7 @@ pub(crate) fn run_elivagar(
     };
 
     if code != 0 {
-        process::exit(code);
+        return Err(DevError::ExitCode(code));
     }
     Ok(())
 }

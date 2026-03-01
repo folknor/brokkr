@@ -27,6 +27,10 @@ pub enum DevError {
     Database(String),
     /// A verification check found a mismatch or unexpected result.
     Verify(String),
+    /// A subprocess completed and the process should exit with this code.
+    /// Used by passthrough commands (run, elivagar) to propagate exit codes
+    /// without calling `process::exit` in handlers.
+    ExitCode(i32),
 }
 
 impl fmt::Display for DevError {
@@ -60,6 +64,7 @@ impl fmt::Display for DevError {
             DevError::Lock(msg) => write!(f, "lock: {msg}"),
             DevError::Database(msg) => write!(f, "database: {msg}"),
             DevError::Verify(msg) => write!(f, "verify: {msg}"),
+            DevError::ExitCode(_) => Ok(()),
         }
     }
 }
@@ -74,7 +79,8 @@ impl StdError for DevError {
             | DevError::Subprocess { .. }
             | DevError::Lock(_)
             | DevError::Database(_)
-            | DevError::Verify(_) => None,
+            | DevError::Verify(_)
+            | DevError::ExitCode(_) => None,
         }
     }
 }
