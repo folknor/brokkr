@@ -44,6 +44,7 @@ pub struct BenchHarness {
     env: EnvInfo,
     git: GitInfo,
     storage_notes: Option<String>,
+    cargo_features: Option<String>,
 }
 
 impl BenchHarness {
@@ -100,7 +101,18 @@ impl BenchHarness {
             env,
             git,
             storage_notes,
+            cargo_features: None,
         })
+    }
+
+    /// Set the cargo features that were used to build the binary.
+    ///
+    /// When set, this value is used as the default `cargo_features` for all
+    /// results recorded by this harness. Individual `BenchConfig.cargo_features`
+    /// values override the harness default when set.
+    pub fn with_cargo_features(mut self, features: Option<String>) -> Self {
+        self.cargo_features = features;
+        self
     }
 
     /// Internal timing: closure called N times, returns `BenchResult`.
@@ -281,7 +293,7 @@ impl BenchHarness {
             variant: config.variant.clone(),
             input_file: config.input_file.clone(),
             input_mb: config.input_mb,
-            cargo_features: config.cargo_features.clone(),
+            cargo_features: config.cargo_features.clone().or_else(|| self.cargo_features.clone()),
             cargo_profile: config.cargo_profile.clone(),
             elapsed_ms: result.elapsed_ms,
             kernel: Some(self.env.kernel.clone()),

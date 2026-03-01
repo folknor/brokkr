@@ -83,7 +83,7 @@ pub fn run(
             variant: Some(mode.name().into()),
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
-            cargo_features: Some("zlib-ng".into()),
+            cargo_features: None,
             cargo_profile: "release".into(),
             runs,
             cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),

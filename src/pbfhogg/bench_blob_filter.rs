@@ -48,7 +48,7 @@ pub fn run(
                 variant: Some(variant),
                 input_file: Some(basename.to_owned()),
                 input_mb: Some(file_mb),
-                cargo_features: Some("zlib-ng".into()),
+                cargo_features: None,
                 cargo_profile: "release".into(),
                 runs,
                 cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),

@@ -154,7 +154,6 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let feature = crate::harness::hotpath_feature(alloc);
     let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, pbf_raw_str);
 
     for test in &tests {
@@ -169,7 +168,7 @@ pub fn run(
             variant: Some(variant),
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
-            cargo_features: Some(feature.into()),
+            cargo_features: None,
             cargo_profile: "release".into(),
             runs,
             cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &subprocess_args)),

@@ -61,7 +61,6 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let feature = crate::harness::hotpath_feature(alloc);
     let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
     let variant = format!("ingest{variant_suffix}");
 
@@ -70,7 +69,7 @@ pub fn run(
         variant: Some(variant),
         input_file: Some(basename),
         input_mb: Some(file_mb),
-        cargo_features: Some(feature.into()),
+        cargo_features: None,
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(binary_str, &args)),

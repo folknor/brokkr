@@ -35,12 +35,6 @@ pub fn run(
         vec!["buffered"]
     };
 
-    let features_str = if uring {
-        "zlib-ng,linux-io-uring".to_owned()
-    } else {
-        "zlib-ng".to_owned()
-    };
-
     for compression in compressions {
         for io_mode in &io_modes {
             let variant = format!("{io_mode}+{compression}");
@@ -58,7 +52,7 @@ pub fn run(
                 variant: Some(variant),
                 input_file: Some(basename.clone()),
                 input_mb: Some(file_mb),
-                cargo_features: Some(features_str.clone()),
+                cargo_features: None,
                 cargo_profile: "release".into(),
                 runs,
                 cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),

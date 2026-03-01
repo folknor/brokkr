@@ -31,13 +31,3 @@ Commands appear to run twice (two "Finished... Running..." blocks in output). Th
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper — probably not worth the complexity.
 
-### Eliminate `cargo_features` duplication
-
-`cargo_features` is specified in two independent places that must stay in sync:
-
-1. **Build time** — `BenchContext::new` in `main.rs` passes features to `BuildConfig`, which feeds `cargo build`.
-2. **Record time** — Each benchmark module independently hardcodes the same string into `BenchConfig.cargo_features`, which gets written to SQLite.
-
-These can silently drift. `bench_read.rs` hardcodes `"zlib-ng"` regardless of what was actually compiled. `bench_merge.rs` duplicates the `if uring` conditional from `main.rs`.
-
-**Fix:** `BenchContext` already builds the binary — it knows exactly what features were used. Carry the resolved feature string (from `BuildConfig.features.join(",")`) forward and have the harness automatically attach it to every result. Remove `cargo_features` from `BenchConfig` entirely — no benchmark module should ever set this manually. Eliminates ~15 hardcoded values and the duplicate uring conditional in `bench_merge.rs`.
