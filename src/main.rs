@@ -222,11 +222,13 @@ fn run_tests(
     if !captured.status.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        if !stdout.is_empty() {
-            output::error(&stdout);
-        }
+        // Print stderr (compilation warnings) first, stdout (test results) last
+        // so the actionable failure details appear at the bottom of output.
         if !stderr.is_empty() {
             output::error(&stderr);
+        }
+        if !stdout.is_empty() {
+            output::error(&stdout);
         }
         return Err(DevError::Build("tests failed".into()));
     }
