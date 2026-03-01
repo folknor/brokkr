@@ -14,13 +14,11 @@ use crate::output;
 pub fn run(port: u16, query: &str) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
-    // URL-encode the query term.
-    let encoded = super::url_encode(query);
-    let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
+    let url = super::client::geocode_url(port, query);
 
     output::run_msg(&format!("GET {url}"));
 
-    let stdout = super::curl_get(&url)?;
+    let stdout = super::client::curl_get(&url)?;
     let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
 
     let arr = parsed.as_array();

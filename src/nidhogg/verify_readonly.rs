@@ -85,7 +85,7 @@ fn run_tests(
     let mut failed = 0u32;
 
     // Geocode tests.
-    let geocode_queries = super::GEOCODE_TEST_QUERIES;
+    let geocode_queries = super::client::GEOCODE_TEST_QUERIES;
     for query in geocode_queries {
         match run_geocode_check(port, query) {
             Ok(true) => {
@@ -135,10 +135,9 @@ fn run_tests(
 
 /// Check a single geocode query returns non-empty results.
 fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
-    let encoded = super::url_encode(query);
-    let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
+    let url = super::client::geocode_url(port, query);
 
-    let stdout = match super::curl_get(&url) {
+    let stdout = match super::client::curl_get(&url) {
         Ok(s) => s,
         Err(_) => return Ok(false),
     };
@@ -158,10 +157,10 @@ fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
 
 /// Check a single API query returns non-empty elements.
 fn run_query_check(port: u16) -> Result<bool, DevError> {
-    let url = format!("http://localhost:{port}/api/query");
-    let body = super::DEFAULT_API_QUERY;
+    let url = super::client::query_url(port);
+    let body = super::client::DEFAULT_API_QUERY;
 
-    let stdout = match super::curl_post(&url, body) {
+    let stdout = match super::client::curl_post(&url, body) {
         Ok(s) => s,
         Err(_) => return Ok(false),
     };

@@ -18,7 +18,7 @@ pub fn run(port: u16, queries: &[&str]) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
     let queries = if queries.is_empty() {
-        super::GEOCODE_TEST_QUERIES
+        super::client::GEOCODE_TEST_QUERIES
     } else {
         queries
     };
@@ -71,10 +71,9 @@ enum GeoResult {
 
 /// Run a single geocode query and return the result.
 fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
-    let encoded = super::url_encode(query);
-    let url = format!("http://localhost:{port}/api/geocode?q={encoded}");
+    let url = super::client::geocode_url(port, query);
 
-    let stdout = match super::curl_get(&url) {
+    let stdout = match super::client::curl_get(&url) {
         Ok(s) => s,
         Err(_) => return Ok(GeoResult::Error("curl request failed".into())),
     };

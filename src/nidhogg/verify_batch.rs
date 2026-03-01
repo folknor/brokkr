@@ -131,11 +131,11 @@ struct BatchResult {
 
 /// Send the batch query and parse the response.
 fn run_batch_query(port: u16) -> Result<BatchResult, DevError> {
-    let url = format!("http://localhost:{port}/api/query_batch");
+    let url = super::client::batch_query_url(port);
     let body = batch_body();
 
     let start = Instant::now();
-    let stdout = super::curl_post(&url, &body)?;
+    let stdout = super::client::curl_post(&url, &body)?;
     let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
@@ -178,12 +178,12 @@ fn report_batch_results(result: &BatchResult) -> Result<usize, DevError> {
 
 /// Run 4 individual queries and return (name, element_count, elapsed_ms).
 fn run_individual_queries(port: u16) -> Result<Vec<(String, usize, i64)>, DevError> {
-    let url = format!("http://localhost:{port}/api/query");
+    let url = super::client::query_url(port);
     let mut results = Vec::with_capacity(INDIVIDUAL_QUERIES.len());
 
     for &(name, body) in INDIVIDUAL_QUERIES {
         let start = Instant::now();
-        let stdout = super::curl_post(&url, body)?;
+        let stdout = super::client::curl_post(&url, body)?;
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
         let parsed: serde_json::Value = serde_json::from_str(&stdout)?;

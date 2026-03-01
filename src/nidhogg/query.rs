@@ -14,12 +14,12 @@ use crate::output;
 pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
-    let body = query_json.unwrap_or(super::DEFAULT_API_QUERY);
-    let url = format!("http://localhost:{port}/api/query");
+    let body = query_json.unwrap_or(super::client::DEFAULT_API_QUERY);
+    let url = super::client::query_url(port);
 
     output::run_msg(&format!("POST {url}"));
 
-    let stdout = super::curl_post(&url, body)?;
+    let stdout = super::client::curl_post(&url, body)?;
     let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
 
     let elements = parsed

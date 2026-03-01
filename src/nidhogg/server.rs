@@ -170,31 +170,7 @@ fn is_nidhogg_process(pid: i32) -> bool {
 ///
 /// Returns `true` if a health-check query succeeds, `false` otherwise.
 pub fn status(port: u16) -> Result<bool, DevError> {
-    let url = format!("http://localhost:{port}/api/query");
-    let body = r#"{"bbox":[0,0,0,0],"query":[]}"#;
-
-    let result = Command::new("curl")
-        .args([
-            "-s",
-            "-o", "/dev/null",
-            "-w", "%{http_code}",
-            "-X", "POST",
-            &url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
-            "--connect-timeout", "2",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            let code = String::from_utf8_lossy(&output.stdout);
-            Ok(code.trim() == "200")
-        }
-        _ => Ok(false),
-    }
+    super::client::health_check(port)
 }
 
 /// Check that the server is running and return an error if not.

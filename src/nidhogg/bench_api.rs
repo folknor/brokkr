@@ -49,7 +49,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
-    let url = format!("http://localhost:{port}/api/query");
+    let url = super::client::query_url(port);
 
     for &(name, body) in QUERIES {
         if let Some(filter) = only
