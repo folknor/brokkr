@@ -470,7 +470,7 @@ fn force_emit_result_lines(
     result: &BenchResult,
     git: &GitInfo,
 ) {
-    output::result_msg(&format_result_line(config, result, git));
+    println!("[result]  {}", format_result_line(config, result, git));
 }
 
 /// Look up an integer KV pair by key.

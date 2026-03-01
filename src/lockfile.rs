@@ -131,7 +131,15 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
 /// Check whether a PID is still running.
 fn pid_alive(pid: u32) -> bool {
     // kill(pid, 0) checks existence without sending a signal.
-    unsafe { libc::kill(pid.cast_signed(), 0) == 0 }
+    // Returns 0 if signalable, or -1 with errno:
+    //   EPERM  = process exists but we can't signal it → alive
+    //   ESRCH  = no such process → dead
+    let ret = unsafe { libc::kill(pid.cast_signed(), 0) };
+    if ret == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    err.raw_os_error() != Some(libc::ESRCH)
 }
 
 /// Open (or create) the lock file, returning the raw fd.
@@ -139,7 +147,7 @@ fn open_lock_file(c_path: &std::ffi::CString) -> Result<RawFd, DevError> {
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
-            libc::O_CREAT | libc::O_RDWR,
+            libc::O_CREAT | libc::O_RDWR | libc::O_CLOEXEC,
             0o644,
         )
     };
@@ -197,13 +205,17 @@ fn write_lock_contents(fd: RawFd, ctx: &LockContext<'_>) {
 
     unsafe {
         if libc::ftruncate(fd, 0) == -1 {
+            eprintln!("[lock] warning: failed to truncate lock file: {}", std::io::Error::last_os_error());
             return;
         }
         if libc::lseek(fd, 0, libc::SEEK_SET) == -1 {
+            eprintln!("[lock] warning: failed to seek lock file: {}", std::io::Error::last_os_error());
             return;
         }
-        // Best-effort write; ignore failure.
-        let _ = libc::write(fd, contents.as_ptr().cast(), contents.len());
+        let n = libc::write(fd, contents.as_ptr().cast(), contents.len());
+        if n == -1 {
+            eprintln!("[lock] warning: failed to write lock metadata: {}", std::io::Error::last_os_error());
+        }
     }
 }
 
