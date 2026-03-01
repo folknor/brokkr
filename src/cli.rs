@@ -10,7 +10,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Run clippy + tests
-    #[command(long_about = "\
+    #[command(display_order = 0, long_about = "\
 Run clippy + tests. Extra args are forwarded raw to `cargo test`.
 
 Examples:
@@ -24,8 +24,10 @@ Examples:
         args: Vec<String>,
     },
     /// Show environment information
+    #[command(display_order = 1)]
     Env,
     /// Build and run the project binary
+    #[command(display_order = 2)]
     Run {
         /// Cargo features to enable (e.g. linux-io-uring)
         #[arg(long, value_delimiter = ',')]
@@ -35,7 +37,7 @@ Examples:
         args: Vec<String>,
     },
     /// Query benchmark results
-    #[command(long_about = "\
+    #[command(display_order = 3, long_about = "\
 Query benchmark results from .brokkr/results.db.
 
 Examples:
@@ -83,10 +85,13 @@ Examples:
         top: usize,
     },
     /// Clean build artifacts and scratch data
+    #[command(display_order = 4)]
     Clean,
     /// Show lock status (who holds the benchmark lock)
+    #[command(display_order = 5)]
     Lock,
     /// Run benchmarks
+    #[command(display_order = 10)]
     Bench {
         /// Print full build/bench/result output
         #[arg(long, short = 'v')]
@@ -103,7 +108,8 @@ Examples:
         #[command(subcommand)]
         bench: BenchCommand,
     },
-    /// Cross-validate pbfhogg output against reference tools
+    /// Cross-validate output against reference tools
+    #[command(display_order = 11)]
     Verify {
         /// Print full build/verify output
         #[arg(long, short = 'v')]
@@ -117,6 +123,7 @@ Examples:
         verify: VerifyCommand,
     },
     /// Run hotpath profiling (timing or allocation instrumentation)
+    #[command(display_order = 12)]
     Hotpath {
         /// Variant to profile (default: main pipeline; elivagar also supports pmtiles, node-store)
         variant: Option<String>,
@@ -170,6 +177,7 @@ Examples:
         no_mem_check: bool,
     },
     /// Run two-pass profiling (timing + allocation) for a dataset
+    #[command(display_order = 13)]
     Profile {
         /// Print full build/bench/result output
         #[arg(long, short = 'v')]
@@ -207,7 +215,8 @@ Examples:
         #[arg(long)]
         no_mem_check: bool,
     },
-    /// Download a region dataset from Geofabrik
+    /// [pbfhogg] Download a region dataset from Geofabrik
+    #[command(display_order = 20)]
     Download {
         /// Region name (malta, greater-london, switzerland, norway, japan, denmark, germany, north-america)
         region: String,
@@ -216,7 +225,8 @@ Examples:
         #[arg(long)]
         osc_url: Option<String>,
     },
-    /// Compare feature counts between two PMTiles archives (elivagar)
+    /// [elivagar] Compare feature counts between two PMTiles archives
+    #[command(display_order = 30)]
     CompareTiles {
         /// First PMTiles file
         file_a: String,
@@ -226,15 +236,18 @@ Examples:
         #[arg(long)]
         sample: Option<usize>,
     },
-    /// Download ocean shapefiles (elivagar)
+    /// [elivagar] Download ocean shapefiles
+    #[command(display_order = 31)]
     DownloadOcean,
     /// Print PMTiles v3 file statistics
+    #[command(display_order = 19)]
     PmtilesStats {
         /// PMTiles file(s) to analyze
         #[arg(required = true)]
         files: Vec<String>,
     },
-    /// Start the nidhogg server (nidhogg only)
+    /// [nidhogg] Start the server
+    #[command(display_order = 40)]
     Serve {
         /// Data directory (ingested disk format)
         #[arg(long)]
@@ -248,11 +261,14 @@ Examples:
         #[arg(long)]
         tiles: Option<String>,
     },
-    /// Stop the nidhogg server (nidhogg only)
+    /// [nidhogg] Stop the server
+    #[command(display_order = 41)]
     Stop,
-    /// Check nidhogg server status (nidhogg only)
+    /// [nidhogg] Check server status
+    #[command(display_order = 42)]
     Status,
-    /// Ingest a PBF into nidhogg disk format (nidhogg only)
+    /// [nidhogg] Ingest a PBF into disk format
+    #[command(display_order = 43)]
     Ingest {
         /// Explicit PBF file path
         #[arg(long)]
@@ -262,18 +278,21 @@ Examples:
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
-    /// Run nidhogg-update for diff application (nidhogg only)
+    /// [nidhogg] Run diff application
+    #[command(display_order = 44)]
     Update {
         /// Arguments passed to nidhogg-update
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Send a test query to the nidhogg server (nidhogg only)
+    /// [nidhogg] Send a test query
+    #[command(display_order = 45)]
     Query {
         /// JSON query body (default: Copenhagen highways)
         json: Option<String>,
     },
-    /// Test geocoding on the nidhogg server (nidhogg only)
+    /// [nidhogg] Test geocoding
+    #[command(display_order = 46)]
     Geocode {
         /// Search term (default: Kobenhavn)
         #[arg(default_value = "København")]
@@ -283,7 +302,8 @@ Examples:
 
 #[derive(Subcommand)]
 pub(crate) enum BenchCommand {
-    /// Benchmark CLI commands (external timing)
+    /// [pbfhogg] Benchmark CLI commands (external timing)
+    #[command(display_order = 0)]
     Commands {
         #[arg(default_value = "all")]
         command: String,
@@ -294,7 +314,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
-    /// Benchmark extract strategies (simple/complete/smart)
+    /// [pbfhogg] Benchmark extract strategies (simple/complete/smart)
+    #[command(display_order = 1)]
     Extract {
         #[arg(long, default_value = "japan")]
         dataset: String,
@@ -307,7 +328,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "simple,complete,smart")]
         strategies: String,
     },
-    /// Benchmark allocators (default/jemalloc/mimalloc) via check-refs
+    /// [pbfhogg] Benchmark allocators (default/jemalloc/mimalloc) via check-refs
+    #[command(display_order = 2)]
     Allocator {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -316,7 +338,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
-    /// Benchmark indexed vs non-indexed PBF performance
+    /// [pbfhogg] Benchmark indexed vs non-indexed PBF performance
+    #[command(display_order = 3)]
     BlobFilter {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -327,7 +350,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
-    /// Benchmark Planetiler Java PBF read performance
+    /// [pbfhogg] Benchmark Planetiler Java PBF read performance
+    #[command(display_order = 4)]
     Planetiler {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -336,7 +360,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
-    /// Read benchmark (5 modes)
+    /// [pbfhogg] Read benchmark (5 modes)
+    #[command(display_order = 5)]
     Read {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -347,7 +372,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "sequential,parallel,pipelined,mmap,blobreader")]
         modes: String,
     },
-    /// Write benchmark (sync + pipelined x compression)
+    /// [pbfhogg] Write benchmark (sync + pipelined x compression)
+    #[command(display_order = 6)]
     Write {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -358,7 +384,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "none,zlib:6,zstd:3")]
         compression: String,
     },
-    /// Merge benchmark (I/O modes x compression)
+    /// [pbfhogg] Merge benchmark (I/O modes x compression)
+    #[command(display_order = 7)]
     Merge {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -373,7 +400,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "zlib,none")]
         compression: String,
     },
-    /// Run full benchmark suite (commands + baselines)
+    /// [pbfhogg] Run full benchmark suite (commands + baselines)
+    #[command(display_order = 8)]
     All {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -383,10 +411,8 @@ pub(crate) enum BenchCommand {
         runs: usize,
     },
 
-    // ----- Elivagar bench variants -----
-
-    /// Elivagar: full pipeline benchmark
-    #[command(name = "self")]
+    /// [elivagar] Full pipeline benchmark
+    #[command(name = "self", display_order = 10)]
     ElivSelf {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -404,7 +430,8 @@ pub(crate) enum BenchCommand {
         #[arg(long)]
         compression_level: Option<u32>,
     },
-    /// Elivagar: SortedNodeStore benchmark
+    /// [elivagar] SortedNodeStore benchmark
+    #[command(display_order = 11)]
     NodeStore {
         /// Nodes in millions
         #[arg(long, default_value = "50")]
@@ -412,7 +439,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "5")]
         runs: usize,
     },
-    /// Elivagar: PMTiles writer benchmark
+    /// [elivagar] PMTiles writer benchmark
+    #[command(display_order = 12)]
     Pmtiles {
         /// Number of tiles
         #[arg(long, default_value = "500000")]
@@ -420,7 +448,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "5")]
         runs: usize,
     },
-    /// Elivagar: Planetiler comparison benchmark
+    /// [elivagar] Planetiler comparison benchmark
+    #[command(display_order = 13)]
     ElivPlanetiler {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -429,7 +458,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
-    /// Elivagar: Tilemaker comparison benchmark
+    /// [elivagar] Tilemaker comparison benchmark
+    #[command(display_order = 14)]
     Tilemaker {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -438,7 +468,8 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
-    /// Elivagar: full benchmark suite
+    /// [elivagar] Full benchmark suite
+    #[command(display_order = 15)]
     ElivAll {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -448,9 +479,8 @@ pub(crate) enum BenchCommand {
         runs: usize,
     },
 
-    // ----- Nidhogg bench variants -----
-
-    /// Nidhogg: API query benchmark
+    /// [nidhogg] API query benchmark
+    #[command(display_order = 20)]
     Api {
         /// Dataset the server is loaded with (for metadata recording)
         #[arg(long, default_value = "denmark")]
@@ -462,7 +492,8 @@ pub(crate) enum BenchCommand {
         #[arg(long)]
         query: Option<String>,
     },
-    /// Nidhogg: ingest benchmark
+    /// [nidhogg] Ingest benchmark
+    #[command(display_order = 21)]
     NidIngest {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -475,21 +506,24 @@ pub(crate) enum BenchCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum VerifyCommand {
-    /// Cross-validate sort against osmium sort
+    /// [pbfhogg] Cross-validate sort against osmium sort
+    #[command(display_order = 0)]
     Sort {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
         pbf: Option<String>,
     },
-    /// Cross-validate cat (type filters) against osmium cat
+    /// [pbfhogg] Cross-validate cat (type filters) against osmium cat
+    #[command(display_order = 1)]
     Cat {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
         pbf: Option<String>,
     },
-    /// Cross-validate extract (bbox strategies) against osmium extract
+    /// [pbfhogg] Cross-validate extract (bbox strategies) against osmium extract
+    #[command(display_order = 2)]
     Extract {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -498,35 +532,40 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         bbox: Option<String>,
     },
-    /// Cross-validate tags-filter against osmium tags-filter
+    /// [pbfhogg] Cross-validate tags-filter against osmium tags-filter
+    #[command(display_order = 3)]
     TagsFilter {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
         pbf: Option<String>,
     },
-    /// Cross-validate getid/removeid against osmium getid
+    /// [pbfhogg] Cross-validate getid/removeid against osmium getid
+    #[command(display_order = 4)]
     GetidRemoveid {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
         pbf: Option<String>,
     },
-    /// Cross-validate add-locations-to-ways against osmium
+    /// [pbfhogg] Cross-validate add-locations-to-ways against osmium
+    #[command(display_order = 5)]
     AddLocationsToWays {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
         pbf: Option<String>,
     },
-    /// Cross-validate check-refs against osmium check-refs
+    /// [pbfhogg] Cross-validate check-refs against osmium check-refs
+    #[command(display_order = 6)]
     CheckRefs {
         #[arg(long, default_value = "denmark")]
         dataset: String,
         #[arg(long)]
         pbf: Option<String>,
     },
-    /// Cross-validate merge against osmium/osmosis/osmconvert
+    /// [pbfhogg] Cross-validate merge against osmium/osmosis/osmconvert
+    #[command(display_order = 7)]
     Merge {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -535,7 +574,8 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc: Option<String>,
     },
-    /// Cross-validate derive-changes roundtrip against osmium
+    /// [pbfhogg] Cross-validate derive-changes roundtrip against osmium
+    #[command(display_order = 8)]
     DeriveChanges {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -544,7 +584,8 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc: Option<String>,
     },
-    /// Cross-validate diff summary against osmium diff
+    /// [pbfhogg] Cross-validate diff summary against osmium diff
+    #[command(display_order = 9)]
     Diff {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -553,7 +594,8 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc: Option<String>,
     },
-    /// Run all verify commands sequentially
+    /// [pbfhogg] Run all verify commands sequentially
+    #[command(display_order = 10)]
     All {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -565,17 +607,18 @@ pub(crate) enum VerifyCommand {
         bbox: Option<String>,
     },
 
-    // ----- Nidhogg verify variants -----
-
-    /// Nidhogg: batch query verification
+    /// [nidhogg] Batch query verification
+    #[command(display_order = 20)]
     Batch,
-    /// Nidhogg: geocode verification
+    /// [nidhogg] Geocode verification
+    #[command(display_order = 21)]
     NidGeocode {
         /// Search terms to test
         #[arg(trailing_var_arg = true)]
         queries: Vec<String>,
     },
-    /// Nidhogg: read-only filesystem verification
+    /// [nidhogg] Read-only filesystem verification
+    #[command(display_order = 22)]
     Readonly {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
