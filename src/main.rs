@@ -27,7 +27,7 @@ use error::DevError;
 use project::Project;
 
 #[derive(Parser)]
-#[command(name = "brokkr", about = "Shared development tooling")]
+#[command(name = "brokkr", about = "Shared development tooling", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -121,6 +121,10 @@ Examples:
         /// Build and benchmark an old commit via git worktree
         #[arg(long)]
         commit: Option<String>,
+
+        /// Cargo features to enable (e.g. libdeflater)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
 
         #[command(subcommand)]
         bench: BenchCommand,
@@ -637,10 +641,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             cmd_clean(&dev_config, project, &project_root)
         }
-        Command::Bench { verbose, commit, bench } => {
+        Command::Bench { verbose, commit, features, bench } => {
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_bench(&dev_config, project, &project_root, build_root, bench)
+                cmd_bench(&dev_config, project, &project_root, build_root, bench, &features)
             })
         }
         Command::Verify { verbose, commit, verify } => {
@@ -1345,24 +1349,24 @@ fn results_db_path(project_root: &Path) -> PathBuf {
 // Bench commands (pbfhogg-specific)
 // ---------------------------------------------------------------------------
 
-fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand) -> Result<(), DevError> {
+fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String]) -> Result<(), DevError> {
     match bench {
         // ----- pbfhogg bench variants -----
         BenchCommand::Commands { command, dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench commands")?;
-            cmd_bench_commands(dev_config, project, project_root, build_root, &command, &dataset, pbf.as_deref(), runs)
+            cmd_bench_commands(dev_config, project, project_root, build_root, &command, &dataset, pbf.as_deref(), runs, features)
         }
         BenchCommand::Extract { dataset, pbf, runs, bbox, strategies } => {
             project::require(project, Project::Pbfhogg, "bench extract")?;
-            cmd_bench_extract(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, bbox.as_deref(), &strategies)
+            cmd_bench_extract(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, bbox.as_deref(), &strategies, features)
         }
         BenchCommand::Allocator { dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench allocator")?;
-            cmd_bench_allocator(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            cmd_bench_allocator(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
         }
         BenchCommand::BlobFilter { dataset, pbf_indexed, pbf_raw, runs } => {
             project::require(project, Project::Pbfhogg, "bench blob-filter")?;
-            cmd_bench_blob_filter(dev_config, project, project_root, build_root, &dataset, pbf_indexed.as_deref(), pbf_raw.as_deref(), runs)
+            cmd_bench_blob_filter(dev_config, project, project_root, build_root, &dataset, pbf_indexed.as_deref(), pbf_raw.as_deref(), runs, features)
         }
         BenchCommand::Planetiler { dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench planetiler")?;
@@ -1370,25 +1374,25 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         }
         BenchCommand::Read { dataset, pbf, runs, modes } => {
             project::require(project, Project::Pbfhogg, "bench read")?;
-            cmd_bench_read(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, &modes)
+            cmd_bench_read(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, &modes, features)
         }
         BenchCommand::Write { dataset, pbf, runs, compression } => {
             project::require(project, Project::Pbfhogg, "bench write")?;
-            cmd_bench_write(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, &compression)
+            cmd_bench_write(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, &compression, features)
         }
         BenchCommand::Merge { dataset, pbf, osc, runs, uring, compression } => {
             project::require(project, Project::Pbfhogg, "bench merge")?;
-            cmd_bench_merge(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), runs, uring, &compression)
+            cmd_bench_merge(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), runs, uring, &compression, features)
         }
         BenchCommand::All { dataset, pbf, runs } => {
             project::require(project, Project::Pbfhogg, "bench all")?;
-            cmd_bench_all(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            cmd_bench_all(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
         }
 
         // ----- elivagar bench variants -----
         BenchCommand::ElivSelf { dataset, pbf, runs, skip_to, no_ocean, compression_level } => {
             project::require(project, Project::Elivagar, "bench self")?;
-            cmd_bench_eliv_self(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, skip_to.as_deref(), no_ocean, compression_level)
+            cmd_bench_eliv_self(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, skip_to.as_deref(), no_ocean, compression_level, features)
         }
         BenchCommand::NodeStore { nodes, runs } => {
             project::require(project, Project::Elivagar, "bench node-store")?;
@@ -1418,21 +1422,22 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         }
         BenchCommand::ElivAll { dataset, pbf, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-all")?;
-            cmd_bench_eliv_all(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            cmd_bench_eliv_all(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
         }
 
         // ----- nidhogg bench variants -----
         BenchCommand::Api { dataset, runs, query } => {
             project::require(project, Project::Nidhogg, "bench api")?;
-            cmd_bench_api(dev_config, project, project_root, build_root, &dataset, runs, query.as_deref())
+            cmd_bench_api(dev_config, project, project_root, build_root, &dataset, runs, query.as_deref(), features)
         }
         BenchCommand::NidIngest { dataset, pbf, runs } => {
             project::require(project, Project::Nidhogg, "bench ingest")?;
-            cmd_bench_nid_ingest(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs)
+            cmd_bench_nid_ingest(dev_config, project, project_root, build_root, &dataset, pbf.as_deref(), runs, features)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn cmd_bench_commands(
     dev_config: &config::DevConfig,
@@ -1443,8 +1448,10 @@ fn cmd_bench_commands(
     dataset: &str,
     pbf: Option<&str>,
     runs: usize,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], true, "bench commands")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench commands")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let commands = pbfhogg::bench_commands::parse_command(command)?;
     let osc_path = resolve_osc_path(None, dataset, &ctx.paths, project_root).ok();
@@ -1472,8 +1479,10 @@ fn cmd_bench_extract(
     runs: usize,
     bbox: Option<&str>,
     strategies_str: &str,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], true, "bench extract")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench extract")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let bbox = resolve_bbox(bbox, dataset, &ctx.paths)?;
     let strategies = pbfhogg::bench_extract::parse_strategies(strategies_str)?;
@@ -1488,6 +1497,7 @@ fn cmd_bench_allocator(
     dataset: &str,
     pbf: Option<&str>,
     runs: usize,
+    _features: &[String],
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -1508,8 +1518,10 @@ fn cmd_bench_blob_filter(
     pbf_indexed: Option<&str>,
     pbf_raw: Option<&str>,
     runs: usize,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], true, "bench blob-filter")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench blob-filter")?;
     let (indexed_path, file_mb) = resolve_pbf_with_size(pbf_indexed, dataset, &ctx.paths, project_root)?;
     let raw_path = resolve_raw_pbf_path(pbf_raw, dataset, &ctx.paths)?;
     pbfhogg::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, runs, project_root)
@@ -1543,8 +1555,10 @@ fn cmd_bench_read(
     pbf: Option<&str>,
     runs: usize,
     modes_str: &str,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], true, "bench read")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench read")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let modes = pbfhogg::bench_read::parse_modes(modes_str)?;
     pbfhogg::bench_read::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &modes, project_root)
@@ -1560,8 +1574,10 @@ fn cmd_bench_write(
     pbf: Option<&str>,
     runs: usize,
     compression_str: &str,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &[], true, "bench write")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench write")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, true)?;
     pbfhogg::bench_write::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &compressions, project_root)
@@ -1579,13 +1595,17 @@ fn cmd_bench_merge(
     runs: usize,
     uring: bool,
     compression_str: &str,
+    features: &[String],
 ) -> Result<(), DevError> {
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
 
-    let features: &[&str] = if uring { &["linux-io-uring"] } else { &[] };
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), features, true, "bench merge")?;
+    let mut all_features: Vec<&str> = features.iter().map(String::as_str).collect();
+    if uring {
+        all_features.push("linux-io-uring");
+    }
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("pbfhogg-cli"), &all_features, true, "bench merge")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
     let compressions = pbfhogg::parse_compressions(compression_str, false)?;
@@ -1611,6 +1631,7 @@ fn cmd_bench_all(
     dataset: &str,
     pbf: Option<&str>,
     runs: usize,
+    _features: &[String],
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -1637,8 +1658,10 @@ fn cmd_bench_eliv_self(
     skip_to: Option<&str>,
     no_ocean: bool,
     compression_level: Option<u32>,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &[], true, "bench self")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &feat_refs, true, "bench self")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     elivagar::bench_self::run(
         &ctx.harness,
@@ -1715,6 +1738,7 @@ fn cmd_bench_eliv_all(
     dataset: &str,
     pbf: Option<&str>,
     runs: usize,
+    _features: &[String],
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -2210,6 +2234,7 @@ fn cmd_bench_api(
     dataset: &str,
     runs: usize,
     query: Option<&str>,
+    _features: &[String],
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -2236,8 +2261,10 @@ fn cmd_bench_nid_ingest(
     dataset: &str,
     pbf: Option<&str>,
     runs: usize,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &[], true, "bench ingest")?;
+    let feat_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(dev_config, project, project_root, build_root, Some("nidhogg"), &feat_refs, true, "bench ingest")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     nidhogg::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &ctx.paths.scratch_dir, project_root)
 }
