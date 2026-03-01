@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
@@ -10,7 +11,7 @@ use crate::tools;
 struct ParsedResult {
     mode: String,
     elapsed_ms: i64,
-    extra: serde_json::Value,
+    kv: Vec<KvPair>,
 }
 
 fn parse_planetiler_output(stderr: &str) -> Vec<ParsedResult> {
@@ -45,13 +46,13 @@ fn parse_planetiler_output(stderr: &str) -> Vec<ParsedResult> {
         }
 
         if let (Some(mode), Some(elapsed_ms)) = (mode, elapsed_ms) {
-            let extra = serde_json::json!({
-                "nodes": nodes.unwrap_or(0),
-                "ways": ways.unwrap_or(0),
-                "relations": relations.unwrap_or(0),
-            });
+            let kv = vec![
+                KvPair::int("nodes", nodes.unwrap_or(0)),
+                KvPair::int("ways", ways.unwrap_or(0)),
+                KvPair::int("relations", relations.unwrap_or(0)),
+            ];
 
-            results.push(ParsedResult { mode, elapsed_ms, extra });
+            results.push(ParsedResult { mode, elapsed_ms, kv });
         }
     }
 
@@ -122,15 +123,15 @@ pub fn run(
             cargo_profile: "java".into(),
             runs: 1,
             cli_args: None,
-            metadata: Some(serde_json::json!({
-                "heap_mb": heap_mb,
-            })),
+            metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
         };
 
         harness.run_internal(&config, |_| {
             Ok(BenchResult {
                 elapsed_ms: result.elapsed_ms,
-                extra: Some(result.extra.clone()),
+                kv: result.kv.clone(),
+                distribution: None,
+                hotpath: None,
             })
         })?;
     }

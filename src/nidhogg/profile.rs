@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use crate::build;
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
@@ -107,14 +108,14 @@ pub fn run(
         cargo_profile: "profiling".into(),
         runs: 1,
         cli_args: None,
-        metadata: Some(serde_json::json!({
-            "tool": tool,
-        })),
+        metadata: vec![KvPair::text("meta.tool", tool)],
     };
 
     let result = BenchResult {
         elapsed_ms,
-        extra: None,
+        kv: vec![],
+        distribution: None,
+        hotpath: None,
     };
 
     harness.record_result(&bench_config, &result)?;

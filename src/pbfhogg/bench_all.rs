@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::build;
 use crate::config::ResolvedPaths;
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
@@ -260,7 +261,7 @@ fn run_osmpbf_baseline(
         };
 
         let variant = format!("osmpbf/{mode}");
-        let extra = build_extra_from_block(block);
+        let kv = build_kv_from_block(block);
 
         let config = BenchConfig {
             command: "bench baseline".into(),
@@ -271,13 +272,15 @@ fn run_osmpbf_baseline(
             cargo_profile: "release".into(),
             runs: 1,
             cli_args: None,
-            metadata: None,
+            metadata: vec![],
         };
 
         harness.run_internal(&config, |_i| {
             Ok(BenchResult {
                 elapsed_ms,
-                extra: extra.clone(),
+                kv: kv.clone(),
+                distribution: None,
+                hotpath: None,
             })
         })?;
     }
@@ -317,7 +320,7 @@ fn run_osmium_baseline(
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &osmium_args)),
-        metadata: None,
+        metadata: vec![],
     };
 
     harness.run_external(
@@ -369,9 +372,9 @@ fn parse_stderr_blocks(stderr: &str) -> Vec<HashMap<String, String>> {
     blocks
 }
 
-/// Build a JSON extra object from a parsed block, including relevant fields.
-fn build_extra_from_block(block: &HashMap<String, String>) -> Option<serde_json::Value> {
-    let mut map = serde_json::Map::new();
+/// Build a KvPair vec from a parsed block, including relevant fields.
+fn build_kv_from_block(block: &HashMap<String, String>) -> Vec<KvPair> {
+    let mut kv = Vec::new();
 
     for (key, value) in block {
         // Skip keys already used as primary fields.
@@ -380,21 +383,13 @@ fn build_extra_from_block(block: &HashMap<String, String>) -> Option<serde_json:
         }
         // Try to parse as number, fall back to string.
         if let Ok(n) = value.parse::<i64>() {
-            map.insert(key.clone(), serde_json::Value::Number(n.into()));
-        } else if let Ok(n) = value.parse::<f64>() {
-            if let Some(num) = serde_json::Number::from_f64(n) {
-                map.insert(key.clone(), serde_json::Value::Number(num));
-            } else {
-                map.insert(key.clone(), serde_json::Value::String(value.clone()));
-            }
+            kv.push(KvPair::int(key, n));
+        } else if let Ok(f) = value.parse::<f64>() {
+            kv.push(KvPair::real(key, f));
         } else {
-            map.insert(key.clone(), serde_json::Value::String(value.clone()));
+            kv.push(KvPair::text(key, value));
         }
     }
 
-    if map.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(map))
-    }
+    kv
 }

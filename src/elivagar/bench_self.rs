@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -74,6 +75,14 @@ pub fn run(
         "elivagar pipeline: {basename} ({file_mb:.0} MB), {runs} run(s)"
     ));
 
+    let mut metadata = vec![KvPair::text("meta.ocean", (!no_ocean).to_string())];
+    if let Some(v) = skip_to {
+        metadata.push(KvPair::text("meta.skip_to", v));
+    }
+    if let Some(v) = compression_level {
+        metadata.push(KvPair::int("meta.compression_level", v as i64));
+    }
+
     let config = BenchConfig {
         command: "bench self".into(),
         variant: None,
@@ -83,11 +92,7 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &arg_refs)),
-        metadata: Some(serde_json::json!({
-            "ocean": !no_ocean,
-            "skip_to": skip_to,
-            "compression_level": compression_level,
-        })),
+        metadata,
     };
 
     // Use kv parsing: elivagar emits elapsed_ms, phase12_ms, ocean_ms,

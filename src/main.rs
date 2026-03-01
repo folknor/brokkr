@@ -1066,8 +1066,8 @@ fn cmd_results(
                 if !details.is_empty() {
                     println!("\n{details}");
                 }
-                if let Some(ref extra) = row.extra
-                    && let Some(report) = hotpath_fmt::format_hotpath_report(extra, top)
+                if let Some(ref hotpath) = row.hotpath
+                    && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, top)
                 {
                     println!("\n{report}");
                 }

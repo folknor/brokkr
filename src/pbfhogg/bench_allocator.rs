@@ -45,7 +45,7 @@ pub fn run(
             cargo_profile: "release".into(),
             runs,
             cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args)),
-            metadata: None,
+            metadata: vec![],
         };
 
         harness.run_external(&config, &binary, &args, project_root)?;

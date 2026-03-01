@@ -55,7 +55,7 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args)),
-        metadata: None,
+        metadata: vec![],
     };
 
     // Clean scratch before first run.
@@ -82,7 +82,9 @@ pub fn run(
 
         Ok(crate::harness::BenchResult {
             elapsed_ms,
-            extra: None,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
         })
     })?;
 

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -34,10 +35,7 @@ pub fn run(
                 cargo_profile: "release".into(),
                 runs,
                 cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
-                metadata: Some(serde_json::json!({
-                    "compression": compression,
-                    "writer_mode": writer_mode,
-                })),
+                metadata: vec![KvPair::text("meta.compression", compression.as_str()), KvPair::text("meta.writer_mode", *writer_mode)],
             };
 
             harness.run_external_with_kv(

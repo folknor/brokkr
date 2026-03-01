@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness};
 use crate::output;
@@ -91,10 +92,7 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
-        metadata: Some(serde_json::json!({
-            "alloc": alloc,
-            "ocean": !no_ocean,
-        })),
+        metadata: vec![KvPair::text("meta.alloc", alloc.to_string()), KvPair::text("meta.ocean", (!no_ocean).to_string())],
     };
 
     harness.run_internal(&config, |_i| {

@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -117,9 +118,7 @@ pub fn run(
         cargo_profile: "java".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(&pt.java.display().to_string(), &args_refs)),
-        metadata: Some(serde_json::json!({
-            "heap_mb": heap_mb,
-        })),
+        metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
     };
 
     harness.run_external(&config, &pt.java, &args_refs, project_root)?;

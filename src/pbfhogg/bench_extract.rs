@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -57,10 +58,7 @@ pub fn run(
             cargo_profile: "release".into(),
             runs,
             cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
-            metadata: Some(serde_json::json!({
-                "strategy": name,
-                "bbox": bbox,
-            })),
+            metadata: vec![KvPair::text("meta.strategy", name), KvPair::text("meta.bbox", bbox)],
         };
 
         harness.run_external(&config, binary, &args_refs, project_root)?;

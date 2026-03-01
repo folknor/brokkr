@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use crate::build;
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
 use crate::output;
@@ -49,10 +50,8 @@ pub fn run(
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
         cli_args: None,
-        metadata: Some(serde_json::json!({
-            "tiles": tiles,
-            "internal_runs": runs,
-        })),
+        #[allow(clippy::cast_possible_wrap)]
+        metadata: vec![KvPair::int("meta.tiles", tiles as i64), KvPair::int("meta.internal_runs", runs as i64)],
     };
 
     harness.run_internal(&config, |_i| {
@@ -75,14 +74,13 @@ pub fn run(
         captured.check_success(&binary_str)?;
 
         let ms = harness::elapsed_to_ms(&captured.elapsed);
-        let extra = serde_json::json!({
-            "tiles": tiles,
-            "internal_runs": runs,
-        });
 
         Ok(BenchResult {
             elapsed_ms: ms,
-            extra: Some(extra),
+            #[allow(clippy::cast_possible_wrap)]
+            kv: vec![KvPair::int("tiles", tiles as i64), KvPair::int("internal_runs", runs as i64)],
+            distribution: None,
+            hotpath: None,
         })
     })?;
 
@@ -135,11 +133,8 @@ pub fn run_hotpath(
         cargo_profile: "release".into(),
         runs: 1,
         cli_args: None,
-        metadata: Some(serde_json::json!({
-            "tiles": tiles,
-            "internal_runs": runs,
-            "alloc": alloc,
-        })),
+        #[allow(clippy::cast_possible_wrap)]
+        metadata: vec![KvPair::int("meta.tiles", tiles as i64), KvPair::int("meta.internal_runs", runs as i64), KvPair::text("meta.alloc", alloc.to_string())],
     };
 
     harness.run_internal(&config, |_i| {

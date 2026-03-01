@@ -93,7 +93,7 @@ pub fn run(
         cargo_profile: "cmake".into(),
         runs,
         cli_args: Some(harness::format_cli_args(&tm.tilemaker.display().to_string(), &args_refs)),
-        metadata: None,
+        metadata: vec![],
     };
 
     harness.run_external(&config, &tm.tilemaker, &args_refs, project_root)?;

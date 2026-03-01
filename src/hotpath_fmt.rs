@@ -1,43 +1,41 @@
-//! Pretty-print hotpath JSON reports stored in the `extra` column.
+//! Pretty-print hotpath profiling data from the results database.
 //!
-//! Reads the JSON structure produced by the `hotpath` crate when
-//! `HOTPATH_OUTPUT_FORMAT=json` is set, and formats it as column-aligned
-//! ASCII tables.
+//! Reads the structured `HotpathData` produced by parsing the hotpath crate's
+//! JSON output, and formats it as column-aligned ASCII tables.
 
 use std::fmt::Write;
 
-/// Format a hotpath JSON report for display.
+use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair};
+
+/// Format a hotpath report for display.
 ///
-/// Returns `None` if `extra` doesn't contain hotpath data (no
-/// `functions_timing` or `functions_alloc` key).
-pub fn format_hotpath_report(extra: &serde_json::Value, top: usize) -> Option<String> {
-    let obj = extra.as_object()?;
+/// Returns `None` if `data` contains no functions and no threads.
+pub fn format_hotpath_report(data: &HotpathData, top: usize) -> Option<String> {
+    let timing: Vec<&HotpathFunction> = data.functions.iter().filter(|f| f.section == "timing").collect();
+    let alloc: Vec<&HotpathFunction> = data.functions.iter().filter(|f| f.section == "alloc").collect();
 
-    let has_timing = obj.contains_key("functions_timing");
-    let has_alloc = obj.contains_key("functions_alloc");
-
-    if !has_timing && !has_alloc {
+    if timing.is_empty() && alloc.is_empty() && data.threads.is_empty() {
         return None;
     }
 
     let mut out = String::new();
 
-    if let Some(timing) = obj.get("functions_timing") {
-        format_functions_table(&mut out, timing, "timing", top);
+    if !timing.is_empty() {
+        format_functions_table(&mut out, &timing, "timing", top);
     }
 
-    if let Some(alloc) = obj.get("functions_alloc") {
+    if !alloc.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
-        format_functions_table(&mut out, alloc, "alloc", top);
+        format_functions_table(&mut out, &alloc, "alloc", top);
     }
 
-    if let Some(threads) = obj.get("threads") {
+    if !data.threads.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
-        format_threads_table(&mut out, threads);
+        format_threads_table(&mut out, &data.threads, &data.thread_summary);
     }
 
     if out.is_empty() {
@@ -51,29 +49,24 @@ pub fn format_hotpath_report(extra: &serde_json::Value, top: usize) -> Option<St
 // Functions table (timing or alloc)
 // ---------------------------------------------------------------------------
 
-fn format_functions_table(out: &mut String, value: &serde_json::Value, label: &str, top: usize) {
-    let Some(obj) = value.as_object() else {
+fn format_functions_table(out: &mut String, functions: &[&HotpathFunction], label: &str, top: usize) {
+    if functions.is_empty() {
         return;
-    };
+    }
 
-    let description = obj
-        .get("description")
-        .and_then(|v| v.as_str())
+    let description = functions
+        .first()
+        .and_then(|f| f.description.as_deref())
         .unwrap_or("");
 
-    let all_data = match obj.get("data").and_then(|v| v.as_array()) {
-        Some(arr) if !arr.is_empty() => arr,
-        _ => return,
-    };
-
-    let data: &[serde_json::Value] = if top > 0 && top < all_data.len() {
-        &all_data[..top]
+    let data: &[&HotpathFunction] = if top > 0 && top < functions.len() {
+        &functions[..top]
     } else {
-        all_data
+        functions
     };
 
     // Determine which percentile columns exist.
-    let percentile_keys = detect_percentile_keys(data);
+    let percentile_keys = detect_percentile_keys(functions);
 
     // Compute column widths.
     let mut w_name = "Function".len();
@@ -83,15 +76,16 @@ fn format_functions_table(out: &mut String, value: &serde_json::Value, label: &s
     let mut w_total = "Total".len();
     let mut w_pct_total = "% Total".len();
 
-    for entry in data {
-        w_name = w_name.max(json_str(entry, "name").len());
-        w_calls = w_calls.max(format_calls(entry).len());
-        w_avg = w_avg.max(json_str(entry, "avg").len());
+    for f in data {
+        w_name = w_name.max(f.name.len());
+        w_calls = w_calls.max(f.calls.map(|c| c.to_string()).unwrap_or_default().len());
+        w_avg = w_avg.max(f.avg.as_deref().unwrap_or("").len());
         for (i, key) in percentile_keys.iter().enumerate() {
-            w_pcts[i] = w_pcts[i].max(json_str(entry, key).len());
+            let val = percentile_value(f, key);
+            w_pcts[i] = w_pcts[i].max(val.len());
         }
-        w_total = w_total.max(json_str(entry, "total").len());
-        w_pct_total = w_pct_total.max(json_str(entry, "percent_total").len());
+        w_total = w_total.max(f.total.as_deref().unwrap_or("").len());
+        w_pct_total = w_pct_total.max(f.percent_total.as_deref().unwrap_or("").len());
     }
 
     // Header line.
@@ -116,90 +110,88 @@ fn format_functions_table(out: &mut String, value: &serde_json::Value, label: &s
     .expect("write to String");
 
     // Data rows.
-    for entry in data {
+    for f in data {
         write!(
             out,
             "{:<w_name$}  {:>w_calls$}  {:>w_avg$}",
-            json_str(entry, "name"),
-            format_calls(entry),
-            json_str(entry, "avg"),
+            f.name,
+            f.calls.map(|c| c.to_string()).unwrap_or_default(),
+            f.avg.as_deref().unwrap_or(""),
         )
         .expect("write to String");
         for (i, key) in percentile_keys.iter().enumerate() {
-            write!(out, "  {:>width$}", json_str(entry, key), width = w_pcts[i])
+            write!(out, "  {:>width$}", percentile_value(f, key), width = w_pcts[i])
                 .expect("write to String");
         }
         writeln!(
             out,
             "  {:>w_total$}  {:>w_pct_total$}",
-            json_str(entry, "total"),
-            json_str(entry, "percent_total"),
+            f.total.as_deref().unwrap_or(""),
+            f.percent_total.as_deref().unwrap_or(""),
         )
         .expect("write to String");
     }
 }
 
-/// Detect percentile column keys from data entries.
+/// Detect which percentile columns are present across the function entries.
 ///
-/// The hotpath crate flattens percentiles into the entry object with keys like
-/// "p50", "p95", "p99". We scan the first entry to discover which ones exist.
-fn detect_percentile_keys(data: &[serde_json::Value]) -> Vec<String> {
-    let known_fields = [
-        "id",
-        "name",
-        "calls",
-        "avg",
-        "total",
-        "percent_total",
-    ];
+/// Checks for `p50`, `p95`, `p99` fields being `Some` on any entry, and
+/// returns the keys in numeric order.
+fn detect_percentile_keys(functions: &[&HotpathFunction]) -> Vec<String> {
+    let mut keys = Vec::new();
 
-    let Some(first) = data.first().and_then(serde_json::Value::as_object) else {
-        return Vec::new();
-    };
+    let has_p50 = functions.iter().any(|f| f.p50.is_some());
+    let has_p95 = functions.iter().any(|f| f.p95.is_some());
+    let has_p99 = functions.iter().any(|f| f.p99.is_some());
 
-    let mut pct_keys: Vec<String> = first
-        .keys()
-        .filter(|k| !known_fields.contains(&k.as_str()))
-        .filter(|k| k.starts_with('p') && k[1..].chars().all(|c| c.is_ascii_digit()))
-        .cloned()
-        .collect();
+    if has_p50 {
+        keys.push("p50".to_string());
+    }
+    if has_p95 {
+        keys.push("p95".to_string());
+    }
+    if has_p99 {
+        keys.push("p99".to_string());
+    }
 
-    // Sort numerically by percentile value.
-    pct_keys.sort_by_key(|k| k[1..].parse::<u32>().unwrap_or(0));
+    keys
+}
 
-    pct_keys
+/// Get the percentile value from a function entry by key name.
+fn percentile_value<'a>(f: &'a HotpathFunction, key: &str) -> &'a str {
+    match key {
+        "p50" => f.p50.as_deref().unwrap_or(""),
+        "p95" => f.p95.as_deref().unwrap_or(""),
+        "p99" => f.p99.as_deref().unwrap_or(""),
+        _ => "",
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Threads table
 // ---------------------------------------------------------------------------
 
-fn format_threads_table(out: &mut String, value: &serde_json::Value) {
-    let Some(obj) = value.as_object() else {
+fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[KvPair]) {
+    if threads.is_empty() {
         return;
-    };
-
-    let data = match obj.get("data").and_then(|v| v.as_array()) {
-        Some(arr) if !arr.is_empty() => arr,
-        _ => return,
-    };
-
-    // Build header annotation.
-    let mut header_parts: Vec<String> = Vec::new();
-    if let Some(rss) = obj.get("rss_bytes").and_then(|v| v.as_str()) {
-        header_parts.push(format!("RSS: {rss}"));
     }
-    if let Some(alloc) = obj.get("total_alloc_bytes").and_then(|v| v.as_str())
-        && let Some(dealloc) = obj.get("total_dealloc_bytes").and_then(|v| v.as_str())
-    {
-        header_parts.push(format!("Alloc: {alloc}"));
-        header_parts.push(format!("Dealloc: {dealloc}"));
-        if let Some(diff) = obj.get("alloc_dealloc_diff").and_then(|v| v.as_str()) {
-            header_parts.push(format!("Diff: {diff}"));
+
+    // Build header annotation from summary KvPairs.
+    let mut header_parts: Vec<String> = Vec::new();
+    if let Some(rss) = summary.iter().find(|kv| kv.key == "threads.rss_bytes") {
+        header_parts.push(format!("RSS: {}", kv_value_str(rss)));
+    }
+    let alloc_kv = summary.iter().find(|kv| kv.key == "threads.total_alloc_bytes");
+    let dealloc_kv = summary.iter().find(|kv| kv.key == "threads.total_dealloc_bytes");
+    if let (Some(alloc), Some(dealloc)) = (alloc_kv, dealloc_kv) {
+        header_parts.push(format!("Alloc: {}", kv_value_str(alloc)));
+        header_parts.push(format!("Dealloc: {}", kv_value_str(dealloc)));
+        if let Some(diff) = summary.iter().find(|kv| kv.key == "threads.alloc_dealloc_diff") {
+            header_parts.push(format!("Diff: {}", kv_value_str(diff)));
         }
     }
 
-    let has_alloc = data.iter().any(|e| e.get("alloc_bytes").is_some());
+    let has_alloc = threads.iter().any(|t| t.alloc_bytes.is_some());
 
     // Compute column widths.
     let mut w_name = "Thread".len();
@@ -213,18 +205,18 @@ fn format_threads_table(out: &mut String, value: &serde_json::Value) {
     let mut w_dealloc = "Dealloc".len();
     let mut w_diff = "Diff".len();
 
-    for entry in data {
-        w_name = w_name.max(json_str(entry, "name").len());
-        w_status = w_status.max(json_str(entry, "status").len());
-        w_cpu_pct = w_cpu_pct.max(json_str_opt(entry, "cpu_percent").len());
-        w_cpu_max = w_cpu_max.max(json_str_opt(entry, "cpu_percent_max").len());
-        w_cpu_user = w_cpu_user.max(json_str(entry, "cpu_user").len());
-        w_cpu_sys = w_cpu_sys.max(json_str(entry, "cpu_sys").len());
-        w_cpu_total = w_cpu_total.max(json_str(entry, "cpu_total").len());
+    for t in threads {
+        w_name = w_name.max(t.name.len());
+        w_status = w_status.max(t.status.as_deref().unwrap_or("").len());
+        w_cpu_pct = w_cpu_pct.max(opt_or_dash(t.cpu_percent.as_deref()).len());
+        w_cpu_max = w_cpu_max.max(opt_or_dash(t.cpu_percent_max.as_deref()).len());
+        w_cpu_user = w_cpu_user.max(t.cpu_user.as_deref().unwrap_or("").len());
+        w_cpu_sys = w_cpu_sys.max(t.cpu_sys.as_deref().unwrap_or("").len());
+        w_cpu_total = w_cpu_total.max(t.cpu_total.as_deref().unwrap_or("").len());
         if has_alloc {
-            w_alloc = w_alloc.max(json_str_opt(entry, "alloc_bytes").len());
-            w_dealloc = w_dealloc.max(json_str_opt(entry, "dealloc_bytes").len());
-            w_diff = w_diff.max(json_str_opt(entry, "mem_diff").len());
+            w_alloc = w_alloc.max(opt_or_dash(t.alloc_bytes.as_deref()).len());
+            w_dealloc = w_dealloc.max(opt_or_dash(t.dealloc_bytes.as_deref()).len());
+            w_diff = w_diff.max(opt_or_dash(t.mem_diff.as_deref()).len());
         }
     }
 
@@ -254,26 +246,26 @@ fn format_threads_table(out: &mut String, value: &serde_json::Value) {
     out.push('\n');
 
     // Data rows.
-    for entry in data {
+    for t in threads {
         write!(
             out,
             "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_user$}  {:>w_cpu_sys$}  {:>w_cpu_total$}",
-            json_str(entry, "name"),
-            json_str(entry, "status"),
-            json_str_opt(entry, "cpu_percent"),
-            json_str_opt(entry, "cpu_percent_max"),
-            json_str(entry, "cpu_user"),
-            json_str(entry, "cpu_sys"),
-            json_str(entry, "cpu_total"),
+            t.name,
+            t.status.as_deref().unwrap_or(""),
+            opt_or_dash(t.cpu_percent.as_deref()),
+            opt_or_dash(t.cpu_percent_max.as_deref()),
+            t.cpu_user.as_deref().unwrap_or(""),
+            t.cpu_sys.as_deref().unwrap_or(""),
+            t.cpu_total.as_deref().unwrap_or(""),
         )
         .expect("write to String");
         if has_alloc {
             write!(
                 out,
                 "  {:>w_alloc$}  {:>w_dealloc$}  {:>w_diff$}",
-                json_str_opt(entry, "alloc_bytes"),
-                json_str_opt(entry, "dealloc_bytes"),
-                json_str_opt(entry, "mem_diff"),
+                opt_or_dash(t.alloc_bytes.as_deref()),
+                opt_or_dash(t.dealloc_bytes.as_deref()),
+                opt_or_dash(t.mem_diff.as_deref()),
             )
             .expect("write to String");
         }
@@ -281,54 +273,35 @@ fn format_threads_table(out: &mut String, value: &serde_json::Value) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// JSON helpers
-// ---------------------------------------------------------------------------
-
-/// Get a string field from a JSON object, returning "" if missing.
-fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
-    value.get(key).and_then(serde_json::Value::as_str).unwrap_or("")
+/// Return the string value of a `KvPair` for display.
+fn kv_value_str(kv: &KvPair) -> String {
+    kv.value.to_string()
 }
 
-/// Get an optional string field, returning "-" if null/missing.
-fn json_str_opt<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("-")
-}
-
-/// Format the `calls` field (u64 in JSON, display as string).
-fn format_calls(entry: &serde_json::Value) -> String {
-    entry
-        .get("calls")
-        .and_then(serde_json::Value::as_u64)
-        .map(|n| n.to_string())
-        .unwrap_or_default()
+/// Return the value if `Some`, otherwise "-".
+fn opt_or_dash(val: Option<&str>) -> &str {
+    val.unwrap_or("-")
 }
 
 // ---------------------------------------------------------------------------
 // Diff formatting
 // ---------------------------------------------------------------------------
 
-/// Format a side-by-side diff of two hotpath JSON reports.
+/// Format a side-by-side diff of two hotpath reports.
 ///
-/// Returns `None` if neither side contains `functions_timing` or
-/// `functions_alloc` data.
+/// Returns `None` if neither side contains timing or alloc function data.
 pub fn format_hotpath_diff(
-    extra_a: &serde_json::Value,
-    extra_b: &serde_json::Value,
+    data_a: &HotpathData,
+    data_b: &HotpathData,
     top: usize,
 ) -> Option<String> {
-    let obj_a = extra_a.as_object();
-    let obj_b = extra_b.as_object();
+    let timing_a: Vec<&HotpathFunction> = data_a.functions.iter().filter(|f| f.section == "timing").collect();
+    let timing_b: Vec<&HotpathFunction> = data_b.functions.iter().filter(|f| f.section == "timing").collect();
+    let alloc_a: Vec<&HotpathFunction> = data_a.functions.iter().filter(|f| f.section == "alloc").collect();
+    let alloc_b: Vec<&HotpathFunction> = data_b.functions.iter().filter(|f| f.section == "alloc").collect();
 
-    let has_timing = obj_a
-        .is_some_and(|o| o.contains_key("functions_timing"))
-        || obj_b.is_some_and(|o| o.contains_key("functions_timing"));
-    let has_alloc = obj_a
-        .is_some_and(|o| o.contains_key("functions_alloc"))
-        || obj_b.is_some_and(|o| o.contains_key("functions_alloc"));
+    let has_timing = !timing_a.is_empty() || !timing_b.is_empty();
+    let has_alloc = !alloc_a.is_empty() || !alloc_b.is_empty();
 
     if !has_timing && !has_alloc {
         return None;
@@ -337,53 +310,15 @@ pub fn format_hotpath_diff(
     let mut out = String::new();
 
     if has_timing {
-        let timing_a = obj_a.and_then(|o| o.get("functions_timing"));
-        let timing_b = obj_b.and_then(|o| o.get("functions_timing"));
-        let section = format_section_diff(
-            "timing",
-            timing_a
-                .and_then(|v| v.get("description"))
-                .and_then(|v| v.as_str()),
-            timing_b
-                .and_then(|v| v.get("description"))
-                .and_then(|v| v.as_str()),
-            timing_a
-                .and_then(|v| v.get("data"))
-                .and_then(|v| v.as_array())
-                .map(Vec::as_slice),
-            timing_b
-                .and_then(|v| v.get("data"))
-                .and_then(|v| v.as_array())
-                .map(Vec::as_slice),
-            top,
-        );
+        let section = format_section_diff("timing", &timing_a, &timing_b, top);
         out.push_str(&section);
     }
 
     if has_alloc {
-        let alloc_a = obj_a.and_then(|o| o.get("functions_alloc"));
-        let alloc_b = obj_b.and_then(|o| o.get("functions_alloc"));
         if !out.is_empty() {
             out.push('\n');
         }
-        let section = format_section_diff(
-            "alloc",
-            alloc_a
-                .and_then(|v| v.get("description"))
-                .and_then(|v| v.as_str()),
-            alloc_b
-                .and_then(|v| v.get("description"))
-                .and_then(|v| v.as_str()),
-            alloc_a
-                .and_then(|v| v.get("data"))
-                .and_then(|v| v.as_array())
-                .map(Vec::as_slice),
-            alloc_b
-                .and_then(|v| v.get("data"))
-                .and_then(|v| v.as_array())
-                .map(Vec::as_slice),
-            top,
-        );
+        let section = format_section_diff("alloc", &alloc_a, &alloc_b, top);
         out.push_str(&section);
     }
 
@@ -396,51 +331,37 @@ pub fn format_hotpath_diff(
 
 fn format_section_diff(
     label: &str,
-    desc_a: Option<&str>,
-    desc_b: Option<&str>,
-    data_a: Option<&[serde_json::Value]>,
-    data_b: Option<&[serde_json::Value]>,
+    data_a: &[&HotpathFunction],
+    data_b: &[&HotpathFunction],
     top: usize,
 ) -> String {
     use std::collections::HashMap;
 
     // Build name -> entry maps for each side.
-    let mut map_a: HashMap<&str, &serde_json::Value> = HashMap::new();
-    if let Some(entries) = data_a {
-        for entry in entries {
-            let name = json_str(entry, "name");
-            if !name.is_empty() {
-                map_a.insert(name, entry);
-            }
+    let mut map_a: HashMap<&str, &HotpathFunction> = HashMap::new();
+    for f in data_a {
+        if !f.name.is_empty() {
+            map_a.insert(&f.name, f);
         }
     }
 
-    let mut map_b: HashMap<&str, &serde_json::Value> = HashMap::new();
-    if let Some(entries) = data_b {
-        for entry in entries {
-            let name = json_str(entry, "name");
-            if !name.is_empty() {
-                map_b.insert(name, entry);
-            }
+    let mut map_b: HashMap<&str, &HotpathFunction> = HashMap::new();
+    for f in data_b {
+        if !f.name.is_empty() {
+            map_b.insert(&f.name, f);
         }
     }
 
     // Union of function names: A's order first, then new-in-B functions.
     let mut names: Vec<&str> = Vec::new();
-    if let Some(entries) = data_a {
-        for entry in entries {
-            let name = json_str(entry, "name");
-            if !name.is_empty() {
-                names.push(name);
-            }
+    for f in data_a {
+        if !f.name.is_empty() {
+            names.push(&f.name);
         }
     }
-    if let Some(entries) = data_b {
-        for entry in entries {
-            let name = json_str(entry, "name");
-            if !name.is_empty() && !map_a.contains_key(name) {
-                names.push(name);
-            }
+    for f in data_b {
+        if !f.name.is_empty() && !map_a.contains_key(f.name.as_str()) {
+            names.push(&f.name);
         }
     }
 
@@ -459,8 +380,8 @@ fn format_section_diff(
     let mut row_change: Vec<String> = Vec::new();
 
     for &name in &names {
-        let ta = map_a.get(name).map(|e| json_str(e, "total"));
-        let tb = map_b.get(name).map(|e| json_str(e, "total"));
+        let ta = map_a.get(name).and_then(|f| f.total.as_deref());
+        let tb = map_b.get(name).and_then(|f| f.total.as_deref());
         row_total_a.push(ta.unwrap_or(placeholder));
         row_total_b.push(tb.unwrap_or(placeholder));
         row_change.push(format_change_str(ta, tb));
@@ -482,6 +403,8 @@ fn format_section_diff(
     let mut out = String::new();
 
     // Header line — prefer A's description, fall back to B's.
+    let desc_a = data_a.first().and_then(|f| f.description.as_deref());
+    let desc_b = data_b.first().and_then(|f| f.description.as_deref());
     let description = desc_a.or(desc_b).unwrap_or("");
     writeln!(out, "{label} - {description}").expect("write to String");
 
@@ -508,8 +431,8 @@ fn format_section_diff(
 
 /// Parse a formatted metric string to a raw `f64` value.
 ///
-/// Handles duration units (ns/µs/ms/s → result in ms), byte units
-/// (B/KB/MB/GB → result in bytes), and bare percentages.
+/// Handles duration units (ns/us/ms/s -> result in ms), byte units
+/// (B/KB/MB/GB -> result in bytes), and bare percentages.
 fn parse_metric(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {
@@ -529,12 +452,12 @@ fn parse_metric(s: &str) -> Option<f64> {
     let number: f64 = num_str.parse().ok()?;
 
     let multiplier = match unit {
-        // Duration → ms
+        // Duration -> ms
         "ns" => 1e-6,
-        "µs" => 1e-3,
+        "\u{b5}s" => 1e-3,
         "ms" => 1.0,
         "s" => 1e3,
-        // Bytes → bytes
+        // Bytes -> bytes
         "B" => 1.0,
         "KB" => 1024.0,
         "MB" => 1_048_576.0,
@@ -571,7 +494,7 @@ fn format_change_str(a: Option<&str>, b: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::db::{HotpathData, HotpathFunction};
 
     // -----------------------------------------------------------------------
     // parse_metric
@@ -585,8 +508,8 @@ mod tests {
 
     #[test]
     fn parse_metric_duration_us() {
-        let v = parse_metric("1.5 µs").unwrap();
-        assert!((v - 0.0015).abs() < 1e-10, "1.5 µs should be 0.0015 ms, got {v}");
+        let v = parse_metric("1.5 \u{b5}s").unwrap();
+        assert!((v - 0.0015).abs() < 1e-10, "1.5 \u{b5}s should be 0.0015 ms, got {v}");
     }
 
     #[test]
@@ -682,7 +605,7 @@ mod tests {
 
     #[test]
     fn parse_metric_bare_number_no_unit_no_pct() {
-        // "42" — no space, no %, so rfind(' ') returns None → None.
+        // "42" -- no space, no %, so rfind(' ') returns None -> None.
         assert!(parse_metric("42").is_none(), "bare number without unit should return None");
     }
 
@@ -712,19 +635,19 @@ mod tests {
     fn format_change_str_cross_unit() {
         // 1 s = 1000 ms. Going from 500 ms to 1 s is a +100% change.
         let result = format_change_str(Some("500 ms"), Some("1 s"));
-        assert_eq!(result, "+100.0%", "500ms → 1s should be +100.0%");
+        assert_eq!(result, "+100.0%", "500ms -> 1s should be +100.0%");
     }
 
     #[test]
     fn format_change_str_gone() {
         let result = format_change_str(Some("100 ms"), None);
-        assert_eq!(result, "(gone)", "present → absent should be (gone)");
+        assert_eq!(result, "(gone)", "present -> absent should be (gone)");
     }
 
     #[test]
     fn format_change_str_new() {
         let result = format_change_str(None, Some("100 ms"));
-        assert_eq!(result, "(new)", "absent → present should be (new)");
+        assert_eq!(result, "(new)", "absent -> present should be (new)");
     }
 
     #[test]
@@ -761,142 +684,113 @@ mod tests {
 
     #[test]
     fn format_change_str_byte_units() {
-        // 1 KB = 1024 B, 2 KB = 2048 B → +100%
+        // 1 KB = 1024 B, 2 KB = 2048 B -> +100%
         let result = format_change_str(Some("1 KB"), Some("2 KB"));
-        assert_eq!(result, "+100.0%", "1KB → 2KB should be +100.0%");
+        assert_eq!(result, "+100.0%", "1KB -> 2KB should be +100.0%");
     }
 
     // -----------------------------------------------------------------------
     // detect_percentile_keys
     // -----------------------------------------------------------------------
 
+    fn make_fn(name: &str, p50: Option<&str>, p95: Option<&str>, p99: Option<&str>) -> HotpathFunction {
+        HotpathFunction {
+            section: "timing".to_string(),
+            description: None,
+            ordinal: 0,
+            name: name.to_string(),
+            calls: Some(1),
+            avg: Some("1 ms".to_string()),
+            total: Some("1 ms".to_string()),
+            percent_total: Some("100%".to_string()),
+            p50: p50.map(String::from),
+            p95: p95.map(String::from),
+            p99: p99.map(String::from),
+        }
+    }
+
     #[test]
     fn detect_percentile_keys_standard() {
-        let data = vec![json!({
-            "name": "foo",
-            "calls": 10,
-            "avg": "1 ms",
-            "total": "10 ms",
-            "percent_total": "50%",
-            "p50": "0.9 ms",
-            "p95": "1.5 ms",
-            "p99": "2.0 ms"
-        })];
-        let keys = detect_percentile_keys(&data);
+        let funcs = vec![make_fn("foo", Some("0.9 ms"), Some("1.5 ms"), Some("2.0 ms"))];
+        let refs: Vec<&HotpathFunction> = funcs.iter().collect();
+        let keys = detect_percentile_keys(&refs);
         assert_eq!(keys, vec!["p50", "p95", "p99"], "should find p50, p95, p99 in numeric order");
     }
 
     #[test]
-    fn detect_percentile_keys_numeric_sort_not_lexicographic() {
-        // p5 < p10 < p99 numerically, but lexicographically p10 < p5 < p99.
-        let data = vec![json!({
-            "name": "bar",
-            "calls": 1,
-            "avg": "1 ms",
-            "total": "1 ms",
-            "percent_total": "100%",
-            "p99": "5 ms",
-            "p5": "0.1 ms",
-            "p10": "0.2 ms"
-        })];
-        let keys = detect_percentile_keys(&data);
-        assert_eq!(keys, vec!["p5", "p10", "p99"], "should sort numerically: p5, p10, p99");
+    fn detect_percentile_keys_only_p50() {
+        let funcs = vec![make_fn("bar", Some("0.5 ms"), None, None)];
+        let refs: Vec<&HotpathFunction> = funcs.iter().collect();
+        let keys = detect_percentile_keys(&refs);
+        assert_eq!(keys, vec!["p50"], "should find only p50");
     }
 
     #[test]
     fn detect_percentile_keys_no_percentiles() {
-        let data = vec![json!({
-            "name": "baz",
-            "calls": 1,
-            "avg": "1 ms",
-            "total": "1 ms",
-            "percent_total": "100%"
-        })];
-        let keys = detect_percentile_keys(&data);
+        let funcs = vec![make_fn("baz", None, None, None)];
+        let refs: Vec<&HotpathFunction> = funcs.iter().collect();
+        let keys = detect_percentile_keys(&refs);
         assert!(keys.is_empty(), "no percentile keys should return empty vec");
     }
 
     #[test]
     fn detect_percentile_keys_empty_data() {
-        let data: Vec<serde_json::Value> = vec![];
-        let keys = detect_percentile_keys(&data);
+        let refs: Vec<&HotpathFunction> = Vec::new();
+        let keys = detect_percentile_keys(&refs);
         assert!(keys.is_empty(), "empty data should return empty vec");
     }
 
     #[test]
-    fn detect_percentile_keys_non_numeric_p_prefix_excluded() {
-        // "parent" starts with 'p' but is not pNN. "pid" starts with 'p' but
-        // p[1..] = "id" which is not all digits. These should be excluded.
-        let data = vec![json!({
-            "name": "fn",
-            "calls": 1,
-            "avg": "1 ms",
-            "total": "1 ms",
-            "percent_total": "100%",
-            "parent": "main",
-            "pid": "1234",
-            "p50": "0.5 ms"
-        })];
-        let keys = detect_percentile_keys(&data);
-        assert_eq!(keys, vec!["p50"], "'parent' and 'pid' should not appear, only p50");
-    }
-
-    #[test]
-    fn detect_percentile_keys_known_fields_excluded() {
-        // "id" is in the known_fields list and should be excluded even though it
-        // doesn't start with 'p'. Just verifying known_fields filtering works.
-        let data = vec![json!({
-            "id": "abc",
-            "name": "fn",
-            "calls": 1,
-            "avg": "1 ms",
-            "total": "1 ms",
-            "percent_total": "100%",
-            "p75": "2 ms"
-        })];
-        let keys = detect_percentile_keys(&data);
-        assert_eq!(keys, vec!["p75"], "known fields like 'id' should be excluded");
-    }
-
-    #[test]
-    fn detect_percentile_keys_first_entry_only() {
-        // Only the first entry is scanned. p99 in the second entry should not appear.
-        let data = vec![
-            json!({"name": "a", "calls": 1, "avg": "1 ms", "total": "1 ms", "percent_total": "50%", "p50": "1 ms"}),
-            json!({"name": "b", "calls": 1, "avg": "2 ms", "total": "2 ms", "percent_total": "50%", "p50": "2 ms", "p99": "3 ms"}),
+    fn detect_percentile_keys_mixed_across_entries() {
+        // p50 on first entry, p99 on second — both should be detected.
+        let funcs = vec![
+            make_fn("a", Some("1 ms"), None, None),
+            make_fn("b", None, None, Some("3 ms")),
         ];
-        let keys = detect_percentile_keys(&data);
-        assert_eq!(keys, vec!["p50"], "only first entry's keys should be detected");
+        let refs: Vec<&HotpathFunction> = funcs.iter().collect();
+        let keys = detect_percentile_keys(&refs);
+        assert_eq!(keys, vec!["p50", "p99"], "should detect p50 from first and p99 from second");
+    }
+
+    #[test]
+    fn detect_percentile_keys_p95_and_p99_only() {
+        let funcs = vec![make_fn("fn", None, Some("2 ms"), Some("5 ms"))];
+        let refs: Vec<&HotpathFunction> = funcs.iter().collect();
+        let keys = detect_percentile_keys(&refs);
+        assert_eq!(keys, vec!["p95", "p99"], "should find p95 and p99 without p50");
     }
 
     // -----------------------------------------------------------------------
-    // format_hotpath_report — --top truncation
+    // format_hotpath_report -- --top truncation
     // -----------------------------------------------------------------------
 
-    fn make_timing_report(n: usize) -> serde_json::Value {
-        let entries: Vec<serde_json::Value> = (0..n)
-            .map(|i| {
-                json!({
-                    "name": format!("fn_{i}"),
-                    "calls": i + 1,
-                    "avg": format!("{} ms", i + 1),
-                    "total": format!("{} ms", (i + 1) * 10),
-                    "percent_total": format!("{}%", 100 / n)
-                })
+    fn make_timing_data(n: usize) -> HotpathData {
+        let functions: Vec<HotpathFunction> = (0..n)
+            .map(|i| HotpathFunction {
+                section: "timing".to_string(),
+                description: Some("wall clock".to_string()),
+                ordinal: i as i64,
+                name: format!("fn_{i}"),
+                calls: Some((i + 1) as i64),
+                avg: Some(format!("{} ms", i + 1)),
+                total: Some(format!("{} ms", (i + 1) * 10)),
+                percent_total: Some(format!("{}%", 100 / n)),
+                p50: None,
+                p95: None,
+                p99: None,
             })
             .collect();
-        json!({
-            "functions_timing": {
-                "description": "wall clock",
-                "data": entries
-            }
-        })
+        HotpathData {
+            functions,
+            threads: Vec::new(),
+            thread_summary: Vec::new(),
+        }
     }
 
     #[test]
     fn format_hotpath_report_top_zero_shows_all() {
-        let report = make_timing_report(5);
-        let output = format_hotpath_report(&report, 0).unwrap();
+        let data = make_timing_data(5);
+        let output = format_hotpath_report(&data, 0).unwrap();
         // Count data rows (all lines minus the header line and column header line).
         let lines: Vec<&str> = output.lines().collect();
         // Line 0: "timing - wall clock"
@@ -907,8 +801,8 @@ mod tests {
 
     #[test]
     fn format_hotpath_report_top_limits_rows() {
-        let report = make_timing_report(10);
-        let output = format_hotpath_report(&report, 3).unwrap();
+        let data = make_timing_data(10);
+        let output = format_hotpath_report(&data, 3).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         // 2 header lines + 3 data rows = 5 lines total
         assert_eq!(lines.len(), 5, "top=3 should show 3 data rows + 2 header lines");
@@ -919,94 +813,89 @@ mod tests {
 
     #[test]
     fn format_hotpath_report_top_larger_than_data() {
-        let report = make_timing_report(3);
-        let output = format_hotpath_report(&report, 100).unwrap();
+        let data = make_timing_data(3);
+        let output = format_hotpath_report(&data, 100).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 5, "top=100 with 3 entries should show all 3 + 2 headers");
     }
 
     #[test]
-    fn format_hotpath_report_returns_none_for_no_sections() {
-        let extra = json!({"unrelated": "data"});
-        assert!(format_hotpath_report(&extra, 0).is_none(), "no timing/alloc → None");
-    }
-
-    #[test]
-    fn format_hotpath_report_returns_none_for_non_object() {
-        let extra = json!("a string");
-        assert!(format_hotpath_report(&extra, 0).is_none(), "non-object → None");
-    }
-
-    #[test]
     fn format_hotpath_report_returns_none_for_empty_data() {
-        let extra = json!({
-            "functions_timing": {
-                "description": "wall clock",
-                "data": []
-            }
-        });
-        assert!(format_hotpath_report(&extra, 0).is_none(), "empty data array → None");
+        let data = HotpathData {
+            functions: Vec::new(),
+            threads: Vec::new(),
+            thread_summary: Vec::new(),
+        };
+        assert!(format_hotpath_report(&data, 0).is_none(), "empty data -> None");
     }
 
     // -----------------------------------------------------------------------
     // format_section_diff
     // -----------------------------------------------------------------------
 
+    fn make_diff_fn(name: &str, total: &str) -> HotpathFunction {
+        HotpathFunction {
+            section: "timing".to_string(),
+            description: Some("wall clock".to_string()),
+            ordinal: 0,
+            name: name.to_string(),
+            calls: None,
+            avg: None,
+            total: Some(total.to_string()),
+            percent_total: None,
+            p50: None,
+            p95: None,
+            p99: None,
+        }
+    }
+
     #[test]
     fn format_section_diff_matched_functions() {
         let data_a = vec![
-            json!({"name": "alpha", "total": "100 ms"}),
-            json!({"name": "beta", "total": "200 ms"}),
+            make_diff_fn("alpha", "100 ms"),
+            make_diff_fn("beta", "200 ms"),
         ];
         let data_b = vec![
-            json!({"name": "alpha", "total": "110 ms"}),
-            json!({"name": "beta", "total": "180 ms"}),
+            make_diff_fn("alpha", "110 ms"),
+            make_diff_fn("beta", "180 ms"),
         ];
-        let result = format_section_diff(
-            "timing",
-            Some("wall clock"),
-            Some("wall clock"),
-            Some(&data_a),
-            Some(&data_b),
-            0,
-        );
+        let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
+        let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
+        let result = format_section_diff("timing", &refs_a, &refs_b, 0);
         assert!(result.contains("alpha"), "output should contain matched fn 'alpha'");
         assert!(result.contains("beta"), "output should contain matched fn 'beta'");
-        assert!(result.contains("+10.0%"), "alpha 100→110 should show +10.0%");
-        assert!(result.contains("-10.0%"), "beta 200→180 should show -10.0%");
+        assert!(result.contains("+10.0%"), "alpha 100->110 should show +10.0%");
+        assert!(result.contains("-10.0%"), "beta 200->180 should show -10.0%");
     }
 
     #[test]
     fn format_section_diff_unmatched_functions() {
-        let data_a = vec![json!({"name": "only_in_a", "total": "50 ms"})];
-        let data_b = vec![json!({"name": "only_in_b", "total": "75 ms"})];
-        let result = format_section_diff(
-            "timing",
-            Some("desc"),
-            Some("desc"),
-            Some(&data_a),
-            Some(&data_b),
-            0,
-        );
+        let data_a = vec![make_diff_fn("only_in_a", "50 ms")];
+        let data_b = vec![make_diff_fn("only_in_b", "75 ms")];
+        let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
+        let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
+        let result = format_section_diff("timing", &refs_a, &refs_b, 0);
         assert!(result.contains("only_in_a"), "should contain function only in A");
         assert!(result.contains("only_in_b"), "should contain function only in B");
-        // only_in_a is present in A but absent in B → (gone)
+        // only_in_a is present in A but absent in B -> (gone)
         assert!(result.contains("(gone)"), "function only in A should show (gone)");
-        // only_in_b is absent in A but present in B → (new)
+        // only_in_b is absent in A but present in B -> (new)
         assert!(result.contains("(new)"), "function only in B should show (new)");
     }
 
     #[test]
     fn format_section_diff_ordering_a_first_then_new_in_b() {
         let data_a = vec![
-            json!({"name": "second", "total": "20 ms"}),
-            json!({"name": "first", "total": "10 ms"}),
+            make_diff_fn("second", "20 ms"),
+            make_diff_fn("first", "10 ms"),
         ];
         let data_b = vec![
-            json!({"name": "newcomer", "total": "30 ms"}),
-            json!({"name": "first", "total": "11 ms"}),
+            make_diff_fn("newcomer", "30 ms"),
+            make_diff_fn("first", "11 ms"),
         ];
-        let result = format_section_diff("t", None, None, Some(&data_a), Some(&data_b), 0);
+        let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
+        let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
+        let result = format_section_diff("t", &refs_a, &refs_b, 0);
         let lines: Vec<&str> = result.lines().collect();
         // Lines: header, col headers, then data rows in order: second, first, newcomer
         let data_lines: Vec<&&str> = lines.iter().skip(2).collect();
@@ -1030,19 +919,21 @@ mod tests {
     #[test]
     fn format_section_diff_top_truncation() {
         let data_a = vec![
-            json!({"name": "a", "total": "1 ms"}),
-            json!({"name": "b", "total": "2 ms"}),
-            json!({"name": "c", "total": "3 ms"}),
-            json!({"name": "d", "total": "4 ms"}),
+            make_diff_fn("a", "1 ms"),
+            make_diff_fn("b", "2 ms"),
+            make_diff_fn("c", "3 ms"),
+            make_diff_fn("d", "4 ms"),
         ];
         let data_b = vec![
-            json!({"name": "a", "total": "1.1 ms"}),
-            json!({"name": "b", "total": "2.2 ms"}),
-            json!({"name": "c", "total": "3.3 ms"}),
-            json!({"name": "d", "total": "4.4 ms"}),
-            json!({"name": "e", "total": "5.5 ms"}),
+            make_diff_fn("a", "1.1 ms"),
+            make_diff_fn("b", "2.2 ms"),
+            make_diff_fn("c", "3.3 ms"),
+            make_diff_fn("d", "4.4 ms"),
+            make_diff_fn("e", "5.5 ms"),
         ];
-        let result = format_section_diff("t", Some("d"), None, Some(&data_a), Some(&data_b), 2);
+        let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
+        let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
+        let result = format_section_diff("t", &refs_a, &refs_b, 2);
         let lines: Vec<&str> = result.lines().collect();
         // 1 header + 1 col header + 2 data rows = 4
         assert_eq!(lines.len(), 4, "top=2 should yield 4 lines total, got {}", lines.len());
@@ -1052,15 +943,19 @@ mod tests {
     }
 
     #[test]
-    fn format_section_diff_both_sides_none() {
-        let result = format_section_diff("t", None, None, None, None, 0);
-        assert!(result.is_empty(), "both sides None should yield empty string");
+    fn format_section_diff_both_sides_empty() {
+        let refs_a: Vec<&HotpathFunction> = Vec::new();
+        let refs_b: Vec<&HotpathFunction> = Vec::new();
+        let result = format_section_diff("t", &refs_a, &refs_b, 0);
+        assert!(result.is_empty(), "both sides empty should yield empty string");
     }
 
     #[test]
-    fn format_section_diff_one_side_none() {
-        let data_b = vec![json!({"name": "fn1", "total": "10 ms"})];
-        let result = format_section_diff("t", None, Some("d"), None, Some(&data_b), 0);
+    fn format_section_diff_one_side_empty() {
+        let data_b = vec![make_diff_fn("fn1", "10 ms")];
+        let refs_a: Vec<&HotpathFunction> = Vec::new();
+        let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
+        let result = format_section_diff("t", &refs_a, &refs_b, 0);
         assert!(result.contains("fn1"), "function from B side should appear");
         assert!(result.contains("(new)"), "function absent from A should show (new)");
         assert!(result.contains("--"), "A's total should be placeholder --");
@@ -1069,9 +964,15 @@ mod tests {
     #[test]
     fn format_section_diff_description_fallback() {
         // desc_a is preferred; when missing, desc_b is used.
-        let data = vec![json!({"name": "f", "total": "1 ms"})];
-        let result =
-            format_section_diff("timing", None, Some("fallback desc"), Some(&data), Some(&data), 0);
+        let mut fn_a = make_diff_fn("f", "1 ms");
+        fn_a.description = None;
+        let mut fn_b = make_diff_fn("f", "1 ms");
+        fn_b.description = Some("fallback desc".to_string());
+        let data_a = vec![fn_a];
+        let data_b = vec![fn_b];
+        let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
+        let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
+        let result = format_section_diff("timing", &refs_a, &refs_b, 0);
         assert!(
             result.contains("fallback desc"),
             "should fall back to B's description"
@@ -1082,10 +983,11 @@ mod tests {
     fn format_section_diff_empty_named_entries_skipped() {
         // Entries with empty name should be excluded from the union.
         let data_a = vec![
-            json!({"name": "", "total": "1 ms"}),
-            json!({"name": "real", "total": "2 ms"}),
+            make_diff_fn("", "1 ms"),
+            make_diff_fn("real", "2 ms"),
         ];
-        let result = format_section_diff("t", None, None, Some(&data_a), Some(&data_a), 0);
+        let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
+        let result = format_section_diff("t", &refs_a, &refs_a, 0);
         let data_lines: Vec<&str> = result.lines().skip(2).collect();
         assert_eq!(data_lines.len(), 1, "empty-name entry should be excluded, leaving 1 row");
         assert!(data_lines[0].starts_with("real"), "only 'real' should appear");

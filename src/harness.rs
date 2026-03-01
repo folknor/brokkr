@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::config::DriveConfig;
-use crate::db::{ResultsDb, RunRow};
+use crate::db::{self, Distribution, HotpathData, KvPair, KvValue, ResultsDb, RunRow};
 use crate::env::EnvInfo;
 use crate::error::DevError;
 use crate::git::GitInfo;
@@ -23,14 +23,15 @@ pub struct BenchConfig {
     pub cargo_profile: String,
     pub runs: usize,
     pub cli_args: Option<String>,
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Vec<KvPair>,
 }
 
 /// Result of a single benchmark measurement.
-#[derive(Debug)]
 pub struct BenchResult {
     pub elapsed_ms: i64,
-    pub extra: Option<serde_json::Value>,
+    pub kv: Vec<KvPair>,
+    pub distribution: Option<Distribution>,
+    pub hotpath: Option<HotpathData>,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +46,7 @@ pub struct BenchHarness {
     git: GitInfo,
     storage_notes: Option<String>,
     cargo_features: Option<String>,
+    project: crate::project::Project,
 }
 
 impl BenchHarness {
@@ -102,6 +104,7 @@ impl BenchHarness {
             git,
             storage_notes,
             cargo_features: None,
+            project,
         })
     }
 
@@ -174,7 +177,9 @@ impl BenchHarness {
 
         let result = BenchResult {
             elapsed_ms,
-            extra: None,
+            kv: Vec::new(),
+            distribution: None,
+            hotpath: None,
         };
         self.record_result(config, &result)?;
         Ok(result)
@@ -204,17 +209,20 @@ impl BenchHarness {
         let p95 = percentile(&samples, 95);
         let max = percentile(&samples, 100);
 
-        let extra = serde_json::json!({
-            "min_ms": min,
-            "p50_ms": p50,
-            "p95_ms": p95,
-            "max_ms": max,
-            "samples": samples.len(),
-        });
+        #[allow(clippy::cast_possible_wrap)]
+        let dist = Distribution {
+            samples: samples.len() as i64,
+            min_ms: min,
+            p50_ms: p50,
+            p95_ms: p95,
+            max_ms: max,
+        };
 
         let result = BenchResult {
             elapsed_ms: min,
-            extra: Some(extra),
+            kv: Vec::new(),
+            distribution: Some(dist),
+            hotpath: None,
         };
 
         self.record_result(config, &result)?;
@@ -285,6 +293,30 @@ impl BenchHarness {
 
     /// Build a `RunRow` from harness state, config, and result.
     fn build_row(&self, config: &BenchConfig, result: &BenchResult) -> RunRow {
+        // Merge config metadata + result kv into a single Vec.
+        // We can't move out of references so we must clone/reconstruct.
+        let mut kv = Vec::with_capacity(config.metadata.len() + result.kv.len());
+        for pair in &config.metadata {
+            kv.push(KvPair {
+                key: pair.key.clone(),
+                value: match &pair.value {
+                    KvValue::Int(v) => KvValue::Int(*v),
+                    KvValue::Real(v) => KvValue::Real(*v),
+                    KvValue::Text(v) => KvValue::Text(v.clone()),
+                },
+            });
+        }
+        for pair in &result.kv {
+            kv.push(KvPair {
+                key: pair.key.clone(),
+                value: match &pair.value {
+                    KvValue::Int(v) => KvValue::Int(*v),
+                    KvValue::Real(v) => KvValue::Real(*v),
+                    KvValue::Text(v) => KvValue::Text(v.clone()),
+                },
+            });
+        }
+
         RunRow {
             hostname: self.env.hostname.clone(),
             commit: self.git.commit.clone(),
@@ -293,6 +325,7 @@ impl BenchHarness {
             variant: config.variant.clone(),
             input_file: config.input_file.clone(),
             input_mb: config.input_mb,
+            peak_rss_mb: None,
             cargo_features: config.cargo_features.clone().or_else(|| self.cargo_features.clone()),
             cargo_profile: config.cargo_profile.clone(),
             elapsed_ms: result.elapsed_ms,
@@ -300,9 +333,11 @@ impl BenchHarness {
             cpu_governor: Some(self.env.governor.clone()),
             avail_memory_mb: i64::try_from(self.env.memory_available_mb).ok(),
             storage_notes: self.storage_notes.clone(),
-            extra: result.extra.clone(),
             cli_args: config.cli_args.clone(),
-            metadata: config.metadata.clone(),
+            project: self.project.name().to_owned(),
+            kv,
+            distribution: reconstruct_distribution(&result.distribution),
+            hotpath: reconstruct_hotpath(&result.hotpath),
         }
     }
 }
@@ -310,6 +345,56 @@ impl BenchHarness {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+fn reconstruct_distribution(dist: &Option<Distribution>) -> Option<Distribution> {
+    let d = dist.as_ref()?;
+    Some(Distribution {
+        samples: d.samples,
+        min_ms: d.min_ms,
+        p50_ms: d.p50_ms,
+        p95_ms: d.p95_ms,
+        max_ms: d.max_ms,
+    })
+}
+
+fn reconstruct_hotpath(hp: &Option<HotpathData>) -> Option<HotpathData> {
+    let h = hp.as_ref()?;
+    Some(db::HotpathData {
+        functions: h.functions.iter().map(|f| db::HotpathFunction {
+            section: f.section.clone(),
+            description: f.description.clone(),
+            ordinal: f.ordinal,
+            name: f.name.clone(),
+            calls: f.calls,
+            avg: f.avg.clone(),
+            total: f.total.clone(),
+            percent_total: f.percent_total.clone(),
+            p50: f.p50.clone(),
+            p95: f.p95.clone(),
+            p99: f.p99.clone(),
+        }).collect(),
+        threads: h.threads.iter().map(|t| db::HotpathThread {
+            name: t.name.clone(),
+            status: t.status.clone(),
+            cpu_percent: t.cpu_percent.clone(),
+            cpu_percent_max: t.cpu_percent_max.clone(),
+            cpu_user: t.cpu_user.clone(),
+            cpu_sys: t.cpu_sys.clone(),
+            cpu_total: t.cpu_total.clone(),
+            alloc_bytes: t.alloc_bytes.clone(),
+            dealloc_bytes: t.dealloc_bytes.clone(),
+            mem_diff: t.mem_diff.clone(),
+        }).collect(),
+        thread_summary: h.thread_summary.iter().map(|kv| KvPair {
+            key: kv.key.clone(),
+            value: match &kv.value {
+                KvValue::Int(v) => KvValue::Int(*v),
+                KvValue::Real(v) => KvValue::Real(*v),
+                KvValue::Text(v) => KvValue::Text(v.clone()),
+            },
+        }).collect(),
+    })
+}
 
 /// Build a result summary string with key=value pairs.
 fn format_result_line(
@@ -331,7 +416,15 @@ fn format_result_line(
         parts.push(format!("input={input}"));
     }
 
-    append_extra_fields(&mut parts, &result.extra);
+    append_kv_fields(&mut parts, &result.kv);
+
+    if let Some(ref dist) = result.distribution {
+        parts.push(format!("samples={}", dist.samples));
+        parts.push(format!("min_ms={}", dist.min_ms));
+        parts.push(format!("p50_ms={}", dist.p50_ms));
+        parts.push(format!("p95_ms={}", dist.p95_ms));
+        parts.push(format!("max_ms={}", dist.max_ms));
+    }
 
     parts.join("  ")
 }
@@ -355,26 +448,10 @@ fn force_emit_result_lines(
     println!("[result]  {}", format_result_line(config, result, git));
 }
 
-/// Flatten top-level keys from the extra JSON object into the result line.
-fn append_extra_fields(parts: &mut Vec<String>, extra: &Option<serde_json::Value>) {
-    let Some(serde_json::Value::Object(map)) = extra else {
-        return;
-    };
-
-    for (key, value) in map {
-        let formatted = format_json_value(value);
-        parts.push(format!("{key}={formatted}"));
-    }
-}
-
-/// Format a JSON value for display in a result line.
-fn format_json_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Null => "null".to_owned(),
-        other => other.to_string(),
+/// Flatten key-value pairs into the result line.
+fn append_kv_fields(parts: &mut Vec<String>, kv: &[KvPair]) {
+    for pair in kv {
+        parts.push(format!("{}={}", pair.key, pair.value));
     }
 }
 
@@ -446,14 +523,17 @@ pub fn run_hotpath_capture(
 
     let ms = elapsed_to_ms(&captured.elapsed);
 
-    let extra = std::fs::read_to_string(&json_file)
+    let hotpath = std::fs::read_to_string(&json_file)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| db::hotpath_data_from_json(&v));
     std::fs::remove_file(&json_file).ok();
 
     Ok(BenchResult {
         elapsed_ms: ms,
-        extra,
+        kv: Vec::new(),
+        distribution: None,
+        hotpath,
     })
 }
 
@@ -526,11 +606,11 @@ fn push_drive_note(parts: &mut Vec<String>, label: &str, value: &Option<String>)
 }
 
 /// Parse stderr bytes for `key=value` lines. Extracts `elapsed_ms` for timing,
-/// puts all other kv pairs into `BenchResult.extra` as a JSON object.
+/// puts all other kv pairs into `BenchResult.kv`.
 fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
     let text = String::from_utf8_lossy(stderr);
     let mut elapsed_ms: Option<i64> = None;
-    let mut extra = serde_json::Map::new();
+    let mut kv = Vec::new();
 
     for line in text.lines() {
         if let Some((key, value)) = line.split_once('=') {
@@ -541,15 +621,15 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
                     DevError::Config(format!("invalid elapsed_ms value: {value}"))
                 })?);
             } else if let Ok(n) = value.parse::<i64>() {
-                extra.insert(key.to_owned(), serde_json::Value::Number(n.into()));
+                kv.push(KvPair::int(key, n));
             } else if let Ok(f) = value.parse::<f64>() {
-                if let Some(n) = serde_json::Number::from_f64(f) {
-                    extra.insert(key.to_owned(), serde_json::Value::Number(n));
+                if f.is_finite() {
+                    kv.push(KvPair::real(key, f));
                 } else {
-                    extra.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+                    kv.push(KvPair::text(key, value));
                 }
             } else {
-                extra.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+                kv.push(KvPair::text(key, value));
             }
         }
     }
@@ -563,7 +643,9 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
 
     Ok(BenchResult {
         elapsed_ms,
-        extra: if extra.is_empty() { None } else { Some(serde_json::Value::Object(extra)) },
+        kv,
+        distribution: None,
+        hotpath: None,
     })
 }
 
@@ -638,7 +720,7 @@ mod tests {
         let stderr = b"elapsed_ms=1234\n";
         let result = parse_kv_stderr(stderr).unwrap();
         assert_eq!(result.elapsed_ms, 1234);
-        assert!(result.extra.is_none(), "no extra fields => extra should be None");
+        assert!(result.kv.is_empty(), "no extra fields => kv should be empty");
     }
 
     #[test]
@@ -667,15 +749,12 @@ mod tests {
         let result = parse_kv_stderr(stderr).unwrap();
         assert_eq!(result.elapsed_ms, 500);
 
-        let extra = result.extra.unwrap();
-        let map = extra.as_object().unwrap();
-
-        // Integer field
-        assert_eq!(map["rows"], serde_json::json!(42));
-        // Float field
-        assert_eq!(map["rate"], serde_json::json!(3.14));
-        // String field
-        assert_eq!(map["label"], serde_json::json!("fast"));
+        assert_eq!(result.kv.len(), 3);
+        // Check that we have the expected keys and values
+        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+        assert!(matches!(find("rows").value, KvValue::Int(42)));
+        assert!(matches!(find("rate").value, KvValue::Real(r) if (r - 3.14).abs() < 0.001));
+        assert!(matches!(&find("label").value, KvValue::Text(s) if s == "fast"));
     }
 
     #[test]
@@ -705,9 +784,8 @@ mod tests {
         // "tag=" has empty value — not parseable as i64 or f64, so becomes a string
         let stderr = b"elapsed_ms=100\ntag=\n";
         let result = parse_kv_stderr(stderr).unwrap();
-        let extra = result.extra.unwrap();
-        let map = extra.as_object().unwrap();
-        assert_eq!(map["tag"], serde_json::json!(""), "empty value should become empty string");
+        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+        assert!(matches!(&find("tag").value, KvValue::Text(s) if s.is_empty()), "empty value should become empty string");
     }
 
     #[test]
@@ -715,8 +793,8 @@ mod tests {
         let stderr = b"  elapsed_ms  =  300  \n  count  =  5  \n";
         let result = parse_kv_stderr(stderr).unwrap();
         assert_eq!(result.elapsed_ms, 300, "keys and values should be trimmed");
-        let extra = result.extra.unwrap();
-        assert_eq!(extra["count"], serde_json::json!(5));
+        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+        assert!(matches!(find("count").value, KvValue::Int(5)));
     }
 
     #[test]
@@ -739,8 +817,8 @@ mod tests {
         // NaN is not representable in JSON numbers
         let stderr = b"elapsed_ms=100\nweird=NaN\n";
         let result = parse_kv_stderr(stderr).unwrap();
-        let extra = result.extra.unwrap();
-        assert_eq!(extra["weird"], serde_json::json!("NaN"), "NaN should fall through to string");
+        let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
+        assert!(matches!(&find("weird").value, KvValue::Text(s) if s == "NaN"), "NaN should fall through to string");
     }
 
     // -----------------------------------------------------------------------
@@ -789,23 +867,23 @@ mod tests {
 
     #[test]
     fn pick_best_none_vs_candidate() {
-        let candidate = BenchResult { elapsed_ms: 500, extra: None };
+        let candidate = BenchResult { elapsed_ms: 500, kv: vec![], distribution: None, hotpath: None };
         let result = pick_best(None, candidate);
         assert_eq!(result.elapsed_ms, 500, "None current should always take candidate");
     }
 
     #[test]
     fn pick_best_keeps_better() {
-        let current = BenchResult { elapsed_ms: 100, extra: None };
-        let candidate = BenchResult { elapsed_ms: 200, extra: None };
+        let current = BenchResult { elapsed_ms: 100, kv: vec![], distribution: None, hotpath: None };
+        let candidate = BenchResult { elapsed_ms: 200, kv: vec![], distribution: None, hotpath: None };
         let result = pick_best(Some(current), candidate);
         assert_eq!(result.elapsed_ms, 100, "should keep the lower value");
     }
 
     #[test]
     fn pick_best_replaces_with_better() {
-        let current = BenchResult { elapsed_ms: 300, extra: None };
-        let candidate = BenchResult { elapsed_ms: 150, extra: None };
+        let current = BenchResult { elapsed_ms: 300, kv: vec![], distribution: None, hotpath: None };
+        let candidate = BenchResult { elapsed_ms: 150, kv: vec![], distribution: None, hotpath: None };
         let result = pick_best(Some(current), candidate);
         assert_eq!(result.elapsed_ms, 150, "should replace with lower value");
     }
@@ -815,15 +893,20 @@ mod tests {
         // Tie-breaking: current wins (<=)
         let current = BenchResult {
             elapsed_ms: 100,
-            extra: Some(serde_json::json!({"tag": "first"})),
+            kv: vec![KvPair::text("tag", "first")],
+            distribution: None,
+            hotpath: None,
         };
         let candidate = BenchResult {
             elapsed_ms: 100,
-            extra: Some(serde_json::json!({"tag": "second"})),
+            kv: vec![KvPair::text("tag", "second")],
+            distribution: None,
+            hotpath: None,
         };
         let result = pick_best(Some(current), candidate);
-        assert_eq!(
-            result.extra.unwrap()["tag"], "first",
+        let tag = result.kv.iter().find(|p| p.key == "tag").unwrap();
+        assert!(
+            matches!(&tag.value, KvValue::Text(s) if s == "first"),
             "on tie, current (first seen) should be kept"
         );
     }

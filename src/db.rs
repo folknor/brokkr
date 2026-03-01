@@ -3,9 +3,180 @@ use std::path::Path;
 
 use crate::error::DevError;
 
+// ---------------------------------------------------------------------------
+// Data structures
+// ---------------------------------------------------------------------------
+
 /// Handle to the results database.
 pub struct ResultsDb {
     conn: rusqlite::Connection,
+}
+
+/// A typed key-value pair for benchmark metadata and subprocess metrics.
+#[derive(Clone)]
+pub struct KvPair {
+    pub key: String,
+    pub value: KvValue,
+}
+
+/// Typed value for a key-value pair.
+#[derive(Clone)]
+pub enum KvValue {
+    Int(i64),
+    Real(f64),
+    Text(String),
+}
+
+impl KvPair {
+    pub fn int(key: impl Into<String>, value: i64) -> Self {
+        Self { key: key.into(), value: KvValue::Int(value) }
+    }
+    pub fn real(key: impl Into<String>, value: f64) -> Self {
+        Self { key: key.into(), value: KvValue::Real(value) }
+    }
+    pub fn text(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { key: key.into(), value: KvValue::Text(value.into()) }
+    }
+}
+
+impl std::fmt::Display for KvValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Real(v) => write!(f, "{v}"),
+            Self::Text(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+/// Distribution statistics from `harness.run_distribution()`.
+pub struct Distribution {
+    pub samples: i64,
+    pub min_ms: i64,
+    pub p50_ms: i64,
+    pub p95_ms: i64,
+    pub max_ms: i64,
+}
+
+/// A single function row from hotpath profiling.
+pub struct HotpathFunction {
+    pub section: String,
+    pub description: Option<String>,
+    pub ordinal: i64,
+    pub name: String,
+    pub calls: Option<i64>,
+    pub avg: Option<String>,
+    pub total: Option<String>,
+    pub percent_total: Option<String>,
+    pub p50: Option<String>,
+    pub p95: Option<String>,
+    pub p99: Option<String>,
+}
+
+/// A single thread row from hotpath profiling.
+pub struct HotpathThread {
+    pub name: String,
+    pub status: Option<String>,
+    pub cpu_percent: Option<String>,
+    pub cpu_percent_max: Option<String>,
+    pub cpu_user: Option<String>,
+    pub cpu_sys: Option<String>,
+    pub cpu_total: Option<String>,
+    pub alloc_bytes: Option<String>,
+    pub dealloc_bytes: Option<String>,
+    pub mem_diff: Option<String>,
+}
+
+/// Structured hotpath profiling data (functions + threads).
+pub struct HotpathData {
+    pub functions: Vec<HotpathFunction>,
+    pub threads: Vec<HotpathThread>,
+    pub thread_summary: Vec<KvPair>,
+}
+
+/// Convert a hotpath JSON report (from the hotpath crate) into a `HotpathData` struct.
+///
+/// Used by `run_hotpath_capture()` and the v2→v3 migration.
+pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> {
+    let obj = extra.as_object()?;
+
+    let has_timing = obj.contains_key("functions_timing");
+    let has_alloc = obj.contains_key("functions_alloc");
+    let has_threads = obj.contains_key("threads");
+
+    if !has_timing && !has_alloc && !has_threads {
+        return None;
+    }
+
+    let mut functions = Vec::new();
+
+    if let Some(timing) = obj.get("functions_timing") {
+        parse_functions_section(timing, "timing", &mut functions);
+    }
+    if let Some(alloc) = obj.get("functions_alloc") {
+        parse_functions_section(alloc, "alloc", &mut functions);
+    }
+
+    let mut threads = Vec::new();
+    let mut thread_summary = Vec::new();
+
+    if let Some(threads_val) = obj.get("threads")
+        && let Some(threads_obj) = threads_val.as_object()
+    {
+        for key in &["rss_bytes", "total_alloc_bytes", "total_dealloc_bytes", "alloc_dealloc_diff"] {
+            if let Some(v) = threads_obj.get(*key).and_then(|v| v.as_str()) {
+                thread_summary.push(KvPair::text(format!("threads.{key}"), v));
+            }
+        }
+        if let Some(data) = threads_obj.get("data").and_then(|v| v.as_array()) {
+            for entry in data {
+                let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+                threads.push(HotpathThread {
+                    name: s("name").unwrap_or_default(),
+                    status: s("status"),
+                    cpu_percent: s("cpu_percent"),
+                    cpu_percent_max: s("cpu_percent_max"),
+                    cpu_user: s("cpu_user"),
+                    cpu_sys: s("cpu_sys"),
+                    cpu_total: s("cpu_total"),
+                    alloc_bytes: s("alloc_bytes"),
+                    dealloc_bytes: s("dealloc_bytes"),
+                    mem_diff: s("mem_diff"),
+                });
+            }
+        }
+    }
+
+    if functions.is_empty() && threads.is_empty() {
+        return None;
+    }
+
+    Some(HotpathData { functions, threads, thread_summary })
+}
+
+fn parse_functions_section(value: &serde_json::Value, section: &str, out: &mut Vec<HotpathFunction>) {
+    let Some(obj) = value.as_object() else { return };
+    let description = obj.get("description").and_then(|v| v.as_str()).map(String::from);
+    let Some(data) = obj.get("data").and_then(|v| v.as_array()) else { return };
+
+    for (ordinal, entry) in data.iter().enumerate() {
+        let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+        #[allow(clippy::cast_possible_wrap)]
+        let ord = ordinal as i64;
+        out.push(HotpathFunction {
+            section: section.to_owned(),
+            description: description.clone(),
+            ordinal: ord,
+            name: s("name").unwrap_or_default(),
+            calls: entry.get("calls").and_then(serde_json::Value::as_i64),
+            avg: s("avg"),
+            total: s("total"),
+            percent_total: s("percent_total"),
+            p50: s("p50"),
+            p95: s("p95"),
+            p99: s("p99"),
+        });
+    }
 }
 
 /// A benchmark result row to insert.
@@ -18,15 +189,18 @@ pub struct RunRow {
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
     pub elapsed_ms: i64,
+    pub peak_rss_mb: Option<f64>,
     pub cargo_features: Option<String>,
     pub cargo_profile: String,
     pub kernel: Option<String>,
     pub cpu_governor: Option<String>,
     pub avail_memory_mb: Option<i64>,
     pub storage_notes: Option<String>,
-    pub extra: Option<serde_json::Value>,
     pub cli_args: Option<String>,
-    pub metadata: Option<serde_json::Value>,
+    pub project: String,
+    pub kv: Vec<KvPair>,
+    pub distribution: Option<Distribution>,
+    pub hotpath: Option<HotpathData>,
 }
 
 /// A row read back from the database.
@@ -47,16 +221,19 @@ pub struct StoredRow {
     pub input_file: String,
     pub input_mb: Option<f64>,
     pub elapsed_ms: i64,
+    pub peak_rss_mb: Option<f64>,
     pub cargo_features: String,
     pub cargo_profile: String,
     pub kernel: String,
     pub cpu_governor: String,
     pub avail_memory_mb: Option<i64>,
     pub storage_notes: String,
-    pub extra: Option<serde_json::Value>,
     pub uuid: String,
     pub cli_args: String,
-    pub metadata: Option<serde_json::Value>,
+    pub project: String,
+    pub kv: Vec<KvPair>,
+    pub distribution: Option<Distribution>,
+    pub hotpath: Option<HotpathData>,
 }
 
 /// Two-commit comparison: (commit_a, rows_a, commit_b, rows_b).
@@ -82,6 +259,7 @@ CREATE TABLE IF NOT EXISTS runs (
     input_file      TEXT,
     input_mb        REAL,
     elapsed_ms      INTEGER NOT NULL,
+    peak_rss_mb     REAL,
     cargo_features  TEXT,
     cargo_profile   TEXT DEFAULT 'release',
     kernel          TEXT,
@@ -91,29 +269,84 @@ CREATE TABLE IF NOT EXISTS runs (
     extra           TEXT,
     uuid            TEXT,
     cli_args        TEXT,
-    metadata        TEXT
+    metadata        TEXT,
+    project         TEXT NOT NULL DEFAULT 'pbfhogg'
 );
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs([commit]);
 CREATE INDEX IF NOT EXISTS idx_runs_command ON runs(command);
 CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
+
+CREATE TABLE IF NOT EXISTS run_distribution (
+    run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    samples     INTEGER NOT NULL,
+    min_ms      INTEGER NOT NULL,
+    p50_ms      INTEGER NOT NULL,
+    p95_ms      INTEGER NOT NULL,
+    max_ms      INTEGER NOT NULL,
+    PRIMARY KEY (run_id)
+);
+
+CREATE TABLE IF NOT EXISTS run_kv (
+    run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    key         TEXT NOT NULL,
+    value_int   INTEGER,
+    value_real  REAL,
+    value_text  TEXT,
+    PRIMARY KEY (run_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_run_kv_key ON run_kv(key, run_id);
+
+CREATE TABLE IF NOT EXISTS hotpath_functions (
+    id              INTEGER PRIMARY KEY,
+    run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    section         TEXT NOT NULL,
+    description     TEXT,
+    ordinal         INTEGER NOT NULL,
+    name            TEXT NOT NULL,
+    calls           INTEGER,
+    avg             TEXT,
+    total           TEXT,
+    percent_total   TEXT,
+    p50             TEXT,
+    p95             TEXT,
+    p99             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hotpath_functions_run_id ON hotpath_functions(run_id);
+
+CREATE TABLE IF NOT EXISTS hotpath_threads (
+    id              INTEGER PRIMARY KEY,
+    run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    status          TEXT,
+    cpu_percent     TEXT,
+    cpu_percent_max TEXT,
+    cpu_user        TEXT,
+    cpu_sys         TEXT,
+    cpu_total       TEXT,
+    alloc_bytes     TEXT,
+    dealloc_bytes   TEXT,
+    mem_diff        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id);
 ";
 
 const SELECT_COLS: &str = "\
 id, timestamp, hostname, [commit], subject, command, variant, \
-input_file, input_mb, elapsed_ms, cargo_features, cargo_profile, \
-kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid, \
-cli_args, metadata";
+input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
+kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
+cli_args, project";
 
 const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, variant, \
-    input_file, input_mb, elapsed_ms, cargo_features, cargo_profile, \
-    kernel, cpu_governor, avail_memory_mb, storage_notes, extra, uuid, \
-    cli_args, metadata\
+    input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
+    kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
+    cli_args, project\
 ) VALUES (\
     datetime('now'), ?1, ?2, ?3, ?4, ?5, \
-    ?6, ?7, ?8, ?9, ?10, \
-    ?11, ?12, ?13, ?14, ?15, ?16, \
+    ?6, ?7, ?8, ?9, ?10, ?11, \
+    ?12, ?13, ?14, ?15, ?16, \
     ?17, ?18\
 )";
 
@@ -131,9 +364,21 @@ impl ResultsDb {
     /// Insert a benchmark result row. Timestamp generated by SQLite
     /// `datetime('now')`. Returns the short UUID prefix (8 hex chars).
     pub fn insert(&self, row: &RunRow) -> Result<String, DevError> {
-        let extra_str = serialize_extra(&row.extra)?;
-        let metadata_str = serialize_extra(&row.metadata)?;
         let uuid = generate_uuid()?;
+        self.conn.execute("BEGIN", [])?;
+
+        let result = self.insert_inner(row, &uuid);
+        if result.is_err() {
+            self.conn.execute("ROLLBACK", []).ok();
+            return result;
+        }
+
+        self.conn.execute("COMMIT", [])?;
+        Ok(short_uuid(&uuid))
+    }
+
+    fn insert_inner(&self, row: &RunRow, uuid: &str) -> Result<String, DevError> {
+        // Envelope row.
         self.conn.execute(
             INSERT_SQL,
             rusqlite::params![
@@ -145,27 +390,100 @@ impl ResultsDb {
                 row.input_file,
                 row.input_mb,
                 row.elapsed_ms,
+                row.peak_rss_mb,
                 row.cargo_features,
                 row.cargo_profile,
                 row.kernel,
                 row.cpu_governor,
                 row.avail_memory_mb,
                 row.storage_notes,
-                extra_str,
                 uuid,
                 row.cli_args,
-                metadata_str,
+                row.project,
             ],
         )?;
-        Ok(short_uuid(&uuid))
-    }
+        let run_id = self.conn.last_insert_rowid();
 
-    /// Query rows by UUID prefix.
+        // Distribution child row.
+        if let Some(ref dist) = row.distribution {
+            self.conn.execute(
+                "INSERT INTO run_distribution (run_id, samples, min_ms, p50_ms, p95_ms, max_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![run_id, dist.samples, dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms],
+            )?;
+        }
+
+        // Key-value pairs.
+        for kv in &row.kv {
+            insert_kv_row(&self.conn, run_id, kv)?;
+        }
+
+        // Hotpath child rows.
+        if let Some(ref hp) = row.hotpath {
+            for func in &hp.functions {
+                self.conn.execute(
+                    "INSERT INTO hotpath_functions \
+                     (run_id, section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    rusqlite::params![
+                        run_id, func.section, func.description, func.ordinal, func.name,
+                        func.calls, func.avg, func.total, func.percent_total,
+                        func.p50, func.p95, func.p99,
+                    ],
+                )?;
+            }
+            for thread in &hp.threads {
+                self.conn.execute(
+                    "INSERT INTO hotpath_threads \
+                     (run_id, name, status, cpu_percent, cpu_percent_max, cpu_user, cpu_sys, cpu_total, \
+                      alloc_bytes, dealloc_bytes, mem_diff) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        run_id, thread.name, thread.status, thread.cpu_percent,
+                        thread.cpu_percent_max, thread.cpu_user, thread.cpu_sys, thread.cpu_total,
+                        thread.alloc_bytes, thread.dealloc_bytes, thread.mem_diff,
+                    ],
+                )?;
+            }
+            // Thread summary stats into run_kv.
+            for kv in &hp.thread_summary {
+                insert_kv_row(&self.conn, run_id, kv)?;
+            }
+        }
+
+        Ok(short_uuid(uuid))
+    }
+}
+
+fn insert_kv_row(conn: &rusqlite::Connection, run_id: i64, kv: &KvPair) -> Result<(), DevError> {
+    match &kv.value {
+        KvValue::Int(v) => conn.execute(
+            "INSERT INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)",
+            rusqlite::params![run_id, kv.key, v],
+        )?,
+        KvValue::Real(v) => conn.execute(
+            "INSERT INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)",
+            rusqlite::params![run_id, kv.key, v],
+        )?,
+        KvValue::Text(v) => conn.execute(
+            "INSERT INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+            rusqlite::params![run_id, kv.key, v],
+        )?,
+    };
+    Ok(())
+}
+
+impl ResultsDb {
+    /// Query rows by UUID prefix. Loads all child data (kv, distribution, hotpath).
     pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
         let sql = format!("SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1||'%' ORDER BY id DESC");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![prefix], map_stored_row)?;
-        collect_rows(rows)
+        let mut result = collect_rows(rows)?;
+        for row in &mut result {
+            load_children(&self.conn, row)?;
+        }
+        Ok(result)
     }
 
     /// Query rows with optional filters. Commit matches by prefix (LIKE).
@@ -181,6 +499,7 @@ impl ResultsDb {
 
     /// Query two commits for side-by-side comparison. Each commit is matched
     /// by prefix. Optional command/variant filters narrow the results.
+    /// Loads kv + hotpath children for each row (needed for output_bytes and diffs).
     pub fn query_compare(
         &self,
         a: &str,
@@ -204,8 +523,11 @@ impl ResultsDb {
             "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, variant, id DESC",
             clauses.join(" AND ")
         );
-        let rows_a = query_commit_filtered(&self.conn, &sql, a, &params)?;
-        let rows_b = query_commit_filtered(&self.conn, &sql, b, &params)?;
+        let mut rows_a = query_commit_filtered(&self.conn, &sql, a, &params)?;
+        let mut rows_b = query_commit_filtered(&self.conn, &sql, b, &params)?;
+        for row in rows_a.iter_mut().chain(rows_b.iter_mut()) {
+            load_children(&self.conn, row)?;
+        }
         Ok((rows_a, rows_b))
     }
 
@@ -281,11 +603,6 @@ fn collect_rows(
 }
 
 fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
-    let extra_raw: Option<String> = row.get("extra")?;
-    let extra = match extra_raw {
-        Some(s) => serde_json::from_str(&s).ok(),
-        None => None,
-    };
     Ok(StoredRow {
         id: row.get("id")?,
         timestamp: row.get("timestamp")?,
@@ -297,32 +614,144 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         input_file: row.get::<_, Option<String>>("input_file")?.unwrap_or_default(),
         input_mb: row.get("input_mb")?,
         elapsed_ms: row.get("elapsed_ms")?,
+        peak_rss_mb: row.get("peak_rss_mb")?,
         cargo_features: row.get::<_, Option<String>>("cargo_features")?.unwrap_or_default(),
         cargo_profile: row.get::<_, Option<String>>("cargo_profile")?.unwrap_or_default(),
         kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),
         cpu_governor: row.get::<_, Option<String>>("cpu_governor")?.unwrap_or_default(),
         avail_memory_mb: row.get("avail_memory_mb")?,
         storage_notes: row.get::<_, Option<String>>("storage_notes")?.unwrap_or_default(),
-        extra,
         uuid: row.get::<_, Option<String>>("uuid")?.unwrap_or_default(),
         cli_args: row.get::<_, Option<String>>("cli_args")?.unwrap_or_default(),
-        metadata: {
-            let raw: Option<String> = row.get::<_, Option<String>>("metadata")?;
-            match raw {
-                Some(s) => serde_json::from_str(&s).ok(),
-                None => None,
-            }
-        },
+        project: row.get::<_, Option<String>>("project")?.unwrap_or_else(|| "pbfhogg".to_owned()),
+        kv: Vec::new(),
+        distribution: None,
+        hotpath: None,
     })
 }
 
-fn serialize_extra(
-    extra: &Option<serde_json::Value>,
-) -> Result<Option<String>, DevError> {
-    match extra {
-        Some(val) => Ok(Some(serde_json::to_string(val)?)),
+/// Load all child data (distribution, kv, hotpath) for a stored row.
+fn load_children(conn: &rusqlite::Connection, row: &mut StoredRow) -> Result<(), DevError> {
+    row.distribution = load_distribution(conn, row.id)?;
+    row.kv = load_kv(conn, row.id)?;
+    row.hotpath = load_hotpath(conn, row.id)?;
+    Ok(())
+}
+
+fn load_distribution(conn: &rusqlite::Connection, run_id: i64) -> Result<Option<Distribution>, DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT samples, min_ms, p50_ms, p95_ms, max_ms FROM run_distribution WHERE run_id = ?1"
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok(Distribution {
+            samples: row.get(0)?,
+            min_ms: row.get(1)?,
+            p50_ms: row.get(2)?,
+            p95_ms: row.get(3)?,
+            max_ms: row.get(4)?,
+        })
+    })?;
+    match rows.next() {
+        Some(Ok(dist)) => Ok(Some(dist)),
+        Some(Err(e)) => Err(e.into()),
         None => Ok(None),
     }
+}
+
+fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT key, value_int, value_real, value_text FROM run_kv WHERE run_id = ?1 ORDER BY key"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        let key: String = row.get(0)?;
+        let vi: Option<i64> = row.get(1)?;
+        let vr: Option<f64> = row.get(2)?;
+        let vt: Option<String> = row.get(3)?;
+        let value = if let Some(v) = vi {
+            KvValue::Int(v)
+        } else if let Some(v) = vr {
+            KvValue::Real(v)
+        } else {
+            KvValue::Text(vt.unwrap_or_default())
+        };
+        Ok(KvPair { key, value })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+fn load_hotpath(conn: &rusqlite::Connection, run_id: i64) -> Result<Option<HotpathData>, DevError> {
+    let functions = load_hotpath_functions(conn, run_id)?;
+    let threads = load_hotpath_threads(conn, run_id)?;
+    if functions.is_empty() && threads.is_empty() {
+        return Ok(None);
+    }
+    // Thread summary stats are stored in run_kv with "threads." prefix.
+    let mut thread_summary = Vec::new();
+    let kv = load_kv(conn, run_id)?;
+    for pair in kv {
+        if pair.key.starts_with("threads.") {
+            thread_summary.push(pair);
+        }
+    }
+    Ok(Some(HotpathData { functions, threads, thread_summary }))
+}
+
+fn load_hotpath_functions(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<HotpathFunction>, DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99 \
+         FROM hotpath_functions WHERE run_id = ?1 ORDER BY section, ordinal"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok(HotpathFunction {
+            section: row.get(0)?,
+            description: row.get(1)?,
+            ordinal: row.get(2)?,
+            name: row.get(3)?,
+            calls: row.get(4)?,
+            avg: row.get(5)?,
+            total: row.get(6)?,
+            percent_total: row.get(7)?,
+            p50: row.get(8)?,
+            p95: row.get(9)?,
+            p99: row.get(10)?,
+        })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+fn load_hotpath_threads(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<HotpathThread>, DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT name, status, cpu_percent, cpu_percent_max, cpu_user, cpu_sys, cpu_total, \
+         alloc_bytes, dealloc_bytes, mem_diff \
+         FROM hotpath_threads WHERE run_id = ?1"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok(HotpathThread {
+            name: row.get(0)?,
+            status: row.get(1)?,
+            cpu_percent: row.get(2)?,
+            cpu_percent_max: row.get(3)?,
+            cpu_user: row.get(4)?,
+            cpu_sys: row.get(5)?,
+            cpu_total: row.get(6)?,
+            alloc_bytes: row.get(7)?,
+            dealloc_bytes: row.get(8)?,
+            mem_diff: row.get(9)?,
+        })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
 }
 
 fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
@@ -377,7 +806,7 @@ pub fn short_uuid(uuid: &str) -> String {
 }
 
 /// Current schema version. Increment when adding new migrations.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -393,19 +822,30 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
     if current < 2 {
         migrate_cli_args_metadata(conn)?;
     }
+    if current < 3 {
+        migrate_v2_to_v3(conn)?;
+    }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
 
+/// Check whether a column exists on a table.
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("PRAGMA table_info({table})"))
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(Result::ok)
+                .collect();
+            Ok(names.contains(&column.to_owned()))
+        })
+        .unwrap_or(false)
+}
+
 /// Migration v0 -> v1: add uuid column and backfill.
 fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    let has_uuid = conn
-        .prepare("PRAGMA table_info(runs)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .any(|name| name.as_deref() == Ok("uuid"));
-
-    if !has_uuid {
+    if !has_column(conn, "runs", "uuid") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN uuid TEXT")?;
     }
 
@@ -428,24 +868,246 @@ fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
 /// Migration v1 -> v2: add cli_args and metadata columns.
 fn migrate_cli_args_metadata(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    let has_cli_args = conn
-        .prepare("PRAGMA table_info(runs)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .any(|name| name.as_deref() == Ok("cli_args"));
-
-    if !has_cli_args {
+    if !has_column(conn, "runs", "cli_args") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN cli_args TEXT")?;
     }
-
-    let has_metadata = conn
-        .prepare("PRAGMA table_info(runs)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .any(|name| name.as_deref() == Ok("metadata"));
-
-    if !has_metadata {
+    if !has_column(conn, "runs", "metadata") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN metadata TEXT")?;
     }
+    Ok(())
+}
 
+/// Migration v2 -> v3: add peak_rss_mb, project columns, create child tables,
+/// migrate extra/metadata JSON into child tables.
+fn migrate_v2_to_v3(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // Phase 1: DDL additions.
+    if !has_column(conn, "runs", "peak_rss_mb") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN peak_rss_mb REAL")?;
+    }
+    if !has_column(conn, "runs", "project") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN project TEXT NOT NULL DEFAULT 'pbfhogg'")?;
+    }
+
+    // Child tables + indexes (all idempotent via IF NOT EXISTS).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS run_distribution (
+            run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            samples INTEGER NOT NULL, min_ms INTEGER NOT NULL,
+            p50_ms INTEGER NOT NULL, p95_ms INTEGER NOT NULL, max_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id));
+
+        CREATE TABLE IF NOT EXISTS run_kv (
+            run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            key TEXT NOT NULL, value_int INTEGER, value_real REAL, value_text TEXT,
+            PRIMARY KEY (run_id, key));
+        CREATE INDEX IF NOT EXISTS idx_run_kv_key ON run_kv(key, run_id);
+
+        CREATE TABLE IF NOT EXISTS hotpath_functions (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            section TEXT NOT NULL, description TEXT, ordinal INTEGER NOT NULL,
+            name TEXT NOT NULL, calls INTEGER, avg TEXT, total TEXT,
+            percent_total TEXT, p50 TEXT, p95 TEXT, p99 TEXT);
+        CREATE INDEX IF NOT EXISTS idx_hotpath_functions_run_id ON hotpath_functions(run_id);
+
+        CREATE TABLE IF NOT EXISTS hotpath_threads (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            name TEXT NOT NULL, status TEXT, cpu_percent TEXT, cpu_percent_max TEXT,
+            cpu_user TEXT, cpu_sys TEXT, cpu_total TEXT,
+            alloc_bytes TEXT, dealloc_bytes TEXT, mem_diff TEXT);
+        CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id);
+
+        CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);"
+    )?;
+
+    // Phase 2: Migrate existing extra/metadata JSON to child tables.
+    migrate_json_to_children(conn)?;
+
+    Ok(())
+}
+
+/// Parse existing extra/metadata JSON and insert into child tables.
+fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, extra, metadata FROM runs WHERE extra IS NOT NULL OR metadata IS NOT NULL"
+    )?;
+    let rows: Vec<(i64, Option<String>, Option<String>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .filter_map(Result::ok)
+        .collect();
+
+    for (run_id, extra_json, metadata_json) in &rows {
+        // Migrate extra JSON.
+        if let Some(json_str) = extra_json
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str)
+            && let Some(obj) = val.as_object()
+        {
+            migrate_extra_object(conn, *run_id, obj)?;
+        }
+        // Migrate metadata JSON -> run_kv with meta. prefix.
+        if let Some(json_str) = metadata_json
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str)
+            && let Some(obj) = val.as_object()
+        {
+            for (key, value) in obj {
+                let prefixed = format!("meta.{key}");
+                insert_kv_from_json(conn, *run_id, &prefixed, value)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Migrate a single extra JSON object into the appropriate child tables.
+fn migrate_extra_object(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), DevError> {
+    // Case 1: Distribution stats.
+    let is_distribution = obj.contains_key("min_ms")
+        && obj.contains_key("p50_ms")
+        && obj.contains_key("p95_ms")
+        && obj.contains_key("max_ms")
+        && obj.contains_key("samples");
+
+    if is_distribution {
+        let get_i64 = |k: &str| obj.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        conn.execute(
+            "INSERT OR IGNORE INTO run_distribution (run_id, samples, min_ms, p50_ms, p95_ms, max_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![run_id, get_i64("samples"), get_i64("min_ms"), get_i64("p50_ms"), get_i64("p95_ms"), get_i64("max_ms")],
+        )?;
+        // Remaining keys (beyond the 5 distribution keys) go to run_kv.
+        let dist_keys = ["min_ms", "p50_ms", "p95_ms", "max_ms", "samples"];
+        for (key, value) in obj {
+            if !dist_keys.contains(&key.as_str()) {
+                insert_kv_from_json(conn, run_id, key, value)?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Case 2: Hotpath data.
+    let is_hotpath = obj.contains_key("functions_timing") || obj.contains_key("functions_alloc");
+
+    if is_hotpath {
+        migrate_hotpath_section(conn, run_id, obj, "functions_timing", "timing")?;
+        migrate_hotpath_section(conn, run_id, obj, "functions_alloc", "alloc")?;
+
+        if let Some(threads_val) = obj.get("threads")
+            && let Some(threads_obj) = threads_val.as_object()
+        {
+            // Thread summary stats -> run_kv with threads. prefix.
+            for key in &["rss_bytes", "total_alloc_bytes", "total_dealloc_bytes", "alloc_dealloc_diff"] {
+                if let Some(v) = threads_obj.get(*key) {
+                    let prefixed = format!("threads.{key}");
+                    insert_kv_from_json(conn, run_id, &prefixed, v)?;
+                }
+            }
+            // Thread data rows.
+            if let Some(data) = threads_obj.get("data").and_then(|v| v.as_array()) {
+                for entry in data {
+                    let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+                    conn.execute(
+                        "INSERT INTO hotpath_threads \
+                         (run_id, name, status, cpu_percent, cpu_percent_max, cpu_user, cpu_sys, cpu_total, \
+                          alloc_bytes, dealloc_bytes, mem_diff) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        rusqlite::params![
+                            run_id,
+                            s("name").unwrap_or_default(),
+                            s("status"), s("cpu_percent"), s("cpu_percent_max"),
+                            s("cpu_user"), s("cpu_sys"), s("cpu_total"),
+                            s("alloc_bytes"), s("dealloc_bytes"), s("mem_diff"),
+                        ],
+                    )?;
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Case 3: Plain kv pairs.
+    for (key, value) in obj {
+        insert_kv_from_json(conn, run_id, key, value)?;
+    }
+
+    Ok(())
+}
+
+/// Migrate a hotpath functions section (timing or alloc) from JSON to the child table.
+fn migrate_hotpath_section(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    json_key: &str,
+    section_name: &str,
+) -> Result<(), DevError> {
+    let Some(section_val) = obj.get(json_key) else { return Ok(()) };
+    let Some(section_obj) = section_val.as_object() else { return Ok(()) };
+    let description = section_obj.get("description").and_then(|v| v.as_str());
+    let Some(data) = section_obj.get("data").and_then(|v| v.as_array()) else { return Ok(()) };
+
+    for (ordinal, entry) in data.iter().enumerate() {
+        let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+        let calls = entry.get("calls").and_then(serde_json::Value::as_i64);
+        #[allow(clippy::cast_possible_wrap)]
+        let ord = ordinal as i64;
+        conn.execute(
+            "INSERT INTO hotpath_functions \
+             (run_id, section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                run_id, section_name, description,
+                ord,
+                s("name").unwrap_or_default(),
+                calls, s("avg"), s("total"), s("percent_total"),
+                s("p50"), s("p95"), s("p99"),
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Insert a single JSON value into run_kv, auto-detecting type.
+fn insert_kv_from_json(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), DevError> {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![run_id, key, v],
+                )?;
+            } else if let Some(v) = n.as_f64() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![run_id, key, v],
+                )?;
+            }
+        }
+        serde_json::Value::String(s) => {
+            conn.execute(
+                "INSERT OR IGNORE INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+                rusqlite::params![run_id, key, s],
+            )?;
+        }
+        serde_json::Value::Bool(b) => {
+            conn.execute(
+                "INSERT OR IGNORE INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+                rusqlite::params![run_id, key, b.to_string()],
+            )?;
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -482,7 +1144,7 @@ pub fn format_table(rows: &[StoredRow]) -> String {
 /// Format the detail fields that aren't shown in the summary table.
 ///
 /// Shows hostname, subject, cargo features/profile, kernel, cpu governor,
-/// available memory, and storage notes — only when non-empty.
+/// available memory, storage notes, kv pairs, and distribution stats.
 pub fn format_details(row: &StoredRow) -> String {
     let mut out = String::new();
     let mut fields: Vec<(String, String)> = Vec::new();
@@ -508,29 +1170,44 @@ pub fn format_details(row: &StoredRow) -> String {
     if let Some(mb) = row.avail_memory_mb {
         fields.push(("avail memory".into(), format!("{mb} MB")));
     }
+    if let Some(mb) = row.peak_rss_mb {
+        fields.push(("peak rss".into(), format!("{mb:.1} MB")));
+    }
     if !row.storage_notes.is_empty() {
         fields.push(("storage".into(), row.storage_notes.clone()));
     }
     if !row.cli_args.is_empty() {
         fields.push(("cli args".into(), row.cli_args.clone()));
     }
-    if let Some(ref meta) = row.metadata {
-        fields.push(("metadata".into(), serde_json::to_string_pretty(meta).unwrap_or_default()));
+    if !row.project.is_empty() && row.project != "pbfhogg" {
+        fields.push(("project".into(), row.project.clone()));
     }
-    if let Some(ref extra) = row.extra
-        && let Some(obj) = extra.as_object()
-    {
-        let mut keys: Vec<&String> = obj.keys().collect();
-        keys.sort();
-        for key in keys {
-            let label = key.replace('_', " ");
-            let value = match &obj[key] {
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            fields.push((label, value));
-        }
+
+    // Distribution stats.
+    if let Some(ref dist) = row.distribution {
+        fields.push(("samples".into(), dist.samples.to_string()));
+        fields.push(("min".into(), format!("{} ms", dist.min_ms)));
+        fields.push(("p50".into(), format!("{} ms", dist.p50_ms)));
+        fields.push(("p95".into(), format!("{} ms", dist.p95_ms)));
+        fields.push(("max".into(), format!("{} ms", dist.max_ms)));
+    }
+
+    // Metadata kv pairs (meta. prefix).
+    let mut meta_kv: Vec<&KvPair> = row.kv.iter().filter(|kv| kv.key.starts_with("meta.")).collect();
+    meta_kv.sort_by_key(|kv| &kv.key);
+    for kv in &meta_kv {
+        let label = kv.key.strip_prefix("meta.").unwrap_or(&kv.key).replace('_', " ");
+        fields.push((label, kv.value.to_string()));
+    }
+
+    // Runtime kv pairs (non-meta, non-threads).
+    let mut runtime_kv: Vec<&KvPair> = row.kv.iter()
+        .filter(|kv| !kv.key.starts_with("meta.") && !kv.key.starts_with("threads."))
+        .collect();
+    runtime_kv.sort_by_key(|kv| &kv.key);
+    for kv in &runtime_kv {
+        let label = kv.key.replace('_', " ");
+        fields.push((label, kv.value.to_string()));
     }
 
     if fields.is_empty() {
@@ -574,10 +1251,10 @@ pub fn format_compare(
         out.push('\n');
     }
 
-    // Append hotpath diff tables for pairs that have extra data on both sides.
+    // Append hotpath diff tables for pairs that have hotpath data on both sides.
     for pair in &pairs {
-        if let (Some(ea), Some(eb)) = (&pair.a_extra, &pair.b_extra)
-            && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ea, eb, top)
+        if let (Some(ha), Some(hb)) = (&pair.a_hotpath, &pair.b_hotpath)
+            && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ha, hb, top)
         {
             let (cmd, var, _) = split_pair_key(&pair.key);
             let label = if var.is_empty() { cmd.to_owned() } else { format!("{cmd} {var}") };
@@ -738,12 +1415,20 @@ struct ComparisonPair {
     key: String,
     a_ms: Option<i64>,
     b_ms: Option<i64>,
-    a_extra: Option<serde_json::Value>,
-    b_extra: Option<serde_json::Value>,
+    a_hotpath: Option<HotpathData>,
+    b_hotpath: Option<HotpathData>,
     a_output_bytes: Option<i64>,
     b_output_bytes: Option<i64>,
     /// Pre-formatted input string for display.
     input_display: String,
+}
+
+/// Find output_bytes in a StoredRow's kv pairs.
+fn find_output_bytes(kv: &[KvPair]) -> Option<i64> {
+    kv.iter().find(|p| p.key == "output_bytes").and_then(|p| match &p.value {
+        KvValue::Int(v) => Some(*v),
+        _ => None,
+    })
 }
 
 fn build_comparison_pairs(
@@ -754,7 +1439,8 @@ fn build_comparison_pairs(
 
     struct RowData {
         elapsed_ms: i64,
-        extra: Option<serde_json::Value>,
+        hotpath: Option<HotpathData>,
+        output_bytes: Option<i64>,
         input_display: String,
     }
 
@@ -768,7 +1454,8 @@ fn build_comparison_pairs(
             keys.push(key);
             e.insert(RowData {
                 elapsed_ms: row.elapsed_ms,
-                extra: row.extra.clone(),
+                hotpath: take_hotpath_for_compare(row),
+                output_bytes: find_output_bytes(&row.kv),
                 input_display: format_input(&row.input_file, row.input_mb),
             });
         }
@@ -781,7 +1468,8 @@ fn build_comparison_pairs(
             }
             e.insert(RowData {
                 elapsed_ms: row.elapsed_ms,
-                extra: row.extra.clone(),
+                hotpath: take_hotpath_for_compare(row),
+                output_bytes: find_output_bytes(&row.kv),
                 input_display: format_input(&row.input_file, row.input_mb),
             });
         }
@@ -794,26 +1482,64 @@ fn build_comparison_pairs(
             let input_display = a.as_ref().or(b.as_ref())
                 .map(|r| r.input_display.clone())
                 .unwrap_or_default();
-            let a_output_bytes = a.as_ref()
-                .and_then(|r| r.extra.as_ref())
-                .and_then(|e| e.get("output_bytes"))
-                .and_then(serde_json::Value::as_i64);
-            let b_output_bytes = b.as_ref()
-                .and_then(|r| r.extra.as_ref())
-                .and_then(|e| e.get("output_bytes"))
-                .and_then(serde_json::Value::as_i64);
+            let a_output_bytes = a.as_ref().and_then(|r| r.output_bytes);
+            let b_output_bytes = b.as_ref().and_then(|r| r.output_bytes);
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
                 b_ms: b.as_ref().map(|r| r.elapsed_ms),
-                a_extra: a.and_then(|r| r.extra),
-                b_extra: b.and_then(|r| r.extra),
+                a_hotpath: a.and_then(|r| r.hotpath),
+                b_hotpath: b.and_then(|r| r.hotpath),
                 a_output_bytes,
                 b_output_bytes,
                 input_display,
             }
         })
         .collect()
+}
+
+/// Extract hotpath data for comparison. Uses a shallow reconstruction since
+/// StoredRow doesn't impl Clone. Returns None if no hotpath data.
+fn take_hotpath_for_compare(row: &StoredRow) -> Option<HotpathData> {
+    row.hotpath.as_ref()?;
+    // We need to reconstruct since HotpathData doesn't derive Clone.
+    // This is called only for compare pairs (a handful of rows).
+    let hp = row.hotpath.as_ref()?;
+    Some(HotpathData {
+        functions: hp.functions.iter().map(|f| HotpathFunction {
+            section: f.section.clone(),
+            description: f.description.clone(),
+            ordinal: f.ordinal,
+            name: f.name.clone(),
+            calls: f.calls,
+            avg: f.avg.clone(),
+            total: f.total.clone(),
+            percent_total: f.percent_total.clone(),
+            p50: f.p50.clone(),
+            p95: f.p95.clone(),
+            p99: f.p99.clone(),
+        }).collect(),
+        threads: hp.threads.iter().map(|t| HotpathThread {
+            name: t.name.clone(),
+            status: t.status.clone(),
+            cpu_percent: t.cpu_percent.clone(),
+            cpu_percent_max: t.cpu_percent_max.clone(),
+            cpu_user: t.cpu_user.clone(),
+            cpu_sys: t.cpu_sys.clone(),
+            cpu_total: t.cpu_total.clone(),
+            alloc_bytes: t.alloc_bytes.clone(),
+            dealloc_bytes: t.dealloc_bytes.clone(),
+            mem_diff: t.mem_diff.clone(),
+        }).collect(),
+        thread_summary: hp.thread_summary.iter().map(|kv| KvPair {
+            key: kv.key.clone(),
+            value: match &kv.value {
+                KvValue::Int(v) => KvValue::Int(*v),
+                KvValue::Real(v) => KvValue::Real(*v),
+                KvValue::Text(v) => KvValue::Text(v.clone()),
+            },
+        }).collect(),
+    })
 }
 
 fn pair_key(command: &str, variant: &str, input_file: &str) -> String {
@@ -1021,10 +1747,13 @@ mod tests {
             cpu_governor: String::new(),
             avail_memory_mb: None,
             storage_notes: String::new(),
-            extra: None,
+            peak_rss_mb: None,
             uuid: String::from("abcdef1234567890"),
             cli_args: String::new(),
-            metadata: None,
+            project: String::from("test"),
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
         }
     }
 
@@ -1480,15 +2209,18 @@ mod tests {
             input_file: Some(String::from("denmark.osm.pbf")),
             input_mb: Some(42.5),
             elapsed_ms: 1234,
+            peak_rss_mb: None,
             cargo_features: None,
             cargo_profile: String::from("release"),
             kernel: None,
             cpu_governor: None,
             avail_memory_mb: None,
             storage_notes: None,
-            extra: None,
             cli_args: Some(String::from("--fast")),
-            metadata: None,
+            project: String::from("test"),
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
         };
         let short = db.insert(&run).expect("insert");
         assert_eq!(short.len(), 8, "short uuid should be 8 chars");

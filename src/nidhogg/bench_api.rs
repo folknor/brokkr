@@ -3,6 +3,7 @@
 //! Replaces `bench-api.sh`. Runs 4 hardcoded spatial queries against the
 //! running nidhogg server, collecting timing distributions via curl.
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -71,10 +72,7 @@ pub fn run(
             cargo_profile: "release".into(),
             runs,
             cli_args: None,
-            metadata: Some(serde_json::json!({
-                "port": port,
-                "query": name,
-            })),
+            metadata: vec![KvPair::int("meta.port", port as i64), KvPair::text("meta.query", name)],
         };
 
         let url_clone = url.clone();
