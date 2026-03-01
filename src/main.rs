@@ -140,6 +140,9 @@ Examples:
     },
     /// Run hotpath profiling (timing or allocation instrumentation)
     Hotpath {
+        /// Variant to profile (default: main pipeline; elivagar also supports pmtiles, node-store)
+        variant: Option<String>,
+
         /// Print full build/bench/result output
         #[arg(long, short = 'v')]
         verbose: bool,
@@ -175,6 +178,14 @@ Examples:
         /// Number of runs (default: 1 for profiling)
         #[arg(long, default_value = "1")]
         runs: usize,
+
+        /// Number of tiles (pmtiles variant only)
+        #[arg(long, default_value = "500000")]
+        tiles: usize,
+
+        /// Nodes in millions (node-store variant only)
+        #[arg(long, default_value = "50")]
+        nodes: usize,
     },
     /// Run two-pass profiling (timing + allocation) for a dataset
     Profile {
@@ -639,6 +650,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             })
         }
         Command::Hotpath {
+            variant,
             verbose,
             commit,
             features,
@@ -648,13 +660,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
             alloc,
             no_ocean,
             runs,
+            tiles,
+            nodes,
         } => {
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
                 preflight::run_preflight(&preflight::uring_checks())?;
             }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs, &features)
+                cmd_hotpath(&dev_config, project, &project_root, build_root, &dataset, pbf.as_deref(), osc.as_deref(), alloc, no_ocean, runs, &features, variant.as_deref(), tiles, nodes)
             })
         }
         Command::Profile { verbose, commit, features, dataset, pbf, osc, tool, no_ocean } => {
@@ -1872,13 +1886,49 @@ fn cmd_hotpath(
     no_ocean: bool,
     runs: usize,
     features: &[String],
+    variant: Option<&str>,
+    tiles: usize,
+    nodes: usize,
 ) -> Result<(), DevError> {
+    if variant.is_some() && project != Project::Elivagar {
+        return Err(DevError::Config(
+            "hotpath variants (pmtiles, node-store) are only available for elivagar".into(),
+        ));
+    }
+
     let feature = harness::hotpath_feature(alloc);
     let mut all_features: Vec<&str> = vec![feature];
     all_features.extend(features.iter().map(String::as_str));
 
     match project {
         Project::Elivagar => {
+            // Micro-benchmark variants: build the example with hotpath and run it.
+            if let Some(v) = variant {
+                return match v {
+                    "pmtiles" => {
+                        project::require(project, Project::Elivagar, "hotpath pmtiles")?;
+                        let pi = bootstrap(build_root)?;
+                        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+                        let effective = build_root.unwrap_or(project_root);
+                        let db_root = build_root.map(|_| project_root);
+                        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "hotpath pmtiles")?;
+                        elivagar::bench_pmtiles::run_hotpath(&harness, &paths.scratch_dir, effective, tiles, runs, alloc)
+                    }
+                    "node-store" => {
+                        project::require(project, Project::Elivagar, "hotpath node-store")?;
+                        let pi = bootstrap(build_root)?;
+                        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+                        let effective = build_root.unwrap_or(project_root);
+                        let db_root = build_root.map(|_| project_root);
+                        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "hotpath node-store")?;
+                        elivagar::bench_node_store::run_hotpath(&harness, &paths.scratch_dir, effective, nodes, runs, alloc)
+                    }
+                    other => Err(DevError::Config(format!(
+                        "unknown hotpath variant '{other}' for elivagar (expected: pmtiles, node-store)"
+                    ))),
+                };
+            }
+
             let ctx = BenchContext::new(dev_config, project, project_root, build_root, None, &all_features, true, "hotpath")?;
             let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             elivagar::hotpath::run(

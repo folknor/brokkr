@@ -1,7 +1,7 @@
 //! Benchmark: node store micro-benchmark.
 //!
-//! Builds the `bench_node_store` example with the `hotpath` feature and runs it.
-//! Results are stored in the database via the bench harness.
+//! - `run()` builds without hotpath (clean baseline).
+//! - `run_hotpath()` builds with hotpath instrumentation for profiling.
 
 use std::path::Path;
 
@@ -25,7 +25,7 @@ pub fn run(
             package: None,
             bin: None,
             example: Some("bench_node_store".into()),
-            features: vec!["hotpath".into()],
+            features: vec![],
             default_features: true,
             profile: "release",
         },
@@ -45,7 +45,7 @@ pub fn run(
         variant: None,
         input_file: None,
         input_mb: None,
-        cargo_features: Some("hotpath".into()),
+        cargo_features: None,
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
         cli_args: None,
@@ -56,14 +56,13 @@ pub fn run(
     };
 
     harness.run_internal(&config, |_i| {
-        let captured = output::run_captured_with_env(
+        let captured = output::run_captured(
             &binary_str,
             &["--nodes", &nodes_str, "--runs", &runs_str],
             project_root,
-            &[("HOTPATH_METRICS_SERVER_OFF", "true")],
         )?;
 
-        // Print stdout (benchmark results) and stderr (hotpath output).
+        // Print stdout (benchmark results).
         let stdout = String::from_utf8_lossy(&captured.stdout);
         if !stdout.is_empty() {
             print!("{stdout}");
@@ -85,6 +84,72 @@ pub fn run(
             elapsed_ms: ms,
             extra: Some(extra),
         })
+    })?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Hotpath variant
+// ---------------------------------------------------------------------------
+
+/// Run with hotpath instrumentation (`brokkr hotpath node-store`).
+pub fn run_hotpath(
+    harness: &BenchHarness,
+    scratch_dir: &Path,
+    project_root: &Path,
+    nodes_millions: usize,
+    runs: usize,
+    alloc: bool,
+) -> Result<(), DevError> {
+    let feature = harness::hotpath_feature(alloc);
+    let binary = build::cargo_build(
+        &build::BuildConfig {
+            package: None,
+            bin: None,
+            example: Some("bench_node_store".into()),
+            features: vec![feature.into()],
+            default_features: true,
+            profile: "release",
+        },
+        project_root,
+    )?;
+    let binary_str = binary.display().to_string();
+
+    let nodes_str = nodes_millions.to_string();
+    let runs_str = runs.to_string();
+
+    let variant_suffix = harness::hotpath_variant_suffix(alloc);
+    let variant = format!("node-store{variant_suffix}");
+
+    output::hotpath_msg(&format!(
+        "=== bench_node_store {feature}: {nodes_millions}M nodes, {runs} runs ==="
+    ));
+
+    let config = BenchConfig {
+        command: "hotpath".into(),
+        variant: Some(variant),
+        input_file: None,
+        input_mb: None,
+        cargo_features: Some(feature.into()),
+        cargo_profile: "release".into(),
+        runs: 1,
+        cli_args: None,
+        metadata: Some(serde_json::json!({
+            "nodes_millions": nodes_millions,
+            "internal_runs": runs,
+            "alloc": alloc,
+        })),
+    };
+
+    harness.run_internal(&config, |_i| {
+        harness::run_hotpath_capture(
+            &binary_str,
+            &["--nodes", &nodes_str, "--runs", &runs_str],
+            scratch_dir,
+            project_root,
+            &[],
+        )
     })?;
 
     Ok(())
