@@ -9,7 +9,7 @@ All paths are constructed from known UTF-8 components, so `.display().to_string(
 10 correct lines in `src/db.rs`. Not worth adding the `uuid` crate as a dependency.
 
 ### `#[allow(clippy::too_many_arguments)]` proliferation
-Functions genuinely need many parameters. `BenchContext` covers the common case; remaining allows are the pragmatic choice.
+Functions genuinely need many parameters. `BenchContext` and `HarnessContext` cover the common cases; remaining allows are the pragmatic choice.
 
 ---
 
@@ -22,10 +22,6 @@ Functions genuinely need many parameters. `BenchContext` covers the common case;
 ### RTK double execution
 
 Commands appear to run twice (two "Finished... Running..." blocks in output). The rtk PreToolUse hook may be executing the command in addition to the original — investigate hook configuration.
-
-### `HarnessContext` for no-build commands
-
-7 handlers in `main.rs` manually expand `bootstrap + bootstrap_config + BenchHarness::new` because they don't need a cargo build (allocator, planetiler, bench-all). `BenchContext::new()` always builds. Add a lighter `HarnessContext` (or make the build step optional in `BenchContext`).
 
 ### `Worktree` has no `Drop` impl
 

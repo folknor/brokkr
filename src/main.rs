@@ -754,6 +754,34 @@ fn bootstrap_config(
 }
 
 // ---------------------------------------------------------------------------
+// HarnessContext — shared bootstrap for no-build command handlers
+// ---------------------------------------------------------------------------
+
+/// Lighter context for commands that need a harness but don't build a binary
+/// (allocator, planetiler, bench-all, profile, hotpath variants, etc.).
+struct HarnessContext {
+    paths: config::ResolvedPaths,
+    harness: harness::BenchHarness,
+}
+
+impl HarnessContext {
+    fn new(
+        dev_config: &config::DevConfig,
+        project: Project,
+        project_root: &Path,
+        build_root: Option<&Path>,
+        lock_command: &str,
+    ) -> Result<Self, DevError> {
+        let pi = bootstrap(build_root)?;
+        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+        let effective = build_root.unwrap_or(project_root);
+        let db_root = build_root.map(|_| project_root);
+        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, lock_command)?;
+        Ok(Self { paths, harness })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BenchContext — shared bootstrap for benchmark command handlers
 // ---------------------------------------------------------------------------
 
@@ -1438,7 +1466,6 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn cmd_bench_commands(
     dev_config: &config::DevConfig,
     project: Project,
@@ -1489,6 +1516,7 @@ fn cmd_bench_extract(
     pbfhogg::bench_extract::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, runs, &bbox, &strategies, project_root)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bench_allocator(
     dev_config: &config::DevConfig,
     project: Project,
@@ -1499,13 +1527,10 @@ fn cmd_bench_allocator(
     runs: usize,
     _features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench allocator")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench allocator")?;
-    pbfhogg::bench_allocator::run(&harness, &pbf_path, file_mb, runs, effective)
+    pbfhogg::bench_allocator::run(&ctx.harness, &pbf_path, file_mb, runs, effective)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1536,13 +1561,9 @@ fn cmd_bench_planetiler(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
-    let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench planetiler")?;
-    pbfhogg::bench_planetiler::run(&harness, &pbf_path, file_mb, runs, &paths.data_dir, project_root)
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench planetiler")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+    pbfhogg::bench_planetiler::run(&ctx.harness, &pbf_path, file_mb, runs, &ctx.paths.data_dir, project_root)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1623,6 +1644,7 @@ fn cmd_bench_merge(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bench_all(
     dev_config: &config::DevConfig,
     project: Project,
@@ -1633,13 +1655,10 @@ fn cmd_bench_all(
     runs: usize,
     _features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench all")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench all")?;
-    pbfhogg::bench_all::run(&harness, &paths, effective, &pbf_path, file_mb, runs, dataset)
+    pbfhogg::bench_all::run(&ctx.harness, &ctx.paths, effective, &pbf_path, file_mb, runs, dataset)
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,19 +1706,15 @@ fn cmd_bench_eliv_planetiler(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
-    let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench planetiler")?;
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench planetiler")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     elivagar::bench_planetiler::run(
-        &harness,
+        &ctx.harness,
         &pbf_path,
         file_mb,
         runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
+        &ctx.paths.data_dir,
+        &ctx.paths.scratch_dir,
         project_root,
     )
 }
@@ -1713,23 +1728,20 @@ fn cmd_bench_tilemaker(
     pbf: Option<&str>,
     runs: usize,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
-    let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench tilemaker")?;
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench tilemaker")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     elivagar::bench_tilemaker::run(
-        &harness,
+        &ctx.harness,
         &pbf_path,
         file_mb,
         runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
+        &ctx.paths.data_dir,
+        &ctx.paths.scratch_dir,
         project_root,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bench_eliv_all(
     dev_config: &config::DevConfig,
     project: Project,
@@ -1740,21 +1752,18 @@ fn cmd_bench_eliv_all(
     runs: usize,
     _features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench all")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
     let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench all")?;
     elivagar::bench_all::run(
-        &harness,
-        &paths,
+        &ctx.harness,
+        &ctx.paths,
         effective,
         &pbf_path,
         file_mb,
         runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
+        &ctx.paths.data_dir,
+        &ctx.paths.scratch_dir,
     )
 }
 
@@ -1931,21 +1940,13 @@ fn cmd_hotpath(
                 return match v {
                     "pmtiles" => {
                         project::require(project, Project::Elivagar, "hotpath pmtiles")?;
-                        let pi = bootstrap(build_root)?;
-                        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-                        let effective = build_root.unwrap_or(project_root);
-                        let db_root = build_root.map(|_| project_root);
-                        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "hotpath pmtiles")?;
-                        elivagar::bench_pmtiles::run_hotpath(&harness, &paths.scratch_dir, effective, tiles, runs, alloc)
+                        let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "hotpath pmtiles")?;
+                        elivagar::bench_pmtiles::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, build_root.unwrap_or(project_root), tiles, runs, alloc)
                     }
                     "node-store" => {
                         project::require(project, Project::Elivagar, "hotpath node-store")?;
-                        let pi = bootstrap(build_root)?;
-                        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-                        let effective = build_root.unwrap_or(project_root);
-                        let db_root = build_root.map(|_| project_root);
-                        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "hotpath node-store")?;
-                        elivagar::bench_node_store::run_hotpath(&harness, &paths.scratch_dir, effective, nodes, runs, alloc)
+                        let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "hotpath node-store")?;
+                        elivagar::bench_node_store::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, build_root.unwrap_or(project_root), nodes, runs, alloc)
                     }
                     other => Err(DevError::Config(format!(
                         "unknown hotpath variant '{other}' for elivagar (expected: pmtiles, node-store)"
@@ -2030,18 +2031,15 @@ fn cmd_profile(
         Project::Elivagar => {
             let tool_name = tool.unwrap_or("perf");
             preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-            let pi = bootstrap(build_root)?;
-            let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
+            let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
+            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
             let effective = build_root.unwrap_or(project_root);
-            let db_root = build_root.map(|_| project_root);
-            let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "profile")?;
             elivagar::profile::run(
-                &harness,
+                &ctx.harness,
                 &pbf_path,
                 file_mb,
-                &paths.data_dir,
-                &paths.scratch_dir,
+                &ctx.paths.data_dir,
+                &ctx.paths.scratch_dir,
                 tool_name,
                 no_ocean,
                 features,
@@ -2051,60 +2049,52 @@ fn cmd_profile(
         Project::Nidhogg => {
             let tool_name = tool.unwrap_or("perf");
             preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-            let pi = bootstrap(build_root)?;
-            let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
+            let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
+            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
 
-            let data_dir = paths
+            let data_dir = ctx.paths
                 .datasets
                 .get(dataset)
                 .and_then(|ds| ds.data_dir.as_ref())
-                .map(|d| paths.data_dir.join(d))
-                .unwrap_or_else(|| paths.data_dir.clone());
+                .map(|d| ctx.paths.data_dir.join(d))
+                .unwrap_or_else(|| ctx.paths.data_dir.clone());
 
-            let effective = build_root.unwrap_or(project_root);
-            let db_root = build_root.map(|_| project_root);
-            let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "profile")?;
             nidhogg::profile::run(
-                &harness,
+                &ctx.harness,
                 &pbf_path,
                 file_mb,
                 &data_dir,
-                &paths.scratch_dir,
+                &ctx.paths.scratch_dir,
                 tool_name,
                 features,
-                effective,
+                build_root.unwrap_or(project_root),
             )
         }
         _ => {
             project::require(project, Project::Pbfhogg, "profile")?;
 
-            let pi = bootstrap(build_root)?;
-            let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &paths, project_root)?;
-            let osc_path = resolve_osc_path(osc, dataset, &paths, project_root)?;
+            let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "profile")?;
+            let (pbf_path, file_mb) = resolve_pbf_with_size(pbf, dataset, &ctx.paths, project_root)?;
+            let osc_path = resolve_osc_path(osc, dataset, &ctx.paths, project_root)?;
 
             // Try to get raw PBF path (optional).
-            let pbf_raw_path = paths
+            let pbf_raw_path = ctx.paths
                 .datasets
                 .get(dataset)
                 .and_then(|ds| ds.pbf_raw.as_ref())
-                .map(|raw_file| paths.data_dir.join(raw_file))
+                .map(|raw_file| ctx.paths.data_dir.join(raw_file))
                 .filter(|p| p.exists());
 
-            let effective = build_root.unwrap_or(project_root);
-            let db_root = build_root.map(|_| project_root);
-            let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "profile")?;
             pbfhogg::profile::run(
-                &harness,
+                &ctx.harness,
                 &pbf_path,
                 pbf_raw_path.as_deref(),
                 &osc_path,
                 dataset,
                 file_mb,
-                &paths.scratch_dir,
+                &ctx.paths.scratch_dir,
                 features,
-                effective,
+                build_root.unwrap_or(project_root),
             )
         }
     }
@@ -2226,6 +2216,7 @@ fn cmd_geocode(dev_config: &config::DevConfig, project: Project, _project_root: 
     nidhogg::geocode::run(port, term)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bench_api(
     dev_config: &config::DevConfig,
     project: Project,
@@ -2236,23 +2227,20 @@ fn cmd_bench_api(
     query: Option<&str>,
     _features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let ctx = HarnessContext::new(dev_config, project, project_root, build_root, "bench api")?;
     let port = resolve_nidhogg_port(dev_config);
 
     // Resolve dataset PBF for metadata recording.
-    let pbf_path = resolve_pbf_path(None, dataset, &paths, project_root).ok();
+    let pbf_path = resolve_pbf_path(None, dataset, &ctx.paths, project_root).ok();
     let input_file = pbf_path.as_ref()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str());
     let input_mb = pbf_path.as_ref().map(|p| file_size_mb(p)).transpose()?;
 
-    let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    let harness = harness::BenchHarness::new(&paths, effective, db_root, project, "bench api")?;
-    nidhogg::bench_api::run(&harness, port, runs, query, input_file, input_mb)
+    nidhogg::bench_api::run(&ctx.harness, port, runs, query, input_file, input_mb)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bench_nid_ingest(
     dev_config: &config::DevConfig,
     project: Project,
