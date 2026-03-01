@@ -174,7 +174,7 @@ fn run_baselines(
     // osmium -- if available
     output::bench_msg("=== osmium baseline ===");
     if super::verify::which_exists("osmium") {
-        run_osmium_baseline(harness, pbf_path, file_mb, runs, project_root)?;
+        run_osmium_baseline(harness, pbf_path, file_mb, runs, &paths.scratch_dir, project_root)?;
     }
 
     // planetiler -- if available
@@ -297,6 +297,7 @@ fn run_osmium_baseline(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
+    scratch_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
@@ -314,7 +315,7 @@ fn run_osmium_baseline(
     let config = BenchConfig {
         command: "bench baseline".into(),
         variant: Some("osmium/cat-opl".into()),
-        input_file: Some(basename),
+        input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
@@ -329,6 +330,41 @@ fn run_osmium_baseline(
         &osmium_args,
         project_root,
     )?;
+
+    // osmium add-locations-to-ways baseline
+    std::fs::create_dir_all(scratch_dir).map_err(|e| {
+        DevError::Config(format!("failed to create scratch dir: {e}"))
+    })?;
+
+    let altw_output = scratch_dir.join("bench-osmium-altw-output.osm.pbf");
+    let altw_output_str = altw_output
+        .to_str()
+        .ok_or_else(|| DevError::Config("scratch path is not valid UTF-8".into()))?;
+
+    let altw_args: Vec<&str> = vec![
+        "add-locations-to-ways", pbf_str, "-o", altw_output_str, "--overwrite",
+    ];
+
+    let altw_config = BenchConfig {
+        command: "bench baseline".into(),
+        variant: Some("osmium/add-locations-to-ways".into()),
+        input_file: Some(basename.clone()),
+        input_mb: Some(file_mb),
+        cargo_features: None,
+        cargo_profile: "release".into(),
+        runs,
+        cli_args: Some(crate::harness::format_cli_args("osmium", &altw_args)),
+        metadata: vec![],
+    };
+
+    harness.run_external(
+        &altw_config,
+        Path::new("osmium"),
+        &altw_args,
+        project_root,
+    )?;
+
+    std::fs::remove_file(&altw_output).ok();
 
     Ok(())
 }
