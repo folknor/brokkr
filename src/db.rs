@@ -713,6 +713,10 @@ struct CompareWidths {
     col_a: usize,
     col_b: usize,
     change: usize,
+    has_output: bool,
+    output_a: usize,
+    output_b: usize,
+    output_change: usize,
 }
 
 struct ComparisonPair {
@@ -721,6 +725,8 @@ struct ComparisonPair {
     b_ms: Option<i64>,
     a_extra: Option<serde_json::Value>,
     b_extra: Option<serde_json::Value>,
+    a_output_bytes: Option<i64>,
+    b_output_bytes: Option<i64>,
     /// Pre-formatted input string for display.
     input_display: String,
 }
@@ -773,12 +779,22 @@ fn build_comparison_pairs(
             let input_display = a.as_ref().or(b.as_ref())
                 .map(|r| r.input_display.clone())
                 .unwrap_or_default();
+            let a_output_bytes = a.as_ref()
+                .and_then(|r| r.extra.as_ref())
+                .and_then(|e| e.get("output_bytes"))
+                .and_then(serde_json::Value::as_i64);
+            let b_output_bytes = b.as_ref()
+                .and_then(|r| r.extra.as_ref())
+                .and_then(|e| e.get("output_bytes"))
+                .and_then(serde_json::Value::as_i64);
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
                 b_ms: b.as_ref().map(|r| r.elapsed_ms),
                 a_extra: a.and_then(|r| r.extra),
                 b_extra: b.and_then(|r| r.extra),
+                a_output_bytes,
+                b_output_bytes,
                 input_display,
             }
         })
@@ -802,6 +818,7 @@ fn compute_compare_widths(
     commit_b: &str,
     pairs: &[ComparisonPair],
 ) -> CompareWidths {
+    let has_output = pairs.iter().any(|p| p.a_output_bytes.is_some() || p.b_output_bytes.is_some());
     let mut w = CompareWidths {
         command: 7,
         variant: 7,
@@ -809,6 +826,10 @@ fn compute_compare_widths(
         col_a: commit_a.len().max(2),
         col_b: commit_b.len().max(2),
         change: 6,
+        has_output,
+        output_a: if has_output { "output_a".len() } else { 0 },
+        output_b: if has_output { "output_b".len() } else { 0 },
+        output_change: if has_output { "out_chg".len() } else { 0 },
     };
     for pair in pairs {
         let (cmd, var, _) = split_pair_key(&pair.key);
@@ -818,6 +839,11 @@ fn compute_compare_widths(
         w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms).len());
         w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms).len());
         w.change = w.change.max(format_change(pair.a_ms, pair.b_ms).len());
+        if has_output {
+            w.output_a = w.output_a.max(format_bytes_or_dash(pair.a_output_bytes).len());
+            w.output_b = w.output_b.max(format_bytes_or_dash(pair.b_output_bytes).len());
+            w.output_change = w.output_change.max(format_change_bytes(pair.a_output_bytes, pair.b_output_bytes).len());
+        }
     }
     w
 }
@@ -846,6 +872,19 @@ fn append_compare_header(
         ch_w = w.change,
     )
     .expect("write to String is infallible");
+    if w.has_output {
+        write!(
+            out,
+            "  {:>oa_w$}  {:>ob_w$}  {:>oc_w$}",
+            "output_a",
+            "output_b",
+            "out_chg",
+            oa_w = w.output_a,
+            ob_w = w.output_b,
+            oc_w = w.output_change,
+        )
+        .expect("write to String is infallible");
+    }
 }
 
 fn append_compare_row(
@@ -875,6 +914,22 @@ fn append_compare_row(
         ch_w = w.change,
     )
     .expect("write to String is infallible");
+    if w.has_output {
+        let oa = format_bytes_or_dash(pair.a_output_bytes);
+        let ob = format_bytes_or_dash(pair.b_output_bytes);
+        let oc = format_change_bytes(pair.a_output_bytes, pair.b_output_bytes);
+        write!(
+            out,
+            "  {:>oa_w$}  {:>ob_w$}  {:>oc_w$}",
+            oa,
+            ob,
+            oc,
+            oa_w = w.output_a,
+            ob_w = w.output_b,
+            oc_w = w.output_change,
+        )
+        .expect("write to String is infallible");
+    }
 }
 
 fn format_ms_or_dash(ms: Option<i64>) -> String {
@@ -886,6 +941,32 @@ fn format_ms_or_dash(ms: Option<i64>) -> String {
 
 fn format_change(a_ms: Option<i64>, b_ms: Option<i64>) -> String {
     match (a_ms, b_ms) {
+        (Some(a), Some(b)) if a != 0 => {
+            #[allow(clippy::cast_precision_loss)]
+            let pct = ((b - a) as f64 / a as f64) * 100.0;
+            if pct >= 0.0 {
+                format!("+{pct:.1}%")
+            } else {
+                format!("{pct:.1}%")
+            }
+        }
+        _ => String::from("--"),
+    }
+}
+
+fn format_bytes_or_dash(bytes: Option<i64>) -> String {
+    match bytes {
+        Some(b) => {
+            #[allow(clippy::cast_precision_loss)]
+            let mb = b as f64 / (1024.0 * 1024.0);
+            format!("{mb:.1} MB")
+        }
+        None => String::from("--"),
+    }
+}
+
+fn format_change_bytes(a: Option<i64>, b: Option<i64>) -> String {
+    match (a, b) {
         (Some(a), Some(b)) if a != 0 => {
             #[allow(clippy::cast_precision_loss)]
             let pct = ((b - a) as f64 / a as f64) * 100.0;
