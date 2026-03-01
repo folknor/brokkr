@@ -28,7 +28,9 @@ Single crate, single binary. No workspace.
 - `src/config.rs` — `DevConfig`, `Dataset`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/db.rs` — `ResultsDb` (SQLite), schema creation with versioned migrations, insert/query/compare
+- `src/db/mod.rs` — `ResultsDb` (SQLite), types, schema, open/insert, query, UUID
+- `src/db/format.rs` — Result formatting: `format_table`, `format_details`, `format_compare`
+- `src/db/migrate.rs` — Migration framework (v0→v3), `run_migrations()`
 - `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/env.rs` — `EnvInfo` collection (hostname, kernel, governor, memory, drives, tool versions)
