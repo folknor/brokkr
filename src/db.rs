@@ -485,37 +485,52 @@ pub fn format_table(rows: &[StoredRow]) -> String {
 /// available memory, and storage notes — only when non-empty.
 pub fn format_details(row: &StoredRow) -> String {
     let mut out = String::new();
-    let mut fields: Vec<(&str, String)> = Vec::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
 
     if !row.hostname.is_empty() {
-        fields.push(("hostname", row.hostname.clone()));
+        fields.push(("hostname".into(), row.hostname.clone()));
     }
     if !row.subject.is_empty() {
-        fields.push(("subject", row.subject.clone()));
+        fields.push(("subject".into(), row.subject.clone()));
     }
     if !row.cargo_features.is_empty() {
-        fields.push(("cargo features", row.cargo_features.clone()));
+        fields.push(("cargo features".into(), row.cargo_features.clone()));
     }
     if !row.cargo_profile.is_empty() {
-        fields.push(("cargo profile", row.cargo_profile.clone()));
+        fields.push(("cargo profile".into(), row.cargo_profile.clone()));
     }
     if !row.kernel.is_empty() {
-        fields.push(("kernel", row.kernel.clone()));
+        fields.push(("kernel".into(), row.kernel.clone()));
     }
     if !row.cpu_governor.is_empty() {
-        fields.push(("cpu governor", row.cpu_governor.clone()));
+        fields.push(("cpu governor".into(), row.cpu_governor.clone()));
     }
     if let Some(mb) = row.avail_memory_mb {
-        fields.push(("avail memory", format!("{mb} MB")));
+        fields.push(("avail memory".into(), format!("{mb} MB")));
     }
     if !row.storage_notes.is_empty() {
-        fields.push(("storage", row.storage_notes.clone()));
+        fields.push(("storage".into(), row.storage_notes.clone()));
     }
     if !row.cli_args.is_empty() {
-        fields.push(("cli args", row.cli_args.clone()));
+        fields.push(("cli args".into(), row.cli_args.clone()));
     }
     if let Some(ref meta) = row.metadata {
-        fields.push(("metadata", serde_json::to_string_pretty(meta).unwrap_or_default()));
+        fields.push(("metadata".into(), serde_json::to_string_pretty(meta).unwrap_or_default()));
+    }
+    if let Some(ref extra) = row.extra
+        && let Some(obj) = extra.as_object()
+    {
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        for key in keys {
+            let label = key.replace('_', " ");
+            let value = match &obj[key] {
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            fields.push((label, value));
+        }
     }
 
     if fields.is_empty() {
