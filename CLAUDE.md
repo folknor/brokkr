@@ -29,15 +29,18 @@ Single crate, single binary. No workspace.
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
 - `src/db.rs` — `ResultsDb` (SQLite), schema creation with versioned migrations, insert/query/compare
-- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_streamed`, `run_timed`)
+- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/env.rs` — `EnvInfo` collection (hostname, kernel, governor, memory, drives, tool versions)
 - `src/git.rs` — `GitInfo` (commit hash, dirty flag, branch)
 - `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive bench/verify/hotpath access
 - `src/hotpath_fmt.rs` — Hotpath JSON report formatting
 - `src/pmtiles.rs` — PMTiles v3 parser (header, varint, directory decoding, stats)
+- `src/oom.rs` — OOM protection (`protect_child`, `check_memory`, `MemoryRisk`)
 - `src/preflight.rs` — Pre-benchmark system checks (`Check` enum framework)
+- `src/profiler.rs` — Sampling profiler integration (perf/samply)
 - `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config), cache-first network checks
+- `src/worktree.rs` — Git worktree creation/cleanup for retroactive benchmarking
 
 ### Project-specific modules
 
