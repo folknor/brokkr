@@ -90,6 +90,10 @@ seq = 4704
 [plantasjen.datasets.denmark.osc.4705]
 file = "denmark-4705.osc.gz"
 sha256 = "fa581f7b..."
+
+[plantasjen.datasets.denmark.pmtiles.elivagar]
+file = "denmark-elivagar.pmtiles"
+sha256 = "9a3b2c1d..."
 ```
 
 Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
@@ -98,12 +102,14 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 
 - `pbf.<variant>` — PBF file entries keyed by variant name (e.g. `raw`, `indexed`, `locations`). Each has `file`, optional `sha256`, optional `seq`.
 - `osc.<seq>` — OSC diff file entries keyed by sequence number. Each has `file`, optional `sha256`.
+- `pmtiles.<variant>` — PMTiles archive entries keyed by variant name (e.g. `elivagar`). Each has `file`, optional `sha256`. Used by nidhogg `serve` and `bench tiles`.
 - Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir` (nidhogg only).
 
 ### CLI flags for variant/seq selection
 
 - `--variant <name>` — selects from `pbf.<name>` in config. Default: `indexed` (pbfhogg), `raw` (elivagar/nidhogg).
 - `--osc-seq <seq>` — selects from `osc.<seq>` in config. Auto-selects if exactly one OSC is configured.
+- `--tiles <variant>` — selects from `pmtiles.<variant>` in config. Auto-selects if exactly one PMTiles entry is configured.
 
 ## Shared commands (all projects)
 
