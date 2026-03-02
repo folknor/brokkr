@@ -217,7 +217,7 @@ fn run_osmpbf_baseline(
         )));
     }
 
-    let binary = build::find_executable(&captured.stdout)?;
+    let binary = build::find_executable(&captured.stdout, None)?;
 
     // Run the baseline binary: {binary} {pbf} {runs}
     let pbf_str = pbf_path

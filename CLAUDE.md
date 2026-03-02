@@ -140,7 +140,7 @@ Results in `.brokkr/results.db` per project (gitignored).
 - All output prefixed: `[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[error]`
 - `DevError` variants for structured error handling (no `.unwrap()`)
 - Project gating via `project::require()` — wrong-project commands fail with helpful message
-- Build uses `--message-format=json` to extract executable path from cargo output
+- Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries).
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.

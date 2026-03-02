@@ -143,7 +143,8 @@ pub fn cargo_build(
         )));
     }
 
-    let executable = find_executable(&captured.stdout)?;
+    let expected = config.bin.as_deref().or(config.package.as_deref());
+    let executable = find_executable(&captured.stdout, expected)?;
 
     output::build_msg(&format!(
         "done in {:.1}s -> {}",
@@ -195,21 +196,36 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
     args
 }
 
-/// Scan JSON lines from cargo output to find the last `"executable"` path.
-pub fn find_executable(stdout: &[u8]) -> Result<PathBuf, DevError> {
+/// Scan JSON lines from cargo output to find the compiled executable.
+///
+/// When `expected_name` is `Some`, prefer the executable whose file stem
+/// matches the name exactly (e.g. `"nidhogg"` matches `target/release/nidhogg`
+/// but not `target/release/nidhogg-update`).  Falls back to the last
+/// executable if no exact match is found.
+pub fn find_executable(
+    stdout: &[u8],
+    expected_name: Option<&str>,
+) -> Result<PathBuf, DevError> {
     let text = String::from_utf8_lossy(stdout);
     let mut last_exe: Option<PathBuf> = None;
+    let mut matched_exe: Option<PathBuf> = None;
 
     for line in text.lines() {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         if let Some(exe) = val.get("executable").and_then(serde_json::Value::as_str) {
-            last_exe = Some(PathBuf::from(exe));
+            let path = PathBuf::from(exe);
+            if let Some(name) = expected_name {
+                if path.file_stem().and_then(|s| s.to_str()) == Some(name) {
+                    matched_exe = Some(path.clone());
+                }
+            }
+            last_exe = Some(path);
         }
     }
 
-    last_exe.ok_or_else(|| {
+    matched_exe.or(last_exe).ok_or_else(|| {
         DevError::Build("no executable in cargo output".into())
     })
 }
