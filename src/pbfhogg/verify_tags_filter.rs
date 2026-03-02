@@ -48,9 +48,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
         ])?;
         harness.check_exit(&captured, "osmium tags-filter")?;
 
-        // Print fileinfo for both outputs.
-        harness.print_fileinfo("pbfhogg", &pbfhogg_out)?;
-        harness.print_fileinfo("osmium", &osmium_out)?;
+        // Print inspect output for both outputs.
+        harness.print_inspect("pbfhogg", &pbfhogg_out)?;
+        harness.print_inspect("osmium", &osmium_out)?;
 
         // Diff and report.
         let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;

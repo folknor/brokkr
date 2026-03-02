@@ -82,13 +82,13 @@ impl VerifyHarness {
 
     // -- Common verify operations ------------------------------------------
 
-    /// Print extended fileinfo for a PBF, prefixed with `label`.
+    /// Print extended inspect output for a PBF, prefixed with `label`.
     ///
-    /// Runs `pbfhogg fileinfo --extended <pbf>`. On failure, prints the
+    /// Runs `pbfhogg inspect --extended <pbf>`. On failure, prints the
     /// error but does **not** propagate it (informational only).
-    pub fn print_fileinfo(&self, label: &str, pbf: &Path) -> Result<(), DevError> {
+    pub fn print_inspect(&self, label: &str, pbf: &Path) -> Result<(), DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["fileinfo", "--extended", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str])?;
 
         if captured.status.success() {
             let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -97,7 +97,7 @@ impl VerifyHarness {
             }
         } else {
             let stderr = String::from_utf8_lossy(&captured.stderr);
-            output::error(&format!("fileinfo failed for {label}: {stderr}"));
+            output::error(&format!("inspect failed for {label}: {stderr}"));
         }
 
         Ok(())
@@ -126,11 +126,11 @@ impl VerifyHarness {
 
     /// Check whether a PBF is marked as sorted (Sort.Type_then_ID).
     ///
-    /// Runs `pbfhogg fileinfo <pbf>` and searches for the sort marker in
+    /// Runs `pbfhogg inspect <pbf>` and searches for the sort marker in
     /// stdout. Prints a PASS/FAIL message and returns the result.
     pub fn check_sorted(&self, label: &str, pbf: &Path) -> Result<bool, DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["fileinfo", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", &pbf_str])?;
 
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let sorted = stdout.contains("Sort.Type_then_ID");
@@ -199,10 +199,10 @@ impl VerifyHarness {
 
     // -- Internal helpers --------------------------------------------------
 
-    /// Run `fileinfo` and return whether stdout contains "Sort.Type_then_ID".
+    /// Run `inspect` and return whether stdout contains "Sort.Type_then_ID".
     fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["fileinfo", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", &pbf_str])?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
         Ok(stdout.contains("Sort.Type_then_ID"))
     }

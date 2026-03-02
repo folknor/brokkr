@@ -59,8 +59,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, bbox: &str) -> Result<(), DevErr
         harness.check_exit(&captured, "osmium extract")?;
 
         // --- Element counts ---
-        harness.print_fileinfo("pbfhogg", &pbfhogg_out)?;
-        harness.print_fileinfo("osmium", &osmium_out)?;
+        harness.print_inspect("pbfhogg", &pbfhogg_out)?;
+        harness.print_inspect("osmium", &osmium_out)?;
 
         // --- Diff (extract has known minor differences, just log) ---
         let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;

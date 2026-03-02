@@ -29,8 +29,8 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     harness.check_exit(&captured, "osmium sort")?;
 
     // --- Element counts ---
-    harness.print_fileinfo("pbfhogg", &pbfhogg_out)?;
-    harness.print_fileinfo("osmium", &osmium_out)?;
+    harness.print_inspect("pbfhogg", &pbfhogg_out)?;
+    harness.print_inspect("osmium", &osmium_out)?;
 
     // --- Diff ---
     let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;

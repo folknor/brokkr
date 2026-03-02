@@ -38,9 +38,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let captured = harness.run_tool("osmium", &osmium_args)?;
     harness.check_exit(&captured, "osmium getid")?;
 
-    // Print fileinfo for both getid outputs.
-    harness.print_fileinfo("pbfhogg getid", &pbfhogg_getid)?;
-    harness.print_fileinfo("osmium getid", &osmium_getid)?;
+    // Print inspect output for both getid outputs.
+    harness.print_inspect("pbfhogg getid", &pbfhogg_getid)?;
+    harness.print_inspect("osmium getid", &osmium_getid)?;
 
     // Diff and report.
     let identical = harness.diff_pbfs(&pbfhogg_getid, &osmium_getid)?;
@@ -63,10 +63,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let captured = harness.run_pbfhogg(&removeid_args)?;
     harness.check_exit(&captured, "pbfhogg removeid")?;
 
-    // Print fileinfo for original, getid, and removeid (complement validation).
-    harness.print_fileinfo("original", pbf)?;
-    harness.print_fileinfo("getid", &pbfhogg_getid)?;
-    harness.print_fileinfo("removeid", &pbfhogg_removeid)?;
+    // Print inspect output for original, getid, and removeid (complement validation).
+    harness.print_inspect("original", pbf)?;
+    harness.print_inspect("getid", &pbfhogg_getid)?;
+    harness.print_inspect("removeid", &pbfhogg_removeid)?;
 
     Ok(())
 }

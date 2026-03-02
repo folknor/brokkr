@@ -96,13 +96,13 @@ pub fn run(
 
     // --- Element counts ---
     verify_msg("=== element counts ===");
-    harness.print_fileinfo("pbfhogg", &pbfhogg_out)?;
-    harness.print_fileinfo("osmium", &osmium_out)?;
+    harness.print_inspect("pbfhogg", &pbfhogg_out)?;
+    harness.print_inspect("osmium", &osmium_out)?;
     if osmosis_out.exists() {
-        harness.print_fileinfo("osmosis", &osmosis_out)?;
+        harness.print_inspect("osmosis", &osmosis_out)?;
     }
     if osmconvert_out.exists() {
-        harness.print_fileinfo("osmconvert", &osmconvert_out)?;
+        harness.print_inspect("osmconvert", &osmconvert_out)?;
     }
 
     // --- Sort check ---

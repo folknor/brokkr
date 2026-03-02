@@ -7,7 +7,7 @@ use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
 pub const ALL_COMMANDS: &[&str] = &[
-    "fileinfo",
+    "inspect",
     "check-refs",
     "sort",
     "cat-way",
@@ -32,7 +32,7 @@ pub const ALL_COMMANDS: &[&str] = &[
 const NEEDS_MERGED: &[&str] = &["diff", "derive-changes"];
 
 /// Commands that produce no output file (no `-o` flag). Everything else writes to scratch.
-const NO_OUTPUT_FILE: &[&str] = &["fileinfo", "check-refs", "tags-count", "tags-count-way", "node-stats", "diff"];
+const NO_OUTPUT_FILE: &[&str] = &["inspect", "check-refs", "tags-count", "tags-count-way", "node-stats", "diff"];
 
 pub fn parse_command(input: &str) -> Result<Vec<&'static str>, DevError> {
     if input == "all" {
@@ -61,7 +61,7 @@ pub fn parse_command(input: &str) -> Result<Vec<&'static str>, DevError> {
 
 fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>, output: &str) -> Result<Vec<String>, DevError> {
     let args = match name {
-        "fileinfo" => vec!["fileinfo".into(), "--extended".into(), pbf.into()],
+        "inspect" => vec!["inspect".into(), "--extended".into(), pbf.into()],
         "check-refs" => vec!["check-refs".into(), pbf.into()],
         "sort" => vec!["sort".into(), pbf.into(), "-o".into(), output.into()],
         "cat-way" => vec!["cat".into(), pbf.into(), "--type".into(), "way".into(), "-o".into(), output.into()],
@@ -227,9 +227,9 @@ mod tests {
     }
 
     #[test]
-    fn exact_match_fileinfo() {
-        let result = parse_command("fileinfo").unwrap();
-        assert_eq!(result, vec!["fileinfo"]);
+    fn exact_match_inspect() {
+        let result = parse_command("inspect").unwrap();
+        assert_eq!(result, vec!["inspect"]);
     }
 
     #[test]

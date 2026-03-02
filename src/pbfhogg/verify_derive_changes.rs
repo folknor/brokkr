@@ -80,9 +80,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
 
     // Element counts.
     verify_msg("=== element counts ===");
-    harness.print_fileinfo("new", &new_pbf)?;
-    harness.print_fileinfo("roundtrip-pbfhogg", &rt_pbfhogg)?;
-    harness.print_fileinfo("roundtrip-osmium", &rt_osmium)?;
+    harness.print_inspect("new", &new_pbf)?;
+    harness.print_inspect("roundtrip-pbfhogg", &rt_pbfhogg)?;
+    harness.print_inspect("roundtrip-osmium", &rt_osmium)?;
 
     let mut all_pass = true;
 
