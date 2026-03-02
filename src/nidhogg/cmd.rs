@@ -69,13 +69,13 @@ pub(crate) fn ingest(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
-    pbf: Option<&str>,
+    variant: &str,
     dataset: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "ingest")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pbf_path = resolve_pbf_path(pbf, dataset, &paths, project_root)?;
+    let pbf_path = resolve_pbf_path(dataset, variant, &paths, project_root)?;
 
     let data_dir = resolve_nidhogg_data_dir(dataset, &paths)?;
 
@@ -111,7 +111,7 @@ pub(crate) fn bench_api(
     let port = resolve_port(req.dev_config);
 
     // Resolve dataset PBF for metadata recording.
-    let pbf_path = resolve_pbf_path(None, req.dataset, &ctx.paths, req.project_root).ok();
+    let pbf_path = resolve_pbf_path(req.dataset, req.variant, &ctx.paths, req.project_root).ok();
     let input_file = pbf_path.as_ref()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str());
@@ -125,7 +125,7 @@ pub(crate) fn bench_ingest(
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &feat_refs, true, "bench ingest")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &ctx.paths.scratch_dir, req.project_root)
 }
 
@@ -160,7 +160,7 @@ pub(crate) fn hotpath(
     req: &HotpathRequest,
 ) -> Result<(), DevError> {
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), req.all_features, true, "hotpath")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
     super::hotpath::run(
@@ -182,7 +182,7 @@ pub(crate) fn profile(
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
     let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.pbf, req.dataset, &ctx.paths, req.project_root)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
 
     let data_dir = ctx.paths

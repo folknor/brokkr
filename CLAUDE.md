@@ -25,7 +25,7 @@ Single crate, single binary. No workspace.
 - `src/context.rs` — `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
 - `src/resolve.rs` — Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
 - `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), `detect()` (delegates to `config::load()`), `require()` gating
-- `src/config.rs` — `DevConfig`, `Dataset`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
+- `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
 - `src/db/mod.rs` — `ResultsDb` (SQLite), types, schema, open/insert, query, UUID
@@ -57,22 +57,46 @@ Each project has a `brokkr.toml` in its root:
 ```toml
 project = "pbfhogg"
 
-[datasets.denmark]
-pbf = "denmark-latest.osm.pbf"
-osc = "denmark-diff.osc.gz"
-pbf_raw = "denmark-latest-raw.osm.pbf"
-bbox = "8.0,54.5,13.0,58.0"
-
 [plantasjen]
 data = "data"
 scratch = "data/scratch"
 target = "target"
 port = 3033
-drives.source = "/dev/nvme0n1p2"
-drives.data = "/dev/sda1"
+drives.source = "nvme"
+drives.data = "ssd"
+
+[plantasjen.datasets.denmark]
+origin = "Geofabrik"
+download_date = "2026-02-20"
+bbox = "12.4,55.6,12.7,55.8"
+data_dir = "denmark-data"          # nidhogg only
+
+[plantasjen.datasets.denmark.pbf.indexed]
+file = "denmark-with-indexdata.osm.pbf"
+sha256 = "3f1977fd..."
+seq = 4704
+
+[plantasjen.datasets.denmark.pbf.raw]
+file = "denmark-raw.osm.pbf"
+seq = 4704
+
+[plantasjen.datasets.denmark.osc.4705]
+file = "denmark-4705.osc.gz"
+sha256 = "fa581f7b..."
 ```
 
-Top-level keys that aren't `project` or `datasets` are treated as hostname sections (unknown non-table keys are rejected). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
+
+### Dataset structure
+
+- `pbf.<variant>` — PBF file entries keyed by variant name (e.g. `raw`, `indexed`, `locations`). Each has `file`, optional `sha256`, optional `seq`.
+- `osc.<seq>` — OSC diff file entries keyed by sequence number. Each has `file`, optional `sha256`.
+- Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir` (nidhogg only).
+
+### CLI flags for variant/seq selection
+
+- `--variant <name>` — selects from `pbf.<name>` in config. Default: `indexed` (pbfhogg), `raw` (elivagar/nidhogg).
+- `--osc-seq <seq>` — selects from `osc.<seq>` in config. Auto-selects if exactly one OSC is configured.
 
 ## Shared commands (all projects)
 

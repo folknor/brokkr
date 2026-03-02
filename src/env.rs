@@ -320,13 +320,17 @@ fn check_datasets(
     let mut out: Vec<(String, DatasetStatus)> = datasets
         .iter()
         .map(|(name, ds)| {
-            let status = match &ds.pbf {
-                Some(pbf) => {
-                    let path = data_dir.join(pbf);
+            // Check "indexed" first, fall back to "raw", then any available variant.
+            let entry = ds.pbf.get("indexed")
+                .or_else(|| ds.pbf.get("raw"))
+                .or_else(|| ds.pbf.values().next());
+            let status = match entry {
+                Some(e) => {
+                    let path = data_dir.join(&e.file);
                     if !path.exists() {
                         DatasetStatus::Missing
                     } else {
-                        check_hash_status(&path, ds.sha256_pbf.as_deref(), project_root)
+                        check_hash_status(&path, e.sha256.as_deref(), project_root)
                     }
                 }
                 None => DatasetStatus::NoPbf,

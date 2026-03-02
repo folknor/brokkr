@@ -4,29 +4,24 @@ use crate::config;
 use crate::error::DevError;
 use crate::preflight;
 
-/// Resolve the PBF path from --pbf or --dataset.
+/// Resolve the PBF path from --dataset + --variant.
 pub(crate) fn resolve_pbf_path(
-    pbf: Option<&str>,
     dataset: &str,
+    variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let (path, hash, origin) = match pbf {
-        Some(p) => (PathBuf::from(p), None, None),
-        None => {
-            let ds = paths.datasets.get(dataset).ok_or_else(|| {
-                DevError::Config(format!("unknown dataset: {dataset}"))
-            })?;
-            let pbf_file = ds.pbf.as_ref().ok_or_else(|| {
-                DevError::Config(format!("dataset '{dataset}' has no pbf configured"))
-            })?;
-            (
-                paths.data_dir.join(pbf_file),
-                ds.sha256_pbf.as_deref(),
-                ds.origin.as_deref(),
-            )
-        }
-    };
+    let ds = paths.datasets.get(dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+    let entry = ds.pbf.get(variant).ok_or_else(|| {
+        DevError::Config(format!(
+            "dataset '{dataset}' has no pbf variant '{variant}'"
+        ))
+    })?;
+    let path = paths.data_dir.join(&entry.file);
+    let hash = entry.sha256.as_deref();
+    let origin = ds.origin.as_deref();
 
     if !path.exists() {
         return Err(DevError::Config(format!(
@@ -42,31 +37,26 @@ pub(crate) fn resolve_pbf_path(
     Ok(path)
 }
 
-/// Resolve the OSC path from --osc or --dataset.
+/// Resolve the OSC path from --dataset + --osc-seq.
 pub(crate) fn resolve_osc_path(
-    osc: Option<&str>,
     dataset: &str,
+    seq: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let (path, hash, origin) = match osc {
-        Some(p) => (PathBuf::from(p), None, None),
-        None => {
-            let ds = paths.datasets.get(dataset).ok_or_else(|| {
-                DevError::Config(format!("unknown dataset: {dataset}"))
-            })?;
-            let osc_file = ds.osc.as_ref().ok_or_else(|| {
-                DevError::Config(format!(
-                    "dataset '{dataset}' has no osc file configured"
-                ))
-            })?;
-            (
-                paths.data_dir.join(osc_file),
-                ds.sha256_osc.as_deref(),
-                ds.origin.as_deref(),
-            )
-        }
-    };
+    let ds = paths.datasets.get(dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+    let entry = ds.osc.get(seq).ok_or_else(|| {
+        let available: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
+        DevError::Config(format!(
+            "dataset '{dataset}' has no osc seq '{seq}' (available: {})",
+            if available.is_empty() { "none".to_string() } else { available.join(", ") }
+        ))
+    })?;
+    let path = paths.data_dir.join(&entry.file);
+    let hash = entry.sha256.as_deref();
+    let origin = ds.origin.as_deref();
 
     if !path.exists() {
         return Err(DevError::Config(format!(
@@ -80,6 +70,38 @@ pub(crate) fn resolve_osc_path(
     }
 
     Ok(path)
+}
+
+/// Resolve the default OSC path when no --osc-seq is specified.
+///
+/// If exactly one OSC is configured, returns it. If multiple exist, errors
+/// with a message listing available sequence numbers.
+pub(crate) fn resolve_default_osc_path(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let ds = paths.datasets.get(dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+
+    if ds.osc.is_empty() {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has no osc files configured"
+        )));
+    }
+
+    if ds.osc.len() > 1 {
+        let mut seqs: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
+        seqs.sort();
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has multiple osc files — use --osc-seq to select (available: {})",
+            seqs.join(", ")
+        )));
+    }
+
+    let (seq, _) = ds.osc.iter().next().unwrap();
+    resolve_osc_path(dataset, seq, paths, project_root)
 }
 
 /// Resolve the bbox from --bbox or dataset config.
@@ -103,37 +125,6 @@ pub(crate) fn resolve_bbox(
     })
 }
 
-/// Resolve the non-indexed (raw) PBF path from --pbf-raw or dataset config.
-pub(crate) fn resolve_raw_pbf_path(
-    pbf_raw: Option<&str>,
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-) -> Result<PathBuf, DevError> {
-    let path = match pbf_raw {
-        Some(p) => PathBuf::from(p),
-        None => {
-            let ds = paths.datasets.get(dataset).ok_or_else(|| {
-                DevError::Config(format!("unknown dataset: {dataset}"))
-            })?;
-            let raw_file = ds.pbf_raw.as_ref().ok_or_else(|| {
-                DevError::Config(format!(
-                    "dataset '{dataset}' has no pbf_raw configured (use --pbf-raw)"
-                ))
-            })?;
-            paths.data_dir.join(raw_file)
-        }
-    };
-
-    if !path.exists() {
-        return Err(DevError::Config(format!(
-            "raw PBF file not found: {}",
-            path.display()
-        )));
-    }
-
-    Ok(path)
-}
-
 /// Get file size in MB (decimal, consistent with bench scripts).
 pub(crate) fn file_size_mb(path: &Path) -> Result<f64, DevError> {
     let meta = std::fs::metadata(path)?;
@@ -142,12 +133,12 @@ pub(crate) fn file_size_mb(path: &Path) -> Result<f64, DevError> {
 
 /// Resolve PBF path and its size in one call.
 pub(crate) fn resolve_pbf_with_size(
-    pbf: Option<&str>,
     dataset: &str,
+    variant: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<(PathBuf, f64), DevError> {
-    let path = resolve_pbf_path(pbf, dataset, paths, project_root)?;
+    let path = resolve_pbf_path(dataset, variant, paths, project_root)?;
     let mb = file_size_mb(&path)?;
     Ok((path, mb))
 }
@@ -164,6 +155,28 @@ pub(crate) fn resolve_nidhogg_data_dir(
         DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
     })?;
     Ok(paths.data_dir.join(dir_name))
+}
+
+/// Get a PBF entry reference for direct field access (e.g. checking if a variant exists).
+pub(crate) fn get_pbf_entry<'a>(
+    dataset: &str,
+    variant: &str,
+    paths: &'a config::ResolvedPaths,
+) -> Option<&'a config::PbfEntry> {
+    paths.datasets.get(dataset)?.pbf.get(variant)
+}
+
+/// Get the first available OSC entry for optional lookups (e.g. bench-all).
+pub(crate) fn get_default_osc_entry<'a>(
+    dataset: &str,
+    paths: &'a config::ResolvedPaths,
+) -> Option<&'a config::OscEntry> {
+    let ds = paths.datasets.get(dataset)?;
+    if ds.osc.len() == 1 {
+        ds.osc.values().next()
+    } else {
+        None
+    }
 }
 
 /// Path to the results database for the current project.

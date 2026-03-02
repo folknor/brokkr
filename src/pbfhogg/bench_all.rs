@@ -35,11 +35,8 @@ pub fn run(
     // 1. bench commands -- all
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
-    let osc_path = paths
-        .datasets
-        .get(dataset)
-        .and_then(|ds| ds.osc.as_ref())
-        .map(|osc_file| paths.data_dir.join(osc_file))
+    let osc_path = crate::resolve::get_default_osc_entry(dataset, paths)
+        .map(|entry| paths.data_dir.join(&entry.file))
         .filter(|p| p.exists());
     bench_commands::run(
         harness,
@@ -102,9 +99,8 @@ fn run_dataset_dependent(
     let ds = paths.datasets.get(dataset);
 
     // bench merge -- if osc is available
-    let osc_path = ds
-        .and_then(|d| d.osc.as_ref())
-        .map(|osc_file| paths.data_dir.join(osc_file))
+    let osc_path = crate::resolve::get_default_osc_entry(dataset, paths)
+        .map(|entry| paths.data_dir.join(&entry.file))
         .filter(|p| p.exists());
 
     if let Some(ref osc_path) = osc_path {
@@ -132,9 +128,8 @@ fn run_dataset_dependent(
     }
 
     // bench blob-filter -- if raw PBF is available
-    let raw_pbf_path = ds
-        .and_then(|d| d.pbf_raw.as_ref())
-        .map(|raw_file| paths.data_dir.join(raw_file))
+    let raw_pbf_path = crate::resolve::get_pbf_entry(dataset, "raw", paths)
+        .map(|entry| paths.data_dir.join(&entry.file))
         .filter(|p| p.exists());
 
     if let Some(ref raw_path) = raw_pbf_path {
@@ -143,7 +138,7 @@ fn run_dataset_dependent(
             harness, binary, pbf_path, raw_path, file_mb, runs, project_root,
         )?;
     } else {
-        output::bench_msg("=== bench blob-filter === (skipped, no pbf_raw in dataset config)");
+        output::bench_msg("=== bench blob-filter === (skipped, no raw pbf variant in dataset config)");
     }
 
     Ok(())

@@ -12,37 +12,39 @@ use crate::project::Project;
 
 #[derive(Debug)]
 pub struct DevConfig {
-    pub datasets: HashMap<String, Dataset>,
     pub hosts: HashMap<String, HostConfig>,
 }
 
+/// A single PBF file entry (one variant like raw, indexed, locations).
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct PbfEntry {
+    pub file: String,
+    pub sha256: Option<String>,
+    pub seq: Option<u64>,
+}
+
+/// A single OSC diff file entry, keyed by sequence number.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OscEntry {
+    pub file: String,
+    pub sha256: Option<String>,
+}
+
+/// A dataset with structured PBF variants and multiple OSC entries.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct Dataset {
-    pub pbf: Option<String>,
-    pub pbf_raw: Option<String>,
-    pub osc: Option<String>,
+    pub origin: Option<String>,
+    pub download_date: Option<String>,
     pub bbox: Option<String>,
     pub data_dir: Option<String>,
-    pub origin: Option<String>,
-    pub sha256_pbf: Option<String>,
-    pub sha256_osc: Option<String>,
-}
-
-impl Dataset {
-    /// Merge with a host override. Host `Some` fields win; `None` fields inherit from self.
-    pub fn merge(&self, over: &Dataset) -> Dataset {
-        Dataset {
-            pbf: over.pbf.clone().or_else(|| self.pbf.clone()),
-            pbf_raw: over.pbf_raw.clone().or_else(|| self.pbf_raw.clone()),
-            osc: over.osc.clone().or_else(|| self.osc.clone()),
-            bbox: over.bbox.clone().or_else(|| self.bbox.clone()),
-            data_dir: over.data_dir.clone().or_else(|| self.data_dir.clone()),
-            origin: over.origin.clone().or_else(|| self.origin.clone()),
-            sha256_pbf: over.sha256_pbf.clone().or_else(|| self.sha256_pbf.clone()),
-            sha256_osc: over.sha256_osc.clone().or_else(|| self.sha256_osc.clone()),
-        }
-    }
+    /// PBF variants keyed by name (e.g. "raw", "indexed", "locations").
+    #[serde(default)]
+    pub pbf: HashMap<String, PbfEntry>,
+    /// OSC files keyed by sequence number.
+    #[serde(default)]
+    pub osc: HashMap<String, OscEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,20 +116,19 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         }
     };
 
-    let datasets = parse_global_datasets(table)?;
     let hosts = parse_hosts(table)?;
 
-    Ok((project, DevConfig { datasets, hosts }))
+    Ok((project, DevConfig { hosts }))
 }
 
-/// Every top-level key that is a table and is not `datasets` is
+/// Every top-level key that is a table and is not `project` is
 /// treated as a hostname section.
 fn parse_hosts(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
     for (key, value) in table {
-        if key == "project" || key == "datasets" {
+        if key == "project" {
             continue;
         }
         if !value.is_table() {
@@ -141,22 +142,6 @@ fn parse_hosts(
         out.insert(key.clone(), hc);
     }
     Ok(out)
-}
-
-/// Parse the top-level `[datasets]` table into global dataset definitions.
-/// Returns an empty map if the section is absent.
-fn parse_global_datasets(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<HashMap<String, Dataset>, DevError> {
-    match table.get("datasets") {
-        Some(v) => {
-            let map: HashMap<String, Dataset> = v.clone().try_into().map_err(
-                |e: toml::de::Error| DevError::Config(format!("datasets: {e}")),
-            )?;
-            Ok(map)
-        }
-        None => Ok(HashMap::new()),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,16 +199,9 @@ pub fn resolve_paths(
 
     let drives = host.and_then(|h| h.drives.clone());
 
-    // Start with global datasets, then overlay host-specific overrides.
-    let mut datasets = config.datasets.clone();
-    if let Some(h) = host {
-        for (name, host_ds) in &h.datasets {
-            datasets
-                .entry(name.clone())
-                .and_modify(|global_ds| *global_ds = global_ds.merge(host_ds))
-                .or_insert_with(|| host_ds.clone());
-        }
-    }
+    let datasets = host
+        .map(|h| h.datasets.clone())
+        .unwrap_or_default();
 
     ResolvedPaths {
         hostname: hostname.to_owned(),
@@ -250,171 +228,149 @@ fn resolve_relative(base: &Path, rel: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {
+        DevConfig { hosts }
+    }
+
     fn empty_dataset() -> Dataset {
         Dataset {
-            pbf: None, pbf_raw: None, osc: None, bbox: None,
-            data_dir: None, origin: None, sha256_pbf: None, sha256_osc: None,
+            origin: None, download_date: None, bbox: None, data_dir: None,
+            pbf: HashMap::new(), osc: HashMap::new(),
         }
     }
 
     // -------------------------------------------------------------------
-    // Dataset::merge
+    // resolve_paths
     // -------------------------------------------------------------------
 
     #[test]
-    fn dataset_merge_override_wins() {
-        let global = Dataset {
-            pbf: Some("global.pbf".into()),
-            osc: Some("global.osc.gz".into()),
-            bbox: Some("1,2,3,4".into()),
-            ..empty_dataset()
-        };
-        let host = Dataset {
-            pbf: Some("host.pbf".into()),
-            ..empty_dataset()
-        };
-        let merged = global.merge(&host);
-        assert_eq!(merged.pbf.as_deref(), Some("host.pbf"));
-        assert_eq!(merged.osc.as_deref(), Some("global.osc.gz"));
-        assert_eq!(merged.bbox.as_deref(), Some("1,2,3,4"));
-    }
-
-    #[test]
-    fn dataset_merge_no_override() {
-        let global = Dataset {
-            pbf: Some("g.pbf".into()),
-            bbox: Some("1,2,3,4".into()),
-            ..empty_dataset()
-        };
-        let merged = global.merge(&empty_dataset());
-        assert_eq!(merged.pbf.as_deref(), Some("g.pbf"));
-        assert_eq!(merged.bbox.as_deref(), Some("1,2,3,4"));
-    }
-
-    // -------------------------------------------------------------------
-    // resolve_paths dataset merging
-    // -------------------------------------------------------------------
-
-    fn make_config(
-        global_datasets: HashMap<String, Dataset>,
-        hosts: HashMap<String, HostConfig>,
-    ) -> DevConfig {
-        DevConfig { datasets: global_datasets, hosts }
-    }
-
-    #[test]
-    fn v1_host_only_datasets() {
+    fn host_datasets_resolved() {
+        let mut pbf = HashMap::new();
+        pbf.insert("indexed".into(), PbfEntry {
+            file: "dk-indexed.osm.pbf".into(), sha256: None, seq: Some(4704),
+        });
         let mut host_ds = HashMap::new();
         host_ds.insert("dk".into(), Dataset {
-            pbf: Some("dk.pbf".into()),
+            bbox: Some("1,2,3,4".into()),
+            pbf,
             ..empty_dataset()
         });
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None,
-            datasets: host_ds,
+            drives: None, datasets: host_ds,
         });
-        let config = make_config(HashMap::new(), hosts);
+        let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
-        assert_eq!(resolved.datasets.get("dk").unwrap().pbf.as_deref(), Some("dk.pbf"));
-    }
-
-    #[test]
-    fn v2_global_datasets_no_host_override() {
-        let mut global = HashMap::new();
-        global.insert("dk".into(), Dataset {
-            pbf: Some("global.pbf".into()),
-            bbox: Some("1,2,3,4".into()),
-            ..empty_dataset()
-        });
-        let config = make_config(global, HashMap::new());
-        // Unknown host — gets global datasets.
-        let resolved = resolve_paths(&config, "unknown", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
-        assert_eq!(dk.pbf.as_deref(), Some("global.pbf"));
+        assert_eq!(dk.pbf.get("indexed").unwrap().file, "dk-indexed.osm.pbf");
         assert_eq!(dk.bbox.as_deref(), Some("1,2,3,4"));
     }
 
     #[test]
-    fn v2_global_with_host_field_override() {
-        let mut global = HashMap::new();
-        global.insert("dk".into(), Dataset {
-            pbf: Some("global.pbf".into()),
-            osc: Some("global.osc.gz".into()),
-            bbox: Some("1,2,3,4".into()),
-            ..empty_dataset()
+    fn unknown_host_gets_empty_datasets() {
+        let config = make_config(HashMap::new());
+        let resolved = resolve_paths(&config, "unknown", Path::new("/proj"), Path::new("/target"));
+        assert!(resolved.datasets.is_empty());
+    }
+
+    #[test]
+    fn multiple_pbf_variants() {
+        let mut pbf = HashMap::new();
+        pbf.insert("raw".into(), PbfEntry {
+            file: "dk-raw.osm.pbf".into(), sha256: Some("aaa".into()), seq: Some(4704),
+        });
+        pbf.insert("indexed".into(), PbfEntry {
+            file: "dk-indexed.osm.pbf".into(), sha256: Some("bbb".into()), seq: None,
+        });
+        pbf.insert("locations".into(), PbfEntry {
+            file: "dk-locations.osm.pbf".into(), sha256: None, seq: None,
         });
         let mut host_ds = HashMap::new();
-        host_ds.insert("dk".into(), Dataset {
-            pbf: Some("host-specific.pbf".into()),
-            ..empty_dataset()
-        });
+        host_ds.insert("dk".into(), Dataset { pbf, ..empty_dataset() });
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None,
-            datasets: host_ds,
+            drives: None, datasets: host_ds,
         });
-        let config = make_config(global, hosts);
+        let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
-        assert_eq!(dk.pbf.as_deref(), Some("host-specific.pbf"), "host override wins");
-        assert_eq!(dk.osc.as_deref(), Some("global.osc.gz"), "global inherited");
-        assert_eq!(dk.bbox.as_deref(), Some("1,2,3,4"), "global inherited");
+        assert_eq!(dk.pbf.len(), 3);
+        assert_eq!(dk.pbf.get("raw").unwrap().sha256.as_deref(), Some("aaa"));
+        assert_eq!(dk.pbf.get("indexed").unwrap().sha256.as_deref(), Some("bbb"));
     }
 
     #[test]
-    fn v2_host_only_dataset_not_in_global() {
-        let mut global = HashMap::new();
-        global.insert("dk".into(), Dataset {
-            pbf: Some("dk.pbf".into()),
-            ..empty_dataset()
+    fn multiple_osc_entries() {
+        let mut osc = HashMap::new();
+        osc.insert("4705".into(), OscEntry {
+            file: "dk-4705.osc.gz".into(), sha256: Some("ccc".into()),
+        });
+        osc.insert("4706".into(), OscEntry {
+            file: "dk-4706.osc.gz".into(), sha256: None,
         });
         let mut host_ds = HashMap::new();
-        host_ds.insert("se".into(), Dataset {
-            pbf: Some("sweden.pbf".into()),
-            ..empty_dataset()
-        });
+        host_ds.insert("dk".into(), Dataset { osc, ..empty_dataset() });
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None,
-            datasets: host_ds,
+            drives: None, datasets: host_ds,
         });
-        let config = make_config(global, hosts);
+        let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
-        assert!(resolved.datasets.contains_key("dk"), "global dataset present");
-        assert!(resolved.datasets.contains_key("se"), "host-only dataset present");
+        let dk = resolved.datasets.get("dk").unwrap();
+        assert_eq!(dk.osc.len(), 2);
+        assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
     }
 
     // -------------------------------------------------------------------
-    // parse_global_datasets
+    // TOML parsing
     // -------------------------------------------------------------------
 
     #[test]
-    fn parse_global_datasets_from_toml() {
+    fn parse_nested_dataset_from_toml() {
         let toml_str = r#"
 project = "pbfhogg"
 
-[datasets.denmark]
-pbf = "dk.pbf"
+[myhost.datasets.denmark]
+origin = "Geofabrik"
+download_date = "2026-02-20"
 bbox = "8.0,54.5,13.0,58.0"
+
+[myhost.datasets.denmark.pbf.raw]
+file = "dk-raw.osm.pbf"
+sha256 = "aaa"
+seq = 4704
+
+[myhost.datasets.denmark.pbf.indexed]
+file = "dk-indexed.osm.pbf"
+sha256 = "bbb"
+
+[myhost.datasets.denmark.osc.4705]
+file = "dk-4705.osc.gz"
+sha256 = "ccc"
 "#;
         let root: toml::Value = toml_str.parse().unwrap();
         let table = root.as_table().unwrap();
-        let ds = parse_global_datasets(table).unwrap();
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds["denmark"].pbf.as_deref(), Some("dk.pbf"));
-        assert_eq!(ds["denmark"].bbox.as_deref(), Some("8.0,54.5,13.0,58.0"));
+        let hosts = parse_hosts(table).unwrap();
+        let host = hosts.get("myhost").unwrap();
+        let dk = host.datasets.get("denmark").unwrap();
+        assert_eq!(dk.origin.as_deref(), Some("Geofabrik"));
+        assert_eq!(dk.download_date.as_deref(), Some("2026-02-20"));
+        assert_eq!(dk.bbox.as_deref(), Some("8.0,54.5,13.0,58.0"));
+        assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
+        assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
+        assert_eq!(dk.pbf.get("indexed").unwrap().sha256.as_deref(), Some("bbb"));
+        assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
     }
 
     #[test]
-    fn parse_global_datasets_missing_section() {
+    fn parse_no_host_section() {
         let toml_str = r#"project = "pbfhogg""#;
         let root: toml::Value = toml_str.parse().unwrap();
         let table = root.as_table().unwrap();
-        let ds = parse_global_datasets(table).unwrap();
-        assert!(ds.is_empty());
+        let hosts = parse_hosts(table).unwrap();
+        assert!(hosts.is_empty());
     }
 }

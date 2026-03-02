@@ -125,8 +125,8 @@ Examples:
     /// Run hotpath profiling (timing or allocation instrumentation)
     #[command(display_order = 12)]
     Hotpath {
-        /// Variant to profile (default: main pipeline; elivagar also supports pmtiles, node-store)
-        variant: Option<String>,
+        /// Target to profile (default: main pipeline; elivagar also supports pmtiles, node-store)
+        target: Option<String>,
 
         /// Print full build/bench/result output
         #[arg(long, short = 'v')]
@@ -144,13 +144,13 @@ Examples:
         #[arg(long, default_value = "denmark")]
         dataset: String,
 
-        /// Explicit PBF file path (overrides --dataset)
-        #[arg(long)]
-        pbf: Option<String>,
+        /// PBF variant to use (raw, indexed, locations)
+        #[arg(long, default_value = "indexed")]
+        variant: String,
 
-        /// Explicit OSC diff file path (overrides --dataset)
+        /// OSC sequence number(s) from brokkr.toml (comma-separated)
         #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
 
         /// Run allocation profiling instead of timing
         #[arg(long)]
@@ -195,13 +195,13 @@ Examples:
         #[arg(long, default_value = "denmark")]
         dataset: String,
 
-        /// Explicit PBF file path (overrides --dataset)
-        #[arg(long)]
-        pbf: Option<String>,
+        /// PBF variant to use (raw, indexed, locations)
+        #[arg(long, default_value = "indexed")]
+        variant: String,
 
-        /// Explicit OSC diff file path (overrides --dataset)
+        /// OSC sequence number(s) from brokkr.toml (comma-separated)
         #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
 
         /// Profiling tool: perf or samply (elivagar only)
         #[arg(long)]
@@ -270,9 +270,9 @@ Examples:
     /// [nidhogg] Ingest a PBF into disk format
     #[command(display_order = 43)]
     Ingest {
-        /// Explicit PBF file path
-        #[arg(long)]
-        pbf: Option<String>,
+        /// PBF variant to use (raw, indexed, locations)
+        #[arg(long, default_value = "raw")]
+        variant: String,
 
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
@@ -309,8 +309,10 @@ pub(crate) enum BenchCommand {
         command: String,
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
-        pbf: Option<String>,
+        osc_seq: Option<String>,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -319,8 +321,8 @@ pub(crate) enum BenchCommand {
     Extract {
         #[arg(long, default_value = "japan")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
         #[arg(long)]
@@ -333,8 +335,8 @@ pub(crate) enum BenchCommand {
     Allocator {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -343,10 +345,10 @@ pub(crate) enum BenchCommand {
     BlobFilter {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf_indexed: Option<String>,
-        #[arg(long)]
-        pbf_raw: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        indexed_variant: String,
+        #[arg(long, default_value = "raw")]
+        raw_variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -355,8 +357,8 @@ pub(crate) enum BenchCommand {
     Planetiler {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -365,8 +367,8 @@ pub(crate) enum BenchCommand {
     Read {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
         #[arg(long, default_value = "sequential,parallel,pipelined,mmap,blobreader")]
@@ -377,8 +379,8 @@ pub(crate) enum BenchCommand {
     Write {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
         #[arg(long, default_value = "none,zlib:6,zstd:3")]
@@ -389,10 +391,10 @@ pub(crate) enum BenchCommand {
     Merge {
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
-        pbf: Option<String>,
-        #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
         #[arg(long, default_value = "3")]
         runs: usize,
         #[arg(long)]
@@ -405,8 +407,8 @@ pub(crate) enum BenchCommand {
     All {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -416,8 +418,8 @@ pub(crate) enum BenchCommand {
     ElivSelf {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "raw")]
+        variant: String,
         #[arg(long, default_value = "1")]
         runs: usize,
         /// Resume from checkpoint: ocean or sort
@@ -453,8 +455,8 @@ pub(crate) enum BenchCommand {
     ElivPlanetiler {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "raw")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -463,8 +465,8 @@ pub(crate) enum BenchCommand {
     Tilemaker {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "raw")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -473,8 +475,8 @@ pub(crate) enum BenchCommand {
     ElivAll {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "raw")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -497,8 +499,8 @@ pub(crate) enum BenchCommand {
     NidIngest {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "raw")]
+        variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
     },
@@ -511,24 +513,24 @@ pub(crate) enum VerifyCommand {
     Sort {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
     },
     /// [pbfhogg] Cross-validate cat (type filters) against osmium cat
     #[command(display_order = 1)]
     Cat {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
     },
     /// [pbfhogg] Cross-validate extract (bbox strategies) against osmium extract
     #[command(display_order = 2)]
     Extract {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
         bbox: Option<String>,
     },
@@ -537,72 +539,72 @@ pub(crate) enum VerifyCommand {
     TagsFilter {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
     },
     /// [pbfhogg] Cross-validate getid/removeid against osmium getid
     #[command(display_order = 4)]
     GetidRemoveid {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
     },
     /// [pbfhogg] Cross-validate add-locations-to-ways against osmium
     #[command(display_order = 5)]
     AddLocationsToWays {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
     },
     /// [pbfhogg] Cross-validate check-refs against osmium check-refs
     #[command(display_order = 6)]
     CheckRefs {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        #[arg(long)]
-        pbf: Option<String>,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
     },
     /// [pbfhogg] Cross-validate merge against osmium/osmosis/osmconvert
     #[command(display_order = 7)]
     Merge {
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
-        pbf: Option<String>,
-        #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
     },
     /// [pbfhogg] Cross-validate derive-changes roundtrip against osmium
     #[command(display_order = 8)]
     DeriveChanges {
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
-        pbf: Option<String>,
-        #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
     },
     /// [pbfhogg] Cross-validate diff summary against osmium diff
     #[command(display_order = 9)]
     Diff {
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
-        pbf: Option<String>,
-        #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
     },
     /// [pbfhogg] Run all verify commands sequentially
     #[command(display_order = 10)]
     All {
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
         #[arg(long)]
-        pbf: Option<String>,
-        #[arg(long)]
-        osc: Option<String>,
+        osc_seq: Option<String>,
         #[arg(long)]
         bbox: Option<String>,
     },
