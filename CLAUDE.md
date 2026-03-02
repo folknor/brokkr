@@ -28,8 +28,15 @@ Single crate, single binary. No workspace.
 - `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/db/mod.rs` — `ResultsDb` (SQLite), types, schema, open/insert, query, UUID
+- `src/request.rs` — Shared request structs (`BenchRequest`, `HotpathRequest`, `ProfileRequest`, `ResultsQuery`)
+- `src/db/mod.rs` — `ResultsDb` wrapper, re-exports
+- `src/db/types.rs` — `StoredRow`, `Distribution`, `KvPair`, `HotpathData`
+- `src/db/schema.rs` — Table definitions, column constants
+- `src/db/write.rs` — Insert/record result rows
+- `src/db/query.rs` — Query by UUID prefix, commit, command, variant; comparison queries
 - `src/db/format.rs` — Result formatting: `format_table`, `format_details`, `format_compare`
+- `src/db/compare.rs` — Side-by-side commit comparison logic
+- `src/db/hotpath.rs` — Hotpath report formatting for result detail view
 - `src/db/migrate.rs` — Migration framework (v0→v3), `run_migrations()`
 - `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
@@ -103,7 +110,8 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `check` — clippy + tests (extra args forwarded to cargo test)
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
 - `run` — build release binary and run with passthrough args
-- `results` — query `.brokkr/results.db` (SQLite)
+- `results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
+- `results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [-n N] [--top N]` — query/compare benchmark results from SQLite. `--top 0` shows all hotpath functions. `--compare-last --command hotpath` diffs two most recent hotpath runs.
 - `clean` — remove scratch/temp files
 - `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline.
 - `profile` — sampling profiler (perf/samply)
