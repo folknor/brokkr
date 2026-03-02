@@ -4,9 +4,11 @@
 //! tile requests at Copenhagen-area coordinates across z8–z12, sends SIGTERM,
 //! and captures the shutdown KV pairs (tile stats, RSS, peak_rss_kb).
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -34,6 +36,10 @@ const TILE_COORDS: &[(u32, u32, u32)] = &[
 
 /// Number of iterations over the full tile set per run.
 const ITERATIONS: usize = 5;
+
+/// Maximum time to wait for the server to print "Listening on" to stderr.
+/// Generous to accommodate slow disk startup (mmap of large files on HDD).
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -103,13 +109,48 @@ fn run_lifecycle(
     // 1. Spawn server with piped stderr.
     let mut child = spawn_server(binary, data_dir, tiles, port, project_root)?;
 
-    // 2. Wait for server to become ready.
-    if !super::server::poll_for_ready(port) {
-        // Try to clean up the child before returning the error.
+    // 2. Take stderr and start a reader thread that watches for "Listening on".
+    //    After the ready signal, the thread continues reading to EOF so it
+    //    captures the shutdown KV pairs emitted after SIGTERM.
+    let stderr = child.stderr.take().ok_or_else(|| {
+        DevError::Config("failed to capture server stderr".into())
+    })?;
+
+    let (tx, rx) = mpsc::sync_channel::<bool>(1);
+    let reader_handle = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+
+        // Read lines until "Listening on" or EOF.
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => { tx.send(false).ok(); return Vec::new(); }
+                Ok(_) => {
+                    if line.contains("Listening on") {
+                        tx.send(true).ok();
+                        break;
+                    }
+                }
+                Err(_) => { tx.send(false).ok(); return Vec::new(); }
+            }
+        }
+
+        // Continue reading until EOF (process exit after SIGTERM).
+        // This captures the shutdown KV pairs.
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).ok();
+        buf
+    });
+
+    let ready = rx.recv_timeout(STARTUP_TIMEOUT).unwrap_or(false);
+    if !ready {
         child.kill().ok();
         child.wait().ok();
+        reader_handle.join().ok();
         return Err(DevError::Config(format!(
-            "nidhogg server did not start within 6s on port {port}"
+            "nidhogg server did not print 'Listening on' within {}s",
+            STARTUP_TIMEOUT.as_secs()
         )));
     }
 
@@ -141,30 +182,30 @@ fn run_lifecycle(
     // SAFETY: sending SIGTERM to our own child process.
     unsafe { libc::kill(pid, libc::SIGTERM) };
 
-    // 6. Wait for exit and collect stderr.
-    let output = child.wait_with_output().map_err(DevError::Io)?;
+    // 6. Wait for process exit, then join reader to get remaining stderr.
+    let status = child.wait().map_err(DevError::Io)?;
+    let remaining_stderr = reader_handle.join().unwrap_or_default();
 
     let elapsed_ms = harness::elapsed_to_ms(&start.elapsed());
 
-    if !output.status.success() {
-        let code = output.status.code();
-        // SIGTERM exit is expected (signal 15 → exit code None on Unix).
-        // Only treat non-signal exits as errors.
-        if code.is_some() {
-            let stderr_preview: String = String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(500)
-                .collect();
-            return Err(DevError::Subprocess {
-                program: binary.display().to_string(),
-                code,
-                stderr: stderr_preview,
-            });
-        }
+    // SIGTERM exit is expected (signal 15 → exit code None on Unix).
+    // Only treat non-signal exits as errors.
+    if !status.success()
+        && let Some(code) = status.code()
+    {
+        let stderr_preview: String = String::from_utf8_lossy(&remaining_stderr)
+            .chars()
+            .take(500)
+            .collect();
+        return Err(DevError::Subprocess {
+            program: binary.display().to_string(),
+            code: Some(code),
+            stderr: stderr_preview,
+        });
     }
 
-    // 7. Parse KV pairs from stderr.
-    let (_stderr_ms, kv) = harness::parse_kv_lines(&output.stderr);
+    // 7. Parse KV pairs from remaining stderr (shutdown output after "Listening on").
+    let (_stderr_ms, kv) = harness::parse_kv_lines(&remaining_stderr);
 
     output::bench_msg(&format!("captured {} KV pairs from server shutdown", kv.len()));
 
