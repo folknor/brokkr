@@ -270,16 +270,10 @@ pub(crate) fn hotpath(
         None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
     };
 
-    // Try to get raw PBF path (optional).
-    let pbf_raw_path = resolve::get_pbf_entry(req.dataset, "raw", &ctx.paths)
-        .map(|entry| ctx.paths.data_dir.join(&entry.file))
-        .filter(|p| p.exists());
-
     super::hotpath::run(
         &ctx.harness,
         &ctx.binary,
         &pbf_path,
-        pbf_raw_path.as_deref(),
         &osc_path,
         file_mb,
         req.runs,
@@ -301,15 +295,9 @@ pub(crate) fn profile(
         None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
     };
 
-    // Try to get raw PBF path (optional).
-    let pbf_raw_path = resolve::get_pbf_entry(req.dataset, "raw", &ctx.paths)
-        .map(|entry| ctx.paths.data_dir.join(&entry.file))
-        .filter(|p| p.exists());
-
     super::profile::run(
         &ctx.harness,
         &pbf_path,
-        pbf_raw_path.as_deref(),
         &osc_path,
         req.dataset,
         file_mb,

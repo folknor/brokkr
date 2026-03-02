@@ -24,9 +24,8 @@ fn build_test_suite(
     pbf_str: &str,
     osc_str: &str,
     merged_str: &str,
-    pbf_raw_str: Option<&str>,
 ) -> Vec<HotpathTest> {
-    let mut tests = vec![
+    vec![
         HotpathTest {
             label: "tags-count",
             args: vec![
@@ -58,7 +57,7 @@ fn build_test_suite(
             ],
         },
         HotpathTest {
-            label: "merge",
+            label: "merge-zlib",
             args: vec![
                 binary_str.into(),
                 "merge".into(),
@@ -70,24 +69,7 @@ fn build_test_suite(
                 merged_str.into(),
             ],
         },
-    ];
-
-    if let Some(raw_str) = pbf_raw_str {
-        tests.push(HotpathTest {
-            label: "merge-no-indexdata",
-            args: vec![
-                binary_str.into(),
-                "merge".into(),
-                raw_str.into(),
-                osc_str.into(),
-                "--compression".into(),
-                "zlib".into(),
-                "-o".into(),
-                merged_str.into(),
-            ],
-        });
-
-        tests.push(HotpathTest {
+        HotpathTest {
             label: "merge-none",
             args: vec![
                 binary_str.into(),
@@ -99,10 +81,8 @@ fn build_test_suite(
                 "-o".into(),
                 merged_str.into(),
             ],
-        });
-    }
-
-    tests
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -114,12 +94,14 @@ fn build_test_suite(
 /// Runs each test `runs` times, recording results through the bench harness.
 /// When `alloc` is true, the binary is expected to be built with `hotpath-alloc`
 /// feature; the variant name gets a `/alloc` suffix.
+///
+/// Tests that fail are reported but do not abort the suite — remaining tests
+/// continue to run.  The command exits successfully if at least one test passed.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,
     pbf_path: &Path,
-    pbf_raw_path: Option<&Path>,
     osc_path: &Path,
     file_mb: f64,
     runs: usize,
@@ -142,12 +124,6 @@ pub fn run(
     let merged_str = merged_path
         .to_str()
         .ok_or_else(|| DevError::Config("merged path is not valid UTF-8".into()))?;
-    let pbf_raw_str = pbf_raw_path
-        .map(|p| {
-            p.to_str()
-                .ok_or_else(|| DevError::Config("raw PBF path is not valid UTF-8".into()))
-        })
-        .transpose()?;
 
     let basename = pbf_path
         .file_name()
@@ -155,7 +131,10 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, pbf_raw_str);
+    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str);
+
+    let mut passed = 0usize;
+    let mut failed: Vec<(&str, String)> = Vec::new();
 
     for test in &tests {
         let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
@@ -176,15 +155,40 @@ pub fn run(
             metadata: vec![KvPair::text("meta.alloc", alloc.to_string()), KvPair::text("meta.test", test.label)],
         };
 
-        harness.run_internal(&config, |_i| {
+        let result = harness.run_internal(&config, |_i| {
             output::hotpath_msg(test.label);
             let program = binary.display().to_string();
             harness::run_hotpath_capture(&program, &subprocess_args, scratch_dir, project_root, &[])
-        })?;
+        });
+
+        match result {
+            Ok(_) => passed += 1,
+            Err(e) => {
+                output::error(&format!("{}: {e}", test.label));
+                failed.push((test.label, e.to_string()));
+            }
+        }
     }
 
     // Clean up merged output file (ignore errors if it doesn't exist).
     std::fs::remove_file(&merged_path).ok();
 
-    Ok(())
+    if !failed.is_empty() {
+        output::hotpath_msg(&format!(
+            "{passed}/{} tests passed ({} failed: {})",
+            tests.len(),
+            failed.len(),
+            failed.iter().map(|(l, _)| *l).collect::<Vec<_>>().join(", "),
+        ));
+    }
+
+    if passed == 0 {
+        Err(DevError::Subprocess {
+            program: "hotpath".into(),
+            code: Some(1),
+            stderr: "all hotpath tests failed".into(),
+        })
+    } else {
+        Ok(())
+    }
 }

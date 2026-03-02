@@ -19,7 +19,6 @@ use crate::output;
 pub fn run(
     harness: &BenchHarness,
     pbf_path: &Path,
-    pbf_raw_path: Option<&Path>,
     osc_path: &Path,
     dataset_name: &str,
     file_mb: f64,
@@ -46,7 +45,6 @@ pub fn run(
         harness,
         &binary,
         pbf_path,
-        pbf_raw_path,
         osc_path,
         file_mb,
         1, // single run per test for profiling
@@ -75,7 +73,6 @@ pub fn run(
         harness,
         &binary,
         pbf_path,
-        pbf_raw_path,
         osc_path,
         file_mb,
         1, // single run per test for profiling
