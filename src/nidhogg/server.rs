@@ -190,7 +190,7 @@ pub fn check_running(port: u16) -> Result<(), DevError> {
 // ---------------------------------------------------------------------------
 
 /// Poll the HTTP health endpoint, up to 30 attempts x 200ms = 6s.
-fn poll_for_ready(port: u16) -> bool {
+pub(crate) fn poll_for_ready(port: u16) -> bool {
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         if let Ok(true) = status(port) {

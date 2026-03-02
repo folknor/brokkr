@@ -31,6 +31,11 @@ pub fn batch_query_url(port: u16) -> String {
     format!("http://localhost:{port}/api/query_batch")
 }
 
+/// Build the `/api/tiles/{z}/{x}/{y}` URL for the given port and tile coordinates.
+pub fn tile_url(port: u16, z: u32, x: u32, y: u32) -> String {
+    format!("http://localhost:{port}/api/tiles/{z}/{x}/{y}")
+}
+
 /// Build the `/api/geocode?q=<encoded>` URL for the given port and search term.
 pub fn geocode_url(port: u16, term: &str) -> String {
     let encoded = url_encode(term);

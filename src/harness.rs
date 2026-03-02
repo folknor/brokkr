@@ -643,7 +643,7 @@ fn push_drive_note(parts: &mut Vec<String>, label: &str, value: &Option<String>)
 /// puts all other kv pairs into `BenchResult.kv`.
 /// Parse `key=value` lines from stderr, returning `(elapsed_ms, kv_pairs)`.
 /// `elapsed_ms` is `None` when no `elapsed_ms`/`total_ms` line is found.
-fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
+pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
     let text = String::from_utf8_lossy(stderr);
     let mut elapsed_ms: Option<i64> = None;
     let mut kv = Vec::new();

@@ -504,6 +504,20 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "3")]
         runs: usize,
     },
+    /// [nidhogg] Tile serving lifecycle benchmark
+    #[command(display_order = 22)]
+    Tiles {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Path to PMTiles file for tile serving
+        #[arg(long)]
+        tiles: String,
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Runs (full server lifecycle per run)
+        #[arg(long, default_value = "1")]
+        runs: usize,
+    },
 }
 
 #[derive(Subcommand)]

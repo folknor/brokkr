@@ -129,6 +129,31 @@ pub(crate) fn bench_ingest(
     super::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &ctx.paths.scratch_dir, req.project_root)
 }
 
+pub(crate) fn bench_tiles(
+    req: &BenchRequest,
+    tiles: &str,
+) -> Result<(), DevError> {
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &feat_refs, true, "bench tiles")?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
+    let port = resolve_port(req.dev_config);
+
+    let input_file = pbf_path.file_name().and_then(|n| n.to_str());
+
+    super::bench_tiles::run(
+        &ctx.harness,
+        &ctx.binary,
+        &data_dir.display().to_string(),
+        tiles,
+        port,
+        input_file,
+        Some(file_mb),
+        req.runs,
+        req.project_root,
+    )
+}
+
 pub(crate) fn verify_batch(dev_config: &config::DevConfig, _project: Project, _project_root: &Path) -> Result<(), DevError> {
     let port = resolve_port(dev_config);
     super::verify_batch::run(port)
