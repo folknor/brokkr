@@ -105,7 +105,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `run` — build release binary and run with passthrough args
 - `results` — query `.brokkr/results.db` (SQLite)
 - `clean` — remove scratch/temp files
-- `hotpath [variant]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports variants: `pmtiles`, `node-store` (micro-benchmark hotpath). No variant = main pipeline.
+- `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline.
 - `profile` — sampling profiler (perf/samply)
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 
