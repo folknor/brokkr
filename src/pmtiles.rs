@@ -68,47 +68,6 @@ fn u64_le(buf: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-fn i32_le(buf: &[u8], offset: usize) -> i32 {
-    let mut bytes = [0u8; 4];
-    bytes.copy_from_slice(&buf[offset..offset + 4]);
-    i32::from_le_bytes(bytes)
-}
-
-// ---------------------------------------------------------------------------
-// Bounds (header-only read)
-// ---------------------------------------------------------------------------
-
-/// Geographic bounds and zoom range from a PMTiles v3 header.
-pub struct TileBounds {
-    pub min_zoom: u8,
-    pub max_zoom: u8,
-    pub min_lon: f64,
-    pub min_lat: f64,
-    pub max_lon: f64,
-    pub max_lat: f64,
-}
-
-/// Read geographic bounds and zoom range from a PMTiles v3 header.
-pub fn read_bounds(path: &Path) -> Result<TileBounds, DevError> {
-    let mut file = File::open(path).map_err(|e| {
-        DevError::Config(format!("{}: {e}", path.display()))
-    })?;
-    let mut buf = [0u8; HEADER_SIZE];
-    file.read_exact(&mut buf).map_err(|e| {
-        DevError::Config(format!("{}: failed to read header: {e}", path.display()))
-    })?;
-    let header = parse_header(&buf)?;
-
-    Ok(TileBounds {
-        min_zoom: header.min_zoom,
-        max_zoom: header.max_zoom,
-        min_lon: f64::from(i32_le(&buf, 102)) / 1e7,
-        min_lat: f64::from(i32_le(&buf, 106)) / 1e7,
-        max_lon: f64::from(i32_le(&buf, 110)) / 1e7,
-        max_lat: f64::from(i32_le(&buf, 114)) / 1e7,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Varint (LEB128 unsigned)
 // ---------------------------------------------------------------------------
@@ -243,6 +202,38 @@ fn tile_id_to_zoom(tile_id: u64) -> u8 {
     31
 }
 
+/// Convert Hilbert curve index to (x, y) on an n×n grid.
+fn hilbert_d2xy(n: u32, mut d: u64) -> (u32, u32) {
+    let mut x: u32 = 0;
+    let mut y: u32 = 0;
+    let mut s: u32 = 1;
+    while s < n {
+        #[allow(clippy::cast_possible_truncation)]
+        let rx = ((d >> 1) & 1) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let ry = ((d & 1) ^ u64::from(rx)) as u32;
+        if ry == 0 {
+            if rx == 1 {
+                x = s - 1 - x;
+                y = s - 1 - y;
+            }
+            std::mem::swap(&mut x, &mut y);
+        }
+        x += s * rx;
+        y += s * ry;
+        d >>= 2;
+        s *= 2;
+    }
+    (x, y)
+}
+
+fn tile_id_to_zxy(tile_id: u64) -> (u8, u32, u32) {
+    let z = tile_id_to_zoom(tile_id);
+    let base = ((1u64 << (2 * u32::from(z))) - 1) / 3;
+    let (x, y) = hilbert_d2xy(1u32 << z, tile_id - base);
+    (z, x, y)
+}
+
 // ---------------------------------------------------------------------------
 // Stats collection
 // ---------------------------------------------------------------------------
@@ -280,64 +271,13 @@ impl ZoomStats {
 /// Read a PMTiles v3 file and print statistics.
 #[allow(clippy::too_many_lines)]
 pub fn run(path: &str) -> Result<(), DevError> {
-    let mut file = File::open(path).map_err(|e| {
-        DevError::Config(format!("{path}: {e}"))
-    })?;
-
-    // Read header.
-    let mut header_buf = [0u8; HEADER_SIZE];
-    file.read_exact(&mut header_buf).map_err(|e| {
-        DevError::Config(format!("{path}: failed to read header: {e}"))
-    })?;
-
-    let header = match parse_header(&header_buf) {
-        Ok(h) => h,
+    let (header, all_entries) = match read_all_entries(Path::new(path)) {
+        Ok(pair) => pair,
         Err(e) => {
             println!("\n=== {path} ===");
             println!("  {e}");
             return Ok(());
         }
-    };
-
-    // Read and decompress root directory.
-    let root_entries = {
-        let compressed = read_range(&mut file, header.root_dir_offset, header.root_dir_length)?;
-        let decompressed = decompress(&compressed, header.internal_compression)?;
-        decode_directory(&decompressed)
-    };
-
-    // Resolve leaf directories if present.
-    let all_entries = if header.leaf_dirs_length > 0 {
-        let leaf_blob = read_range(&mut file, header.leaf_dirs_offset, header.leaf_dirs_length)?;
-        let mut entries = Vec::new();
-
-        for entry in &root_entries {
-            if entry.run_length == 0 {
-                // Leaf pointer: offset and length index into leaf blob.
-                #[allow(clippy::cast_possible_truncation)]
-                let start = entry.offset as usize;
-                #[allow(clippy::cast_possible_truncation)]
-                let end = start + entry.length as usize;
-                if end > leaf_blob.len() {
-                    return Err(DevError::Config(format!(
-                        "{path}: leaf pointer out of bounds (offset={}, length={}, blob={})",
-                        entry.offset, entry.length, leaf_blob.len(),
-                    )));
-                }
-                let leaf_data = decompress(&leaf_blob[start..end], header.internal_compression)?;
-                entries.extend(decode_directory(&leaf_data));
-            } else {
-                entries.push(DirEntry {
-                    tile_id: entry.tile_id,
-                    run_length: entry.run_length,
-                    length: entry.length,
-                    offset: entry.offset,
-                });
-            }
-        }
-        entries
-    } else {
-        root_entries
     };
 
     // Compute per-zoom statistics.
@@ -413,6 +353,118 @@ pub fn run(path: &str) -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Directory reading
+// ---------------------------------------------------------------------------
+
+/// Read header and all directory entries (resolving leaf pointers).
+fn read_all_entries(path: &Path) -> Result<(Header, Vec<DirEntry>), DevError> {
+    let mut file = File::open(path).map_err(|e| {
+        DevError::Config(format!("{}: {e}", path.display()))
+    })?;
+
+    let mut header_buf = [0u8; HEADER_SIZE];
+    file.read_exact(&mut header_buf).map_err(|e| {
+        DevError::Config(format!("{}: failed to read header: {e}", path.display()))
+    })?;
+    let header = parse_header(&header_buf)?;
+
+    let root_entries = {
+        let compressed = read_range(&mut file, header.root_dir_offset, header.root_dir_length)?;
+        let decompressed = decompress(&compressed, header.internal_compression)?;
+        decode_directory(&decompressed)
+    };
+
+    let all_entries = if header.leaf_dirs_length > 0 {
+        let leaf_blob = read_range(&mut file, header.leaf_dirs_offset, header.leaf_dirs_length)?;
+        let mut entries = Vec::new();
+
+        for entry in &root_entries {
+            if entry.run_length == 0 {
+                #[allow(clippy::cast_possible_truncation)]
+                let start = entry.offset as usize;
+                #[allow(clippy::cast_possible_truncation)]
+                let end = start + entry.length as usize;
+                if end > leaf_blob.len() {
+                    return Err(DevError::Config(format!(
+                        "{}: leaf pointer out of bounds (offset={}, length={}, blob={})",
+                        path.display(), entry.offset, entry.length, leaf_blob.len(),
+                    )));
+                }
+                let leaf_data = decompress(&leaf_blob[start..end], header.internal_compression)?;
+                entries.extend(decode_directory(&leaf_data));
+            } else {
+                entries.push(DirEntry {
+                    tile_id: entry.tile_id,
+                    run_length: entry.run_length,
+                    length: entry.length,
+                    offset: entry.offset,
+                });
+            }
+        }
+        entries
+    } else {
+        root_entries
+    };
+
+    Ok((header, all_entries))
+}
+
+// ---------------------------------------------------------------------------
+// Tile sampling
+// ---------------------------------------------------------------------------
+
+/// Sample ~20 tile coordinates from a PMTiles archive's directory.
+///
+/// Reads the directory to find tiles that actually exist, picks up to 5 zoom
+/// levels spread across the range, and samples up to 4 geographically diverse
+/// tiles per level (via evenly-spaced Hilbert indices).
+pub fn sample_tile_coords(path: &Path) -> Result<Vec<(u32, u32, u32)>, DevError> {
+    let (_header, entries) = read_all_entries(path)?;
+
+    // Group tile IDs by zoom level (skip leaf pointers with run_length=0).
+    let mut by_zoom: HashMap<u8, Vec<u64>> = HashMap::new();
+    for entry in &entries {
+        if entry.run_length == 0 {
+            continue;
+        }
+        let z = tile_id_to_zoom(entry.tile_id);
+        by_zoom.entry(z).or_default().push(entry.tile_id);
+    }
+
+    // Pick up to 5 zoom levels evenly spread across the available range.
+    let mut zooms: Vec<u8> = by_zoom.keys().copied().collect();
+    zooms.sort_unstable();
+    let selected_zooms = pick_spread(&zooms, 5);
+
+    // Sample up to 4 tiles per zoom level.
+    let mut coords = Vec::new();
+    for z in selected_zooms {
+        if let Some(ids) = by_zoom.get(&z) {
+            for id in pick_spread(ids, 4) {
+                let (_, x, y) = tile_id_to_zxy(id);
+                coords.push((u32::from(z), x, y));
+            }
+        }
+    }
+
+    Ok(coords)
+}
+
+/// Pick up to `count` items evenly spread across a sorted slice.
+fn pick_spread<T: Copy>(items: &[T], count: usize) -> Vec<T> {
+    let len = items.len();
+    if len == 0 || count == 0 {
+        return vec![];
+    }
+    if count >= len {
+        return items.to_vec();
+    }
+    (0..count)
+        .map(|i| items[i * (len - 1) / (count - 1)])
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -632,24 +684,71 @@ mod tests {
         assert!(msg.contains("brotli"), "error should mention brotli, got: {msg}");
     }
 
-    // -- i32_le -------------------------------------------------------------
+    // -- hilbert_d2xy -------------------------------------------------------
 
     #[test]
-    fn i32_le_positive() {
-        // Copenhagen longitude 12.57° → 125_700_000 in E7
-        let val: i32 = 125_700_000;
-        let mut buf = [0u8; 8];
-        buf[2..6].copy_from_slice(&val.to_le_bytes());
-        assert_eq!(i32_le(&buf, 2), 125_700_000);
+    fn hilbert_z0_single_tile() {
+        // n=1, only position 0 → (0, 0)
+        assert_eq!(hilbert_d2xy(1, 0), (0, 0));
     }
 
     #[test]
-    fn i32_le_negative() {
-        // Western hemisphere: -73.9° → -739_000_000 in E7
-        let val: i32 = -739_000_000;
-        let mut buf = [0u8; 4];
-        buf.copy_from_slice(&val.to_le_bytes());
-        assert_eq!(i32_le(&buf, 0), -739_000_000);
+    fn hilbert_z1_four_tiles() {
+        // n=2, Hilbert curve: U-shape
+        assert_eq!(hilbert_d2xy(2, 0), (0, 0));
+        assert_eq!(hilbert_d2xy(2, 1), (0, 1));
+        assert_eq!(hilbert_d2xy(2, 2), (1, 1));
+        assert_eq!(hilbert_d2xy(2, 3), (1, 0));
+    }
+
+    // -- tile_id_to_zxy -----------------------------------------------------
+
+    #[test]
+    fn tile_id_to_zxy_z0() {
+        assert_eq!(tile_id_to_zxy(0), (0, 0, 0));
+    }
+
+    #[test]
+    fn tile_id_to_zxy_z1() {
+        // z1 tile IDs 1–4, base=1
+        assert_eq!(tile_id_to_zxy(1), (1, 0, 0));
+        assert_eq!(tile_id_to_zxy(2), (1, 0, 1));
+        assert_eq!(tile_id_to_zxy(3), (1, 1, 1));
+        assert_eq!(tile_id_to_zxy(4), (1, 1, 0));
+    }
+
+    #[test]
+    fn tile_id_to_zxy_z2_boundaries() {
+        // z2 base=5, first tile
+        assert_eq!(tile_id_to_zxy(5), (2, 0, 0));
+        // z2 last tile (id=20, pos=15 on 4×4 grid)
+        assert_eq!(tile_id_to_zxy(20), (2, 3, 0));
+    }
+
+    // -- pick_spread --------------------------------------------------------
+
+    #[test]
+    fn pick_spread_fewer_available() {
+        assert_eq!(pick_spread(&[1, 2], 5), vec![1, 2]);
+    }
+
+    #[test]
+    fn pick_spread_exact_count() {
+        assert_eq!(pick_spread(&[10, 20, 30], 3), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn pick_spread_evenly_spaced() {
+        assert_eq!(
+            pick_spread(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 4),
+            vec![10, 40, 70, 100]
+        );
+    }
+
+    #[test]
+    fn pick_spread_empty() {
+        let empty: &[u8] = &[];
+        assert!(pick_spread(empty, 3).is_empty());
     }
 
     // -- test helper --------------------------------------------------------

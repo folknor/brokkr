@@ -19,66 +19,6 @@ use crate::pmtiles;
 /// Number of iterations over the full tile set per run.
 const ITERATIONS: usize = 5;
 
-// ---------------------------------------------------------------------------
-// Tile coordinate generation from PMTiles bounds
-// ---------------------------------------------------------------------------
-
-fn lon_to_tile_x(lon: f64, z: u32) -> u32 {
-    let n = f64::from(1u32 << z);
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    { ((lon + 180.0) / 360.0 * n).floor() as u32 }
-}
-
-fn lat_to_tile_y(lat: f64, z: u32) -> u32 {
-    let lat_rad = lat.to_radians();
-    let n = f64::from(1u32 << z);
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    { ((1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0 * n).floor() as u32 }
-}
-
-/// Pick up to 5 evenly spaced zoom levels from the available range.
-fn pick_zoom_levels(min_zoom: u8, max_zoom: u8) -> Vec<u32> {
-    let min_z = u32::from(min_zoom);
-    let max_z = u32::from(max_zoom);
-    if max_z <= min_z {
-        return vec![min_z];
-    }
-    let range = max_z - min_z;
-    let count = range.min(4) + 1; // 2–5 levels
-    (0..count)
-        .map(|i| min_z + i * range / (count - 1))
-        .collect()
-}
-
-/// Generate tile coordinates from PMTiles bounds.
-///
-/// Picks up to 5 zoom levels spread across the archive's range, with a 2×2
-/// grid of tiles centered on the bounding box at each level (~20 tiles total).
-fn generate_tile_coords(bounds: &pmtiles::TileBounds) -> Vec<(u32, u32, u32)> {
-    let center_lon = (bounds.min_lon + bounds.max_lon) / 2.0;
-    let center_lat = (bounds.min_lat + bounds.max_lat) / 2.0;
-    let zoom_levels = pick_zoom_levels(bounds.min_zoom, bounds.max_zoom);
-
-    let mut coords = Vec::new();
-    for z in zoom_levels {
-        let max_tile = (1u32 << z).saturating_sub(1);
-        let cx = lon_to_tile_x(center_lon, z).min(max_tile);
-        let cy = lat_to_tile_y(center_lat, z).min(max_tile);
-
-        coords.push((z, cx, cy));
-        if cx < max_tile {
-            coords.push((z, cx + 1, cy));
-        }
-        if cy < max_tile {
-            coords.push((z, cx, cy + 1));
-        }
-        if cx < max_tile && cy < max_tile {
-            coords.push((z, cx + 1, cy + 1));
-        }
-    }
-    coords
-}
-
 /// Maximum time to wait for the server to print "Listening on" to stderr.
 /// Generous to accommodate slow disk startup (mmap of large files on HDD).
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -105,11 +45,15 @@ pub fn run(
     runs: usize,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let bounds = pmtiles::read_bounds(Path::new(tiles))?;
-    let tile_coords = generate_tile_coords(&bounds);
+    let tile_coords = pmtiles::sample_tile_coords(Path::new(tiles))?;
+    if tile_coords.is_empty() {
+        return Err(DevError::Config("PMTiles archive contains no tile entries".into()));
+    }
+    let min_z = tile_coords.iter().map(|&(z, _, _)| z).min().unwrap_or(0);
+    let max_z = tile_coords.iter().map(|&(z, _, _)| z).max().unwrap_or(0);
     output::bench_msg(&format!(
-        "z{}-z{}, {} tile coordinates from PMTiles bounds",
-        bounds.min_zoom, bounds.max_zoom, tile_coords.len()
+        "z{min_z}-z{max_z}, {} tile coordinates sampled from PMTiles directory",
+        tile_coords.len()
     ));
 
     let mut metadata = vec![
@@ -339,86 +283,4 @@ fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     }
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn bounds(min_zoom: u8, max_zoom: u8, min_lon: f64, min_lat: f64, max_lon: f64, max_lat: f64) -> pmtiles::TileBounds {
-        pmtiles::TileBounds { min_zoom, max_zoom, min_lon, min_lat, max_lon, max_lat }
-    }
-
-    #[test]
-    fn pick_zoom_levels_single() {
-        assert_eq!(pick_zoom_levels(5, 5), vec![5]);
-    }
-
-    #[test]
-    fn pick_zoom_levels_small_range() {
-        assert_eq!(pick_zoom_levels(10, 12), vec![10, 11, 12]);
-    }
-
-    #[test]
-    fn pick_zoom_levels_full_range() {
-        let levels = pick_zoom_levels(0, 14);
-        assert_eq!(levels.len(), 5);
-        assert_eq!(levels[0], 0);
-        assert_eq!(*levels.last().unwrap(), 14);
-    }
-
-    #[test]
-    fn copenhagen_tiles_hit_expected_region() {
-        // Denmark bbox from brokkr.toml: 12.4,55.6,12.7,55.8
-        let b = bounds(0, 14, 12.4, 55.6, 12.7, 55.8);
-        let coords = generate_tile_coords(&b);
-        assert!(!coords.is_empty());
-
-        // Should have tiles at z14 (the max zoom)
-        let z14: Vec<_> = coords.iter().filter(|(z, _, _)| *z == 14).collect();
-        assert!(!z14.is_empty(), "should have z14 tiles");
-
-        // All tiles should be in valid range for their zoom
-        for &(z, x, y) in &coords {
-            let max = (1u32 << z) - 1;
-            assert!(x <= max, "x={x} out of range at z{z}");
-            assert!(y <= max, "y={y} out of range at z{z}");
-        }
-    }
-
-    #[test]
-    fn generates_roughly_twenty_tiles() {
-        // Typical z0-z14 archive
-        let b = bounds(0, 14, 5.0, 47.0, 15.0, 55.0);
-        let coords = generate_tile_coords(&b);
-        // 5 zoom levels × up to 4 tiles = up to 20
-        assert!(coords.len() >= 5, "at least one tile per zoom level");
-        assert!(coords.len() <= 20, "at most 4 tiles per zoom level × 5 levels");
-    }
-
-    #[test]
-    fn z0_produces_single_tile() {
-        let b = bounds(0, 0, -180.0, -85.0, 180.0, 85.0);
-        let coords = generate_tile_coords(&b);
-        // z0 has only tile (0,0), so 2×2 grid collapses to 1
-        assert_eq!(coords.len(), 1);
-        assert_eq!(coords[0], (0, 0, 0));
-    }
-
-    #[test]
-    fn western_hemisphere_tiles() {
-        // New York area
-        let b = bounds(0, 14, -74.3, 40.5, -73.7, 40.9);
-        let coords = generate_tile_coords(&b);
-        assert!(!coords.is_empty());
-        for &(z, x, y) in &coords {
-            let max = (1u32 << z) - 1;
-            assert!(x <= max, "x={x} out of range at z{z}");
-            assert!(y <= max, "y={y} out of range at z{z}");
-        }
-    }
 }
