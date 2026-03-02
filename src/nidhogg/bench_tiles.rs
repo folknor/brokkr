@@ -1,7 +1,7 @@
 //! Tile serving lifecycle benchmark for nidhogg.
 //!
 //! Builds nidhogg, starts it as a foreground child with piped stderr, fires
-//! tile requests at Copenhagen-area coordinates across z8–z12, sends SIGTERM,
+//! tile requests at coordinates derived from the PMTiles bounds, sends SIGTERM,
 //! and captures the shutdown KV pairs (tile stats, RSS, peak_rss_kb).
 
 use std::io::{BufRead, BufReader, Read};
@@ -14,28 +14,70 @@ use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
 use crate::output;
-
-// ---------------------------------------------------------------------------
-// Tile coordinates — Copenhagen area, z8–z12
-// ---------------------------------------------------------------------------
-
-/// (z, x, y) tile coordinates covering Copenhagen at zoom levels 8–12.
-/// ~20 tiles spanning different sizes for varied read patterns.
-const TILE_COORDS: &[(u32, u32, u32)] = &[
-    // z8
-    (8, 136, 80), (8, 136, 81), (8, 137, 80), (8, 137, 81),
-    // z9
-    (9, 272, 160), (9, 273, 160), (9, 272, 161), (9, 273, 161),
-    // z10
-    (10, 544, 320), (10, 545, 320), (10, 544, 321), (10, 545, 321),
-    // z11
-    (11, 1088, 640), (11, 1089, 641), (11, 1090, 642), (11, 1091, 643),
-    // z12
-    (12, 2176, 1280), (12, 2177, 1281), (12, 2178, 1282), (12, 2179, 1283),
-];
+use crate::pmtiles;
 
 /// Number of iterations over the full tile set per run.
 const ITERATIONS: usize = 5;
+
+// ---------------------------------------------------------------------------
+// Tile coordinate generation from PMTiles bounds
+// ---------------------------------------------------------------------------
+
+fn lon_to_tile_x(lon: f64, z: u32) -> u32 {
+    let n = f64::from(1u32 << z);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    { ((lon + 180.0) / 360.0 * n).floor() as u32 }
+}
+
+fn lat_to_tile_y(lat: f64, z: u32) -> u32 {
+    let lat_rad = lat.to_radians();
+    let n = f64::from(1u32 << z);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    { ((1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0 * n).floor() as u32 }
+}
+
+/// Pick up to 5 evenly spaced zoom levels from the available range.
+fn pick_zoom_levels(min_zoom: u8, max_zoom: u8) -> Vec<u32> {
+    let min_z = u32::from(min_zoom);
+    let max_z = u32::from(max_zoom);
+    if max_z <= min_z {
+        return vec![min_z];
+    }
+    let range = max_z - min_z;
+    let count = range.min(4) + 1; // 2–5 levels
+    (0..count)
+        .map(|i| min_z + i * range / (count - 1))
+        .collect()
+}
+
+/// Generate tile coordinates from PMTiles bounds.
+///
+/// Picks up to 5 zoom levels spread across the archive's range, with a 2×2
+/// grid of tiles centered on the bounding box at each level (~20 tiles total).
+fn generate_tile_coords(bounds: &pmtiles::TileBounds) -> Vec<(u32, u32, u32)> {
+    let center_lon = (bounds.min_lon + bounds.max_lon) / 2.0;
+    let center_lat = (bounds.min_lat + bounds.max_lat) / 2.0;
+    let zoom_levels = pick_zoom_levels(bounds.min_zoom, bounds.max_zoom);
+
+    let mut coords = Vec::new();
+    for z in zoom_levels {
+        let max_tile = (1u32 << z).saturating_sub(1);
+        let cx = lon_to_tile_x(center_lon, z).min(max_tile);
+        let cy = lat_to_tile_y(center_lat, z).min(max_tile);
+
+        coords.push((z, cx, cy));
+        if cx < max_tile {
+            coords.push((z, cx + 1, cy));
+        }
+        if cy < max_tile {
+            coords.push((z, cx, cy + 1));
+        }
+        if cx < max_tile && cy < max_tile {
+            coords.push((z, cx + 1, cy + 1));
+        }
+    }
+    coords
+}
 
 /// Maximum time to wait for the server to print "Listening on" to stderr.
 /// Generous to accommodate slow disk startup (mmap of large files on HDD).
@@ -50,6 +92,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Each run: start server → warmup → fire tile requests → SIGTERM → capture
 /// KV pairs from stderr. The server's self-reported stats (tile_read_us_p50,
 /// tile_bytes_served, peak_rss_kb, etc.) are stored as result KV pairs.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,
@@ -62,12 +105,19 @@ pub fn run(
     runs: usize,
     project_root: &Path,
 ) -> Result<(), DevError> {
+    let bounds = pmtiles::read_bounds(Path::new(tiles))?;
+    let tile_coords = generate_tile_coords(&bounds);
+    output::bench_msg(&format!(
+        "z{}-z{}, {} tile coordinates from PMTiles bounds",
+        bounds.min_zoom, bounds.max_zoom, tile_coords.len()
+    ));
+
     let mut metadata = vec![
         KvPair::int("meta.port", i64::from(port)),
         KvPair::text("meta.tiles", tiles_file),
         KvPair::real("meta.tiles_mb", tiles_mb),
         #[allow(clippy::cast_possible_wrap)]
-        KvPair::int("meta.tile_coords", TILE_COORDS.len() as i64),
+        KvPair::int("meta.tile_coords", tile_coords.len() as i64),
         #[allow(clippy::cast_possible_wrap)]
         KvPair::int("meta.iterations", ITERATIONS as i64),
     ];
@@ -93,7 +143,7 @@ pub fn run(
     let project_root = project_root.to_owned();
 
     harness.run_internal(&config, |_i| {
-        run_lifecycle(&binary, &data_dir, &tiles, port, &project_root)
+        run_lifecycle(&binary, &data_dir, &tiles, port, &project_root, &tile_coords)
     })?;
 
     Ok(())
@@ -110,6 +160,7 @@ fn run_lifecycle(
     tiles: &str,
     port: u16,
     project_root: &Path,
+    tile_coords: &[(u32, u32, u32)],
 ) -> Result<BenchResult, DevError> {
     let start = Instant::now();
 
@@ -176,19 +227,19 @@ fn run_lifecycle(
     output::bench_msg("server ready, firing tile requests");
 
     // 3. Warmup: one pass through all coordinates.
-    for &(z, x, y) in TILE_COORDS {
+    for &(z, x, y) in tile_coords {
         curl_get_tile(port, z, x, y)?;
     }
 
     // 4. Timed passes.
-    let total_requests = ITERATIONS * TILE_COORDS.len();
+    let total_requests = ITERATIONS * tile_coords.len();
     output::bench_msg(&format!(
         "warmup done, running {ITERATIONS} iterations × {} tiles = {total_requests} requests",
-        TILE_COORDS.len()
+        tile_coords.len()
     ));
 
     for iter in 0..ITERATIONS {
-        for &(z, x, y) in TILE_COORDS {
+        for &(z, x, y) in tile_coords {
             curl_get_tile(port, z, x, y)?;
         }
         output::bench_msg(&format!("iteration {}/{ITERATIONS}", iter + 1));
@@ -288,4 +339,86 @@ fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(min_zoom: u8, max_zoom: u8, min_lon: f64, min_lat: f64, max_lon: f64, max_lat: f64) -> pmtiles::TileBounds {
+        pmtiles::TileBounds { min_zoom, max_zoom, min_lon, min_lat, max_lon, max_lat }
+    }
+
+    #[test]
+    fn pick_zoom_levels_single() {
+        assert_eq!(pick_zoom_levels(5, 5), vec![5]);
+    }
+
+    #[test]
+    fn pick_zoom_levels_small_range() {
+        assert_eq!(pick_zoom_levels(10, 12), vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn pick_zoom_levels_full_range() {
+        let levels = pick_zoom_levels(0, 14);
+        assert_eq!(levels.len(), 5);
+        assert_eq!(levels[0], 0);
+        assert_eq!(*levels.last().unwrap(), 14);
+    }
+
+    #[test]
+    fn copenhagen_tiles_hit_expected_region() {
+        // Denmark bbox from brokkr.toml: 12.4,55.6,12.7,55.8
+        let b = bounds(0, 14, 12.4, 55.6, 12.7, 55.8);
+        let coords = generate_tile_coords(&b);
+        assert!(!coords.is_empty());
+
+        // Should have tiles at z14 (the max zoom)
+        let z14: Vec<_> = coords.iter().filter(|(z, _, _)| *z == 14).collect();
+        assert!(!z14.is_empty(), "should have z14 tiles");
+
+        // All tiles should be in valid range for their zoom
+        for &(z, x, y) in &coords {
+            let max = (1u32 << z) - 1;
+            assert!(x <= max, "x={x} out of range at z{z}");
+            assert!(y <= max, "y={y} out of range at z{z}");
+        }
+    }
+
+    #[test]
+    fn generates_roughly_twenty_tiles() {
+        // Typical z0-z14 archive
+        let b = bounds(0, 14, 5.0, 47.0, 15.0, 55.0);
+        let coords = generate_tile_coords(&b);
+        // 5 zoom levels × up to 4 tiles = up to 20
+        assert!(coords.len() >= 5, "at least one tile per zoom level");
+        assert!(coords.len() <= 20, "at most 4 tiles per zoom level × 5 levels");
+    }
+
+    #[test]
+    fn z0_produces_single_tile() {
+        let b = bounds(0, 0, -180.0, -85.0, 180.0, 85.0);
+        let coords = generate_tile_coords(&b);
+        // z0 has only tile (0,0), so 2×2 grid collapses to 1
+        assert_eq!(coords.len(), 1);
+        assert_eq!(coords[0], (0, 0, 0));
+    }
+
+    #[test]
+    fn western_hemisphere_tiles() {
+        // New York area
+        let b = bounds(0, 14, -74.3, 40.5, -73.7, 40.9);
+        let coords = generate_tile_coords(&b);
+        assert!(!coords.is_empty());
+        for &(z, x, y) in &coords {
+            let max = (1u32 << z) - 1;
+            assert!(x <= max, "x={x} out of range at z{z}");
+            assert!(y <= max, "y={y} out of range at z{z}");
+        }
+    }
 }

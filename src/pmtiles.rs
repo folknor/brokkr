@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 use crate::error::DevError;
 
@@ -65,6 +66,47 @@ fn u64_le(buf: &[u8], offset: usize) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&buf[offset..offset + 8]);
     u64::from_le_bytes(bytes)
+}
+
+fn i32_le(buf: &[u8], offset: usize) -> i32 {
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&buf[offset..offset + 4]);
+    i32::from_le_bytes(bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Bounds (header-only read)
+// ---------------------------------------------------------------------------
+
+/// Geographic bounds and zoom range from a PMTiles v3 header.
+pub struct TileBounds {
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub min_lon: f64,
+    pub min_lat: f64,
+    pub max_lon: f64,
+    pub max_lat: f64,
+}
+
+/// Read geographic bounds and zoom range from a PMTiles v3 header.
+pub fn read_bounds(path: &Path) -> Result<TileBounds, DevError> {
+    let mut file = File::open(path).map_err(|e| {
+        DevError::Config(format!("{}: {e}", path.display()))
+    })?;
+    let mut buf = [0u8; HEADER_SIZE];
+    file.read_exact(&mut buf).map_err(|e| {
+        DevError::Config(format!("{}: failed to read header: {e}", path.display()))
+    })?;
+    let header = parse_header(&buf)?;
+
+    Ok(TileBounds {
+        min_zoom: header.min_zoom,
+        max_zoom: header.max_zoom,
+        min_lon: f64::from(i32_le(&buf, 102)) / 1e7,
+        min_lat: f64::from(i32_le(&buf, 106)) / 1e7,
+        max_lon: f64::from(i32_le(&buf, 110)) / 1e7,
+        max_lat: f64::from(i32_le(&buf, 114)) / 1e7,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +630,26 @@ mod tests {
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("brotli"), "error should mention brotli, got: {msg}");
+    }
+
+    // -- i32_le -------------------------------------------------------------
+
+    #[test]
+    fn i32_le_positive() {
+        // Copenhagen longitude 12.57° → 125_700_000 in E7
+        let val: i32 = 125_700_000;
+        let mut buf = [0u8; 8];
+        buf[2..6].copy_from_slice(&val.to_le_bytes());
+        assert_eq!(i32_le(&buf, 2), 125_700_000);
+    }
+
+    #[test]
+    fn i32_le_negative() {
+        // Western hemisphere: -73.9° → -739_000_000 in E7
+        let val: i32 = -739_000_000;
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&val.to_le_bytes());
+        assert_eq!(i32_le(&buf, 0), -739_000_000);
     }
 
     // -- test helper --------------------------------------------------------
