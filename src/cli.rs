@@ -517,6 +517,8 @@ pub(crate) enum BenchCommand {
         /// Runs (full server lifecycle per run)
         #[arg(long, default_value = "1")]
         runs: usize,
+        #[arg(long)]
+        uring: bool,
     },
 }
 

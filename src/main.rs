@@ -512,10 +512,10 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
             nidhogg::cmd::bench_ingest(&req)
         }
-        BenchCommand::Tiles { dataset, tiles, variant, runs } => {
+        BenchCommand::Tiles { dataset, tiles, variant, runs, uring } => {
             project::require(project, Project::Nidhogg, "bench tiles")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
-            nidhogg::cmd::bench_tiles(&req, &tiles)
+            nidhogg::cmd::bench_tiles(&req, &tiles, uring)
         }
     }
 }

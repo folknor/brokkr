@@ -132,9 +132,16 @@ pub(crate) fn bench_ingest(
 pub(crate) fn bench_tiles(
     req: &BenchRequest,
     tiles: &str,
+    uring: bool,
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &feat_refs, true, "bench tiles")?;
+    if uring {
+        preflight::run_preflight(&preflight::uring_checks())?;
+    }
+    let mut all_features: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    if uring {
+        all_features.push("linux-io-uring");
+    }
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &all_features, true, "bench tiles")?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config);
