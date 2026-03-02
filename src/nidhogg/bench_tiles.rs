@@ -127,22 +127,24 @@ fn run_lifecycle(
     })?;
 
     let (tx, rx) = mpsc::sync_channel::<bool>(1);
-    let reader_handle = std::thread::spawn(move || {
+    let reader_handle = std::thread::spawn(move || -> (Vec<String>, Vec<u8>) {
         let mut reader = BufReader::new(stderr);
         let mut line = String::new();
+        let mut pre_ready = Vec::new();
 
         // Read lines until "Listening on" or EOF.
         loop {
             line.clear();
             match reader.read_line(&mut line) {
-                Ok(0) => { tx.send(false).ok(); return Vec::new(); }
+                Ok(0) => { tx.send(false).ok(); return (pre_ready, Vec::new()); }
                 Ok(_) => {
                     if line.contains("Listening on") {
                         tx.send(true).ok();
                         break;
                     }
+                    pre_ready.push(line.clone());
                 }
-                Err(_) => { tx.send(false).ok(); return Vec::new(); }
+                Err(_) => { tx.send(false).ok(); return (pre_ready, Vec::new()); }
             }
         }
 
@@ -150,18 +152,28 @@ fn run_lifecycle(
         // This captures the shutdown KV pairs.
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).ok();
-        buf
+        (pre_ready, buf)
     });
 
     let ready = rx.recv_timeout(STARTUP_TIMEOUT).unwrap_or(false);
     if !ready {
         child.kill().ok();
         child.wait().ok();
-        reader_handle.join().ok();
-        return Err(DevError::Config(format!(
-            "nidhogg server did not print 'Listening on' within {}s",
-            STARTUP_TIMEOUT.as_secs()
-        )));
+        let (pre_ready, _) = reader_handle.join().unwrap_or_default();
+        let server_output = pre_ready.join("");
+        let msg = if server_output.is_empty() {
+            format!(
+                "nidhogg server did not print 'Listening on' within {}s (no stderr output)",
+                STARTUP_TIMEOUT.as_secs()
+            )
+        } else {
+            format!(
+                "nidhogg server did not print 'Listening on' within {}s\nserver stderr:\n{}",
+                STARTUP_TIMEOUT.as_secs(),
+                server_output.chars().take(2000).collect::<String>()
+            )
+        };
+        return Err(DevError::Config(msg));
     }
 
     output::bench_msg("server ready, firing tile requests");
@@ -194,7 +206,7 @@ fn run_lifecycle(
 
     // 6. Wait for process exit, then join reader to get remaining stderr.
     let status = child.wait().map_err(DevError::Io)?;
-    let remaining_stderr = reader_handle.join().unwrap_or_default();
+    let (_, remaining_stderr) = reader_handle.join().unwrap_or_default();
 
     let elapsed_ms = harness::elapsed_to_ms(&start.elapsed());
 
