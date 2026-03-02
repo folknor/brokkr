@@ -48,9 +48,11 @@ pub fn run(
     std::fs::create_dir_all(&tmp_dir)?;
     let tmp_dir_str = tmp_dir.display().to_string();
 
-    // Build the command args: elivagar <pbf> <output> [flags]
+    // Build the command args: elivagar run <pbf> -o <output> [flags]
     let mut args: Vec<String> = vec![
+        "run".into(),
         pbf_str.into(),
+        "-o".into(),
         output_str,
         "--tmp-dir".into(),
         tmp_dir_str,
