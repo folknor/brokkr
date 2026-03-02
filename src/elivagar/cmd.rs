@@ -36,14 +36,23 @@ pub(crate) fn run_elivagar(
         i += 1;
     }
 
-    // Inject --tmp-dir if not already provided.
-    if !passthrough.iter().any(|a| a == "--tmp-dir") {
+    // Inject `run` subcommand for elivagar's clap CLI unless the user
+    // already specified a subcommand (e.g. `brokkr run inspect <file>`).
+    let is_subcommand = passthrough.first().is_some_and(|a| a == "run" || a == "inspect");
+    if !is_subcommand {
+        passthrough.insert(0, "run".into());
+    }
+
+    // Inject --tmp-dir if not already provided (only meaningful for `run`).
+    if passthrough.first().is_some_and(|a| a == "run")
+        && !passthrough.iter().any(|a| a == "--tmp-dir")
+    {
         passthrough.push("--tmp-dir".into());
         passthrough.push(paths.scratch_dir.display().to_string());
     }
 
-    // Inject ocean shapefiles if not suppressed and not already provided.
-    if !no_ocean {
+    // Inject ocean shapefiles if not suppressed and not already provided (only for `run`).
+    if passthrough.first().is_some_and(|a| a == "run") && !no_ocean {
         let (ocean_full, ocean_simplified) =
             super::detect_ocean(&paths.data_dir);
 
