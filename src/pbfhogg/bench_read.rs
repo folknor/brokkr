@@ -13,7 +13,6 @@ pub enum ReadMode {
     Sequential,
     Parallel,
     Pipelined,
-    Mmap,
     BlobReader,
 }
 
@@ -23,7 +22,6 @@ impl ReadMode {
             ReadMode::Sequential => "sequential",
             ReadMode::Parallel => "parallel",
             ReadMode::Pipelined => "pipelined",
-            ReadMode::Mmap => "mmap",
             ReadMode::BlobReader => "blobreader",
         }
     }
@@ -33,7 +31,6 @@ pub const ALL_MODES: &[ReadMode] = &[
     ReadMode::Sequential,
     ReadMode::Parallel,
     ReadMode::Pipelined,
-    ReadMode::Mmap,
     ReadMode::BlobReader,
 ];
 
@@ -46,7 +43,6 @@ pub fn parse_modes(input: &str) -> Result<Vec<ReadMode>, DevError> {
             "sequential" => ReadMode::Sequential,
             "parallel" => ReadMode::Parallel,
             "pipelined" => ReadMode::Pipelined,
-            "mmap" => ReadMode::Mmap,
             "blobreader" => ReadMode::BlobReader,
             _ => return Err(DevError::Config(format!("unknown read mode: {trimmed}"))),
         };

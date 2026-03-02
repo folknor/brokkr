@@ -371,7 +371,7 @@ pub(crate) enum BenchCommand {
         variant: String,
         #[arg(long, default_value = "3")]
         runs: usize,
-        #[arg(long, default_value = "sequential,parallel,pipelined,mmap,blobreader")]
+        #[arg(long, default_value = "sequential,parallel,pipelined,blobreader")]
         modes: String,
     },
     /// [pbfhogg] Write benchmark (sync + pipelined x compression)
