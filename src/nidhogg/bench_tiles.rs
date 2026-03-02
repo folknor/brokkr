@@ -59,9 +59,25 @@ pub fn run(
     port: u16,
     input_file: Option<&str>,
     input_mb: Option<f64>,
+    tiles_file: &str,
+    tiles_sha256: Option<&str>,
+    tiles_mb: f64,
     runs: usize,
     project_root: &Path,
 ) -> Result<(), DevError> {
+    let mut metadata = vec![
+        KvPair::int("meta.port", i64::from(port)),
+        KvPair::text("meta.tiles", tiles_file),
+        KvPair::real("meta.tiles_mb", tiles_mb),
+        #[allow(clippy::cast_possible_wrap)]
+        KvPair::int("meta.tile_coords", TILE_COORDS.len() as i64),
+        #[allow(clippy::cast_possible_wrap)]
+        KvPair::int("meta.iterations", ITERATIONS as i64),
+    ];
+    if let Some(hash) = tiles_sha256 {
+        metadata.push(KvPair::text("meta.tiles_sha256", hash));
+    }
+
     let config = BenchConfig {
         command: "bench tiles".into(),
         variant: None,
@@ -71,13 +87,7 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: None,
-        #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![
-            KvPair::int("meta.port", i64::from(port)),
-            KvPair::text("meta.tiles", tiles),
-            KvPair::int("meta.tile_coords", TILE_COORDS.len() as i64),
-            KvPair::int("meta.iterations", ITERATIONS as i64),
-        ],
+        metadata,
     };
 
     let binary = binary.to_owned();

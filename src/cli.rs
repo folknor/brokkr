@@ -257,7 +257,7 @@ Examples:
         #[arg(long, default_value = "denmark")]
         dataset: String,
 
-        /// Path to PMTiles file for tile serving
+        /// PMTiles variant from config (auto-selects if only one configured)
         #[arg(long)]
         tiles: Option<String>,
     },
@@ -509,9 +509,9 @@ pub(crate) enum BenchCommand {
     Tiles {
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        /// Path to PMTiles file for tile serving
+        /// PMTiles variant from config (auto-selects if only one configured)
         #[arg(long)]
-        tiles: String,
+        tiles: Option<String>,
         #[arg(long, default_value = "raw")]
         variant: String,
         /// Runs (full server lifecycle per run)

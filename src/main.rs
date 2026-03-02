@@ -49,6 +49,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<(), DevError> {
     // `lock` works without a project root (global lock file).
     if matches!(cli.command, Command::Lock) {
@@ -515,7 +516,7 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         BenchCommand::Tiles { dataset, tiles, variant, runs, uring } => {
             project::require(project, Project::Nidhogg, "bench tiles")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
-            nidhogg::cmd::bench_tiles(&req, &tiles, uring)
+            nidhogg::cmd::bench_tiles(&req, tiles.as_deref(), uring)
         }
     }
 }

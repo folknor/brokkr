@@ -9,7 +9,7 @@ use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
 use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
-use crate::resolve::{file_size_mb, resolve_nidhogg_data_dir, resolve_pbf_path, resolve_pbf_with_size};
+use crate::resolve::{self, file_size_mb, resolve_nidhogg_data_dir, resolve_pbf_path, resolve_pbf_with_size};
 
 fn resolve_port(dev_config: &config::DevConfig) -> u16 {
     // Check PORT env var first
@@ -32,7 +32,7 @@ pub(crate) fn serve(
     project_root: &Path,
     data_dir: Option<&str>,
     dataset: &str,
-    tiles: Option<&str>,
+    tiles_variant: Option<&str>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "serve")?;
     let pi = bootstrap(None)?;
@@ -43,9 +43,15 @@ pub(crate) fn serve(
         None => resolve_nidhogg_data_dir(dataset, &paths)?.display().to_string(),
     };
 
+    let tiles_path = match tiles_variant {
+        Some(v) => Some(resolve::resolve_pmtiles_path(dataset, v, &paths, project_root)?),
+        None => None,
+    };
+    let tiles_str = tiles_path.as_ref().map(|p| p.display().to_string());
+
     let port = resolve_port(dev_config);
     let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
-    super::server::serve(&binary, &data_dir_str, tiles, port, project_root)
+    super::server::serve(&binary, &data_dir_str, tiles_str.as_deref(), port, project_root)
 }
 
 pub(crate) fn stop(project: Project, project_root: &Path) -> Result<(), DevError> {
@@ -131,7 +137,7 @@ pub(crate) fn bench_ingest(
 
 pub(crate) fn bench_tiles(
     req: &BenchRequest,
-    tiles: &str,
+    tiles_variant: Option<&str>,
     uring: bool,
 ) -> Result<(), DevError> {
     if uring {
@@ -146,16 +152,39 @@ pub(crate) fn bench_tiles(
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config);
 
+    let (tiles_path, tiles_mb) = match tiles_variant {
+        Some(v) => resolve::resolve_pmtiles_with_size(req.dataset, v, &ctx.paths, req.project_root)?,
+        None => resolve::resolve_default_pmtiles_with_size(req.dataset, &ctx.paths, req.project_root)?,
+    };
+    let tiles_sha256 = {
+        let ds = ctx.paths.datasets.get(req.dataset);
+        ds.and_then(|d| {
+            if let Some(v) = tiles_variant {
+                d.pmtiles.get(v)
+            } else if d.pmtiles.len() == 1 {
+                d.pmtiles.values().next()
+            } else {
+                None
+            }
+        })
+        .and_then(|e| e.sha256.clone())
+    };
+
     let input_file = pbf_path.file_name().and_then(|n| n.to_str());
+    let tiles_file = tiles_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let tiles_str = tiles_path.display().to_string();
 
     super::bench_tiles::run(
         &ctx.harness,
         &ctx.binary,
         &data_dir.display().to_string(),
-        tiles,
+        &tiles_str,
         port,
         input_file,
         Some(file_mb),
+        tiles_file,
+        tiles_sha256.as_deref(),
+        tiles_mb,
         req.runs,
         req.project_root,
     )

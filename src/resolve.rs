@@ -100,7 +100,12 @@ pub(crate) fn resolve_default_osc_path(
         )));
     }
 
-    let (seq, _) = ds.osc.iter().next().unwrap();
+    // SAFETY: checked len == 1 above.
+    let Some((seq, _)) = ds.osc.iter().next() else {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has no osc files configured"
+        )));
+    };
     resolve_osc_path(dataset, seq, paths, project_root)
 }
 
@@ -123,6 +128,99 @@ pub(crate) fn resolve_bbox(
             "dataset '{dataset}' has no bbox configured (use --bbox)"
         ))
     })
+}
+
+/// Resolve the PMTiles path from --dataset + --tiles variant.
+pub(crate) fn resolve_pmtiles_path(
+    dataset: &str,
+    variant: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let ds = paths.datasets.get(dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+    let entry = ds.pmtiles.get(variant).ok_or_else(|| {
+        DevError::Config(format!(
+            "dataset '{dataset}' has no pmtiles variant '{variant}'"
+        ))
+    })?;
+    let path = paths.data_dir.join(&entry.file);
+    let hash = entry.sha256.as_deref();
+    let origin = ds.origin.as_deref();
+
+    if !path.exists() {
+        return Err(DevError::Config(format!(
+            "PMTiles file not found: {}",
+            path.display()
+        )));
+    }
+
+    if let Some(expected) = hash {
+        preflight::verify_file_hash(&path, expected, project_root, origin)?;
+    }
+
+    Ok(path)
+}
+
+/// Resolve the default PMTiles path when no variant is specified.
+///
+/// If exactly one PMTiles entry is configured, returns it. If multiple exist,
+/// errors with a message listing available variants.
+pub(crate) fn resolve_default_pmtiles_path(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let ds = paths.datasets.get(dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })?;
+
+    if ds.pmtiles.is_empty() {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has no pmtiles configured"
+        )));
+    }
+
+    if ds.pmtiles.len() > 1 {
+        let mut variants: Vec<&str> = ds.pmtiles.keys().map(String::as_str).collect();
+        variants.sort();
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has multiple pmtiles variants — use --tiles to select (available: {})",
+            variants.join(", ")
+        )));
+    }
+
+    // SAFETY: checked len == 1 above.
+    let Some((variant, _)) = ds.pmtiles.iter().next() else {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has no pmtiles configured"
+        )));
+    };
+    resolve_pmtiles_path(dataset, variant, paths, project_root)
+}
+
+/// Resolve PMTiles path and its size in one call.
+pub(crate) fn resolve_pmtiles_with_size(
+    dataset: &str,
+    variant: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<(PathBuf, f64), DevError> {
+    let path = resolve_pmtiles_path(dataset, variant, paths, project_root)?;
+    let mb = file_size_mb(&path)?;
+    Ok((path, mb))
+}
+
+/// Resolve default PMTiles path and its size in one call.
+pub(crate) fn resolve_default_pmtiles_with_size(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<(PathBuf, f64), DevError> {
+    let path = resolve_default_pmtiles_path(dataset, paths, project_root)?;
+    let mb = file_size_mb(&path)?;
+    Ok((path, mb))
 }
 
 /// Get file size in MB (decimal, consistent with bench scripts).

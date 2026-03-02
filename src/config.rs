@@ -31,6 +31,13 @@ pub struct OscEntry {
     pub sha256: Option<String>,
 }
 
+/// A PMTiles archive entry, keyed by variant name (e.g. "elivagar").
+#[derive(Debug, Clone, Deserialize)]
+pub struct PmtilesEntry {
+    pub file: String,
+    pub sha256: Option<String>,
+}
+
 /// A dataset with structured PBF variants and multiple OSC entries.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -45,6 +52,9 @@ pub struct Dataset {
     /// OSC files keyed by sequence number.
     #[serde(default)]
     pub osc: HashMap<String, OscEntry>,
+    /// PMTiles archives keyed by variant name (e.g. "elivagar").
+    #[serde(default)]
+    pub pmtiles: HashMap<String, PmtilesEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,7 +245,7 @@ mod tests {
     fn empty_dataset() -> Dataset {
         Dataset {
             origin: None, download_date: None, bbox: None, data_dir: None,
-            pbf: HashMap::new(), osc: HashMap::new(),
+            pbf: HashMap::new(), osc: HashMap::new(), pmtiles: HashMap::new(),
         }
     }
 
@@ -372,5 +382,24 @@ sha256 = "ccc"
         let table = root.as_table().unwrap();
         let hosts = parse_hosts(table).unwrap();
         assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_pmtiles_entries() {
+        let toml_str = r#"
+project = "nidhogg"
+
+[myhost.datasets.denmark.pmtiles.elivagar]
+file = "denmark-elivagar.pmtiles"
+sha256 = "ddd"
+"#;
+        let root: toml::Value = toml_str.parse().unwrap();
+        let table = root.as_table().unwrap();
+        let hosts = parse_hosts(table).unwrap();
+        let host = hosts.get("myhost").unwrap();
+        let dk = host.datasets.get("denmark").unwrap();
+        assert_eq!(dk.pmtiles.len(), 1);
+        assert_eq!(dk.pmtiles.get("elivagar").unwrap().file, "denmark-elivagar.pmtiles");
+        assert_eq!(dk.pmtiles.get("elivagar").unwrap().sha256.as_deref(), Some("ddd"));
     }
 }
