@@ -512,8 +512,6 @@ pub(crate) enum BenchCommand {
         /// PMTiles variant from config (auto-selects if only one configured)
         #[arg(long)]
         tiles: Option<String>,
-        #[arg(long, default_value = "raw")]
-        variant: String,
         /// Runs (full server lifecycle per run)
         #[arg(long, default_value = "1")]
         runs: usize,

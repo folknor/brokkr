@@ -50,15 +50,12 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Each run: start server → warmup → fire tile requests → SIGTERM → capture
 /// KV pairs from stderr. The server's self-reported stats (tile_read_us_p50,
 /// tile_bytes_served, peak_rss_kb, etc.) are stored as result KV pairs.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,
     data_dir: &str,
     tiles: &str,
     port: u16,
-    input_file: Option<&str>,
-    input_mb: Option<f64>,
     tiles_file: &str,
     tiles_sha256: Option<&str>,
     tiles_mb: f64,
@@ -81,8 +78,8 @@ pub fn run(
     let config = BenchConfig {
         command: "bench tiles".into(),
         variant: None,
-        input_file: input_file.map(str::to_owned),
-        input_mb,
+        input_file: Some(tiles_file.to_owned()),
+        input_mb: Some(tiles_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,

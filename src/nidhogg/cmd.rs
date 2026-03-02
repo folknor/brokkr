@@ -148,7 +148,6 @@ pub(crate) fn bench_tiles(
         all_features.push("linux-io-uring");
     }
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &all_features, true, "bench tiles")?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config);
 
@@ -170,7 +169,6 @@ pub(crate) fn bench_tiles(
         .and_then(|e| e.sha256.clone())
     };
 
-    let input_file = pbf_path.file_name().and_then(|n| n.to_str());
     let tiles_file = tiles_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let tiles_str = tiles_path.display().to_string();
 
@@ -180,8 +178,6 @@ pub(crate) fn bench_tiles(
         &data_dir.display().to_string(),
         &tiles_str,
         port,
-        input_file,
-        Some(file_mb),
         tiles_file,
         tiles_sha256.as_deref(),
         tiles_mb,
