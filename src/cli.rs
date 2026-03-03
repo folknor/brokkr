@@ -32,8 +32,20 @@ Examples:
         /// Cargo features to enable (e.g. linux-io-uring)
         #[arg(long, value_delimiter = ',')]
         features: Vec<String>,
+        /// Print machine-readable timing line (key=value pairs)
+        #[arg(long)]
+        time: bool,
+        /// Print machine-readable JSON timing summary
+        #[arg(long)]
+        json: bool,
+        /// Number of times to run the command (build happens once)
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
+        /// Skip build step and run existing release binary
+        #[arg(long)]
+        no_build: bool,
         /// Arguments passed to the binary
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Query benchmark results

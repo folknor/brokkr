@@ -38,7 +38,7 @@ Single crate, single binary. No workspace.
 - `src/db/compare.rs` — Side-by-side commit comparison logic
 - `src/db/hotpath.rs` — Hotpath report formatting for result detail view
 - `src/db/migrate.rs` — Migration framework (v0→v3), `run_migrations()`
-- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough`)
+- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough_timed`, `run_passthrough_with_env_timed`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/env.rs` — `EnvInfo` collection (hostname, kernel, governor, memory, drives, tool versions)
 - `src/git.rs` — `GitInfo` (commit hash, dirty flag, branch)
@@ -115,7 +115,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 
 - `check` — clippy + tests (extra args forwarded to cargo test)
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
-- `run` — build release binary and run with passthrough args
+- `run` — build release binary and run with passthrough args; supports `--time` (stable key=value timing), `--json` (structured timing), `--runs N` (min/median/p95 summary), `--no-build` (skip build)
 - `results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
 - `results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [-n N] [--top N]` — query/compare benchmark results from SQLite. `--top 0` shows all hotpath functions. `--compare-last --command hotpath` diffs two most recent hotpath runs.
 - `clean` — remove scratch/temp files

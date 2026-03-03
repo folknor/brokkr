@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use crate::config;
 use crate::context::{bootstrap, bootstrap_config, BenchContext, HarnessContext};
@@ -14,7 +15,7 @@ pub(crate) fn run_elivagar(
     paths: &config::ResolvedPaths,
     binary: &Path,
     raw_args: &[String],
-) -> Result<(), DevError> {
+) -> Result<Duration, DevError> {
     // Parse dev-specific flags from raw args.
     let mut no_ocean = false;
     let mut mem_limit: Option<String> = None;
@@ -74,7 +75,7 @@ pub(crate) fn run_elivagar(
 
     // Execute with optional systemd-run memory-limit wrapping.
     let binary_str = binary.display().to_string();
-    let code = if let Some(ref mem) = mem_limit {
+    let run = if let Some(ref mem) = mem_limit {
         let mem_arg = format!("MemoryMax={mem}");
         let mut wrapped: Vec<&str> = vec!["--scope", "-p", &mem_arg, &binary_str];
         let pt_refs: Vec<&str> = passthrough.iter().map(String::as_str).collect();
@@ -85,17 +86,17 @@ pub(crate) fn run_elivagar(
             passthrough.join(" "),
         ));
 
-        output::run_passthrough_with_env("systemd-run", &wrapped, &env)?
+        output::run_passthrough_with_env_timed("systemd-run", &wrapped, &env)?
     } else {
         let pt_refs: Vec<&str> = passthrough.iter().map(String::as_str).collect();
         output::run_msg(&format!("{binary_str} {}", passthrough.join(" ")));
-        output::run_passthrough_with_env(&binary_str, &pt_refs, &env)?
+        output::run_passthrough_with_env_timed(&binary_str, &pt_refs, &env)?
     };
 
-    if code != 0 {
-        return Err(DevError::ExitCode(code));
+    if run.code != 0 {
+        return Err(DevError::ExitCode(run.code));
     }
-    Ok(())
+    Ok(run.elapsed)
 }
 
 pub(crate) fn bench_node_store(

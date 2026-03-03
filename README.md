@@ -34,7 +34,7 @@ brokkr bench api               # API query benchmark
 |---------|-------------|
 | `check` | Run clippy + tests (extra args forwarded to `cargo test`) |
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
-| `run` | Build release binary and run with passthrough args |
+| `run` | Build (or `--no-build`) and run with passthrough args; supports `--time`, `--json`, `--runs N` |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `clean` | Remove scratch/temp files |
 | `hotpath` | Function-level timing/allocation profiling via `hotpath` feature |
@@ -105,6 +105,26 @@ brokkr results --compare-last --command hotpath      # compare with hotpath func
 ```
 
 The compare view shows timing, output size, peak RSS, rewrite ratio, and blob distribution columns as applicable. Hotpath comparisons include function-level timing diffs.
+
+## Quick runtime timing
+
+`brokkr run` supports ad-hoc machine-readable timing without the full benchmark harness:
+
+```
+brokkr run --time -- --help
+# elapsed_ms=52 build_ms=51 run_ms=1
+
+brokkr run --json -- --version
+# {"build_ms":...,"run_ms":...,"elapsed_ms":...}
+
+brokkr run --json --runs 5 --no-build -- --version
+# {"build_ms":0,"run_ms":...,"elapsed_ms":...,"runs":5,"min_ms":...,"median_ms":...,"p95_ms":...}
+```
+
+- `--time`: stable `key=value` timing line.
+- `--json`: structured timing JSON.
+- `--runs N`: executes the command N times (single build) and reports min/median/p95.
+- `--no-build`: skips build and runs the existing release binary.
 
 ## Configuration
 

@@ -88,6 +88,12 @@ pub struct CapturedOutput {
     pub elapsed: Duration,
 }
 
+/// Exit code and elapsed time from a passthrough subprocess.
+pub struct PassthroughOutput {
+    pub code: i32,
+    pub elapsed: Duration,
+}
+
 impl CapturedOutput {
     /// Return `Ok(())` if the process exited successfully, or a `DevError::Subprocess`
     /// with the captured stderr if it failed.
@@ -176,10 +182,12 @@ pub fn run_captured_with_env(
     })
 }
 
-/// Run a subprocess with inherited stdio (passthrough mode).
-///
-/// Returns the process exit code, or 1 if the process was killed by a signal.
-pub fn run_passthrough(program: &str, args: &[&str]) -> Result<i32, DevError> {
+/// Run a subprocess with inherited stdio (passthrough mode), returning timing.
+pub fn run_passthrough_timed(
+    program: &str,
+    args: &[&str],
+) -> Result<PassthroughOutput, DevError> {
+    let start = Instant::now();
     let mut cmd = Command::new(program);
     cmd.args(args);
     crate::oom::protect_child(&mut cmd);
@@ -190,17 +198,19 @@ pub fn run_passthrough(program: &str, args: &[&str]) -> Result<i32, DevError> {
         stderr: e.to_string(),
     })?;
 
-    Ok(status.code().unwrap_or(1))
+    Ok(PassthroughOutput {
+        code: status.code().unwrap_or(1),
+        elapsed: start.elapsed(),
+    })
 }
 
-/// Run a subprocess with inherited stdio (passthrough mode) and extra env vars.
-///
-/// Returns the process exit code, or 1 if the process was killed by a signal.
-pub fn run_passthrough_with_env(
+/// Run a subprocess with inherited stdio and env vars, returning timing.
+pub fn run_passthrough_with_env_timed(
     program: &str,
     args: &[&str],
     env: &[(&str, &str)],
-) -> Result<i32, DevError> {
+) -> Result<PassthroughOutput, DevError> {
+    let start = Instant::now();
     let mut cmd = Command::new(program);
     cmd.args(args);
     for &(key, value) in env {
@@ -213,5 +223,8 @@ pub fn run_passthrough_with_env(
         stderr: e.to_string(),
     })?;
 
-    Ok(status.code().unwrap_or(1))
+    Ok(PassthroughOutput {
+        code: status.code().unwrap_or(1),
+        elapsed: start.elapsed(),
+    })
 }

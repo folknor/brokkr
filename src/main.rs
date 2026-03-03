@@ -25,6 +25,7 @@ mod worktree;
 
 use std::path::Path;
 use std::process;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 
@@ -62,9 +63,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Lock => unreachable!(),
         Command::Check { args } => cmd_check(project, &project_root, &args),
         Command::Env => cmd_env(&dev_config, project, &project_root),
-        Command::Run { features, args } => {
+        Command::Run { features, time, json, runs, no_build, args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "run")?;
-            cmd_run(&dev_config, project, &project_root, &features, &args)
+            let opts = RunOptions { time, json, runs, no_build };
+            cmd_run(&dev_config, project, &project_root, &features, &args, &opts)
         }
         Command::Results {
             query,
@@ -246,7 +248,117 @@ fn cmd_env(dev_config: &config::DevConfig, project: Project, project_root: &Path
     Ok(())
 }
 
-fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, features: &[String], args: &[String]) -> Result<(), DevError> {
+struct RunOptions {
+    time: bool,
+    json: bool,
+    runs: usize,
+    no_build: bool,
+}
+
+struct RunStats {
+    min_ms: u64,
+    median_ms: u64,
+    p95_ms: u64,
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    if ms == 0 && !duration.is_zero() {
+        1
+    } else {
+        ms
+    }
+}
+
+fn summarize_runs(samples_ms: &[u64]) -> Result<RunStats, DevError> {
+    if samples_ms.is_empty() {
+        return Err(DevError::Config("run requires at least one sample".into()));
+    }
+
+    let mut sorted = samples_ms.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let min_ms = sorted[0];
+    let median_ms = if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        let a = sorted[(n / 2) - 1];
+        let b = sorted[n / 2];
+        a.saturating_add(b) / 2
+    };
+    let p95_rank = (95 * n).div_ceil(100);
+    let p95_index = p95_rank.saturating_sub(1);
+    let p95_ms = sorted[p95_index];
+
+    Ok(RunStats { min_ms, median_ms, p95_ms })
+}
+
+fn print_run_timing(opts: &RunOptions, build_ms: u64, run_ms: u64, samples_ms: &[u64]) -> Result<(), DevError> {
+    let elapsed_ms = build_ms.saturating_add(run_ms);
+    let stats = summarize_runs(samples_ms)?;
+
+    if opts.json {
+        if opts.runs == 1 {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "build_ms": build_ms,
+                    "run_ms": run_ms,
+                    "elapsed_ms": elapsed_ms,
+                })
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "build_ms": build_ms,
+                    "run_ms": run_ms,
+                    "elapsed_ms": elapsed_ms,
+                    "runs": opts.runs,
+                    "min_ms": stats.min_ms,
+                    "median_ms": stats.median_ms,
+                    "p95_ms": stats.p95_ms,
+                    "run_samples_ms": samples_ms,
+                })
+            );
+        }
+        return Ok(());
+    }
+
+    if opts.time {
+        if opts.runs == 1 {
+            println!("elapsed_ms={elapsed_ms} build_ms={build_ms} run_ms={run_ms}");
+        } else {
+            println!(
+                "elapsed_ms={elapsed_ms} build_ms={build_ms} run_ms={run_ms} runs={} min_ms={} median_ms={} p95_ms={}",
+                opts.runs,
+                stats.min_ms,
+                stats.median_ms,
+                stats.p95_ms,
+            );
+        }
+        return Ok(());
+    }
+
+    if opts.runs > 1 {
+        output::run_msg(&format!(
+            "runs={} min={}ms median={}ms p95={}ms total={}ms",
+            opts.runs,
+            stats.min_ms,
+            stats.median_ms,
+            stats.p95_ms,
+            run_ms,
+        ));
+    }
+
+    Ok(())
+}
+
+fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, features: &[String], args: &[String], opts: &RunOptions) -> Result<(), DevError> {
+    if opts.runs == 0 {
+        return Err(DevError::Config("--runs must be >= 1".into()));
+    }
+
     // Run uring preflight checks if io_uring feature is requested.
     if features.iter().any(|f| f == "linux-io-uring") {
         preflight::run_preflight(&preflight::uring_checks())?;
@@ -259,26 +371,50 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
     } else {
         build::BuildConfig::release_with_features(package, &feature_refs)
     };
-    let binary = build::cargo_build(&build_config, project_root)?;
+    let build_start = Instant::now();
+    let binary = if opts.no_build {
+        build::resolve_existing_binary(&build_config, project_root)?
+    } else {
+        build::cargo_build(&build_config, project_root)?
+    };
+    let build_ms = if opts.no_build {
+        0
+    } else {
+        duration_ms(build_start.elapsed())
+    };
 
     // Ensure scratch dir exists — binary commands often write output there.
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     std::fs::create_dir_all(&paths.scratch_dir)?;
 
-    match project {
-        Project::Elivagar => elivagar::cmd::run_elivagar(&paths, &binary, args),
-        _ => {
-            let binary_str = binary.display().to_string();
-            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            output::run_msg(&format!("{binary_str} {}", args.join(" ")));
-            let code = output::run_passthrough(&binary_str, &arg_refs)?;
-            if code != 0 {
-                return Err(DevError::ExitCode(code));
-            }
-            Ok(())
+    let mut run_total = Duration::ZERO;
+    let mut samples_ms = Vec::with_capacity(opts.runs);
+
+    for idx in 0..opts.runs {
+        if opts.runs > 1 {
+            output::run_msg(&format!("run {}/{}", idx + 1, opts.runs));
         }
+        let run_elapsed = match project {
+            Project::Elivagar => elivagar::cmd::run_elivagar(&paths, &binary, args)?,
+            _ => {
+                let binary_str = binary.display().to_string();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                output::run_msg(&format!("{binary_str} {}", args.join(" ")));
+                let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+                if out.code != 0 {
+                    return Err(DevError::ExitCode(out.code));
+                }
+                out.elapsed
+            }
+        };
+        run_total += run_elapsed;
+        samples_ms.push(duration_ms(run_elapsed));
     }
+
+    print_run_timing(opts, build_ms, duration_ms(run_total), &samples_ms)?;
+
+    Ok(())
 }
 
 fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {

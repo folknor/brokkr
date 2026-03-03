@@ -155,6 +155,47 @@ pub fn cargo_build(
     Ok(executable)
 }
 
+/// Resolve the expected release binary path from cargo metadata without
+/// building.
+pub fn resolve_existing_binary(
+    config: &BuildConfig,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let captured = output::run_captured(
+        "cargo",
+        &["metadata", "--format-version", "1", "--no-deps"],
+        project_root,
+    )?;
+    if !captured.status.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Build(format!(
+            "cargo metadata failed: {stderr}"
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout)?;
+    let target_dir = extract_string(&val, "target_directory")?;
+    let bin_name = resolve_bin_name(&val, config)?;
+
+    let mut path = PathBuf::from(target_dir);
+    path.push(config.profile);
+    path.push(bin_name);
+
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
+
+    if !path.exists() {
+        return Err(DevError::Build(format!(
+            "binary not found at {} (build first or omit --no-build)",
+            path.display()
+        )));
+    }
+
+    Ok(path)
+}
+
 /// Assemble the argument list for `cargo build`.
 fn build_args(config: &BuildConfig) -> Vec<String> {
     let mut args = Vec::with_capacity(10);
@@ -194,6 +235,98 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
     }
 
     args
+}
+
+fn resolve_bin_name(
+    metadata: &serde_json::Value,
+    config: &BuildConfig,
+) -> Result<String, DevError> {
+    if let Some(ref bin) = config.bin {
+        return Ok(bin.clone());
+    }
+
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| DevError::Build("cargo metadata missing packages".into()))?;
+
+    let package = if let Some(ref name) = config.package {
+        packages
+            .iter()
+            .find(|pkg| {
+                pkg.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(name.as_str())
+            })
+            .ok_or_else(|| DevError::Build(format!("package '{name}' not found in metadata")))?
+    } else {
+        let root_id = metadata
+            .get("resolve")
+            .and_then(|r| r.get("root"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(id) = root_id {
+            packages
+                .iter()
+                .find(|pkg| pkg.get("id").and_then(serde_json::Value::as_str) == Some(id))
+                .ok_or_else(|| DevError::Build(format!("root package '{id}' not found in metadata")))?
+        } else {
+            packages
+                .first()
+                .ok_or_else(|| DevError::Build("cargo metadata has no packages".into()))?
+        }
+    };
+
+    let targets = package
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| DevError::Build("package metadata missing targets".into()))?;
+
+    let mut bins: Vec<&serde_json::Value> = Vec::new();
+    for target in targets {
+        let kinds = target
+            .get("kind")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| DevError::Build("target metadata missing kind".into()))?;
+        if kinds
+            .iter()
+            .any(|k| k.as_str() == Some("bin"))
+        {
+            bins.push(target);
+        }
+    }
+
+    if bins.is_empty() {
+        return Err(DevError::Build("no binary targets found in package metadata".into()));
+    }
+
+    if bins.len() == 1 {
+        return bins[0]
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(std::borrow::ToOwned::to_owned)
+            .ok_or_else(|| DevError::Build("binary target missing name".into()));
+    }
+
+    if let Some(ref pkg) = config.package
+        && let Some(named) = bins.iter().find(|target| {
+            target
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                == Some(pkg.as_str())
+        })
+    {
+        return named
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(std::borrow::ToOwned::to_owned)
+            .ok_or_else(|| DevError::Build("binary target missing name".into()));
+    }
+
+    bins[0]
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(std::borrow::ToOwned::to_owned)
+        .ok_or_else(|| DevError::Build("binary target missing name".into()))
 }
 
 /// Scan JSON lines from cargo output to find the compiled executable.
