@@ -136,6 +136,7 @@ pub fn cargo_build(
     let elapsed = start.elapsed();
 
     if !captured.status.success() {
+        dump_compiler_messages(&captured.stdout);
         dump_build_stderr(&captured.stderr);
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!(
@@ -361,6 +362,32 @@ pub fn find_executable(
     matched_exe.or(last_exe).ok_or_else(|| {
         DevError::Build("no executable in cargo output".into())
     })
+}
+
+/// Extract compiler diagnostics from `--message-format=json` stdout and print
+/// the rendered messages.  With JSON message format, cargo sends the actual
+/// error details (file, line, message) as JSON to stdout — stderr only contains
+/// the "Compiling…" progress lines and the final summary.
+fn dump_compiler_messages(stdout: &[u8]) {
+    let text = String::from_utf8_lossy(stdout);
+    for line in text.lines() {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if val.get("reason").and_then(serde_json::Value::as_str)
+            != Some("compiler-message")
+        {
+            continue;
+        }
+        if let Some(rendered) = val
+            .get("message")
+            .and_then(|m| m.get("rendered"))
+            .and_then(serde_json::Value::as_str)
+        {
+            // rendered already ends with newline; trim to avoid double-spacing
+            output::error(rendered.trim_end());
+        }
+    }
 }
 
 /// Print captured stderr through the error output channel.
