@@ -675,3 +675,75 @@ pub(crate) enum VerifyCommand {
         dataset: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn results_compare_last_conflicts_with_query() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "results",
+            "abc123",
+            "--compare-last",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn results_compare_requires_two_commits() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "results",
+            "--compare",
+            "abc123",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn bench_blob_filter_defaults_are_stable() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "bench",
+            "blob-filter",
+        ]).expect("parse");
+
+        let Command::Bench { bench, .. } = parsed.command else {
+            panic!("expected bench command");
+        };
+        let BenchCommand::BlobFilter { dataset, indexed_variant, raw_variant, runs } = bench else {
+            panic!("expected blob-filter subcommand");
+        };
+        assert_eq!(dataset, "denmark");
+        assert_eq!(indexed_variant, "indexed");
+        assert_eq!(raw_variant, "raw");
+        assert_eq!(runs, 3);
+    }
+
+    #[test]
+    fn pmtiles_stats_requires_at_least_one_file() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "pmtiles-stats",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn run_supports_passthrough_args_after_double_dash() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "run",
+            "--",
+            "query",
+            "--json",
+        ]).expect("parse");
+
+        let Command::Run { args, .. } = parsed.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args, vec!["query", "--json"]);
+    }
+}

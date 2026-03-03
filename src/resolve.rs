@@ -281,3 +281,125 @@ pub(crate) fn get_default_osc_entry<'a>(
 pub(crate) fn results_db_path(project_root: &Path) -> PathBuf {
     project_root.join(".brokkr").join("results.db")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::config::{Dataset, OscEntry, PbfEntry, PmtilesEntry, ResolvedPaths};
+
+    use super::*;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let cwd = std::env::current_dir().expect("cwd");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        cwd.join(".brokkr")
+            .join("test-artifacts")
+            .join(format!("resolve-{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn mk_paths(data_dir: &Path, datasets: HashMap<String, Dataset>) -> ResolvedPaths {
+        ResolvedPaths {
+            hostname: String::from("test-host"),
+            data_dir: data_dir.to_path_buf(),
+            scratch_dir: data_dir.join("scratch"),
+            target_dir: data_dir.join("target"),
+            drives: None,
+            datasets,
+        }
+    }
+
+    fn empty_dataset() -> Dataset {
+        Dataset {
+            origin: None,
+            download_date: None,
+            bbox: None,
+            data_dir: None,
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+            pmtiles: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_default_osc_path_errors_when_multiple_variants_exist() {
+        let mut ds = empty_dataset();
+        ds.osc.insert(String::from("4706"), OscEntry { file: String::from("b.osc.gz"), sha256: None });
+        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("a.osc.gz"), sha256: None });
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+
+        let paths = mk_paths(Path::new("/irrelevant"), datasets);
+        let err = resolve_default_osc_path("denmark", &paths, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("multiple osc files"));
+        assert!(err.contains("4705, 4706"));
+    }
+
+    #[test]
+    fn resolve_default_osc_path_uses_single_entry() {
+        let dir = unique_test_dir("single-osc");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let osc = dir.join("one.osc.gz");
+        std::fs::write(&osc, "x").expect("write");
+
+        let mut ds = empty_dataset();
+        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("one.osc.gz"), sha256: None });
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let resolved = resolve_default_osc_path("denmark", &paths, Path::new(".")).expect("resolve");
+        assert_eq!(resolved, osc);
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_default_pmtiles_path_errors_when_multiple_variants_exist() {
+        let mut ds = empty_dataset();
+        ds.pmtiles.insert(String::from("z"), PmtilesEntry { file: String::from("z.pmtiles"), sha256: None });
+        ds.pmtiles.insert(String::from("a"), PmtilesEntry { file: String::from("a.pmtiles"), sha256: None });
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+
+        let paths = mk_paths(Path::new("/irrelevant"), datasets);
+        let err = resolve_default_pmtiles_path("denmark", &paths, Path::new(".")).unwrap_err().to_string();
+        assert!(err.contains("multiple pmtiles variants"));
+        assert!(err.contains("a, z"));
+    }
+
+    #[test]
+    fn resolve_bbox_prefers_arg_then_dataset() {
+        let mut ds = empty_dataset();
+        ds.bbox = Some(String::from("1,2,3,4"));
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+        let paths = mk_paths(Path::new("/irrelevant"), datasets);
+
+        let explicit = resolve_bbox(Some("9,9,9,9"), "denmark", &paths).expect("bbox");
+        assert_eq!(explicit, "9,9,9,9");
+
+        let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
+        assert_eq!(from_dataset, "1,2,3,4");
+    }
+
+    #[test]
+    fn resolve_nidhogg_data_dir_requires_configured_data_dir() {
+        let mut ds = empty_dataset();
+        ds.pbf.insert(
+            String::from("raw"),
+            PbfEntry { file: String::from("raw.osm.pbf"), sha256: None, seq: None },
+        );
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+        let paths = mk_paths(Path::new("/data-root"), datasets);
+
+        let err = resolve_nidhogg_data_dir("denmark", &paths).unwrap_err().to_string();
+        assert!(err.contains("has no data_dir configured"));
+    }
+}

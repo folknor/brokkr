@@ -86,3 +86,100 @@ impl ResultsDb {
         Ok(Some((commits[1].clone(), rows_a, commits[0].clone(), rows_b)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::db::{QueryFilter, ResultsDb, RunRow};
+
+    fn unique_db(name: &str) -> PathBuf {
+        let cwd = std::env::current_dir().expect("cwd");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        cwd.join(".brokkr")
+            .join("test-artifacts")
+            .join(format!("compare-{name}-{}-{stamp}.db", std::process::id()))
+    }
+
+    fn make_row(commit: &str, command: &str, variant: &str) -> RunRow {
+        RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from(commit),
+            subject: String::from("test subject"),
+            command: String::from(command),
+            variant: Some(String::from(variant)),
+            input_file: Some(String::from("in.osm.pbf")),
+            input_mb: Some(1.0),
+            elapsed_ms: 100,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: String::from("release"),
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
+            project: String::from("pbfhogg"),
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        }
+    }
+
+    #[test]
+    fn compare_last_returns_none_with_fewer_than_two_commits() {
+        let db_path = unique_db("none");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        let db = ResultsDb::open(&db_path).expect("open");
+        db.insert(&make_row("aaaa1111", "bench read", "sequential")).expect("insert");
+
+        let result = db.query_compare_last(None, None).expect("query");
+        assert!(result.is_none());
+
+        drop(db);
+        drop(std::fs::remove_file(&db_path));
+    }
+
+    #[test]
+    fn compare_last_respects_command_filter() {
+        let db_path = unique_db("filter");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        db.insert(&make_row("aaaa1111", "bench read", "sequential")).expect("insert");
+        db.insert(&make_row("bbbb2222", "bench read", "sequential")).expect("insert");
+        db.insert(&make_row("cccc3333", "bench write", "sync-zlib")).expect("insert");
+
+        let compared = db
+            .query_compare_last(Some("bench read"), None)
+            .expect("compare")
+            .expect("two commits");
+        assert_eq!(compared.0, "aaaa1111");
+        assert_eq!(compared.2, "bbbb2222");
+        assert_eq!(compared.1.len(), 1);
+        assert_eq!(compared.3.len(), 1);
+        assert_eq!(compared.1[0].command, "bench read");
+        assert_eq!(compared.3[0].command, "bench read");
+
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: Some(String::from("bench write")),
+                variant: None,
+                limit: 10,
+            })
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+
+        drop(db);
+        drop(std::fs::remove_file(&db_path));
+    }
+}

@@ -86,3 +86,85 @@ fn parse_functions_section(value: &serde_json::Value, section: &str, out: &mut V
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hotpath_data_from_json;
+
+    #[test]
+    fn returns_none_when_no_hotpath_sections_exist() {
+        let json = serde_json::json!({
+            "unrelated": "value",
+        });
+        assert!(hotpath_data_from_json(&json).is_none());
+    }
+
+    #[test]
+    fn parses_timing_and_alloc_and_threads() {
+        let json = serde_json::json!({
+            "functions_timing": {
+                "description": "timing section",
+                "data": [
+                    {
+                        "name": "decode",
+                        "calls": 12,
+                        "avg": "2 ms",
+                        "total": "24 ms",
+                        "percent_total": "40%",
+                        "p50": "1.8 ms",
+                        "p95": "3.0 ms",
+                        "p99": "3.8 ms"
+                    }
+                ]
+            },
+            "functions_alloc": {
+                "description": "alloc section",
+                "data": [
+                    {
+                        "name": "decode",
+                        "calls": 12,
+                        "avg": "1 KB",
+                        "total": "12 KB",
+                        "percent_total": "30%",
+                        "p50": "0.8 KB",
+                        "p95": "1.5 KB",
+                        "p99": "2.0 KB"
+                    }
+                ]
+            },
+            "threads": {
+                "rss_bytes": "1000",
+                "alloc_dealloc_diff": "300",
+                "data": [
+                    {
+                        "name": "worker-0",
+                        "status": "running",
+                        "cpu_percent": "55%",
+                        "cpu_total": "12 s",
+                        "alloc_bytes": "5 MB",
+                        "dealloc_bytes": "4 MB",
+                        "mem_diff": "1 MB"
+                    }
+                ]
+            }
+        });
+
+        let parsed = hotpath_data_from_json(&json).expect("hotpath");
+        assert_eq!(parsed.functions.len(), 2);
+        assert_eq!(parsed.functions[0].section, "timing");
+        assert_eq!(parsed.functions[1].section, "alloc");
+        assert_eq!(parsed.threads.len(), 1);
+        assert_eq!(parsed.threads[0].name, "worker-0");
+        assert!(parsed.thread_summary.iter().any(|kv| kv.key == "threads.rss_bytes"));
+        assert!(parsed.thread_summary.iter().any(|kv| kv.key == "threads.alloc_dealloc_diff"));
+    }
+
+    #[test]
+    fn returns_none_when_sections_are_present_but_empty() {
+        let json = serde_json::json!({
+            "functions_timing": { "data": [] },
+            "threads": { "data": [] }
+        });
+        assert!(hotpath_data_from_json(&json).is_none());
+    }
+}
