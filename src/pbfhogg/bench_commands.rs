@@ -61,7 +61,8 @@ pub fn parse_command(input: &str) -> Result<Vec<&'static str>, DevError> {
 
 fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>, output: &str) -> Result<Vec<String>, DevError> {
     let args = match name {
-        "inspect" => vec!["inspect".into(), "--extended".into(), pbf.into()],
+        // `--extended` was removed from pbfhogg; plain inspect remains stable.
+        "inspect" => vec!["inspect".into(), pbf.into()],
         "check-refs" => vec!["check-refs".into(), pbf.into()],
         "sort" => vec!["sort".into(), pbf.into(), "-o".into(), output.into()],
         "cat-way" => vec!["cat".into(), pbf.into(), "--type".into(), "way".into(), "-o".into(), output.into()],
