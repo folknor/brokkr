@@ -45,7 +45,9 @@ pub(crate) fn bench_self(
     req: &BenchRequest,
     skip_to: Option<&str>,
     no_ocean: bool,
+    force_sorted: bool,
     compression_level: Option<u32>,
+    allow_unsafe_flat_index: bool,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, &feat_refs, true, "bench self")?;
@@ -61,7 +63,9 @@ pub(crate) fn bench_self(
         req.project_root,
         skip_to,
         no_ocean,
+        force_sorted,
         compression_level,
+        allow_unsafe_flat_index,
     )
 }
 
@@ -140,6 +144,8 @@ pub(crate) fn hotpath(
     tiles: usize,
     nodes: usize,
     no_ocean: bool,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
 ) -> Result<(), DevError> {
     // Micro-benchmark variants: build the example with hotpath and run it.
     if let Some(v) = variant {
@@ -172,6 +178,8 @@ pub(crate) fn hotpath(
         req.runs,
         req.alloc,
         no_ocean,
+        force_sorted,
+        allow_unsafe_flat_index,
         req.project_root,
     )
 }
@@ -180,6 +188,8 @@ pub(crate) fn profile(
     req: &ProfileRequest,
     tool: Option<&str>,
     no_ocean: bool,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
@@ -195,6 +205,8 @@ pub(crate) fn profile(
         &ctx.paths.scratch_dir,
         tool_name,
         no_ocean,
+        force_sorted,
+        allow_unsafe_flat_index,
         req.features,
         effective,
     )

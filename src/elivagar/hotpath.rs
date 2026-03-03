@@ -32,6 +32,8 @@ pub fn run(
     runs: usize,
     alloc: bool,
     no_ocean: bool,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
     project_root: &Path,
 ) -> Result<(), DevError> {
     let binary_str = binary
@@ -64,6 +66,12 @@ pub fn run(
 
     // Ocean flags.
     super::push_ocean_args(&mut args, data_dir, no_ocean);
+    if force_sorted {
+        args.push("--force-sorted".into());
+    }
+    if allow_unsafe_flat_index {
+        args.push("--allow-unsafe-flat-index".into());
+    }
 
     let label = crate::harness::hotpath_feature(alloc);
     output::hotpath_msg(&format!("=== elivagar {label} ==="));
@@ -94,7 +102,15 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
-        metadata: vec![KvPair::text("meta.alloc", alloc.to_string()), KvPair::text("meta.ocean", (!no_ocean).to_string())],
+        metadata: vec![
+            KvPair::text("meta.alloc", alloc.to_string()),
+            KvPair::text("meta.ocean", (!no_ocean).to_string()),
+            KvPair::text("meta.force_sorted", force_sorted.to_string()),
+            KvPair::text(
+                "meta.allow_unsafe_flat_index",
+                allow_unsafe_flat_index.to_string(),
+            ),
+        ],
     };
 
     harness.run_internal(&config, |_i| {

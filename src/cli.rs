@@ -172,6 +172,14 @@ Examples:
         #[arg(long)]
         no_ocean: bool,
 
+        /// Force compact node store even without PBF sort header (elivagar only)
+        #[arg(long)]
+        force_sorted: bool,
+
+        /// Bypass elivagar flat-index safety guardrails (unsafe)
+        #[arg(long)]
+        allow_unsafe_flat_index: bool,
+
         /// Number of runs; best-of-N is stored (default: 1)
         #[arg(long, default_value = "1")]
         runs: usize,
@@ -222,6 +230,14 @@ Examples:
         /// Skip ocean shapefile detection (elivagar only)
         #[arg(long)]
         no_ocean: bool,
+
+        /// Force compact node store even without PBF sort header (elivagar only)
+        #[arg(long)]
+        force_sorted: bool,
+
+        /// Bypass elivagar flat-index safety guardrails (unsafe)
+        #[arg(long)]
+        allow_unsafe_flat_index: bool,
 
         /// Skip memory availability check
         #[arg(long)]
@@ -440,9 +456,15 @@ pub(crate) enum BenchCommand {
         /// Skip ocean processing
         #[arg(long)]
         no_ocean: bool,
+        /// Force compact node store even without PBF sort header
+        #[arg(long)]
+        force_sorted: bool,
         /// Gzip compression level 0-10
         #[arg(long)]
         compression_level: Option<u32>,
+        /// Bypass elivagar flat-index safety guardrails (unsafe)
+        #[arg(long)]
+        allow_unsafe_flat_index: bool,
     },
     /// [elivagar] SortedNodeStore benchmark
     #[command(display_order = 11)]

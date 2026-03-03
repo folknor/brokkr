@@ -39,7 +39,9 @@ pub fn run(
         project_root,
         None,    // skip_to
         false,   // no_ocean
+        false,   // force_sorted
         None,    // compression_level
+        false,   // allow_unsafe_flat_index
     )?;
 
     // 2. bench planetiler -- comparison baseline

@@ -107,6 +107,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             osc_seq,
             alloc,
             no_ocean,
+            force_sorted,
+            allow_unsafe_flat_index,
             runs,
             tiles,
             nodes,
@@ -125,10 +127,31 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     dataset: &dataset, variant: &variant, runs,
                     all_features: &all_features, alloc, no_mem_check,
                 };
-                cmd_hotpath(&req, osc_seq.as_deref(), no_ocean, target.as_deref(), tiles, nodes)
+                cmd_hotpath(
+                    &req,
+                    osc_seq.as_deref(),
+                    no_ocean,
+                    force_sorted,
+                    allow_unsafe_flat_index,
+                    target.as_deref(),
+                    tiles,
+                    nodes,
+                )
             })
         }
-        Command::Profile { verbose, commit, features, dataset, variant, osc_seq, tool, no_ocean, no_mem_check } => {
+        Command::Profile {
+            verbose,
+            commit,
+            features,
+            dataset,
+            variant,
+            osc_seq,
+            tool,
+            no_ocean,
+            force_sorted,
+            allow_unsafe_flat_index,
+            no_mem_check,
+        } => {
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
                 preflight::run_preflight(&preflight::uring_checks())?;
@@ -138,7 +161,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &dataset, variant: &variant, features: &features, no_mem_check,
                 };
-                cmd_profile(&req, osc_seq.as_deref(), tool.as_deref(), no_ocean)
+                cmd_profile(
+                    &req,
+                    osc_seq.as_deref(),
+                    tool.as_deref(),
+                    no_ocean,
+                    force_sorted,
+                    allow_unsafe_flat_index,
+                )
             })
         }
         Command::Download { region, osc_url } => {
@@ -604,10 +634,26 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         }
 
         // ----- elivagar bench variants -----
-        BenchCommand::ElivSelf { dataset, variant, runs, skip_to, no_ocean, compression_level } => {
+        BenchCommand::ElivSelf {
+            dataset,
+            variant,
+            runs,
+            skip_to,
+            no_ocean,
+            force_sorted,
+            compression_level,
+            allow_unsafe_flat_index,
+        } => {
             project::require(project, Project::Elivagar, "bench self")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
-            elivagar::cmd::bench_self(&req, skip_to.as_deref(), no_ocean, compression_level)
+            elivagar::cmd::bench_self(
+                &req,
+                skip_to.as_deref(),
+                no_ocean,
+                force_sorted,
+                compression_level,
+                allow_unsafe_flat_index,
+            )
         }
         BenchCommand::NodeStore { nodes, runs } => {
             project::require(project, Project::Elivagar, "bench node-store")?;
@@ -683,7 +729,16 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
 // Hotpath / Profile dispatch
 // ---------------------------------------------------------------------------
 
-fn cmd_hotpath(req: &HotpathRequest, osc_seq: Option<&str>, no_ocean: bool, target: Option<&str>, tiles: usize, nodes: usize) -> Result<(), DevError> {
+fn cmd_hotpath(
+    req: &HotpathRequest,
+    osc_seq: Option<&str>,
+    no_ocean: bool,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
+    target: Option<&str>,
+    tiles: usize,
+    nodes: usize,
+) -> Result<(), DevError> {
     if target.is_some() && req.project != Project::Elivagar {
         return Err(DevError::Config(
             "hotpath targets (pmtiles, node-store) are only available for elivagar".into(),
@@ -691,7 +746,15 @@ fn cmd_hotpath(req: &HotpathRequest, osc_seq: Option<&str>, no_ocean: bool, targ
     }
 
     match req.project {
-        Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, no_ocean),
+        Project::Elivagar => elivagar::cmd::hotpath(
+            req,
+            target,
+            tiles,
+            nodes,
+            no_ocean,
+            force_sorted,
+            allow_unsafe_flat_index,
+        ),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
@@ -700,9 +763,22 @@ fn cmd_hotpath(req: &HotpathRequest, osc_seq: Option<&str>, no_ocean: bool, targ
     }
 }
 
-fn cmd_profile(req: &ProfileRequest, osc_seq: Option<&str>, tool: Option<&str>, no_ocean: bool) -> Result<(), DevError> {
+fn cmd_profile(
+    req: &ProfileRequest,
+    osc_seq: Option<&str>,
+    tool: Option<&str>,
+    no_ocean: bool,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
+) -> Result<(), DevError> {
     match req.project {
-        Project::Elivagar => elivagar::cmd::profile(req, tool, no_ocean),
+        Project::Elivagar => elivagar::cmd::profile(
+            req,
+            tool,
+            no_ocean,
+            force_sorted,
+            allow_unsafe_flat_index,
+        ),
         Project::Nidhogg => nidhogg::cmd::profile(req, tool),
         _ => {
             project::require(req.project, Project::Pbfhogg, "profile")?;

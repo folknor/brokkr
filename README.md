@@ -66,6 +66,10 @@ brokkr bench api               # API query benchmark
 
 **Benchmarks**: `self` (full pipeline), `node-store`, `pmtiles`, `planetiler`, `tilemaker`, `all`.
 
+For `elivagar`-specific node-store behavior, `brokkr bench self`, `brokkr hotpath`, and `brokkr profile` also forward:
+- `--force-sorted`
+- `--allow-unsafe-flat-index`
+
 **Other**: `compare-tiles` (feature count comparison between PMTiles archives), `download-ocean` (ocean shapefiles).
 
 ### nidhogg

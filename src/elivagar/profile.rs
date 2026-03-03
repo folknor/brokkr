@@ -29,6 +29,8 @@ pub fn run(
     scratch_dir: &Path,
     tool: &str,
     no_ocean: bool,
+    force_sorted: bool,
+    allow_unsafe_flat_index: bool,
     extra_features: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
@@ -85,6 +87,12 @@ pub fn run(
 
     // Ocean flags.
     super::push_ocean_args(&mut elivagar_args, data_dir, no_ocean);
+    if force_sorted {
+        elivagar_args.push("--force-sorted".into());
+    }
+    if allow_unsafe_flat_index {
+        elivagar_args.push("--allow-unsafe-flat-index".into());
+    }
 
     // Collect git info for profiler output naming.
     let git_info = crate::git::collect(project_root)?;
@@ -120,7 +128,15 @@ pub fn run(
         cargo_profile: "profiling".into(),
         runs: 1,
         cli_args: None,
-        metadata: vec![KvPair::text("meta.tool", tool), KvPair::text("meta.ocean", (!no_ocean).to_string())],
+        metadata: vec![
+            KvPair::text("meta.tool", tool),
+            KvPair::text("meta.ocean", (!no_ocean).to_string()),
+            KvPair::text("meta.force_sorted", force_sorted.to_string()),
+            KvPair::text(
+                "meta.allow_unsafe_flat_index",
+                allow_unsafe_flat_index.to_string(),
+            ),
+        ],
     };
 
     let result = BenchResult {

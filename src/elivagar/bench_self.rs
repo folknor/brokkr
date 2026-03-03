@@ -27,7 +27,9 @@ pub fn run(
     project_root: &Path,
     skip_to: Option<&str>,
     no_ocean: bool,
+    force_sorted: bool,
     compression_level: Option<u32>,
+    allow_unsafe_flat_index: bool,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
         .to_str()
@@ -67,6 +69,12 @@ pub fn run(
         args.push("--compression-level".into());
         args.push(level.to_string());
     }
+    if force_sorted {
+        args.push("--force-sorted".into());
+    }
+    if allow_unsafe_flat_index {
+        args.push("--allow-unsafe-flat-index".into());
+    }
 
     // Add ocean shapefile paths if they exist.
     super::push_ocean_args(&mut args, data_dir, no_ocean);
@@ -84,6 +92,11 @@ pub fn run(
     if let Some(v) = compression_level {
         metadata.push(KvPair::int("meta.compression_level", v as i64));
     }
+    metadata.push(KvPair::text("meta.force_sorted", force_sorted.to_string()));
+    metadata.push(KvPair::text(
+        "meta.allow_unsafe_flat_index",
+        allow_unsafe_flat_index.to_string(),
+    ));
 
     let config = BenchConfig {
         command: "bench self".into(),
