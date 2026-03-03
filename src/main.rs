@@ -395,19 +395,14 @@ fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path
         if opts.runs > 1 {
             output::run_msg(&format!("run {}/{}", idx + 1, opts.runs));
         }
-        let run_elapsed = match project {
-            Project::Elivagar => elivagar::cmd::run_elivagar(&paths, &binary, args)?,
-            _ => {
-                let binary_str = binary.display().to_string();
-                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                output::run_msg(&format!("{binary_str} {}", args.join(" ")));
-                let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
-                if out.code != 0 {
-                    return Err(DevError::ExitCode(out.code));
-                }
-                out.elapsed
-            }
-        };
+        let binary_str = binary.display().to_string();
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        output::run_msg(&format!("{binary_str} {}", args.join(" ")));
+        let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+        if out.code != 0 {
+            return Err(DevError::ExitCode(out.code));
+        }
+        let run_elapsed = out.elapsed;
         run_total += run_elapsed;
         samples_ms.push(duration_ms(run_elapsed));
     }

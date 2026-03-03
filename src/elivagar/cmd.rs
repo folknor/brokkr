@@ -1,103 +1,13 @@
 use std::path::Path;
-use std::time::Duration;
 
 use crate::config;
 use crate::context::{bootstrap, bootstrap_config, BenchContext, HarnessContext};
 use crate::error::DevError;
 use crate::oom;
-use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
 use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
 use crate::resolve::resolve_pbf_with_size;
-
-pub(crate) fn run_elivagar(
-    paths: &config::ResolvedPaths,
-    binary: &Path,
-    raw_args: &[String],
-) -> Result<Duration, DevError> {
-    // Parse dev-specific flags from raw args.
-    let mut no_ocean = false;
-    let mut mem_limit: Option<String> = None;
-    let mut passthrough: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < raw_args.len() {
-        match raw_args[i].as_str() {
-            "--no-ocean" => no_ocean = true,
-            "--mem" => {
-                i += 1;
-                if i >= raw_args.len() {
-                    return Err(DevError::Config("--mem requires a value (e.g. --mem 8G)".into()));
-                }
-                mem_limit = Some(raw_args[i].clone());
-            }
-            other => passthrough.push(other.to_owned()),
-        }
-        i += 1;
-    }
-
-    // Inject `run` subcommand for elivagar's clap CLI unless the user
-    // already specified a subcommand (e.g. `brokkr run inspect <file>`).
-    let is_subcommand = passthrough.first().is_some_and(|a| a == "run" || a == "inspect");
-    if !is_subcommand {
-        passthrough.insert(0, "run".into());
-    }
-
-    // Inject --tmp-dir if not already provided (only meaningful for `run`).
-    if passthrough.first().is_some_and(|a| a == "run")
-        && !passthrough.iter().any(|a| a == "--tmp-dir")
-    {
-        passthrough.push("--tmp-dir".into());
-        passthrough.push(paths.scratch_dir.display().to_string());
-    }
-
-    // Inject ocean shapefiles if not suppressed and not already provided (only for `run`).
-    if passthrough.first().is_some_and(|a| a == "run") && !no_ocean {
-        let (ocean_full, ocean_simplified) =
-            super::detect_ocean(&paths.data_dir);
-
-        if !passthrough.iter().any(|a| a == "--ocean")
-            && let Some(ref shp) = ocean_full
-        {
-            passthrough.push("--ocean".into());
-            passthrough.push(shp.display().to_string());
-        }
-        if !passthrough.iter().any(|a| a == "--ocean-simplified")
-            && let Some(ref shp) = ocean_simplified
-        {
-            passthrough.push("--ocean-simplified".into());
-            passthrough.push(shp.display().to_string());
-        }
-    }
-
-    let env = [("HOTPATH_METRICS_SERVER_OFF", "true")];
-
-    // Execute with optional systemd-run memory-limit wrapping.
-    let binary_str = binary.display().to_string();
-    let run = if let Some(ref mem) = mem_limit {
-        let mem_arg = format!("MemoryMax={mem}");
-        let mut wrapped: Vec<&str> = vec!["--scope", "-p", &mem_arg, &binary_str];
-        let pt_refs: Vec<&str> = passthrough.iter().map(String::as_str).collect();
-        wrapped.extend_from_slice(&pt_refs);
-
-        output::run_msg(&format!(
-            "systemd-run --scope -p {mem_arg} {binary_str} {}",
-            passthrough.join(" "),
-        ));
-
-        output::run_passthrough_with_env_timed("systemd-run", &wrapped, &env)?
-    } else {
-        let pt_refs: Vec<&str> = passthrough.iter().map(String::as_str).collect();
-        output::run_msg(&format!("{binary_str} {}", passthrough.join(" ")));
-        output::run_passthrough_with_env_timed(&binary_str, &pt_refs, &env)?
-    };
-
-    if run.code != 0 {
-        return Err(DevError::ExitCode(run.code));
-    }
-    Ok(run.elapsed)
-}
 
 pub(crate) fn bench_node_store(
     dev_config: &config::DevConfig,

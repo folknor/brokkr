@@ -38,7 +38,7 @@ Single crate, single binary. No workspace.
 - `src/db/compare.rs` — Side-by-side commit comparison logic
 - `src/db/hotpath.rs` — Hotpath report formatting for result detail view
 - `src/db/migrate.rs` — Migration framework (v0→v3), `run_migrations()`
-- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough_timed`, `run_passthrough_with_env_timed`)
+- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough_timed`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/env.rs` — `EnvInfo` collection (hostname, kernel, governor, memory, drives, tool versions)
 - `src/git.rs` — `GitInfo` (commit hash, dirty flag, branch)

@@ -203,28 +203,3 @@ pub fn run_passthrough_timed(
         elapsed: start.elapsed(),
     })
 }
-
-/// Run a subprocess with inherited stdio and env vars, returning timing.
-pub fn run_passthrough_with_env_timed(
-    program: &str,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> Result<PassthroughOutput, DevError> {
-    let start = Instant::now();
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-    for &(key, value) in env {
-        cmd.env(key, value);
-    }
-    crate::oom::protect_child(&mut cmd);
-    let status = cmd.status().map_err(|e| DevError::Subprocess {
-        program: program.to_owned(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-
-    Ok(PassthroughOutput {
-        code: status.code().unwrap_or(1),
-        elapsed: start.elapsed(),
-    })
-}
