@@ -398,7 +398,7 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "simple,complete,smart")]
         strategies: String,
     },
-    /// [pbfhogg] Benchmark allocators (default/jemalloc/mimalloc) via check-refs
+    /// [pbfhogg] Benchmark allocators (default/jemalloc/mimalloc) via check --refs
     #[command(display_order = 2)]
     Allocator {
         #[arg(long, default_value = "denmark")]
@@ -645,7 +645,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long, default_value = "indexed")]
         variant: String,
     },
-    /// [pbfhogg] Cross-validate getid/removeid against osmium getid
+    /// [pbfhogg] Cross-validate getid/getid --invert against osmium getid
     #[command(display_order = 4)]
     GetidRemoveid {
         #[arg(long, default_value = "denmark")]
@@ -661,7 +661,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long, default_value = "indexed")]
         variant: String,
     },
-    /// [pbfhogg] Cross-validate check-refs against osmium check-refs
+    /// [pbfhogg] Cross-validate check --refs against osmium check-refs
     #[command(display_order = 6)]
     CheckRefs {
         #[arg(long, default_value = "denmark")]
@@ -669,7 +669,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long, default_value = "indexed")]
         variant: String,
     },
-    /// [pbfhogg] Cross-validate merge against osmium/osmosis/osmconvert
+    /// [pbfhogg] Cross-validate apply-changes against osmium/osmosis/osmconvert
     #[command(display_order = 7)]
     Merge {
         #[arg(long, default_value = "denmark")]
@@ -679,7 +679,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc_seq: Option<String>,
     },
-    /// [pbfhogg] Cross-validate derive-changes roundtrip against osmium
+    /// [pbfhogg] Cross-validate diff --format osc roundtrip against osmium
     #[command(display_order = 8)]
     DeriveChanges {
         #[arg(long, default_value = "denmark")]

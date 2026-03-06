@@ -1,4 +1,4 @@
-//! Verify: check-refs — pbfhogg check-refs vs osmium check-refs.
+//! Verify: check --refs — pbfhogg check --refs vs osmium check-refs.
 
 use std::fs;
 use std::path::Path;
@@ -7,7 +7,7 @@ use crate::error::DevError;
 use crate::output::verify_msg;
 use super::verify::VerifyHarness;
 
-/// Run check-refs cross-validation: pbfhogg check-refs vs osmium check-refs.
+/// Run check --refs cross-validation: pbfhogg check --refs vs osmium check-refs.
 ///
 /// Two modes: ways-only (default) and with relations. Both tools may exit
 /// non-zero when missing refs are found, so we do not check exit status.
@@ -16,9 +16,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let pbf_str = pbf.display().to_string();
 
     // --- Ways only ---
-    verify_msg("--- check-refs (ways only) ---");
+    verify_msg("--- check --refs (ways only) ---");
 
-    let captured = harness.run_pbfhogg(&["check-refs", &pbf_str])?;
+    let captured = harness.run_pbfhogg(&["check", "--refs", &pbf_str])?;
     let pbfhogg_text = format!(
         "{}{}",
         String::from_utf8_lossy(&captured.stdout),
@@ -51,9 +51,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     }
 
     // --- With relations ---
-    verify_msg("--- check-refs (with relations) ---");
+    verify_msg("--- check --refs (with relations) ---");
 
-    let captured = harness.run_pbfhogg(&["check-refs", &pbf_str, "--check-relations"])?;
+    let captured = harness.run_pbfhogg(&["check", "--refs", &pbf_str, "--check-relations"])?;
     let pbfhogg_text = format!(
         "{}{}",
         String::from_utf8_lossy(&captured.stdout),
@@ -87,7 +87,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
 
     if !ways_match || !relations_match {
         return Err(DevError::Verify(
-            "check-refs: pbfhogg and osmium output differ".into(),
+            "check --refs: pbfhogg and osmium output differ".into(),
         ));
     }
 

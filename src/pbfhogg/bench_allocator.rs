@@ -1,4 +1,4 @@
-//! Benchmark: compare allocators (default, jemalloc, mimalloc) via check-refs.
+//! Benchmark: compare allocators (default, jemalloc, mimalloc) via check --refs.
 
 use std::path::Path;
 
@@ -28,7 +28,7 @@ pub fn run(
         };
 
         let binary = build::cargo_build(&build_config, project_root)?;
-        let args: Vec<&str> = vec!["check-refs", pbf_str];
+        let args: Vec<&str> = vec!["check", "--refs", pbf_str];
 
         let features_label = match name {
             "jemalloc" => Some("jemalloc".into()),

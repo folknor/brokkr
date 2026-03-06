@@ -1,4 +1,4 @@
-//! Verify: derive-changes — roundtrip validation via pbfhogg and osmium.
+//! Verify: diff --format osc — roundtrip validation via pbfhogg and osmium.
 
 use std::path::Path;
 
@@ -6,16 +6,16 @@ use crate::error::DevError;
 use crate::output::verify_msg;
 use super::verify::VerifyHarness;
 
-/// Cross-validate `pbfhogg derive-changes` against `osmium derive-changes`.
+/// Cross-validate `pbfhogg diff --format osc` against `osmium derive-changes`.
 ///
-/// Creates a "new" PBF by merging, derives changes from old->new with both
-/// tools, then roundtrips each derived OSC back through merge and compares.
+/// Creates a "new" PBF by applying changes, derives changes from old->new with
+/// both tools, then roundtrips each derived OSC back through apply-changes and compares.
 pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevError> {
     let outdir = harness.subdir("derive-changes")?;
 
-    verify_msg("=== verify derive-changes ===");
+    verify_msg("=== verify diff --format osc ===");
     verify_msg(&format!("  old: {}", pbf.display()));
-    verify_msg(&format!("  osc: {} (used to create 'new' via merge)", osc.display()));
+    verify_msg(&format!("  osc: {} (used to create 'new' via apply-changes)", osc.display()));
 
     let pbf_str = pbf.display().to_string();
     let osc_str = osc.display().to_string();
@@ -24,20 +24,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     let new_pbf = outdir.join("new.osm.pbf");
     let new_pbf_str = new_pbf.display().to_string();
 
-    verify_msg("--- creating 'new' PBF via merge ---");
+    verify_msg("--- creating 'new' PBF via apply-changes ---");
     let captured =
-        harness.run_pbfhogg(&["merge", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
-    harness.check_exit(&captured, "pbfhogg merge")?;
+        harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
+    harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // Step 2: Derive changes with both tools.
     let pbfhogg_osc = outdir.join("pbfhogg.osc.gz");
     let pbfhogg_osc_str = pbfhogg_osc.display().to_string();
 
-    verify_msg("--- pbfhogg derive-changes ---");
+    verify_msg("--- pbfhogg diff --format osc ---");
     let captured = harness.run_pbfhogg(&[
-        "derive-changes", &pbf_str, &new_pbf_str, "-o", &pbfhogg_osc_str,
+        "diff", "--format", "osc", &pbf_str, &new_pbf_str, "-o", &pbfhogg_osc_str,
     ])?;
-    harness.check_exit(&captured, "pbfhogg derive-changes")?;
+    harness.check_exit(&captured, "pbfhogg diff --format osc")?;
 
     let osmium_osc = outdir.join("osmium.osc.gz");
     let osmium_osc_str = osmium_osc.display().to_string();
@@ -64,9 +64,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
 
     verify_msg("--- roundtrip: apply pbfhogg OSC ---");
     let captured = harness.run_pbfhogg(&[
-        "merge", &pbf_str, &pbfhogg_osc_str, "-o", &rt_pbfhogg_str,
+        "apply-changes", &pbf_str, &pbfhogg_osc_str, "-o", &rt_pbfhogg_str,
     ])?;
-    harness.check_exit(&captured, "pbfhogg merge (roundtrip)")?;
+    harness.check_exit(&captured, "pbfhogg apply-changes (roundtrip)")?;
 
     let rt_osmium = outdir.join("roundtrip-osmium.osm.pbf");
     let rt_osmium_str = rt_osmium.display().to_string();
@@ -119,7 +119,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
 
     if !all_pass {
         return Err(DevError::Verify(
-            "derive-changes: roundtrip produced differences".into(),
+            "diff --format osc: roundtrip produced differences".into(),
         ));
     }
 

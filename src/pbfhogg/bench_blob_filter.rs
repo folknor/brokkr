@@ -6,14 +6,14 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
-const COMMANDS: &[&str] = &["cat-way", "cat-relation", "tags-count-way", "node-stats"];
+const COMMANDS: &[&str] = &["cat-way", "cat-relation", "inspect-tags-way", "inspect-nodes"];
 
 fn command_args(name: &str, pbf: &str, force: bool) -> Vec<String> {
     let mut args = match name {
         "cat-way" => vec!["cat".into(), pbf.into(), "--type".into(), "way".into(), "-o".into(), "/dev/null".into()],
         "cat-relation" => vec!["cat".into(), pbf.into(), "--type".into(), "relation".into(), "-o".into(), "/dev/null".into()],
-        "tags-count-way" => vec!["tags-count".into(), pbf.into(), "--type".into(), "way".into(), "--min-count".into(), "999999999".into()],
-        "node-stats" => vec!["node-stats".into(), pbf.into()],
+        "inspect-tags-way" => vec!["inspect".into(), "tags".into(), pbf.into(), "--type".into(), "way".into(), "--min-count".into(), "999999999".into()],
+        "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
         _ => unreachable!("unknown command: {name}"),
     };
     if force {
@@ -72,13 +72,13 @@ mod tests {
 
     #[test]
     fn raw_variant_appends_force() {
-        let args = command_args("node-stats", "in.osm.pbf", true);
-        assert_eq!(args, vec!["node-stats", "in.osm.pbf", "--force"]);
+        let args = command_args("inspect-nodes", "in.osm.pbf", true);
+        assert_eq!(args, vec!["inspect", "--nodes", "in.osm.pbf", "--force"]);
     }
 
     #[test]
     fn indexed_variant_has_no_force() {
-        let args = command_args("node-stats", "in.osm.pbf", false);
-        assert_eq!(args, vec!["node-stats", "in.osm.pbf"]);
+        let args = command_args("inspect-nodes", "in.osm.pbf", false);
+        assert_eq!(args, vec!["inspect", "--nodes", "in.osm.pbf"]);
     }
 }

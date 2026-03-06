@@ -1,4 +1,4 @@
-//! Verify: merge — 4-tool comparison: pbfhogg, osmium, osmosis, osmconvert.
+//! Verify: apply-changes — 4-tool comparison: pbfhogg, osmium, osmosis, osmconvert.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -10,7 +10,7 @@ use crate::output::verify_msg;
 use crate::tools::OsmosisTools;
 use super::verify::{self, VerifyHarness};
 
-/// Cross-validate `pbfhogg merge` against osmium, osmosis, and osmconvert.
+/// Cross-validate `pbfhogg apply-changes` against osmium, osmosis, and osmconvert.
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
@@ -19,21 +19,21 @@ pub fn run(
 ) -> Result<(), DevError> {
     let outdir = harness.subdir("merge")?;
 
-    verify_msg("=== verify merge ===");
+    verify_msg("=== verify apply-changes ===");
     verify_msg(&format!("  base: {}", pbf.display()));
     verify_msg(&format!("  diff: {}", osc.display()));
 
     let pbf_str = pbf.display().to_string();
     let osc_str = osc.display().to_string();
 
-    // --- pbfhogg merge ---
+    // --- pbfhogg apply-changes ---
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
     let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
-    verify_msg("--- pbfhogg merge ---");
+    verify_msg("--- pbfhogg apply-changes ---");
     let captured =
-        harness.run_pbfhogg(&["merge", &pbf_str, &osc_str, "-o", &pbfhogg_out_str])?;
-    harness.check_exit(&captured, "pbfhogg merge")?;
+        harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &pbfhogg_out_str])?;
+    harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // --- osmium apply-changes ---
     let osmium_out = outdir.join("osmium.osm.pbf");
@@ -106,7 +106,7 @@ pub fn run(
     }
 
     // --- Sort check ---
-    harness.check_sorted("pbfhogg merge", &pbfhogg_out)?;
+    harness.check_sorted("pbfhogg apply-changes", &pbfhogg_out)?;
 
     Ok(())
 }

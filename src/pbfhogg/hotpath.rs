@@ -27,10 +27,11 @@ fn build_test_suite(
 ) -> Vec<HotpathTest> {
     vec![
         HotpathTest {
-            label: "tags-count",
+            label: "inspect-tags",
             args: vec![
                 binary_str.into(),
-                "tags-count".into(),
+                "inspect".into(),
+                "tags".into(),
                 pbf_str.into(),
             ],
         },
@@ -38,7 +39,8 @@ fn build_test_suite(
             label: "check-refs",
             args: vec![
                 binary_str.into(),
-                "check-refs".into(),
+                "check".into(),
+                "--refs".into(),
                 pbf_str.into(),
             ],
         },
@@ -57,10 +59,10 @@ fn build_test_suite(
             ],
         },
         HotpathTest {
-            label: "merge-zlib",
+            label: "apply-changes-zlib",
             args: vec![
                 binary_str.into(),
-                "merge".into(),
+                "apply-changes".into(),
                 pbf_str.into(),
                 osc_str.into(),
                 "--compression".into(),
@@ -70,10 +72,10 @@ fn build_test_suite(
             ],
         },
         HotpathTest {
-            label: "merge-none",
+            label: "apply-changes-none",
             args: vec![
                 binary_str.into(),
-                "merge".into(),
+                "apply-changes".into(),
                 pbf_str.into(),
                 osc_str.into(),
                 "--compression".into(),

@@ -16,7 +16,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
 
     verify_msg("=== verify diff ===");
     verify_msg(&format!("  old: {}", pbf.display()));
-    verify_msg(&format!("  osc: {} (used to create 'new' via merge)", osc.display()));
+    verify_msg(&format!("  osc: {} (used to create 'new' via apply-changes)", osc.display()));
 
     let pbf_str = pbf.display().to_string();
     let osc_str = osc.display().to_string();
@@ -25,10 +25,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     let new_pbf = outdir.join("new.osm.pbf");
     let new_pbf_str = new_pbf.display().to_string();
 
-    verify_msg("--- creating 'new' PBF via merge ---");
+    verify_msg("--- creating 'new' PBF via apply-changes ---");
     let captured =
-        harness.run_pbfhogg(&["merge", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
-    harness.check_exit(&captured, "pbfhogg merge")?;
+        harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
+    harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // pbfhogg diff — exits non-zero when differences exist, so do NOT check_exit.
     verify_msg("--- pbfhogg diff ---");

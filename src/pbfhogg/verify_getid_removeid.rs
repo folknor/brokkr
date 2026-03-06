@@ -1,4 +1,4 @@
-//! Verify: getid/removeid — pbfhogg getid vs osmium getid, plus removeid complement test.
+//! Verify: getid — pbfhogg getid vs osmium getid, plus getid --invert complement test.
 
 use std::path::Path;
 
@@ -13,8 +13,8 @@ const IDS: &[&str] = &[
     "r174", "r213", "r339",
 ];
 
-/// Run getid/removeid cross-validation: pbfhogg getid vs osmium getid,
-/// then pbfhogg removeid complement test.
+/// Run getid cross-validation: pbfhogg getid vs osmium getid,
+/// then pbfhogg getid --invert complement test.
 pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let outdir = harness.subdir("getid-removeid")?;
     let pbf_str = pbf.display().to_string();
@@ -53,20 +53,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     // Compare sort feature flags.
     harness.compare_sort_feature(&pbfhogg_getid, &osmium_getid)?;
 
-    // --- removeid: complement test ---
-    verify_msg("--- removeid: complement test ---");
+    // --- getid --invert: complement test ---
+    verify_msg("--- getid --invert: complement test ---");
 
-    let pbfhogg_removeid = outdir.join("pbfhogg-removeid.osm.pbf");
-    let pbfhogg_removeid_str = pbfhogg_removeid.display().to_string();
-    let mut removeid_args: Vec<&str> = vec!["removeid", &pbf_str, "-o", &pbfhogg_removeid_str];
-    removeid_args.extend_from_slice(IDS);
-    let captured = harness.run_pbfhogg(&removeid_args)?;
-    harness.check_exit(&captured, "pbfhogg removeid")?;
+    let pbfhogg_invert = outdir.join("pbfhogg-getid-invert.osm.pbf");
+    let pbfhogg_invert_str = pbfhogg_invert.display().to_string();
+    let mut invert_args: Vec<&str> = vec!["getid", "--invert", &pbf_str, "-o", &pbfhogg_invert_str];
+    invert_args.extend_from_slice(IDS);
+    let captured = harness.run_pbfhogg(&invert_args)?;
+    harness.check_exit(&captured, "pbfhogg getid --invert")?;
 
-    // Print inspect output for original, getid, and removeid (complement validation).
+    // Print inspect output for original, getid, and getid --invert (complement validation).
     harness.print_inspect("original", pbf)?;
     harness.print_inspect("getid", &pbfhogg_getid)?;
-    harness.print_inspect("removeid", &pbfhogg_removeid)?;
+    harness.print_inspect("getid --invert", &pbfhogg_invert)?;
 
     Ok(())
 }

@@ -82,8 +82,8 @@ pub fn run(
     verify_msg("========== check-refs ==========");
     run_one("check-refs", verify_check_refs::run(harness, pbf));
 
-    // 8. merge
-    verify_msg("========== merge ==========");
+    // 8. apply-changes
+    verify_msg("========== apply-changes ==========");
     if let Some(osc_path) = osc {
         // Best-effort osmosis setup — merge works without it.
         let osmosis = match crate::tools::ensure_osmosis(data_dir, project_root) {
@@ -94,22 +94,22 @@ pub fn run(
             }
         };
         run_one(
-            "merge",
+            "apply-changes",
             verify_merge::run(harness, pbf, osc_path, osmosis.as_ref()),
         );
     } else {
-        skip("merge", "no --osc provided");
+        skip("apply-changes", "no --osc provided");
     }
 
-    // 9. derive-changes
-    verify_msg("========== derive-changes ==========");
+    // 9. diff --format osc
+    verify_msg("========== diff --format osc ==========");
     if let Some(osc_path) = osc {
         run_one(
-            "derive-changes",
+            "diff --format osc",
             verify_derive_changes::run(harness, pbf, osc_path),
         );
     } else {
-        skip("derive-changes", "no --osc provided");
+        skip("diff --format osc", "no --osc provided");
     }
 
     // 10. diff
