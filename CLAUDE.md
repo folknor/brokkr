@@ -50,6 +50,7 @@ Single crate, single binary. No workspace.
 - `src/profiler.rs` — Sampling profiler integration (perf/samply)
 - `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config), cache-first network checks
 - `src/worktree.rs` — Git worktree creation/cleanup for retroactive benchmarking
+- `src/preview.rs` — Preview pipeline orchestrator: enrich → tilegen → ingest → serve → browser. Cross-project builds, artifact validation, `--from` step skipping
 
 ### Project-specific modules
 
@@ -94,6 +95,11 @@ sha256 = "fa581f7b..."
 [plantasjen.datasets.denmark.pmtiles.elivagar]
 file = "denmark-elivagar.pmtiles"
 sha256 = "9a3b2c1d..."
+
+[plantasjen.preview]
+pbfhogg = "/home/folk/Programs/pbfhogg"
+elivagar = "/home/folk/Programs/elivagar"
+nidhogg = "/home/folk/Programs/nidhogg"
 ```
 
 Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
@@ -122,6 +128,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline.
 - `profile` — sampling profiler (perf/samply)
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
+- `preview` — end-to-end pipeline (enrich → tilegen → ingest → serve) with map viewer. Requires `[hostname.preview]` in brokkr.toml. Supports `--from enrich|tilegen|ingest|serve`, `--dataset`, `--variant`, `--no-open`
 
 ## Benchmark harness
 

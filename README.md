@@ -40,6 +40,7 @@ brokkr bench api               # API query benchmark
 | `hotpath` | Function-level timing/allocation profiling via `hotpath` feature |
 | `profile` | Sampling profiler (perf/samply) |
 | `pmtiles-stats` | PMTiles v3 file statistics (zoom distribution, tile sizes, compression) |
+| `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
 | `lock` | Show who holds the benchmark lock |
 
 ### pbfhogg
@@ -81,6 +82,30 @@ For `elivagar`-specific node-store behavior, `brokkr bench self`, `brokkr hotpat
 **Benchmarks**: `api` (query performance), `nid-ingest` (ingest performance).
 
 **Verification**: `batch` (batch query), `nid-geocode`, `readonly` (read-only filesystem).
+
+## Preview pipeline
+
+`brokkr preview` runs the full data pipeline and opens a map viewer for visual inspection:
+
+```
+brokkr preview                          # full pipeline, default dataset/variant
+brokkr preview --from tilegen           # skip enrich, start from tile generation
+brokkr preview --from serve --no-open   # just restart server, don't open browser
+brokkr preview --dataset japan --variant raw
+```
+
+Steps: **enrich** (pbfhogg add-locations-to-ways) → **tilegen** (elivagar run) → **ingest** (nidhogg ingest) → **serve** (nidhogg serve + browser). Use `--from` to skip upstream steps when iterating on a single project.
+
+Requires a `[hostname.preview]` section in `brokkr.toml` pointing to each project's source tree:
+
+```toml
+[plantasjen.preview]
+pbfhogg = "/home/folk/Programs/pbfhogg"
+elivagar = "/home/folk/Programs/elivagar"
+nidhogg = "/home/folk/Programs/nidhogg"
+```
+
+Artifacts are written to `.brokkr/preview/` (enriched PBF, PMTiles, ingest data dir). Works from any of the three project roots.
 
 ## Benchmark harness
 
@@ -155,6 +180,12 @@ target = "target"
 port = 3033
 drives.source = "/dev/nvme0n1p2"
 drives.data = "/dev/sda1"
+
+# Cross-project source trees for preview pipeline
+[plantasjen.preview]
+pbfhogg = "/home/folk/Programs/pbfhogg"
+elivagar = "/home/folk/Programs/elivagar"
+nidhogg = "/home/folk/Programs/nidhogg"
 ```
 
 - `project` — which project this is (`pbfhogg`, `elivagar`, or `nidhogg`)
