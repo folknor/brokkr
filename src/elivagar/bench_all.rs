@@ -44,7 +44,7 @@ pub fn run(
         false,   // allow_unsafe_flat_index
         None,    // tile_format
         None,    // tile_compression
-        false,   // compress_sort_chunks
+        None,    // compress_sort_chunks
         false,   // in_memory
         false,   // locations_on_ways
     )?;

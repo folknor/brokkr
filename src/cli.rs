@@ -186,9 +186,9 @@ Examples:
         /// Tile compression (gzip or brotli, elivagar only)
         #[arg(long)]
         tile_compression: Option<String>,
-        /// Compress sort chunks with LZ4 (elivagar only)
+        /// Compress sort chunks (lz4 or snappy, elivagar only)
         #[arg(long)]
-        compress_sort_chunks: bool,
+        compress_sort_chunks: Option<String>,
         /// Keep tile blob in memory (elivagar only)
         #[arg(long)]
         in_memory: bool,
@@ -261,9 +261,9 @@ Examples:
         /// Tile compression (gzip or brotli, elivagar only)
         #[arg(long)]
         tile_compression: Option<String>,
-        /// Compress sort chunks with LZ4 (elivagar only)
+        /// Compress sort chunks (lz4 or snappy, elivagar only)
         #[arg(long)]
-        compress_sort_chunks: bool,
+        compress_sort_chunks: Option<String>,
         /// Keep tile blob in memory (elivagar only)
         #[arg(long)]
         in_memory: bool,
@@ -503,9 +503,9 @@ pub(crate) enum BenchCommand {
         /// Tile compression (gzip or brotli)
         #[arg(long)]
         tile_compression: Option<String>,
-        /// Compress sort chunks with LZ4
+        /// Compress sort chunks (lz4 or snappy)
         #[arg(long)]
-        compress_sort_chunks: bool,
+        compress_sort_chunks: Option<String>,
         /// Keep tile blob in memory
         #[arg(long)]
         in_memory: bool,

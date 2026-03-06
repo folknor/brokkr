@@ -50,7 +50,7 @@ pub(crate) fn bench_self(
     allow_unsafe_flat_index: bool,
     tile_format: Option<&str>,
     tile_compression: Option<&str>,
-    compress_sort_chunks: bool,
+    compress_sort_chunks: Option<&str>,
     in_memory: bool,
     locations_on_ways: bool,
 ) -> Result<(), DevError> {
@@ -177,7 +177,7 @@ pub(crate) fn hotpath(
     allow_unsafe_flat_index: bool,
     tile_format: Option<&str>,
     tile_compression: Option<&str>,
-    compress_sort_chunks: bool,
+    compress_sort_chunks: Option<&str>,
     in_memory: bool,
     locations_on_ways: bool,
 ) -> Result<(), DevError> {
@@ -231,7 +231,7 @@ pub(crate) fn profile(
     allow_unsafe_flat_index: bool,
     tile_format: Option<&str>,
     tile_compression: Option<&str>,
-    compress_sort_chunks: bool,
+    compress_sort_chunks: Option<&str>,
     in_memory: bool,
     locations_on_ways: bool,
 ) -> Result<(), DevError> {

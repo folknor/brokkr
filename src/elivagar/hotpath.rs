@@ -36,7 +36,7 @@ pub fn run(
     allow_unsafe_flat_index: bool,
     tile_format: Option<&str>,
     tile_compression: Option<&str>,
-    compress_sort_chunks: bool,
+    compress_sort_chunks: Option<&str>,
     in_memory: bool,
     locations_on_ways: bool,
     project_root: &Path,
@@ -85,8 +85,9 @@ pub fn run(
         args.push("--tile-compression".into());
         args.push(comp.into());
     }
-    if compress_sort_chunks {
+    if let Some(algo) = compress_sort_chunks {
         args.push("--compress-sort-chunks".into());
+        args.push(algo.into());
     }
     if in_memory {
         args.push("--in-memory".into());
@@ -140,7 +141,7 @@ pub fn run(
             if let Some(v) = tile_compression {
                 m.push(KvPair::text("meta.tile_compression", v));
             }
-            m.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.to_string()));
+            m.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.unwrap_or("none")));
             m.push(KvPair::text("meta.in_memory", in_memory.to_string()));
             m.push(KvPair::text("meta.locations_on_ways", locations_on_ways.to_string()));
             m
