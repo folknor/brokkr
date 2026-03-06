@@ -16,6 +16,7 @@ mod pmtiles;
 mod elivagar;
 mod nidhogg;
 mod preflight;
+mod preview;
 mod profiler;
 mod project;
 mod request;
@@ -208,6 +209,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Query { json } => nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref()),
         Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
+        Command::Preview { from, dataset, variant, no_open } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "preview")?;
+            preview::run(&dev_config, &project_root, from, &dataset, &variant, no_open)
+        }
     }
 }
 

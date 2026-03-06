@@ -310,6 +310,7 @@ mod tests {
             scratch_dir: data_dir.join("scratch"),
             target_dir: data_dir.join("target"),
             drives: None,
+            preview: None,
             datasets,
         }
     }

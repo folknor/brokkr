@@ -65,6 +65,7 @@ pub struct HostConfig {
     pub target: Option<String>,
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
+    pub preview: Option<PreviewConfig>,
     #[serde(default)]
     pub datasets: HashMap<String, Dataset>,
 }
@@ -77,6 +78,14 @@ pub struct DriveConfig {
     pub target: Option<String>,
 }
 
+/// Cross-project source tree paths for the preview pipeline.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewConfig {
+    pub pbfhogg: String,
+    pub elivagar: String,
+    pub nidhogg: String,
+}
+
 #[allow(dead_code)]
 pub struct ResolvedPaths {
     pub hostname: String,
@@ -84,6 +93,7 @@ pub struct ResolvedPaths {
     pub scratch_dir: PathBuf,
     pub target_dir: PathBuf,
     pub drives: Option<DriveConfig>,
+    pub preview: Option<PreviewConfig>,
     pub datasets: HashMap<String, Dataset>,
 }
 
@@ -208,6 +218,7 @@ pub fn resolve_paths(
     };
 
     let drives = host.and_then(|h| h.drives.clone());
+    let preview = host.and_then(|h| h.preview.clone());
 
     let datasets = host
         .map(|h| h.datasets.clone())
@@ -219,6 +230,7 @@ pub fn resolve_paths(
         scratch_dir,
         target_dir,
         drives,
+        preview,
         datasets,
     }
 }
@@ -268,7 +280,7 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None, datasets: host_ds,
+            drives: None, preview: None, datasets: host_ds,
         });
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
@@ -301,7 +313,7 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None, datasets: host_ds,
+            drives: None, preview: None, datasets: host_ds,
         });
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
@@ -325,7 +337,7 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None, datasets: host_ds,
+            drives: None, preview: None, datasets: host_ds,
         });
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
