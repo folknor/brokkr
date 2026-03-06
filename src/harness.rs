@@ -62,13 +62,14 @@ impl BenchHarness {
         db_root: Option<&Path>,
         project: crate::project::Project,
         lock_command: &str,
+        force: bool,
     ) -> Result<Self, DevError> {
         let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
             project: project.name(),
             command: lock_command,
             project_root: &project_root.display().to_string(),
         })?;
-        Self::new_with_lock(lock, paths, project_root, db_root, project)
+        Self::new_with_lock(lock, paths, project_root, db_root, project, force)
     }
 
     /// Create a new harness with a pre-acquired lock.
@@ -81,6 +82,7 @@ impl BenchHarness {
         project_root: &Path,
         db_root: Option<&Path>,
         project: crate::project::Project,
+        force: bool,
     ) -> Result<Self, DevError> {
         std::fs::create_dir_all(&paths.scratch_dir)?;
         let env = crate::env::collect(paths, project, project_root);
@@ -92,9 +94,16 @@ impl BenchHarness {
         let storage_notes = format_storage_notes(&paths.drives);
 
         if !git.is_clean {
-            output::error(
-                "WARNING: dirty tree — results will NOT be stored in database",
-            );
+            if force {
+                output::error(
+                    "WARNING: dirty tree — results will NOT be stored in database",
+                );
+            } else {
+                return Err(DevError::Preflight(vec![
+                    "dirty tree — commit or stash changes before benchmarking".into(),
+                    "run with --force to bench anyway (results will not be stored)".into(),
+                ]));
+            }
         }
 
         Ok(Self {

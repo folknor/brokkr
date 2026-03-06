@@ -85,10 +85,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             cmd_clean(&dev_config, project, &project_root)
         }
-        Command::Bench { verbose, commit, features, bench } => {
+        Command::Bench { verbose, commit, features, force, bench } => {
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_bench(&dev_config, project, &project_root, build_root, bench, &features)
+                cmd_bench(&dev_config, project, &project_root, build_root, bench, &features, force)
             })
         }
         Command::Verify { verbose, commit, verify } => {
@@ -118,6 +118,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             tiles,
             nodes,
             no_mem_check,
+            force,
         } => {
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
@@ -130,7 +131,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 let req = HotpathRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &dataset, variant: &variant, runs,
-                    all_features: &all_features, alloc, no_mem_check,
+                    all_features: &all_features, alloc, no_mem_check, force,
                 };
                 cmd_hotpath(
                     &req,
@@ -604,52 +605,52 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
 // Bench dispatch
 // ---------------------------------------------------------------------------
 
-fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String]) -> Result<(), DevError> {
+fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String], force: bool) -> Result<(), DevError> {
     match bench {
         // ----- pbfhogg bench variants -----
         BenchCommand::Commands { command, dataset, variant, osc_seq, runs } => {
             project::require(project, Project::Pbfhogg, "bench commands")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_commands(&req, &command, osc_seq.as_deref())
         }
         BenchCommand::Extract { dataset, variant, runs, bbox, strategies } => {
             project::require(project, Project::Pbfhogg, "bench extract")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_extract(&req, bbox.as_deref(), &strategies)
         }
         BenchCommand::Allocator { dataset, variant, runs } => {
             project::require(project, Project::Pbfhogg, "bench allocator")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_allocator(&req)
         }
         BenchCommand::BlobFilter { dataset, indexed_variant, raw_variant, runs } => {
             project::require(project, Project::Pbfhogg, "bench blob-filter")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &indexed_variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &indexed_variant, runs, features, force };
             pbfhogg::cmd::bench_blob_filter(&req, &raw_variant)
         }
         BenchCommand::Planetiler { dataset, variant, runs } => {
             project::require(project, Project::Pbfhogg, "bench planetiler")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_planetiler(&req)
         }
         BenchCommand::Read { dataset, variant, runs, modes } => {
             project::require(project, Project::Pbfhogg, "bench read")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_read(&req, &modes)
         }
         BenchCommand::Write { dataset, variant, runs, compression } => {
             project::require(project, Project::Pbfhogg, "bench write")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_write(&req, &compression)
         }
         BenchCommand::Merge { dataset, variant, osc_seq, runs, uring, compression } => {
             project::require(project, Project::Pbfhogg, "bench merge")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_merge(&req, osc_seq.as_deref(), uring, &compression)
         }
         BenchCommand::All { dataset, variant, runs } => {
             project::require(project, Project::Pbfhogg, "bench all")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_all(&req)
         }
 
@@ -670,7 +671,7 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             locations_on_ways,
         } => {
             project::require(project, Project::Elivagar, "bench self")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             elivagar::cmd::bench_self(
                 &req,
                 skip_to.as_deref(),
@@ -687,42 +688,42 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         }
         BenchCommand::NodeStore { nodes, runs } => {
             project::require(project, Project::Elivagar, "bench node-store")?;
-            elivagar::cmd::bench_node_store(dev_config, project, project_root, build_root, nodes, runs)
+            elivagar::cmd::bench_node_store(dev_config, project, project_root, build_root, nodes, runs, force)
         }
         BenchCommand::Pmtiles { tiles, runs } => {
             project::require(project, Project::Elivagar, "bench pmtiles")?;
-            elivagar::cmd::bench_pmtiles(dev_config, project, project_root, build_root, tiles, runs)
+            elivagar::cmd::bench_pmtiles(dev_config, project, project_root, build_root, tiles, runs, force)
         }
         BenchCommand::ElivPlanetiler { dataset, variant, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-planetiler")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             elivagar::cmd::bench_planetiler(&req)
         }
         BenchCommand::Tilemaker { dataset, variant, runs } => {
             project::require(project, Project::Elivagar, "bench tilemaker")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             elivagar::cmd::bench_tilemaker(&req)
         }
         BenchCommand::ElivAll { dataset, variant, runs } => {
             project::require(project, Project::Elivagar, "bench eliv-all")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             elivagar::cmd::bench_all(&req)
         }
 
         // ----- nidhogg bench variants -----
         BenchCommand::Api { dataset, runs, query } => {
             project::require(project, Project::Nidhogg, "bench api")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: "raw", runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: "raw", runs, features, force };
             nidhogg::cmd::bench_api(&req, query.as_deref())
         }
         BenchCommand::NidIngest { dataset, variant, runs } => {
             project::require(project, Project::Nidhogg, "bench ingest")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             nidhogg::cmd::bench_ingest(&req)
         }
         BenchCommand::Tiles { dataset, tiles, runs, uring } => {
             project::require(project, Project::Nidhogg, "bench tiles")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: "", runs, features };
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: "", runs, features, force };
             nidhogg::cmd::bench_tiles(&req, tiles.as_deref(), uring)
         }
     }

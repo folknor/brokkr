@@ -61,12 +61,13 @@ impl HarnessContext {
         project_root: &Path,
         build_root: Option<&Path>,
         lock_command: &str,
+        force: bool,
     ) -> Result<Self, DevError> {
         let pi = bootstrap(build_root)?;
         let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
         let effective = build_root.unwrap_or(project_root);
         let db_root = build_root.map(|_| project_root);
-        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, lock_command)?;
+        let harness = harness::BenchHarness::new(&paths, effective, db_root, project, lock_command, force)?;
         Ok(Self { paths, harness })
     }
 }
@@ -97,6 +98,7 @@ impl BenchContext {
         features: &[&str],
         default_features: bool,
         lock_command: &str,
+        force: bool,
     ) -> Result<Self, DevError> {
         let effective_build_root = build_root.unwrap_or(project_root);
         let pi = bootstrap(build_root)?;
@@ -122,7 +124,7 @@ impl BenchContext {
         };
         let binary = build::cargo_build(&build_config, effective_build_root)?;
         let db_root = build_root.map(|_| project_root);
-        let harness = harness::BenchHarness::new_with_lock(lock, &paths, effective_build_root, db_root, project)?
+        let harness = harness::BenchHarness::new_with_lock(lock, &paths, effective_build_root, db_root, project, force)?
             .with_cargo_features(cargo_features);
         Ok(Self { paths, harness, binary })
     }

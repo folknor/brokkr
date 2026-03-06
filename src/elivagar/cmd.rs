@@ -16,12 +16,13 @@ pub(crate) fn bench_node_store(
     build_root: Option<&Path>,
     nodes: usize,
     runs: usize,
+    force: bool,
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let db_root = build_root.map(|_| project_root);
     let effective = build_root.unwrap_or(project_root);
-    let harness = crate::harness::BenchHarness::new(&paths, effective, db_root, project, "bench node-store")?;
+    let harness = crate::harness::BenchHarness::new(&paths, effective, db_root, project, "bench node-store", force)?;
     super::bench_node_store::run(&harness, effective, nodes, runs)
 }
 
@@ -32,12 +33,13 @@ pub(crate) fn bench_pmtiles(
     build_root: Option<&Path>,
     tiles: usize,
     runs: usize,
+    force: bool,
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let db_root = build_root.map(|_| project_root);
     let effective = build_root.unwrap_or(project_root);
-    let harness = crate::harness::BenchHarness::new(&paths, effective, db_root, project, "bench pmtiles")?;
+    let harness = crate::harness::BenchHarness::new(&paths, effective, db_root, project, "bench pmtiles", force)?;
     super::bench_pmtiles::run(&harness, effective, tiles, runs)
 }
 
@@ -55,7 +57,7 @@ pub(crate) fn bench_self(
     locations_on_ways: bool,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, &feat_refs, true, "bench self")?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, &feat_refs, true, "bench self", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_self::run(
         &ctx.harness,
@@ -82,7 +84,7 @@ pub(crate) fn bench_self(
 pub(crate) fn bench_planetiler(
     req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench planetiler")?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench planetiler", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_planetiler::run(
         &ctx.harness,
@@ -98,7 +100,7 @@ pub(crate) fn bench_planetiler(
 pub(crate) fn bench_tilemaker(
     req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench tilemaker")?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench tilemaker", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_tilemaker::run(
         &ctx.harness,
@@ -114,7 +116,7 @@ pub(crate) fn bench_tilemaker(
 pub(crate) fn bench_all(
     req: &BenchRequest,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench all")?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench all", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let effective = req.build_root.unwrap_or(req.project_root);
     super::bench_all::run(
@@ -185,11 +187,11 @@ pub(crate) fn hotpath(
     if let Some(v) = variant {
         return match v {
             "pmtiles" => {
-                let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "hotpath pmtiles")?;
+                let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "hotpath pmtiles", req.force)?;
                 super::bench_pmtiles::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, req.build_root.unwrap_or(req.project_root), tiles, req.runs, req.alloc)
             }
             "node-store" => {
-                let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "hotpath node-store")?;
+                let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "hotpath node-store", req.force)?;
                 super::bench_node_store::run_hotpath(&ctx.harness, &ctx.paths.scratch_dir, req.build_root.unwrap_or(req.project_root), nodes, req.runs, req.alloc)
             }
             other => Err(DevError::Config(format!(
@@ -198,7 +200,7 @@ pub(crate) fn hotpath(
         };
     }
 
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, req.all_features, true, "hotpath")?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, req.all_features, true, "hotpath", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
@@ -237,7 +239,7 @@ pub(crate) fn profile(
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile")?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile", false)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
     let effective = req.build_root.unwrap_or(req.project_root);

@@ -113,7 +113,7 @@ pub(crate) fn bench_api(
     req: &BenchRequest,
     query: Option<&str>,
 ) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench api")?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench api", req.force)?;
     let port = resolve_port(req.dev_config);
 
     // Resolve dataset PBF for metadata recording.
@@ -130,7 +130,7 @@ pub(crate) fn bench_ingest(
     req: &BenchRequest,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &feat_refs, true, "bench ingest")?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &feat_refs, true, "bench ingest", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_ingest::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &ctx.paths.scratch_dir, req.project_root)
 }
@@ -147,7 +147,7 @@ pub(crate) fn bench_tiles(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &all_features, true, "bench tiles")?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), &all_features, true, "bench tiles", req.force)?;
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config);
 
@@ -216,7 +216,7 @@ pub(crate) fn verify_readonly(dev_config: &config::DevConfig, _project: Project,
 pub(crate) fn hotpath(
     req: &HotpathRequest,
 ) -> Result<(), DevError> {
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), req.all_features, true, "hotpath")?;
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("nidhogg"), req.all_features, true, "hotpath", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
@@ -238,7 +238,7 @@ pub(crate) fn profile(
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile")?;
+    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile", false)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
 

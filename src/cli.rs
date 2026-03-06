@@ -117,6 +117,10 @@ Examples:
         #[arg(long, value_delimiter = ',')]
         features: Vec<String>,
 
+        /// Run even if the git tree is dirty (results will not be stored)
+        #[arg(long)]
+        force: bool,
+
         #[command(subcommand)]
         bench: BenchCommand,
     },
@@ -151,6 +155,10 @@ Examples:
         /// Cargo features to enable (e.g. linux-io-uring)
         #[arg(long, value_delimiter = ',')]
         features: Vec<String>,
+
+        /// Run even if the git tree is dirty (results will not be stored)
+        #[arg(long)]
+        force: bool,
 
         /// Dataset name from brokkr.toml (default: denmark)
         #[arg(long, default_value = "denmark")]

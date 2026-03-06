@@ -13,6 +13,7 @@ pub(crate) struct BenchRequest<'a> {
     pub(crate) variant: &'a str,
     pub(crate) runs: usize,
     pub(crate) features: &'a [String],
+    pub(crate) force: bool,
 }
 
 /// Common parameters for hotpath command handlers.
@@ -27,6 +28,7 @@ pub(crate) struct HotpathRequest<'a> {
     pub(crate) all_features: &'a [&'a str],
     pub(crate) alloc: bool,
     pub(crate) no_mem_check: bool,
+    pub(crate) force: bool,
 }
 
 /// Common parameters for profile command handlers.
