@@ -30,6 +30,11 @@ pub fn run(
     force_sorted: bool,
     compression_level: Option<u32>,
     allow_unsafe_flat_index: bool,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
         .to_str()
@@ -75,6 +80,23 @@ pub fn run(
     if allow_unsafe_flat_index {
         args.push("--allow-unsafe-flat-index".into());
     }
+    if let Some(fmt) = tile_format {
+        args.push("--tile-format".into());
+        args.push(fmt.into());
+    }
+    if let Some(comp) = tile_compression {
+        args.push("--tile-compression".into());
+        args.push(comp.into());
+    }
+    if compress_sort_chunks {
+        args.push("--compress-sort-chunks".into());
+    }
+    if in_memory {
+        args.push("--in-memory".into());
+    }
+    if locations_on_ways {
+        args.push("--locations-on-ways".into());
+    }
 
     // Add ocean shapefile paths if they exist.
     super::push_ocean_args(&mut args, data_dir, no_ocean);
@@ -97,6 +119,15 @@ pub fn run(
         "meta.allow_unsafe_flat_index",
         allow_unsafe_flat_index.to_string(),
     ));
+    if let Some(v) = tile_format {
+        metadata.push(KvPair::text("meta.tile_format", v));
+    }
+    if let Some(v) = tile_compression {
+        metadata.push(KvPair::text("meta.tile_compression", v));
+    }
+    metadata.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.to_string()));
+    metadata.push(KvPair::text("meta.in_memory", in_memory.to_string()));
+    metadata.push(KvPair::text("meta.locations_on_ways", locations_on_ways.to_string()));
 
     let config = BenchConfig {
         command: "bench self".into(),

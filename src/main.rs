@@ -109,6 +109,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             no_ocean,
             force_sorted,
             allow_unsafe_flat_index,
+            tile_format,
+            tile_compression,
+            compress_sort_chunks,
+            in_memory,
+            locations_on_ways,
             runs,
             tiles,
             nodes,
@@ -136,6 +141,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     target.as_deref(),
                     tiles,
                     nodes,
+                    tile_format.as_deref(),
+                    tile_compression.as_deref(),
+                    compress_sort_chunks,
+                    in_memory,
+                    locations_on_ways,
                 )
             })
         }
@@ -150,6 +160,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             no_ocean,
             force_sorted,
             allow_unsafe_flat_index,
+            tile_format,
+            tile_compression,
+            compress_sort_chunks,
+            in_memory,
+            locations_on_ways,
             no_mem_check,
         } => {
             output::set_quiet(!verbose);
@@ -168,6 +183,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     no_ocean,
                     force_sorted,
                     allow_unsafe_flat_index,
+                    tile_format.as_deref(),
+                    tile_compression.as_deref(),
+                    compress_sort_chunks,
+                    in_memory,
+                    locations_on_ways,
                 )
             })
         }
@@ -643,6 +663,11 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             force_sorted,
             compression_level,
             allow_unsafe_flat_index,
+            tile_format,
+            tile_compression,
+            compress_sort_chunks,
+            in_memory,
+            locations_on_ways,
         } => {
             project::require(project, Project::Elivagar, "bench self")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features };
@@ -653,6 +678,11 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
                 force_sorted,
                 compression_level,
                 allow_unsafe_flat_index,
+                tile_format.as_deref(),
+                tile_compression.as_deref(),
+                compress_sort_chunks,
+                in_memory,
+                locations_on_ways,
             )
         }
         BenchCommand::NodeStore { nodes, runs } => {
@@ -704,6 +734,12 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
 
 fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand) -> Result<(), DevError> {
     match verify {
+        // ----- elivagar verify variants -----
+        VerifyCommand::ElivVerify { dataset, tiles } => {
+            project::require(project, Project::Elivagar, "verify")?;
+            elivagar::cmd::verify(dev_config, project, project_root, build_root, &dataset, tiles.as_deref())
+        }
+
         // ----- nidhogg verify variants -----
         VerifyCommand::Batch => {
             project::require(project, Project::Nidhogg, "verify batch")?;
@@ -738,6 +774,11 @@ fn cmd_hotpath(
     target: Option<&str>,
     tiles: usize,
     nodes: usize,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
 ) -> Result<(), DevError> {
     if target.is_some() && req.project != Project::Elivagar {
         return Err(DevError::Config(
@@ -754,6 +795,11 @@ fn cmd_hotpath(
             no_ocean,
             force_sorted,
             allow_unsafe_flat_index,
+            tile_format,
+            tile_compression,
+            compress_sort_chunks,
+            in_memory,
+            locations_on_ways,
         ),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
         _ => {
@@ -770,6 +816,11 @@ fn cmd_profile(
     no_ocean: bool,
     force_sorted: bool,
     allow_unsafe_flat_index: bool,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
 ) -> Result<(), DevError> {
     match req.project {
         Project::Elivagar => elivagar::cmd::profile(
@@ -778,6 +829,11 @@ fn cmd_profile(
             no_ocean,
             force_sorted,
             allow_unsafe_flat_index,
+            tile_format,
+            tile_compression,
+            compress_sort_chunks,
+            in_memory,
+            locations_on_ways,
         ),
         Project::Nidhogg => nidhogg::cmd::profile(req, tool),
         _ => {

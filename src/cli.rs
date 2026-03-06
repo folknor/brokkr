@@ -180,6 +180,22 @@ Examples:
         #[arg(long)]
         allow_unsafe_flat_index: bool,
 
+        /// Tile output format (mvt or mlt, elivagar only)
+        #[arg(long)]
+        tile_format: Option<String>,
+        /// Tile compression (gzip or brotli, elivagar only)
+        #[arg(long)]
+        tile_compression: Option<String>,
+        /// Compress sort chunks with LZ4 (elivagar only)
+        #[arg(long)]
+        compress_sort_chunks: bool,
+        /// Keep tile blob in memory (elivagar only)
+        #[arg(long)]
+        in_memory: bool,
+        /// Input PBF has locations on ways (elivagar only)
+        #[arg(long)]
+        locations_on_ways: bool,
+
         /// Number of runs; best-of-N is stored (default: 1)
         #[arg(long, default_value = "1")]
         runs: usize,
@@ -238,6 +254,22 @@ Examples:
         /// Bypass elivagar flat-index safety guardrails (unsafe)
         #[arg(long)]
         allow_unsafe_flat_index: bool,
+
+        /// Tile output format (mvt or mlt, elivagar only)
+        #[arg(long)]
+        tile_format: Option<String>,
+        /// Tile compression (gzip or brotli, elivagar only)
+        #[arg(long)]
+        tile_compression: Option<String>,
+        /// Compress sort chunks with LZ4 (elivagar only)
+        #[arg(long)]
+        compress_sort_chunks: bool,
+        /// Keep tile blob in memory (elivagar only)
+        #[arg(long)]
+        in_memory: bool,
+        /// Input PBF has locations on ways (elivagar only)
+        #[arg(long)]
+        locations_on_ways: bool,
 
         /// Skip memory availability check
         #[arg(long)]
@@ -465,6 +497,21 @@ pub(crate) enum BenchCommand {
         /// Bypass elivagar flat-index safety guardrails (unsafe)
         #[arg(long)]
         allow_unsafe_flat_index: bool,
+        /// Tile output format (mvt or mlt)
+        #[arg(long)]
+        tile_format: Option<String>,
+        /// Tile compression (gzip or brotli)
+        #[arg(long)]
+        tile_compression: Option<String>,
+        /// Compress sort chunks with LZ4
+        #[arg(long)]
+        compress_sort_chunks: bool,
+        /// Keep tile blob in memory
+        #[arg(long)]
+        in_memory: bool,
+        /// Input PBF has locations on ways
+        #[arg(long)]
+        locations_on_ways: bool,
     },
     /// [elivagar] SortedNodeStore benchmark
     #[command(display_order = 11)]
@@ -655,6 +702,17 @@ pub(crate) enum VerifyCommand {
         osc_seq: Option<String>,
         #[arg(long)]
         bbox: Option<String>,
+    },
+
+    /// [elivagar] Verify PMTiles output integrity
+    #[command(display_order = 15)]
+    ElivVerify {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PMTiles variant from config (auto-selects if only one configured)
+        #[arg(long)]
+        tiles: Option<String>,
     },
 
     /// [nidhogg] Batch query verification

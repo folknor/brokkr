@@ -7,7 +7,7 @@ use crate::oom;
 use crate::preflight;
 use crate::project::{self, Project};
 use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
-use crate::resolve::resolve_pbf_with_size;
+use crate::resolve::{resolve_pbf_with_size, resolve_default_pmtiles_path, resolve_pmtiles_path};
 
 pub(crate) fn bench_node_store(
     dev_config: &config::DevConfig,
@@ -48,6 +48,11 @@ pub(crate) fn bench_self(
     force_sorted: bool,
     compression_level: Option<u32>,
     allow_unsafe_flat_index: bool,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, &feat_refs, true, "bench self")?;
@@ -66,6 +71,11 @@ pub(crate) fn bench_self(
         force_sorted,
         compression_level,
         allow_unsafe_flat_index,
+        tile_format,
+        tile_compression,
+        compress_sort_chunks,
+        in_memory,
+        locations_on_ways,
     )
 }
 
@@ -138,6 +148,25 @@ pub(crate) fn download_ocean(dev_config: &config::DevConfig, project: Project, p
     super::download_ocean::run(&paths.data_dir)
 }
 
+pub(crate) fn verify(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    build_root: Option<&Path>,
+    dataset: &str,
+    tiles_variant: Option<&str>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "verify")?;
+    let pi = bootstrap(build_root)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let pmtiles_path = match tiles_variant {
+        Some(v) => resolve_pmtiles_path(dataset, v, &paths, project_root)?,
+        None => resolve_default_pmtiles_path(dataset, &paths, project_root)?,
+    };
+    let effective = build_root.unwrap_or(project_root);
+    super::verify::run(&pmtiles_path, effective)
+}
+
 pub(crate) fn hotpath(
     req: &HotpathRequest,
     variant: Option<&str>,
@@ -146,6 +175,11 @@ pub(crate) fn hotpath(
     no_ocean: bool,
     force_sorted: bool,
     allow_unsafe_flat_index: bool,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
 ) -> Result<(), DevError> {
     // Micro-benchmark variants: build the example with hotpath and run it.
     if let Some(v) = variant {
@@ -180,6 +214,11 @@ pub(crate) fn hotpath(
         no_ocean,
         force_sorted,
         allow_unsafe_flat_index,
+        tile_format,
+        tile_compression,
+        compress_sort_chunks,
+        in_memory,
+        locations_on_ways,
         req.project_root,
     )
 }
@@ -190,6 +229,11 @@ pub(crate) fn profile(
     no_ocean: bool,
     force_sorted: bool,
     allow_unsafe_flat_index: bool,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
@@ -207,6 +251,11 @@ pub(crate) fn profile(
         no_ocean,
         force_sorted,
         allow_unsafe_flat_index,
+        tile_format,
+        tile_compression,
+        compress_sort_chunks,
+        in_memory,
+        locations_on_ways,
         req.features,
         effective,
     )

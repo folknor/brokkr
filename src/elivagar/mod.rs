@@ -11,6 +11,7 @@ pub mod compare_tiles;
 pub mod download_ocean;
 pub mod hotpath;
 pub mod profile;
+pub mod verify;
 
 /// Detect ocean shapefiles in the data directory.
 ///

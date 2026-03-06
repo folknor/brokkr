@@ -34,6 +34,11 @@ pub fn run(
     no_ocean: bool,
     force_sorted: bool,
     allow_unsafe_flat_index: bool,
+    tile_format: Option<&str>,
+    tile_compression: Option<&str>,
+    compress_sort_chunks: bool,
+    in_memory: bool,
+    locations_on_ways: bool,
     project_root: &Path,
 ) -> Result<(), DevError> {
     let binary_str = binary
@@ -72,6 +77,23 @@ pub fn run(
     if allow_unsafe_flat_index {
         args.push("--allow-unsafe-flat-index".into());
     }
+    if let Some(fmt) = tile_format {
+        args.push("--tile-format".into());
+        args.push(fmt.into());
+    }
+    if let Some(comp) = tile_compression {
+        args.push("--tile-compression".into());
+        args.push(comp.into());
+    }
+    if compress_sort_chunks {
+        args.push("--compress-sort-chunks".into());
+    }
+    if in_memory {
+        args.push("--in-memory".into());
+    }
+    if locations_on_ways {
+        args.push("--locations-on-ways".into());
+    }
 
     let label = crate::harness::hotpath_feature(alloc);
     output::hotpath_msg(&format!("=== elivagar {label} ==="));
@@ -102,15 +124,27 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
-        metadata: vec![
-            KvPair::text("meta.alloc", alloc.to_string()),
-            KvPair::text("meta.ocean", (!no_ocean).to_string()),
-            KvPair::text("meta.force_sorted", force_sorted.to_string()),
-            KvPair::text(
-                "meta.allow_unsafe_flat_index",
-                allow_unsafe_flat_index.to_string(),
-            ),
-        ],
+        metadata: {
+            let mut m = vec![
+                KvPair::text("meta.alloc", alloc.to_string()),
+                KvPair::text("meta.ocean", (!no_ocean).to_string()),
+                KvPair::text("meta.force_sorted", force_sorted.to_string()),
+                KvPair::text(
+                    "meta.allow_unsafe_flat_index",
+                    allow_unsafe_flat_index.to_string(),
+                ),
+            ];
+            if let Some(v) = tile_format {
+                m.push(KvPair::text("meta.tile_format", v));
+            }
+            if let Some(v) = tile_compression {
+                m.push(KvPair::text("meta.tile_compression", v));
+            }
+            m.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.to_string()));
+            m.push(KvPair::text("meta.in_memory", in_memory.to_string()));
+            m.push(KvPair::text("meta.locations_on_ways", locations_on_ways.to_string()));
+            m
+        },
     };
 
     harness.run_internal(&config, |_i| {

@@ -54,7 +54,7 @@ Single crate, single binary. No workspace.
 ### Project-specific modules
 
 - `src/pbfhogg/` — 25 modules: benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), hotpath, profile, download
-- `src/elivagar/` — 11 modules: benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), compare-tiles, download-ocean, hotpath, profile
+- `src/elivagar/` — 12 modules: benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath, profile
 - `src/nidhogg/` — 13 modules: server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath, profile. `mod.rs` has shared curl helpers and query constants.
 
 ## brokkr.toml format

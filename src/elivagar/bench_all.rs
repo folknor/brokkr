@@ -42,6 +42,11 @@ pub fn run(
         false,   // force_sorted
         None,    // compression_level
         false,   // allow_unsafe_flat_index
+        None,    // tile_format
+        None,    // tile_compression
+        false,   // compress_sort_chunks
+        false,   // in_memory
+        false,   // locations_on_ways
     )?;
 
     // 2. bench planetiler -- comparison baseline
