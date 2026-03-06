@@ -350,10 +350,10 @@ pub fn find_executable(
         };
         if let Some(exe) = val.get("executable").and_then(serde_json::Value::as_str) {
             let path = PathBuf::from(exe);
-            if let Some(name) = expected_name {
-                if path.file_stem().and_then(|s| s.to_str()) == Some(name) {
-                    matched_exe = Some(path.clone());
-                }
+            if expected_name.is_some()
+                && path.file_stem().and_then(|s| s.to_str()) == expected_name
+            {
+                matched_exe = Some(path.clone());
             }
             last_exe = Some(path);
         }

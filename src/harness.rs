@@ -248,7 +248,23 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
+        let (best, _stderr) = self.run_external_with_kv_raw(config, program, args, cwd)?;
+        self.record_result(config, &best)?;
+        Ok(best)
+    }
+
+    /// Like `run_external_with_kv` but does NOT record — returns the best
+    /// result and the raw stderr from the best run. Caller is responsible for
+    /// calling `record_result` after any post-processing.
+    pub fn run_external_with_kv_raw(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+    ) -> Result<(BenchResult, Vec<u8>), DevError> {
         let mut best: Option<BenchResult> = None;
+        let mut best_stderr: Vec<u8> = Vec::new();
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
@@ -262,6 +278,10 @@ impl BenchHarness {
             captured.check_success(&program.display().to_string())?;
 
             let result = parse_kv_stderr(&captured.stderr)?;
+            let is_new_best = best.as_ref().is_none_or(|b| result.elapsed_ms < b.elapsed_ms);
+            if is_new_best {
+                best_stderr = captured.stderr;
+            }
             best = Some(pick_best(best, result));
         }
 
@@ -269,8 +289,7 @@ impl BenchHarness {
             DevError::Config("benchmark requires at least 1 run".into())
         })?;
 
-        self.record_result(config, &best)?;
-        Ok(best)
+        Ok((best, best_stderr))
     }
 
     // -----------------------------------------------------------------------
@@ -543,7 +562,7 @@ pub fn run_hotpath_capture(
     scratch_dir: &std::path::Path,
     project_root: &std::path::Path,
     extra_env: &[(&str, &str)],
-) -> Result<BenchResult, crate::error::DevError> {
+) -> Result<(BenchResult, Vec<u8>), crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
 
@@ -565,6 +584,7 @@ pub fn run_hotpath_capture(
 
     let ms = elapsed_to_ms(&captured.elapsed);
     let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);
+    let stderr = captured.stderr;
 
     let hotpath = std::fs::read_to_string(&json_file)
         .ok()
@@ -572,12 +592,12 @@ pub fn run_hotpath_capture(
         .and_then(|v| db::hotpath_data_from_json(&v));
     std::fs::remove_file(&json_file).ok();
 
-    Ok(BenchResult {
+    Ok((BenchResult {
         elapsed_ms: ms,
         kv,
         distribution: None,
         hotpath,
-    })
+    }, stderr))
 }
 
 /// Compute a percentile from a sorted slice using linear interpolation.

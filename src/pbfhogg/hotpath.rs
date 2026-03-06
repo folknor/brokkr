@@ -160,7 +160,8 @@ pub fn run(
         let result = harness.run_internal(&config, |_i| {
             output::hotpath_msg(test.label);
             let program = binary.display().to_string();
-            harness::run_hotpath_capture(&program, &subprocess_args, scratch_dir, project_root, &[])
+            let (result, _stderr) = harness::run_hotpath_capture(&program, &subprocess_args, scratch_dir, project_root, &[])?;
+            Ok(result)
         });
 
         match result {

@@ -133,21 +133,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     dataset: &dataset, variant: &variant, runs,
                     all_features: &all_features, alloc, no_mem_check, force,
                 };
-                cmd_hotpath(
-                    &req,
-                    osc_seq.as_deref(),
-                    no_ocean,
-                    force_sorted,
-                    allow_unsafe_flat_index,
-                    target.as_deref(),
-                    tiles,
-                    nodes,
-                    tile_format.as_deref(),
-                    tile_compression.as_deref(),
-                    compress_sort_chunks.as_deref(),
-                    in_memory,
-                    locations_on_ways,
-                )
+                let opts = elivagar::PipelineOpts {
+                    no_ocean, force_sorted, allow_unsafe_flat_index,
+                    tile_format: tile_format.as_deref(),
+                    tile_compression: tile_compression.as_deref(),
+                    compress_sort_chunks: compress_sort_chunks.as_deref(),
+                    in_memory, locations_on_ways,
+                };
+                cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, &opts)
             })
         }
         Command::Profile {
@@ -177,19 +170,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &dataset, variant: &variant, features: &features, no_mem_check,
                 };
-                cmd_profile(
-                    &req,
-                    osc_seq.as_deref(),
-                    tool.as_deref(),
-                    no_ocean,
-                    force_sorted,
-                    allow_unsafe_flat_index,
-                    tile_format.as_deref(),
-                    tile_compression.as_deref(),
-                    compress_sort_chunks.as_deref(),
-                    in_memory,
-                    locations_on_ways,
-                )
+                let opts = elivagar::PipelineOpts {
+                    no_ocean, force_sorted, allow_unsafe_flat_index,
+                    tile_format: tile_format.as_deref(),
+                    tile_compression: tile_compression.as_deref(),
+                    compress_sort_chunks: compress_sort_chunks.as_deref(),
+                    in_memory, locations_on_ways,
+                };
+                cmd_profile(&req, osc_seq.as_deref(), tool.as_deref(), &opts)
             })
         }
         Command::Download { region, osc_url } => {
@@ -605,6 +593,7 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
 // Bench dispatch
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String], force: bool) -> Result<(), DevError> {
     match bench {
         // ----- pbfhogg bench variants -----
@@ -672,19 +661,14 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
         } => {
             project::require(project, Project::Elivagar, "bench self")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            elivagar::cmd::bench_self(
-                &req,
-                skip_to.as_deref(),
-                no_ocean,
-                force_sorted,
-                compression_level,
-                allow_unsafe_flat_index,
-                tile_format.as_deref(),
-                tile_compression.as_deref(),
-                compress_sort_chunks.as_deref(),
-                in_memory,
-                locations_on_ways,
-            )
+            let opts = elivagar::PipelineOpts {
+                no_ocean, force_sorted, allow_unsafe_flat_index,
+                tile_format: tile_format.as_deref(),
+                tile_compression: tile_compression.as_deref(),
+                compress_sort_chunks: compress_sort_chunks.as_deref(),
+                in_memory, locations_on_ways,
+            };
+            elivagar::cmd::bench_self(&req, skip_to.as_deref(), compression_level, &opts)
         }
         BenchCommand::NodeStore { nodes, runs } => {
             project::require(project, Project::Elivagar, "bench node-store")?;
@@ -769,17 +753,10 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
 fn cmd_hotpath(
     req: &HotpathRequest,
     osc_seq: Option<&str>,
-    no_ocean: bool,
-    force_sorted: bool,
-    allow_unsafe_flat_index: bool,
     target: Option<&str>,
     tiles: usize,
     nodes: usize,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &elivagar::PipelineOpts,
 ) -> Result<(), DevError> {
     if target.is_some() && req.project != Project::Elivagar {
         return Err(DevError::Config(
@@ -788,20 +765,7 @@ fn cmd_hotpath(
     }
 
     match req.project {
-        Project::Elivagar => elivagar::cmd::hotpath(
-            req,
-            target,
-            tiles,
-            nodes,
-            no_ocean,
-            force_sorted,
-            allow_unsafe_flat_index,
-            tile_format,
-            tile_compression,
-            compress_sort_chunks,
-            in_memory,
-            locations_on_ways,
-        ),
+        Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, opts),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
@@ -814,28 +778,10 @@ fn cmd_profile(
     req: &ProfileRequest,
     osc_seq: Option<&str>,
     tool: Option<&str>,
-    no_ocean: bool,
-    force_sorted: bool,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &elivagar::PipelineOpts,
 ) -> Result<(), DevError> {
     match req.project {
-        Project::Elivagar => elivagar::cmd::profile(
-            req,
-            tool,
-            no_ocean,
-            force_sorted,
-            allow_unsafe_flat_index,
-            tile_format,
-            tile_compression,
-            compress_sort_chunks,
-            in_memory,
-            locations_on_ways,
-        ),
+        Project::Elivagar => elivagar::cmd::profile(req, tool, opts),
         Project::Nidhogg => nidhogg::cmd::profile(req, tool),
         _ => {
             project::require(req.project, Project::Pbfhogg, "profile")?;

@@ -10,7 +10,7 @@ use crate::harness;
 use crate::output;
 
 /// Run the application under `perf record` and save the profile data.
-/// Returns the elapsed wall-clock time in milliseconds.
+/// Returns (elapsed_ms, raw_stderr).
 pub fn run_perf(
     binary_str: &str,
     app_args: &[String],
@@ -18,7 +18,7 @@ pub fn run_perf(
     commit: &str,
     data_dir: &Path,
     project_root: &Path,
-) -> Result<i64, DevError> {
+) -> Result<(i64, Vec<u8>), DevError> {
     let perf_data = data_dir.join(format!("perf-{hostname}-{commit}.data"));
     let perf_data_str = perf_data.display().to_string();
 
@@ -41,6 +41,7 @@ pub fn run_perf(
 
     let captured = output::run_captured("perf", &args_refs, project_root)?;
 
+    let raw_stderr = captured.stderr.clone();
     let stderr = String::from_utf8_lossy(&captured.stderr);
     if !stderr.is_empty() {
         eprint!("{stderr}");
@@ -57,11 +58,11 @@ pub fn run_perf(
         "  perf report -i {perf_data_str} --no-children    (self time only)"
     ));
 
-    Ok(elapsed_ms)
+    Ok((elapsed_ms, raw_stderr))
 }
 
 /// Run the application under `samply record` and save the profile data.
-/// Returns the elapsed wall-clock time in milliseconds.
+/// Returns (elapsed_ms, raw_stderr).
 pub fn run_samply(
     binary_str: &str,
     app_args: &[String],
@@ -69,7 +70,7 @@ pub fn run_samply(
     commit: &str,
     data_dir: &Path,
     project_root: &Path,
-) -> Result<i64, DevError> {
+) -> Result<(i64, Vec<u8>), DevError> {
     let profile_out = data_dir.join(format!("samply-{hostname}-{commit}.json.gz"));
     let profile_out_str = profile_out.display().to_string();
 
@@ -88,6 +89,7 @@ pub fn run_samply(
 
     let captured = output::run_captured("samply", &args_refs, project_root)?;
 
+    let raw_stderr = captured.stderr.clone();
     let stderr = String::from_utf8_lossy(&captured.stderr);
     if !stderr.is_empty() {
         eprint!("{stderr}");
@@ -100,5 +102,5 @@ pub fn run_samply(
     output::run_msg(&format!("profile saved to {profile_out_str}"));
     output::run_msg(&format!("view with: samply load {profile_out_str}"));
 
-    Ok(elapsed_ms)
+    Ok((elapsed_ms, raw_stderr))
 }

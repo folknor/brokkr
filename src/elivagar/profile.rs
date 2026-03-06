@@ -28,14 +28,7 @@ pub fn run(
     data_dir: &Path,
     scratch_dir: &Path,
     tool: &str,
-    no_ocean: bool,
-    force_sorted: bool,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &super::PipelineOpts,
     extra_features: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
@@ -90,38 +83,13 @@ pub fn run(
         tmp_dir_str,
     ];
 
-    // Ocean flags.
-    super::push_ocean_args(&mut elivagar_args, data_dir, no_ocean);
-    if force_sorted {
-        elivagar_args.push("--force-sorted".into());
-    }
-    if allow_unsafe_flat_index {
-        elivagar_args.push("--allow-unsafe-flat-index".into());
-    }
-    if let Some(fmt) = tile_format {
-        elivagar_args.push("--tile-format".into());
-        elivagar_args.push(fmt.into());
-    }
-    if let Some(comp) = tile_compression {
-        elivagar_args.push("--tile-compression".into());
-        elivagar_args.push(comp.into());
-    }
-    if let Some(algo) = compress_sort_chunks {
-        elivagar_args.push("--compress-sort-chunks".into());
-        elivagar_args.push(algo.into());
-    }
-    if in_memory {
-        elivagar_args.push("--in-memory".into());
-    }
-    if locations_on_ways {
-        elivagar_args.push("--locations-on-ways".into());
-    }
+    opts.push_args(&mut elivagar_args, data_dir);
 
     // Collect git info for profiler output naming.
     let git_info = crate::git::collect(project_root)?;
     let hostname = crate::config::hostname()?;
 
-    let elapsed_ms = match tool {
+    let (elapsed_ms, raw_stderr) = match tool {
         "perf" => crate::profiler::run_perf(
             &binary_str,
             &elivagar_args,
@@ -142,7 +110,7 @@ pub fn run(
     }?;
 
     // Store result in DB.
-    let bench_config = BenchConfig {
+    let mut bench_config = BenchConfig {
         command: "profile".into(),
         variant: Some(tool.into()),
         input_file: Some(basename),
@@ -152,27 +120,14 @@ pub fn run(
         runs: 1,
         cli_args: None,
         metadata: {
-            let mut m = vec![
-                KvPair::text("meta.tool", tool),
-                KvPair::text("meta.ocean", (!no_ocean).to_string()),
-                KvPair::text("meta.force_sorted", force_sorted.to_string()),
-                KvPair::text(
-                    "meta.allow_unsafe_flat_index",
-                    allow_unsafe_flat_index.to_string(),
-                ),
-            ];
-            if let Some(v) = tile_format {
-                m.push(KvPair::text("meta.tile_format", v));
-            }
-            if let Some(v) = tile_compression {
-                m.push(KvPair::text("meta.tile_compression", v));
-            }
-            m.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.unwrap_or("none")));
-            m.push(KvPair::text("meta.in_memory", in_memory.to_string()));
-            m.push(KvPair::text("meta.locations_on_ways", locations_on_ways.to_string()));
+            let mut m = opts.metadata();
+            m.push(KvPair::text("meta.tool", tool));
             m
         },
     };
+
+    let detected = super::detect_locations_on_ways_stderr(&raw_stderr);
+    bench_config.metadata.push(KvPair::text("meta.locations_on_ways_detected", detected.to_string()));
 
     let result = BenchResult {
         elapsed_ms,

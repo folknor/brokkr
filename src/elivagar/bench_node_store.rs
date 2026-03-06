@@ -138,13 +138,14 @@ pub fn run_hotpath(
     };
 
     harness.run_internal(&config, |_i| {
-        harness::run_hotpath_capture(
+        let (result, _stderr) = harness::run_hotpath_capture(
             &binary_str,
             &["--nodes", &nodes_str, "--runs", &runs_str],
             scratch_dir,
             project_root,
             &[],
-        )
+        )?;
+        Ok(result)
     })?;
 
     Ok(())

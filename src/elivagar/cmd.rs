@@ -46,38 +46,16 @@ pub(crate) fn bench_pmtiles(
 pub(crate) fn bench_self(
     req: &BenchRequest,
     skip_to: Option<&str>,
-    no_ocean: bool,
-    force_sorted: bool,
     compression_level: Option<u32>,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, None, &feat_refs, true, "bench self", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_self::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        file_mb,
-        req.runs,
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        req.project_root,
-        skip_to,
-        no_ocean,
-        force_sorted,
-        compression_level,
-        allow_unsafe_flat_index,
-        tile_format,
-        tile_compression,
-        compress_sort_chunks,
-        in_memory,
-        locations_on_ways,
+        &ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs,
+        &ctx.paths.data_dir, &ctx.paths.scratch_dir, req.project_root,
+        skip_to, compression_level, opts,
     )
 }
 
@@ -174,14 +152,7 @@ pub(crate) fn hotpath(
     variant: Option<&str>,
     tiles: usize,
     nodes: usize,
-    no_ocean: bool,
-    force_sorted: bool,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     // Micro-benchmark variants: build the example with hotpath and run it.
     if let Some(v) = variant {
@@ -205,37 +176,15 @@ pub(crate) fn hotpath(
     let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
     super::hotpath::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        file_mb,
-        req.runs,
-        req.alloc,
-        no_ocean,
-        force_sorted,
-        allow_unsafe_flat_index,
-        tile_format,
-        tile_compression,
-        compress_sort_chunks,
-        in_memory,
-        locations_on_ways,
-        req.project_root,
+        &ctx.harness, &ctx.binary, &pbf_path, &ctx.paths.data_dir, &ctx.paths.scratch_dir,
+        file_mb, req.runs, req.alloc, opts, req.project_root,
     )
 }
 
 pub(crate) fn profile(
     req: &ProfileRequest,
     tool: Option<&str>,
-    no_ocean: bool,
-    force_sorted: bool,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     let tool_name = tool.unwrap_or("perf");
     preflight::run_preflight(&preflight::profile_checks(tool_name))?;
@@ -244,21 +193,7 @@ pub(crate) fn profile(
     oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
     let effective = req.build_root.unwrap_or(req.project_root);
     super::profile::run(
-        &ctx.harness,
-        &pbf_path,
-        file_mb,
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        tool_name,
-        no_ocean,
-        force_sorted,
-        allow_unsafe_flat_index,
-        tile_format,
-        tile_compression,
-        compress_sort_chunks,
-        in_memory,
-        locations_on_ways,
-        req.features,
-        effective,
+        &ctx.harness, &pbf_path, file_mb, &ctx.paths.data_dir, &ctx.paths.scratch_dir,
+        tool_name, opts, req.features, effective,
     )
 }

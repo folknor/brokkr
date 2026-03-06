@@ -26,15 +26,8 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
     skip_to: Option<&str>,
-    no_ocean: bool,
-    force_sorted: bool,
     compression_level: Option<u32>,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
         .to_str()
@@ -69,38 +62,11 @@ pub fn run(
         args.push("--skip-to".into());
         args.push(phase.into());
     }
-
     if let Some(level) = compression_level {
         args.push("--compression-level".into());
         args.push(level.to_string());
     }
-    if force_sorted {
-        args.push("--force-sorted".into());
-    }
-    if allow_unsafe_flat_index {
-        args.push("--allow-unsafe-flat-index".into());
-    }
-    if let Some(fmt) = tile_format {
-        args.push("--tile-format".into());
-        args.push(fmt.into());
-    }
-    if let Some(comp) = tile_compression {
-        args.push("--tile-compression".into());
-        args.push(comp.into());
-    }
-    if let Some(algo) = compress_sort_chunks {
-        args.push("--compress-sort-chunks".into());
-        args.push(algo.into());
-    }
-    if in_memory {
-        args.push("--in-memory".into());
-    }
-    if locations_on_ways {
-        args.push("--locations-on-ways".into());
-    }
-
-    // Add ocean shapefile paths if they exist.
-    super::push_ocean_args(&mut args, data_dir, no_ocean);
+    opts.push_args(&mut args, data_dir);
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -108,29 +74,15 @@ pub fn run(
         "elivagar pipeline: {basename} ({file_mb:.0} MB), {runs} run(s)"
     ));
 
-    let mut metadata = vec![KvPair::text("meta.ocean", (!no_ocean).to_string())];
+    let mut metadata = opts.metadata();
     if let Some(v) = skip_to {
         metadata.push(KvPair::text("meta.skip_to", v));
     }
     if let Some(v) = compression_level {
         metadata.push(KvPair::int("meta.compression_level", v as i64));
     }
-    metadata.push(KvPair::text("meta.force_sorted", force_sorted.to_string()));
-    metadata.push(KvPair::text(
-        "meta.allow_unsafe_flat_index",
-        allow_unsafe_flat_index.to_string(),
-    ));
-    if let Some(v) = tile_format {
-        metadata.push(KvPair::text("meta.tile_format", v));
-    }
-    if let Some(v) = tile_compression {
-        metadata.push(KvPair::text("meta.tile_compression", v));
-    }
-    metadata.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.unwrap_or("none")));
-    metadata.push(KvPair::text("meta.in_memory", in_memory.to_string()));
-    metadata.push(KvPair::text("meta.locations_on_ways", locations_on_ways.to_string()));
 
-    let config = BenchConfig {
+    let mut config = BenchConfig {
         command: "bench self".into(),
         variant: None,
         input_file: Some(basename),
@@ -144,7 +96,11 @@ pub fn run(
 
     // Use kv parsing: elivagar emits elapsed_ms, phase12_ms, ocean_ms,
     // phase3_ms, phase4_ms, features, tiles, output_bytes to stderr.
-    harness.run_external_with_kv(&config, binary, &arg_refs, project_root)?;
+    // Use _raw so we can detect LocationsOnWays from stderr before recording.
+    let (result, stderr) = harness.run_external_with_kv_raw(&config, binary, &arg_refs, project_root)?;
+    let detected = super::detect_locations_on_ways_stderr(&stderr);
+    config.metadata.push(KvPair::text("meta.locations_on_ways_detected", detected.to_string()));
+    harness.record_result(&config, &result)?;
 
     // Clean up output.
     std::fs::remove_file(&output_path).ok();

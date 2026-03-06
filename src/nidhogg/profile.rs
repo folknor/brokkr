@@ -78,7 +78,7 @@ pub fn run(
     let git_info = crate::git::collect(project_root)?;
     let hostname = crate::config::hostname()?;
 
-    let elapsed_ms = match tool {
+    let (elapsed_ms, _raw_stderr) = match tool {
         "perf" => crate::profiler::run_perf(
             &binary_str,
             &nidhogg_args,

@@ -31,14 +31,7 @@ pub fn run(
     file_mb: f64,
     runs: usize,
     alloc: bool,
-    no_ocean: bool,
-    force_sorted: bool,
-    allow_unsafe_flat_index: bool,
-    tile_format: Option<&str>,
-    tile_compression: Option<&str>,
-    compress_sort_chunks: Option<&str>,
-    in_memory: bool,
-    locations_on_ways: bool,
+    opts: &super::PipelineOpts,
     project_root: &Path,
 ) -> Result<(), DevError> {
     let binary_str = binary
@@ -69,32 +62,7 @@ pub fn run(
         tmp_dir_str,
     ];
 
-    // Ocean flags.
-    super::push_ocean_args(&mut args, data_dir, no_ocean);
-    if force_sorted {
-        args.push("--force-sorted".into());
-    }
-    if allow_unsafe_flat_index {
-        args.push("--allow-unsafe-flat-index".into());
-    }
-    if let Some(fmt) = tile_format {
-        args.push("--tile-format".into());
-        args.push(fmt.into());
-    }
-    if let Some(comp) = tile_compression {
-        args.push("--tile-compression".into());
-        args.push(comp.into());
-    }
-    if let Some(algo) = compress_sort_chunks {
-        args.push("--compress-sort-chunks".into());
-        args.push(algo.into());
-    }
-    if in_memory {
-        args.push("--in-memory".into());
-    }
-    if locations_on_ways {
-        args.push("--locations-on-ways".into());
-    }
+    opts.push_args(&mut args, data_dir);
 
     let label = crate::harness::hotpath_feature(alloc);
     output::hotpath_msg(&format!("=== elivagar {label} ==="));
@@ -126,33 +94,20 @@ pub fn run(
         runs,
         cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
         metadata: {
-            let mut m = vec![
-                KvPair::text("meta.alloc", alloc.to_string()),
-                KvPair::text("meta.ocean", (!no_ocean).to_string()),
-                KvPair::text("meta.force_sorted", force_sorted.to_string()),
-                KvPair::text(
-                    "meta.allow_unsafe_flat_index",
-                    allow_unsafe_flat_index.to_string(),
-                ),
-            ];
-            if let Some(v) = tile_format {
-                m.push(KvPair::text("meta.tile_format", v));
-            }
-            if let Some(v) = tile_compression {
-                m.push(KvPair::text("meta.tile_compression", v));
-            }
-            m.push(KvPair::text("meta.compress_sort_chunks", compress_sort_chunks.unwrap_or("none")));
-            m.push(KvPair::text("meta.in_memory", in_memory.to_string()));
-            m.push(KvPair::text("meta.locations_on_ways", locations_on_ways.to_string()));
+            let mut m = opts.metadata();
+            m.push(KvPair::text("meta.alloc", alloc.to_string()));
             m
         },
     };
 
     harness.run_internal(&config, |_i| {
-        harness::run_hotpath_capture(
-            binary_str, &args_refs, scratch_dir, project_root,
-            &[("ELIVAGAR_NODE_STATS", "1")],
-        )
+        let (mut result, stderr) = harness::run_hotpath_capture(
+            binary_str, &args_refs, scratch_dir, project_root, &[("ELIVAGAR_NODE_STATS", "1")],
+        )?;
+        result.kv.push(KvPair::text(
+            "meta.locations_on_ways_detected", super::detect_locations_on_ways_stderr(&stderr).to_string(),
+        ));
+        Ok(result)
     })?;
 
     // Clean up output file.

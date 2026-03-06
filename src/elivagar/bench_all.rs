@@ -28,25 +28,15 @@ pub fn run(
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
     let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+    let opts = super::PipelineOpts {
+        no_ocean: false, force_sorted: false, allow_unsafe_flat_index: false,
+        tile_format: None, tile_compression: None, compress_sort_chunks: None,
+        in_memory: false, locations_on_ways: false,
+    };
     bench_self::run(
-        harness,
-        &binary,
-        pbf_path,
-        file_mb,
-        runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
-        project_root,
-        None,    // skip_to
-        false,   // no_ocean
-        false,   // force_sorted
-        None,    // compression_level
-        false,   // allow_unsafe_flat_index
-        None,    // tile_format
-        None,    // tile_compression
-        None,    // compress_sort_chunks
-        false,   // in_memory
-        false,   // locations_on_ways
+        harness, &binary, pbf_path, file_mb, runs,
+        &paths.data_dir, &paths.scratch_dir, project_root,
+        None, None, &opts,
     )?;
 
     // 2. bench planetiler -- comparison baseline

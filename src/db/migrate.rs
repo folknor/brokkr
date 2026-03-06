@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -27,6 +27,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 4 {
         migrate_v3_to_v4(conn)?;
+    }
+    if current < 5 {
+        migrate_v4_to_v5(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -175,6 +178,18 @@ fn migrate_v3_to_v4(conn: &rusqlite::Connection) -> Result<(), DevError> {
         stmt.execute(rusqlite::params![new, old])?;
     }
 
+    Ok(())
+}
+
+/// Migration v4 -> v5: rename `meta.locations_on_ways` to `meta.locations_on_ways_cli`
+/// in run_kv. Existing rows recorded only CLI intent, not runtime detection.
+fn migrate_v4_to_v5(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if has_table(conn, "run_kv") {
+        conn.execute(
+            "UPDATE run_kv SET key = 'meta.locations_on_ways_cli' WHERE key = 'meta.locations_on_ways'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -679,7 +694,7 @@ mod tests {
         let db = ResultsDb::open(&db_path).expect("open should migrate v3 to v4");
 
         let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Helper to query variant by row id.
         let variant_of = |id: i64| -> String {
