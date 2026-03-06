@@ -252,7 +252,7 @@ fn run_clippy(
 
     output::run_msg(&format!("cargo {}", args.join(" ")));
 
-    let captured = output::run_captured("cargo", &args[1..], project_root)?;
+    let captured = output::run_captured("cargo", &args, project_root)?;
 
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
