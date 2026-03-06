@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 4;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -24,6 +24,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 3 {
         migrate_v2_to_v3(conn)?;
+    }
+    if current < 4 {
+        migrate_v3_to_v4(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -134,6 +137,43 @@ fn migrate_v2_to_v3(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
     // Phase 2: Migrate existing extra/metadata JSON to child tables.
     migrate_json_to_children(conn)?;
+
+    Ok(())
+}
+
+/// Migration v3 -> v4: rename pbfhogg variant values after CLI consolidation (22→14).
+///
+/// Only touches rows where `project = 'pbfhogg'` (or project IS NULL, which defaults
+/// to pbfhogg in older schemas).
+fn migrate_v3_to_v4(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // Variant renames in bench commands / bench blob-filter / hotpath.
+    const RENAMES: &[(&str, &str)] = &[
+        ("tags-count",      "inspect-tags"),
+        ("tags-count-way",  "inspect-tags-way"),
+        ("node-stats",      "inspect-nodes"),
+        ("removeid",        "getid-invert"),
+        ("merge-pbf",       "cat-dedupe"),
+        ("derive-changes",  "diff-osc"),
+        // blob-filter compound variants
+        ("tags-count-way+indexed",  "inspect-tags-way+indexed"),
+        ("tags-count-way+raw",      "inspect-tags-way+raw"),
+        ("node-stats+indexed",      "inspect-nodes+indexed"),
+        ("node-stats+raw",          "inspect-nodes+raw"),
+        // hotpath variants
+        ("merge-zlib",        "apply-changes-zlib"),
+        ("merge-none",        "apply-changes-none"),
+        ("merge-zlib/alloc",  "apply-changes-zlib/alloc"),
+        ("merge-none/alloc",  "apply-changes-none/alloc"),
+        ("tags-count/alloc",  "inspect-tags/alloc"),
+    ];
+
+    let mut stmt = conn.prepare(
+        "UPDATE runs SET variant = ?1 WHERE variant = ?2 AND (project = 'pbfhogg' OR project IS NULL)"
+    )?;
+
+    for &(old, new) in RENAMES {
+        stmt.execute(rusqlite::params![new, old])?;
+    }
 
     Ok(())
 }
@@ -417,9 +457,9 @@ mod tests {
         // project defaults to pbfhogg.
         assert_eq!(rows[0].project, "pbfhogg");
 
-        // Schema version is 3.
+        // Schema version is current.
         let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
 
         // Child tables exist (can query without error).
         db.conn.execute_batch("SELECT COUNT(*) FROM run_distribution").unwrap();
@@ -479,7 +519,7 @@ mod tests {
         assert_eq!(val, 999);
 
         let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -589,7 +629,82 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Fresh database gets schema version 3
+    // Migration: v3 -> v4 variant renames
+    // -----------------------------------------------------------------------
+
+    /// v3 schema (full current schema minus v4 changes).
+    const V3_SCHEMA: &str = "\
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, hostname TEXT NOT NULL,
+            [commit] TEXT NOT NULL, subject TEXT NOT NULL, command TEXT NOT NULL,
+            variant TEXT, input_file TEXT, input_mb REAL, elapsed_ms INTEGER NOT NULL,
+            peak_rss_mb REAL, cargo_features TEXT, cargo_profile TEXT DEFAULT 'release',
+            kernel TEXT, cpu_governor TEXT, avail_memory_mb INTEGER,
+            storage_notes TEXT, extra TEXT, uuid TEXT, cli_args TEXT, metadata TEXT,
+            project TEXT NOT NULL DEFAULT 'pbfhogg'
+        )";
+
+    const V3_INSERT: &str = "\
+        INSERT INTO runs (timestamp, hostname, [commit], subject, command, variant,
+            input_file, input_mb, elapsed_ms, uuid, project)
+        VALUES ('2026-01-01 00:00:00', 'testhost', 'aabb', 'test', ?1, ?2,
+            'denmark.osm.pbf', 42.5, 1234, 'uuid1', ?3)";
+
+    #[test]
+    fn migrate_v3_to_v4_renames_variants() {
+        let (dir, db_path) = test_db("migrate_v3_v4");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V3_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+
+            // pbfhogg rows that should be renamed.
+            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "tags-count", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "node-stats", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "removeid", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "derive-changes", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "merge-pbf", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["bench blob-filter", "node-stats+raw", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["hotpath", "merge-zlib", "pbfhogg"]).unwrap();
+            conn.execute(V3_INSERT, rusqlite::params!["hotpath", "tags-count/alloc", "pbfhogg"]).unwrap();
+
+            // pbfhogg row that should NOT be renamed (already correct).
+            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "inspect", "pbfhogg"]).unwrap();
+
+            // elivagar row with same old variant name — should NOT be touched.
+            conn.execute(V3_INSERT, rusqlite::params!["bench self", "tags-count", "elivagar"]).unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v3 to v4");
+
+        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 4);
+
+        // Helper to query variant by row id.
+        let variant_of = |id: i64| -> String {
+            db.conn.query_row(
+                "SELECT variant FROM runs WHERE id = ?1", [id], |r| r.get(0),
+            ).unwrap()
+        };
+
+        assert_eq!(variant_of(1), "inspect-tags");       // tags-count -> inspect-tags
+        assert_eq!(variant_of(2), "inspect-nodes");       // node-stats -> inspect-nodes
+        assert_eq!(variant_of(3), "getid-invert");        // removeid -> getid-invert
+        assert_eq!(variant_of(4), "diff-osc");            // derive-changes -> diff-osc
+        assert_eq!(variant_of(5), "cat-dedupe");           // merge-pbf -> cat-dedupe
+        assert_eq!(variant_of(6), "inspect-nodes+raw");   // node-stats+raw -> inspect-nodes+raw
+        assert_eq!(variant_of(7), "apply-changes-zlib");  // merge-zlib -> apply-changes-zlib
+        assert_eq!(variant_of(8), "inspect-tags/alloc");  // tags-count/alloc -> inspect-tags/alloc
+        assert_eq!(variant_of(9), "inspect");             // unchanged
+        assert_eq!(variant_of(10), "tags-count");         // elivagar row: NOT renamed
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fresh database gets correct schema version
     // -----------------------------------------------------------------------
 
     #[test]
