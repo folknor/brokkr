@@ -62,7 +62,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
     match cli.command {
         Command::Lock => unreachable!(),
-        Command::Check { args } => cmd_check(project, &project_root, &args),
+        Command::Check { features, no_default_features, args } => {
+            cmd_check(project, &project_root, &features, no_default_features, &args)
+        }
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::Run { features, time, json, runs, no_build, args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "run")?;
@@ -220,17 +222,37 @@ fn run(cli: Cli) -> Result<(), DevError> {
 // Shared commands
 // ---------------------------------------------------------------------------
 
-fn cmd_check(project: Project, project_root: &Path, extra_args: &[String]) -> Result<(), DevError> {
-    run_clippy(project_root)?;
-    run_tests(project, project_root, extra_args)?;
+fn cmd_check(
+    project: Project,
+    project_root: &Path,
+    features: &[String],
+    no_default_features: bool,
+    extra_args: &[String],
+) -> Result<(), DevError> {
+    run_clippy(project_root, features, no_default_features)?;
+    run_tests(project, project_root, features, no_default_features, extra_args)?;
     output::result_msg("check passed");
     Ok(())
 }
 
-fn run_clippy(project_root: &Path) -> Result<(), DevError> {
-    output::run_msg("cargo clippy --all-targets");
+fn run_clippy(
+    project_root: &Path,
+    features: &[String],
+    no_default_features: bool,
+) -> Result<(), DevError> {
+    let mut args = vec!["clippy", "--all-targets"];
+    if no_default_features {
+        args.push("--no-default-features");
+    }
+    let joined = features.join(",");
+    if !features.is_empty() {
+        args.push("--features");
+        args.push(&joined);
+    }
 
-    let captured = output::run_captured("cargo", &["clippy", "--all-targets"], project_root)?;
+    output::run_msg(&format!("cargo {}", args.join(" ")));
+
+    let captured = output::run_captured("cargo", &args[1..], project_root)?;
 
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -244,9 +266,19 @@ fn run_clippy(project_root: &Path) -> Result<(), DevError> {
 fn run_tests(
     project: Project,
     project_root: &Path,
+    features: &[String],
+    no_default_features: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let mut args = vec!["test"];
+    if no_default_features {
+        args.push("--no-default-features");
+    }
+    let joined = features.join(",");
+    if !features.is_empty() {
+        args.push("--features");
+        args.push(&joined);
+    }
     if !extra_args.is_empty() {
         let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&extra_refs);

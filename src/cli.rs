@@ -17,8 +17,18 @@ Examples:
   brokkr check                                     # clippy + all tests
   brokkr check -- --test read_paths                # run one test file
   brokkr check -- -- --ignored                     # run ignored tests
-  brokkr check -- --test read_paths -- --ignored   # one file, ignored only")]
+  brokkr check -- --test read_paths -- --ignored   # one file, ignored only
+  brokkr check --no-default-features               # check without default features
+  brokkr check --features commands                  # check with specific features")]
     Check {
+        /// Cargo features to enable
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
+
+        /// Disable default Cargo features
+        #[arg(long)]
+        no_default_features: bool,
+
         /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
