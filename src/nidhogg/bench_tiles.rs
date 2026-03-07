@@ -16,6 +16,29 @@ use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
 use crate::output;
 use crate::pmtiles;
 
+/// RAII guard that kills a child process on drop if it hasn't been consumed.
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    /// Take ownership of the child, preventing kill-on-drop.
+    fn take(&mut self) -> Option<std::process::Child> {
+        self.0.take()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            child.kill().ok();
+            child.wait().ok();
+        }
+    }
+}
+
 /// Number of iterations over the full tile set per run.
 const ITERATIONS: usize = 5;
 
@@ -108,8 +131,11 @@ fn run_lifecycle(
 ) -> Result<BenchResult, DevError> {
     let start = Instant::now();
 
-    // 1. Spawn server with piped stderr.
-    let mut child = spawn_server(binary, data_dir, tiles, port, project_root)?;
+    // 1. Spawn server with piped stderr. ChildGuard ensures cleanup on error.
+    let mut guard = ChildGuard::new(spawn_server(binary, data_dir, tiles, port, project_root)?);
+    let child = guard.0.as_mut().ok_or_else(|| {
+        DevError::Config("failed to get child process".into())
+    })?;
 
     // 2. Take stderr and start a reader thread that watches for "Listening on".
     //    After the ready signal, the thread continues reading to EOF so it
@@ -149,8 +175,8 @@ fn run_lifecycle(
 
     let ready = rx.recv_timeout(STARTUP_TIMEOUT).unwrap_or(false);
     if !ready {
-        child.kill().ok();
-        child.wait().ok();
+        // Guard handles kill+wait on drop.
+        drop(guard);
         let (pre_ready, _) = reader_handle.join().unwrap_or_default();
         let server_output = pre_ready.join("");
         let msg = if server_output.is_empty() {
@@ -189,7 +215,11 @@ fn run_lifecycle(
         output::bench_msg(&format!("iteration {}/{ITERATIONS}", iter + 1));
     }
 
-    // 5. Send SIGTERM for graceful shutdown.
+    // 5. Send SIGTERM for graceful shutdown. Take child from guard so we
+    //    control the shutdown sequence (guard no longer kills on drop).
+    let mut child = guard.take().ok_or_else(|| {
+        DevError::Config("child process already consumed".into())
+    })?;
     output::bench_msg("sending SIGTERM");
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;

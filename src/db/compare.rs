@@ -63,12 +63,12 @@ impl ResultsDb {
             params.push(v.to_owned());
             clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
         }
-        let mut sql = "SELECT DISTINCT [commit] FROM runs".to_owned();
+        let mut sql = "SELECT [commit] FROM runs".to_owned();
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY id DESC LIMIT 2");
+        sql.push_str(" GROUP BY [commit] ORDER BY MAX(id) DESC LIMIT 2");
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();

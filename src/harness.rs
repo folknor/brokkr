@@ -586,10 +586,19 @@ pub fn run_hotpath_capture(
     let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);
     let stderr = captured.stderr;
 
-    let hotpath = std::fs::read_to_string(&json_file)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| db::hotpath_data_from_json(&v));
+    let hotpath = match std::fs::read_to_string(&json_file) {
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(v) => db::hotpath_data_from_json(&v),
+            Err(e) => {
+                output::error(&format!("failed to parse hotpath JSON: {e}"));
+                None
+            }
+        },
+        Err(e) => {
+            output::error(&format!("failed to read hotpath report {}: {e}", json_file.display()));
+            None
+        }
+    };
     std::fs::remove_file(&json_file).ok();
 
     Ok((BenchResult {

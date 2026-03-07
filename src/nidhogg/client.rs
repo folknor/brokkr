@@ -47,9 +47,11 @@ pub fn geocode_url(port: u16, term: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Send an HTTP GET request via curl and return the response body.
+///
+/// Fails on HTTP 4xx/5xx via `--fail-with-body`. Times out after 30s.
 pub fn curl_get(url: &str) -> Result<String, DevError> {
     let output = Command::new("curl")
-        .args(["-s", "--compressed", url])
+        .args(["-s", "--compressed", "--fail-with-body", "--max-time", "30", url])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -72,11 +74,15 @@ pub fn curl_get(url: &str) -> Result<String, DevError> {
 }
 
 /// Send an HTTP POST request with a JSON body via curl and return the response body.
+///
+/// Fails on HTTP 4xx/5xx via `--fail-with-body`. Times out after 30s.
 pub fn curl_post(url: &str, body: &str) -> Result<String, DevError> {
     let output = Command::new("curl")
         .args([
             "-s",
             "--compressed",
+            "--fail-with-body",
+            "--max-time", "30",
             "-X", "POST",
             url,
             "-H", "Content-Type: application/json",

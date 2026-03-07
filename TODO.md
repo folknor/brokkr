@@ -13,6 +13,111 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ---
 
+## Bugs
+
+### ~~`query_compare_last` may not return the two most recent commits~~ FIXED
+`db/compare.rs`: changed `SELECT DISTINCT ... ORDER BY id DESC` to `GROUP BY [commit] ORDER BY MAX(id) DESC LIMIT 2`.
+
+### ~~Orphaned server process in bench_tiles on mid-benchmark error~~ FIXED
+`nidhogg/bench_tiles.rs`: added `ChildGuard` RAII wrapper that kills+waits the child on drop. Guard is consumed before SIGTERM in the normal path.
+
+---
+
+## Missing error handling
+
+### ~~No HTTP status code checking in nidhogg curl helpers~~ FIXED
+`nidhogg/client.rs`: added `--fail-with-body` to `curl_get` and `curl_post`. Server 4xx/5xx now fail with curl exit code 22.
+
+### ~~No timeout on `curl_get`/`curl_post`~~ FIXED
+`nidhogg/client.rs`: added `--max-time 30` to both helpers.
+
+### ~~Silent hotpath JSON failure~~ FIXED
+`harness.rs` `run_hotpath_capture`: now prints `[error]` diagnostic when the hotpath JSON file is missing, unreadable, or invalid.
+
+### `run_curl_timed` silently defaults to 0.0
+`nidhogg/bench_api.rs`: if `time_total` can't be parsed as f64, it defaults to `0.0`, silently recording a 0ms benchmark result.
+
+### `run_passthrough_timed` loses signal-kill information
+`output.rs`: uses `status.code().unwrap_or(1)` for signal-killed processes, losing the information that the process was killed by a signal (e.g. OOM killer SIGKILL).
+
+### `serde_json::Error` maps to `DevError::Config`
+`error.rs`: a cargo metadata JSON parse failure in `build.rs` gets reported as a "config" error instead of "build" error, which is misleading.
+
+---
+
+## Config validation
+
+### No `deny_unknown_fields` on config structs
+`config.rs`: `HostConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `PmtilesEntry` all silently accept unknown fields. A typo like `origni = "Geofabrik"` or `sha265 = "abc"` is silently ignored. Adding `#[serde(deny_unknown_fields)]` would catch these.
+
+### `sha256` + `xxhash` coexistence silently accepted
+`config.rs`: with `#[serde(alias = "sha256")]`, if both `sha256` and `xxhash` are present in the same TOML entry, serde silently uses last-writer-wins. No error or warning during migration.
+
+### No validation of empty file names
+`config.rs`: `file = ""` parses fine and propagates to path resolution, failing later with an opaque I/O error.
+
+### No bbox format validation
+`resolve.rs`: `--bbox` values and dataset-configured bbox strings are accepted verbatim with no check for 4 comma-separated floats or min < max. Fails downstream.
+
+### `resolve_nidhogg_data_dir` does not check directory existence
+`resolve.rs`: unlike PBF/OSC/PMTiles resolvers which verify `path.exists()`, this returns a path without checking the directory exists.
+
+---
+
+## Code duplication
+
+### resolve_pbf/osc/pmtiles share identical 5-step pattern
+`resolve.rs`: `resolve_pbf_path`, `resolve_osc_path`, `resolve_pmtiles_path` all do: lookup dataset -> lookup entry -> join path -> check exists -> verify hash. Could be collapsed into one generic helper + thin wrappers, saving ~40 lines. Same for the two `resolve_default_*` functions.
+
+### env.rs dataset check loops are identical
+`env.rs`: PBF, OSC, and PMTiles loops in `check_datasets` are structurally identical (build label, join path, check exists, check hash). Could extract a helper.
+
+### Missing `#[derive(Clone)]` causes ~60 lines of manual clone code
+`db/types.rs`, `harness.rs`: `KvPair`, `KvValue`, `Distribution`, `HotpathData`, `HotpathFunction`, `HotpathThread` lack `#[derive(Clone)]`, forcing manual field-by-field reconstruction in `build_row`, `reconstruct_hotpath`, and `take_hotpath_for_compare`.
+
+### JSON element-count parsing repeated in 4 nidhogg files
+`nidhogg/bench_api.rs`, `query.rs`, `verify_batch.rs`, `verify_readonly.rs`: each reimplements `parsed.get("elements").and_then(|v| v.as_array())`. A shared helper in `client.rs` would reduce this.
+
+### Geocode response parsing repeated in 3 nidhogg files
+`nidhogg/geocode.rs`, `verify_geocode.rs`, `verify_readonly.rs`: parsing geocode JSON array and extracting `displayName`/`lat`/`lon` from the top result is repeated.
+
+### Path-to-string conversion boilerplate in nidhogg
+`nidhogg/ingest.rs` (3x), `hotpath.rs` (2x), `profile.rs` (1x): the `path.to_str().ok_or_else(|| DevError::Config("... not valid UTF-8"))` pattern could be a utility function.
+
+### Duplicate geocode defaults
+`nidhogg/cmd.rs` defines `["Kobenhavn", "Aarhus", "Odense"]` as a local array instead of reusing `client::GEOCODE_TEST_QUERIES`.
+
+---
+
+## Inconsistencies
+
+### Inconsistent available-variant listing in resolve errors
+`resolve.rs`: `resolve_osc_path` lists available keys on miss, but `resolve_pbf_path` and `resolve_pmtiles_path` do not. `resolve_osc_path` doesn't sort the keys, while `resolve_default_osc_path` does.
+
+### `DatasetStatus::NoPbf` name is misleading
+`env.rs`: this variant now means "no files of any kind" (PBF, OSC, or PMTiles), not just "no PBF". Should be renamed to `NoFiles` or `Empty`.
+
+### Double hashing on mismatch in env.rs
+`env.rs` `check_hash_status`: `verify_file_hash` computes the hash internally, then on failure `cached_xxh128` is called again to get the actual hash for display. The second call hits cache so no perf issue, just redundant logic.
+
+### io_uring status in env.rs incomplete
+`env.rs`: `check_uring_disabled` only checks the kernel kill switch (`/proc/sys/kernel/io_uring_disabled`), ignoring AppArmor restrictions that `preflight.rs` checks for. `brokkr env` could report "supported" when io_uring would actually be blocked.
+
+---
+
+## Fragility
+
+### bench_tiles startup detection via string matching
+`nidhogg/bench_tiles.rs`: waits for stderr to contain `"Listening on"`. If nidhogg changes this message text, the benchmark hangs for 30s then fails.
+
+### `find_executable` fallback is order-dependent
+`build.rs`: when `expected_name` is `None`, falls back to `last_exe` — the last executable in cargo's JSON output. Cargo doesn't guarantee ordering.
+
+### All nidhogg test data hardcoded to Denmark
+`nidhogg/bench_api.rs`, `verify_batch.rs`, `client.rs`: all query bboxes, geocode terms, and API test queries use Copenhagen/Denmark coordinates. Would not work for non-Denmark datasets.
+
+---
+
 ## Backlog
 
 ### Make default binary configurable per-project in brokkr.toml
