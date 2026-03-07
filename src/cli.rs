@@ -112,6 +112,50 @@ Examples:
     /// Show lock status (who holds the benchmark lock)
     #[command(display_order = 5)]
     Lock,
+    /// Browse command history
+    #[command(display_order = 6, long_about = "\
+Browse the global command history log (~/.local/share/brokkr/history.db).
+
+Every brokkr invocation is recorded with timing and exit status.
+
+Examples:
+  brokkr history                        # last 25 entries
+  brokkr history -n 50                  # last 50
+  brokkr history --all                  # everything
+  brokkr history --command bench        # filter by command substring
+  brokkr history --project pbfhogg      # filter by project
+  brokkr history --failed               # only non-zero exit
+  brokkr history --since 2026-03-01     # from date (YYYY-MM-DD)
+  brokkr history --slow 10000           # commands that took >10s")]
+    History {
+        /// Filter by command (substring match)
+        #[arg(long)]
+        command: Option<String>,
+
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Show only failed commands (non-zero exit)
+        #[arg(long)]
+        failed: bool,
+
+        /// Show entries from this date onward (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        #[arg(long, value_parser = validate_since)]
+        since: Option<String>,
+
+        /// Show commands that took at least this many milliseconds
+        #[arg(long)]
+        slow: Option<i64>,
+
+        /// Maximum number of entries to show
+        #[arg(long, short = 'n', default_value = "25", conflicts_with = "all")]
+        limit: usize,
+
+        /// Show all entries (ignores -n)
+        #[arg(long)]
+        all: bool,
+    },
     /// Run benchmarks
     #[command(display_order = 10)]
     Bench {
@@ -795,6 +839,33 @@ pub(crate) enum VerifyCommand {
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
+}
+
+/// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.
+fn validate_since(s: &str) -> Result<String, String> {
+    let date_ok = s.len() == 10
+        && s.as_bytes().get(4) == Some(&b'-')
+        && s.as_bytes().get(7) == Some(&b'-')
+        && s[..4].chars().all(|c| c.is_ascii_digit())
+        && s[5..7].chars().all(|c| c.is_ascii_digit())
+        && s[8..10].chars().all(|c| c.is_ascii_digit());
+
+    let datetime_ok = s.len() == 19
+        && date_ok == false
+        && s[..10].len() == 10
+        && validate_since(&s[..10]).is_ok()
+        && s.as_bytes().get(10) == Some(&b' ')
+        && s[11..13].chars().all(|c| c.is_ascii_digit())
+        && s.as_bytes().get(13) == Some(&b':')
+        && s[14..16].chars().all(|c| c.is_ascii_digit())
+        && s.as_bytes().get(16) == Some(&b':')
+        && s[17..19].chars().all(|c| c.is_ascii_digit());
+
+    if date_ok || datetime_ok {
+        Ok(s.to_owned())
+    } else {
+        Err(format!("invalid date format '{s}', expected YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"))
+    }
 }
 
 #[cfg(test)]

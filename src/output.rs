@@ -74,6 +74,11 @@ pub fn lock_msg(msg: &str) {
     println!("[lock]    {msg}");
 }
 
+#[allow(dead_code)]
+pub fn history_msg(msg: &str) {
+    println!("[history] {msg}");
+}
+
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
