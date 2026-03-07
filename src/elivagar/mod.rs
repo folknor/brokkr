@@ -27,6 +27,8 @@ pub struct PipelineOpts<'a> {
     pub compress_sort_chunks: Option<&'a str>,
     pub in_memory: bool,
     pub locations_on_ways: bool,
+    pub fanout_cap_default: Option<u32>,
+    pub fanout_cap: Option<&'a str>,
 }
 
 impl PipelineOpts<'_> {
@@ -56,6 +58,14 @@ impl PipelineOpts<'_> {
         if self.locations_on_ways {
             args.push("--locations-on-ways".into());
         }
+        if let Some(n) = self.fanout_cap_default {
+            args.push("--fanout-cap-default".into());
+            args.push(n.to_string());
+        }
+        if let Some(spec) = self.fanout_cap {
+            args.push("--fanout-cap".into());
+            args.push(spec.into());
+        }
         push_ocean_args(args, data_dir, self.no_ocean);
     }
 
@@ -81,6 +91,12 @@ impl PipelineOpts<'_> {
         ));
         m.push(crate::db::KvPair::text("meta.in_memory", self.in_memory.to_string()));
         m.push(crate::db::KvPair::text("meta.locations_on_ways_cli", self.locations_on_ways.to_string()));
+        if let Some(n) = self.fanout_cap_default {
+            m.push(crate::db::KvPair::int("meta.fanout_cap_default", n as i64));
+        }
+        if let Some(spec) = self.fanout_cap {
+            m.push(crate::db::KvPair::text("meta.fanout_cap", spec));
+        }
         m
     }
 }

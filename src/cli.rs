@@ -213,6 +213,12 @@ Examples:
         /// Input PBF has locations on ways (elivagar only)
         #[arg(long)]
         locations_on_ways: bool,
+        /// Default fanout cap for all layers (elivagar only)
+        #[arg(long)]
+        fanout_cap_default: Option<u32>,
+        /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
+        #[arg(long)]
+        fanout_cap: Option<String>,
 
         /// Number of runs; best-of-N is stored (default: 1)
         #[arg(long, default_value = "1")]
@@ -288,6 +294,12 @@ Examples:
         /// Input PBF has locations on ways (elivagar only)
         #[arg(long)]
         locations_on_ways: bool,
+        /// Default fanout cap for all layers (elivagar only)
+        #[arg(long)]
+        fanout_cap_default: Option<u32>,
+        /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
+        #[arg(long)]
+        fanout_cap: Option<String>,
 
         /// Skip memory availability check
         #[arg(long)]
@@ -557,6 +569,12 @@ pub(crate) enum BenchCommand {
         /// Input PBF has locations on ways
         #[arg(long)]
         locations_on_ways: bool,
+        /// Default fanout cap for all layers
+        #[arg(long)]
+        fanout_cap_default: Option<u32>,
+        /// Per-layer fanout caps (comma-separated layer=N pairs, e.g. water_polygons=2048,boundaries=4096)
+        #[arg(long)]
+        fanout_cap: Option<String>,
     },
     /// [elivagar] SortedNodeStore benchmark
     #[command(display_order = 11)]

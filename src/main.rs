@@ -117,6 +117,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             compress_sort_chunks,
             in_memory,
             locations_on_ways,
+            fanout_cap_default,
+            fanout_cap,
             runs,
             tiles,
             nodes,
@@ -142,6 +144,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     tile_compression: tile_compression.as_deref(),
                     compress_sort_chunks: compress_sort_chunks.as_deref(),
                     in_memory, locations_on_ways,
+                    fanout_cap_default,
+                    fanout_cap: fanout_cap.as_deref(),
                 };
                 cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, &opts)
             })
@@ -162,6 +166,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             compress_sort_chunks,
             in_memory,
             locations_on_ways,
+            fanout_cap_default,
+            fanout_cap,
             no_mem_check,
         } => {
             output::set_quiet(!verbose);
@@ -179,6 +185,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     tile_compression: tile_compression.as_deref(),
                     compress_sort_chunks: compress_sort_chunks.as_deref(),
                     in_memory, locations_on_ways,
+                    fanout_cap_default,
+                    fanout_cap: fanout_cap.as_deref(),
                 };
                 cmd_profile(&req, osc_seq.as_deref(), tool.as_deref(), &opts)
             })
@@ -695,6 +703,8 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             compress_sort_chunks,
             in_memory,
             locations_on_ways,
+            fanout_cap_default,
+            fanout_cap,
         } => {
             project::require(project, Project::Elivagar, "bench self")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
@@ -704,6 +714,8 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
                 tile_compression: tile_compression.as_deref(),
                 compress_sort_chunks: compress_sort_chunks.as_deref(),
                 in_memory, locations_on_ways,
+                fanout_cap_default,
+                fanout_cap: fanout_cap.as_deref(),
             };
             elivagar::cmd::bench_self(&req, skip_to.as_deref(), compression_level, &opts)
         }
