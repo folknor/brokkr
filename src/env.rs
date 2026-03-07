@@ -173,22 +173,38 @@ fn parse_kb_to_mb(rest: &str) -> u64 {
 }
 
 /// Check io_uring support and memlock limit.
+///
+/// Checks the same kernel parameters as `preflight::uring_checks()`:
+/// kill switch, AppArmor io_uring restriction, and AppArmor userns restriction.
 fn read_io_uring_status() -> String {
-    let disabled = check_uring_disabled();
     let memlock = read_memlock_limit();
 
-    if disabled {
-        return format!("disabled ({memlock})");
+    if let Some(reason) = check_uring_blocked() {
+        return format!("disabled: {reason} ({memlock})");
     }
 
     format!("supported ({memlock})")
 }
 
-/// Check if io_uring is disabled via the kernel parameter.
-fn check_uring_disabled() -> bool {
-    match std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled") {
+/// Check if io_uring is blocked by any kernel parameter.
+/// Returns `Some(reason)` if blocked, `None` if all checks pass.
+fn check_uring_blocked() -> Option<&'static str> {
+    if kernel_param_nonzero("/proc/sys/kernel/io_uring_disabled") {
+        return Some("kernel kill switch");
+    }
+    if kernel_param_nonzero("/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring") {
+        return Some("AppArmor io_uring restriction");
+    }
+    if kernel_param_nonzero("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") {
+        return Some("AppArmor userns restriction");
+    }
+    None
+}
+
+/// Check if a kernel parameter file exists and has a non-zero value.
+fn kernel_param_nonzero(path: &str) -> bool {
+    match std::fs::read_to_string(path) {
         Ok(content) => content.trim() != "0",
-        // File doesn't exist means io_uring is not restricted.
         Err(_) => false,
     }
 }
@@ -353,22 +369,13 @@ fn check_file_entries<E: crate::resolve::FileEntry>(
 }
 
 fn check_hash_status(path: &Path, expected: Option<&str>, project_root: &Path) -> DatasetStatus {
+    let hash = crate::preflight::cached_xxh128(path, project_root)
+        .unwrap_or_else(|_| String::from("error"));
+
     match expected {
-        None => {
-            let hash = crate::preflight::cached_xxh128(path, project_root)
-                .unwrap_or_else(|_| String::from("error"));
-            DatasetStatus::Present(hash)
-        }
-        Some(hex) => {
-            match crate::preflight::verify_file_hash(path, hex, project_root, None) {
-                Ok(()) => DatasetStatus::Verified,
-                Err(_) => {
-                    let hash = crate::preflight::cached_xxh128(path, project_root)
-                        .unwrap_or_else(|_| String::from("error"));
-                    DatasetStatus::HashMismatch(hash)
-                }
-            }
-        }
+        None => DatasetStatus::Present(hash),
+        Some(hex) if hash.eq_ignore_ascii_case(hex) => DatasetStatus::Verified,
+        Some(_) => DatasetStatus::HashMismatch(hash),
     }
 }
 

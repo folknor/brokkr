@@ -66,11 +66,11 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Inconsistencies
 
-### Double hashing on mismatch in env.rs
-`env.rs` `check_hash_status`: `verify_file_hash` computes the hash internally, then on failure `cached_xxh128` is called again to get the actual hash for display. The second call hits cache so no perf issue, just redundant logic.
+### ~~Double hashing on mismatch in env.rs~~ FIXED
+`env.rs`: `check_hash_status` now calls `cached_xxh128` once and compares directly.
 
-### io_uring status in env.rs incomplete
-`env.rs`: `check_uring_disabled` only checks the kernel kill switch (`/proc/sys/kernel/io_uring_disabled`), ignoring AppArmor restrictions that `preflight.rs` checks for. `brokkr env` could report "supported" when io_uring would actually be blocked.
+### ~~io_uring status in env.rs incomplete~~ FIXED
+`env.rs`: `check_uring_blocked` now checks all 3 kernel parameters (kill switch + both AppArmor restrictions), matching `preflight.rs`.
 
 ---
 
