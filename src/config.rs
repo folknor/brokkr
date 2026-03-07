@@ -17,6 +17,7 @@ pub struct DevConfig {
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct PbfEntry {
     pub file: String,
@@ -27,6 +28,7 @@ pub struct PbfEntry {
 
 /// A single OSC diff file entry, keyed by sequence number.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OscEntry {
     pub file: String,
     #[serde(alias = "sha256")]
@@ -35,6 +37,7 @@ pub struct OscEntry {
 
 /// A PMTiles archive entry, keyed by variant name (e.g. "elivagar").
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PmtilesEntry {
     pub file: String,
     #[serde(alias = "sha256")]
@@ -43,6 +46,7 @@ pub struct PmtilesEntry {
 
 /// A dataset with structured PBF variants and multiple OSC entries.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct Dataset {
     pub origin: Option<String>,
@@ -61,6 +65,7 @@ pub struct Dataset {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct HostConfig {
     pub data: Option<String>,

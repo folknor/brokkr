@@ -19,7 +19,8 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
     output::run_msg(&format!("GET {url}"));
 
     let stdout = super::client::curl_get(&url)?;
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| DevError::Verify(format!("invalid JSON from geocode API: {e}")))?;
 
     let arr = parsed.as_array();
 

@@ -99,7 +99,7 @@ impl From<toml::de::Error> for DevError {
 
 impl From<serde_json::Error> for DevError {
     fn from(err: serde_json::Error) -> DevError {
-        DevError::Config(format!("json: {err}"))
+        DevError::Build(format!("json: {err}"))
     }
 }
 

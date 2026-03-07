@@ -15,40 +15,21 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Bugs
 
-### ~~`query_compare_last` may not return the two most recent commits~~ FIXED
-`db/compare.rs`: changed `SELECT DISTINCT ... ORDER BY id DESC` to `GROUP BY [commit] ORDER BY MAX(id) DESC LIMIT 2`.
-
-### ~~Orphaned server process in bench_tiles on mid-benchmark error~~ FIXED
-`nidhogg/bench_tiles.rs`: added `ChildGuard` RAII wrapper that kills+waits the child on drop. Guard is consumed before SIGTERM in the normal path.
-
----
-
-## Missing error handling
-
-### ~~No HTTP status code checking in nidhogg curl helpers~~ FIXED
-`nidhogg/client.rs`: added `--fail-with-body` to `curl_get` and `curl_post`. Server 4xx/5xx now fail with curl exit code 22.
-
-### ~~No timeout on `curl_get`/`curl_post`~~ FIXED
-`nidhogg/client.rs`: added `--max-time 30` to both helpers.
-
-### ~~Silent hotpath JSON failure~~ FIXED
-`harness.rs` `run_hotpath_capture`: now prints `[error]` diagnostic when the hotpath JSON file is missing, unreadable, or invalid.
-
 ### `run_curl_timed` silently defaults to 0.0
 `nidhogg/bench_api.rs`: if `time_total` can't be parsed as f64, it defaults to `0.0`, silently recording a 0ms benchmark result.
 
 ### `run_passthrough_timed` loses signal-kill information
 `output.rs`: uses `status.code().unwrap_or(1)` for signal-killed processes, losing the information that the process was killed by a signal (e.g. OOM killer SIGKILL).
 
-### `serde_json::Error` maps to `DevError::Config`
-`error.rs`: a cargo metadata JSON parse failure in `build.rs` gets reported as a "config" error instead of "build" error, which is misleading.
+### ~~`serde_json::Error` maps to `DevError::Config`~~ FIXED
+`error.rs`: blanket `From<serde_json::Error>` now maps to `DevError::Build`. Nidhogg API response parsing uses explicit `.map_err()` to `DevError::Verify`.
 
 ---
 
 ## Config validation
 
-### No `deny_unknown_fields` on config structs
-`config.rs`: `HostConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `PmtilesEntry` all silently accept unknown fields. A typo like `origni = "Geofabrik"` or `sha265 = "abc"` is silently ignored. Adding `#[serde(deny_unknown_fields)]` would catch these.
+### ~~No `deny_unknown_fields` on config structs~~ FIXED
+`config.rs`: added `#[serde(deny_unknown_fields)]` to `HostConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `PmtilesEntry`.
 
 ### `sha256` + `xxhash` coexistence silently accepted
 `config.rs`: with `#[serde(alias = "sha256")]`, if both `sha256` and `xxhash` are present in the same TOML entry, serde silently uses last-writer-wins. No error or warning during migration.
@@ -59,8 +40,8 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 ### No bbox format validation
 `resolve.rs`: `--bbox` values and dataset-configured bbox strings are accepted verbatim with no check for 4 comma-separated floats or min < max. Fails downstream.
 
-### `resolve_nidhogg_data_dir` does not check directory existence
-`resolve.rs`: unlike PBF/OSC/PMTiles resolvers which verify `path.exists()`, this returns a path without checking the directory exists.
+### ~~`resolve_nidhogg_data_dir` does not check directory existence~~ FIXED
+`resolve.rs`: now checks `path.exists()` like the other resolvers.
 
 ---
 
@@ -72,9 +53,6 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 ### env.rs dataset check loops are identical
 `env.rs`: PBF, OSC, and PMTiles loops in `check_datasets` are structurally identical (build label, join path, check exists, check hash). Could extract a helper.
 
-### ~~Missing `#[derive(Clone)]` causes ~60 lines of manual clone code~~ FIXED
-`db/types.rs`: added `#[derive(Clone)]` to `Distribution`, `HotpathFunction`, `HotpathThread`, `HotpathData`. Removed `reconstruct_hotpath` (harness.rs) and `take_hotpath_for_compare` (format.rs).
-
 ### JSON element-count parsing repeated in 4 nidhogg files
 `nidhogg/bench_api.rs`, `query.rs`, `verify_batch.rs`, `verify_readonly.rs`: each reimplements `parsed.get("elements").and_then(|v| v.as_array())`. A shared helper in `client.rs` would reduce this.
 
@@ -84,18 +62,9 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 ### Path-to-string conversion boilerplate in nidhogg
 `nidhogg/ingest.rs` (3x), `hotpath.rs` (2x), `profile.rs` (1x): the `path.to_str().ok_or_else(|| DevError::Config("... not valid UTF-8"))` pattern could be a utility function.
 
-### ~~Duplicate geocode defaults~~ FIXED
-`nidhogg/cmd.rs`: now reuses `client::GEOCODE_TEST_QUERIES` instead of a local duplicate array.
-
 ---
 
 ## Inconsistencies
-
-### ~~Inconsistent available-variant listing in resolve errors~~ FIXED
-`resolve.rs`: all three resolve functions now list available keys on miss, all sorted.
-
-### ~~`DatasetStatus::NoPbf` name is misleading~~ FIXED
-`env.rs`: renamed to `DatasetStatus::NoFiles`.
 
 ### Double hashing on mismatch in env.rs
 `env.rs` `check_hash_status`: `verify_file_hash` computes the hash internally, then on failure `cached_xxh128` is called again to get the actual hash for display. The second call hits cache so no perf issue, just redundant logic.

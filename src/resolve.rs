@@ -259,7 +259,14 @@ pub(crate) fn resolve_nidhogg_data_dir(
     let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
         DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
     })?;
-    Ok(paths.data_dir.join(dir_name))
+    let path = paths.data_dir.join(dir_name);
+    if !path.exists() {
+        return Err(DevError::Config(format!(
+            "data directory not found: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 /// Get a PBF entry reference for direct field access (e.g. checking if a variant exists).

@@ -20,7 +20,8 @@ pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
     output::run_msg(&format!("POST {url}"));
 
     let stdout = super::client::curl_post(&url, body)?;
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| DevError::Verify(format!("invalid JSON from query API: {e}")))?;
 
     let elements = parsed
         .get("elements")

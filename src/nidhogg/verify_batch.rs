@@ -138,7 +138,8 @@ fn run_batch_query(port: u16) -> Result<BatchResult, DevError> {
     let stdout = super::client::curl_post(&url, &body)?;
     let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| DevError::Verify(format!("invalid JSON from batch API: {e}")))?;
 
     let mut filter_counts = Vec::new();
 
@@ -186,7 +187,8 @@ fn run_individual_queries(port: u16) -> Result<Vec<(String, usize, i64)>, DevErr
         let stdout = super::client::curl_post(&url, body)?;
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-        let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
+        let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| DevError::Verify(format!("invalid JSON from batch API: {e}")))?;
 
         let count = parsed
             .get("elements")
