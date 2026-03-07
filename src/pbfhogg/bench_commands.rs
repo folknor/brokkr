@@ -232,12 +232,15 @@ pub fn run(
         } else {
             None
         };
-        let output_str = scratch_output_path
-            .as_ref()
-            .and_then(|p| p.to_str())
-            .unwrap_or("/dev/null");
+        let output_str = match scratch_output_path.as_ref().and_then(|p| p.to_str()) {
+            Some(s) => s.to_owned(),
+            None if NO_OUTPUT_FILE.contains(&name) => String::new(), // unused
+            None => return Err(DevError::Config(format!(
+                "command '{name}' produces output but no scratch directory is configured"
+            ))),
+        };
 
-        let args = command_args(name, pbf_str, merged_str, osc_str.as_deref(), output_str)?;
+        let args = command_args(name, pbf_str, merged_str, osc_str.as_deref(), &output_str)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {

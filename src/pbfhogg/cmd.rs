@@ -70,7 +70,7 @@ pub(crate) fn bench_blob_filter(
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench blob-filter", req.force)?;
     let (indexed_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let raw_path = resolve_pbf_path(req.dataset, raw_variant, &ctx.paths, req.project_root)?;
-    super::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, req.runs, req.project_root)
+    super::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, req.runs, req.project_root, &ctx.paths.scratch_dir)
 }
 
 pub(crate) fn bench_planetiler(

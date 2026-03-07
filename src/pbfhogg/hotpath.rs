@@ -24,6 +24,7 @@ fn build_test_suite(
     pbf_str: &str,
     osc_str: &str,
     merged_str: &str,
+    cat_output_str: &str,
 ) -> Vec<HotpathTest> {
     vec![
         HotpathTest {
@@ -55,7 +56,7 @@ fn build_test_suite(
                 "--compression".into(),
                 "zlib".into(),
                 "-o".into(),
-                "/dev/null".into(),
+                cat_output_str.into(),
             ],
         },
         HotpathTest {
@@ -113,6 +114,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(scratch_dir)?;
     let merged_path = scratch_dir.join("hotpath-merged.osm.pbf");
+    let cat_output_path = scratch_dir.join("hotpath-cat-output.osm.pbf");
 
     let binary_str = binary
         .to_str()
@@ -126,6 +128,9 @@ pub fn run(
     let merged_str = merged_path
         .to_str()
         .ok_or_else(|| DevError::Config("merged path is not valid UTF-8".into()))?;
+    let cat_output_str = cat_output_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("cat output path is not valid UTF-8".into()))?;
 
     let basename = pbf_path
         .file_name()
@@ -133,7 +138,7 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str);
+    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str);
 
     let mut passed = 0usize;
     let mut failed: Vec<(&str, String)> = Vec::new();
@@ -173,8 +178,9 @@ pub fn run(
         }
     }
 
-    // Clean up merged output file (ignore errors if it doesn't exist).
+    // Clean up output files (ignore errors if they don't exist).
     std::fs::remove_file(&merged_path).ok();
+    std::fs::remove_file(&cat_output_path).ok();
 
     if !failed.is_empty() {
         output::hotpath_msg(&format!(

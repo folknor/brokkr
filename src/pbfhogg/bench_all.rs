@@ -137,6 +137,7 @@ fn run_dataset_dependent(
         output::bench_msg("=== bench blob-filter ===");
         bench_blob_filter::run(
             harness, binary, pbf_path, raw_path, file_mb, runs, project_root,
+            &paths.scratch_dir,
         )?;
     } else {
         output::bench_msg("=== bench blob-filter === (skipped, no raw pbf variant in dataset config)");
