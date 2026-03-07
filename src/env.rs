@@ -94,12 +94,10 @@ fn print_tools(info: &EnvInfo) {
 }
 
 fn print_datasets(info: &EnvInfo) {
-    let parts: Vec<String> = info
-        .datasets
-        .iter()
-        .map(|(name, status)| format_dataset(name, status))
-        .collect();
-    println!("{:<12} {}", "datasets:", parts.join("  "));
+    for (i, (name, status)) in info.datasets.iter().enumerate() {
+        let label = if i == 0 { "datasets:" } else { "" };
+        println!("{:<12} {}", label, format_dataset(name, status));
+    }
 }
 
 fn format_dataset(name: &str, status: &DatasetStatus) -> String {
@@ -317,27 +315,50 @@ fn check_datasets(
     data_dir: &Path,
     project_root: &Path,
 ) -> Vec<(String, DatasetStatus)> {
-    let mut out: Vec<(String, DatasetStatus)> = datasets
-        .iter()
-        .map(|(name, ds)| {
-            // Check "indexed" first, fall back to "raw", then any available variant.
-            let entry = ds.pbf.get("indexed")
-                .or_else(|| ds.pbf.get("raw"))
-                .or_else(|| ds.pbf.values().next());
-            let status = match entry {
-                Some(e) => {
-                    let path = data_dir.join(&e.file);
-                    if !path.exists() {
-                        DatasetStatus::Missing
-                    } else {
-                        check_hash_status(&path, e.xxhash.as_deref(), project_root)
-                    }
-                }
-                None => DatasetStatus::NoPbf,
+    let mut out: Vec<(String, DatasetStatus)> = Vec::new();
+
+    for (name, ds) in datasets {
+        // PBF variants.
+        for (variant, entry) in &ds.pbf {
+            let label = format!("{name}/{variant}");
+            let path = data_dir.join(&entry.file);
+            let status = if !path.exists() {
+                DatasetStatus::Missing
+            } else {
+                check_hash_status(&path, entry.xxhash.as_deref(), project_root)
             };
-            (name.clone(), status)
-        })
-        .collect();
+            out.push((label, status));
+        }
+
+        // OSC entries.
+        for (seq, entry) in &ds.osc {
+            let label = format!("{name}/osc.{seq}");
+            let path = data_dir.join(&entry.file);
+            let status = if !path.exists() {
+                DatasetStatus::Missing
+            } else {
+                check_hash_status(&path, entry.xxhash.as_deref(), project_root)
+            };
+            out.push((label, status));
+        }
+
+        // PMTiles entries.
+        for (variant, entry) in &ds.pmtiles {
+            let label = format!("{name}/pmtiles.{variant}");
+            let path = data_dir.join(&entry.file);
+            let status = if !path.exists() {
+                DatasetStatus::Missing
+            } else {
+                check_hash_status(&path, entry.xxhash.as_deref(), project_root)
+            };
+            out.push((label, status));
+        }
+
+        // If no files at all, emit a single entry.
+        if ds.pbf.is_empty() && ds.osc.is_empty() && ds.pmtiles.is_empty() {
+            out.push((name.clone(), DatasetStatus::NoPbf));
+        }
+    }
 
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
