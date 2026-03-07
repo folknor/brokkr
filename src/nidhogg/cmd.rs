@@ -193,9 +193,8 @@ pub(crate) fn verify_batch(dev_config: &config::DevConfig, _project: Project, _p
 
 pub(crate) fn verify_geocode(dev_config: &config::DevConfig, _project: Project, _project_root: &Path, queries: &[String]) -> Result<(), DevError> {
     let port = resolve_port(dev_config);
-    let default_queries = ["Kobenhavn", "Aarhus", "Odense"];
     let query_refs: Vec<&str> = if queries.is_empty() {
-        default_queries.to_vec()
+        super::client::GEOCODE_TEST_QUERIES.to_vec()
     } else {
         queries.iter().map(String::as_str).collect()
     };

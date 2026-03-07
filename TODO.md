@@ -72,8 +72,8 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 ### env.rs dataset check loops are identical
 `env.rs`: PBF, OSC, and PMTiles loops in `check_datasets` are structurally identical (build label, join path, check exists, check hash). Could extract a helper.
 
-### Missing `#[derive(Clone)]` causes ~60 lines of manual clone code
-`db/types.rs`, `harness.rs`: `KvPair`, `KvValue`, `Distribution`, `HotpathData`, `HotpathFunction`, `HotpathThread` lack `#[derive(Clone)]`, forcing manual field-by-field reconstruction in `build_row`, `reconstruct_hotpath`, and `take_hotpath_for_compare`.
+### ~~Missing `#[derive(Clone)]` causes ~60 lines of manual clone code~~ FIXED
+`db/types.rs`: added `#[derive(Clone)]` to `Distribution`, `HotpathFunction`, `HotpathThread`, `HotpathData`. Removed `reconstruct_hotpath` (harness.rs) and `take_hotpath_for_compare` (format.rs).
 
 ### JSON element-count parsing repeated in 4 nidhogg files
 `nidhogg/bench_api.rs`, `query.rs`, `verify_batch.rs`, `verify_readonly.rs`: each reimplements `parsed.get("elements").and_then(|v| v.as_array())`. A shared helper in `client.rs` would reduce this.
@@ -84,18 +84,18 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 ### Path-to-string conversion boilerplate in nidhogg
 `nidhogg/ingest.rs` (3x), `hotpath.rs` (2x), `profile.rs` (1x): the `path.to_str().ok_or_else(|| DevError::Config("... not valid UTF-8"))` pattern could be a utility function.
 
-### Duplicate geocode defaults
-`nidhogg/cmd.rs` defines `["Kobenhavn", "Aarhus", "Odense"]` as a local array instead of reusing `client::GEOCODE_TEST_QUERIES`.
+### ~~Duplicate geocode defaults~~ FIXED
+`nidhogg/cmd.rs`: now reuses `client::GEOCODE_TEST_QUERIES` instead of a local duplicate array.
 
 ---
 
 ## Inconsistencies
 
-### Inconsistent available-variant listing in resolve errors
-`resolve.rs`: `resolve_osc_path` lists available keys on miss, but `resolve_pbf_path` and `resolve_pmtiles_path` do not. `resolve_osc_path` doesn't sort the keys, while `resolve_default_osc_path` does.
+### ~~Inconsistent available-variant listing in resolve errors~~ FIXED
+`resolve.rs`: all three resolve functions now list available keys on miss, all sorted.
 
-### `DatasetStatus::NoPbf` name is misleading
-`env.rs`: this variant now means "no files of any kind" (PBF, OSC, or PMTiles), not just "no PBF". Should be renamed to `NoFiles` or `Empty`.
+### ~~`DatasetStatus::NoPbf` name is misleading~~ FIXED
+`env.rs`: renamed to `DatasetStatus::NoFiles`.
 
 ### Double hashing on mismatch in env.rs
 `env.rs` `check_hash_status`: `verify_file_hash` computes the hash internally, then on failure `cached_xxh128` is called again to get the actual hash for display. The second call hits cache so no perf issue, just redundant logic.

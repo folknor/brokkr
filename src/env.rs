@@ -29,8 +29,8 @@ pub enum DatasetStatus {
     HashMismatch(String),
     /// File does not exist.
     Missing,
-    /// Dataset has no PBF path configured.
-    NoPbf,
+    /// Dataset has no files configured.
+    NoFiles,
 }
 
 /// Collect all environment information.
@@ -106,7 +106,7 @@ fn format_dataset(name: &str, status: &DatasetStatus) -> String {
         DatasetStatus::Present(hash) => format!("{name} \u{2713} (no hash configured, actual: {hash})"),
         DatasetStatus::HashMismatch(hash) => format!("{name} \u{2717} (hash mismatch, actual: {hash})"),
         DatasetStatus::Missing => format!("{name} \u{2717} (missing)"),
-        DatasetStatus::NoPbf => format!("{name} (no pbf)"),
+        DatasetStatus::NoFiles => format!("{name} (no files configured)"),
     }
 }
 
@@ -356,7 +356,7 @@ fn check_datasets(
 
         // If no files at all, emit a single entry.
         if ds.pbf.is_empty() && ds.osc.is_empty() && ds.pmtiles.is_empty() {
-            out.push((name.clone(), DatasetStatus::NoPbf));
+            out.push((name.clone(), DatasetStatus::NoFiles));
         }
     }
 

@@ -50,6 +50,7 @@ impl std::fmt::Display for KvValue {
 // ---------------------------------------------------------------------------
 
 /// Distribution statistics from `harness.run_distribution()`.
+#[derive(Clone)]
 pub struct Distribution {
     pub samples: i64,
     pub min_ms: i64,
@@ -59,6 +60,7 @@ pub struct Distribution {
 }
 
 /// A single function row from hotpath profiling.
+#[derive(Clone)]
 pub struct HotpathFunction {
     pub section: String,
     pub description: Option<String>,
@@ -74,6 +76,7 @@ pub struct HotpathFunction {
 }
 
 /// A single thread row from hotpath profiling.
+#[derive(Clone)]
 pub struct HotpathThread {
     pub name: String,
     pub status: Option<String>,
@@ -88,6 +91,7 @@ pub struct HotpathThread {
 }
 
 /// Structured hotpath profiling data (functions + threads).
+#[derive(Clone)]
 pub struct HotpathData {
     pub functions: Vec<HotpathFunction>,
     pub threads: Vec<HotpathThread>,

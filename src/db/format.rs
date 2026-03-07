@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::types::short_uuid;
-use super::{HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, StoredRow};
+use super::{HotpathData, KvPair, KvValue, StoredRow};
 
 // ---------------------------------------------------------------------------
 // Public formatting API
@@ -387,7 +387,7 @@ fn build_comparison_pairs(
             keys.push(key);
             e.insert(RowData {
                 elapsed_ms: row.elapsed_ms,
-                hotpath: take_hotpath_for_compare(row),
+                hotpath: row.hotpath.clone(),
                 output_bytes: find_output_bytes(&row.kv),
                 peak_rss_mb: row.peak_rss_mb,
                 rewrite_pct: compute_rewrite_pct(&row.kv),
@@ -404,7 +404,7 @@ fn build_comparison_pairs(
             }
             e.insert(RowData {
                 elapsed_ms: row.elapsed_ms,
-                hotpath: take_hotpath_for_compare(row),
+                hotpath: row.hotpath.clone(),
                 output_bytes: find_output_bytes(&row.kv),
                 peak_rss_mb: row.peak_rss_mb,
                 rewrite_pct: compute_rewrite_pct(&row.kv),
@@ -447,50 +447,6 @@ fn build_comparison_pairs(
             }
         })
         .collect()
-}
-
-/// Extract hotpath data for comparison. Uses a shallow reconstruction since
-/// StoredRow doesn't impl Clone. Returns None if no hotpath data.
-fn take_hotpath_for_compare(row: &StoredRow) -> Option<HotpathData> {
-    row.hotpath.as_ref()?;
-    // We need to reconstruct since HotpathData doesn't derive Clone.
-    // This is called only for compare pairs (a handful of rows).
-    let hp = row.hotpath.as_ref()?;
-    Some(HotpathData {
-        functions: hp.functions.iter().map(|f| HotpathFunction {
-            section: f.section.clone(),
-            description: f.description.clone(),
-            ordinal: f.ordinal,
-            name: f.name.clone(),
-            calls: f.calls,
-            avg: f.avg.clone(),
-            total: f.total.clone(),
-            percent_total: f.percent_total.clone(),
-            p50: f.p50.clone(),
-            p95: f.p95.clone(),
-            p99: f.p99.clone(),
-        }).collect(),
-        threads: hp.threads.iter().map(|t| HotpathThread {
-            name: t.name.clone(),
-            status: t.status.clone(),
-            cpu_percent: t.cpu_percent.clone(),
-            cpu_percent_max: t.cpu_percent_max.clone(),
-            cpu_user: t.cpu_user.clone(),
-            cpu_sys: t.cpu_sys.clone(),
-            cpu_total: t.cpu_total.clone(),
-            alloc_bytes: t.alloc_bytes.clone(),
-            dealloc_bytes: t.dealloc_bytes.clone(),
-            mem_diff: t.mem_diff.clone(),
-        }).collect(),
-        thread_summary: hp.thread_summary.iter().map(|kv| KvPair {
-            key: kv.key.clone(),
-            value: match &kv.value {
-                KvValue::Int(v) => KvValue::Int(*v),
-                KvValue::Real(v) => KvValue::Real(*v),
-                KvValue::Text(v) => KvValue::Text(v.clone()),
-            },
-        }).collect(),
-    })
 }
 
 fn pair_key(command: &str, variant: &str, input_file: &str) -> String {

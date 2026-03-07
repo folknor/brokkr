@@ -373,8 +373,8 @@ impl BenchHarness {
             cli_args: config.cli_args.clone(),
             project: self.project.name().to_owned(),
             kv,
-            distribution: reconstruct_distribution(&result.distribution),
-            hotpath: reconstruct_hotpath(&result.hotpath),
+            distribution: result.distribution.clone(),
+            hotpath: result.hotpath.clone(),
         }
     }
 }
@@ -382,56 +382,6 @@ impl BenchHarness {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
-
-fn reconstruct_distribution(dist: &Option<Distribution>) -> Option<Distribution> {
-    let d = dist.as_ref()?;
-    Some(Distribution {
-        samples: d.samples,
-        min_ms: d.min_ms,
-        p50_ms: d.p50_ms,
-        p95_ms: d.p95_ms,
-        max_ms: d.max_ms,
-    })
-}
-
-fn reconstruct_hotpath(hp: &Option<HotpathData>) -> Option<HotpathData> {
-    let h = hp.as_ref()?;
-    Some(db::HotpathData {
-        functions: h.functions.iter().map(|f| db::HotpathFunction {
-            section: f.section.clone(),
-            description: f.description.clone(),
-            ordinal: f.ordinal,
-            name: f.name.clone(),
-            calls: f.calls,
-            avg: f.avg.clone(),
-            total: f.total.clone(),
-            percent_total: f.percent_total.clone(),
-            p50: f.p50.clone(),
-            p95: f.p95.clone(),
-            p99: f.p99.clone(),
-        }).collect(),
-        threads: h.threads.iter().map(|t| db::HotpathThread {
-            name: t.name.clone(),
-            status: t.status.clone(),
-            cpu_percent: t.cpu_percent.clone(),
-            cpu_percent_max: t.cpu_percent_max.clone(),
-            cpu_user: t.cpu_user.clone(),
-            cpu_sys: t.cpu_sys.clone(),
-            cpu_total: t.cpu_total.clone(),
-            alloc_bytes: t.alloc_bytes.clone(),
-            dealloc_bytes: t.dealloc_bytes.clone(),
-            mem_diff: t.mem_diff.clone(),
-        }).collect(),
-        thread_summary: h.thread_summary.iter().map(|kv| KvPair {
-            key: kv.key.clone(),
-            value: match &kv.value {
-                KvValue::Int(v) => KvValue::Int(*v),
-                KvValue::Real(v) => KvValue::Real(*v),
-                KvValue::Text(v) => KvValue::Text(v.clone()),
-            },
-        }).collect(),
-    })
-}
 
 /// Build a result summary string with key=value pairs.
 fn format_result_line(

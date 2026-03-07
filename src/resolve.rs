@@ -15,8 +15,11 @@ pub(crate) fn resolve_pbf_path(
         DevError::Config(format!("unknown dataset: {dataset}"))
     })?;
     let entry = ds.pbf.get(variant).ok_or_else(|| {
+        let mut available: Vec<&str> = ds.pbf.keys().map(String::as_str).collect();
+        available.sort();
         DevError::Config(format!(
-            "dataset '{dataset}' has no pbf variant '{variant}'"
+            "dataset '{dataset}' has no pbf variant '{variant}' (available: {})",
+            if available.is_empty() { "none".to_string() } else { available.join(", ") }
         ))
     })?;
     let path = paths.data_dir.join(&entry.file);
@@ -48,7 +51,8 @@ pub(crate) fn resolve_osc_path(
         DevError::Config(format!("unknown dataset: {dataset}"))
     })?;
     let entry = ds.osc.get(seq).ok_or_else(|| {
-        let available: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
+        let mut available: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
+        available.sort();
         DevError::Config(format!(
             "dataset '{dataset}' has no osc seq '{seq}' (available: {})",
             if available.is_empty() { "none".to_string() } else { available.join(", ") }
@@ -141,8 +145,11 @@ pub(crate) fn resolve_pmtiles_path(
         DevError::Config(format!("unknown dataset: {dataset}"))
     })?;
     let entry = ds.pmtiles.get(variant).ok_or_else(|| {
+        let mut available: Vec<&str> = ds.pmtiles.keys().map(String::as_str).collect();
+        available.sort();
         DevError::Config(format!(
-            "dataset '{dataset}' has no pmtiles variant '{variant}'"
+            "dataset '{dataset}' has no pmtiles variant '{variant}' (available: {})",
+            if available.is_empty() { "none".to_string() } else { available.join(", ") }
         ))
     })?;
     let path = paths.data_dir.join(&entry.file);
