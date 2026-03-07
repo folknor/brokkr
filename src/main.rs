@@ -248,9 +248,29 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Query { json } => nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref()),
         Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
-        Command::Preview { from, dataset, variant, no_open } => {
+        Command::Preview {
+            from, dataset, variant, no_open, pmtiles,
+            fanout_cap_default, fanout_cap, polygon_simplify_factor,
+            tile_format, tile_compression, compress_sort_chunks,
+        } => {
             let _lock = acquire_cmd_lock(project, &project_root, "preview")?;
-            preview::run(&dev_config, &project_root, from, &dataset, &variant, no_open)
+            let pipeline_opts = elivagar::PipelineOpts {
+                no_ocean: false,
+                force_sorted: false,
+                allow_unsafe_flat_index: false,
+                tile_format: tile_format.as_deref(),
+                tile_compression: tile_compression.as_deref(),
+                compress_sort_chunks: compress_sort_chunks.as_deref(),
+                in_memory: true,
+                locations_on_ways: true,
+                fanout_cap_default,
+                fanout_cap: fanout_cap.as_deref(),
+                polygon_simplify_factor,
+            };
+            preview::run(
+                &dev_config, &project_root, from, &dataset, &variant,
+                no_open, pmtiles.as_deref(), &pipeline_opts,
+            )
         }
     }
 }

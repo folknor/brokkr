@@ -50,7 +50,7 @@ Single crate, single binary. No workspace.
 - `src/profiler.rs` — Sampling profiler integration (perf/samply)
 - `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config), cache-first network checks
 - `src/worktree.rs` — Git worktree creation/cleanup for retroactive benchmarking
-- `src/preview.rs` — Preview pipeline orchestrator: enrich → tilegen → ingest → serve → browser. Cross-project builds, artifact validation, `--from` step skipping
+- `src/preview.rs` — Preview pipeline orchestrator: enrich → tilegen → ingest → serve → browser. Cross-project builds, artifact validation, `--from` step skipping, `--pmtiles` override, elivagar pipeline flag passthrough
 - `src/history.rs` — `HistoryDb` — global command history at `$XDG_DATA_HOME/brokkr/history.db`. Schema v1, migration framework, insert/query/format
 
 ### Project-specific modules
@@ -130,7 +130,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline. Pbfhogg supports `--test <name>` to run a single test (inspect-tags, check-refs, cat, apply-changes-zlib, apply-changes-none).
 - `profile` — sampling profiler (perf/samply)
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
-- `preview` — end-to-end pipeline (enrich → tilegen → ingest → serve) with map viewer. Requires `[hostname.preview]` in brokkr.toml. Supports `--from enrich|tilegen|ingest|serve`, `--dataset`, `--variant`, `--no-open`
+- `preview` — end-to-end pipeline (enrich → tilegen → ingest → serve) with map viewer. Requires `[hostname.preview]` in brokkr.toml. Supports `--from enrich|tilegen|ingest|serve`, `--dataset`, `--variant`, `--no-open`, `--pmtiles <path>` (skip to serve with existing tiles), elivagar pipeline flags (`--fanout-cap-default`, `--fanout-cap`, `--polygon-simplify-factor`, `--tile-format`, `--tile-compression`, `--compress-sort-chunks`)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Every invocation (except `history` itself) is recorded with timing, exit status, project, commit, and system context. Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 
 ## Benchmark harness

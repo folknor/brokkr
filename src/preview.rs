@@ -140,6 +140,7 @@ fn step_tilegen(
     tmp_dir: &Path,
     data_dir: &Path,
     project_root: &Path,
+    pipeline_opts: &crate::elivagar::PipelineOpts<'_>,
 ) -> Result<(), DevError> {
     output::preview_msg(&format!(
         "generating tiles {} -> {}",
@@ -153,36 +154,21 @@ fn step_tilegen(
     )?;
 
     let binary_str = binary.display().to_string();
-    let input_str = input_pbf.display().to_string();
-    let output_str = output_pmtiles.display().to_string();
-    let tmp_str = tmp_dir.display().to_string();
 
     std::fs::create_dir_all(tmp_dir)?;
 
-    let mut args: Vec<&str> = vec![
-        "run", &input_str,
-        "-o", &output_str,
-        "--tmp-dir", &tmp_str,
-        "--locations-on-ways",
-        "--in-memory",
+    let mut args: Vec<String> = vec![
+        "run".into(), input_pbf.display().to_string(),
+        "-o".into(), output_pmtiles.display().to_string(),
+        "--tmp-dir".into(), tmp_dir.display().to_string(),
     ];
 
-    // Detect ocean shapefiles
-    let (ocean, simplified) = crate::elivagar::detect_ocean(data_dir);
-    let ocean_str = ocean.as_ref().map(|p| p.display().to_string());
-    let simplified_str = simplified.as_ref().map(|p| p.display().to_string());
-    if let Some(ref s) = ocean_str {
-        args.push("--ocean");
-        args.push(s);
-    }
-    if let Some(ref s) = simplified_str {
-        args.push("--ocean-simplified");
-        args.push(s);
-    }
+    pipeline_opts.push_args(&mut args, data_dir);
 
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_captured(
         &binary_str,
-        &args,
+        &arg_refs,
         project_root,
     )?;
 
@@ -274,6 +260,8 @@ pub fn run(
     dataset: &str,
     variant: &str,
     no_open: bool,
+    pmtiles_override: Option<&str>,
+    pipeline_opts: &crate::elivagar::PipelineOpts<'_>,
 ) -> Result<(), DevError> {
     // Resolve host config.
     let pi = build::project_info(None)?;
@@ -290,6 +278,9 @@ pub fn run(
     let nidhogg_root = resolve_project_root(project_root, &preview.nidhogg)?;
 
     output::preview_msg(&format!("dataset={dataset} variant={variant}"));
+    if let Some(p) = pmtiles_override {
+        output::preview_msg(&format!("pmtiles  = {p}"));
+    }
     output::preview_msg(&format!("pbfhogg  = {}", pbfhogg_root.display()));
     output::preview_msg(&format!("elivagar = {}", elivagar_root.display()));
     output::preview_msg(&format!("nidhogg  = {}", nidhogg_root.display()));
@@ -300,14 +291,30 @@ pub fn run(
 
     // Determine artifact paths.
     let enriched = enriched_pbf_path(project_root, dataset, variant);
-    let pmtiles = pmtiles_path(project_root, dataset, variant);
+    let pmtiles = if let Some(p) = pmtiles_override {
+        let path = PathBuf::from(p);
+        if !path.exists() {
+            return Err(DevError::Config(format!(
+                "PMTiles file not found: {}",
+                path.display(),
+            )));
+        }
+        path
+    } else {
+        pmtiles_path(project_root, dataset, variant)
+    };
     let data_dir = data_dir_path(project_root, dataset, variant);
     let tmp_dir = tilegen_tmp_path(project_root);
 
     // Resolve port.
     let port = resolve_port(dev_config);
 
-    let start_step = from.unwrap_or(PreviewStep::Enrich);
+    // --pmtiles implies --from serve when no explicit --from is given.
+    let start_step = match (from, pmtiles_override) {
+        (Some(step), _) => step,
+        (None, Some(_)) => PreviewStep::Serve,
+        (None, None) => PreviewStep::Enrich,
+    };
 
     match start_step {
         PreviewStep::Enrich => {}
@@ -320,7 +327,13 @@ pub fn run(
         }
         PreviewStep::Serve => {
             check_artifact(&pmtiles, "PMTiles", "tilegen")?;
-            check_artifact(&data_dir, "nidhogg data dir", "ingest")?;
+            if pmtiles_override.is_some() {
+                // Tile-only QA: create an empty data dir so nidhogg can start
+                // without requiring a prior ingest run.
+                std::fs::create_dir_all(&data_dir)?;
+            } else {
+                check_artifact(&data_dir, "nidhogg data dir", "ingest")?;
+            }
         }
     }
 
@@ -337,6 +350,7 @@ pub fn run(
             &tmp_dir,
             &paths.data_dir,
             project_root,
+            pipeline_opts,
         )?;
     }
 

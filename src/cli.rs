@@ -460,6 +460,29 @@ Examples:
         /// Don't open browser after starting the server
         #[arg(long)]
         no_open: bool,
+
+        /// Use an existing PMTiles file (skips enrich+tilegen, implies --from serve if no --from given)
+        #[arg(long)]
+        pmtiles: Option<String>,
+
+        /// Default fanout cap for all layers (elivagar only)
+        #[arg(long)]
+        fanout_cap_default: Option<u32>,
+        /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
+        #[arg(long)]
+        fanout_cap: Option<String>,
+        /// Polygon simplification factor (elivagar only, default 1.0, range 0.1–10.0)
+        #[arg(long)]
+        polygon_simplify_factor: Option<f64>,
+        /// Tile output format (mvt or mlt, elivagar only)
+        #[arg(long)]
+        tile_format: Option<String>,
+        /// Tile compression (gzip or brotli, elivagar only)
+        #[arg(long)]
+        tile_compression: Option<String>,
+        /// Compress sort chunks (lz4 or snappy, elivagar only)
+        #[arg(long)]
+        compress_sort_chunks: Option<String>,
     },
 }
 
@@ -947,13 +970,14 @@ mod tests {
             "preview",
         ]).expect("parse");
 
-        let Command::Preview { from, dataset, variant, no_open } = parsed.command else {
+        let Command::Preview { from, dataset, variant, no_open, pmtiles, .. } = parsed.command else {
             panic!("expected preview command");
         };
         assert!(from.is_none());
         assert_eq!(dataset, "denmark");
         assert_eq!(variant, "indexed");
         assert!(!no_open);
+        assert!(pmtiles.is_none());
     }
 
     #[test]
