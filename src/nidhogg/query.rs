@@ -23,9 +23,7 @@ pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|e| DevError::Verify(format!("invalid JSON from query API: {e}")))?;
 
-    let elements = parsed
-        .get("elements")
-        .and_then(|v| v.as_array());
+    let elements = parsed.get("elements").and_then(|v| v.as_array());
 
     match elements {
         Some(arr) => {

@@ -1,8 +1,107 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::error::DevError;
 use crate::preflight;
+
+// ---------------------------------------------------------------------------
+// FileEntry trait — unifies PBF, OSC, and PMTiles entry types
+// ---------------------------------------------------------------------------
+
+pub(crate) trait FileEntry {
+    fn file(&self) -> &str;
+    fn xxhash(&self) -> Option<&str>;
+}
+
+impl FileEntry for config::PbfEntry {
+    fn file(&self) -> &str { &self.file }
+    fn xxhash(&self) -> Option<&str> { self.xxhash.as_deref() }
+}
+
+impl FileEntry for config::OscEntry {
+    fn file(&self) -> &str { &self.file }
+    fn xxhash(&self) -> Option<&str> { self.xxhash.as_deref() }
+}
+
+impl FileEntry for config::PmtilesEntry {
+    fn file(&self) -> &str { &self.file }
+    fn xxhash(&self) -> Option<&str> { self.xxhash.as_deref() }
+}
+
+/// Generic file resolver: lookup entry in map → join path → check exists → verify hash.
+fn resolve_entry_path<E: FileEntry>(
+    entries: &HashMap<String, E>,
+    key: &str,
+    dataset: &str,
+    kind: &str,
+    data_dir: &Path,
+    origin: Option<&str>,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let entry = entries.get(key).ok_or_else(|| {
+        let mut available: Vec<&str> = entries.keys().map(String::as_str).collect();
+        available.sort();
+        DevError::Config(format!(
+            "dataset '{dataset}' has no {kind} '{key}' (available: {})",
+            if available.is_empty() { "none".to_string() } else { available.join(", ") }
+        ))
+    })?;
+    let path = data_dir.join(entry.file());
+
+    if !path.exists() {
+        return Err(DevError::Config(format!(
+            "{} file not found: {}",
+            kind.to_uppercase(),
+            path.display()
+        )));
+    }
+
+    if let Some(expected) = entry.xxhash() {
+        preflight::verify_file_hash(&path, expected, project_root, origin)?;
+    }
+
+    Ok(path)
+}
+
+/// Generic default resolver: auto-select if exactly one entry, error if zero or multiple.
+fn resolve_default_entry_path<E: FileEntry>(
+    entries: &HashMap<String, E>,
+    dataset: &str,
+    kind: &str,
+    flag: &str,
+    data_dir: &Path,
+    origin: Option<&str>,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    if entries.is_empty() {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has no {kind} configured"
+        )));
+    }
+
+    if entries.len() > 1 {
+        let mut keys: Vec<&str> = entries.keys().map(String::as_str).collect();
+        keys.sort();
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has multiple {kind} entries — use {flag} to select (available: {})",
+            keys.join(", ")
+        )));
+    }
+
+    let key = entries.keys().next().unwrap();
+    resolve_entry_path(entries, key, dataset, kind, data_dir, origin, project_root)
+}
+
+/// Look up a dataset by name, returning it and its origin.
+fn get_dataset<'a>(
+    dataset: &str,
+    paths: &'a config::ResolvedPaths,
+) -> Result<&'a config::Dataset, DevError> {
+    paths.datasets.get(dataset).ok_or_else(|| {
+        DevError::Config(format!("unknown dataset: {dataset}"))
+    })
+}
 
 /// Resolve the PBF path from --dataset + --variant.
 pub(crate) fn resolve_pbf_path(
@@ -11,33 +110,8 @@ pub(crate) fn resolve_pbf_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
-    let entry = ds.pbf.get(variant).ok_or_else(|| {
-        let mut available: Vec<&str> = ds.pbf.keys().map(String::as_str).collect();
-        available.sort();
-        DevError::Config(format!(
-            "dataset '{dataset}' has no pbf variant '{variant}' (available: {})",
-            if available.is_empty() { "none".to_string() } else { available.join(", ") }
-        ))
-    })?;
-    let path = paths.data_dir.join(&entry.file);
-    let hash = entry.xxhash.as_deref();
-    let origin = ds.origin.as_deref();
-
-    if !path.exists() {
-        return Err(DevError::Config(format!(
-            "PBF file not found: {}",
-            path.display()
-        )));
-    }
-
-    if let Some(expected) = hash {
-        preflight::verify_file_hash(&path, expected, project_root, origin)?;
-    }
-
-    Ok(path)
+    let ds = get_dataset(dataset, paths)?;
+    resolve_entry_path(&ds.pbf, variant, dataset, "pbf variant", &paths.data_dir, ds.origin.as_deref(), project_root)
 }
 
 /// Resolve the OSC path from --dataset + --osc-seq.
@@ -47,33 +121,8 @@ pub(crate) fn resolve_osc_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
-    let entry = ds.osc.get(seq).ok_or_else(|| {
-        let mut available: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
-        available.sort();
-        DevError::Config(format!(
-            "dataset '{dataset}' has no osc seq '{seq}' (available: {})",
-            if available.is_empty() { "none".to_string() } else { available.join(", ") }
-        ))
-    })?;
-    let path = paths.data_dir.join(&entry.file);
-    let hash = entry.xxhash.as_deref();
-    let origin = ds.origin.as_deref();
-
-    if !path.exists() {
-        return Err(DevError::Config(format!(
-            "OSC file not found: {}",
-            path.display()
-        )));
-    }
-
-    if let Some(expected) = hash {
-        preflight::verify_file_hash(&path, expected, project_root, origin)?;
-    }
-
-    Ok(path)
+    let ds = get_dataset(dataset, paths)?;
+    resolve_entry_path(&ds.osc, seq, dataset, "osc seq", &paths.data_dir, ds.origin.as_deref(), project_root)
 }
 
 /// Resolve the default OSC path when no --osc-seq is specified.
@@ -85,32 +134,8 @@ pub(crate) fn resolve_default_osc_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
-
-    if ds.osc.is_empty() {
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has no osc files configured"
-        )));
-    }
-
-    if ds.osc.len() > 1 {
-        let mut seqs: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
-        seqs.sort();
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has multiple osc files — use --osc-seq to select (available: {})",
-            seqs.join(", ")
-        )));
-    }
-
-    // SAFETY: checked len == 1 above.
-    let Some((seq, _)) = ds.osc.iter().next() else {
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has no osc files configured"
-        )));
-    };
-    resolve_osc_path(dataset, seq, paths, project_root)
+    let ds = get_dataset(dataset, paths)?;
+    resolve_default_entry_path(&ds.osc, dataset, "osc", "--osc-seq", &paths.data_dir, ds.origin.as_deref(), project_root)
 }
 
 /// Resolve the bbox from --bbox or dataset config.
@@ -164,33 +189,8 @@ pub(crate) fn resolve_pmtiles_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
-    let entry = ds.pmtiles.get(variant).ok_or_else(|| {
-        let mut available: Vec<&str> = ds.pmtiles.keys().map(String::as_str).collect();
-        available.sort();
-        DevError::Config(format!(
-            "dataset '{dataset}' has no pmtiles variant '{variant}' (available: {})",
-            if available.is_empty() { "none".to_string() } else { available.join(", ") }
-        ))
-    })?;
-    let path = paths.data_dir.join(&entry.file);
-    let hash = entry.xxhash.as_deref();
-    let origin = ds.origin.as_deref();
-
-    if !path.exists() {
-        return Err(DevError::Config(format!(
-            "PMTiles file not found: {}",
-            path.display()
-        )));
-    }
-
-    if let Some(expected) = hash {
-        preflight::verify_file_hash(&path, expected, project_root, origin)?;
-    }
-
-    Ok(path)
+    let ds = get_dataset(dataset, paths)?;
+    resolve_entry_path(&ds.pmtiles, variant, dataset, "pmtiles variant", &paths.data_dir, ds.origin.as_deref(), project_root)
 }
 
 /// Resolve the default PMTiles path when no variant is specified.
@@ -202,32 +202,8 @@ pub(crate) fn resolve_default_pmtiles_path(
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
-
-    if ds.pmtiles.is_empty() {
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has no pmtiles configured"
-        )));
-    }
-
-    if ds.pmtiles.len() > 1 {
-        let mut variants: Vec<&str> = ds.pmtiles.keys().map(String::as_str).collect();
-        variants.sort();
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has multiple pmtiles variants — use --tiles to select (available: {})",
-            variants.join(", ")
-        )));
-    }
-
-    // SAFETY: checked len == 1 above.
-    let Some((variant, _)) = ds.pmtiles.iter().next() else {
-        return Err(DevError::Config(format!(
-            "dataset '{dataset}' has no pmtiles configured"
-        )));
-    };
-    resolve_pmtiles_path(dataset, variant, paths, project_root)
+    let ds = get_dataset(dataset, paths)?;
+    resolve_default_entry_path(&ds.pmtiles, dataset, "pmtiles", "--tiles", &paths.data_dir, ds.origin.as_deref(), project_root)
 }
 
 /// Resolve PMTiles path and its size in one call.
@@ -375,7 +351,7 @@ mod tests {
 
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
         let err = resolve_default_osc_path("denmark", &paths, Path::new(".")).unwrap_err().to_string();
-        assert!(err.contains("multiple osc files"));
+        assert!(err.contains("multiple osc entries"));
         assert!(err.contains("4705, 4706"));
     }
 
@@ -408,7 +384,7 @@ mod tests {
 
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
         let err = resolve_default_pmtiles_path("denmark", &paths, Path::new(".")).unwrap_err().to_string();
-        assert!(err.contains("multiple pmtiles variants"));
+        assert!(err.contains("multiple pmtiles entries"));
         assert!(err.contains("a, z"));
     }
 

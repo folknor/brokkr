@@ -318,43 +318,10 @@ fn check_datasets(
     let mut out: Vec<(String, DatasetStatus)> = Vec::new();
 
     for (name, ds) in datasets {
-        // PBF variants.
-        for (variant, entry) in &ds.pbf {
-            let label = format!("{name}/{variant}");
-            let path = data_dir.join(&entry.file);
-            let status = if !path.exists() {
-                DatasetStatus::Missing
-            } else {
-                check_hash_status(&path, entry.xxhash.as_deref(), project_root)
-            };
-            out.push((label, status));
-        }
+        check_file_entries(&mut out, name, &ds.pbf, "", data_dir, project_root);
+        check_file_entries(&mut out, name, &ds.osc, "osc.", data_dir, project_root);
+        check_file_entries(&mut out, name, &ds.pmtiles, "pmtiles.", data_dir, project_root);
 
-        // OSC entries.
-        for (seq, entry) in &ds.osc {
-            let label = format!("{name}/osc.{seq}");
-            let path = data_dir.join(&entry.file);
-            let status = if !path.exists() {
-                DatasetStatus::Missing
-            } else {
-                check_hash_status(&path, entry.xxhash.as_deref(), project_root)
-            };
-            out.push((label, status));
-        }
-
-        // PMTiles entries.
-        for (variant, entry) in &ds.pmtiles {
-            let label = format!("{name}/pmtiles.{variant}");
-            let path = data_dir.join(&entry.file);
-            let status = if !path.exists() {
-                DatasetStatus::Missing
-            } else {
-                check_hash_status(&path, entry.xxhash.as_deref(), project_root)
-            };
-            out.push((label, status));
-        }
-
-        // If no files at all, emit a single entry.
         if ds.pbf.is_empty() && ds.osc.is_empty() && ds.pmtiles.is_empty() {
             out.push((name.clone(), DatasetStatus::NoFiles));
         }
@@ -362,6 +329,27 @@ fn check_datasets(
 
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// Check all entries in a file map and push their status to `out`.
+fn check_file_entries<E: crate::resolve::FileEntry>(
+    out: &mut Vec<(String, DatasetStatus)>,
+    dataset_name: &str,
+    entries: &HashMap<String, E>,
+    prefix: &str,
+    data_dir: &Path,
+    project_root: &Path,
+) {
+    for (key, entry) in entries {
+        let label = format!("{dataset_name}/{prefix}{key}");
+        let path = data_dir.join(entry.file());
+        let status = if !path.exists() {
+            DatasetStatus::Missing
+        } else {
+            check_hash_status(&path, entry.xxhash(), project_root)
+        };
+        out.push((label, status));
+    }
 }
 
 fn check_hash_status(path: &Path, expected: Option<&str>, project_root: &Path) -> DatasetStatus {

@@ -146,9 +146,7 @@ fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
 
     match parsed {
         Ok(val) => {
-            let non_empty = val
-                .as_array()
-                .is_some_and(|arr| !arr.is_empty());
+            let non_empty = val.as_array().is_some_and(|arr| !arr.is_empty());
             Ok(non_empty)
         }
         Err(_) => Ok(false),
@@ -168,13 +166,7 @@ fn run_query_check(port: u16) -> Result<bool, DevError> {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
 
     match parsed {
-        Ok(val) => {
-            let non_empty = val
-                .get("elements")
-                .and_then(|v| v.as_array())
-                .is_some_and(|arr| !arr.is_empty());
-            Ok(non_empty)
-        }
+        Ok(val) => Ok(super::client::element_count(&val) > 0),
         Err(_) => Ok(false),
     }
 }

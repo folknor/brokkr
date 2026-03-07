@@ -47,20 +47,20 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Code duplication
 
-### resolve_pbf/osc/pmtiles share identical 5-step pattern
-`resolve.rs`: `resolve_pbf_path`, `resolve_osc_path`, `resolve_pmtiles_path` all do: lookup dataset -> lookup entry -> join path -> check exists -> verify hash. Could be collapsed into one generic helper + thin wrappers, saving ~40 lines. Same for the two `resolve_default_*` functions.
+### ~~resolve_pbf/osc/pmtiles share identical 5-step pattern~~ FIXED
+`resolve.rs`: `FileEntry` trait + `resolve_entry_path` / `resolve_default_entry_path` generic helpers replace 3 resolve functions and 2 default resolvers.
 
-### env.rs dataset check loops are identical
-`env.rs`: PBF, OSC, and PMTiles loops in `check_datasets` are structurally identical (build label, join path, check exists, check hash). Could extract a helper.
+### ~~env.rs dataset check loops are identical~~ FIXED
+`env.rs`: `check_file_entries` generic helper replaces 3 identical loops using the `FileEntry` trait.
 
-### JSON element-count parsing repeated in 4 nidhogg files
-`nidhogg/bench_api.rs`, `query.rs`, `verify_batch.rs`, `verify_readonly.rs`: each reimplements `parsed.get("elements").and_then(|v| v.as_array())`. A shared helper in `client.rs` would reduce this.
+### ~~JSON element-count parsing repeated in 4 nidhogg files~~ FIXED
+`client.rs`: `element_count()` helper used by `bench_api.rs`, `verify_batch.rs`, `verify_readonly.rs`.
 
-### Geocode response parsing repeated in 3 nidhogg files
-`nidhogg/geocode.rs`, `verify_geocode.rs`, `verify_readonly.rs`: parsing geocode JSON array and extracting `displayName`/`lat`/`lon` from the top result is repeated.
+### ~~Geocode response parsing repeated in 3 nidhogg files~~ FIXED
+`client.rs`: `geocode_top_name()` helper used by `geocode.rs`, `verify_geocode.rs`.
 
-### Path-to-string conversion boilerplate in nidhogg
-`nidhogg/ingest.rs` (3x), `hotpath.rs` (2x), `profile.rs` (1x): the `path.to_str().ok_or_else(|| DevError::Config("... not valid UTF-8"))` pattern could be a utility function.
+### ~~Path-to-string conversion boilerplate in nidhogg~~ FIXED
+`client.rs`: `path_str()` helper replaces 7 instances across `ingest.rs`, `hotpath.rs`, `profile.rs`, `bench_ingest.rs`, `update.rs`.
 
 ---
 

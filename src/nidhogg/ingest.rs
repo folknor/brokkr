@@ -19,15 +19,9 @@ pub fn run(
     data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let binary_str = binary
-        .to_str()
-        .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))?;
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
-    let data_str = data_dir
-        .to_str()
-        .ok_or_else(|| DevError::Config("data dir path is not valid UTF-8".into()))?;
+    let binary_str = super::client::path_str(binary)?;
+    let pbf_str = super::client::path_str(pbf_path)?;
+    let data_str = super::client::path_str(data_dir)?;
 
     // Ensure the output directory exists.
     std::fs::create_dir_all(data_dir)?;

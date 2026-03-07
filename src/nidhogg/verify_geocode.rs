@@ -85,10 +85,7 @@ fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
             let arr = val.as_array();
             match arr {
                 Some(results) if !results.is_empty() => {
-                    let top_name = results
-                        .first()
-                        .and_then(|v| v.get("displayName"))
-                        .and_then(|v| v.as_str())
+                    let top_name = super::client::geocode_top_name(&val)
                         .unwrap_or("(unknown)")
                         .to_owned();
                     Ok(GeoResult::Success {

@@ -146,10 +146,7 @@ fn run_batch_query(port: u16) -> Result<BatchResult, DevError> {
     // The batch response should be an object with filter names as keys.
     if let Some(obj) = parsed.as_object() {
         for (name, value) in obj {
-            let count = value
-                .get("elements")
-                .and_then(|v| v.as_array())
-                .map_or(0, Vec::len);
+            let count = super::client::element_count(value);
             filter_counts.push((name.clone(), count));
         }
     }
@@ -190,10 +187,7 @@ fn run_individual_queries(port: u16) -> Result<Vec<(String, usize, i64)>, DevErr
         let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|e| DevError::Verify(format!("invalid JSON from batch API: {e}")))?;
 
-        let count = parsed
-            .get("elements")
-            .and_then(|v| v.as_array())
-            .map_or(0, Vec::len);
+        let count = super::client::element_count(&parsed);
 
         results.push((name.to_owned(), count, elapsed_ms));
     }

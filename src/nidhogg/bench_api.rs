@@ -180,10 +180,13 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
         .parse()
         .unwrap_or(0);
 
-    let element_count = count_elements(json_body);
+    let count = match serde_json::from_str::<serde_json::Value>(json_body) {
+        Ok(val) => super::client::element_count(&val),
+        Err(_) => 0,
+    };
 
     output::bench_msg(&format!(
-        "{name}: {element_count} elements, {download_bytes} bytes response"
+        "{name}: {count} elements, {download_bytes} bytes response"
     ));
 
     Ok(())
@@ -196,18 +199,5 @@ fn split_curl_output(stdout: &str) -> (&str, &str) {
     match stdout.rfind('\n') {
         Some(pos) => (&stdout[..pos], &stdout[pos + 1..]),
         None => (stdout, "0"),
-    }
-}
-
-/// Count elements in a JSON response by looking for the "elements" array.
-fn count_elements(json_body: &str) -> usize {
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(json_body);
-    match parsed {
-        Ok(val) => {
-            val.get("elements")
-                .and_then(|v| v.as_array())
-                .map_or(0, Vec::len)
-        }
-        Err(_) => 0,
     }
 }

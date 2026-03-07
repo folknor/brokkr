@@ -142,6 +142,41 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
 }
 
 // ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a path to a `&str`, returning a clear error if it's not valid UTF-8.
+pub fn path_str(path: &std::path::Path) -> Result<&str, crate::error::DevError> {
+    path.to_str().ok_or_else(|| {
+        crate::error::DevError::Config(format!(
+            "path is not valid UTF-8: {}",
+            path.display()
+        ))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// JSON response helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the element count from a JSON response with an "elements" array.
+pub fn element_count(parsed: &serde_json::Value) -> usize {
+    parsed
+        .get("elements")
+        .and_then(|v| v.as_array())
+        .map_or(0, Vec::len)
+}
+
+/// Extract the top geocode result's display name from a JSON response array.
+pub fn geocode_top_name(parsed: &serde_json::Value) -> Option<&str> {
+    parsed
+        .as_array()?
+        .first()?
+        .get("displayName")?
+        .as_str()
+}
+
+// ---------------------------------------------------------------------------
 // URL encoding
 // ---------------------------------------------------------------------------
 

@@ -39,9 +39,7 @@ pub fn run(
         }
     }
 
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let pbf_str = super::client::path_str(pbf_path)?;
 
     let basename = pbf_path
         .file_name()

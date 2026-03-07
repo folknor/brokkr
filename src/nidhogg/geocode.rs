@@ -29,11 +29,8 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
             output::result_msg(&format!("{} results for '{query}'", results.len()));
 
             // Print top result details.
+            let display_name = super::client::geocode_top_name(&parsed).unwrap_or("(unknown)");
             if let Some(top) = results.first() {
-                let display_name = top
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(unknown)");
                 let lat = top.get("lat").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                 let lon = top.get("lon").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                 output::result_msg(&format!("  top: {display_name} ({lat:.4}, {lon:.4})"));

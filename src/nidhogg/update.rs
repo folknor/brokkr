@@ -18,9 +18,7 @@ pub fn run(
     args: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let binary_str = binary
-        .to_str()
-        .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))?;
+    let binary_str = super::client::path_str(binary)?;
 
     output::run_msg(&format!(
         "nidhogg-update {}",
