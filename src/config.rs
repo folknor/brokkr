@@ -69,6 +69,9 @@ pub struct HostConfig {
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
     pub preview: Option<PreviewConfig>,
+    /// Cargo features to enable by default for all build commands on this host.
+    #[serde(default)]
+    pub features: Vec<String>,
     #[serde(default)]
     pub datasets: HashMap<String, Dataset>,
 }
@@ -97,6 +100,7 @@ pub struct ResolvedPaths {
     pub target_dir: PathBuf,
     pub drives: Option<DriveConfig>,
     pub preview: Option<PreviewConfig>,
+    pub features: Vec<String>,
     pub datasets: HashMap<String, Dataset>,
 }
 
@@ -168,6 +172,18 @@ fn parse_hosts(
 }
 
 // ---------------------------------------------------------------------------
+// Host features
+// ---------------------------------------------------------------------------
+
+/// Return the default cargo features configured for the current host.
+pub fn host_features(config: &DevConfig) -> Vec<String> {
+    let Ok(name) = hostname() else { return Vec::new() };
+    config.hosts.get(&name)
+        .map(|h| h.features.clone())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Hostname
 // ---------------------------------------------------------------------------
 
@@ -223,6 +239,10 @@ pub fn resolve_paths(
     let drives = host.and_then(|h| h.drives.clone());
     let preview = host.and_then(|h| h.preview.clone());
 
+    let features = host
+        .map(|h| h.features.clone())
+        .unwrap_or_default();
+
     let datasets = host
         .map(|h| h.datasets.clone())
         .unwrap_or_default();
@@ -234,6 +254,7 @@ pub fn resolve_paths(
         target_dir,
         drives,
         preview,
+        features,
         datasets,
     }
 }
@@ -283,7 +304,7 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None, preview: None, datasets: host_ds,
+            drives: None, preview: None, features: Vec::new(), datasets: host_ds,
         });
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
@@ -316,7 +337,7 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None, preview: None, datasets: host_ds,
+            drives: None, preview: None, features: Vec::new(), datasets: host_ds,
         });
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
@@ -340,7 +361,7 @@ mod tests {
         let mut hosts = HashMap::new();
         hosts.insert("myhost".into(), HostConfig {
             data: None, scratch: None, target: None, port: None,
-            drives: None, preview: None, datasets: host_ds,
+            drives: None, preview: None, features: Vec::new(), datasets: host_ds,
         });
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));

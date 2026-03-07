@@ -12,8 +12,14 @@ use crate::output;
 pub fn run(
     pmtiles_path: &Path,
     project_root: &Path,
+    features: &[String],
 ) -> Result<(), DevError> {
-    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+    let build_config = if features.is_empty() {
+        build::BuildConfig::release(None)
+    } else {
+        build::BuildConfig::release_with_owned_features(None, features)
+    };
+    let binary = build::cargo_build(&build_config, project_root)?;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
 

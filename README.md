@@ -170,6 +170,7 @@ target = "target"
 port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
+features = ["linux-direct-io", "linux-io-uring"]
 
 [plantasjen.datasets.denmark]
 origin = "Geofabrik"
@@ -199,7 +200,8 @@ nidhogg = "/home/folk/Programs/nidhogg"
 - `project` — which project this is (`pbfhogg`, `elivagar`, or `nidhogg`)
 - `[hostname.datasets.*]` — named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
 - `xxhash` — optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
-- `[hostname]` — per-host path overrides, port, and drive configuration; defaults to `data/`, `data/scratch/`, and cargo target dir
+- `[hostname]` — per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
+- `features` — cargo features appended to every build (`run`, `bench`, `hotpath`, `profile`, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top
 
 ## License
 

@@ -90,6 +90,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::Run { features, time, json, runs, no_build, args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "run")?;
+            let features = resolve_features(&dev_config, &features);
             let opts = RunOptions { time, json, runs, no_build };
             cmd_run(&dev_config, project, &project_root, &features, &args, &opts)
         }
@@ -111,15 +112,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
             cmd_clean(&dev_config, project, &project_root)
         }
         Command::Bench { verbose, commit, features, force, bench } => {
+            let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
                 cmd_bench(&dev_config, project, &project_root, build_root, bench, &features, force)
             })
         }
         Command::Verify { verbose, commit, verify } => {
+            let features = resolve_features(&dev_config, &[]);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_verify(&dev_config, project, &project_root, build_root, verify)
+                cmd_verify(&dev_config, project, &project_root, build_root, verify, &features)
             })
         }
         Command::Hotpath {
@@ -147,6 +150,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             no_mem_check,
             force,
         } => {
+            let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
                 preflight::run_preflight(&preflight::uring_checks())?;
@@ -192,6 +196,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             fanout_cap,
             no_mem_check,
         } => {
+            let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             if features.iter().any(|f| f == "linux-io-uring") {
                 preflight::run_preflight(&preflight::uring_checks())?;
@@ -227,17 +232,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::PmtilesStats { files } => cmd_pmtiles_stats(&files),
         Command::Serve { data_dir, dataset, tiles } => {
             let _lock = acquire_cmd_lock(project, &project_root, "serve")?;
-            nidhogg::cmd::serve(&dev_config, project, &project_root, data_dir.as_deref(), &dataset, tiles.as_deref())
+            let features = resolve_features(&dev_config, &[]);
+            nidhogg::cmd::serve(&dev_config, project, &project_root, data_dir.as_deref(), &dataset, tiles.as_deref(), &features)
         }
         Command::Stop => nidhogg::cmd::stop(project, &project_root),
         Command::Status => nidhogg::cmd::status(&dev_config, project, &project_root),
         Command::Ingest { variant, dataset } => {
             let _lock = acquire_cmd_lock(project, &project_root, "ingest")?;
-            nidhogg::cmd::ingest(&dev_config, project, &project_root, &variant, &dataset)
+            let features = resolve_features(&dev_config, &[]);
+            nidhogg::cmd::ingest(&dev_config, project, &project_root, &variant, &dataset, &features)
         }
         Command::Update { args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "update")?;
-            nidhogg::cmd::update(project, &project_root, &args)
+            let features = resolve_features(&dev_config, &[]);
+            nidhogg::cmd::update(project, &project_root, &args, &features)
         }
         Command::Query { json } => nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref()),
         Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
@@ -246,6 +254,28 @@ fn run(cli: Cli) -> Result<(), DevError> {
             preview::run(&dev_config, &project_root, from, &dataset, &variant, no_open)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Host feature resolution
+// ---------------------------------------------------------------------------
+
+/// Merge CLI `--features` with host-configured default features from brokkr.toml.
+///
+/// Host features are appended first, then CLI features. Duplicates are removed
+/// (CLI wins, but since features are additive this just means dedup).
+fn resolve_features(dev_config: &config::DevConfig, cli_features: &[String]) -> Vec<String> {
+    let host_features = config::host_features(dev_config);
+    if host_features.is_empty() {
+        return cli_features.to_vec();
+    }
+    let mut merged = host_features;
+    for f in cli_features {
+        if !merged.iter().any(|existing| existing == f) {
+            merged.push(f.clone());
+        }
+    }
+    merged
 }
 
 // ---------------------------------------------------------------------------
@@ -869,12 +899,12 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
 // Verify dispatch
 // ---------------------------------------------------------------------------
 
-fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand) -> Result<(), DevError> {
+fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand, features: &[String]) -> Result<(), DevError> {
     match verify {
         // ----- elivagar verify variants -----
         VerifyCommand::ElivVerify { dataset, tiles } => {
             project::require(project, Project::Elivagar, "verify")?;
-            elivagar::cmd::verify(dev_config, project, project_root, build_root, &dataset, tiles.as_deref())
+            elivagar::cmd::verify(dev_config, project, project_root, build_root, &dataset, tiles.as_deref(), features)
         }
 
         // ----- nidhogg verify variants -----
@@ -888,12 +918,12 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
         }
         VerifyCommand::Readonly { dataset } => {
             project::require(project, Project::Nidhogg, "verify readonly")?;
-            nidhogg::cmd::verify_readonly(dev_config, project, project_root, &dataset)
+            nidhogg::cmd::verify_readonly(dev_config, project, project_root, &dataset, features)
         }
         // ----- pbfhogg verify variants -----
         _ => {
             project::require(project, Project::Pbfhogg, "verify")?;
-            pbfhogg::cmd::verify(dev_config, project, project_root, build_root, verify)
+            pbfhogg::cmd::verify(dev_config, project, project_root, build_root, verify, features)
         }
     }
 }

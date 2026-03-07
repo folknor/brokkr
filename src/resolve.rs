@@ -318,6 +318,7 @@ mod tests {
             target_dir: data_dir.join("target"),
             drives: None,
             preview: None,
+            features: Vec::new(),
             datasets,
         }
     }

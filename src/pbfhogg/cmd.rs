@@ -147,11 +147,11 @@ pub(crate) fn bench_all(
     super::bench_all::run(&ctx.harness, &ctx.paths, effective, &pbf_path, file_mb, req.runs, req.dataset)
 }
 
-pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand) -> Result<(), DevError> {
+pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand, features: &[String]) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let harness = super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root)?;
+    let harness = super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
 
     match verify {
         VerifyCommand::Sort { dataset, variant } => {

@@ -73,6 +73,7 @@ target = "target"
 port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
+features = ["linux-direct-io", "linux-io-uring"]
 
 [plantasjen.datasets.denmark]
 origin = "Geofabrik"
@@ -103,7 +104,7 @@ elivagar = "/home/folk/Programs/elivagar"
 nidhogg = "/home/folk/Programs/nidhogg"
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir).
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (`run`, `bench`, `hotpath`, `profile`, `verify`, `serve`, `ingest`, `update`) — NOT applied to `check`. CLI `--features` are additive on top of host features (deduped).
 
 ### Dataset structure
 

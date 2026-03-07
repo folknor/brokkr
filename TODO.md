@@ -134,6 +134,37 @@ The old `run_elivagar` had `--mem 8G` support via systemd-run. Could be promoted
 
 ---
 
+## History command enhancements
+
+### Capture brokkr's own output
+All brokkr output goes through `output::*` helpers (`build_msg`, `bench_msg`, `error`, etc.). Add a tee layer that copies prefixed lines into a global buffer, flushed to a nullable `output TEXT` column at end of invocation. Cap at 64KB. Does NOT cover passthrough subprocess output (`brokkr run`, `brokkr serve`) which uses `Stdio::inherit()` — capturing that would require piped tee threads and changes live output UX. Schema v2 migration alongside `error_tail`.
+
+### Capture stderr tail on failure
+On non-zero exit, capture the last 4KB of stderr into a nullable `error_tail TEXT` column. Requires schema v2 migration. Only stored on failure — success path stays lightweight. The `history <id>` detail view would display it, and `brokkr history --failed` could show a one-line preview.
+
+### `--json` output
+Useful for scripting (jq, dashboards, CI analysis) instead of only human-formatted lines.
+
+### `history <id>` detail view
+One command to inspect full metadata for a specific entry (cwd, commit, dirty, kernel, memory, exit status).
+
+### `--from-last-success` / `--failed` + `--rerun <id>`
+Fast recovery loop: find last failed command and re-execute it exactly.
+
+### `--project-dir <path-substring>` filter
+`--project` is great, but directory filter helps when you have multiple clones/worktrees of the same project.
+
+### `--until <date>` in addition to `--since`
+Time-range queries are much more useful than one-sided filtering.
+
+### `--status <code>` filter
+`--failed` is coarse; filtering specific exit codes (e.g. 130 for interrupt) is valuable.
+
+### `--sort slow|recent` and `--top-slowest N`
+Makes performance triage easier without external tooling.
+
+---
+
 ## CLI sync backlog
 
 Last synced at brokkr commit `e9bb402` (2026-03-03). Both pbfhogg and elivagar have expanded significantly since then.

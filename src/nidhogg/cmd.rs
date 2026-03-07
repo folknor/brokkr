@@ -26,6 +26,14 @@ fn resolve_port(dev_config: &config::DevConfig) -> u16 {
     super::server::DEFAULT_PORT
 }
 
+fn build_config_with_features(package: Option<&str>, features: &[String]) -> build::BuildConfig {
+    if features.is_empty() {
+        build::BuildConfig::release(package)
+    } else {
+        build::BuildConfig::release_with_owned_features(package, features)
+    }
+}
+
 pub(crate) fn serve(
     dev_config: &config::DevConfig,
     project: Project,
@@ -33,6 +41,7 @@ pub(crate) fn serve(
     data_dir: Option<&str>,
     dataset: &str,
     tiles_variant: Option<&str>,
+    features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "serve")?;
     let pi = bootstrap(None)?;
@@ -50,7 +59,8 @@ pub(crate) fn serve(
     let tiles_str = tiles_path.as_ref().map(|p| p.display().to_string());
 
     let port = resolve_port(dev_config);
-    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    let build_config = build_config_with_features(Some("nidhogg"), features);
+    let binary = build::cargo_build(&build_config, project_root)?;
     super::server::serve(&binary, &data_dir_str, tiles_str.as_deref(), port, project_root)
 }
 
@@ -77,6 +87,7 @@ pub(crate) fn ingest(
     project_root: &Path,
     variant: &str,
     dataset: &str,
+    features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "ingest")?;
     let pi = bootstrap(None)?;
@@ -85,13 +96,14 @@ pub(crate) fn ingest(
 
     let data_dir = resolve_nidhogg_data_dir(dataset, &paths)?;
 
-    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    let build_config = build_config_with_features(Some("nidhogg"), features);
+    let binary = build::cargo_build(&build_config, project_root)?;
     super::ingest::run(&binary, &pbf_path, &data_dir, project_root)
 }
 
-pub(crate) fn update(project: Project, project_root: &Path, args: &[String]) -> Result<(), DevError> {
+pub(crate) fn update(project: Project, project_root: &Path, args: &[String], features: &[String]) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "update")?;
-    let mut config = build::BuildConfig::release(Some("nidhogg"));
+    let mut config = build_config_with_features(Some("nidhogg"), features);
     config.bin = Some("nidhogg-update".into());
     let binary = build::cargo_build(&config, project_root)?;
     super::update::run(&binary, args, project_root)
@@ -201,14 +213,15 @@ pub(crate) fn verify_geocode(dev_config: &config::DevConfig, _project: Project, 
     super::verify_geocode::run(port, &query_refs)
 }
 
-pub(crate) fn verify_readonly(dev_config: &config::DevConfig, _project: Project, project_root: &Path, dataset: &str) -> Result<(), DevError> {
+pub(crate) fn verify_readonly(dev_config: &config::DevConfig, _project: Project, project_root: &Path, dataset: &str, features: &[String]) -> Result<(), DevError> {
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let port = resolve_port(dev_config);
 
     let data_dir_str = resolve_nidhogg_data_dir(dataset, &paths)?.display().to_string();
 
-    let binary = build::cargo_build(&build::BuildConfig::release(Some("nidhogg")), project_root)?;
+    let build_config = build_config_with_features(Some("nidhogg"), features);
+    let binary = build::cargo_build(&build_config, project_root)?;
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root)
 }
 

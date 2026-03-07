@@ -40,6 +40,18 @@ impl BuildConfig {
         }
     }
 
+    /// Release build with features from owned strings (e.g. host config features).
+    pub fn release_with_owned_features(package: Option<&str>, features: &[String]) -> Self {
+        Self {
+            package: package.map(std::borrow::ToOwned::to_owned),
+            bin: None,
+            example: None,
+            features: features.to_vec(),
+            default_features: true,
+            profile: "release",
+        }
+    }
+
     pub fn release_no_defaults(package: Option<&str>, features: &[&str]) -> Self {
         Self {
             package: package.map(std::borrow::ToOwned::to_owned),

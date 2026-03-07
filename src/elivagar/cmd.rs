@@ -135,6 +135,7 @@ pub(crate) fn verify(
     build_root: Option<&Path>,
     dataset: &str,
     tiles_variant: Option<&str>,
+    features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "verify")?;
     let pi = bootstrap(build_root)?;
@@ -144,7 +145,7 @@ pub(crate) fn verify(
         None => resolve_default_pmtiles_path(dataset, &paths, project_root)?,
     };
     let effective = build_root.unwrap_or(project_root);
-    super::verify::run(&pmtiles_path, effective)
+    super::verify::run(&pmtiles_path, effective, features)
 }
 
 pub(crate) fn hotpath(
