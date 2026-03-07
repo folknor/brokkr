@@ -81,7 +81,7 @@ data_dir = "denmark-data"          # nidhogg only
 
 [plantasjen.datasets.denmark.pbf.indexed]
 file = "denmark-with-indexdata.osm.pbf"
-sha256 = "3f1977fd..."
+xxhash = "3f1977fd..."
 seq = 4704
 
 [plantasjen.datasets.denmark.pbf.raw]
@@ -90,11 +90,11 @@ seq = 4704
 
 [plantasjen.datasets.denmark.osc.4705]
 file = "denmark-4705.osc.gz"
-sha256 = "fa581f7b..."
+xxhash = "fa581f7b..."
 
 [plantasjen.datasets.denmark.pmtiles.elivagar]
 file = "denmark-elivagar.pmtiles"
-sha256 = "9a3b2c1d..."
+xxhash = "9a3b2c1d..."
 
 [plantasjen.preview]
 pbfhogg = "/home/folk/Programs/pbfhogg"
@@ -106,9 +106,9 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 
 ### Dataset structure
 
-- `pbf.<variant>` — PBF file entries keyed by variant name (e.g. `raw`, `indexed`, `locations`). Each has `file`, optional `sha256`, optional `seq`.
-- `osc.<seq>` — OSC diff file entries keyed by sequence number. Each has `file`, optional `sha256`.
-- `pmtiles.<variant>` — PMTiles archive entries keyed by variant name (e.g. `elivagar`). Each has `file`, optional `sha256`. Used by nidhogg `serve` and `bench tiles`.
+- `pbf.<variant>` — PBF file entries keyed by variant name (e.g. `raw`, `indexed`, `locations`). Each has `file`, optional `xxhash` (XXH128), optional `seq`. `sha256` is accepted as an alias during migration.
+- `osc.<seq>` — OSC diff file entries keyed by sequence number. Each has `file`, optional `xxhash`. `sha256` accepted as alias.
+- `pmtiles.<variant>` — PMTiles archive entries keyed by variant name (e.g. `elivagar`). Each has `file`, optional `xxhash`. `sha256` accepted as alias. Used by nidhogg `serve` and `bench tiles`.
 - Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir` (nidhogg only).
 
 ### CLI flags for variant/seq selection
@@ -119,7 +119,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 
 ## Shared commands (all projects)
 
-- `check` — clippy + tests (extra args forwarded to cargo test)
+- `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features` and `--no-default-features`
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
 - `run` — build release binary and run with passthrough args; supports `--time` (stable key=value timing), `--json` (structured timing), `--runs N` (min/median/p95 summary), `--no-build` (skip build)
 - `results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)

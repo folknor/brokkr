@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use xxhash_rust::xxh3::Xxh3;
 
 use crate::error::DevError;
 
@@ -260,12 +260,12 @@ pub fn uring_checks() -> Vec<Check> {
 }
 
 // ---------------------------------------------------------------------------
-// SHA256 file verification with mtime cache
+// XXH128 file verification with mtime cache
 // ---------------------------------------------------------------------------
 
-/// Verify that a file matches the expected SHA256 hash.
+/// Verify that a file matches the expected XXH128 hash.
 ///
-/// Results are cached in `{project_root}/.brokkr/sha256_cache` keyed on path,
+/// Results are cached in `{project_root}/.brokkr/hash_cache` keyed on path,
 /// mtime, and size. Re-hashing only happens when the file changes.
 pub fn verify_file_hash(
     path: &Path,
@@ -273,13 +273,13 @@ pub fn verify_file_hash(
     project_root: &Path,
     origin: Option<&str>,
 ) -> Result<(), DevError> {
-    let actual = cached_sha256(path, project_root)?;
+    let actual = cached_xxh128(path, project_root)?;
 
     if actual.eq_ignore_ascii_case(expected_hex) {
         Ok(())
     } else {
         let mut msg = format!(
-            "SHA256 mismatch for {}\n  expected: {expected_hex}\n  actual:   {actual}",
+            "hash mismatch for {}\n  expected: {expected_hex}\n  actual:   {actual}",
             path.display(),
         );
         if let Some(o) = origin {
@@ -289,14 +289,14 @@ pub fn verify_file_hash(
     }
 }
 
-/// Return the SHA256 hex digest of a file, using the mtime cache when possible.
-pub fn cached_sha256(path: &Path, project_root: &Path) -> Result<String, DevError> {
+/// Return the XXH128 hex digest of a file, using the mtime cache when possible.
+pub fn cached_xxh128(path: &Path, project_root: &Path) -> Result<String, DevError> {
     let meta = std::fs::metadata(path)?;
     let mtime = file_mtime(&meta);
     let size = meta.len();
 
     let cache_dir = project_root.join(".brokkr");
-    let cache_path = cache_dir.join("sha256_cache");
+    let cache_path = cache_dir.join("hash_cache");
 
     // Check cache.
     if let Some(hit) = read_cache_entry(&cache_path, path, mtime, size) {
@@ -304,7 +304,7 @@ pub fn cached_sha256(path: &Path, project_root: &Path) -> Result<String, DevErro
     }
 
     // Compute hash.
-    let hex = compute_sha256(path)?;
+    let hex = compute_xxh128(path)?;
 
     // Write to cache.
     std::fs::create_dir_all(&cache_dir)?;
@@ -313,10 +313,10 @@ pub fn cached_sha256(path: &Path, project_root: &Path) -> Result<String, DevErro
     Ok(hex)
 }
 
-/// Compute SHA256 of a file, reading in 64 KB chunks.
-fn compute_sha256(path: &Path) -> Result<String, DevError> {
+/// Compute XXH128 of a file, reading in 64 KB chunks.
+fn compute_xxh128(path: &Path) -> Result<String, DevError> {
     let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Xxh3::new();
     let mut buf = vec![0u8; 64 * 1024];
 
     loop {
@@ -327,17 +327,8 @@ fn compute_sha256(path: &Path) -> Result<String, DevError> {
         hasher.update(&buf[..n]);
     }
 
-    let digest = hasher.finalize();
-    Ok(hex_encode(&digest))
-}
-
-/// Encode bytes as lowercase hex.
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    let digest = hasher.digest128();
+    Ok(format!("{digest:032x}"))
 }
 
 /// Extract mtime as seconds since epoch from metadata.

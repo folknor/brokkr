@@ -40,7 +40,7 @@ pub fn run(
     tiles: &str,
     port: u16,
     tiles_file: &str,
-    tiles_sha256: Option<&str>,
+    tiles_hash: Option<&str>,
     tiles_mb: f64,
     runs: usize,
     project_root: &Path,
@@ -65,8 +65,8 @@ pub fn run(
         #[allow(clippy::cast_possible_wrap)]
         KvPair::int("meta.iterations", ITERATIONS as i64),
     ];
-    if let Some(hash) = tiles_sha256 {
-        metadata.push(KvPair::text("meta.tiles_sha256", hash));
+    if let Some(hash) = tiles_hash {
+        metadata.push(KvPair::text("meta.tiles_hash", hash));
     }
 
     let config = BenchConfig {

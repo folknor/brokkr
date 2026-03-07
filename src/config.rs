@@ -20,7 +20,8 @@ pub struct DevConfig {
 #[allow(dead_code)]
 pub struct PbfEntry {
     pub file: String,
-    pub sha256: Option<String>,
+    #[serde(alias = "sha256")]
+    pub xxhash: Option<String>,
     pub seq: Option<u64>,
 }
 
@@ -28,14 +29,16 @@ pub struct PbfEntry {
 #[derive(Debug, Clone, Deserialize)]
 pub struct OscEntry {
     pub file: String,
-    pub sha256: Option<String>,
+    #[serde(alias = "sha256")]
+    pub xxhash: Option<String>,
 }
 
 /// A PMTiles archive entry, keyed by variant name (e.g. "elivagar").
 #[derive(Debug, Clone, Deserialize)]
 pub struct PmtilesEntry {
     pub file: String,
-    pub sha256: Option<String>,
+    #[serde(alias = "sha256")]
+    pub xxhash: Option<String>,
 }
 
 /// A dataset with structured PBF variants and multiple OSC entries.
@@ -269,7 +272,7 @@ mod tests {
     fn host_datasets_resolved() {
         let mut pbf = HashMap::new();
         pbf.insert("indexed".into(), PbfEntry {
-            file: "dk-indexed.osm.pbf".into(), sha256: None, seq: Some(4704),
+            file: "dk-indexed.osm.pbf".into(), xxhash: None, seq: Some(4704),
         });
         let mut host_ds = HashMap::new();
         host_ds.insert("dk".into(), Dataset {
@@ -300,13 +303,13 @@ mod tests {
     fn multiple_pbf_variants() {
         let mut pbf = HashMap::new();
         pbf.insert("raw".into(), PbfEntry {
-            file: "dk-raw.osm.pbf".into(), sha256: Some("aaa".into()), seq: Some(4704),
+            file: "dk-raw.osm.pbf".into(), xxhash: Some("aaa".into()), seq: Some(4704),
         });
         pbf.insert("indexed".into(), PbfEntry {
-            file: "dk-indexed.osm.pbf".into(), sha256: Some("bbb".into()), seq: None,
+            file: "dk-indexed.osm.pbf".into(), xxhash: Some("bbb".into()), seq: None,
         });
         pbf.insert("locations".into(), PbfEntry {
-            file: "dk-locations.osm.pbf".into(), sha256: None, seq: None,
+            file: "dk-locations.osm.pbf".into(), xxhash: None, seq: None,
         });
         let mut host_ds = HashMap::new();
         host_ds.insert("dk".into(), Dataset { pbf, ..empty_dataset() });
@@ -319,18 +322,18 @@ mod tests {
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.len(), 3);
-        assert_eq!(dk.pbf.get("raw").unwrap().sha256.as_deref(), Some("aaa"));
-        assert_eq!(dk.pbf.get("indexed").unwrap().sha256.as_deref(), Some("bbb"));
+        assert_eq!(dk.pbf.get("raw").unwrap().xxhash.as_deref(), Some("aaa"));
+        assert_eq!(dk.pbf.get("indexed").unwrap().xxhash.as_deref(), Some("bbb"));
     }
 
     #[test]
     fn multiple_osc_entries() {
         let mut osc = HashMap::new();
         osc.insert("4705".into(), OscEntry {
-            file: "dk-4705.osc.gz".into(), sha256: Some("ccc".into()),
+            file: "dk-4705.osc.gz".into(), xxhash: Some("ccc".into()),
         });
         osc.insert("4706".into(), OscEntry {
-            file: "dk-4706.osc.gz".into(), sha256: None,
+            file: "dk-4706.osc.gz".into(), xxhash: None,
         });
         let mut host_ds = HashMap::new();
         host_ds.insert("dk".into(), Dataset { osc, ..empty_dataset() });
@@ -383,7 +386,7 @@ sha256 = "ccc"
         assert_eq!(dk.bbox.as_deref(), Some("8.0,54.5,13.0,58.0"));
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
         assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
-        assert_eq!(dk.pbf.get("indexed").unwrap().sha256.as_deref(), Some("bbb"));
+        assert_eq!(dk.pbf.get("indexed").unwrap().xxhash.as_deref(), Some("bbb"));
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
     }
 
@@ -412,6 +415,6 @@ sha256 = "ddd"
         let dk = host.datasets.get("denmark").unwrap();
         assert_eq!(dk.pmtiles.len(), 1);
         assert_eq!(dk.pmtiles.get("elivagar").unwrap().file, "denmark-elivagar.pmtiles");
-        assert_eq!(dk.pmtiles.get("elivagar").unwrap().sha256.as_deref(), Some("ddd"));
+        assert_eq!(dk.pmtiles.get("elivagar").unwrap().xxhash.as_deref(), Some("ddd"));
     }
 }

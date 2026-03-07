@@ -32,8 +32,8 @@ brokkr bench api               # API query benchmark
 
 | Command | Description |
 |---------|-------------|
-| `check` | Run clippy + tests (extra args forwarded to `cargo test`) |
-| `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
+| `check` | Run clippy + tests (extra args forwarded to `cargo test`). Supports `--features` and `--no-default-features` |
+| `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status (with XXH128 hashes) |
 | `run` | Build (or `--no-build`) and run with passthrough args; supports `--time`, `--json`, `--runs N` |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `clean` | Remove scratch/temp files |
@@ -162,24 +162,32 @@ Each project has a `brokkr.toml` in its root:
 ```toml
 project = "pbfhogg"
 
-[datasets.denmark]
-pbf = "denmark-latest.osm.pbf"
-osc = "denmark-diff.osc.gz"
-pbf_raw = "denmark-latest-raw.osm.pbf"
-bbox = "8.0,54.5,13.0,58.0"
-
-[datasets.japan]
-pbf = "japan-latest.osm.pbf"
-bbox = "122.0,20.0,154.0,46.0"
-
-# Host-specific overrides (matched by hostname)
+# Host-specific config (matched by hostname)
 [plantasjen]
 data = "data"
 scratch = "data/scratch"
 target = "target"
 port = 3033
-drives.source = "/dev/nvme0n1p2"
-drives.data = "/dev/sda1"
+drives.source = "nvme"
+drives.data = "ssd"
+
+[plantasjen.datasets.denmark]
+origin = "Geofabrik"
+download_date = "2026-02-20"
+bbox = "8.0,54.5,13.0,58.0"
+
+[plantasjen.datasets.denmark.pbf.indexed]
+file = "denmark-with-indexdata.osm.pbf"
+xxhash = "a1b2c3d4e5f6..."
+seq = 4704
+
+[plantasjen.datasets.denmark.pbf.raw]
+file = "denmark-raw.osm.pbf"
+seq = 4704
+
+[plantasjen.datasets.denmark.osc.4705]
+file = "denmark-4705.osc.gz"
+xxhash = "f1e2d3c4b5a6..."
 
 # Cross-project source trees for preview pipeline
 [plantasjen.preview]
@@ -189,7 +197,8 @@ nidhogg = "/home/folk/Programs/nidhogg"
 ```
 
 - `project` — which project this is (`pbfhogg`, `elivagar`, or `nidhogg`)
-- `[datasets.*]` — named datasets with PBF path, OSC diff, raw PBF, and bounding box
+- `[hostname.datasets.*]` — named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
+- `xxhash` — optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` — per-host path overrides, port, and drive configuration; defaults to `data/`, `data/scratch/`, and cargo target dir
 
 ## License

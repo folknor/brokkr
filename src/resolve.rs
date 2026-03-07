@@ -20,7 +20,7 @@ pub(crate) fn resolve_pbf_path(
         ))
     })?;
     let path = paths.data_dir.join(&entry.file);
-    let hash = entry.sha256.as_deref();
+    let hash = entry.xxhash.as_deref();
     let origin = ds.origin.as_deref();
 
     if !path.exists() {
@@ -55,7 +55,7 @@ pub(crate) fn resolve_osc_path(
         ))
     })?;
     let path = paths.data_dir.join(&entry.file);
-    let hash = entry.sha256.as_deref();
+    let hash = entry.xxhash.as_deref();
     let origin = ds.origin.as_deref();
 
     if !path.exists() {
@@ -146,7 +146,7 @@ pub(crate) fn resolve_pmtiles_path(
         ))
     })?;
     let path = paths.data_dir.join(&entry.file);
-    let hash = entry.sha256.as_deref();
+    let hash = entry.xxhash.as_deref();
     let origin = ds.origin.as_deref();
 
     if !path.exists() {
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn resolve_default_osc_path_errors_when_multiple_variants_exist() {
         let mut ds = empty_dataset();
-        ds.osc.insert(String::from("4706"), OscEntry { file: String::from("b.osc.gz"), sha256: None });
-        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("a.osc.gz"), sha256: None });
+        ds.osc.insert(String::from("4706"), OscEntry { file: String::from("b.osc.gz"), xxhash: None });
+        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("a.osc.gz"), xxhash: None });
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
 
@@ -349,7 +349,7 @@ mod tests {
         std::fs::write(&osc, "x").expect("write");
 
         let mut ds = empty_dataset();
-        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("one.osc.gz"), sha256: None });
+        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("one.osc.gz"), xxhash: None });
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
         let paths = mk_paths(&dir, datasets);
@@ -363,8 +363,8 @@ mod tests {
     #[test]
     fn resolve_default_pmtiles_path_errors_when_multiple_variants_exist() {
         let mut ds = empty_dataset();
-        ds.pmtiles.insert(String::from("z"), PmtilesEntry { file: String::from("z.pmtiles"), sha256: None });
-        ds.pmtiles.insert(String::from("a"), PmtilesEntry { file: String::from("a.pmtiles"), sha256: None });
+        ds.pmtiles.insert(String::from("z"), PmtilesEntry { file: String::from("z.pmtiles"), xxhash: None });
+        ds.pmtiles.insert(String::from("a"), PmtilesEntry { file: String::from("a.pmtiles"), xxhash: None });
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
 
@@ -394,7 +394,7 @@ mod tests {
         let mut ds = empty_dataset();
         ds.pbf.insert(
             String::from("raw"),
-            PbfEntry { file: String::from("raw.osm.pbf"), sha256: None, seq: None },
+            PbfEntry { file: String::from("raw.osm.pbf"), xxhash: None, seq: None },
         );
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);

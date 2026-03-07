@@ -155,7 +155,7 @@ pub(crate) fn bench_tiles(
         Some(v) => resolve::resolve_pmtiles_with_size(req.dataset, v, &ctx.paths, req.project_root)?,
         None => resolve::resolve_default_pmtiles_with_size(req.dataset, &ctx.paths, req.project_root)?,
     };
-    let tiles_sha256 = {
+    let tiles_hash = {
         let ds = ctx.paths.datasets.get(req.dataset);
         ds.and_then(|d| {
             if let Some(v) = tiles_variant {
@@ -166,7 +166,7 @@ pub(crate) fn bench_tiles(
                 None
             }
         })
-        .and_then(|e| e.sha256.clone())
+        .and_then(|e| e.xxhash.clone())
     };
 
     let tiles_file = tiles_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -179,7 +179,7 @@ pub(crate) fn bench_tiles(
         &tiles_str,
         port,
         tiles_file,
-        tiles_sha256.as_deref(),
+        tiles_hash.as_deref(),
         tiles_mb,
         req.runs,
         req.project_root,

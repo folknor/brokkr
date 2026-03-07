@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -30,6 +30,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 5 {
         migrate_v4_to_v5(conn)?;
+    }
+    if current < 6 {
+        migrate_v5_to_v6(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -187,6 +190,18 @@ fn migrate_v4_to_v5(conn: &rusqlite::Connection) -> Result<(), DevError> {
     if has_table(conn, "run_kv") {
         conn.execute(
             "UPDATE run_kv SET key = 'meta.locations_on_ways_cli' WHERE key = 'meta.locations_on_ways'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Migration v5 -> v6: rename `meta.tiles_sha256` to `meta.tiles_hash`
+/// in run_kv after switching from SHA256 to XXH128.
+fn migrate_v5_to_v6(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if has_table(conn, "run_kv") {
+        conn.execute(
+            "UPDATE run_kv SET key = 'meta.tiles_hash' WHERE key = 'meta.tiles_sha256'",
             [],
         )?;
     }

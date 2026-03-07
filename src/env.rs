@@ -21,12 +21,12 @@ pub struct EnvInfo {
 
 /// Whether a dataset PBF file exists on disk and passes hash verification.
 pub enum DatasetStatus {
-    /// File exists and SHA256 matches (or no hash configured).
+    /// File exists and hash matches.
     Verified,
-    /// File exists but no hash is configured.
-    Present,
-    /// File exists but SHA256 does not match.
-    HashMismatch,
+    /// File exists but no hash is configured. Contains computed hash.
+    Present(String),
+    /// File exists but hash does not match. Contains actual hash.
+    HashMismatch(String),
     /// File does not exist.
     Missing,
     /// Dataset has no PBF path configured.
@@ -105,8 +105,8 @@ fn print_datasets(info: &EnvInfo) {
 fn format_dataset(name: &str, status: &DatasetStatus) -> String {
     match status {
         DatasetStatus::Verified => format!("{name} \u{2713}"),
-        DatasetStatus::Present => format!("{name} \u{2713} (no hash)"),
-        DatasetStatus::HashMismatch => format!("{name} \u{2717} (hash mismatch)"),
+        DatasetStatus::Present(hash) => format!("{name} \u{2713} (no hash configured, actual: {hash})"),
+        DatasetStatus::HashMismatch(hash) => format!("{name} \u{2717} (hash mismatch, actual: {hash})"),
         DatasetStatus::Missing => format!("{name} \u{2717} (missing)"),
         DatasetStatus::NoPbf => format!("{name} (no pbf)"),
     }
@@ -330,7 +330,7 @@ fn check_datasets(
                     if !path.exists() {
                         DatasetStatus::Missing
                     } else {
-                        check_hash_status(&path, e.sha256.as_deref(), project_root)
+                        check_hash_status(&path, e.xxhash.as_deref(), project_root)
                     }
                 }
                 None => DatasetStatus::NoPbf,
@@ -345,11 +345,19 @@ fn check_datasets(
 
 fn check_hash_status(path: &Path, expected: Option<&str>, project_root: &Path) -> DatasetStatus {
     match expected {
-        None => DatasetStatus::Present,
+        None => {
+            let hash = crate::preflight::cached_xxh128(path, project_root)
+                .unwrap_or_else(|_| String::from("error"));
+            DatasetStatus::Present(hash)
+        }
         Some(hex) => {
             match crate::preflight::verify_file_hash(path, hex, project_root, None) {
                 Ok(()) => DatasetStatus::Verified,
-                Err(_) => DatasetStatus::HashMismatch,
+                Err(_) => {
+                    let hash = crate::preflight::cached_xxh128(path, project_root)
+                        .unwrap_or_else(|_| String::from("error"));
+                    DatasetStatus::HashMismatch(hash)
+                }
             }
         }
     }
