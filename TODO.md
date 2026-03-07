@@ -31,14 +31,14 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 ### ~~No `deny_unknown_fields` on config structs~~ FIXED
 `config.rs`: added `#[serde(deny_unknown_fields)]` to `HostConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `PmtilesEntry`.
 
-### `sha256` + `xxhash` coexistence silently accepted
-`config.rs`: with `#[serde(alias = "sha256")]`, if both `sha256` and `xxhash` are present in the same TOML entry, serde silently uses last-writer-wins. No error or warning during migration.
+### ~~`sha256` + `xxhash` coexistence silently accepted~~ FIXED
+`config.rs`: `deny_unknown_fields` + serde alias causes duplicate field rejection. Added test.
 
-### No validation of empty file names
-`config.rs`: `file = ""` parses fine and propagates to path resolution, failing later with an opaque I/O error.
+### ~~No validation of empty file names~~ FIXED
+`config.rs`: `validate_datasets()` rejects empty file names at parse time with a clear error path.
 
-### No bbox format validation
-`resolve.rs`: `--bbox` values and dataset-configured bbox strings are accepted verbatim with no check for 4 comma-separated floats or min < max. Fails downstream.
+### ~~No bbox format validation~~ FIXED
+`resolve.rs`: `validate_bbox()` checks for exactly 4 comma-separated floats.
 
 ### ~~`resolve_nidhogg_data_dir` does not check directory existence~~ FIXED
 `resolve.rs`: now checks `path.exists()` like the other resolvers.

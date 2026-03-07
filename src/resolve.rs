@@ -114,24 +114,47 @@ pub(crate) fn resolve_default_osc_path(
 }
 
 /// Resolve the bbox from --bbox or dataset config.
+///
+/// Validates that the bbox has exactly 4 comma-separated floats.
 pub(crate) fn resolve_bbox(
     bbox: Option<&str>,
     dataset: &str,
     paths: &config::ResolvedPaths,
 ) -> Result<String, DevError> {
-    if let Some(b) = bbox {
-        return Ok(b.to_owned());
+    let value = if let Some(b) = bbox {
+        b.to_owned()
+    } else {
+        let ds = paths.datasets.get(dataset).ok_or_else(|| {
+            DevError::Config(format!("unknown dataset: {dataset}"))
+        })?;
+        ds.bbox.clone().ok_or_else(|| {
+            DevError::Config(format!(
+                "dataset '{dataset}' has no bbox configured (use --bbox)"
+            ))
+        })?
+    };
+
+    validate_bbox(&value)?;
+    Ok(value)
+}
+
+/// Check that a bbox string has exactly 4 comma-separated floats.
+fn validate_bbox(bbox: &str) -> Result<(), DevError> {
+    let parts: Vec<&str> = bbox.split(',').collect();
+    if parts.len() != 4 {
+        return Err(DevError::Config(format!(
+            "bbox must have 4 comma-separated values, got {}: '{bbox}'",
+            parts.len()
+        )));
     }
-
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
-
-    ds.bbox.clone().ok_or_else(|| {
-        DevError::Config(format!(
-            "dataset '{dataset}' has no bbox configured (use --bbox)"
-        ))
-    })
+    for (i, part) in parts.iter().enumerate() {
+        if part.trim().parse::<f64>().is_err() {
+            return Err(DevError::Config(format!(
+                "bbox component {i} is not a number: '{}'", part.trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the PMTiles path from --dataset + --tiles variant.

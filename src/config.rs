@@ -149,6 +149,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     };
 
     let hosts = parse_hosts(table)?;
+    validate_datasets(&hosts)?;
 
     Ok((project, DevConfig { hosts }))
 }
@@ -174,6 +175,36 @@ fn parse_hosts(
         out.insert(key.clone(), hc);
     }
     Ok(out)
+}
+
+/// Validate all datasets across all hosts for empty file names.
+fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError> {
+    for (host, hc) in hosts {
+        for (ds_name, ds) in &hc.datasets {
+            for (variant, entry) in &ds.pbf {
+                if entry.file.is_empty() {
+                    return Err(DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.pbf.{variant}: file name is empty"
+                    )));
+                }
+            }
+            for (seq, entry) in &ds.osc {
+                if entry.file.is_empty() {
+                    return Err(DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.osc.{seq}: file name is empty"
+                    )));
+                }
+            }
+            for (variant, entry) in &ds.pmtiles {
+                if entry.file.is_empty() {
+                    return Err(DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.pmtiles.{variant}: file name is empty"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +445,22 @@ sha256 = "ccc"
         assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
         assert_eq!(dk.pbf.get("indexed").unwrap().xxhash.as_deref(), Some("bbb"));
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
+    }
+
+    #[test]
+    fn both_sha256_and_xxhash_is_rejected() {
+        let toml_str = r#"
+project = "pbfhogg"
+
+[myhost.datasets.dk.pbf.raw]
+file = "test.pbf"
+sha256 = "aaa"
+xxhash = "bbb"
+"#;
+        let root: toml::Value = toml_str.parse().unwrap();
+        let table = root.as_table().unwrap();
+        let result = parse_hosts(table);
+        assert!(result.is_err(), "should reject entry with both sha256 and xxhash");
     }
 
     #[test]
