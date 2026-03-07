@@ -152,9 +152,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
-            if features.iter().any(|f| f == "linux-io-uring") {
-                preflight::run_preflight(&preflight::uring_checks())?;
-            }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
                 let feature = harness::hotpath_feature(alloc);
                 let mut all_features: Vec<&str> = vec![feature];
@@ -198,9 +195,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
-            if features.iter().any(|f| f == "linux-io-uring") {
-                preflight::run_preflight(&preflight::uring_checks())?;
-            }
             with_worktree(&project_root, commit.as_deref(), |build_root| {
                 let req = ProfileRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
@@ -493,11 +487,6 @@ fn print_run_timing(opts: &RunOptions, build_ms: u64, run_ms: u64, samples_ms: &
 fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, features: &[String], args: &[String], opts: &RunOptions) -> Result<(), DevError> {
     if opts.runs == 0 {
         return Err(DevError::Config("--runs must be >= 1".into()));
-    }
-
-    // Run uring preflight checks if io_uring feature is requested.
-    if features.iter().any(|f| f == "linux-io-uring") {
-        preflight::run_preflight(&preflight::uring_checks())?;
     }
 
     let package = project.cli_package();
