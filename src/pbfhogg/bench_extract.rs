@@ -22,11 +22,11 @@ pub fn parse_strategies(input: &str) -> Result<Vec<&'static str>, DevError> {
     Ok(out)
 }
 
-fn strategy_args(name: &str, pbf: &str, bbox: &str) -> Vec<String> {
+fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Vec<String> {
     match name {
-        "simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), bbox.into(), "-o".into(), "/dev/null".into()],
-        "complete" => vec!["extract".into(), pbf.into(), "-b".into(), bbox.into(), "-o".into(), "/dev/null".into()],
-        "smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), bbox.into(), "-o".into(), "/dev/null".into()],
+        "simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), bbox.into(), "-o".into(), output.into()],
+        "complete" => vec!["extract".into(), pbf.into(), "-b".into(), bbox.into(), "-o".into(), output.into()],
+        "smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), bbox.into(), "-o".into(), output.into()],
         _ => unreachable!("unknown strategy: {name}"),
     }
 }
@@ -41,12 +41,17 @@ pub fn run(
     bbox: &str,
     strategies: &[&str],
     project_root: &Path,
+    scratch_dir: &Path,
 ) -> Result<(), DevError> {
+    std::fs::create_dir_all(scratch_dir)?;
+    let output_path = scratch_dir.join("bench-extract-output.osm.pbf");
+    let output_str = output_path.display().to_string();
+
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
     for &name in strategies {
         output::bench_msg(&format!("strategy: {name}"));
-        let args = strategy_args(name, pbf_str, bbox);
+        let args = strategy_args(name, pbf_str, bbox, &output_str);
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
@@ -63,6 +68,9 @@ pub fn run(
 
         harness.run_external(&config, binary, &args_refs, project_root)?;
     }
+
+    // Clean up
+    std::fs::remove_file(&output_path).ok();
 
     Ok(())
 }

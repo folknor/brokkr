@@ -50,7 +50,7 @@ pub(crate) fn bench_extract(
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let bbox = resolve_bbox(bbox, req.dataset, &ctx.paths)?;
     let strategies = super::bench_extract::parse_strategies(strategies_str)?;
-    super::bench_extract::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &bbox, &strategies, req.project_root)
+    super::bench_extract::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &bbox, &strategies, req.project_root, &ctx.paths.scratch_dir)
 }
 
 pub(crate) fn bench_allocator(

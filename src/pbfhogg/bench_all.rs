@@ -122,6 +122,7 @@ fn run_dataset_dependent(
         bench_extract::run(
             harness, binary, pbf_path, file_mb, runs,
             bbox, bench_extract::ALL_STRATEGIES, project_root,
+            &paths.scratch_dir,
         )?;
     } else {
         output::bench_msg("=== bench extract === (skipped, no bbox in dataset config)");
