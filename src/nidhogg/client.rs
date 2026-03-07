@@ -66,13 +66,15 @@ fn shrink_bbox(bbox: &str) -> Result<String, crate::error::DevError> {
 /// (`lon_min,lat_min,lon_max,lat_max`).
 pub fn build_api_queries(bbox: &str) -> Result<Vec<(String, String)>, crate::error::DevError> {
     let full = bbox_to_api(bbox)?;
-    let small_bbox = shrink_bbox(bbox)?;
+    let medium_bbox = shrink_bbox(bbox)?;
+    let medium = bbox_to_api(&medium_bbox)?;
+    let small_bbox = shrink_bbox(&medium_bbox)?;
     let small = bbox_to_api(&small_bbox)?;
 
     Ok(vec![
         (
             "highways".into(),
-            format!(r#"{{"bbox":{full},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#),
+            format!(r#"{{"bbox":{medium},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#),
         ),
         (
             "highways_large".into(),
@@ -84,7 +86,7 @@ pub fn build_api_queries(bbox: &str) -> Result<Vec<(String, String)>, crate::err
         ),
         (
             "buildings".into(),
-            format!(r#"{{"bbox":{full},"query":[{{"building":true}}]}}"#),
+            format!(r#"{{"bbox":{medium},"query":[{{"building":true}}]}}"#),
         ),
     ])
 }

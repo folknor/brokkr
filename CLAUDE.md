@@ -127,7 +127,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
 - `results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [-n N] [--top N]` — query/compare benchmark results from SQLite. `--top 0` shows all hotpath functions. `--compare-last --command hotpath` diffs two most recent hotpath runs.
 - `clean` — remove scratch/temp files
-- `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline.
+- `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline. Pbfhogg supports `--test <name>` to run a single test (inspect-tags, check-refs, cat, apply-changes-zlib, apply-changes-none).
 - `profile` — sampling profiler (perf/samply)
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `preview` — end-to-end pipeline (enrich → tilegen → ingest → serve) with map viewer. Requires `[hostname.preview]` in brokkr.toml. Supports `--from enrich|tilegen|ingest|serve`, `--dataset`, `--variant`, `--no-open`
@@ -150,7 +150,7 @@ Results in `.brokkr/results.db` per project (gitignored).
 - All output prefixed: `[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[error]`
 - `DevError` variants for structured error handling (no `.unwrap()`)
 - Project gating via `project::require()` — wrong-project commands fail with helpful message
-- Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries).
+- Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries). When no expected name is provided, requires exactly one executable — errors if multiple are found.
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
