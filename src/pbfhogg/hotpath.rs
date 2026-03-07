@@ -100,6 +100,9 @@ fn build_test_suite(
 ///
 /// Tests that fail are reported but do not abort the suite — remaining tests
 /// continue to run.  The command exits successfully if at least one test passed.
+/// Available test labels for `--test` filtering.
+pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none"];
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
@@ -111,7 +114,16 @@ pub fn run(
     alloc: bool,
     scratch_dir: &Path,
     project_root: &Path,
+    test_filter: Option<&str>,
 ) -> Result<(), DevError> {
+    if let Some(name) = test_filter {
+        if !TEST_LABELS.contains(&name) {
+            return Err(DevError::Config(format!(
+                "unknown hotpath test '{name}'. Available: {}",
+                TEST_LABELS.join(", ")
+            )));
+        }
+    }
     std::fs::create_dir_all(scratch_dir)?;
     let merged_path = scratch_dir.join("hotpath-merged.osm.pbf");
     let cat_output_path = scratch_dir.join("hotpath-cat-output.osm.pbf");
@@ -144,6 +156,11 @@ pub fn run(
     let mut failed: Vec<(&str, String)> = Vec::new();
 
     for test in &tests {
+        if let Some(filter) = test_filter {
+            if test.label != filter {
+                continue;
+            }
+        }
         let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
         let variant = format!("{}{variant_suffix}", test.label);
 

@@ -279,6 +279,10 @@ Examples:
         #[arg(long, default_value = "50")]
         nodes: usize,
 
+        /// Run only this test (pbfhogg: inspect-tags, check-refs, cat, apply-changes-zlib, apply-changes-none)
+        #[arg(long)]
+        test: Option<String>,
+
         /// Skip memory availability check
         #[arg(long)]
         no_mem_check: bool,

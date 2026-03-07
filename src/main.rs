@@ -148,6 +148,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             runs,
             tiles,
             nodes,
+            test,
             no_mem_check,
             force,
         } => {
@@ -172,7 +173,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     fanout_cap: fanout_cap.as_deref(),
                     polygon_simplify_factor,
                 };
-                cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, &opts)
+                cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, test.as_deref(), &opts)
             })
         }
         Command::Profile {
@@ -933,11 +934,17 @@ fn cmd_hotpath(
     target: Option<&str>,
     tiles: usize,
     nodes: usize,
+    test: Option<&str>,
     opts: &elivagar::PipelineOpts,
 ) -> Result<(), DevError> {
     if target.is_some() && req.project != Project::Elivagar {
         return Err(DevError::Config(
             "hotpath targets (pmtiles, node-store) are only available for elivagar".into(),
+        ));
+    }
+    if test.is_some() && req.project != Project::Pbfhogg {
+        return Err(DevError::Config(
+            "--test filter is only available for pbfhogg hotpath".into(),
         ));
     }
 
@@ -946,7 +953,7 @@ fn cmd_hotpath(
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
-            pbfhogg::cmd::hotpath(req, osc_seq)
+            pbfhogg::cmd::hotpath(req, osc_seq, test)
         }
     }
 }

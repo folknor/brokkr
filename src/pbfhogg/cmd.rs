@@ -261,6 +261,7 @@ pub(crate) fn download(
 pub(crate) fn hotpath(
     req: &HotpathRequest,
     osc_seq: Option<&str>,
+    test: Option<&str>,
 ) -> Result<(), DevError> {
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), req.all_features, true, "hotpath", req.force)?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -281,6 +282,7 @@ pub(crate) fn hotpath(
         req.alloc,
         &ctx.paths.scratch_dir,
         req.project_root,
+        test,
     )
 }
 
