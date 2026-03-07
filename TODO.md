@@ -15,11 +15,11 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Bugs
 
-### `run_curl_timed` silently defaults to 0.0
-`nidhogg/bench_api.rs`: if `time_total` can't be parsed as f64, it defaults to `0.0`, silently recording a 0ms benchmark result.
+### ~~`run_curl_timed` silently defaults to 0.0~~ FIXED
+`nidhogg/bench_api.rs`: now returns `DevError::Verify` if `time_total` can't be parsed.
 
-### `run_passthrough_timed` loses signal-kill information
-`output.rs`: uses `status.code().unwrap_or(1)` for signal-killed processes, losing the information that the process was killed by a signal (e.g. OOM killer SIGKILL).
+### ~~`run_passthrough_timed` loses signal-kill information~~ FIXED
+`output.rs`: now returns `DevError::Subprocess` with signal number and name (SIGKILL, SIGTERM, SIGSEGV) when a process is killed by a signal.
 
 ### ~~`serde_json::Error` maps to `DevError::Config`~~ FIXED
 `error.rs`: blanket `From<serde_json::Error>` now maps to `DevError::Build`. Nidhogg API response parsing uses explicit `.map_err()` to `DevError::Verify`.

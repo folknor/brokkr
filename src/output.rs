@@ -192,10 +192,16 @@ pub fn run_captured_with_env(
 }
 
 /// Run a subprocess with inherited stdio (passthrough mode), returning timing.
+///
+/// If the process is killed by a signal (e.g. OOM killer SIGKILL), returns a
+/// `DevError::Subprocess` with the signal number instead of silently mapping
+/// to exit code 1.
 pub fn run_passthrough_timed(
     program: &str,
     args: &[&str],
 ) -> Result<PassthroughOutput, DevError> {
+    use std::os::unix::process::ExitStatusExt;
+
     let start = Instant::now();
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -207,8 +213,23 @@ pub fn run_passthrough_timed(
         stderr: e.to_string(),
     })?;
 
-    Ok(PassthroughOutput {
-        code: status.code().unwrap_or(1),
-        elapsed: start.elapsed(),
-    })
+    let elapsed = start.elapsed();
+
+    match status.code() {
+        Some(code) => Ok(PassthroughOutput { code, elapsed }),
+        None => {
+            let signal = status.signal().unwrap_or(0);
+            let signal_name = match signal {
+                9 => " (SIGKILL — possible OOM kill)",
+                15 => " (SIGTERM)",
+                11 => " (SIGSEGV)",
+                _ => "",
+            };
+            Err(DevError::Subprocess {
+                program: program.to_owned(),
+                code: None,
+                stderr: format!("killed by signal {signal}{signal_name}"),
+            })
+        }
+    }
 }
