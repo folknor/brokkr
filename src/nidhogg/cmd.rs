@@ -9,7 +9,7 @@ use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
 use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
-use crate::resolve::{self, file_size_mb, resolve_nidhogg_data_dir, resolve_pbf_path, resolve_pbf_with_size};
+use crate::resolve::{self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path, resolve_pbf_with_size};
 
 fn resolve_port(dev_config: &config::DevConfig) -> u16 {
     // Check PORT env var first
@@ -135,7 +135,8 @@ pub(crate) fn bench_api(
         .and_then(|n| n.to_str());
     let input_mb = pbf_path.as_ref().map(|p| file_size_mb(p)).transpose()?;
 
-    super::bench_api::run(&ctx.harness, port, req.runs, query, input_file, input_mb)
+    let bbox = resolve_bbox(None, req.dataset, &ctx.paths)?;
+    super::bench_api::run(&ctx.harness, port, req.runs, query, input_file, input_mb, &bbox)
 }
 
 pub(crate) fn bench_ingest(
@@ -198,9 +199,12 @@ pub(crate) fn bench_tiles(
     )
 }
 
-pub(crate) fn verify_batch(dev_config: &config::DevConfig, _project: Project, _project_root: &Path) -> Result<(), DevError> {
+pub(crate) fn verify_batch(dev_config: &config::DevConfig, _project: Project, project_root: &Path, dataset: &str) -> Result<(), DevError> {
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let port = resolve_port(dev_config);
-    super::verify_batch::run(port)
+    let bbox = resolve_bbox(None, dataset, &paths)?;
+    super::verify_batch::run(port, &bbox)
 }
 
 pub(crate) fn verify_geocode(dev_config: &config::DevConfig, _project: Project, _project_root: &Path, queries: &[String]) -> Result<(), DevError> {
@@ -222,7 +226,8 @@ pub(crate) fn verify_readonly(dev_config: &config::DevConfig, _project: Project,
 
     let build_config = build_config_with_features(Some("nidhogg"), features);
     let binary = build::cargo_build(&build_config, project_root)?;
-    super::verify_readonly::run(&binary, &data_dir_str, port, project_root)
+    let bbox = resolve_bbox(None, dataset, &paths)?;
+    super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)
 }
 
 pub(crate) fn hotpath(

@@ -76,14 +76,14 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Fragility
 
-### bench_tiles startup detection via string matching
-`nidhogg/bench_tiles.rs`: waits for stderr to contain `"Listening on"`. If nidhogg changes this message text, the benchmark hangs for 30s then fails.
+### ~~bench_tiles startup detection via string matching~~ FIXED
+`nidhogg/bench_tiles.rs`: now uses case-insensitive match on "listening" instead of exact `"Listening on"` string.
 
-### `find_executable` fallback is order-dependent
-`build.rs`: when `expected_name` is `None`, falls back to `last_exe` — the last executable in cargo's JSON output. Cargo doesn't guarantee ordering.
+### ~~`find_executable` fallback is order-dependent~~ FIXED
+`build.rs`: when `expected_name` is `None`, now requires exactly one executable — errors with a clear message if multiple are found instead of picking the last one.
 
-### All nidhogg test data hardcoded to Denmark
-`nidhogg/bench_api.rs`, `verify_batch.rs`, `client.rs`: all query bboxes, geocode terms, and API test queries use Copenhagen/Denmark coordinates. Would not work for non-Denmark datasets.
+### ~~All nidhogg test data hardcoded to Denmark~~ FIXED
+`bench_api`, `verify_batch`, `verify_readonly`: queries are now derived from the dataset bbox in `brokkr.toml` via `client::build_api_queries()` / `build_batch_queries()`. Geocode queries remain as user-supplied with Denmark defaults (geocode terms are inherently locale-specific).
 
 ---
 

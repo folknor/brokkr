@@ -1,8 +1,8 @@
 //! Batch query verification for nidhogg.
 //!
-//! Replaces `test-batch.sh`. Sends a batch query with 4 named filters to
-//! `/api/query_batch`, then compares with 4 individual queries. Verifies
-//! that all responses contain non-zero elements.
+//! Sends a batch query with 4 named filters to `/api/query_batch`, then
+//! compares with 4 individual queries. Verifies that all responses contain
+//! non-zero elements. Queries are derived from the dataset bbox.
 
 use std::time::Instant;
 
@@ -10,52 +10,22 @@ use crate::error::DevError;
 use crate::output;
 
 // ---------------------------------------------------------------------------
-// Batch query payload
-// ---------------------------------------------------------------------------
-
-/// Copenhagen bbox shared by all queries.
-const BBOX: &str = r#"[55.66,12.55,55.70,12.60]"#;
-
-/// Batch query body with 4 named filters.
-fn batch_body() -> String {
-    format!(
-        r#"{{"bbox":{BBOX},"queries":{{"roads":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}],"infra":[{{"railway":true}}],"coastline":[{{"natural":["coastline"]}}],"landcover":[{{"landuse":true}}]}}}}"#,
-    )
-}
-
-/// Individual queries corresponding to the batch filters.
-const INDIVIDUAL_QUERIES: &[(&str, &str)] = &[
-    (
-        "roads",
-        r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#,
-    ),
-    (
-        "infra",
-        r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"railway":true}]}"#,
-    ),
-    (
-        "coastline",
-        r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"natural":["coastline"]}]}"#,
-    ),
-    (
-        "landcover",
-        r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"landuse":true}]}"#,
-    ),
-];
-
-// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 /// Run batch query verification.
-pub fn run(port: u16) -> Result<(), DevError> {
+///
+/// `bbox` is in brokkr.toml format (`lon_min,lat_min,lon_max,lat_max`).
+pub fn run(port: u16, bbox: &str) -> Result<(), DevError> {
     super::server::check_running(port)?;
+
+    let (batch_body, individual_queries) = super::client::build_batch_queries(bbox)?;
 
     let mut failures = 0u32;
 
     // --- Batch query ---
     output::verify_msg("=== batch query ===");
-    let batch_result = run_batch_query(port)?;
+    let batch_result = run_batch_query(port, &batch_body)?;
 
     let total_batch_elements = report_batch_results(&batch_result)?;
 
@@ -66,7 +36,7 @@ pub fn run(port: u16) -> Result<(), DevError> {
 
     // --- Individual queries ---
     output::verify_msg("=== individual queries ===");
-    let individual_results = run_individual_queries(port)?;
+    let individual_results = run_individual_queries(port, &individual_queries)?;
 
     for (name, count, elapsed_ms) in &individual_results {
         output::verify_msg(&format!(
@@ -130,12 +100,11 @@ struct BatchResult {
 }
 
 /// Send the batch query and parse the response.
-fn run_batch_query(port: u16) -> Result<BatchResult, DevError> {
+fn run_batch_query(port: u16, body: &str) -> Result<BatchResult, DevError> {
     let url = super::client::batch_query_url(port);
-    let body = batch_body();
 
     let start = Instant::now();
-    let stdout = super::client::curl_post(&url, &body)?;
+    let stdout = super::client::curl_post(&url, body)?;
     let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
@@ -174,12 +143,12 @@ fn report_batch_results(result: &BatchResult) -> Result<usize, DevError> {
     Ok(total)
 }
 
-/// Run 4 individual queries and return (name, element_count, elapsed_ms).
-fn run_individual_queries(port: u16) -> Result<Vec<(String, usize, i64)>, DevError> {
+/// Run individual queries and return (name, element_count, elapsed_ms).
+fn run_individual_queries(port: u16, queries: &[(String, String)]) -> Result<Vec<(String, usize, i64)>, DevError> {
     let url = super::client::query_url(port);
-    let mut results = Vec::with_capacity(INDIVIDUAL_QUERIES.len());
+    let mut results = Vec::with_capacity(queries.len());
 
-    for &(name, body) in INDIVIDUAL_QUERIES {
+    for (name, body) in queries {
         let start = Instant::now();
         let stdout = super::client::curl_post(&url, body)?;
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -189,7 +158,7 @@ fn run_individual_queries(port: u16) -> Result<Vec<(String, usize, i64)>, DevErr
 
         let count = super::client::element_count(&parsed);
 
-        results.push((name.to_owned(), count, elapsed_ms));
+        results.push((name.clone(), count, elapsed_ms));
     }
 
     Ok(results)

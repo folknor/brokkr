@@ -25,6 +25,7 @@ pub fn run(
     data_dir: &str,
     port: u16,
     project_root: &Path,
+    bbox: &str,
 ) -> Result<(), DevError> {
     output::verify_msg("=== read-only filesystem test ===");
 
@@ -48,7 +49,7 @@ pub fn run(
     set_permissions(&geocode_dir, false, project_root)?;
 
     // Run tests with cleanup guarantee.
-    let test_result = run_tests(binary, data_dir, port, project_root);
+    let test_result = run_tests(binary, data_dir, port, project_root, bbox);
 
     // Always restore permissions and stop server.
     output::verify_msg("restoring permissions");
@@ -77,6 +78,7 @@ fn run_tests(
     data_dir: &str,
     port: u16,
     project_root: &Path,
+    bbox: &str,
 ) -> Result<(), DevError> {
     // Start server.
     super::server::serve(binary, data_dir, None, port, project_root)?;
@@ -104,7 +106,7 @@ fn run_tests(
     }
 
     // API query test.
-    match run_query_check(port) {
+    match run_query_check(port, bbox) {
         Ok(true) => {
             output::verify_msg("PASS  API query");
             passed += 1;
@@ -154,11 +156,11 @@ fn run_geocode_check(port: u16, query: &str) -> Result<bool, DevError> {
 }
 
 /// Check a single API query returns non-empty elements.
-fn run_query_check(port: u16) -> Result<bool, DevError> {
+fn run_query_check(port: u16, bbox: &str) -> Result<bool, DevError> {
     let url = super::client::query_url(port);
-    let body = super::client::DEFAULT_API_QUERY;
+    let body = super::client::default_api_query(bbox)?;
 
-    let stdout = match super::client::curl_post(&url, body) {
+    let stdout = match super::client::curl_post(&url, &body) {
         Ok(s) => s,
         Err(_) => return Ok(false),
     };

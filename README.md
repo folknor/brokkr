@@ -81,7 +81,7 @@ For `elivagar`-specific node-store behavior, `brokkr bench self`, `brokkr hotpat
 
 **Benchmarks**: `api` (query performance), `nid-ingest` (ingest performance).
 
-**Verification**: `batch` (batch query), `nid-geocode`, `readonly` (read-only filesystem).
+**Verification**: `batch [--dataset]` (batch query, bbox from dataset config), `nid-geocode`, `readonly [--dataset]` (read-only filesystem).
 
 ## Preview pipeline
 

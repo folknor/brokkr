@@ -353,6 +353,7 @@ pub fn find_executable(
     expected_name: Option<&str>,
 ) -> Result<PathBuf, DevError> {
     let text = String::from_utf8_lossy(stdout);
+    let mut all_exes: Vec<PathBuf> = Vec::new();
     let mut last_exe: Option<PathBuf> = None;
     let mut matched_exe: Option<PathBuf> = None;
 
@@ -367,13 +368,26 @@ pub fn find_executable(
             {
                 matched_exe = Some(path.clone());
             }
+            all_exes.push(path.clone());
             last_exe = Some(path);
         }
     }
 
-    matched_exe.or(last_exe).ok_or_else(|| {
-        DevError::Build("no executable in cargo output".into())
-    })
+    if let Some(exe) = matched_exe {
+        return Ok(exe);
+    }
+
+    // No name to match — require exactly one executable to avoid
+    // order-dependent behaviour (cargo doesn't guarantee JSON ordering).
+    match last_exe {
+        Some(exe) if all_exes.len() == 1 => Ok(exe),
+        Some(_) => Err(DevError::Build(format!(
+            "found {} executables in cargo output but no expected name to disambiguate; \
+             specify --bin or -p",
+            all_exes.len()
+        ))),
+        None => Err(DevError::Build("no executable in cargo output".into())),
+    }
 }
 
 /// Extract compiler diagnostics from `--message-format=json` stdout and print

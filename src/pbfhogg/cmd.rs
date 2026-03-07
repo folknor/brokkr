@@ -232,7 +232,7 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
         }
         // Elivagar and nidhogg variants are handled above in cmd_verify().
         VerifyCommand::ElivVerify { .. }
-        | VerifyCommand::Batch
+        | VerifyCommand::Batch { .. }
         | VerifyCommand::NidGeocode { .. }
         | VerifyCommand::Readonly { .. } => unreachable!(),
     }

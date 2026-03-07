@@ -42,9 +42,19 @@ impl Drop for ChildGuard {
 /// Number of iterations over the full tile set per run.
 const ITERATIONS: usize = 5;
 
-/// Maximum time to wait for the server to print "Listening on" to stderr.
+/// Maximum time to wait for the server to signal readiness on stderr.
 /// Generous to accommodate slow disk startup (mmap of large files on HDD).
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Check whether a stderr line indicates the server is ready.
+///
+/// Matches case-insensitively on "listening" — this is more resilient than
+/// matching the exact phrase "Listening on" which could change across nidhogg
+/// versions.
+fn is_ready_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("listening")
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -137,7 +147,7 @@ fn run_lifecycle(
         DevError::Config("failed to get child process".into())
     })?;
 
-    // 2. Take stderr and start a reader thread that watches for "Listening on".
+    // 2. Take stderr and start a reader thread that watches for a ready signal.
     //    After the ready signal, the thread continues reading to EOF so it
     //    captures the shutdown KV pairs emitted after SIGTERM.
     let stderr = child.stderr.take().ok_or_else(|| {
@@ -150,13 +160,13 @@ fn run_lifecycle(
         let mut line = String::new();
         let mut pre_ready = Vec::new();
 
-        // Read lines until "Listening on" or EOF.
+        // Read lines until the server signals readiness or EOF.
         loop {
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => { tx.send(false).ok(); return (pre_ready, Vec::new()); }
                 Ok(_) => {
-                    if line.contains("Listening on") {
+                    if is_ready_line(&line) {
                         tx.send(true).ok();
                         break;
                     }
@@ -181,12 +191,12 @@ fn run_lifecycle(
         let server_output = pre_ready.join("");
         let msg = if server_output.is_empty() {
             format!(
-                "nidhogg server did not print 'Listening on' within {}s (no stderr output)",
+                "nidhogg server did not print ready signal within {}s (no stderr output)",
                 STARTUP_TIMEOUT.as_secs()
             )
         } else {
             format!(
-                "nidhogg server did not print 'Listening on' within {}s\nserver stderr:\n{}",
+                "nidhogg server did not print ready signal within {}s\nserver stderr:\n{}",
                 STARTUP_TIMEOUT.as_secs(),
                 server_output.chars().take(2000).collect::<String>()
             )
@@ -248,7 +258,7 @@ fn run_lifecycle(
         });
     }
 
-    // 7. Parse KV pairs from remaining stderr (shutdown output after "Listening on").
+    // 7. Parse KV pairs from remaining stderr (shutdown output after ready signal).
     let (_stderr_ms, kv) = harness::parse_kv_lines(&remaining_stderr);
 
     output::bench_msg(&format!("captured {} KV pairs from server shutdown", kv.len()));

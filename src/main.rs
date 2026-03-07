@@ -903,9 +903,9 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
         }
 
         // ----- nidhogg verify variants -----
-        VerifyCommand::Batch => {
+        VerifyCommand::Batch { dataset } => {
             project::require(project, Project::Nidhogg, "verify batch")?;
-            nidhogg::cmd::verify_batch(dev_config, project, project_root)
+            nidhogg::cmd::verify_batch(dev_config, project, project_root, &dataset)
         }
         VerifyCommand::NidGeocode { queries } => {
             project::require(project, Project::Nidhogg, "verify geocode")?;

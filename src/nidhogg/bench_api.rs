@@ -1,7 +1,8 @@
 //! API query benchmark for nidhogg.
 //!
-//! Replaces `bench-api.sh`. Runs 4 hardcoded spatial queries against the
-//! running nidhogg server, collecting timing distributions via curl.
+//! Runs spatial queries against the running nidhogg server, collecting timing
+//! distributions via curl. Queries are derived from the dataset bbox configured
+//! in brokkr.toml.
 
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -9,34 +10,12 @@ use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
 // ---------------------------------------------------------------------------
-// Query definitions
-// ---------------------------------------------------------------------------
-
-const QUERIES: &[(&str, &str)] = &[
-    (
-        "cph_highways",
-        r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#,
-    ),
-    (
-        "cph_large",
-        r#"{"bbox":[55.60,12.40,55.75,12.70],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#,
-    ),
-    (
-        "cph_small_nofilter",
-        r#"{"bbox":[55.67,12.57,55.68,12.58],"query":[]}"#,
-    ),
-    (
-        "cph_buildings",
-        r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"building":true}]}"#,
-    ),
-];
-
-// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 /// Run API query benchmarks against the nidhogg server.
 ///
+/// Queries are derived from `bbox` (brokkr.toml format: `lon_min,lat_min,lon_max,lat_max`).
 /// For each query (optionally filtered by `only`): warmup, run N timed
 /// requests via curl, then report timing distribution plus element counts.
 pub fn run(
@@ -46,12 +25,14 @@ pub fn run(
     only: Option<&str>,
     input_file: Option<&str>,
     input_mb: Option<f64>,
+    bbox: &str,
 ) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
+    let queries = super::client::build_api_queries(bbox)?;
     let url = super::client::query_url(port);
 
-    for &(name, body) in QUERIES {
+    for (name, body) in &queries {
         if let Some(filter) = only
             && name != filter {
                 continue;
@@ -65,7 +46,7 @@ pub fn run(
         // Timed runs via distribution harness.
         let config = BenchConfig {
             command: "bench api".into(),
-            variant: Some(name.into()),
+            variant: Some(name.clone()),
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,
@@ -76,7 +57,7 @@ pub fn run(
         };
 
         let url_clone = url.clone();
-        let body_owned = body.to_owned();
+        let body_owned = body.clone();
 
         harness.run_distribution(&config, |_i| {
             let ms = run_curl_timed(&url_clone, &body_owned)?;

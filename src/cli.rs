@@ -833,7 +833,11 @@ pub(crate) enum VerifyCommand {
 
     /// [nidhogg] Batch query verification
     #[command(display_order = 20)]
-    Batch,
+    Batch {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+    },
     /// [nidhogg] Geocode verification
     #[command(display_order = 21)]
     NidGeocode {

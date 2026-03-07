@@ -11,11 +11,101 @@ use crate::error::DevError;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default spatial query: Copenhagen highways.
-pub const DEFAULT_API_QUERY: &str = r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#;
-
-/// Default geocode test queries (Danish cities).
+/// Default geocode test queries (Danish cities — used when no queries are specified).
 pub const GEOCODE_TEST_QUERIES: &[&str] = &["Kobenhavn", "Aarhus", "Odense"];
+
+/// Convert a brokkr.toml bbox (`lon_min,lat_min,lon_max,lat_max`) to a nidhogg
+/// API bbox array string (`[lat_min,lon_min,lat_max,lon_max]`).
+pub fn bbox_to_api(bbox: &str) -> Result<String, crate::error::DevError> {
+    let parts: Vec<&str> = bbox.split(',').collect();
+    if parts.len() != 4 {
+        return Err(crate::error::DevError::Config(format!(
+            "bbox must have 4 comma-separated values, got {}: {bbox}",
+            parts.len()
+        )));
+    }
+    // brokkr.toml: lon_min,lat_min,lon_max,lat_max
+    // nidhogg API: [lat_min,lon_min,lat_max,lon_max]
+    Ok(format!("[{},{},{},{}]", parts[1], parts[0], parts[3], parts[2]))
+}
+
+/// Build a default spatial query JSON from a bbox string (brokkr.toml format).
+pub fn default_api_query(bbox: &str) -> Result<String, crate::error::DevError> {
+    let api_bbox = bbox_to_api(bbox)?;
+    Ok(format!(
+        r#"{{"bbox":{api_bbox},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
+    ))
+}
+
+/// Shrink a bbox to roughly its center quarter (for small-area queries).
+fn shrink_bbox(bbox: &str) -> Result<String, crate::error::DevError> {
+    let parts: Vec<f64> = bbox
+        .split(',')
+        .map(|s| s.trim().parse::<f64>().map_err(|_| {
+            crate::error::DevError::Config(format!("invalid bbox component: {s}"))
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
+    if parts.len() != 4 {
+        return Err(crate::error::DevError::Config("bbox must have 4 values".into()));
+    }
+    let (lon_min, lat_min, lon_max, lat_max) = (parts[0], parts[1], parts[2], parts[3]);
+    let lon_mid = (lon_min + lon_max) / 2.0;
+    let lat_mid = (lat_min + lat_max) / 2.0;
+    let lon_q = (lon_max - lon_min) / 4.0;
+    let lat_q = (lat_max - lat_min) / 4.0;
+    Ok(format!(
+        "{},{},{},{}",
+        lon_mid - lon_q, lat_mid - lat_q,
+        lon_mid + lon_q, lat_mid + lat_q,
+    ))
+}
+
+/// Build the standard set of API benchmark queries from a dataset bbox.
+///
+/// Returns (name, JSON body) pairs. The bbox is from brokkr.toml format
+/// (`lon_min,lat_min,lon_max,lat_max`).
+pub fn build_api_queries(bbox: &str) -> Result<Vec<(String, String)>, crate::error::DevError> {
+    let full = bbox_to_api(bbox)?;
+    let small_bbox = shrink_bbox(bbox)?;
+    let small = bbox_to_api(&small_bbox)?;
+
+    Ok(vec![
+        (
+            "highways".into(),
+            format!(r#"{{"bbox":{full},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#),
+        ),
+        (
+            "highways_large".into(),
+            format!(r#"{{"bbox":{full},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#),
+        ),
+        (
+            "small_nofilter".into(),
+            format!(r#"{{"bbox":{small},"query":[]}}"#),
+        ),
+        (
+            "buildings".into(),
+            format!(r#"{{"bbox":{full},"query":[{{"building":true}}]}}"#),
+        ),
+    ])
+}
+
+/// Build the standard batch verification queries from a dataset bbox.
+pub fn build_batch_queries(bbox: &str) -> Result<(String, Vec<(String, String)>), crate::error::DevError> {
+    let api_bbox = bbox_to_api(bbox)?;
+
+    let batch_body = format!(
+        r#"{{"bbox":{api_bbox},"queries":{{"roads":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}],"infra":[{{"railway":true}}],"coastline":[{{"natural":["coastline"]}}],"landcover":[{{"landuse":true}}]}}}}"#
+    );
+
+    let individual = vec![
+        ("roads".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#)),
+        ("infra".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"railway":true}}]}}"#)),
+        ("coastline".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"natural":["coastline"]}}]}}"#)),
+        ("landcover".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"landuse":true}}]}}"#)),
+    ];
+
+    Ok((batch_body, individual))
+}
 
 // ---------------------------------------------------------------------------
 // URL construction
@@ -286,5 +376,55 @@ mod tests {
     fn geocode_url_encodes_term() {
         let url = geocode_url(3033, "hello world");
         assert_eq!(url, "http://localhost:3033/api/geocode?q=hello%20world");
+    }
+
+    #[test]
+    fn bbox_to_api_swaps_lon_lat() {
+        // brokkr.toml: lon_min,lat_min,lon_max,lat_max
+        // nidhogg API: [lat_min,lon_min,lat_max,lon_max]
+        let result = bbox_to_api("12.4,55.6,12.7,55.8").unwrap();
+        assert_eq!(result, "[55.6,12.4,55.8,12.7]");
+    }
+
+    #[test]
+    fn bbox_to_api_rejects_bad_count() {
+        assert!(bbox_to_api("1,2,3").is_err());
+        assert!(bbox_to_api("1,2,3,4,5").is_err());
+    }
+
+    #[test]
+    fn shrink_bbox_produces_center_quarter() {
+        let result = shrink_bbox("10.0,50.0,14.0,54.0").unwrap();
+        let parts: Vec<f64> = result.split(',').map(|s| s.parse().unwrap()).collect();
+        assert_eq!(parts.len(), 4);
+        // Center is (12, 52), quarter-width is 1.0 lon, 1.0 lat
+        assert!((parts[0] - 11.0).abs() < 1e-10);
+        assert!((parts[1] - 51.0).abs() < 1e-10);
+        assert!((parts[2] - 13.0).abs() < 1e-10);
+        assert!((parts[3] - 53.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn build_api_queries_produces_four() {
+        let queries = build_api_queries("12.4,55.6,12.7,55.8").unwrap();
+        assert_eq!(queries.len(), 4);
+        // All should be valid JSON
+        for (_, body) in &queries {
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert!(parsed.get("bbox").is_some());
+        }
+    }
+
+    #[test]
+    fn build_batch_queries_produces_matching_names() {
+        let (batch, individual) = build_batch_queries("12.4,55.6,12.7,55.8").unwrap();
+        // batch body should be valid JSON
+        let _: serde_json::Value = serde_json::from_str(&batch).unwrap();
+        assert_eq!(individual.len(), 4);
+        let names: Vec<&str> = individual.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"roads"));
+        assert!(names.contains(&"infra"));
+        assert!(names.contains(&"coastline"));
+        assert!(names.contains(&"landcover"));
     }
 }

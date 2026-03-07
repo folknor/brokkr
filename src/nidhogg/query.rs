@@ -14,7 +14,9 @@ use crate::output;
 pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
-    let body = query_json.unwrap_or(super::client::DEFAULT_API_QUERY);
+    // Fallback query for interactive use when no --json is provided.
+    const FALLBACK_QUERY: &str = r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#;
+    let body = query_json.unwrap_or(FALLBACK_QUERY);
     let url = super::client::query_url(port);
 
     output::run_msg(&format!("POST {url}"));
