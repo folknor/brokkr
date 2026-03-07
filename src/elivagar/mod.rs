@@ -29,6 +29,7 @@ pub struct PipelineOpts<'a> {
     pub locations_on_ways: bool,
     pub fanout_cap_default: Option<u32>,
     pub fanout_cap: Option<&'a str>,
+    pub polygon_simplify_factor: Option<f64>,
 }
 
 impl PipelineOpts<'_> {
@@ -66,6 +67,10 @@ impl PipelineOpts<'_> {
             args.push("--fanout-cap".into());
             args.push(spec.into());
         }
+        if let Some(f) = self.polygon_simplify_factor {
+            args.push("--polygon-simplify-factor".into());
+            args.push(f.to_string());
+        }
         push_ocean_args(args, data_dir, self.no_ocean);
     }
 
@@ -96,6 +101,9 @@ impl PipelineOpts<'_> {
         }
         if let Some(spec) = self.fanout_cap {
             m.push(crate::db::KvPair::text("meta.fanout_cap", spec));
+        }
+        if let Some(f) = self.polygon_simplify_factor {
+            m.push(crate::db::KvPair::real("meta.polygon_simplify_factor", f));
         }
         m
     }

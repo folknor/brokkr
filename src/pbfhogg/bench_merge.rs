@@ -31,7 +31,7 @@ pub fn run(
     let output_str = output_path.display().to_string();
 
     let io_modes: Vec<&str> = if uring {
-        vec!["buffered", "uring", "uring-sqpoll"]
+        vec!["buffered", "uring"]
     } else {
         vec!["buffered"]
     };

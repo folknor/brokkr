@@ -144,6 +144,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             locations_on_ways,
             fanout_cap_default,
             fanout_cap,
+            polygon_simplify_factor,
             runs,
             tiles,
             nodes,
@@ -169,6 +170,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     in_memory, locations_on_ways,
                     fanout_cap_default,
                     fanout_cap: fanout_cap.as_deref(),
+                    polygon_simplify_factor,
                 };
                 cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, &opts)
             })
@@ -191,6 +193,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             locations_on_ways,
             fanout_cap_default,
             fanout_cap,
+            polygon_simplify_factor,
             no_mem_check,
         } => {
             let features = resolve_features(&dev_config, &features);
@@ -208,6 +211,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     in_memory, locations_on_ways,
                     fanout_cap_default,
                     fanout_cap: fanout_cap.as_deref(),
+                    polygon_simplify_factor,
                 };
                 cmd_profile(&req, osc_seq.as_deref(), tool.as_deref(), &opts)
             })
@@ -827,6 +831,7 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             locations_on_ways,
             fanout_cap_default,
             fanout_cap,
+            polygon_simplify_factor,
         } => {
             project::require(project, Project::Elivagar, "bench self")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
@@ -838,6 +843,7 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
                 in_memory, locations_on_ways,
                 fanout_cap_default,
                 fanout_cap: fanout_cap.as_deref(),
+                polygon_simplify_factor,
             };
             elivagar::cmd::bench_self(&req, skip_to.as_deref(), compression_level, &opts)
         }

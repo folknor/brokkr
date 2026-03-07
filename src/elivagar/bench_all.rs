@@ -32,7 +32,7 @@ pub fn run(
         no_ocean: false, force_sorted: false, allow_unsafe_flat_index: false,
         tile_format: None, tile_compression: None, compress_sort_chunks: None,
         in_memory: false, locations_on_ways: false,
-        fanout_cap_default: None, fanout_cap: None,
+        fanout_cap_default: None, fanout_cap: None, polygon_simplify_factor: None,
     };
     bench_self::run(
         harness, &binary, pbf_path, file_mb, runs,

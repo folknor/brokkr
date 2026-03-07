@@ -263,6 +263,9 @@ Examples:
         /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
         #[arg(long)]
         fanout_cap: Option<String>,
+        /// Polygon simplification factor (elivagar only, default 1.0, range 0.1–10.0)
+        #[arg(long)]
+        polygon_simplify_factor: Option<f64>,
 
         /// Number of runs; best-of-N is stored (default: 1)
         #[arg(long, default_value = "1")]
@@ -344,6 +347,9 @@ Examples:
         /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
         #[arg(long)]
         fanout_cap: Option<String>,
+        /// Polygon simplification factor (elivagar only, default 1.0, range 0.1–10.0)
+        #[arg(long)]
+        polygon_simplify_factor: Option<f64>,
 
         /// Skip memory availability check
         #[arg(long)]
@@ -619,6 +625,9 @@ pub(crate) enum BenchCommand {
         /// Per-layer fanout caps (comma-separated layer=N pairs, e.g. water_polygons=2048,boundaries=4096)
         #[arg(long)]
         fanout_cap: Option<String>,
+        /// Polygon simplification factor (default 1.0, range 0.1–10.0)
+        #[arg(long)]
+        polygon_simplify_factor: Option<f64>,
     },
     /// [elivagar] SortedNodeStore benchmark
     #[command(display_order = 11)]
