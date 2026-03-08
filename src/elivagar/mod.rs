@@ -8,6 +8,7 @@ pub mod bench_pmtiles;
 pub mod bench_self;
 pub mod bench_tilemaker;
 pub mod compare_tiles;
+pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod hotpath;
 pub mod profile;

@@ -389,6 +389,9 @@ Examples:
     /// [elivagar] Download ocean shapefiles
     #[command(display_order = 31)]
     DownloadOcean,
+    /// [elivagar] Download Natural Earth shapefiles for low-zoom layers
+    #[command(display_order = 32)]
+    DownloadNaturalEarth,
     /// Print PMTiles v3 file statistics
     #[command(display_order = 19)]
     PmtilesStats {

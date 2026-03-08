@@ -128,6 +128,13 @@ pub(crate) fn download_ocean(dev_config: &config::DevConfig, project: Project, p
     super::download_ocean::run(&paths.data_dir)
 }
 
+pub(crate) fn download_natural_earth(dev_config: &config::DevConfig, project: Project, project_root: &Path) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "download-natural-earth")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    super::download_natural_earth::run(&paths.data_dir)
+}
+
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
     project: Project,
