@@ -442,56 +442,6 @@ Examples:
         #[arg(default_value = "København")]
         term: String,
     },
-    /// Run the full pipeline and open a map viewer for visual inspection
-    #[command(display_order = 50)]
-    Preview {
-        /// Start from a specific pipeline step (enrich, tilegen, ingest, serve)
-        #[arg(long, value_enum)]
-        from: Option<PreviewStep>,
-
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-
-        /// PBF variant to use (raw, indexed, locations)
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-
-        /// Don't open browser after starting the server
-        #[arg(long)]
-        no_open: bool,
-
-        /// Use an existing PMTiles file (skips enrich+tilegen, implies --from serve if no --from given)
-        #[arg(long)]
-        pmtiles: Option<String>,
-
-        /// Default fanout cap for all layers (elivagar only)
-        #[arg(long)]
-        fanout_cap_default: Option<u32>,
-        /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
-        #[arg(long)]
-        fanout_cap: Option<String>,
-        /// Polygon simplification factor (elivagar only, default 1.0, range 0.1–10.0)
-        #[arg(long)]
-        polygon_simplify_factor: Option<f64>,
-        /// Tile output format (mvt or mlt, elivagar only)
-        #[arg(long)]
-        tile_format: Option<String>,
-        /// Tile compression (gzip or brotli, elivagar only)
-        #[arg(long)]
-        tile_compression: Option<String>,
-        /// Compress sort chunks (lz4 or snappy, elivagar only)
-        #[arg(long)]
-        compress_sort_chunks: Option<String>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-pub(crate) enum PreviewStep {
-    Enrich,
-    Tilegen,
-    Ingest,
-    Serve,
 }
 
 #[derive(Subcommand)]
@@ -959,63 +909,6 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "brokkr",
             "pmtiles-stats",
-        ]);
-        assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn preview_defaults_are_stable() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "preview",
-        ]).expect("parse");
-
-        let Command::Preview { from, dataset, variant, no_open, pmtiles, .. } = parsed.command else {
-            panic!("expected preview command");
-        };
-        assert!(from.is_none());
-        assert_eq!(dataset, "denmark");
-        assert_eq!(variant, "indexed");
-        assert!(!no_open);
-        assert!(pmtiles.is_none());
-    }
-
-    #[test]
-    fn preview_from_accepts_all_steps() {
-        for step in ["enrich", "tilegen", "ingest", "serve"] {
-            let parsed = Cli::try_parse_from([
-                "brokkr",
-                "preview",
-                "--from", step,
-            ]).expect(&format!("parse --from {step}"));
-
-            let Command::Preview { from, .. } = parsed.command else {
-                panic!("expected preview command");
-            };
-            assert!(from.is_some(), "--from {step} should parse");
-        }
-    }
-
-    #[test]
-    fn preview_no_open_flag() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "preview",
-            "--no-open",
-        ]).expect("parse");
-
-        let Command::Preview { no_open, .. } = parsed.command else {
-            panic!("expected preview command");
-        };
-        assert!(no_open);
-    }
-
-    #[test]
-    fn preview_from_rejects_invalid_step() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "preview",
-            "--from", "bogus",
         ]);
         assert!(parsed.is_err());
     }

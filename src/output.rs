@@ -62,10 +62,6 @@ pub fn hotpath_msg(msg: &str) {
     }
 }
 
-pub fn preview_msg(msg: &str) {
-    println!("[preview] {msg}");
-}
-
 pub fn download_msg(msg: &str) {
     println!("[download] {msg}");
 }
