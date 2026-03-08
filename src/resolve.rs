@@ -89,8 +89,11 @@ fn resolve_default_entry_path<E: FileEntry>(
         )));
     }
 
-    let key = entries.keys().next().unwrap();
-    resolve_entry_path(entries, key, dataset, kind, data_dir, origin, project_root)
+    if let Some(key) = entries.keys().next() {
+        resolve_entry_path(entries, key, dataset, kind, data_dir, origin, project_root)
+    } else {
+        unreachable!("entries is non-empty (checked above)")
+    }
 }
 
 /// Look up a dataset by name, returning it and its origin.

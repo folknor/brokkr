@@ -116,13 +116,11 @@ pub fn run(
     project_root: &Path,
     test_filter: Option<&str>,
 ) -> Result<(), DevError> {
-    if let Some(name) = test_filter {
-        if !TEST_LABELS.contains(&name) {
-            return Err(DevError::Config(format!(
-                "unknown hotpath test '{name}'. Available: {}",
-                TEST_LABELS.join(", ")
-            )));
-        }
+    if let Some(name) = test_filter.filter(|n| !TEST_LABELS.contains(n)) {
+        return Err(DevError::Config(format!(
+            "unknown hotpath test '{name}'. Available: {}",
+            TEST_LABELS.join(", ")
+        )));
     }
     std::fs::create_dir_all(scratch_dir)?;
     let merged_path = scratch_dir.join("hotpath-merged.osm.pbf");
@@ -156,10 +154,8 @@ pub fn run(
     let mut failed: Vec<(&str, String)> = Vec::new();
 
     for test in &tests {
-        if let Some(filter) = test_filter {
-            if test.label != filter {
-                continue;
-            }
+        if test_filter.is_some_and(|filter| test.label != filter) {
+            continue;
         }
         let variant_suffix = crate::harness::hotpath_variant_suffix(alloc);
         let variant = format!("{}{variant_suffix}", test.label);

@@ -154,36 +154,36 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
     let harness = super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
 
     match verify {
-        VerifyCommand::Sort { dataset, variant } => {
+        VerifyCommand::Sort { dataset, variant, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_sort::run(&harness, &pbf_path)
+            super::verify_sort::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::Cat { dataset, variant } => {
+        VerifyCommand::Cat { dataset, variant, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_cat::run(&harness, &pbf_path)
+            super::verify_cat::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::Extract { dataset, variant, bbox } => {
+        VerifyCommand::Extract { dataset, variant, bbox, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let bbox = resolve_bbox(bbox.as_deref(), &dataset, &paths)?;
-            super::verify_extract::run(&harness, &pbf_path, &bbox)
+            super::verify_extract::run(&harness, &pbf_path, &bbox, direct_io)
         }
-        VerifyCommand::TagsFilter { dataset, variant } => {
+        VerifyCommand::TagsFilter { dataset, variant, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_tags_filter::run(&harness, &pbf_path)
+            super::verify_tags_filter::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::GetidRemoveid { dataset, variant } => {
+        VerifyCommand::GetidRemoveid { dataset, variant, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_getid_removeid::run(&harness, &pbf_path)
+            super::verify_getid_removeid::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::AddLocationsToWays { dataset, variant } => {
+        VerifyCommand::AddLocationsToWays { dataset, variant, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_add_locations::run(&harness, &pbf_path)
+            super::verify_add_locations::run(&harness, &pbf_path, direct_io)
         }
         VerifyCommand::CheckRefs { dataset, variant } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_check_refs::run(&harness, &pbf_path)
         }
-        VerifyCommand::Merge { dataset, variant, osc_seq } => {
+        VerifyCommand::Merge { dataset, variant, osc_seq, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root)?,
@@ -196,15 +196,15 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
                     None
                 }
             };
-            super::verify_merge::run(&harness, &pbf_path, &osc_path, osmosis.as_ref())
+            super::verify_merge::run(&harness, &pbf_path, &osc_path, osmosis.as_ref(), direct_io)
         }
-        VerifyCommand::DeriveChanges { dataset, variant, osc_seq } => {
+        VerifyCommand::DeriveChanges { dataset, variant, osc_seq, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root)?,
                 None => resolve_default_osc_path(&dataset, &paths, project_root)?,
             };
-            super::verify_derive_changes::run(&harness, &pbf_path, &osc_path)
+            super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, direct_io)
         }
         VerifyCommand::Diff { dataset, variant, osc_seq } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
@@ -214,7 +214,7 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
             };
             super::verify_diff::run(&harness, &pbf_path, &osc_path)
         }
-        VerifyCommand::All { dataset, variant, osc_seq, bbox } => {
+        VerifyCommand::All { dataset, variant, osc_seq, bbox, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root).ok(),
@@ -228,6 +228,7 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
                 bbox_str.as_deref(),
                 &paths.data_dir,
                 project_root,
+                direct_io,
             )
         }
         // Elivagar and nidhogg variants are handled above in cmd_verify().

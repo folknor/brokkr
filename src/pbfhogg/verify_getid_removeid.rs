@@ -15,7 +15,7 @@ const IDS: &[&str] = &[
 
 /// Run getid cross-validation: pbfhogg getid vs osmium getid,
 /// then pbfhogg getid --invert complement test.
-pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("getid-removeid")?;
     let pbf_str = pbf.display().to_string();
 
@@ -25,6 +25,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let pbfhogg_getid = outdir.join("pbfhogg-getid.osm.pbf");
     let pbfhogg_getid_str = pbfhogg_getid.display().to_string();
     let mut pbfhogg_args: Vec<&str> = vec!["getid", &pbf_str, "-o", &pbfhogg_getid_str];
+    if direct_io {
+        pbfhogg_args.push("--direct-io");
+    }
     pbfhogg_args.extend_from_slice(IDS);
     let captured = harness.run_pbfhogg(&pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg getid")?;
@@ -59,6 +62,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let pbfhogg_invert = outdir.join("pbfhogg-getid-invert.osm.pbf");
     let pbfhogg_invert_str = pbfhogg_invert.display().to_string();
     let mut invert_args: Vec<&str> = vec!["getid", "--invert", &pbf_str, "-o", &pbfhogg_invert_str];
+    if direct_io {
+        invert_args.push("--direct-io");
+    }
     invert_args.extend_from_slice(IDS);
     let captured = harness.run_pbfhogg(&invert_args)?;
     harness.check_exit(&captured, "pbfhogg getid --invert")?;

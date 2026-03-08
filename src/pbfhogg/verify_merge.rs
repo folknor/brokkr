@@ -16,6 +16,7 @@ pub fn run(
     pbf: &Path,
     osc: &Path,
     osmosis: Option<&OsmosisTools>,
+    direct_io: bool,
 ) -> Result<(), DevError> {
     let outdir = harness.subdir("merge")?;
 
@@ -31,8 +32,11 @@ pub fn run(
     let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
     verify_msg("--- pbfhogg apply-changes ---");
-    let captured =
-        harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &pbfhogg_out_str])?;
+    let mut pbfhogg_args = vec!["apply-changes", &pbf_str, &osc_str, "-o", &pbfhogg_out_str];
+    if direct_io {
+        pbfhogg_args.push("--direct-io");
+    }
+    let captured = harness.run_pbfhogg(&pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // --- osmium apply-changes ---

@@ -7,7 +7,7 @@ use crate::output::verify_msg;
 use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg cat` against `osmium cat` for node/way/relation types.
-pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("cat")?;
 
     let pbf_str = pbf.display().to_string();
@@ -20,8 +20,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
         let pbfhogg_out = outdir.join(format!("pbfhogg-{elem_type}.osm.pbf"));
         let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
-        let captured =
-            harness.run_pbfhogg(&["cat", &pbf_str, "-t", elem_type, "-o", &pbfhogg_out_str])?;
+        let mut pbfhogg_args = vec!["cat", &pbf_str, "-t", elem_type, "-o", &pbfhogg_out_str];
+        if direct_io {
+            pbfhogg_args.push("--direct-io");
+        }
+        let captured = harness.run_pbfhogg(&pbfhogg_args)?;
         harness.check_exit(&captured, "pbfhogg cat")?;
 
         // --- osmium cat ---

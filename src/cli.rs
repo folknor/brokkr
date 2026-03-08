@@ -703,6 +703,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate cat (type filters) against osmium cat
     #[command(display_order = 1)]
@@ -711,6 +714,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate extract (bbox strategies) against osmium extract
     #[command(display_order = 2)]
@@ -721,6 +727,9 @@ pub(crate) enum VerifyCommand {
         variant: String,
         #[arg(long)]
         bbox: Option<String>,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate tags-filter against osmium tags-filter
     #[command(display_order = 3)]
@@ -729,6 +738,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate getid/getid --invert against osmium getid
     #[command(display_order = 4)]
@@ -737,6 +749,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate add-locations-to-ways against osmium
     #[command(display_order = 5)]
@@ -745,6 +760,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate check --refs against osmium check-refs
     #[command(display_order = 6)]
@@ -763,6 +781,9 @@ pub(crate) enum VerifyCommand {
         variant: String,
         #[arg(long)]
         osc_seq: Option<String>,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate diff --format osc roundtrip against osmium
     #[command(display_order = 8)]
@@ -773,6 +794,9 @@ pub(crate) enum VerifyCommand {
         variant: String,
         #[arg(long)]
         osc_seq: Option<String>,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate diff summary against osmium diff
     #[command(display_order = 9)]
@@ -795,6 +819,9 @@ pub(crate) enum VerifyCommand {
         osc_seq: Option<String>,
         #[arg(long)]
         bbox: Option<String>,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
 
     /// [elivagar] Verify PMTiles output integrity

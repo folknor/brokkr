@@ -10,7 +10,7 @@ use super::verify::VerifyHarness;
 ///
 /// Creates a "new" PBF by applying changes, derives changes from old->new with
 /// both tools, then roundtrips each derived OSC back through apply-changes and compares.
-pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("derive-changes")?;
 
     verify_msg("=== verify diff --format osc ===");
@@ -25,8 +25,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     let new_pbf_str = new_pbf.display().to_string();
 
     verify_msg("--- creating 'new' PBF via apply-changes ---");
-    let captured =
-        harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
+    let mut ac_args = vec!["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str];
+    if direct_io {
+        ac_args.push("--direct-io");
+    }
+    let captured = harness.run_pbfhogg(&ac_args)?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
     // Step 2: Derive changes with both tools.
@@ -63,9 +66,13 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     let rt_pbfhogg_str = rt_pbfhogg.display().to_string();
 
     verify_msg("--- roundtrip: apply pbfhogg OSC ---");
-    let captured = harness.run_pbfhogg(&[
+    let mut rt_args = vec![
         "apply-changes", &pbf_str, &pbfhogg_osc_str, "-o", &rt_pbfhogg_str,
-    ])?;
+    ];
+    if direct_io {
+        rt_args.push("--direct-io");
+    }
+    let captured = harness.run_pbfhogg(&rt_args)?;
     harness.check_exit(&captured, "pbfhogg apply-changes (roundtrip)")?;
 
     let rt_osmium = outdir.join("roundtrip-osmium.osm.pbf");

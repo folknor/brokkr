@@ -8,7 +8,7 @@ use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg extract` against `osmium extract` for
 /// simple, complete-ways, and smart strategies.
-pub fn run(harness: &VerifyHarness, pbf: &Path, bbox: &str) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, bbox: &str, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("extract")?;
 
     let pbf_str = pbf.display().to_string();
@@ -26,6 +26,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, bbox: &str) -> Result<(), DevErr
             "smart" => pbfhogg_args.push("--smart"),
             // "complete" is the default — no extra flag needed.
             _ => {}
+        }
+        if direct_io {
+            pbfhogg_args.push("--direct-io");
         }
 
         let captured = harness.run_pbfhogg(&pbfhogg_args)?;

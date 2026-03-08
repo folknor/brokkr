@@ -22,6 +22,7 @@ fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Vec<String>
     args
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,

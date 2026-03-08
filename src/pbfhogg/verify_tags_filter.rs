@@ -14,7 +14,7 @@ const EXPRESSIONS: &[(&str, &str)] = &[
 ];
 
 /// Run tags-filter cross-validation: pbfhogg vs osmium, 3 expressions with `-R`.
-pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("tags-filter")?;
     let pbf_str = pbf.display().to_string();
 
@@ -24,14 +24,18 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
         // pbfhogg: tags-filter <pbf> -R <expr> -o <out>
         let pbfhogg_out = outdir.join(format!("pbfhogg-{label}.osm.pbf"));
         let pbfhogg_out_str = pbfhogg_out.display().to_string();
-        let captured = harness.run_pbfhogg(&[
+        let mut pbfhogg_args = vec![
             "tags-filter",
             &pbf_str,
             "-R",
             expr,
             "-o",
             &pbfhogg_out_str,
-        ])?;
+        ];
+        if direct_io {
+            pbfhogg_args.push("--direct-io");
+        }
+        let captured = harness.run_pbfhogg(&pbfhogg_args)?;
         harness.check_exit(&captured, "pbfhogg tags-filter")?;
 
         // osmium: tags-filter <pbf> <expr> -R -o <out> --overwrite

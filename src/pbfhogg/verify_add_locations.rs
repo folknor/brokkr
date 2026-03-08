@@ -11,7 +11,7 @@ use super::verify::VerifyHarness;
 /// Also runs an optional dense index variant — if the dense allocation fails
 /// (common on systems without `vm.overcommit_memory=1`), the failure is logged
 /// and the function still returns `Ok`.
-pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("add-locations-to-ways")?;
 
     verify_msg("=== verify add-locations-to-ways ===");
@@ -22,8 +22,11 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let pbfhogg_out = outdir.join("pbfhogg.osm.pbf");
     let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
-    let captured =
-        harness.run_pbfhogg(&["add-locations-to-ways", &pbf_str, "-o", &pbfhogg_out_str])?;
+    let mut pbfhogg_args = vec!["add-locations-to-ways", &pbf_str, "-o", &pbfhogg_out_str];
+    if direct_io {
+        pbfhogg_args.push("--direct-io");
+    }
+    let captured = harness.run_pbfhogg(&pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg add-locations-to-ways")?;
 
     // --- osmium add-locations-to-ways ---
@@ -63,14 +66,18 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
     let dense_out = outdir.join("pbfhogg-dense.osm.pbf");
     let dense_out_str = dense_out.display().to_string();
 
-    let dense_result = harness.run_pbfhogg(&[
+    let mut dense_args = vec![
         "add-locations-to-ways",
         &pbf_str,
         "-o",
         &dense_out_str,
         "--index-type",
         "dense",
-    ])?;
+    ];
+    if direct_io {
+        dense_args.push("--direct-io");
+    }
+    let dense_result = harness.run_pbfhogg(&dense_args)?;
 
     if dense_result.status.success() {
         let identical = harness.diff_pbfs(&pbfhogg_out, &dense_out)?;

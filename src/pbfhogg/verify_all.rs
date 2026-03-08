@@ -22,6 +22,7 @@ pub fn run(
     bbox: Option<&str>,
     data_dir: &Path,
     project_root: &Path,
+    direct_io: bool,
 ) -> Result<(), DevError> {
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
@@ -49,33 +50,33 @@ pub fn run(
 
     // 1. sort
     verify_msg("========== sort ==========");
-    run_one("sort", verify_sort::run(harness, pbf));
+    run_one("sort", verify_sort::run(harness, pbf, direct_io));
 
     // 2. cat
     verify_msg("========== cat ==========");
-    run_one("cat", verify_cat::run(harness, pbf));
+    run_one("cat", verify_cat::run(harness, pbf, direct_io));
 
     // 3. extract
     verify_msg("========== extract ==========");
     if let Some(b) = bbox {
-        run_one("extract", verify_extract::run(harness, pbf, b));
+        run_one("extract", verify_extract::run(harness, pbf, b, direct_io));
     } else {
         skip("extract", "no --bbox provided");
     }
 
     // 4. tags-filter
     verify_msg("========== tags-filter ==========");
-    run_one("tags-filter", verify_tags_filter::run(harness, pbf));
+    run_one("tags-filter", verify_tags_filter::run(harness, pbf, direct_io));
 
     // 5. getid-removeid
     verify_msg("========== getid-removeid ==========");
-    run_one("getid-removeid", verify_getid_removeid::run(harness, pbf));
+    run_one("getid-removeid", verify_getid_removeid::run(harness, pbf, direct_io));
 
     // 6. add-locations-to-ways
     verify_msg("========== add-locations-to-ways ==========");
     run_one(
         "add-locations-to-ways",
-        verify_add_locations::run(harness, pbf),
+        verify_add_locations::run(harness, pbf, direct_io),
     );
 
     // 7. check-refs
@@ -95,7 +96,7 @@ pub fn run(
         };
         run_one(
             "apply-changes",
-            verify_merge::run(harness, pbf, osc_path, osmosis.as_ref()),
+            verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io),
         );
     } else {
         skip("apply-changes", "no --osc provided");
@@ -106,7 +107,7 @@ pub fn run(
     if let Some(osc_path) = osc {
         run_one(
             "diff --format osc",
-            verify_derive_changes::run(harness, pbf, osc_path),
+            verify_derive_changes::run(harness, pbf, osc_path, direct_io),
         );
     } else {
         skip("diff --format osc", "no --osc provided");
