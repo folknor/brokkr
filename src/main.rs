@@ -83,8 +83,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
     match cli.command {
         Command::Lock | Command::History { .. } => unreachable!(),
-        Command::Check { features, no_default_features, args } => {
-            cmd_check(project, &project_root, &features, no_default_features, &args)
+        Command::Check { features, no_default_features, package, args } => {
+            cmd_check(project, &project_root, &features, no_default_features, package.as_deref(), &args)
         }
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::Run { features, time, json, runs, no_build, args } => {
@@ -281,10 +281,11 @@ fn cmd_check(
     project_root: &Path,
     features: &[String],
     no_default_features: bool,
+    package: Option<&str>,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    run_clippy(project_root, features, no_default_features)?;
-    run_tests(project, project_root, features, no_default_features, extra_args)?;
+    run_clippy(project_root, features, no_default_features, package)?;
+    run_tests(project, project_root, features, no_default_features, package, extra_args)?;
     output::result_msg("check passed");
     Ok(())
 }
@@ -293,6 +294,7 @@ fn run_clippy(
     project_root: &Path,
     features: &[String],
     no_default_features: bool,
+    package: Option<&str>,
 ) -> Result<(), DevError> {
     let mut args = vec!["clippy", "--all-targets"];
     if no_default_features {
@@ -302,6 +304,10 @@ fn run_clippy(
     if !features.is_empty() {
         args.push("--features");
         args.push(&joined);
+    }
+    if let Some(pkg) = package {
+        args.push("--package");
+        args.push(pkg);
     }
 
     output::run_msg(&format!("cargo {}", args.join(" ")));
@@ -322,6 +328,7 @@ fn run_tests(
     project_root: &Path,
     features: &[String],
     no_default_features: bool,
+    package: Option<&str>,
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let mut args = vec!["test"];
@@ -332,6 +339,10 @@ fn run_tests(
     if !features.is_empty() {
         args.push("--features");
         args.push(&joined);
+    }
+    if let Some(pkg) = package {
+        args.push("--package");
+        args.push(pkg);
     }
     if !extra_args.is_empty() {
         let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();

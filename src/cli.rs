@@ -19,7 +19,9 @@ Examples:
   brokkr check -- -- --ignored                     # run ignored tests
   brokkr check -- --test read_paths -- --ignored   # one file, ignored only
   brokkr check --no-default-features               # check without default features
-  brokkr check --features commands                  # check with specific features")]
+  brokkr check --features commands                  # check with specific features
+  brokkr check --package pbfhogg-cli                # check only the CLI crate
+  brokkr check --package pbfhogg-cli -- --test cli  # one test file in the CLI crate")]
     Check {
         /// Cargo features to enable
         #[arg(long, value_delimiter = ',')]
@@ -28,6 +30,10 @@ Examples:
         /// Disable default Cargo features
         #[arg(long)]
         no_default_features: bool,
+
+        /// Target a specific package in the workspace
+        #[arg(long, short)]
+        package: Option<String>,
 
         /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
