@@ -18,6 +18,7 @@ pub(crate) fn bench_commands(
     req: &BenchRequest,
     command: &str,
     osc_seq: Option<&str>,
+    index_type: Option<&str>,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench commands", req.force)?;
@@ -37,6 +38,7 @@ pub(crate) fn bench_commands(
         req.runs,
         &commands,
         req.project_root,
+        index_type,
     )
 }
 

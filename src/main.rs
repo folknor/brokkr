@@ -779,10 +779,10 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
 fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String], force: bool) -> Result<(), DevError> {
     match bench {
         // ----- pbfhogg bench variants -----
-        BenchCommand::Commands { command, dataset, variant, osc_seq, runs } => {
+        BenchCommand::Commands { command, dataset, variant, osc_seq, runs, index_type } => {
             project::require(project, Project::Pbfhogg, "bench commands")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_commands(&req, &command, osc_seq.as_deref())
+            pbfhogg::cmd::bench_commands(&req, &command, osc_seq.as_deref(), index_type.as_deref())
         }
         BenchCommand::Extract { dataset, variant, runs, bbox, strategies } => {
             project::require(project, Project::Pbfhogg, "bench extract")?;

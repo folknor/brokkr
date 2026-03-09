@@ -1,4 +1,4 @@
-//! Verify: add-locations-to-ways — pbfhogg vs osmium, plus optional dense index test.
+//! Verify: add-locations-to-ways — pbfhogg vs osmium, plus optional sparse/dense index tests.
 
 use std::path::Path;
 
@@ -8,9 +8,8 @@ use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg add-locations-to-ways` against `osmium add-locations-to-ways`.
 ///
-/// Also runs an optional dense index variant — if the dense allocation fails
-/// (common on systems without `vm.overcommit_memory=1`), the failure is logged
-/// and the function still returns `Ok`.
+/// Also runs optional sparse and dense index variants — if either allocation
+/// fails, the failure is logged and the function still returns `Ok`.
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("add-locations-to-ways")?;
 
@@ -59,6 +58,36 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
 
     // --- Sort feature comparison ---
     harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?;
+
+    // --- Optional sparse index variant ---
+    verify_msg("--- sparse index variant ---");
+
+    let sparse_out = outdir.join("pbfhogg-sparse.osm.pbf");
+    let sparse_out_str = sparse_out.display().to_string();
+
+    let mut sparse_args = vec![
+        "add-locations-to-ways",
+        &pbf_str,
+        "-o",
+        &sparse_out_str,
+        "--index-type",
+        "sparse",
+    ];
+    if direct_io {
+        sparse_args.push("--direct-io");
+    }
+    let sparse_result = harness.run_pbfhogg(&sparse_args)?;
+
+    if sparse_result.status.success() {
+        let identical = harness.diff_pbfs(&pbfhogg_out, &sparse_out)?;
+        if identical {
+            verify_msg("  diff (hash vs sparse): PASS (identical)");
+        } else {
+            verify_msg("  diff (hash vs sparse): FAIL (differences found)");
+        }
+    } else {
+        verify_msg("  sparse index skipped (allocation failed)");
+    }
 
     // --- Optional dense index variant ---
     verify_msg("--- dense index variant ---");

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -73,7 +74,7 @@ pub fn parse_command(input: &str) -> Result<Vec<&'static str>, DevError> {
     )))
 }
 
-fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>, osc: Option<&str>, output: &str) -> Result<Vec<String>, DevError> {
+fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>, osc: Option<&str>, output: &str, index_type: Option<&str>) -> Result<Vec<String>, DevError> {
     let args = match name {
         "inspect" => vec!["inspect".into(), pbf.into()],
         "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
@@ -104,7 +105,14 @@ fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>, osc: Option<&st
             let o = osc.ok_or_else(|| DevError::Config("apply-changes requires an OSC file".into()))?;
             vec!["apply-changes".into(), pbf.into(), o.into(), "-o".into(), output.into()]
         }
-        "add-locations-to-ways" => vec!["add-locations-to-ways".into(), pbf.into(), "-o".into(), output.into()],
+        "add-locations-to-ways" => {
+            let mut args = vec!["add-locations-to-ways".into(), pbf.into(), "-o".into(), output.into()];
+            if let Some(it) = index_type {
+                args.push("--index-type".into());
+                args.push(it.into());
+            }
+            args
+        }
         "extract-simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), output.into()],
         "extract-complete" => vec!["extract".into(), pbf.into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), output.into()],
         "extract-smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), output.into()],
@@ -185,6 +193,7 @@ pub fn run(
     runs: usize,
     commands: &[&str],
     project_root: &Path,
+    index_type: Option<&str>,
 ) -> Result<(), DevError> {
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
@@ -240,7 +249,7 @@ pub fn run(
             ))),
         };
 
-        let args = command_args(name, pbf_str, merged_str, osc_str.as_deref(), &output_str)?;
+        let args = command_args(name, pbf_str, merged_str, osc_str.as_deref(), &output_str, index_type)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
@@ -252,7 +261,10 @@ pub fn run(
             cargo_profile: "release".into(),
             runs,
             cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
-            metadata: vec![],
+            metadata: match index_type {
+                Some(it) => vec![KvPair::text("meta.index_type", it)],
+                None => vec![],
+            },
         };
 
         harness.run_external(&config, binary, &args_refs, project_root)?;

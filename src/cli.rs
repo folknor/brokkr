@@ -468,6 +468,9 @@ pub(crate) enum BenchCommand {
         osc_seq: Option<String>,
         #[arg(long, default_value = "3")]
         runs: usize,
+        /// Index type for add-locations-to-ways (dense or sparse; default is hash)
+        #[arg(long)]
+        index_type: Option<String>,
     },
     /// [pbfhogg] Benchmark extract strategies (simple/complete/smart)
     #[command(display_order = 1)]

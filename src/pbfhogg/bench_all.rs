@@ -48,6 +48,7 @@ pub fn run(
         runs,
         bench_commands::ALL_COMMANDS,
         project_root,
+        None,
     )?;
 
     // 2. bench read -- all 5 modes
