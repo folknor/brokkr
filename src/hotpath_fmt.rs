@@ -198,9 +198,7 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
     let mut w_status = "Status".len();
     let mut w_cpu_pct = "CPU%".len();
     let mut w_cpu_max = "Max%".len();
-    let mut w_cpu_user = "CPU User".len();
-    let mut w_cpu_sys = "CPU Sys".len();
-    let mut w_cpu_total = "CPU Total".len();
+    let mut w_cpu_avg = "Avg%".len();
     let mut w_alloc = "Alloc".len();
     let mut w_dealloc = "Dealloc".len();
     let mut w_diff = "Diff".len();
@@ -210,9 +208,7 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
         w_status = w_status.max(t.status.as_deref().unwrap_or("").len());
         w_cpu_pct = w_cpu_pct.max(opt_or_dash(t.cpu_percent.as_deref()).len());
         w_cpu_max = w_cpu_max.max(opt_or_dash(t.cpu_percent_max.as_deref()).len());
-        w_cpu_user = w_cpu_user.max(t.cpu_user.as_deref().unwrap_or("").len());
-        w_cpu_sys = w_cpu_sys.max(t.cpu_sys.as_deref().unwrap_or("").len());
-        w_cpu_total = w_cpu_total.max(t.cpu_total.as_deref().unwrap_or("").len());
+        w_cpu_avg = w_cpu_avg.max(opt_or_dash(t.cpu_percent_avg.as_deref()).len());
         if has_alloc {
             w_alloc = w_alloc.max(opt_or_dash(t.alloc_bytes.as_deref()).len());
             w_dealloc = w_dealloc.max(opt_or_dash(t.dealloc_bytes.as_deref()).len());
@@ -231,8 +227,8 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
     // Column headers.
     write!(
         out,
-        "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_user$}  {:>w_cpu_sys$}  {:>w_cpu_total$}",
-        "Thread", "Status", "CPU%", "Max%", "CPU User", "CPU Sys", "CPU Total",
+        "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_avg$}",
+        "Thread", "Status", "CPU%", "Max%", "Avg%",
     )
     .expect("write to String");
     if has_alloc {
@@ -249,14 +245,12 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
     for t in threads {
         write!(
             out,
-            "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_user$}  {:>w_cpu_sys$}  {:>w_cpu_total$}",
+            "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_avg$}",
             t.name,
             t.status.as_deref().unwrap_or(""),
             opt_or_dash(t.cpu_percent.as_deref()),
             opt_or_dash(t.cpu_percent_max.as_deref()),
-            t.cpu_user.as_deref().unwrap_or(""),
-            t.cpu_sys.as_deref().unwrap_or(""),
-            t.cpu_total.as_deref().unwrap_or(""),
+            opt_or_dash(t.cpu_percent_avg.as_deref()),
         )
         .expect("write to String");
         if has_alloc {

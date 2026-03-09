@@ -44,9 +44,7 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
                     status: s("status"),
                     cpu_percent: s("cpu_percent"),
                     cpu_percent_max: s("cpu_percent_max"),
-                    cpu_user: s("cpu_user"),
-                    cpu_sys: s("cpu_sys"),
-                    cpu_total: s("cpu_total"),
+                    cpu_percent_avg: s("cpu_percent_avg"),
                     alloc_bytes: s("alloc_bytes"),
                     dealloc_bytes: s("dealloc_bytes"),
                     mem_diff: s("mem_diff"),
@@ -139,8 +137,9 @@ mod tests {
                     {
                         "name": "worker-0",
                         "status": "running",
-                        "cpu_percent": "55%",
-                        "cpu_total": "12 s",
+                        "cpu_percent": "55.0%",
+                        "cpu_percent_max": "80.0%",
+                        "cpu_percent_avg": "42.0%",
                         "alloc_bytes": "5 MB",
                         "dealloc_bytes": "4 MB",
                         "mem_diff": "1 MB"

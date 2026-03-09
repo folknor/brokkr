@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -33,6 +33,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 6 {
         migrate_v5_to_v6(conn)?;
+    }
+    if current < 7 {
+        migrate_v6_to_v7(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -205,6 +208,39 @@ fn migrate_v5_to_v6(conn: &rusqlite::Connection) -> Result<(), DevError> {
             [],
         )?;
     }
+    Ok(())
+}
+
+/// Migration v6 -> v7: replace `cpu_user`, `cpu_sys`, `cpu_total` columns in
+/// `hotpath_threads` with `cpu_percent_avg` (hotpath 0.14 schema change).
+fn migrate_v6_to_v7(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if !has_table(conn, "hotpath_threads") {
+        return Ok(());
+    }
+    // SQLite doesn't support DROP COLUMN before 3.35.0, and even then it's
+    // finicky with constraints.  Safest approach: recreate the table.
+    conn.execute_batch(
+        "CREATE TABLE hotpath_threads_new (
+            id              INTEGER PRIMARY KEY,
+            run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            name            TEXT NOT NULL,
+            status          TEXT,
+            cpu_percent     TEXT,
+            cpu_percent_max TEXT,
+            cpu_percent_avg TEXT,
+            alloc_bytes     TEXT,
+            dealloc_bytes   TEXT,
+            mem_diff        TEXT
+        );
+        INSERT INTO hotpath_threads_new (id, run_id, name, status, cpu_percent, cpu_percent_max,
+            alloc_bytes, dealloc_bytes, mem_diff)
+            SELECT id, run_id, name, status, cpu_percent, cpu_percent_max,
+                   alloc_bytes, dealloc_bytes, mem_diff
+            FROM hotpath_threads;
+        DROP TABLE hotpath_threads;
+        ALTER TABLE hotpath_threads_new RENAME TO hotpath_threads;
+        CREATE INDEX idx_hotpath_threads_run_id ON hotpath_threads(run_id);"
+    )?;
     Ok(())
 }
 
