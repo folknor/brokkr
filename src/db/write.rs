@@ -89,12 +89,12 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
         for thread in &hp.threads {
             conn.execute(
                 "INSERT INTO hotpath_threads \
-                 (run_id, name, status, cpu_percent, cpu_percent_max, cpu_user, cpu_sys, cpu_total, \
+                 (run_id, name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
                   alloc_bytes, dealloc_bytes, mem_diff) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     run_id, thread.name, thread.status, thread.cpu_percent,
-                    thread.cpu_percent_max, thread.cpu_user, thread.cpu_sys, thread.cpu_total,
+                    thread.cpu_percent_max, thread.cpu_percent_avg,
                     thread.alloc_bytes, thread.dealloc_bytes, thread.mem_diff,
                 ],
             )?;

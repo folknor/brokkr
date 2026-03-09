@@ -84,9 +84,7 @@ CREATE TABLE IF NOT EXISTS hotpath_threads (
     status          TEXT,
     cpu_percent     TEXT,
     cpu_percent_max TEXT,
-    cpu_user        TEXT,
-    cpu_sys         TEXT,
-    cpu_total       TEXT,
+    cpu_percent_avg TEXT,
     alloc_bytes     TEXT,
     dealloc_bytes   TEXT,
     mem_diff        TEXT

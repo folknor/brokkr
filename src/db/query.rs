@@ -227,7 +227,7 @@ fn load_hotpath_functions(conn: &rusqlite::Connection, run_id: i64) -> Result<Ve
 
 fn load_hotpath_threads(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<HotpathThread>, DevError> {
     let mut stmt = conn.prepare(
-        "SELECT name, status, cpu_percent, cpu_percent_max, cpu_user, cpu_sys, cpu_total, \
+        "SELECT name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
          alloc_bytes, dealloc_bytes, mem_diff \
          FROM hotpath_threads WHERE run_id = ?1"
     )?;
@@ -237,12 +237,10 @@ fn load_hotpath_threads(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<
             status: row.get(1)?,
             cpu_percent: row.get(2)?,
             cpu_percent_max: row.get(3)?,
-            cpu_user: row.get(4)?,
-            cpu_sys: row.get(5)?,
-            cpu_total: row.get(6)?,
-            alloc_bytes: row.get(7)?,
-            dealloc_bytes: row.get(8)?,
-            mem_diff: row.get(9)?,
+            cpu_percent_avg: row.get(4)?,
+            alloc_bytes: row.get(5)?,
+            dealloc_bytes: row.get(6)?,
+            mem_diff: row.get(7)?,
         })
     })?;
     let mut result = Vec::new();
@@ -545,8 +543,8 @@ mod tests {
                     name: String::from("main"),
                     status: Some(String::from("running")),
                     cpu_percent: Some(String::from("95%")),
-                    cpu_percent_max: None, cpu_user: None, cpu_sys: None,
-                    cpu_total: None, alloc_bytes: None, dealloc_bytes: None,
+                    cpu_percent_max: None, cpu_percent_avg: None,
+                    alloc_bytes: None, dealloc_bytes: None,
                     mem_diff: None,
                 }],
                 thread_summary: vec![
