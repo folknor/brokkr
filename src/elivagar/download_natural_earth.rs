@@ -108,8 +108,7 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
         ));
     } else {
         output::download_msg(&format!(
-            "done: {} downloaded, {} already present",
-            downloaded, skipped
+            "done: {downloaded} downloaded, {skipped} already present"
         ));
     }
 

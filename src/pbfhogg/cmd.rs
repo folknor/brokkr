@@ -179,9 +179,9 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_add_locations::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::CheckRefs { dataset, variant } => {
+        VerifyCommand::CheckRefs { dataset, variant, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_check_refs::run(&harness, &pbf_path)
+            super::verify_check_refs::run(&harness, &pbf_path, direct_io)
         }
         VerifyCommand::Merge { dataset, variant, osc_seq, direct_io } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;

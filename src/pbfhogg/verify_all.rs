@@ -81,7 +81,7 @@ pub fn run(
 
     // 7. check-refs
     verify_msg("========== check-refs ==========");
-    run_one("check-refs", verify_check_refs::run(harness, pbf));
+    run_one("check-refs", verify_check_refs::run(harness, pbf, direct_io));
 
     // 8. apply-changes
     verify_msg("========== apply-changes ==========");

@@ -141,14 +141,18 @@ fn capture_and_log(
 ///
 /// Two modes: ways-only (default) and with relations. Both tools may exit
 /// non-zero when missing refs are found, so we do not check exit status.
-pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
     let outdir = harness.subdir("check-refs")?;
     let pbf_str = pbf.display().to_string();
 
     // --- Ways only ---
     verify_msg("--- check --refs (ways only) ---");
+    let mut pbf_ways_args = vec!["check", "--refs", &pbf_str];
+    if direct_io {
+        pbf_ways_args.push("--direct-io");
+    }
     let pbfhogg_text = capture_and_log(
-        harness, "pbfhogg", &["check", "--refs", &pbf_str],
+        harness, "pbfhogg", &pbf_ways_args,
         &outdir.join("pbfhogg-ways.txt"), "pbfhogg (ways only)",
     )?;
     let osmium_text = capture_and_log(
@@ -165,8 +169,12 @@ pub fn run(harness: &VerifyHarness, pbf: &Path) -> Result<(), DevError> {
 
     // --- With relations ---
     verify_msg("--- check --refs (with relations) ---");
+    let mut pbf_all_args = vec!["check", "--refs", &pbf_str, "--check-relations"];
+    if direct_io {
+        pbf_all_args.push("--direct-io");
+    }
     let pbfhogg_text = capture_and_log(
-        harness, "pbfhogg", &["check", "--refs", &pbf_str, "--check-relations"],
+        harness, "pbfhogg", &pbf_all_args,
         &outdir.join("pbfhogg-all.txt"), "pbfhogg (with relations)",
     )?;
     let osmium_text = capture_and_log(

@@ -780,6 +780,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Use O_DIRECT for reads (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate apply-changes against osmium/osmosis/osmconvert
     #[command(display_order = 7)]
