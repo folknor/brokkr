@@ -131,11 +131,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "elivagar" => Project::Elivagar,
         "nidhogg" => Project::Nidhogg,
         "brokkr" => Project::Brokkr,
-        other => {
-            return Err(DevError::Config(format!(
-                "unknown project '{other}' in brokkr.toml (expected: pbfhogg, elivagar, nidhogg, brokkr)"
-            )));
-        }
+        other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 
     let hosts = parse_hosts(table)?;

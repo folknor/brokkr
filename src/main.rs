@@ -778,6 +778,10 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
 #[allow(clippy::too_many_lines)]
 fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String], force: bool) -> Result<(), DevError> {
     match bench {
+        // ----- generic bench (all projects) -----
+        BenchCommand::Run { runs, variant, command, args } => {
+            cmd_bench_run(dev_config, project, project_root, build_root, features, force, runs, variant, command, &args)
+        }
         // ----- pbfhogg bench variants -----
         BenchCommand::Commands { command, dataset, variant, osc_seq, runs, index_type } => {
             project::require(project, Project::Pbfhogg, "bench commands")?;
@@ -935,6 +939,49 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
 }
 
 // ---------------------------------------------------------------------------
+// Generic bench run (all projects)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_bench_run(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    build_root: Option<&Path>,
+    features: &[String],
+    force: bool,
+    runs: usize,
+    variant: Option<String>,
+    command_label: Option<String>,
+    args: &[String],
+) -> Result<(), DevError> {
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let ctx = context::BenchContext::new(
+        dev_config, project, project_root, build_root,
+        project.cli_package(), &feature_refs, true, "bench run", force,
+    )?;
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let binary_str = ctx.binary.display().to_string();
+
+    let config = harness::BenchConfig {
+        command: command_label.unwrap_or_else(|| "bench run".into()),
+        variant,
+        input_file: None,
+        input_mb: None,
+        cargo_features: None,
+        cargo_profile: "release".into(),
+        runs,
+        cli_args: Some(harness::format_cli_args(&binary_str, &arg_refs)),
+        metadata: vec![],
+    };
+
+    ctx.harness.run_external_with_kv(&config, &ctx.binary, &arg_refs, project_root)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Hotpath / Profile dispatch
 // ---------------------------------------------------------------------------
 
@@ -961,11 +1008,68 @@ fn cmd_hotpath(
     match req.project {
         Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, opts),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
+        Project::Other(_) => cmd_hotpath_generic(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
             pbfhogg::cmd::hotpath(req, osc_seq, test)
         }
     }
+}
+
+/// Generic hotpath for projects without dedicated modules.
+///
+/// Builds the binary with `--features hotpath` (or `hotpath-alloc`), runs it
+/// with no extra arguments, and collects the JSON hotpath report via the
+/// standard env-var mechanism.
+fn cmd_hotpath_generic(req: &HotpathRequest) -> Result<(), DevError> {
+    let ctx = context::BenchContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        req.project.cli_package(),
+        req.all_features,
+        true,
+        "hotpath",
+        req.force,
+    )?;
+
+    let label = harness::hotpath_feature(req.alloc);
+    output::hotpath_msg(&format!("=== {} {label} ===", req.project));
+
+    if req.alloc {
+        output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
+    }
+
+    let variant_suffix = harness::hotpath_variant_suffix(req.alloc);
+    let variant = format!("default{variant_suffix}");
+
+    let binary_str = ctx.binary.display().to_string();
+
+    let config = harness::BenchConfig {
+        command: "hotpath".into(),
+        variant: Some(variant),
+        input_file: None,
+        input_mb: None,
+        cargo_features: None,
+        cargo_profile: "release".into(),
+        runs: req.runs,
+        cli_args: Some(harness::format_cli_args(&binary_str, &[])),
+        metadata: vec![db::KvPair::text("meta.alloc", req.alloc.to_string())],
+    };
+
+    ctx.harness.run_internal(&config, |_i| {
+        let (result, _stderr) = harness::run_hotpath_capture(
+            &binary_str,
+            &[],
+            &ctx.paths.scratch_dir,
+            req.project_root,
+            &[],
+        )?;
+        Ok(result)
+    })?;
+
+    Ok(())
 }
 
 fn cmd_profile(
@@ -977,6 +1081,9 @@ fn cmd_profile(
     match req.project {
         Project::Elivagar => elivagar::cmd::profile(req, tool, opts),
         Project::Nidhogg => nidhogg::cmd::profile(req, tool),
+        Project::Other(_) => Err(DevError::Config(
+            "profile is not supported for generic projects (use hotpath instead)".into(),
+        )),
         _ => {
             project::require(req.project, Project::Pbfhogg, "profile")?;
             pbfhogg::cmd::profile(req, osc_seq)

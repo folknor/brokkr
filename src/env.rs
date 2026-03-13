@@ -271,7 +271,7 @@ fn collect_tools(project: Project) -> Vec<(String, String)> {
         Project::Nidhogg => {
             tools.push(("curl".to_owned(), read_tool_version("curl", &["--version"])));
         }
-        Project::Brokkr => {}
+        Project::Brokkr | Project::Other(_) => {}
     }
 
     tools.push((project.name().to_owned(), read_git_rev()));

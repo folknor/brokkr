@@ -455,8 +455,27 @@ Examples:
 
 #[derive(Subcommand)]
 pub(crate) enum BenchCommand {
-    /// [pbfhogg] Benchmark CLI commands (external timing)
+    /// Build, run, and store timing + key=value output in results DB
     #[command(display_order = 0)]
+    Run {
+        /// Number of runs (best-of-N stored)
+        #[arg(long, default_value = "3")]
+        runs: usize,
+
+        /// Variant label for this benchmark (stored in results DB)
+        #[arg(long)]
+        variant: Option<String>,
+
+        /// Command label (default: "bench run")
+        #[arg(long)]
+        command: Option<String>,
+
+        /// Arguments passed to the binary
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// [pbfhogg] Benchmark CLI commands (external timing)
+    #[command(display_order = 1)]
     Commands {
         #[arg(default_value = "all")]
         command: String,

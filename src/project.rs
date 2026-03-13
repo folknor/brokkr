@@ -11,6 +11,10 @@ pub enum Project {
     Elivagar,
     Nidhogg,
     Brokkr,
+    /// Any project not in the hardcoded set. Gets generic command support
+    /// (check, run, hotpath, results, env, clean, history).
+    /// The `&'static str` is leaked once at startup from the TOML value.
+    Other(&'static str),
 }
 
 impl Project {
@@ -20,6 +24,7 @@ impl Project {
             Self::Elivagar => "elivagar",
             Self::Nidhogg => "nidhogg",
             Self::Brokkr => "brokkr",
+            Self::Other(s) => s,
         }
     }
 
@@ -28,10 +33,15 @@ impl Project {
     pub fn cli_package(self) -> Option<&'static str> {
         match self {
             Self::Pbfhogg => Some("pbfhogg-cli"),
-            Self::Elivagar => None,
             Self::Nidhogg => Some("nidhogg"),
-            Self::Brokkr => None,
+            Self::Elivagar | Self::Brokkr | Self::Other(_) => None,
         }
+    }
+
+    /// Whether this is one of the built-in projects with dedicated modules.
+    #[allow(dead_code)]
+    pub fn is_builtin(self) -> bool {
+        !matches!(self, Self::Other(_))
     }
 }
 
