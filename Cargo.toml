@@ -18,7 +18,7 @@ libc = "0.2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-png = "0.17"
+png = "0.18"
 
 [lints.clippy]
 uninlined_format_args = "deny"

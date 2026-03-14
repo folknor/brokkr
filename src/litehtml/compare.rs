@@ -62,7 +62,7 @@ fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
     let file = std::fs::File::open(path).map_err(|e| {
         DevError::Verify(format!("cannot open {}: {e}", path.display()))
     })?;
-    let decoder = png::Decoder::new(file);
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info().map_err(|e| {
         DevError::Verify(format!("invalid PNG {}: {e}", path.display()))
     })?;
@@ -73,7 +73,10 @@ fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
     let color_type = info.color_type;
     let bit_depth = info.bit_depth;
 
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let buf_size = reader.output_buffer_size().ok_or_else(|| {
+        DevError::Verify(format!("cannot determine buffer size for {}", path.display()))
+    })?;
+    let mut buf = vec![0u8; buf_size];
     let output_info = reader.next_frame(&mut buf).map_err(|e| {
         DevError::Verify(format!("PNG decode error {}: {e}", path.display()))
     })?;
