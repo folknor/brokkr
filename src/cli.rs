@@ -451,6 +451,12 @@ Examples:
         #[arg(default_value = "København")]
         term: String,
     },
+    /// [litehtml] Visual reference testing
+    #[command(display_order = 50)]
+    Litehtml {
+        #[command(subcommand)]
+        litehtml: LitehtmlCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -890,6 +896,52 @@ pub(crate) enum VerifyCommand {
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum LitehtmlCommand {
+    /// Run fixtures against Chrome reference artifacts
+    #[command(display_order = 0)]
+    Run {
+        /// Fixture HTML path (from fixtures/src/)
+        fixture: Option<String>,
+
+        /// Run all fixtures tagged with this suite name
+        #[arg(long, conflicts_with = "all")]
+        suite: Option<String>,
+
+        /// Run all fixtures
+        #[arg(long)]
+        all: bool,
+    },
+    /// List fixtures, tags, and approval state
+    #[command(display_order = 1)]
+    List,
+    /// Regenerate Chrome reference artifacts
+    #[command(display_order = 2)]
+    Capture {
+        /// Fixture HTML path (from fixtures/src/)
+        fixture: Option<String>,
+
+        /// Capture all fixtures
+        #[arg(long)]
+        all: bool,
+    },
+    /// Record current divergence as accepted baseline (requires clean git tree)
+    #[command(display_order = 3)]
+    Approve {
+        /// Fixture HTML path (from fixtures/src/)
+        fixture: String,
+    },
+    /// Show detailed results for a past run
+    #[command(display_order = 4)]
+    Report {
+        /// Run ID (or prefix)
+        run_id: String,
+    },
+    /// Show current state of all fixtures (last run vs approved baseline)
+    #[command(display_order = 5)]
+    Status,
 }
 
 /// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.

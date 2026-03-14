@@ -11,6 +11,7 @@ pub enum Project {
     Elivagar,
     Nidhogg,
     Brokkr,
+    Litehtml,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
     /// The `&'static str` is leaked once at startup from the TOML value.
@@ -24,6 +25,7 @@ impl Project {
             Self::Elivagar => "elivagar",
             Self::Nidhogg => "nidhogg",
             Self::Brokkr => "brokkr",
+            Self::Litehtml => "litehtml-rs",
             Self::Other(s) => s,
         }
     }
@@ -34,7 +36,7 @@ impl Project {
         match self {
             Self::Pbfhogg => Some("pbfhogg-cli"),
             Self::Nidhogg => Some("nidhogg"),
-            Self::Elivagar | Self::Brokkr | Self::Other(_) => None,
+            Self::Elivagar | Self::Brokkr | Self::Litehtml | Self::Other(_) => None,
         }
     }
 

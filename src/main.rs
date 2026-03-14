@@ -12,6 +12,7 @@ mod hotpath_fmt;
 mod lockfile;
 mod oom;
 mod output;
+mod litehtml;
 mod pbfhogg;
 mod pmtiles;
 mod elivagar;
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use cli::{BenchCommand, Cli, Command, VerifyCommand};
+use cli::{BenchCommand, Cli, Command, LitehtmlCommand, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
@@ -251,6 +252,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Query { json } => nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref()),
         Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
+        Command::Litehtml { litehtml: litehtml_cmd } => {
+            match litehtml_cmd {
+                LitehtmlCommand::Run { fixture, suite, all } => {
+                    litehtml::cmd::run(project, &project_root, fixture.as_deref(), suite.as_deref(), all)
+                }
+                LitehtmlCommand::List => litehtml::cmd::list(project, &project_root),
+                LitehtmlCommand::Capture { fixture, all } => {
+                    litehtml::cmd::capture(project, &project_root, fixture.as_deref(), all)
+                }
+                LitehtmlCommand::Approve { fixture } => {
+                    litehtml::cmd::approve(project, &project_root, &fixture)
+                }
+                LitehtmlCommand::Report { run_id } => {
+                    litehtml::cmd::report(project, &project_root, &run_id)
+                }
+                LitehtmlCommand::Status => litehtml::cmd::status(project, &project_root),
+            }
+        }
     }
 }
 
@@ -1008,7 +1027,7 @@ fn cmd_hotpath(
     match req.project {
         Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, opts),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
-        Project::Other(_) => cmd_hotpath_generic(req),
+        Project::Litehtml | Project::Other(_) => cmd_hotpath_generic(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
             pbfhogg::cmd::hotpath(req, osc_seq, test)
@@ -1081,7 +1100,7 @@ fn cmd_profile(
     match req.project {
         Project::Elivagar => elivagar::cmd::profile(req, tool, opts),
         Project::Nidhogg => nidhogg::cmd::profile(req, tool),
-        Project::Other(_) => Err(DevError::Config(
+        Project::Litehtml | Project::Other(_) => Err(DevError::Config(
             "profile is not supported for generic projects (use hotpath instead)".into(),
         )),
         _ => {

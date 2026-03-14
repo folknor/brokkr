@@ -271,6 +271,9 @@ fn collect_tools(project: Project) -> Vec<(String, String)> {
         Project::Nidhogg => {
             tools.push(("curl".to_owned(), read_tool_version("curl", &["--version"])));
         }
+        Project::Litehtml => {
+            tools.push(("node".to_owned(), read_tool_version("node", &["--version"])));
+        }
         Project::Brokkr | Project::Other(_) => {}
     }
 
