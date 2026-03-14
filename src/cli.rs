@@ -900,10 +900,10 @@ pub(crate) enum VerifyCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum LitehtmlCommand {
-    /// Run fixtures against Chrome reference artifacts
+    /// Test fixtures against Chrome reference artifacts
     #[command(display_order = 0)]
-    Run {
-        /// Fixture HTML path (from fixtures/src/)
+    Test {
+        /// Fixture ID from fixtures.toml (or unique prefix)
         fixture: Option<String>,
 
         /// Run all fixtures tagged with this suite name
@@ -913,24 +913,18 @@ pub(crate) enum LitehtmlCommand {
         /// Run all fixtures
         #[arg(long)]
         all: bool,
+
+        /// Force-regenerate Chrome reference artifacts before comparing
+        #[arg(long)]
+        recapture: bool,
     },
     /// List fixtures, tags, and approval state
     #[command(display_order = 1)]
     List,
-    /// Regenerate Chrome reference artifacts
-    #[command(display_order = 2)]
-    Capture {
-        /// Fixture HTML path (from fixtures/src/)
-        fixture: Option<String>,
-
-        /// Capture all fixtures
-        #[arg(long)]
-        all: bool,
-    },
     /// Record current divergence as accepted baseline (requires clean git tree)
-    #[command(display_order = 3)]
+    #[command(display_order = 2)]
     Approve {
-        /// Fixture HTML path (from fixtures/src/)
+        /// Fixture ID from fixtures.toml (or unique prefix)
         fixture: String,
     },
     /// Show detailed results for a past run

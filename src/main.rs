@@ -254,13 +254,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
         Command::Litehtml { litehtml: litehtml_cmd } => {
             match litehtml_cmd {
-                LitehtmlCommand::Run { fixture, suite, all } => {
-                    litehtml::cmd::run(project, &project_root, fixture.as_deref(), suite.as_deref(), all)
+                LitehtmlCommand::Test { fixture, suite, all, recapture } => {
+                    litehtml::cmd::test(project, &project_root, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
                 LitehtmlCommand::List => litehtml::cmd::list(project, &project_root),
-                LitehtmlCommand::Capture { fixture, all } => {
-                    litehtml::cmd::capture(project, &project_root, fixture.as_deref(), all)
-                }
                 LitehtmlCommand::Approve { fixture } => {
                     litehtml::cmd::approve(project, &project_root, &fixture)
                 }

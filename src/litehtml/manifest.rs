@@ -71,26 +71,7 @@ impl Manifest {
             .collect()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn fixture_by_id(&self, id: &str) -> Option<&FixtureEntry> {
         self.fixtures.iter().find(|f| f.id == id)
-    }
-
-    pub(crate) fn fixture_by_path(&self, path: &str) -> Option<&FixtureEntry> {
-        let stem = Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str());
-
-        self.fixtures.iter().find(|f| {
-            if f.path == path {
-                return true;
-            }
-            if let Some(stem) = stem
-                && let Some(f_stem) = Path::new(&f.path).file_stem().and_then(|s| s.to_str())
-            {
-                return f_stem == stem;
-            }
-            false
-        })
     }
 }
