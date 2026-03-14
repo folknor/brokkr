@@ -452,6 +452,19 @@ fn write_capture_script(project_root: &Path) -> Result<PathBuf, DevError> {
     Ok(script_path)
 }
 
+fn npm_global_root() -> Result<String, DevError> {
+    let out = std::process::Command::new("npm")
+        .args(["root", "-g"])
+        .output()
+        .map_err(|e| DevError::Verify(format!("cannot run `npm root -g`: {e}")))?;
+
+    if !out.status.success() {
+        return Err(DevError::Verify("npm root -g failed".into()));
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
 fn capture_fixture(
     fixture: &FixtureEntry,
     defaults: &Defaults,
@@ -474,14 +487,18 @@ fn capture_fixture(
     let chrome_png = reference_dir.join("chrome.png");
     let chrome_json = reference_dir.join("chrome.json");
 
+    let node_path = npm_global_root()?;
     let script_str = capture_script.display().to_string();
     let html_str = fixture_html.display().to_string();
     let png_str = chrome_png.display().to_string();
     let json_str = chrome_json.display().to_string();
     let vp_str = viewport.to_string();
 
-    let captured = output::run_captured(
-        "node", &[&script_str, &html_str, &png_str, &json_str, &vp_str], project_root,
+    let captured = output::run_captured_with_env(
+        "node",
+        &[&script_str, &html_str, &png_str, &json_str, &vp_str],
+        project_root,
+        &[("NODE_PATH", &node_path)],
     )?;
 
     if !captured.status.success() {
