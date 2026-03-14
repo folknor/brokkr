@@ -6,14 +6,15 @@ use rusqlite::Connection;
 
 use crate::error::DevError;
 
-const SCHEMA: &str = "\
+const SCHEMA_RUNS: &str = "\
 CREATE TABLE IF NOT EXISTS mechanical_runs (
     run_id          TEXT PRIMARY KEY,
     timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
-    commit          TEXT NOT NULL,
+    [commit]        TEXT NOT NULL,
     dirty           INTEGER NOT NULL DEFAULT 0
-);
+)";
 
+const SCHEMA_RESULTS: &str = "\
 CREATE TABLE IF NOT EXISTS mechanical_results (
     run_id          TEXT NOT NULL REFERENCES mechanical_runs(run_id),
     fixture_id      TEXT NOT NULL,
@@ -22,16 +23,16 @@ CREATE TABLE IF NOT EXISTS mechanical_results (
     status          TEXT NOT NULL,
     artifact_dir    TEXT,
     PRIMARY KEY (run_id, fixture_id)
-);
+)";
 
+const SCHEMA_APPROVALS: &str = "\
 CREATE TABLE IF NOT EXISTS mechanical_approvals (
     fixture_id          TEXT PRIMARY KEY,
     approved_at         TEXT NOT NULL DEFAULT (datetime('now')),
-    commit              TEXT NOT NULL,
+    [commit]            TEXT NOT NULL,
     pixel_diff_pct      REAL NOT NULL,
     element_match_pct   REAL
-);
-";
+)";
 
 #[allow(dead_code)]
 pub(crate) struct Approval {
@@ -68,13 +69,15 @@ impl MechanicalDb {
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute(SCHEMA_RUNS, [])?;
+        conn.execute(SCHEMA_RESULTS, [])?;
+        conn.execute(SCHEMA_APPROVALS, [])?;
         Ok(Self { conn })
     }
 
     pub fn insert_run(&self, run_id: &str, commit: &str, dirty: bool) -> Result<(), DevError> {
         self.conn.execute(
-            "INSERT INTO mechanical_runs (run_id, commit, dirty) VALUES (?1, ?2, ?3)",
+            "INSERT INTO mechanical_runs (run_id, [commit], dirty) VALUES (?1, ?2, ?3)",
             rusqlite::params![run_id, commit, dirty as i32],
         )?;
         Ok(())
@@ -100,7 +103,7 @@ impl MechanicalDb {
 
     pub fn get_approval(&self, fixture_id: &str) -> Result<Option<Approval>, DevError> {
         let mut stmt = self.conn.prepare(
-            "SELECT fixture_id, approved_at, commit, pixel_diff_pct, element_match_pct \
+            "SELECT fixture_id, approved_at, [commit], pixel_diff_pct, element_match_pct \
              FROM mechanical_approvals WHERE fixture_id = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![fixture_id], map_approval)?;
@@ -120,7 +123,7 @@ impl MechanicalDb {
     ) -> Result<(), DevError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO mechanical_approvals \
-             (fixture_id, commit, pixel_diff_pct, element_match_pct) \
+             (fixture_id, [commit], pixel_diff_pct, element_match_pct) \
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![fixture_id, commit, pixel_diff_pct, element_match_pct],
         )?;
@@ -130,7 +133,7 @@ impl MechanicalDb {
     #[allow(dead_code)]
     pub fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
         let mut stmt = self.conn.prepare(
-            "SELECT run_id, timestamp, commit, dirty \
+            "SELECT run_id, timestamp, [commit], dirty \
              FROM mechanical_runs ORDER BY timestamp DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], map_run_summary)?;
@@ -156,7 +159,7 @@ impl MechanicalDb {
 
     pub fn all_approvals(&self) -> Result<Vec<Approval>, DevError> {
         let mut stmt = self.conn.prepare(
-            "SELECT fixture_id, approved_at, commit, pixel_diff_pct, element_match_pct \
+            "SELECT fixture_id, approved_at, [commit], pixel_diff_pct, element_match_pct \
              FROM mechanical_approvals ORDER BY fixture_id",
         )?;
         let rows = stmt.query_map([], map_approval)?;
