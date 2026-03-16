@@ -253,18 +253,21 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Query { json } => nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref()),
         Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
         Command::Litehtml { litehtml: litehtml_cmd } => {
+            let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
+                error::DevError::Config("no [litehtml] section in brokkr.toml".into())
+            })?;
             match litehtml_cmd {
                 LitehtmlCommand::Test { fixture, suite, all, recapture } => {
-                    litehtml::cmd::test(project, &project_root, fixture.as_deref(), suite.as_deref(), all, recapture)
+                    litehtml::cmd::test(project, &project_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
-                LitehtmlCommand::List => litehtml::cmd::list(project, &project_root),
+                LitehtmlCommand::List => litehtml::cmd::list(project, &project_root, litehtml_config),
                 LitehtmlCommand::Approve { fixture } => {
-                    litehtml::cmd::approve(project, &project_root, &fixture)
+                    litehtml::cmd::approve(project, &project_root, litehtml_config, &fixture)
                 }
                 LitehtmlCommand::Report { run_id } => {
                     litehtml::cmd::report(project, &project_root, &run_id)
                 }
-                LitehtmlCommand::Status => litehtml::cmd::status(project, &project_root),
+                LitehtmlCommand::Status => litehtml::cmd::status(project, &project_root, litehtml_config),
             }
         }
     }

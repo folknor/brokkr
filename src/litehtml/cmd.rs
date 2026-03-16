@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::build;
+use crate::config::{LitehtmlConfig, LitehtmlFixture};
 use crate::error::DevError;
 use crate::git;
 use crate::output;
@@ -11,7 +12,6 @@ use crate::resolve;
 
 use super::compare;
 use super::db::MechanicalDb;
-use super::manifest::{Defaults, FixtureEntry, Manifest};
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
     let db_path = resolve::results_db_path(project_root);
@@ -26,7 +26,7 @@ struct FixtureOutcome {
 
 struct TestContext<'a> {
     binary: &'a Path,
-    defaults: &'a Defaults,
+    config: &'a LitehtmlConfig,
     project_root: &'a Path,
     db: &'a MechanicalDb,
     run_id: &'a str,
@@ -39,8 +39,8 @@ struct TestContext<'a> {
 
 fn run_pipeline(
     binary: &Path,
-    fixture: &FixtureEntry,
-    defaults: &Defaults,
+    fixture: &LitehtmlFixture,
+    config: &LitehtmlConfig,
     project_root: &Path,
     artifact_dir: &Path,
 ) -> Result<(), DevError> {
@@ -56,7 +56,7 @@ fn run_pipeline(
     let output_dir_str = artifact_dir.display().to_string();
 
     let mode = fixture.mode.as_deref()
-        .unwrap_or(&defaults.mode);
+        .unwrap_or(&config.mode);
 
     let mut args = vec![&html_str as &str, "--output-dir", &output_dir_str];
     if mode == "ahem" {
@@ -83,21 +83,22 @@ fn run_pipeline(
 
 fn run_fixture(
     ctx: &TestContext,
-    fixture: &FixtureEntry,
-    artifact_dir: &Path,
+    fixture: &LitehtmlFixture,
 ) -> Result<FixtureOutcome, DevError> {
-    let reference_dir = ctx.project_root.join("fixtures/reference").join(&fixture.id);
-    let ref_png = reference_dir.join("chrome.png");
-    let ref_json = reference_dir.join("chrome.json");
+    let fixture_dir = ctx.project_root.join("fixtures").join(&fixture.id);
+    std::fs::create_dir_all(&fixture_dir)?;
+
+    let ref_png = fixture_dir.join("chrome.png");
+    let ref_json = fixture_dir.join("chrome.json");
 
     // Auto-capture or recapture Chrome reference if needed.
     let needs_capture = !ref_png.exists() || ctx.capture_script.is_some();
     if needs_capture {
         if let Some(script) = ctx.capture_script {
-            capture_fixture(fixture, ctx.defaults, ctx.project_root, script)?;
+            capture_fixture(fixture, ctx.config, ctx.project_root, script)?;
         } else {
             let script = write_capture_script(ctx.project_root)?;
-            capture_fixture(fixture, ctx.defaults, ctx.project_root, &script)?;
+            capture_fixture(fixture, ctx.config, ctx.project_root, &script)?;
             drop(std::fs::remove_file(&script));
         }
     }
@@ -105,7 +106,6 @@ fn run_fixture(
     if !ref_png.exists() {
         ctx.db.insert_result(
             ctx.run_id, &fixture.id, None, None, compare::Status::Error.as_str(),
-            Some(&artifact_dir.display().to_string()),
         )?;
         return Ok(FixtureOutcome {
             pixel_diff_pct: None, element_match_pct: None, status: compare::Status::Error,
@@ -113,16 +113,15 @@ fn run_fixture(
     }
 
     // Run the pipeline to produce pipeline.png + pipeline.json.
-    run_pipeline(ctx.binary, fixture, ctx.defaults, ctx.project_root, artifact_dir)?;
+    run_pipeline(ctx.binary, fixture, ctx.config, ctx.project_root, &fixture_dir)?;
 
-    let pipeline_png = artifact_dir.join("pipeline.png");
-    let pipeline_json = artifact_dir.join("pipeline.json");
-    let diff_png = artifact_dir.join("diff.png");
+    let pipeline_png = fixture_dir.join("pipeline.png");
+    let pipeline_json = fixture_dir.join("pipeline.json");
+    let diff_png = fixture_dir.join("diff.png");
 
     if !pipeline_png.exists() {
         ctx.db.insert_result(
             ctx.run_id, &fixture.id, None, None, compare::Status::Error.as_str(),
-            Some(&artifact_dir.display().to_string()),
         )?;
         return Ok(FixtureOutcome {
             pixel_diff_pct: None, element_match_pct: None, status: compare::Status::Error,
@@ -130,11 +129,11 @@ fn run_fixture(
     }
 
     // Compare pipeline output against Chrome reference.
-    let pixel_threshold = fixture.resolved_pixel_threshold(ctx.defaults);
+    let pixel_threshold = fixture.resolved_pixel_threshold(ctx.config);
     let element_threshold = if fixture.waive_element_threshold {
         None
     } else {
-        Some(fixture.resolved_element_threshold(ctx.defaults))
+        Some(fixture.resolved_element_threshold(ctx.config))
     };
     let expected_fail = fixture.expected == "fail";
     let approved_pixel = ctx.db.get_approval(&fixture.id)?.map(|a| a.pixel_diff_pct);
@@ -162,8 +161,7 @@ fn run_fixture(
     };
 
     ctx.db.insert_result(
-        ctx.run_id, &fixture.id, pixel_diff_pct, element_match_pct,
-        status.as_str(), Some(&artifact_dir.display().to_string()),
+        ctx.run_id, &fixture.id, pixel_diff_pct, element_match_pct, status.as_str(),
     )?;
 
     Ok(FixtureOutcome { pixel_diff_pct, element_match_pct, status })
@@ -187,7 +185,7 @@ fn print_table_header() {
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 }
 
-fn resolve_fixture<'a>(manifest: &'a Manifest, id: &str) -> Result<&'a FixtureEntry, DevError> {
+fn resolve_fixture<'a>(manifest: &'a LitehtmlConfig, id: &str) -> Result<&'a LitehtmlFixture, DevError> {
     if let Some(entry) = manifest.fixture_by_id(id) {
         return Ok(entry);
     }
@@ -207,11 +205,11 @@ fn resolve_fixture<'a>(manifest: &'a Manifest, id: &str) -> Result<&'a FixtureEn
 }
 
 fn resolve_fixtures<'a>(
-    manifest: &'a Manifest,
+    manifest: &'a LitehtmlConfig,
     fixture_id: Option<&str>,
     suite: Option<&str>,
     all: bool,
-) -> Result<Vec<&'a FixtureEntry>, DevError> {
+) -> Result<Vec<&'a LitehtmlFixture>, DevError> {
     if all {
         Ok(manifest.fixtures.iter().collect())
     } else if let Some(suite) = suite {
@@ -240,6 +238,7 @@ fn build_pipeline(project_root: &Path) -> Result<PathBuf, DevError> {
 pub(crate) fn test(
     project: Project,
     project_root: &Path,
+    litehtml_config: &LitehtmlConfig,
     fixture_id: Option<&str>,
     suite: Option<&str>,
     all: bool,
@@ -247,10 +246,9 @@ pub(crate) fn test(
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "litehtml test")?;
 
-    let manifest = Manifest::load(project_root)?;
     let db = open_db(project_root)?;
     let git_info = git::collect(project_root)?;
-    let fixtures = resolve_fixtures(&manifest, fixture_id, suite, all)?;
+    let fixtures = resolve_fixtures(litehtml_config, fixture_id, suite, all)?;
 
     // Build the pipeline binary once.
     let binary = build_pipeline(project_root)?;
@@ -268,9 +266,6 @@ pub(crate) fn test(
 
     db.insert_run(&run_id, &git_info.commit, dirty)?;
 
-    let artifact_base = project_root.join(".brokkr").join("mechanical").join(short_id);
-    std::fs::create_dir_all(&artifact_base)?;
-
     let dirty_label = if dirty { ", dirty" } else { "" };
     output::litehtml_msg(&format!(
         "MECHANICAL TEST RESULTS  (run {short_id}, commit {}{dirty_label})",
@@ -281,7 +276,7 @@ pub(crate) fn test(
 
     let ctx = TestContext {
         binary: &binary,
-        defaults: &manifest.defaults,
+        config: litehtml_config,
         project_root,
         db: &db,
         run_id: &run_id,
@@ -291,10 +286,7 @@ pub(crate) fn test(
     let mut counts = [0u32; 4]; // pass, fail, expected_fail, error
 
     for fixture in &fixtures {
-        let fixture_dir = artifact_base.join(&fixture.id);
-        std::fs::create_dir_all(&fixture_dir)?;
-
-        let outcome = run_fixture(&ctx, fixture, &fixture_dir)?;
+        let outcome = run_fixture(&ctx, fixture)?;
 
         let px = format_pct(outcome.pixel_diff_pct, 1);
         let el = format_pct(outcome.element_match_pct, 0);
@@ -314,11 +306,11 @@ pub(crate) fn test(
         drop(std::fs::remove_file(script));
     }
 
-    print_run_summary(&counts, short_id)?;
+    print_run_summary(&counts)?;
     Ok(())
 }
 
-fn print_run_summary(counts: &[u32; 4], short_id: &str) -> Result<(), DevError> {
+fn print_run_summary(counts: &[u32; 4]) -> Result<(), DevError> {
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 
     let labels = ["passed", "failed", "expected fail", "error"];
@@ -327,7 +319,6 @@ fn print_run_summary(counts: &[u32; 4], short_id: &str) -> Result<(), DevError> 
         .map(|(&c, &l)| format!("{c} {l}"))
         .collect();
     output::litehtml_msg(&format!("  {}", parts.join(", ")));
-    output::litehtml_msg(&format!("\n  Artifacts: .brokkr/mechanical/{short_id}/"));
 
     if counts[1] > 0 || counts[3] > 0 {
         return Err(DevError::ExitCode(1));
@@ -339,10 +330,13 @@ fn print_run_summary(counts: &[u32; 4], short_id: &str) -> Result<(), DevError> 
 // List command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn list(project: Project, project_root: &Path) -> Result<(), DevError> {
+pub(crate) fn list(
+    project: Project,
+    project_root: &Path,
+    litehtml_config: &LitehtmlConfig,
+) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "litehtml list")?;
 
-    let manifest = Manifest::load(project_root)?;
     let db = open_db(project_root)?;
 
     output::litehtml_msg(&format!(
@@ -350,7 +344,7 @@ pub(crate) fn list(project: Project, project_root: &Path) -> Result<(), DevError
     ));
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(75)));
 
-    for fixture in &manifest.fixtures {
+    for fixture in &litehtml_config.fixtures {
         let tags = fixture.tags.join(", ");
         let approved = match db.get_approval(&fixture.id)? {
             Some(a) => format!("{:.1}%", a.pixel_diff_pct),
@@ -466,15 +460,15 @@ fn npm_global_root() -> Result<String, DevError> {
 }
 
 fn capture_fixture(
-    fixture: &FixtureEntry,
-    defaults: &Defaults,
+    fixture: &LitehtmlFixture,
+    config: &LitehtmlConfig,
     project_root: &Path,
     capture_script: &Path,
 ) -> Result<(), DevError> {
-    let reference_dir = project_root.join("fixtures/reference").join(&fixture.id);
-    std::fs::create_dir_all(&reference_dir)?;
+    let fixture_dir = project_root.join("fixtures").join(&fixture.id);
+    std::fs::create_dir_all(&fixture_dir)?;
 
-    let viewport = fixture.viewport_width.unwrap_or(defaults.viewport_width);
+    let viewport = fixture.viewport_width.unwrap_or(config.viewport_width);
     output::litehtml_msg(&format!("  capturing {} ({viewport}px)", fixture.id));
 
     let fixture_html = project_root.join(&fixture.path);
@@ -484,8 +478,8 @@ fn capture_fixture(
         )));
     }
 
-    let chrome_png = reference_dir.join("chrome.png");
-    let chrome_json = reference_dir.join("chrome.json");
+    let chrome_png = fixture_dir.join("chrome.png");
+    let chrome_json = fixture_dir.join("chrome.json");
 
     let node_path = npm_global_root()?;
     let script_str = capture_script.display().to_string();
@@ -508,7 +502,7 @@ fn capture_fixture(
         )));
     }
 
-    output::litehtml_msg(&format!("    \u{2192} {}", reference_dir.display()));
+    output::litehtml_msg(&format!("    \u{2192} {}", fixture_dir.display()));
     Ok(())
 }
 
@@ -519,6 +513,7 @@ fn capture_fixture(
 pub(crate) fn approve(
     project: Project,
     project_root: &Path,
+    litehtml_config: &LitehtmlConfig,
     fixture_id: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "litehtml approve")?;
@@ -528,10 +523,9 @@ pub(crate) fn approve(
         return Err(DevError::Verify("litehtml approve requires a clean git tree".into()));
     }
 
-    let manifest = Manifest::load(project_root)?;
     let db = open_db(project_root)?;
 
-    let fixture = resolve_fixture(&manifest, fixture_id)?;
+    let fixture = resolve_fixture(litehtml_config, fixture_id)?;
 
     let result = db.latest_result_for_fixture(&fixture.id)?.ok_or_else(|| {
         DevError::Verify(format!(
@@ -590,10 +584,13 @@ pub(crate) fn report(
 // Status command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn status(project: Project, project_root: &Path) -> Result<(), DevError> {
+pub(crate) fn status(
+    project: Project,
+    project_root: &Path,
+    litehtml_config: &LitehtmlConfig,
+) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "litehtml status")?;
 
-    let manifest = Manifest::load(project_root)?;
     let db = open_db(project_root)?;
     let approvals = db.all_approvals()?;
 
@@ -602,7 +599,7 @@ pub(crate) fn status(project: Project, project_root: &Path) -> Result<(), DevErr
     ));
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(70)));
 
-    for fixture in &manifest.fixtures {
+    for fixture in &litehtml_config.fixtures {
         print_fixture_status(fixture, &approvals, &db)?;
     }
 
@@ -610,7 +607,7 @@ pub(crate) fn status(project: Project, project_root: &Path) -> Result<(), DevErr
 }
 
 fn print_fixture_status(
-    fixture: &FixtureEntry,
+    fixture: &LitehtmlFixture,
     approvals: &[super::db::Approval],
     db: &MechanicalDb,
 ) -> Result<(), DevError> {

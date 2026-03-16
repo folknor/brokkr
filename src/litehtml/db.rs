@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS mechanical_results (
     pixel_diff_pct  REAL,
     element_match_pct REAL,
     status          TEXT NOT NULL,
-    artifact_dir    TEXT,
     PRIMARY KEY (run_id, fixture_id)
 )";
 
@@ -58,7 +57,6 @@ pub(crate) struct ResultRow {
     pub pixel_diff_pct: Option<f64>,
     pub element_match_pct: Option<f64>,
     pub status: String,
-    pub artifact_dir: Option<String>,
 }
 
 pub(crate) struct MechanicalDb {
@@ -72,6 +70,7 @@ impl MechanicalDb {
         conn.execute(SCHEMA_RUNS, [])?;
         conn.execute(SCHEMA_RESULTS, [])?;
         conn.execute(SCHEMA_APPROVALS, [])?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -90,13 +89,12 @@ impl MechanicalDb {
         pixel_diff_pct: Option<f64>,
         element_match_pct: Option<f64>,
         status: &str,
-        artifact_dir: Option<&str>,
     ) -> Result<(), DevError> {
         self.conn.execute(
             "INSERT INTO mechanical_results \
-             (run_id, fixture_id, pixel_diff_pct, element_match_pct, status, artifact_dir) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![run_id, fixture_id, pixel_diff_pct, element_match_pct, status, artifact_dir],
+             (run_id, fixture_id, pixel_diff_pct, element_match_pct, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![run_id, fixture_id, pixel_diff_pct, element_match_pct, status],
         )?;
         Ok(())
     }
@@ -146,7 +144,7 @@ impl MechanicalDb {
 
     pub fn run_results(&self, run_id: &str) -> Result<Vec<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(
-            "SELECT run_id, fixture_id, pixel_diff_pct, element_match_pct, status, artifact_dir \
+            "SELECT run_id, fixture_id, pixel_diff_pct, element_match_pct, status \
              FROM mechanical_results WHERE run_id = ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![run_id], map_result_row)?;
@@ -172,7 +170,7 @@ impl MechanicalDb {
 
     pub fn latest_result_for_fixture(&self, fixture_id: &str) -> Result<Option<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(
-            "SELECT r.run_id, r.fixture_id, r.pixel_diff_pct, r.element_match_pct, r.status, r.artifact_dir \
+            "SELECT r.run_id, r.fixture_id, r.pixel_diff_pct, r.element_match_pct, r.status \
              FROM mechanical_results r \
              JOIN mechanical_runs mr ON mr.run_id = r.run_id \
              WHERE r.fixture_id = ?1 \
@@ -214,6 +212,20 @@ fn map_result_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResultRow> {
         pixel_diff_pct: row.get(2)?,
         element_match_pct: row.get(3)?,
         status: row.get(4)?,
-        artifact_dir: row.get(5)?,
     })
+}
+
+fn migrate(conn: &Connection) -> Result<(), DevError> {
+    let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version < 1 {
+        // Check if artifact_dir column exists before trying to drop it.
+        let has_column = conn
+            .prepare("SELECT artifact_dir FROM mechanical_results LIMIT 0")
+            .is_ok();
+        if has_column {
+            conn.execute("ALTER TABLE mechanical_results DROP COLUMN artifact_dir", [])?;
+        }
+        conn.pragma_update(None, "user_version", 1)?;
+    }
+    Ok(())
 }

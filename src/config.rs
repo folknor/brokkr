@@ -13,6 +13,7 @@ use crate::project::Project;
 #[derive(Debug)]
 pub struct DevConfig {
     pub hosts: HashMap<String, HostConfig>,
+    pub litehtml: Option<LitehtmlConfig>,
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
@@ -88,6 +89,62 @@ pub struct DriveConfig {
     pub target: Option<String>,
 }
 
+/// Litehtml visual reference testing configuration from `[litehtml]` in brokkr.toml.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LitehtmlConfig {
+    pub viewport_width: u32,
+    pub mode: String,
+    pub pixel_diff_threshold: f64,
+    pub element_match_threshold: f64,
+    #[serde(rename = "fixture")]
+    pub fixtures: Vec<LitehtmlFixture>,
+}
+
+/// A single litehtml test fixture entry.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct LitehtmlFixture {
+    pub id: String,
+    pub path: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub viewport_width: Option<u32>,
+    pub mode: Option<String>,
+    pub pixel_diff_threshold: Option<f64>,
+    pub element_match_threshold: Option<f64>,
+    pub expected: String,
+    #[serde(default)]
+    pub waive_element_threshold: bool,
+    pub notes: Option<String>,
+}
+
+impl LitehtmlFixture {
+    pub fn resolved_pixel_threshold(&self, config: &LitehtmlConfig) -> f64 {
+        self.pixel_diff_threshold
+            .unwrap_or(config.pixel_diff_threshold)
+    }
+
+    pub fn resolved_element_threshold(&self, config: &LitehtmlConfig) -> f64 {
+        self.element_match_threshold
+            .unwrap_or(config.element_match_threshold)
+    }
+}
+
+impl LitehtmlConfig {
+    pub fn fixtures_for_suite(&self, suite: &str) -> Vec<&LitehtmlFixture> {
+        self.fixtures
+            .iter()
+            .filter(|f| f.tags.iter().any(|t| t == suite))
+            .collect()
+    }
+
+    pub fn fixture_by_id(&self, id: &str) -> Option<&LitehtmlFixture> {
+        self.fixtures.iter().find(|f| f.id == id)
+    }
+}
+
 #[allow(dead_code)]
 pub struct ResolvedPaths {
     pub hostname: String,
@@ -135,10 +192,11 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 
+    let litehtml = parse_litehtml(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
 
-    Ok((project, DevConfig { hosts }))
+    Ok((project, DevConfig { hosts, litehtml }))
 }
 
 /// Every top-level key that is a table and is not `project` is
@@ -148,7 +206,7 @@ fn parse_hosts(
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
     for (key, value) in table {
-        if key == "project" {
+        if key == "project" || key == "litehtml" {
             continue;
         }
         if !value.is_table() {
@@ -162,6 +220,19 @@ fn parse_hosts(
         out.insert(key.clone(), hc);
     }
     Ok(out)
+}
+
+/// Parse the optional `[litehtml]` section from the root table.
+fn parse_litehtml(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<LitehtmlConfig>, DevError> {
+    let Some(value) = table.get("litehtml") else {
+        return Ok(None);
+    };
+    let config: LitehtmlConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
+        DevError::Config(format!("litehtml: {e}"))
+    })?;
+    Ok(Some(config))
 }
 
 /// Validate all datasets across all hosts for empty file names.
@@ -296,7 +367,7 @@ mod tests {
     use super::*;
 
     fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {
-        DevConfig { hosts }
+        DevConfig { hosts, litehtml: None }
     }
 
     fn empty_dataset() -> Dataset {

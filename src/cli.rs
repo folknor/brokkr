@@ -903,7 +903,7 @@ pub(crate) enum LitehtmlCommand {
     /// Test fixtures against Chrome reference artifacts
     #[command(display_order = 0)]
     Test {
-        /// Fixture ID from fixtures.toml (or unique prefix)
+        /// Fixture ID from brokkr.toml (or unique prefix)
         fixture: Option<String>,
 
         /// Run all fixtures tagged with this suite name
@@ -924,7 +924,7 @@ pub(crate) enum LitehtmlCommand {
     /// Record current divergence as accepted baseline (requires clean git tree)
     #[command(display_order = 2)]
     Approve {
-        /// Fixture ID from fixtures.toml (or unique prefix)
+        /// Fixture ID from brokkr.toml (or unique prefix)
         fixture: String,
     },
     /// Show detailed results for a past run
