@@ -949,11 +949,32 @@ pub(crate) enum LitehtmlCommand {
     Extract {
         /// Input HTML file (already prepared)
         input: String,
-        /// CSS selector to extract
-        #[arg(long)]
-        selector: String,
+        /// CSS selector to extract (single element)
+        #[arg(long, conflicts_with_all = ["from", "to"])]
+        selector: Option<String>,
+        /// Start of sibling range to extract (inclusive)
+        #[arg(long, requires = "to", conflicts_with = "selector")]
+        from: Option<String>,
+        /// End of sibling range to extract (inclusive)
+        #[arg(long, requires = "from", conflicts_with = "selector")]
+        to: Option<String>,
         /// Output HTML file (extracted sub-fixture)
         output: String,
+    },
+    /// Print structural outline of a prepared HTML file
+    #[command(display_order = 8)]
+    Outline {
+        /// Input HTML file (prepared)
+        input: String,
+        /// Maximum nesting depth before collapsing (default: 4)
+        #[arg(long, default_value = "4")]
+        depth: usize,
+        /// Show full tree with no depth limit
+        #[arg(long)]
+        full: bool,
+        /// Print suggested CSS selectors for top-level sections
+        #[arg(long)]
+        selectors: bool,
     },
 }
 

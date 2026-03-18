@@ -789,7 +789,9 @@ pub(crate) fn extract(
     project: Project,
     project_root: &Path,
     input: &str,
-    selector: &str,
+    selector: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
     output_path: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "litehtml extract")?;
@@ -808,15 +810,31 @@ pub(crate) fn extract(
     let output_resolved = project_root.join(output_path);
     let output_str = output_resolved.display().to_string();
 
-    let args = vec![
+    let mut args = vec![
         script_str.as_str(),
         "extract",
         &input_str,
         &output_str,
-        "--selector", selector,
     ];
 
-    output::litehtml_msg(&format!("extracting '{selector}' from {input}"));
+    let label: String;
+    if let Some(sel) = selector {
+        args.push("--selector");
+        args.push(sel);
+        label = format!("extracting '{sel}' from {input}");
+    } else if let (Some(f), Some(t)) = (from, to) {
+        args.push("--from");
+        args.push(f);
+        args.push("--to");
+        args.push(t);
+        label = format!("extracting range from {input}");
+    } else {
+        return Err(DevError::Config(
+            "specify --selector or --from/--to".into(),
+        ));
+    }
+
+    output::litehtml_msg(&label);
 
     let captured = output::run_captured("node", &args, project_root)?;
 
@@ -834,5 +852,69 @@ pub(crate) fn extract(
     }
 
     output::litehtml_msg(&format!("wrote {output_path}"));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Outline command
+// ---------------------------------------------------------------------------
+
+pub(crate) fn outline(
+    project: Project,
+    project_root: &Path,
+    input: &str,
+    depth: usize,
+    full: bool,
+    selectors: bool,
+) -> Result<(), DevError> {
+    project::require(project, Project::Litehtml, "litehtml outline")?;
+
+    let script = ensure_prepare_script(project_root)?;
+    let script_str = script.display().to_string();
+
+    let input_path = project_root.join(input);
+    if !input_path.exists() {
+        return Err(DevError::Config(format!(
+            "input file not found: {}", input_path.display(),
+        )));
+    }
+
+    let input_str = input_path.display().to_string();
+    let depth_str = depth.to_string();
+
+    let mut args = vec![
+        script_str.as_str(),
+        "outline",
+        &input_str,
+        "--depth", &depth_str,
+    ];
+    if full {
+        args.push("--full");
+    }
+    if selectors {
+        args.push("--selectors");
+    }
+
+    let captured = output::run_captured("node", &args, project_root)?;
+
+    // Outline output goes to stdout from the script.
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    for line in stderr.lines() {
+        if !line.is_empty() {
+            output::litehtml_msg(&format!("  {line}"));
+        }
+    }
+
+    if !captured.status.success() {
+        return Err(DevError::Verify(format!(
+            "outline failed for {input}",
+        )));
+    }
+
     Ok(())
 }

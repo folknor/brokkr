@@ -271,8 +271,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 LitehtmlCommand::Prepare { input, output } => {
                     litehtml::cmd::prepare(project, &project_root, litehtml_config, &input, &output)
                 }
-                LitehtmlCommand::Extract { input, selector, output } => {
-                    litehtml::cmd::extract(project, &project_root, &input, &selector, &output)
+                LitehtmlCommand::Extract { input, selector, from, to, output } => {
+                    litehtml::cmd::extract(project, &project_root, &input, selector.as_deref(), from.as_deref(), to.as_deref(), &output)
+                }
+                LitehtmlCommand::Outline { input, depth, full, selectors } => {
+                    litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
                 }
             }
         }

@@ -42,11 +42,25 @@ function parseArgs(argv) {
       const key = args[i];
       const val = args[i + 1];
       if (key === '--selector') opts.selector = val;
+      else if (key === '--from') opts.from = val;
+      else if (key === '--to') opts.to = val;
     }
     return { command, input, output, opts };
   }
 
-  process.stderr.write(`Usage:\n  node prepare.js prepare <input> <output> [options]\n  node prepare.js extract <input> <output> --selector <sel>\n`);
+  if (command === 'outline') {
+    const input = args[1];
+    const opts = { depth: 4, full: false, selectors: false };
+    for (let i = 2; i < args.length; i++) {
+      const key = args[i];
+      if (key === '--depth') { opts.depth = parseInt(args[++i], 10); }
+      else if (key === '--full') { opts.full = true; }
+      else if (key === '--selectors') { opts.selectors = true; }
+    }
+    return { command, input, opts };
+  }
+
+  process.stderr.write(`Usage:\n  node prepare.js prepare <input> <output> [options]\n  node prepare.js extract <input> <output> --selector <sel>\n  node prepare.js outline <input> [--depth N] [--full] [--selectors]\n`);
   process.exit(1);
 }
 
@@ -592,19 +606,10 @@ async function cmdPrepare(input, output, opts) {
 // Extract command
 // ---------------------------------------------------------------------------
 
-function cmdExtract(input, output, opts) {
-  const html = fs.readFileSync(input, 'utf-8');
-  const $ = cheerio.load(html, { decodeEntities: false });
-
-  const selector = opts.selector;
-  if (!selector) {
-    process.stderr.write('error: --selector is required\n');
-    process.exit(1);
-  }
-
+function resolveOne($, selector, label) {
   const matches = $(selector);
   if (matches.length === 0) {
-    process.stderr.write(`error: selector '${selector}' matched no elements\n`);
+    process.stderr.write(`error: ${label} selector '${selector}' matched no elements\n`);
     process.exit(1);
   }
   if (matches.length > 1) {
@@ -619,16 +624,16 @@ function cmdExtract(input, output, opts) {
       if (cls) desc += `.${cls.split(/\s+/).join('.')}`;
       paths.push(desc);
     });
-    process.stderr.write(`error: selector '${selector}' matched ${matches.length} elements:\n`);
+    process.stderr.write(`error: ${label} selector '${selector}' matched ${matches.length} elements:\n`);
     for (const p of paths) {
       process.stderr.write(`  ${p}\n`);
     }
     process.exit(1);
   }
+  return matches.first();
+}
 
-  const target = matches.first();
-
-  // Collect head content (styles, meta).
+function collectHeadContent($) {
   const headContent = [];
   $('head').children().each(function () {
     const el = $(this);
@@ -637,24 +642,26 @@ function cmdExtract(input, output, opts) {
       headContent.push($.html(el));
     }
   });
+  return headContent;
+}
 
-  // Walk ancestor chain from target up to body.
+function buildAncestorChain(el) {
   const ancestors = [];
-  let current = target;
+  let current = el;
   while (current.length && current[0].name !== 'body' && current[0].name !== 'html') {
     ancestors.unshift(current);
     current = current.parent();
   }
+  return ancestors;
+}
 
-  // Build the extracted structure.
+function buildExtractedDoc($, headContent, ancestors, targetHtmlFragments) {
   const out = cheerio.load('<!DOCTYPE html><html><head></head><body></body></html>', { decodeEntities: false });
 
-  // Copy head content.
   for (const h of headContent) {
     out('head').append(h);
   }
 
-  // Reconstruct ancestor chain inside <body>.
   let parent = out('body');
 
   for (let i = 0; i < ancestors.length; i++) {
@@ -665,42 +672,411 @@ function cmdExtract(input, output, opts) {
     const attrStr = attrs ? ' ' + attrs : '';
 
     if (isTarget) {
-      // Clone the target with all its children.
-      parent.append($.html(ancestorNode));
+      // At the target level, append all target fragments.
+      for (const frag of targetHtmlFragments) {
+        parent.append(frag);
+      }
     } else {
-      // Create the ancestor wrapper (tag + attributes, no other children).
       const wrapper = out(`<${tagName}${attrStr}></${tagName}>`);
       parent.append(wrapper);
 
       // Table context: preserve sibling <td>/<th> in the same <tr> as empty stubs.
-      if (tagName === 'tr' || (ancestors[i + 1] && ancestors[i + 1][0].name === 'td') || (ancestors[i + 1] && ancestors[i + 1][0].name === 'th')) {
-        // If this is a <tr>, stub out sibling cells.
-        if (tagName === 'tr') {
-          const nextAncestor = ancestors[i + 1];
-          ancestorNode.children().each(function () {
-            const child = $(this);
-            const childTag = this.name;
-            if ((childTag === 'td' || childTag === 'th') && !child.is(nextAncestor)) {
-              const stubAttrs = serializeAttributes(child);
-              const stubAttrStr = stubAttrs ? ' ' + stubAttrs : '';
-              wrapper.append(out(`<${childTag}${stubAttrStr}></${childTag}>`));
-            }
-          });
-        }
+      if (tagName === 'tr') {
+        const nextAncestor = ancestors[i + 1];
+        ancestorNode.children().each(function () {
+          const child = $(this);
+          const childTag = this.name;
+          if ((childTag === 'td' || childTag === 'th') && !child.is(nextAncestor)) {
+            const stubAttrs = serializeAttributes(child);
+            const stubAttrStr = stubAttrs ? ' ' + stubAttrs : '';
+            wrapper.append(out(`<${childTag}${stubAttrStr}></${childTag}>`));
+          }
+        });
       }
 
       parent = wrapper;
     }
   }
 
-  // If no ancestors (target was directly in body), just copy it.
   if (ancestors.length === 0) {
-    parent.append($.html(target));
+    for (const frag of targetHtmlFragments) {
+      parent.append(frag);
+    }
   }
 
-  const result = prettyPrint(out);
-  fs.mkdirSync(path.dirname(output), { recursive: true });
-  fs.writeFileSync(output, result, 'utf-8');
+  return prettyPrint(out);
+}
+
+function cmdExtract(input, output, opts) {
+  const html = fs.readFileSync(input, 'utf-8');
+  const $ = cheerio.load(html, { decodeEntities: false });
+
+  const headContent = collectHeadContent($);
+
+  if (opts.from && opts.to) {
+    // Range extraction: --from / --to
+    const fromEl = resolveOne($, opts.from, '--from');
+    const toEl = resolveOne($, opts.to, '--to');
+
+    // Find the closest common ancestor.
+    // Build ancestor sets for both elements, then find where they diverge.
+    function ancestorPath(el) {
+      const path = [];
+      let cur = el;
+      while (cur.length && cur[0].name !== 'html') {
+        path.unshift(cur[0]);
+        cur = cur.parent();
+      }
+      return path;
+    }
+
+    const fromPath = ancestorPath(fromEl);
+    const toPath = ancestorPath(toEl);
+
+    // Walk both paths to find the deepest common node.
+    let commonDepth = 0;
+    while (commonDepth < fromPath.length && commonDepth < toPath.length && fromPath[commonDepth] === toPath[commonDepth]) {
+      commonDepth++;
+    }
+
+    if (commonDepth === 0) {
+      process.stderr.write('error: --from and --to share no common ancestor\n');
+      process.exit(1);
+    }
+
+    const commonAncestorNode = fromPath[commonDepth - 1];
+    const commonAncestor = $(commonAncestorNode);
+
+    // The children of the common ancestor that contain --from and --to.
+    const fromChild = commonDepth < fromPath.length ? fromPath[commonDepth] : fromEl[0];
+    const toChild = commonDepth < toPath.length ? toPath[commonDepth] : toEl[0];
+
+    // Collect all children of the common ancestor from fromChild to toChild inclusive.
+    const fragments = [];
+    let found = false;
+    let finished = false;
+    commonAncestor.children().each(function () {
+      if (finished) return;
+      if (this === fromChild) found = true;
+      if (found) fragments.push($.html($(this)));
+      if (this === toChild) finished = true;
+    });
+
+    if (!found || !finished) {
+      process.stderr.write('error: --from element does not appear before --to in document order within their common ancestor\n');
+      process.exit(1);
+    }
+
+    // Ancestor chain from the common ancestor up to body.
+    const ancestors = buildAncestorChain(commonAncestor);
+
+    const result = buildExtractedDoc($, headContent, ancestors, fragments);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, result, 'utf-8');
+  } else if (opts.selector) {
+    // Single element extraction: --selector
+    const target = resolveOne($, opts.selector, '--selector');
+    const ancestors = buildAncestorChain(target);
+    const fragments = [$.html(target)];
+
+    const result = buildExtractedDoc($, headContent, ancestors, fragments);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, result, 'utf-8');
+  } else {
+    process.stderr.write('error: --selector or --from/--to is required\n');
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Outline command
+// ---------------------------------------------------------------------------
+
+const ZERO_WIDTH_RE = /^[\s\u200B\u200C\u200D\u2060\uFEFF\u202A-\u202E\u2061-\u2064]*$/;
+
+function isHiddenElement(el) {
+  const style = el.attr('style');
+  if (!style) return false;
+  if (/display\s*:\s*none/i.test(style)) return true;
+  if (/max-height\s*:\s*0/i.test(style) && /overflow\s*:\s*hidden/i.test(style)) return true;
+  return false;
+}
+
+function isMsoComment(node) {
+  if (node.type === 'comment') {
+    const data = node.data || '';
+    return /\[if\s+mso/i.test(data) || /\[endif\]/i.test(data);
+  }
+  return false;
+}
+
+function isTrackingImg(el) {
+  const w = parsePxValue(el.attr('width'));
+  const h = parsePxValue(el.attr('height'));
+  return w && h && w <= 1 && h <= 1;
+}
+
+function isEmptySpacer(el, $) {
+  const text = el.text();
+  return ZERO_WIDTH_RE.test(text) && el.children().length === 0;
+}
+
+function isSectionMarker(el) {
+  const style = el.attr('style') || '';
+  const tag = el[0] && el[0].name;
+  if (/max-width\s*:\s*6\d\dpx/i.test(style)) return true;
+  if (tag === 'table' && el.parent().length && el.parent()[0].name === 'body') return true;
+  return false;
+}
+
+function stylePreview(el) {
+  const style = el.attr('style');
+  if (!style) return '';
+  // Extract the most layout-relevant property.
+  const maxW = style.match(/max-width\s*:\s*[^;]+/i);
+  if (maxW) return maxW[0].trim();
+  const w = style.match(/width\s*:\s*[^;]+/i);
+  if (w) return w[0].trim();
+  const display = style.match(/display\s*:\s*[^;]+/i);
+  if (display) return display[0].trim();
+  // Truncate to 60 chars.
+  return style.length > 60 ? style.slice(0, 57) + '...' : style;
+}
+
+function imgDimsLabel(el) {
+  const w = el.attr('width');
+  const h = el.attr('height');
+  if (w && h) return `${w}x${h}`;
+  return '';
+}
+
+function textPreview(el, $) {
+  // Direct text children only (not nested element text).
+  let text = '';
+  el.contents().each(function () {
+    if (this.type === 'text') text += this.data;
+  });
+  text = text.trim();
+  if (!text) return '';
+  return text.length > 60 ? `"${text.slice(0, 57)}..."` : `"${text}"`;
+}
+
+function sectionSummary(el, $) {
+  // Scan descendants for first image and first meaningful text.
+  const annotations = [];
+  let foundImg = false;
+  let foundText = false;
+
+  function scan(node) {
+    if (foundImg && foundText) return;
+    const children = node.children().toArray();
+    for (const child of children) {
+      if (foundImg && foundText) return;
+      const ch = $(child);
+      const tag = child.name;
+      if (tag === 'img' && !foundImg) {
+        const w = ch.attr('width');
+        const h = ch.attr('height');
+        if (w && h && !(parseInt(w, 10) <= 1 && parseInt(h, 10) <= 1)) {
+          annotations.push(`img ${w}x${h}`);
+          foundImg = true;
+        }
+      }
+      if (!foundText) {
+        // Check direct text children of this element.
+        let text = '';
+        ch.contents().each(function () {
+          if (this.type === 'text') text += this.data;
+        });
+        text = text.trim();
+        if (text && !ZERO_WIDTH_RE.test(text)) {
+          const preview = text.length > 50 ? text.slice(0, 47) + '...' : text;
+          annotations.push(`"${preview}"`);
+          foundText = true;
+        }
+      }
+      scan(ch);
+    }
+  }
+
+  scan(el);
+  return annotations.length > 0 ? annotations.join(', ') : '';
+}
+
+function buildSelectorForSection(el, $) {
+  // Build an actual CSS selector by walking the DOM path from <body> to this element.
+  const tag = el[0].name;
+  const id = el.attr('id');
+  if (id) return `#${id}`;
+
+  const parts = [];
+  let current = el;
+  while (current.length && current[0].name && current[0].name !== 'body' && current[0].name !== 'html') {
+    const node = current;
+    const t = node[0].name;
+    const nid = node.attr('id');
+    if (nid) {
+      parts.unshift(`#${nid}`);
+      break; // id is unique, no need to go higher
+    }
+    const cls = node.attr('class');
+    // Count same-tag siblings before this node to get nth-of-type index.
+    let idx = 1;
+    let sib = node.prev();
+    while (sib.length) {
+      if (sib[0].name === t) idx++;
+      sib = sib.prev();
+    }
+    // Count total same-tag siblings to decide if :nth-of-type is needed.
+    let totalSameTag = idx;
+    sib = node.next();
+    while (sib.length) {
+      if (sib[0].name === t) totalSameTag++;
+      sib = sib.next();
+    }
+    let part = t;
+    if (cls) {
+      const first = cls.trim().split(/\s+/)[0];
+      part += `.${first}`;
+    } else if (totalSameTag > 1) {
+      part += `:nth-of-type(${idx})`;
+    }
+    parts.unshift(part);
+    current = current.parent();
+  }
+
+  return parts.join(' > ');
+}
+
+function cmdOutline(input, opts) {
+  const html = fs.readFileSync(input, 'utf-8');
+  const $ = cheerio.load(html, { decodeEntities: false, sourceCodeLocationInfo: true });
+
+  const maxDepth = opts.full ? Infinity : opts.depth;
+  const showSelectors = opts.selectors;
+
+  function lineNumberFor(el) {
+    const loc = el[0] && el[0].sourceCodeLocation;
+    return loc ? loc.startLine : null;
+  }
+
+  const output = [];
+  const sections = [];
+  let sectionCount = 0;
+
+  function walk(node, depth, isLastChild) {
+    const type = node[0] && node[0].type;
+    if (!type) return;
+
+    // Skip comments (including MSO).
+    if (type === 'comment') return;
+    if (type === 'text') return;
+    if (type !== 'tag' && type !== 'style' && type !== 'script') return;
+
+    const tag = node[0].name;
+    const el = node;
+
+    // Skip non-layout elements.
+    if (tag === 'style' || tag === 'script' || tag === 'meta' || tag === 'link' || tag === 'head') return;
+
+    // Skip hidden elements.
+    if (isHiddenElement(el)) return;
+
+    // Skip empty spacers.
+    if ((tag === 'div' || tag === 'span') && isEmptySpacer(el, $)) return;
+
+    // Skip tracking pixels.
+    if (tag === 'img' && isTrackingImg(el)) return;
+
+    const lineNum = lineNumberFor(el);
+    const lineLabel = lineNum ? `L${String(lineNum).padStart(3)}` : '    ';
+
+    // Build tree prefix.
+    const isSection = isSectionMarker(el);
+    let prefix;
+    if (depth === 0 || isSection) {
+      prefix = '\u250c'; // ┌
+    } else {
+      prefix = '\u2502 '.repeat(Math.max(0, depth - 1)) + '\u2514 '; // │ ... └
+    }
+
+    // Build description.
+    let desc = tag;
+    const id = el.attr('id');
+    if (id) desc += `#${id}`;
+    const cls = el.attr('class');
+    if (cls) {
+      const classes = cls.trim().split(/\s+/).slice(0, 3).join('.');
+      desc += `.${classes}`;
+    }
+
+    const stylePrev = stylePreview(el);
+    if (stylePrev) desc += `  ${stylePrev}`;
+
+    if (tag === 'img') {
+      const dims = imgDimsLabel(el);
+      if (dims) desc = `img ${dims}`;
+    }
+
+    const textPrev = textPreview(el, $);
+    if (textPrev) desc += `  ${textPrev}`;
+
+    if (isSection) {
+      const summary = sectionSummary(el, $);
+      desc += '  [SECTION]';
+      if (summary) desc += `  ${summary}`;
+      sections.push({ el, index: sectionCount++ });
+    }
+
+    // Only print non-section elements when within depth limit.
+    const withinDepth = depth < maxDepth;
+    if (withinDepth || isSection) {
+      output.push(`${lineLabel}  ${prefix} ${desc}`);
+    }
+
+    if (withinDepth) {
+      // Recurse into children.
+      const children = el.children().toArray();
+      for (let i = 0; i < children.length; i++) {
+        walk($(children[i]), depth + 1, i === children.length - 1);
+      }
+    } else if (isSection) {
+      // Section beyond depth limit — children already summarized via sectionSummary.
+      // Recurse to find nested sections but don't print non-section content.
+      const children = el.children().toArray();
+      for (let i = 0; i < children.length; i++) {
+        walk($(children[i]), depth + 1, i === children.length - 1);
+      }
+    } else {
+      // Beyond depth limit, not a section — scan for deeper sections only.
+      const children = el.children().toArray();
+      for (let i = 0; i < children.length; i++) {
+        walk($(children[i]), depth + 1, i === children.length - 1);
+      }
+    }
+  }
+
+  // Start from body children.
+  const body = $('body');
+  if (body.length) {
+    const children = body.children().toArray();
+    for (let i = 0; i < children.length; i++) {
+      walk($(children[i]), 0, i === children.length - 1);
+    }
+  }
+
+  process.stdout.write(output.join('\n') + '\n');
+
+  // Selector hints.
+  if (showSelectors && sections.length > 0) {
+    process.stdout.write('\nSuggested selectors:\n');
+    for (const { el, index } of sections) {
+      const selector = buildSelectorForSection(el, $);
+      const lineNum = lineNumberFor(el);
+      const lineLabel = lineNum ? `L${lineNum}` : '';
+      process.stdout.write(`  ${lineLabel.padEnd(6)} ${selector}\n`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +1090,8 @@ async function main() {
     await cmdPrepare(parsed.input, parsed.output, parsed.opts);
   } else if (parsed.command === 'extract') {
     cmdExtract(parsed.input, parsed.output, parsed.opts);
+  } else if (parsed.command === 'outline') {
+    cmdOutline(parsed.input, parsed.opts);
   }
 }
 
