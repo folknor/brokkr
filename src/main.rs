@@ -268,6 +268,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     litehtml::cmd::report(project, &project_root, &run_id)
                 }
                 LitehtmlCommand::Status => litehtml::cmd::status(project, &project_root, litehtml_config),
+                LitehtmlCommand::Prepare { input, output } => {
+                    litehtml::cmd::prepare(project, &project_root, litehtml_config, &input, &output)
+                }
+                LitehtmlCommand::Extract { input, selector, output } => {
+                    litehtml::cmd::extract(project, &project_root, &input, &selector, &output)
+                }
             }
         }
     }

@@ -97,6 +97,7 @@ pub struct LitehtmlConfig {
     pub mode: String,
     pub pixel_diff_threshold: f64,
     pub element_match_threshold: f64,
+    pub fallback_aspect_ratio: Option<f64>,
     #[serde(rename = "fixture")]
     pub fixtures: Vec<LitehtmlFixture>,
 }

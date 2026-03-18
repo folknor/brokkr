@@ -936,6 +936,25 @@ pub(crate) enum LitehtmlCommand {
     /// Show current state of all fixtures (last run vs approved baseline)
     #[command(display_order = 5)]
     Status,
+    /// Normalize raw email HTML into a self-contained fixture
+    #[command(display_order = 6)]
+    Prepare {
+        /// Input HTML file (raw email)
+        input: String,
+        /// Output HTML file (self-contained fixture)
+        output: String,
+    },
+    /// Extract a sub-fixture from a prepared HTML file
+    #[command(display_order = 7)]
+    Extract {
+        /// Input HTML file (already prepared)
+        input: String,
+        /// CSS selector to extract
+        #[arg(long)]
+        selector: String,
+        /// Output HTML file (extracted sub-fixture)
+        output: String,
+    },
 }
 
 /// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.

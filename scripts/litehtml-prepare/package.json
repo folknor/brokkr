@@ -1,0 +1,11 @@
+{
+  "name": "litehtml-prepare",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fixture preprocessing for litehtml visual reference testing",
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "image-size": "^1.1.1",
+    "pngjs": "^7.0.0"
+  }
+}

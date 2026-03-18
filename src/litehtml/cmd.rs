@@ -666,3 +666,173 @@ fn format_status_columns(
 
     (px, delta, extra)
 }
+
+// ---------------------------------------------------------------------------
+// Script infrastructure
+// ---------------------------------------------------------------------------
+
+/// Directory containing the prepare/extract Node.js scripts.
+fn scripts_dir() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir).join("scripts").join("litehtml-prepare")
+}
+
+/// Ensure pnpm dependencies are installed, then return path to prepare.js.
+fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
+    let dir = scripts_dir();
+    let script = dir.join("prepare.js");
+
+    if !script.exists() {
+        return Err(DevError::Config(format!(
+            "prepare script not found: {}", script.display(),
+        )));
+    }
+
+    let node_modules = dir.join("node_modules");
+    if !node_modules.exists() {
+        output::litehtml_msg("installing prepare dependencies...");
+        let dir_str = dir.display().to_string();
+        let captured = output::run_captured(
+            "pnpm", &["install", "--dir", &dir_str], project_root,
+        )?;
+        if !captured.status.success() {
+            let stderr = String::from_utf8_lossy(&captured.stderr);
+            return Err(DevError::Verify(format!(
+                "pnpm install failed: {stderr}",
+            )));
+        }
+    }
+
+    Ok(script)
+}
+
+// ---------------------------------------------------------------------------
+// Prepare command
+// ---------------------------------------------------------------------------
+
+pub(crate) fn prepare(
+    project: Project,
+    project_root: &Path,
+    litehtml_config: &LitehtmlConfig,
+    input: &str,
+    output_path: &str,
+) -> Result<(), DevError> {
+    project::require(project, Project::Litehtml, "litehtml prepare")?;
+
+    let script = ensure_prepare_script(project_root)?;
+    let script_str = script.display().to_string();
+
+    let input_path = project_root.join(input);
+    if !input_path.exists() {
+        return Err(DevError::Config(format!(
+            "input file not found: {}", input_path.display(),
+        )));
+    }
+
+    let input_str = input_path.display().to_string();
+    let output_resolved = project_root.join(output_path);
+    let output_str = output_resolved.display().to_string();
+
+    let cache_dir = project_root.join(".brokkr").join("prepare-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_str = cache_dir.display().to_string();
+
+    // Resolve Ahem font path: look for fixtures/Ahem.ttf in project root.
+    let ahem_path = project_root.join("fixtures").join("Ahem.ttf");
+    let ahem_str = ahem_path.display().to_string();
+    if !ahem_path.exists() {
+        return Err(DevError::Config(format!(
+            "Ahem font not found: {}", ahem_path.display(),
+        )));
+    }
+
+    let ratio = litehtml_config.fallback_aspect_ratio.unwrap_or(2.0);
+    let ratio_str = ratio.to_string();
+
+    let args = vec![
+        script_str.as_str(),
+        "prepare",
+        &input_str,
+        &output_str,
+        "--cache-dir", &cache_str,
+        "--ahem-font", &ahem_str,
+        "--fallback-aspect-ratio", &ratio_str,
+    ];
+
+    output::litehtml_msg(&format!("preparing {input}"));
+
+    let captured = output::run_captured("node", &args, project_root)?;
+
+    // Print warnings from stderr.
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    for line in stderr.lines() {
+        if !line.is_empty() {
+            output::litehtml_msg(&format!("  {line}"));
+        }
+    }
+
+    if !captured.status.success() {
+        return Err(DevError::Verify(format!(
+            "prepare failed for {input}",
+        )));
+    }
+
+    output::litehtml_msg(&format!("wrote {output_path}"));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Extract command
+// ---------------------------------------------------------------------------
+
+pub(crate) fn extract(
+    project: Project,
+    project_root: &Path,
+    input: &str,
+    selector: &str,
+    output_path: &str,
+) -> Result<(), DevError> {
+    project::require(project, Project::Litehtml, "litehtml extract")?;
+
+    let script = ensure_prepare_script(project_root)?;
+    let script_str = script.display().to_string();
+
+    let input_path = project_root.join(input);
+    if !input_path.exists() {
+        return Err(DevError::Config(format!(
+            "input file not found: {}", input_path.display(),
+        )));
+    }
+
+    let input_str = input_path.display().to_string();
+    let output_resolved = project_root.join(output_path);
+    let output_str = output_resolved.display().to_string();
+
+    let args = vec![
+        script_str.as_str(),
+        "extract",
+        &input_str,
+        &output_str,
+        "--selector", selector,
+    ];
+
+    output::litehtml_msg(&format!("extracting '{selector}' from {input}"));
+
+    let captured = output::run_captured("node", &args, project_root)?;
+
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    for line in stderr.lines() {
+        if !line.is_empty() {
+            output::litehtml_msg(&format!("  {line}"));
+        }
+    }
+
+    if !captured.status.success() {
+        return Err(DevError::Verify(format!(
+            "extract failed for {input}",
+        )));
+    }
+
+    output::litehtml_msg(&format!("wrote {output_path}"));
+    Ok(())
+}
