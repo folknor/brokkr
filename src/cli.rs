@@ -457,6 +457,12 @@ Examples:
         #[command(subcommand)]
         litehtml: LitehtmlCommand,
     },
+    /// [sluggrs] Visual snapshot testing
+    #[command(display_order = 55)]
+    Sluggrs {
+        #[command(subcommand)]
+        sluggrs: SluggrsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -975,6 +981,38 @@ pub(crate) enum LitehtmlCommand {
         /// Print suggested CSS selectors for top-level sections
         #[arg(long)]
         selectors: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SluggrsCommand {
+    /// Render snapshots and diff against approved baselines
+    #[command(display_order = 0)]
+    Test {
+        /// Snapshot ID (or unique prefix)
+        snapshot: Option<String>,
+
+        /// Run all snapshots
+        #[arg(long)]
+        all: bool,
+    },
+    /// List snapshots and approval state
+    #[command(display_order = 1)]
+    List,
+    /// Record current output as accepted baseline (requires clean git tree)
+    #[command(display_order = 2)]
+    Approve {
+        /// Snapshot ID (or unique prefix)
+        snapshot: String,
+    },
+    /// Show current state of all snapshots (last run vs approved baseline)
+    #[command(display_order = 3)]
+    Status,
+    /// Show detailed results for a past run
+    #[command(display_order = 4)]
+    Report {
+        /// Run ID (or prefix)
+        run_id: String,
     },
 }
 

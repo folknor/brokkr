@@ -14,6 +14,7 @@ use crate::project::Project;
 pub struct DevConfig {
     pub hosts: HashMap<String, HostConfig>,
     pub litehtml: Option<LitehtmlConfig>,
+    pub sluggrs: Option<SluggrsConfig>,
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
@@ -146,6 +147,35 @@ impl LitehtmlConfig {
     }
 }
 
+/// Sluggrs visual snapshot testing configuration from `[sluggrs]` in brokkr.toml.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SluggrsConfig {
+    pub width: u32,
+    pub height: u32,
+    pub pixel_diff_threshold: f64,
+    #[serde(rename = "snapshot")]
+    pub snapshots: Vec<SluggrsSnapshot>,
+}
+
+/// A single sluggrs snapshot definition.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct SluggrsSnapshot {
+    pub id: String,
+    pub description: String,
+    pub fonts: Vec<String>,
+    #[serde(default)]
+    pub optional_fonts: Option<Vec<String>>,
+}
+
+impl SluggrsConfig {
+    pub fn snapshot_by_id(&self, id: &str) -> Option<&SluggrsSnapshot> {
+        self.snapshots.iter().find(|s| s.id == id)
+    }
+}
+
 #[allow(dead_code)]
 pub struct ResolvedPaths {
     pub hostname: String,
@@ -190,14 +220,16 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "nidhogg" => Project::Nidhogg,
         "brokkr" => Project::Brokkr,
         "litehtml-rs" => Project::Litehtml,
+        "sluggrs" => Project::Sluggrs,
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 
     let litehtml = parse_litehtml(table)?;
+    let sluggrs = parse_sluggrs(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
 
-    Ok((project, DevConfig { hosts, litehtml }))
+    Ok((project, DevConfig { hosts, litehtml, sluggrs }))
 }
 
 /// Every top-level key that is a table and is not `project` is
@@ -207,7 +239,7 @@ fn parse_hosts(
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
     for (key, value) in table {
-        if key == "project" || key == "litehtml" {
+        if key == "project" || key == "litehtml" || key == "sluggrs" {
             continue;
         }
         if !value.is_table() {
@@ -232,6 +264,19 @@ fn parse_litehtml(
     };
     let config: LitehtmlConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
         DevError::Config(format!("litehtml: {e}"))
+    })?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[sluggrs]` section from the root table.
+fn parse_sluggrs(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<SluggrsConfig>, DevError> {
+    let Some(value) = table.get("sluggrs") else {
+        return Ok(None);
+    };
+    let config: SluggrsConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
+        DevError::Config(format!("sluggrs: {e}"))
     })?;
     Ok(Some(config))
 }
@@ -368,7 +413,7 @@ mod tests {
     use super::*;
 
     fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {
-        DevConfig { hosts, litehtml: None }
+        DevConfig { hosts, litehtml: None, sluggrs: None }
     }
 
     fn empty_dataset() -> Dataset {

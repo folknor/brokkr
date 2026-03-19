@@ -274,7 +274,7 @@ fn collect_tools(project: Project) -> Vec<(String, String)> {
         Project::Litehtml => {
             tools.push(("node".to_owned(), read_tool_version("node", &["--version"])));
         }
-        Project::Brokkr | Project::Other(_) => {}
+        Project::Sluggrs | Project::Brokkr | Project::Other(_) => {}
     }
 
     tools.push((project.name().to_owned(), read_git_rev()));

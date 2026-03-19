@@ -13,6 +13,7 @@ mod lockfile;
 mod oom;
 mod output;
 mod litehtml;
+mod sluggrs;
 mod pbfhogg;
 mod pmtiles;
 mod elivagar;
@@ -31,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use cli::{BenchCommand, Cli, Command, LitehtmlCommand, VerifyCommand};
+use cli::{BenchCommand, Cli, Command, LitehtmlCommand, SluggrsCommand, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
@@ -276,6 +277,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 }
                 LitehtmlCommand::Outline { input, depth, full, selectors } => {
                     litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
+                }
+            }
+        }
+        Command::Sluggrs { sluggrs: sluggrs_cmd } => {
+            let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
+                error::DevError::Config("no [sluggrs] section in brokkr.toml".into())
+            })?;
+            match sluggrs_cmd {
+                SluggrsCommand::Test { snapshot, all } => {
+                    sluggrs::cmd::test(project, &project_root, sluggrs_config, snapshot.as_deref(), all)
+                }
+                SluggrsCommand::List => sluggrs::cmd::list(project, &project_root, sluggrs_config),
+                SluggrsCommand::Approve { snapshot } => {
+                    sluggrs::cmd::approve(project, &project_root, sluggrs_config, &snapshot)
+                }
+                SluggrsCommand::Status => sluggrs::cmd::status(project, &project_root, sluggrs_config),
+                SluggrsCommand::Report { run_id } => {
+                    sluggrs::cmd::report(project, &project_root, &run_id)
                 }
             }
         }
@@ -1036,7 +1055,7 @@ fn cmd_hotpath(
     match req.project {
         Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, opts),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
-        Project::Litehtml | Project::Other(_) => cmd_hotpath_generic(req),
+        Project::Litehtml | Project::Sluggrs | Project::Other(_) => cmd_hotpath_generic(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
             pbfhogg::cmd::hotpath(req, osc_seq, test)
@@ -1109,7 +1128,7 @@ fn cmd_profile(
     match req.project {
         Project::Elivagar => elivagar::cmd::profile(req, tool, opts),
         Project::Nidhogg => nidhogg::cmd::profile(req, tool),
-        Project::Litehtml | Project::Other(_) => Err(DevError::Config(
+        Project::Litehtml | Project::Sluggrs | Project::Other(_) => Err(DevError::Config(
             "profile is not supported for generic projects (use hotpath instead)".into(),
         )),
         _ => {

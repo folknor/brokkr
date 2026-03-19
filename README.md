@@ -1,6 +1,6 @@
 # brokkr
 
-Command orchestrator and development utility for [pbfhogg](https://github.com/folkol/pbfhogg), elivagar, and nidhogg. Single Rust binary that provides benchmarking, verification, profiling, and operational commands across all three projects.
+Command orchestrator and development utility for [pbfhogg](https://github.com/folkol/pbfhogg), elivagar, nidhogg, and litehtml-rs. Single Rust binary that provides benchmarking, verification, profiling, visual reference testing, and operational commands across all projects.
 
 ## Install
 
@@ -24,6 +24,10 @@ brokkr hotpath pmtiles         # pmtiles micro-benchmark hotpath
 cd ~/Programs/nidhogg
 brokkr serve                   # start the nidhogg server
 brokkr bench api               # API query benchmark
+
+cd ~/Programs/litehtml-rs
+brokkr litehtml test --all     # visual reference tests
+brokkr litehtml outline fixtures/prepared.html --selectors
 ```
 
 ## Commands
@@ -82,6 +86,34 @@ For `elivagar`-specific node-store behavior, `brokkr bench self`, `brokkr hotpat
 **Benchmarks**: `api` (query performance), `nid-ingest` (ingest performance).
 
 **Verification**: `batch [--dataset]` (batch query, bbox from dataset config), `nid-geocode`, `readonly [--dataset]` (read-only filesystem).
+
+### litehtml-rs
+
+Visual reference testing and fixture preprocessing (`brokkr litehtml <subcommand>`):
+
+| Subcommand | Description |
+|------------|-------------|
+| `test` | Run fixtures against Chrome reference artifacts (pixel diff + element comparison) |
+| `list` | Show fixtures, tags, and approval state |
+| `approve` | Record current divergence as accepted baseline |
+| `status` | Dashboard of all fixtures vs approved baselines |
+| `report` | Show results for a past test run |
+| `prepare` | Normalize raw email HTML into self-contained fixture (images → gray PNGs, inject Ahem font, strip external resources, pretty-print) |
+| `extract` | Extract sub-fixture by CSS selector (`--selector`) or sibling range (`--from`/`--to`) |
+| `outline` | Structural overview with section markers, content previews, and suggested selectors |
+
+**Fixture workflow**:
+```
+brokkr litehtml prepare raw-email.html fixtures/email-prepared.html
+brokkr litehtml outline fixtures/email-prepared.html --selectors
+brokkr litehtml extract fixtures/email-prepared.html \
+  --from "div:nth-of-type(2) > table > tbody > tr > td > div:nth-of-type(4) > div" \
+  --to   "div:nth-of-type(2) > table > tbody > tr > td > div:nth-of-type(7) > div" \
+  fixtures/creatine_products.html
+brokkr litehtml test creatine_products
+```
+
+`prepare` and `extract` shell out to a Node.js script (requires Node + pnpm; auto-installs dependencies on first use). Node is already required for Puppeteer-based Chrome capture.
 
 ## Preview pipeline
 
@@ -197,7 +229,7 @@ elivagar = "/home/folk/Programs/elivagar"
 nidhogg = "/home/folk/Programs/nidhogg"
 ```
 
-- `project` — which project this is (`pbfhogg`, `elivagar`, or `nidhogg`)
+- `project` — which project this is (`pbfhogg`, `elivagar`, `nidhogg`, or `litehtml-rs`)
 - `[hostname.datasets.*]` — named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
 - `xxhash` — optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` — per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir

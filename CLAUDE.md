@@ -1,6 +1,6 @@
 # brokkr
 
-Shared development tooling for pbfhogg, elivagar, and nidhogg. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
+Shared development tooling for pbfhogg, elivagar, nidhogg, and litehtml-rs. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
 
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
@@ -10,7 +10,7 @@ Shared development tooling for pbfhogg, elivagar, and nidhogg. Single Rust binar
 
 ## How it works
 
-Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg"`). Commands are gated by project — running a pbfhogg-only command from elivagar's root produces an error.
+Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs"`). Commands are gated by project — running a pbfhogg-only command from elivagar's root produces an error.
 
 Install: `cargo install --path ~/Programs/brokkr`
 
@@ -21,11 +21,11 @@ Single crate, single binary. No workspace.
 ### Source layout
 
 - `src/main.rs` — `main()`, command dispatch, all `cmd_*` handler functions
-- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command`, `BenchCommand`, `VerifyCommand`
+- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command`, `BenchCommand`, `VerifyCommand`, `LitehtmlCommand`
 - `src/context.rs` — `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
 - `src/resolve.rs` — Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
-- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg), `detect()` (delegates to `config::load()`), `require()` gating
-- `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
+- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml), `detect()` (delegates to `config::load()`), `require()` gating
+- `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
 - `src/request.rs` — Shared request structs (`BenchRequest`, `HotpathRequest`, `ProfileRequest`, `ResultsQuery`)
@@ -57,6 +57,8 @@ Single crate, single binary. No workspace.
 - `src/pbfhogg/` — 25 modules: benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), hotpath, profile, download
 - `src/elivagar/` — 12 modules: benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath, profile
 - `src/nidhogg/` — 13 modules: server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath, profile. `mod.rs` has shared curl helpers. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
+- `src/litehtml/` — 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.
+- `scripts/litehtml-prepare/` — Node.js fixture preprocessing (cheerio + pngjs). `prepare.js` handles `prepare`, `extract`, and `outline` subcommands. Dependencies managed via pnpm (`package.json`, `pnpm-lock.yaml`).
 
 ## brokkr.toml format
 
@@ -125,6 +127,36 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `profile` — sampling profiler (perf/samply)
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Every invocation (except `history` itself) is recorded with timing, exit status, project, commit, and system context. Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
+
+## Litehtml commands (`brokkr litehtml <subcommand>`)
+
+Gated to `project = "litehtml-rs"`. Visual reference testing — renders HTML fixtures through a pipeline binary, compares against Chrome screenshots.
+
+- `test [fixture] [--suite S] [--all] [--recapture]` — run fixtures against Chrome reference artifacts. Builds pipeline binary, produces pixel diff + element match comparison.
+- `list` — show configured fixtures with tags, expected outcome, and approval state
+- `approve <fixture>` — record current divergence as accepted baseline (requires clean git tree)
+- `report <run_id>` — show results table for a past test run
+- `status` — dashboard: all fixtures with approved baseline vs last run, delta, improvements
+- `prepare <input.html> <output.html>` — normalize raw email HTML into self-contained fixture (replaces images with correctly-sized gray PNGs, strips background-image/external CSS, injects Ahem font, pretty-prints). Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`.
+- `extract <input.html> [--selector S | --from S --to S] <output.html>` — extract sub-fixture from prepared HTML. `--selector` for single element, `--from`/`--to` for sibling range. Preserves ancestor context and table cell stubs.
+- `outline <input.html> [--depth N] [--full] [--selectors]` — structural overview of prepared HTML showing sections, image dimensions, text previews, and suggested CSS selectors for extract.
+
+### Litehtml config in brokkr.toml
+
+```toml
+[litehtml]
+viewport_width = 800
+mode = "ahem"
+pixel_diff_threshold = 0.5
+element_match_threshold = 95.0
+fallback_aspect_ratio = 2.0  # optional, for prepare command
+
+[[litehtml.fixture]]
+id = "creatine_hero"
+path = "fixtures/creatine_hero/creatine_hero.html"
+tags = ["creatine"]
+expected = "pass"
+```
 
 ## Benchmark harness
 
