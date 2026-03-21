@@ -1014,6 +1014,29 @@ pub(crate) enum SluggrsCommand {
         /// Run ID (or prefix)
         run_id: String,
     },
+    /// Run hotpath profiling (function-level timing/allocation instrumentation)
+    #[command(display_order = 5)]
+    Hotpath {
+        /// Run allocation profiling instead of timing
+        #[arg(long)]
+        alloc: bool,
+
+        /// Number of runs; best-of-N is stored (default: 1)
+        #[arg(long, default_value = "1")]
+        runs: usize,
+
+        /// Run even if the git tree is dirty (results will not be stored)
+        #[arg(long)]
+        force: bool,
+
+        /// Cargo features to enable (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
+
+        /// Build and benchmark an old commit via git worktree
+        #[arg(long)]
+        commit: Option<String>,
+    },
 }
 
 /// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.

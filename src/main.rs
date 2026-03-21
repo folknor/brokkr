@@ -296,6 +296,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 SluggrsCommand::Report { run_id } => {
                     sluggrs::cmd::report(project, &project_root, &run_id)
                 }
+                SluggrsCommand::Hotpath { alloc, runs, force, features, commit } => {
+                    context::with_worktree(&project_root, commit.as_deref(), |build_root| {
+                        sluggrs::hotpath::cmd(
+                            &dev_config, project, &project_root, build_root,
+                            runs, alloc, force, &features,
+                        )
+                    })
+                }
             }
         }
     }
@@ -1055,7 +1063,14 @@ fn cmd_hotpath(
     match req.project {
         Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, opts),
         Project::Nidhogg => nidhogg::cmd::hotpath(req),
-        Project::Litehtml | Project::Sluggrs | Project::Other(_) => cmd_hotpath_generic(req),
+        Project::Sluggrs => {
+            let features: Vec<String> = req.all_features.iter().map(|s| (*s).to_owned()).collect();
+            sluggrs::hotpath::cmd(
+                req.dev_config, req.project, req.project_root, req.build_root,
+                req.runs, req.alloc, req.force, &features,
+            )
+        }
+        Project::Litehtml | Project::Other(_) => cmd_hotpath_generic(req),
         _ => {
             project::require(req.project, Project::Pbfhogg, "hotpath")?;
             pbfhogg::cmd::hotpath(req, osc_seq, test)

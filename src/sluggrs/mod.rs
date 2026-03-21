@@ -2,6 +2,7 @@
 
 pub(crate) mod cmd;
 pub(crate) mod db;
+pub(crate) mod hotpath;
 
 use std::io::Read;
 
