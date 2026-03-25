@@ -304,6 +304,7 @@ pub(crate) fn hotpath(
         &ctx.paths.scratch_dir,
         req.project_root,
         test,
+        req.dataset,
     )
 }
 

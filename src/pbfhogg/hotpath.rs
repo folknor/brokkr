@@ -25,6 +25,7 @@ fn build_test_suite(
     osc_str: &str,
     merged_str: &str,
     cat_output_str: &str,
+    geocode_output_str: &str,
 ) -> Vec<HotpathTest> {
     vec![
         HotpathTest {
@@ -85,6 +86,17 @@ fn build_test_suite(
                 merged_str.into(),
             ],
         },
+        HotpathTest {
+            label: "build-geocode-index",
+            args: vec![
+                binary_str.into(),
+                "build-geocode-index".into(),
+                pbf_str.into(),
+                "--output-dir".into(),
+                geocode_output_str.into(),
+                "--force".into(),
+            ],
+        },
     ]
 }
 
@@ -101,7 +113,7 @@ fn build_test_suite(
 /// Tests that fail are reported but do not abort the suite — remaining tests
 /// continue to run.  The command exits successfully if at least one test passed.
 /// Available test labels for `--test` filtering.
-pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none"];
+pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none", "build-geocode-index"];
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -115,6 +127,7 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
     test_filter: Option<&str>,
+    dataset: &str,
 ) -> Result<(), DevError> {
     if let Some(name) = test_filter.filter(|n| !TEST_LABELS.contains(n)) {
         return Err(DevError::Config(format!(
@@ -125,6 +138,7 @@ pub fn run(
     std::fs::create_dir_all(scratch_dir)?;
     let merged_path = scratch_dir.join("hotpath-merged.osm.pbf");
     let cat_output_path = scratch_dir.join("hotpath-cat-output.osm.pbf");
+    let geocode_output_path = scratch_dir.join(format!("geocode-{dataset}"));
 
     let binary_str = binary
         .to_str()
@@ -141,6 +155,9 @@ pub fn run(
     let cat_output_str = cat_output_path
         .to_str()
         .ok_or_else(|| DevError::Config("cat output path is not valid UTF-8".into()))?;
+    let geocode_output_str = geocode_output_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("geocode output path is not valid UTF-8".into()))?;
 
     let basename = pbf_path
         .file_name()
@@ -148,7 +165,7 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str);
+    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str, geocode_output_str);
 
     let mut passed = 0usize;
     let mut failed: Vec<(&str, String)> = Vec::new();

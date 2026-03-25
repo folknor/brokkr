@@ -52,6 +52,7 @@ pub fn run(
         scratch_dir,
         project_root,
         None,
+        dataset_name,
     )?;
 
     // -----------------------------------------------------------------------
@@ -81,6 +82,7 @@ pub fn run(
         scratch_dir,
         project_root,
         None,
+        dataset_name,
     )?;
 
     // -----------------------------------------------------------------------
