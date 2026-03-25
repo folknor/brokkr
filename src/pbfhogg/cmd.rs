@@ -140,6 +140,24 @@ pub(crate) fn bench_merge(
     )
 }
 
+pub(crate) fn bench_build_geocode_index(
+    req: &BenchRequest,
+) -> Result<(), DevError> {
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench build-geocode-index", req.force)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    super::bench_build_geocode_index::run(
+        &ctx.harness,
+        &ctx.binary,
+        &pbf_path,
+        file_mb,
+        req.runs,
+        &ctx.paths.scratch_dir,
+        req.dataset,
+        req.project_root,
+    )
+}
+
 pub(crate) fn bench_all(
     req: &BenchRequest,
 ) -> Result<(), DevError> {

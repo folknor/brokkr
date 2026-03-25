@@ -589,8 +589,18 @@ pub(crate) enum BenchCommand {
         #[arg(long, default_value = "zlib,none")]
         compression: String,
     },
-    /// [pbfhogg] Run full benchmark suite (commands + baselines)
+    /// [pbfhogg] Benchmark build-geocode-index command
     #[command(display_order = 8)]
+    BuildGeocodeIndex {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+    /// [pbfhogg] Run full benchmark suite (commands + baselines)
+    #[command(display_order = 9)]
     All {
         #[arg(long, default_value = "denmark")]
         dataset: String,

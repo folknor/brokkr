@@ -711,6 +711,15 @@ fn cmd_clean(dev_config: &config::DevConfig, project: Project, project_root: &Pa
                         std::fs::remove_file(&path).ok();
                         removed += 1;
                     }
+                    // Clean geocode output directories (geocode-<dataset>/).
+                    if path.is_dir() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("geocode-") {
+                                std::fs::remove_dir_all(&path).ok();
+                                removed += 1;
+                            }
+                        }
+                    }
                 }
             }
             if removed > 0 {
@@ -877,6 +886,11 @@ fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Pa
             project::require(project, Project::Pbfhogg, "bench merge")?;
             let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
             pbfhogg::cmd::bench_merge(&req, osc_seq.as_deref(), uring, &compression)
+        }
+        BenchCommand::BuildGeocodeIndex { dataset, variant, runs } => {
+            project::require(project, Project::Pbfhogg, "bench build-geocode-index")?;
+            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
+            pbfhogg::cmd::bench_build_geocode_index(&req)
         }
         BenchCommand::All { dataset, variant, runs } => {
             project::require(project, Project::Pbfhogg, "bench all")?;

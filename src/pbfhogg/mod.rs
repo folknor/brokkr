@@ -21,6 +21,7 @@ pub(crate) mod cmd;
 pub mod bench_allocator;
 pub mod bench_all;
 pub mod bench_blob_filter;
+pub mod bench_build_geocode_index;
 pub mod bench_commands;
 pub mod bench_extract;
 pub mod bench_merge;
