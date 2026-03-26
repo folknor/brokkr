@@ -293,6 +293,8 @@ pub(crate) fn hotpath(
         None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
     };
 
+    let bbox = resolve_bbox(None, req.dataset, &ctx.paths).ok();
+
     super::hotpath::run(
         &ctx.harness,
         &ctx.binary,
@@ -305,6 +307,7 @@ pub(crate) fn hotpath(
         req.project_root,
         test,
         req.dataset,
+        bbox.as_deref(),
     )
 }
 
@@ -320,6 +323,8 @@ pub(crate) fn profile(
         None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
     };
 
+    let bbox = resolve_bbox(None, req.dataset, &ctx.paths).ok();
+
     super::profile::run(
         &ctx.harness,
         &pbf_path,
@@ -329,5 +334,6 @@ pub(crate) fn profile(
         &ctx.paths.scratch_dir,
         req.features,
         req.build_root.unwrap_or(req.project_root),
+        bbox.as_deref(),
     )
 }

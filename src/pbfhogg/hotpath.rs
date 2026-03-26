@@ -26,8 +26,12 @@ fn build_test_suite(
     merged_str: &str,
     cat_output_str: &str,
     geocode_output_str: &str,
+    bbox: Option<&str>,
+    extract_simple_str: &str,
+    extract_complete_str: &str,
+    extract_smart_str: &str,
 ) -> Vec<HotpathTest> {
-    vec![
+    let mut tests = vec![
         HotpathTest {
             label: "inspect-tags",
             args: vec![
@@ -97,7 +101,34 @@ fn build_test_suite(
                 "--force".into(),
             ],
         },
-    ]
+    ];
+
+    if let Some(bbox) = bbox {
+        let extract_tests: &[(&str, &str, &str)] = &[
+            ("extract-simple", "--simple", extract_simple_str),
+            ("extract-complete", "", extract_complete_str),
+            ("extract-smart", "--smart", extract_smart_str),
+        ];
+        for &(label, strategy_flag, output_str) in extract_tests {
+            let mut args = vec![
+                binary_str.into(),
+                "extract".into(),
+                pbf_str.into(),
+            ];
+            if !strategy_flag.is_empty() {
+                args.push(strategy_flag.into());
+            }
+            args.extend([
+                "-b".into(),
+                bbox.into(),
+                "-o".into(),
+                output_str.into(),
+            ]);
+            tests.push(HotpathTest { label, args });
+        }
+    }
+
+    tests
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +144,7 @@ fn build_test_suite(
 /// Tests that fail are reported but do not abort the suite — remaining tests
 /// continue to run.  The command exits successfully if at least one test passed.
 /// Available test labels for `--test` filtering.
-pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none", "build-geocode-index"];
+pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none", "build-geocode-index", "extract-simple", "extract-complete", "extract-smart"];
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -128,6 +159,7 @@ pub fn run(
     project_root: &Path,
     test_filter: Option<&str>,
     dataset: &str,
+    bbox: Option<&str>,
 ) -> Result<(), DevError> {
     if let Some(name) = test_filter.filter(|n| !TEST_LABELS.contains(n)) {
         return Err(DevError::Config(format!(
@@ -139,6 +171,9 @@ pub fn run(
     let merged_path = scratch_dir.join("hotpath-merged.osm.pbf");
     let cat_output_path = scratch_dir.join("hotpath-cat-output.osm.pbf");
     let geocode_output_path = scratch_dir.join(format!("geocode-{dataset}"));
+    let extract_simple_path = scratch_dir.join("hotpath-extract-simple.osm.pbf");
+    let extract_complete_path = scratch_dir.join("hotpath-extract-complete.osm.pbf");
+    let extract_smart_path = scratch_dir.join("hotpath-extract-smart.osm.pbf");
 
     let binary_str = binary
         .to_str()
@@ -158,6 +193,15 @@ pub fn run(
     let geocode_output_str = geocode_output_path
         .to_str()
         .ok_or_else(|| DevError::Config("geocode output path is not valid UTF-8".into()))?;
+    let extract_simple_str = extract_simple_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("extract output path is not valid UTF-8".into()))?;
+    let extract_complete_str = extract_complete_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("extract output path is not valid UTF-8".into()))?;
+    let extract_smart_str = extract_smart_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("extract output path is not valid UTF-8".into()))?;
 
     let basename = pbf_path
         .file_name()
@@ -165,7 +209,7 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str, geocode_output_str);
+    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str, geocode_output_str, bbox, extract_simple_str, extract_complete_str, extract_smart_str);
 
     let mut passed = 0usize;
     let mut failed: Vec<(&str, String)> = Vec::new();
@@ -211,6 +255,9 @@ pub fn run(
     // Clean up output files (ignore errors if they don't exist).
     std::fs::remove_file(&merged_path).ok();
     std::fs::remove_file(&cat_output_path).ok();
+    std::fs::remove_file(&extract_simple_path).ok();
+    std::fs::remove_file(&extract_complete_path).ok();
+    std::fs::remove_file(&extract_smart_path).ok();
 
     if !failed.is_empty() {
         output::hotpath_msg(&format!(

@@ -25,6 +25,7 @@ pub fn run(
     scratch_dir: &Path,
     extra_features: &[String],
     project_root: &Path,
+    bbox: Option<&str>,
 ) -> Result<(), DevError> {
     output::hotpath_msg(&format!("=== {dataset_name} ({file_mb:.0} MB) ==="));
 
@@ -53,6 +54,7 @@ pub fn run(
         project_root,
         None,
         dataset_name,
+        bbox,
     )?;
 
     // -----------------------------------------------------------------------
@@ -83,6 +85,7 @@ pub fn run(
         project_root,
         None,
         dataset_name,
+        bbox,
     )?;
 
     // -----------------------------------------------------------------------
