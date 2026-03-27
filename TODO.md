@@ -112,20 +112,11 @@ Computes min/max/avg/p50/p95. Composes with --phase, --range, --where.
 
 Also implemented but not in original TODO: `--fields`, `--every`, `--where`, `--head`, `--tail` for agent-friendly pipe-free querying. Time output changed from microseconds to fractional seconds.
 
-### Sidecar: --markers --phases
+### ~~Sidecar: --markers --phases~~ FIXED
+Shows START/END pairs with duration, peak RSS, peak anon, and peak majflt delta from samples.
 
-Show only paired phase markers (filter out standalone markers), with duration and peak RSS/majflt from samples within each phase. A richer version of `--durations` that cross-references sample data.
-
-### Sidecar: --compare-timeline <uuid1> <uuid2>
-
-Phase-aligned comparison of two sidecar runs. Aligns phases by marker name, shows per-phase deltas for duration, peak RSS, disk I/O, and CPU%. The table view from the spec:
-
-```
-Phase         | Run 1 (ee9b19f)       | Run 2 (d272b49)       | Delta
---------------+-----------------------+-----------------------+--------
-STAGE1        |   82s   69MB  0 mflt  |   82s   69MB  0 mflt  |   0%
-STAGE2        |  331s   69MB  0 mflt  |  301s   69MB  0 mflt  |  -9%
-```
+### ~~Sidecar: --compare-timeline~~ FIXED
+Phase-aligned comparison of two runs with duration, peak anon, disk read, and delta %.
 
 ### Sidecar: no foreign keys on sidecar tables
 
