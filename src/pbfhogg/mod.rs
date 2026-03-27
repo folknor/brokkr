@@ -23,6 +23,7 @@ pub mod bench_all;
 pub mod bench_blob_filter;
 pub mod bench_build_geocode_index;
 pub mod bench_commands;
+pub mod commands;
 pub mod bench_extract;
 pub mod bench_merge;
 pub mod bench_planetiler;

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod cmd;
 pub mod bench_all;
+pub mod commands;
 pub mod bench_node_store;
 pub mod bench_planetiler;
 pub mod bench_pmtiles;

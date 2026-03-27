@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "brokkr", about = "Shared development tooling", version)]
@@ -63,6 +63,48 @@ Examples:
         /// Arguments passed to the binary
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Run a measured command (wall-clock, hotpath, alloc, or profile)
+    #[command(display_order = 2)]
+    Measure {
+        /// Function-level timing via hotpath feature
+        #[arg(long)]
+        hotpath: bool,
+
+        /// Per-function allocation tracking via hotpath-alloc feature
+        #[arg(long)]
+        alloc: bool,
+
+        /// Two-pass profiling (pbfhogg: timing+alloc; elivagar: sampling profiler)
+        #[arg(long)]
+        profile: bool,
+
+        /// Print full build/bench/result output
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Build and benchmark an old commit via git worktree
+        #[arg(long)]
+        commit: Option<String>,
+
+        /// Cargo features to enable (e.g. linux-io-uring)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
+
+        /// Run even if the git tree is dirty (results will not be stored)
+        #[arg(long)]
+        force: bool,
+
+        /// Skip memory availability check
+        #[arg(long)]
+        no_mem_check: bool,
+
+        /// Profiling tool for elivagar (perf or samply)
+        #[arg(long)]
+        tool: Option<String>,
+
+        #[command(subcommand)]
+        command: MeasureCommand,
     },
     /// Query benchmark results
     #[command(display_order = 3, long_about = "\
@@ -744,6 +786,386 @@ pub(crate) enum BenchCommand {
         runs: usize,
         #[arg(long)]
         uring: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Shared args for pbfhogg measured commands
+// ---------------------------------------------------------------------------
+
+#[derive(Args, Clone)]
+pub(crate) struct PbfArgs {
+    /// Dataset name from brokkr.toml
+    #[arg(long, default_value = "denmark")]
+    pub(crate) dataset: String,
+    /// PBF variant to use (raw, indexed, locations)
+    #[arg(long, default_value = "indexed")]
+    pub(crate) variant: String,
+    /// Number of measurement runs (best-of-N stored)
+    #[arg(long, default_value = "3")]
+    pub(crate) runs: usize,
+}
+
+// ---------------------------------------------------------------------------
+// MeasureCommand — subcommands for `brokkr measure <command>`
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Subcommand)]
+pub(crate) enum MeasureCommand {
+    // ----- pbfhogg tool CLI commands -----
+
+    /// [pbfhogg] Inspect PBF metadata
+    #[command(name = "inspect", display_order = 0)]
+    Inspect {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Inspect PBF node statistics
+    #[command(name = "inspect-nodes", display_order = 0)]
+    InspectNodes {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Inspect PBF tag frequencies
+    #[command(name = "inspect-tags", display_order = 0)]
+    InspectTags {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Inspect PBF tag frequencies (way type only)
+    #[command(name = "inspect-tags-way", display_order = 0)]
+    InspectTagsWay {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Check referential integrity
+    #[command(name = "check-refs", display_order = 0)]
+    CheckRefs {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Check ID ordering
+    #[command(name = "check-ids", display_order = 0)]
+    CheckIds {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Sort PBF
+    #[command(name = "sort", display_order = 0)]
+    Sort {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Cat way elements
+    #[command(name = "cat-way", display_order = 0)]
+    CatWay {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Cat relation elements
+    #[command(name = "cat-relation", display_order = 0)]
+    CatRelation {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Cat with deduplication
+    #[command(name = "cat-dedupe", display_order = 0)]
+    CatDedupe {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Tags filter (way/highway=primary)
+    #[command(name = "tags-filter-way", display_order = 0)]
+    TagsFilterWay {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Tags filter (amenity=restaurant)
+    #[command(name = "tags-filter-amenity", display_order = 0)]
+    TagsFilterAmenity {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Tags filter two-pass
+    #[command(name = "tags-filter-twopass", display_order = 0)]
+    TagsFilterTwopass {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Tags filter OSC input
+    #[command(name = "tags-filter-osc", display_order = 0)]
+    TagsFilterOsc {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// OSC sequence number from brokkr.toml
+        #[arg(long)]
+        osc_seq: Option<String>,
+    },
+    /// [pbfhogg] Get elements by ID
+    #[command(name = "getid", display_order = 0)]
+    Getid {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Get parent elements
+    #[command(name = "getparents", display_order = 0)]
+    Getparents {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Get elements by ID (inverted)
+    #[command(name = "getid-invert", display_order = 0)]
+    GetidInvert {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Renumber element IDs
+    #[command(name = "renumber", display_order = 0)]
+    Renumber {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Merge OSC changes
+    #[command(name = "merge-changes", display_order = 0)]
+    MergeChanges {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// OSC sequence number from brokkr.toml
+        #[arg(long)]
+        osc_seq: Option<String>,
+    },
+    /// [pbfhogg] Apply OSC changes to PBF
+    #[command(name = "apply-changes", display_order = 0)]
+    ApplyChanges {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// OSC sequence number from brokkr.toml
+        #[arg(long)]
+        osc_seq: Option<String>,
+    },
+    /// [pbfhogg] Add location data to ways
+    #[command(name = "add-locations-to-ways", display_order = 0)]
+    AddLocationsToWays {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Index type (dense, sparse, external; default: hash)
+        #[arg(long)]
+        index_type: Option<String>,
+    },
+    /// [pbfhogg] Extract by bounding box (simple strategy)
+    #[command(name = "extract-simple", display_order = 0)]
+    ExtractSimple {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Extract by bounding box (complete strategy)
+    #[command(name = "extract-complete", display_order = 0)]
+    ExtractComplete {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Extract by bounding box (smart strategy)
+    #[command(name = "extract-smart", display_order = 0)]
+    ExtractSmart {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Filter by timestamp
+    #[command(name = "time-filter", display_order = 0)]
+    TimeFilter {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+    /// [pbfhogg] Diff two PBFs (summary)
+    #[command(name = "diff", display_order = 0)]
+    Diff {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// OSC sequence number from brokkr.toml
+        #[arg(long)]
+        osc_seq: Option<String>,
+    },
+    /// [pbfhogg] Diff two PBFs (OSC output)
+    #[command(name = "diff-osc", display_order = 0)]
+    DiffOsc {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// OSC sequence number from brokkr.toml
+        #[arg(long)]
+        osc_seq: Option<String>,
+    },
+    /// [pbfhogg] Build geocode index
+    #[command(name = "build-geocode-index", display_order = 0)]
+    BuildGeocodeIndex {
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
+
+    // ----- pbfhogg multi-variant commands -----
+
+    /// [pbfhogg] Extract by bounding box (configurable strategy)
+    #[command(name = "extract", display_order = 1)]
+    Extract {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Extract strategy: simple, complete, smart, or all
+        #[arg(long, default_value = "all")]
+        strategy: String,
+        /// Bounding box (lon_min,lat_min,lon_max,lat_max)
+        #[arg(long)]
+        bbox: Option<String>,
+    },
+    /// [pbfhogg] Read benchmark
+    #[command(name = "read", display_order = 1)]
+    Read {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Read modes (comma-separated: sequential,parallel,pipelined,blobreader)
+        #[arg(long, default_value = "sequential,parallel,pipelined,blobreader")]
+        modes: String,
+    },
+    /// [pbfhogg] Write benchmark
+    #[command(name = "write", display_order = 1)]
+    Write {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Compression (comma-separated: none,zlib:6,zstd:3)
+        #[arg(long, default_value = "none,zlib:6,zstd:3")]
+        compression: String,
+    },
+    /// [pbfhogg] Merge benchmark
+    #[command(name = "merge", display_order = 1)]
+    Merge {
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Compression (comma-separated: zlib,none)
+        #[arg(long, default_value = "zlib,none")]
+        compression: String,
+        /// Use io-uring
+        #[arg(long)]
+        uring: bool,
+        /// OSC sequence number from brokkr.toml
+        #[arg(long)]
+        osc_seq: Option<String>,
+    },
+
+    // ----- elivagar commands -----
+
+    /// [elivagar] Full tile generation pipeline
+    #[command(name = "tilegen", display_order = 10)]
+    Tilegen {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "3")]
+        runs: usize,
+        /// Resume from checkpoint: ocean or sort
+        #[arg(long)]
+        skip_to: Option<String>,
+        /// Gzip compression level 0-10
+        #[arg(long)]
+        compression_level: Option<u32>,
+        /// Skip ocean processing
+        #[arg(long)]
+        no_ocean: bool,
+        /// Force compact node store even without PBF sort header
+        #[arg(long)]
+        force_sorted: bool,
+        /// Bypass elivagar flat-index safety guardrails (unsafe)
+        #[arg(long)]
+        allow_unsafe_flat_index: bool,
+        /// Tile output format (mvt or mlt)
+        #[arg(long)]
+        tile_format: Option<String>,
+        /// Tile compression (gzip or brotli)
+        #[arg(long)]
+        tile_compression: Option<String>,
+        /// Compress sort chunks (lz4 or snappy)
+        #[arg(long)]
+        compress_sort_chunks: Option<String>,
+        /// Keep tile blob in memory
+        #[arg(long)]
+        in_memory: bool,
+        /// Input PBF has locations on ways
+        #[arg(long)]
+        locations_on_ways: bool,
+        /// Default fanout cap for all layers
+        #[arg(long)]
+        fanout_cap_default: Option<u32>,
+        /// Per-layer fanout caps (comma-separated layer=N pairs)
+        #[arg(long)]
+        fanout_cap: Option<String>,
+        /// Polygon simplification factor (default 1.0, range 0.1-10.0)
+        #[arg(long)]
+        polygon_simplify_factor: Option<f64>,
+    },
+    /// [elivagar] PMTiles writer micro-benchmark
+    #[command(name = "pmtiles-writer", display_order = 11)]
+    PmtilesWriter {
+        /// Number of synthetic tiles
+        #[arg(long, default_value = "500000")]
+        tiles: usize,
+        /// Number of runs
+        #[arg(long, default_value = "1")]
+        runs: usize,
+    },
+    /// [elivagar] SortedNodeStore micro-benchmark
+    #[command(name = "node-store", display_order = 11)]
+    NodeStore {
+        /// Nodes in millions
+        #[arg(long, default_value = "50")]
+        nodes: usize,
+        /// Number of runs
+        #[arg(long, default_value = "1")]
+        runs: usize,
+    },
+    /// [elivagar] Planetiler comparison baseline
+    #[command(name = "planetiler", display_order = 12)]
+    Planetiler {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+    /// [elivagar] Tilemaker comparison baseline
+    #[command(name = "tilemaker", display_order = 12)]
+    Tilemaker {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+
+    // ----- suites -----
+
+    /// Run a full benchmark suite (pbfhogg or elivagar)
+    #[command(name = "suite", display_order = 20)]
+    Suite {
+        /// Suite name: pbfhogg or elivagar
+        name: String,
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use
+        #[arg(long, default_value = "indexed")]
+        variant: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "3")]
+        runs: usize,
     },
 }
 
