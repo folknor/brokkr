@@ -10,4 +10,6 @@ pub(crate) struct ResultsQuery {
     pub(crate) top: usize,
     pub(crate) timeline: bool,
     pub(crate) markers: bool,
+    pub(crate) summary: bool,
+    pub(crate) durations: bool,
 }

@@ -406,6 +406,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             top,
             timeline,
             markers,
+            summary,
+            durations,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -418,6 +420,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 top,
                 timeline,
                 markers,
+                summary,
+                durations,
             };
             cmd_results(&project_root, &rq)
         }
@@ -966,11 +970,14 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let results_db = db::ResultsDb::open(&db_path)?;
 
     if let Some(ref uuid_prefix) = q.query {
-        // Sidecar JSONL output modes.
+        // Sidecar output modes.
         if q.timeline {
             let samples = results_db.query_sidecar_samples(uuid_prefix)?;
             if samples.is_empty() {
                 output::result_msg("no sidecar data for this result");
+            } else if q.summary {
+                let markers = results_db.query_sidecar_markers(uuid_prefix)?;
+                print_phase_summary(&samples, &markers);
             } else {
                 for s in &samples {
                     println!("{}", sidecar_sample_json(s));
@@ -982,6 +989,8 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             let markers = results_db.query_sidecar_markers(uuid_prefix)?;
             if markers.is_empty() {
                 output::result_msg("no sidecar markers for this result");
+            } else if q.durations {
+                print_marker_durations(&markers);
             } else {
                 for m in &markers {
                     println!("{}", sidecar_marker_json(m));
@@ -1123,6 +1132,143 @@ fn sidecar_marker_json(m: &sidecar::Marker) -> String {
         "{{\"i\":{},\"t\":{},\"name\":\"{}\"}}",
         m.marker_idx, m.timestamp_us, name,
     )
+}
+
+/// Print per-phase summary table from sidecar samples and markers.
+///
+/// Phases are defined by marker pairs: a marker ending in `_START` begins a
+/// phase and the next marker (or child exit) ends it. For each phase, shows
+/// duration, peak RSS (anon), peak majflt rate, and total disk I/O.
+///
+/// If there are no markers, treats the entire run as a single phase.
+fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker]) {
+    // Build phase boundaries from markers.
+    let mut phases: Vec<(&str, i64, i64)> = Vec::new(); // (name, start_us, end_us)
+
+    if markers.is_empty() {
+        // No markers — single phase covering all samples.
+        if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+            phases.push(("(all)", first.timestamp_us, last.timestamp_us));
+        }
+    } else {
+        // Walk markers, pairing _START with the next marker or end of samples.
+        let end_us = samples.last().map_or(0, |s| s.timestamp_us);
+        for (i, m) in markers.iter().enumerate() {
+            let phase_end = markers
+                .get(i + 1)
+                .map_or(end_us, |next| next.timestamp_us);
+            phases.push((&m.name, m.timestamp_us, phase_end));
+        }
+    }
+
+    // Header.
+    println!(
+        "{:<24} {:>8} {:>10} {:>10} {:>12} {:>12}",
+        "Phase", "Duration", "Peak RSS", "Peak Anon", "Disk Read", "Disk Write",
+    );
+    println!("{}", "-".repeat(80));
+
+    for (name, start_us, end_us) in &phases {
+        // Find samples within this phase.
+        let phase_samples: Vec<&sidecar::Sample> = samples
+            .iter()
+            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us <= *end_us)
+            .collect();
+
+        if phase_samples.is_empty() {
+            println!("{name:<24} {:>8}", "(no samples)");
+            continue;
+        }
+
+        let duration_ms = (end_us - start_us) / 1_000;
+        let peak_rss = phase_samples.iter().map(|s| s.rss_kb).max().unwrap_or(0);
+        let peak_anon = phase_samples.iter().map(|s| s.anon_kb).max().unwrap_or(0);
+
+        // Disk I/O delta across the phase (last - first, cumulative counters).
+        let first = phase_samples.first().unwrap();
+        let last = phase_samples.last().unwrap();
+        let disk_read = last.read_bytes - first.read_bytes;
+        let disk_write = last.write_bytes - first.write_bytes;
+
+        println!(
+            "{name:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB",
+            duration_ms,
+            peak_rss,
+            peak_anon,
+            disk_read / 1024,
+            disk_write / 1024,
+        );
+    }
+}
+
+/// Print duration between _START/_END marker pairs.
+///
+/// Matches markers by stripping the `_START`/`_END` suffix to find pairs.
+/// For unpaired markers (standalone), prints the timestamp only.
+fn print_marker_durations(markers: &[sidecar::Marker]) {
+    // Build a map of base_name -> (start_us, end_us).
+    let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
+
+    // Index of consumed markers (to avoid double-counting).
+    let mut consumed = vec![false; markers.len()];
+
+    for (i, m) in markers.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        if let Some(base) = m.name.strip_suffix("_START") {
+            consumed[i] = true;
+            let end_name = format!("{base}_END");
+            // Find the matching END.
+            let end_us = markers[i + 1..]
+                .iter()
+                .enumerate()
+                .find(|(_, m2)| m2.name == end_name)
+                .map(|(j, m2)| {
+                    consumed[i + 1 + j] = true;
+                    m2.timestamp_us
+                });
+            pairs.push((base.to_owned(), m.timestamp_us, end_us));
+        }
+    }
+
+    // Print standalone markers that weren't consumed.
+    let mut standalone: Vec<&sidecar::Marker> = Vec::new();
+    for (i, m) in markers.iter().enumerate() {
+        if !consumed[i] {
+            standalone.push(m);
+        }
+    }
+
+    if !pairs.is_empty() {
+        println!("{:<32} {:>12} {:>12} {:>12}", "Phase", "Start", "End", "Duration");
+        println!("{}", "-".repeat(72));
+        for (name, start_us, end_us) in &pairs {
+            match end_us {
+                Some(end) => {
+                    let dur_ms = (end - start_us) / 1_000;
+                    let start_ms = start_us / 1_000;
+                    let end_ms = end / 1_000;
+                    println!("{name:<32} {:>9}ms {:>9}ms {:>9}ms", start_ms, end_ms, dur_ms);
+                }
+                None => {
+                    let start_ms = start_us / 1_000;
+                    println!("{name:<32} {:>9}ms {:>12} {:>12}", start_ms, "(no end)", "—");
+                }
+            }
+        }
+    }
+
+    if !standalone.is_empty() {
+        if !pairs.is_empty() {
+            println!();
+        }
+        println!("Standalone markers:");
+        for m in &standalone {
+            let ms = m.timestamp_us / 1_000;
+            println!("  {:<32} {:>9}ms", m.name, ms);
+        }
+    }
 }
 
 fn cmd_clean(

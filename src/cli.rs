@@ -595,6 +595,14 @@ Examples:
         /// Output sidecar markers as JSONL (requires UUID argument)
         #[arg(long, requires = "query")]
         markers: bool,
+
+        /// Show per-phase summary table (use with --timeline)
+        #[arg(long, requires = "timeline")]
+        summary: bool,
+
+        /// Show duration between _START/_END marker pairs (use with --markers)
+        #[arg(long, requires = "markers")]
+        durations: bool,
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 4)]
