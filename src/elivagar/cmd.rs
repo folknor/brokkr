@@ -8,65 +8,6 @@ use crate::oom;
 use crate::project::{self, Project};
 use crate::resolve::{resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_path};
 
-pub(crate) fn bench_node_store(req: &MeasureRequest, nodes: usize) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench node-store",
-        req.force,
-    )?;
-    super::bench_node_store::run(&ctx.harness, req.effective_build_root(), nodes, req.runs)
-}
-
-pub(crate) fn bench_pmtiles(req: &MeasureRequest, tiles: usize) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench pmtiles",
-        req.force,
-    )?;
-    super::bench_pmtiles::run(&ctx.harness, req.effective_build_root(), tiles, req.runs)
-}
-
-pub(crate) fn bench_self(
-    req: &MeasureRequest,
-    skip_to: Option<&str>,
-    compression_level: Option<u32>,
-    opts: &super::PipelineOpts,
-) -> Result<(), DevError> {
-    let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        None,
-        &feat_refs,
-        true,
-        "bench self",
-        req.force,
-    )?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    super::bench_self::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        file_mb,
-        req.runs,
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        req.project_root,
-        skip_to,
-        compression_level,
-        opts,
-    )
-}
-
 pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
         req.dev_config,

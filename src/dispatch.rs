@@ -433,12 +433,17 @@ pub fn run_elivagar_command(
 }
 
 /// Elivagar run mode: build, run once, print timing. No DB storage.
+///
+/// Uses `ElivagarCommand::build_config()` to determine build type and
+/// `ElivagarCommand::build_args()` for argument construction.
 fn run_elivagar_run(
     req: &MeasureRequest,
     command: &ElivagarCommand,
 ) -> Result<(), DevError> {
-    match command {
-        ElivagarCommand::Tilegen { .. } => {
+    use crate::elivagar::commands::BuildKind;
+
+    match command.build_config() {
+        BuildKind::MainBinary => {
             let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
             // Run mode never stores results, so dirty tree is always fine.
             let ctx = BenchContext::new(
@@ -453,13 +458,22 @@ fn run_elivagar_run(
                 true,
             )?;
 
-            let (pbf_path, _) =
-                resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-            let pbf_str = pbf_path
-                .to_str()
-                .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+            let pbf_str = if command.needs_pbf() {
+                let (p, _) = resolve_pbf_with_size(
+                    req.dataset,
+                    req.variant,
+                    &ctx.paths,
+                    req.project_root,
+                )?;
+                p.to_str()
+                    .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?
+                    .to_owned()
+            } else {
+                String::new()
+            };
 
-            let args = command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let args =
+                command.build_args(&pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let binary_str = ctx.binary.display().to_string();
@@ -467,9 +481,9 @@ fn run_elivagar_run(
 
             let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
 
-            // Clean up output.
-            let output_path = ctx.paths.scratch_dir.join("bench-self-output.pmtiles");
-            std::fs::remove_file(output_path).ok();
+            for path in command.output_files(&ctx.paths.scratch_dir) {
+                std::fs::remove_file(path).ok();
+            }
 
             if out.code != 0 {
                 return Err(DevError::ExitCode(out.code));
@@ -479,25 +493,181 @@ fn run_elivagar_run(
             output::run_msg(&format!("elapsed={ms}ms"));
             Ok(())
         }
-        ElivagarCommand::PmtilesWriter { tiles } => {
-            run_elivagar_example_run(req, "bench_pmtiles", &["--tiles", &tiles.to_string(), "--runs", "1"])
+        BuildKind::Example(example) => {
+            let build_root = req.build_root.unwrap_or(req.project_root);
+            let binary = crate::build::cargo_build(
+                &crate::build::BuildConfig {
+                    package: None,
+                    bin: None,
+                    example: Some(example.into()),
+                    features: vec![],
+                    default_features: true,
+                    profile: "release",
+                },
+                build_root,
+            )?;
+            let binary_str = binary.display().to_string();
+
+            let args = command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+            output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
+
+            let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+
+            if out.code != 0 {
+                return Err(DevError::ExitCode(out.code));
+            }
+
+            let ms = crate::duration_ms(out.elapsed);
+            output::run_msg(&format!("elapsed={ms}ms"));
+            Ok(())
         }
-        ElivagarCommand::NodeStore { nodes } => {
-            run_elivagar_example_run(req, "bench_node_store", &["--nodes", &nodes.to_string(), "--runs", "1"])
-        }
-        _ => Err(DevError::Config(format!(
+        BuildKind::NoBuild => Err(DevError::Config(format!(
             "command '{}' does not support run mode",
             command.id(),
         ))),
     }
 }
 
-/// Run a cargo example once in run mode (no DB, print timing).
-fn run_elivagar_example_run(
+/// Elivagar bench mode: full harness with DB storage.
+///
+/// Uses `ElivagarCommand::build_config()` to determine how to build and
+/// `ElivagarCommand::build_args()` to get the argument vector. Tilegen uses
+/// `run_external_with_kv` (parses kv from stderr); micro-benchmarks use
+/// `run_internal` (examples handle their own iteration).
+fn run_elivagar_bench(
     req: &MeasureRequest,
-    example: &str,
-    args: &[&str],
+    command: &ElivagarCommand,
 ) -> Result<(), DevError> {
+    use crate::elivagar::commands::BuildKind;
+
+    match command.build_config() {
+        BuildKind::MainBinary => run_elivagar_wallclock(req, command),
+        BuildKind::Example(_) => run_elivagar_internal(req, command),
+        BuildKind::NoBuild => Err(DevError::Config(format!(
+            "command '{}' does not support bench mode via this path",
+            command.id(),
+        ))),
+    }
+}
+
+/// Elivagar wallclock benchmark for the main binary (Tilegen).
+///
+/// Builds the main binary, runs via `run_external_with_kv`, parses kv metrics
+/// from stderr, detects `locations_on_ways`, and stores results.
+fn run_elivagar_wallclock(
+    req: &MeasureRequest,
+    command: &ElivagarCommand,
+) -> Result<(), DevError> {
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        command.package(),
+        &feat_refs,
+        true,
+        &format!("bench {}", command.id()),
+        req.force,
+    )?;
+
+    let (pbf_path, file_mb) = if command.needs_pbf() {
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?
+    } else {
+        (std::path::PathBuf::new(), 0.0)
+    };
+    let pbf_str = pbf_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+
+    let basename = pbf_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_owned();
+
+    let args = command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    output::bench_msg(&format!(
+        "{} ({file_mb:.0} MB), {} run(s)",
+        command.id(),
+        req.runs,
+    ));
+
+    let mut bench_config = BenchConfig {
+        command: command.result_command().into(),
+        variant: command.result_variant(),
+        input_file: if command.needs_pbf() { Some(basename) } else { None },
+        input_mb: if command.needs_pbf() { Some(file_mb) } else { None },
+        cargo_features: None,
+        cargo_profile: "release".into(),
+        runs: req.runs,
+        cli_args: Some(harness::format_cli_args(
+            &ctx.binary.display().to_string(),
+            &arg_refs,
+        )),
+        metadata: command.metadata(),
+    };
+
+    if req.sidecar {
+        ctx.harness.run_external_with_sidecar(
+            &bench_config,
+            &ctx.binary,
+            &arg_refs,
+            req.project_root,
+            &ctx.paths.scratch_dir,
+        )?;
+    } else {
+        // Use kv parsing: elivagar emits timing/metrics to stderr.
+        let (result, stderr) = ctx.harness.run_external_with_kv_raw(
+            &bench_config,
+            &ctx.binary,
+            &arg_refs,
+            req.project_root,
+        )?;
+        let detected = elivagar::detect_locations_on_ways_stderr(&stderr);
+        bench_config.metadata.push(KvPair::text(
+            "meta.locations_on_ways_detected",
+            detected.to_string(),
+        ));
+        ctx.harness.record_result(&bench_config, &result)?;
+    }
+
+    // Clean up output files.
+    for path in command.output_files(&ctx.paths.scratch_dir) {
+        std::fs::remove_file(path).ok();
+    }
+
+    Ok(())
+}
+
+/// Elivagar internal benchmark for cargo examples (PmtilesWriter, NodeStore).
+///
+/// Builds the example binary, runs via `run_internal` (the example handles
+/// its own iteration), and stores results. The harness does 1 external run
+/// while the example does N internal runs.
+fn run_elivagar_internal(
+    req: &MeasureRequest,
+    command: &ElivagarCommand,
+) -> Result<(), DevError> {
+    use crate::context::HarnessContext;
+
+    let ctx = HarnessContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        &format!("bench {}", command.id()),
+        req.force,
+    )?;
+
+    let example = command.example().ok_or_else(|| {
+        DevError::Config(format!("command '{}' has no cargo example", command.id()))
+    })?;
+
     let build_root = req.build_root.unwrap_or(req.project_root);
     let binary = crate::build::cargo_build(
         &crate::build::BuildConfig {
@@ -512,44 +682,45 @@ fn run_elivagar_example_run(
     )?;
     let binary_str = binary.display().to_string();
 
-    output::run_msg(&format!("{binary_str} {}", args.join(" ")));
+    // build_args returns ["--tiles", "500000", "--runs", "1"] or similar.
+    // We pass an empty pbf_str and dummy paths since examples don't need them.
+    let args = command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let out = output::run_passthrough_timed(&binary_str, args)?;
+    output::bench_msg(&format!("{}, {} run(s)", command.id(), req.runs));
 
-    if out.code != 0 {
-        return Err(DevError::ExitCode(out.code));
-    }
+    let config = BenchConfig {
+        command: command.result_command().into(),
+        variant: command.result_variant(),
+        input_file: None,
+        input_mb: None,
+        cargo_features: None,
+        cargo_profile: "release".into(),
+        runs: 1, // example handles its own iterations
+        cli_args: None,
+        metadata: command.metadata(),
+    };
 
-    let ms = crate::duration_ms(out.elapsed);
-    output::run_msg(&format!("elapsed={ms}ms"));
+    ctx.harness.run_internal(&config, |_i| {
+        let captured = output::run_captured(&binary_str, &arg_refs, build_root)?;
+        captured.check_success(&binary_str)?;
+        let ms = harness::elapsed_to_ms(&captured.elapsed);
+        Ok(crate::harness::BenchResult {
+            elapsed_ms: ms,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        })
+    })?;
+
     Ok(())
 }
 
-/// Elivagar bench mode: full harness with DB storage.
-fn run_elivagar_bench(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
-    match command {
-        ElivagarCommand::Tilegen {
-            opts,
-            skip_to,
-            compression_level,
-        } => elivagar::cmd::bench_self(req, *skip_to, *compression_level, opts),
-        ElivagarCommand::PmtilesWriter { tiles } => {
-            elivagar::cmd::bench_pmtiles(req, *tiles)
-        }
-        ElivagarCommand::NodeStore { nodes } => {
-            elivagar::cmd::bench_node_store(req, *nodes)
-        }
-        _ => Err(DevError::Config(format!(
-            "command '{}' does not support bench mode via this path",
-            command.id(),
-        ))),
-    }
-}
-
 /// Elivagar hotpath/alloc: build with hotpath feature, run with instrumentation.
+///
+/// Tilegen uses the main binary with hotpath features. Micro-benchmarks use
+/// their cargo example with hotpath features. Both go through
+/// `run_hotpath_capture` for JSON report collection.
 fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     if !command.supports_hotpath() {
         return Err(DevError::Config(format!(
@@ -558,6 +729,10 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
         )));
     }
 
+    // Tilegen hotpath still delegates to its module because it has special
+    // concerns (PBF resolution, OOM check, locations_on_ways detection,
+    // output cleanup, pipeline opts for arg construction).
+    // Micro-benchmarks delegate to their modules for hotpath feature builds.
     match command {
         ElivagarCommand::Tilegen { opts, .. } => {
             elivagar::cmd::hotpath(req, None, 0, 0, opts)
@@ -576,10 +751,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             *nodes,
             &default_pipeline_opts(),
         ),
-        _ => Err(DevError::Config(format!(
-            "command '{}' does not support hotpath/alloc profiling",
-            command.id(),
-        ))),
+        _ => unreachable!("supports_hotpath() check above"),
     }
 }
 
