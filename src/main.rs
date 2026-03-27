@@ -76,6 +76,58 @@ macro_rules! pbfhogg_cmd {
     }};
 }
 
+macro_rules! elivagar_cmd {
+    ($mode:expr, $dev_config:expr, $project:expr, $project_root:expr, $dataset:expr, $variant:expr, $cmd:expr) => {{
+        let mm = resolve_mode(&$mode)?;
+        let features = resolve_features(&$dev_config, &$mode.features);
+        output::set_quiet(!$mode.verbose);
+        let dataset_ref: &str = $dataset.as_ref();
+        let variant_ref: &str = $variant.as_ref();
+        context::with_worktree(&$project_root, $mode.commit.as_deref(), |build_root| {
+            let req = measure::MeasureRequest {
+                dev_config: &$dev_config,
+                project: $project,
+                project_root: &$project_root,
+                build_root,
+                dataset: dataset_ref,
+                variant: variant_ref,
+                runs: mm.runs(),
+                features: &features,
+                force: $mode.force,
+                mode: mm,
+                no_mem_check: $mode.no_mem_check,
+            };
+            dispatch::run_elivagar_command(&req, &$cmd)
+        })
+    }};
+}
+
+macro_rules! nidhogg_cmd {
+    ($mode:expr, $dev_config:expr, $project:expr, $project_root:expr, $dataset:expr, $variant:expr, $cmd_name:expr, $bench_fn:expr, $hotpath_fn:expr) => {{
+        let mm = resolve_mode(&$mode)?;
+        let features = resolve_features(&$dev_config, &$mode.features);
+        output::set_quiet(!$mode.verbose);
+        let dataset_ref: &str = $dataset.as_ref();
+        let variant_ref: &str = $variant.as_ref();
+        context::with_worktree(&$project_root, $mode.commit.as_deref(), |build_root| {
+            let req = measure::MeasureRequest {
+                dev_config: &$dev_config,
+                project: $project,
+                project_root: &$project_root,
+                build_root,
+                dataset: dataset_ref,
+                variant: variant_ref,
+                runs: mm.runs(),
+                features: &features,
+                force: $mode.force,
+                mode: mm,
+                no_mem_check: $mode.no_mem_check,
+            };
+            dispatch::run_nidhogg_command(&req, $cmd_name, $bench_fn, $hotpath_fn)
+        })
+    }};
+}
+
 fn main() {
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
@@ -531,7 +583,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             mode,
             dataset,
             variant,
-            runs,
+            runs: _,
             skip_to,
             compression_level,
             no_ocean,
@@ -546,299 +598,69 @@ fn run(cli: Cli) -> Result<(), DevError> {
             fanout_cap,
             polygon_simplify_factor,
         } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = mm.runs();
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: &dataset,
-                    variant: &variant,
-                    runs: effective_runs,
-                    features: &features,
-                    force: mode.force,
-                    mode: mm,
-                    no_mem_check: mode.no_mem_check,
-                };
-                let opts = elivagar::PipelineOpts {
-                    no_ocean,
-                    force_sorted,
-                    allow_unsafe_flat_index,
-                    tile_format: tile_format.as_deref(),
-                    tile_compression: tile_compression.as_deref(),
-                    compress_sort_chunks: compress_sort_chunks.as_deref(),
-                    in_memory,
-                    locations_on_ways,
-                    fanout_cap_default,
-                    fanout_cap: fanout_cap.as_deref(),
-                    polygon_simplify_factor,
-                };
-                let cmd = elivagar::commands::ElivagarCommand::Tilegen {
-                    opts: &opts,
-                    skip_to: skip_to.as_deref(),
-                    compression_level,
-                };
-                dispatch::run_elivagar_command(&req, &cmd)
-            })
+            let opts = elivagar::PipelineOpts {
+                no_ocean,
+                force_sorted,
+                allow_unsafe_flat_index,
+                tile_format: tile_format.as_deref(),
+                tile_compression: tile_compression.as_deref(),
+                compress_sort_chunks: compress_sort_chunks.as_deref(),
+                in_memory,
+                locations_on_ways,
+                fanout_cap_default,
+                fanout_cap: fanout_cap.as_deref(),
+                polygon_simplify_factor,
+            };
+            let cmd = elivagar::commands::ElivagarCommand::Tilegen {
+                opts: &opts,
+                skip_to: skip_to.as_deref(),
+                compression_level,
+            };
+            elivagar_cmd!(mode, dev_config, project, project_root, dataset, variant, cmd)
         }
-        Command::PmtilesWriter { mode, tiles, runs } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = mm.runs();
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: "denmark",
-                    variant: "raw",
-                    runs: effective_runs,
-                    features: &features,
-                    force: mode.force,
-                    mode: mm,
-                    no_mem_check: mode.no_mem_check,
-                };
-                let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
-                dispatch::run_elivagar_command(&req, &cmd)
-            })
+        Command::PmtilesWriter { mode, tiles, runs: _ } => {
+            let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
+            elivagar_cmd!(mode, dev_config, project, project_root, "denmark", "raw", cmd)
         }
-        Command::NodeStore { mode, nodes, runs } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = mm.runs();
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: "denmark",
-                    variant: "raw",
-                    runs: effective_runs,
-                    features: &features,
-                    force: mode.force,
-                    mode: mm,
-                    no_mem_check: mode.no_mem_check,
-                };
-                let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
-                dispatch::run_elivagar_command(&req, &cmd)
-            })
+        Command::NodeStore { mode, nodes, runs: _ } => {
+            let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
+            elivagar_cmd!(mode, dev_config, project, project_root, "denmark", "raw", cmd)
         }
-        Command::ElivPlanetiler {
-            mode,
-            dataset,
-            variant,
-            runs,
-        } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = mm.runs();
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: &dataset,
-                    variant: &variant,
-                    runs: effective_runs,
-                    features: &features,
-                    force: mode.force,
-                    mode: mm,
-                    no_mem_check: mode.no_mem_check,
-                };
-                let cmd = elivagar::commands::ElivagarCommand::Planetiler;
-                dispatch::run_elivagar_command(&req, &cmd)
-            })
+        Command::ElivPlanetiler { mode, dataset, variant, runs: _ } => {
+            let cmd = elivagar::commands::ElivagarCommand::Planetiler;
+            elivagar_cmd!(mode, dev_config, project, project_root, dataset, variant, cmd)
         }
-        Command::ElivTilemaker {
-            mode,
-            dataset,
-            variant,
-            runs,
-        } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = mm.runs();
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: &dataset,
-                    variant: &variant,
-                    runs: effective_runs,
-                    features: &features,
-                    force: mode.force,
-                    mode: mm,
-                    no_mem_check: mode.no_mem_check,
-                };
-                let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
-                dispatch::run_elivagar_command(&req, &cmd)
-            })
+        Command::ElivTilemaker { mode, dataset, variant, runs: _ } => {
+            let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
+            elivagar_cmd!(mode, dev_config, project, project_root, dataset, variant, cmd)
         }
 
         // ----- nidhogg commands -----
-        Command::RunApi {
-            mode,
-            dataset,
-            runs,
-            query,
-        } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                project::require(project, Project::Nidhogg, "api")?;
-                let effective_runs = mm.runs();
-                match mm {
-                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
-                        let bench_req = request::BenchRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: "raw",
-                            runs: effective_runs,
-                            features: &features,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::bench_api(&bench_req, query.as_deref())
-                    }
-                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
-                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
-                        let feature = harness::hotpath_feature(alloc);
-                        let mut all_features: Vec<&str> = vec![feature];
-                        all_features.extend(features.iter().map(String::as_str));
-                        let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: "raw",
-                            runs: effective_runs,
-                            all_features: &all_features,
-                            alloc,
-                            no_mem_check: mode.no_mem_check,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::hotpath(&hotpath_req)
-                    }
-                }
-            })
+        Command::RunApi { mode, dataset, runs: _, query } => {
+            let query = query.clone();
+            nidhogg_cmd!(
+                mode, dev_config, project, project_root, dataset, "raw",
+                "api",
+                |req: &request::BenchRequest| nidhogg::cmd::bench_api(req, query.as_deref()),
+                |req: &request::HotpathRequest| nidhogg::cmd::hotpath(req)
+            )
         }
-        Command::RunNidIngest {
-            mode,
-            dataset,
-            variant,
-            runs,
-        } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                project::require(project, Project::Nidhogg, "nid-ingest")?;
-                let effective_runs = mm.runs();
-                match mm {
-                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
-                        let bench_req = request::BenchRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: &variant,
-                            runs: effective_runs,
-                            features: &features,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::bench_ingest(&bench_req)
-                    }
-                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
-                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
-                        let feature = harness::hotpath_feature(alloc);
-                        let mut all_features: Vec<&str> = vec![feature];
-                        all_features.extend(features.iter().map(String::as_str));
-                        let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: &variant,
-                            runs: effective_runs,
-                            all_features: &all_features,
-                            alloc,
-                            no_mem_check: mode.no_mem_check,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::hotpath(&hotpath_req)
-                    }
-                }
-            })
+        Command::RunNidIngest { mode, dataset, variant, runs: _ } => {
+            nidhogg_cmd!(
+                mode, dev_config, project, project_root, dataset, variant,
+                "nid-ingest",
+                |req: &request::BenchRequest| nidhogg::cmd::bench_ingest(req),
+                |req: &request::HotpathRequest| nidhogg::cmd::hotpath(req)
+            )
         }
-        Command::RunTiles {
-            mode,
-            dataset,
-            tiles,
-            runs,
-            uring,
-        } => {
-            let mm = resolve_mode(&mode)?;
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                project::require(project, Project::Nidhogg, "tiles")?;
-                let effective_runs = mm.runs();
-                match mm {
-                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
-                        let bench_req = request::BenchRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: "raw",
-                            runs: effective_runs,
-                            features: &features,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::bench_tiles(&bench_req, tiles.as_deref(), uring)
-                    }
-                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
-                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
-                        let feature = harness::hotpath_feature(alloc);
-                        let mut all_features: Vec<&str> = vec![feature];
-                        all_features.extend(features.iter().map(String::as_str));
-                        let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: "raw",
-                            runs: effective_runs,
-                            all_features: &all_features,
-                            alloc,
-                            no_mem_check: mode.no_mem_check,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::hotpath(&hotpath_req)
-                    }
-                }
-            })
+        Command::RunTiles { mode, dataset, tiles, runs: _, uring } => {
+            let tiles = tiles.clone();
+            nidhogg_cmd!(
+                mode, dev_config, project, project_root, dataset, "raw",
+                "tiles",
+                |req: &request::BenchRequest| nidhogg::cmd::bench_tiles(req, tiles.as_deref(), uring),
+                |req: &request::HotpathRequest| nidhogg::cmd::hotpath(req)
+            )
         }
 
         // ----- sluggrs commands -----

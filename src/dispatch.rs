@@ -388,7 +388,10 @@ fn ensure_merged_pbf(
 // ---------------------------------------------------------------------------
 
 /// Run an elivagar command with the specified measurement mode.
-#[allow(clippy::too_many_lines)]
+///
+/// Handles run, bench, hotpath, and alloc for any elivagar command.
+/// External commands (Planetiler, Tilemaker) delegate to old handlers for
+/// bench mode but do not support run/hotpath/alloc.
 pub fn run_elivagar_command(
     req: &MeasureRequest,
     command: &ElivagarCommand,
@@ -399,16 +402,118 @@ pub fn run_elivagar_command(
         command.id(),
     )?;
 
+    // External tools (Planetiler, Tilemaker) keep their old dispatch path.
+    if command.is_external() {
+        return run_elivagar_external(req, command);
+    }
+
     match req.mode {
-        MeasureMode::Run | MeasureMode::Bench { .. } => run_elivagar_wallclock(req, command),
+        MeasureMode::Run => run_elivagar_run(req, command),
+        MeasureMode::Bench { .. } => run_elivagar_bench(req, command),
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
             run_elivagar_hotpath(req, command)
         }
     }
 }
 
-/// Elivagar wall-clock: delegates to existing bench modules based on command variant.
-fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
+/// Elivagar run mode: build, run once, print timing. No DB storage.
+fn run_elivagar_run(
+    req: &MeasureRequest,
+    command: &ElivagarCommand,
+) -> Result<(), DevError> {
+    match command {
+        ElivagarCommand::Tilegen { .. } => {
+            let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+            let ctx = BenchContext::new(
+                req.dev_config,
+                req.project,
+                req.project_root,
+                req.build_root,
+                command.package(),
+                &feat_refs,
+                true,
+                &format!("run {}", command.id()),
+                req.force,
+            )?;
+
+            let (pbf_path, _) =
+                resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+            let pbf_str = pbf_path
+                .to_str()
+                .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+
+            let args = command.build_tilegen_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+            let binary_str = ctx.binary.display().to_string();
+            output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
+
+            let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+
+            // Clean up output.
+            let output_path = ctx.paths.scratch_dir.join("bench-self-output.pmtiles");
+            std::fs::remove_file(output_path).ok();
+
+            if out.code != 0 {
+                return Err(DevError::ExitCode(out.code));
+            }
+
+            let ms = crate::duration_ms(out.elapsed);
+            output::run_msg(&format!("elapsed={ms}ms"));
+            Ok(())
+        }
+        ElivagarCommand::PmtilesWriter { tiles } => {
+            run_elivagar_example_run(req, "bench_pmtiles", &["--tiles", &tiles.to_string(), "--runs", "1"])
+        }
+        ElivagarCommand::NodeStore { nodes } => {
+            run_elivagar_example_run(req, "bench_node_store", &["--nodes", &nodes.to_string(), "--runs", "1"])
+        }
+        _ => Err(DevError::Config(format!(
+            "command '{}' does not support run mode",
+            command.id(),
+        ))),
+    }
+}
+
+/// Run a cargo example once in run mode (no DB, print timing).
+fn run_elivagar_example_run(
+    req: &MeasureRequest,
+    example: &str,
+    args: &[&str],
+) -> Result<(), DevError> {
+    let build_root = req.build_root.unwrap_or(req.project_root);
+    let binary = crate::build::cargo_build(
+        &crate::build::BuildConfig {
+            package: None,
+            bin: None,
+            example: Some(example.into()),
+            features: vec![],
+            default_features: true,
+            profile: "release",
+        },
+        build_root,
+    )?;
+    let binary_str = binary.display().to_string();
+
+    output::run_msg(&format!("{binary_str} {}", args.join(" ")));
+
+    let out = output::run_passthrough_timed(&binary_str, args)?;
+
+    if out.code != 0 {
+        return Err(DevError::ExitCode(out.code));
+    }
+
+    let ms = crate::duration_ms(out.elapsed);
+    output::run_msg(&format!("elapsed={ms}ms"));
+    Ok(())
+}
+
+/// Elivagar bench mode: full harness with DB storage.
+fn run_elivagar_bench(
+    req: &MeasureRequest,
+    command: &ElivagarCommand,
+) -> Result<(), DevError> {
+    // Delegate to existing bench modules which handle their own harness setup.
     let bench_req = crate::request::BenchRequest {
         dev_config: req.dev_config,
         project: req.project,
@@ -445,8 +550,10 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
             req.runs,
             req.force,
         ),
-        ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(&bench_req),
-        ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(&bench_req),
+        _ => Err(DevError::Config(format!(
+            "command '{}' does not support bench mode via this path",
+            command.id(),
+        ))),
     }
 }
 
@@ -498,7 +605,38 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             *nodes,
             &default_pipeline_opts(),
         ),
-        ElivagarCommand::Planetiler | ElivagarCommand::Tilemaker => Err(DevError::Config(format!(
+        _ => Err(DevError::Config(format!(
+            "command '{}' does not support hotpath/alloc profiling",
+            command.id(),
+        ))),
+    }
+}
+
+/// External tool dispatch (Planetiler, Tilemaker). Only bench mode is supported.
+fn run_elivagar_external(
+    req: &MeasureRequest,
+    command: &ElivagarCommand,
+) -> Result<(), DevError> {
+    match req.mode {
+        MeasureMode::Run | MeasureMode::Bench { .. } => {
+            let bench_req = crate::request::BenchRequest {
+                dev_config: req.dev_config,
+                project: req.project,
+                project_root: req.project_root,
+                build_root: req.build_root,
+                dataset: req.dataset,
+                variant: req.variant,
+                runs: req.runs,
+                features: req.features,
+                force: req.force,
+            };
+            match command {
+                ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(&bench_req),
+                ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(&bench_req),
+                _ => unreachable!(),
+            }
+        }
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => Err(DevError::Config(format!(
             "command '{}' does not support hotpath/alloc profiling",
             command.id(),
         ))),
@@ -519,5 +657,65 @@ fn default_pipeline_opts<'a>() -> elivagar::PipelineOpts<'a> {
         fanout_cap_default: None,
         fanout_cap: None,
         polygon_simplify_factor: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// nidhogg dispatch
+// ---------------------------------------------------------------------------
+
+/// Run a nidhogg command with the specified measurement mode.
+///
+/// Nidhogg commands have complex lifecycle requirements (running servers,
+/// HTTP requests, etc.) so most modes delegate to old handlers. The main
+/// benefit here is a unified entry point and the `nidhogg_cmd!` macro in
+/// main.rs that eliminates boilerplate.
+pub fn run_nidhogg_command(
+    req: &MeasureRequest,
+    command: &str,
+    bench_fn: impl FnOnce(&crate::request::BenchRequest) -> Result<(), DevError>,
+    hotpath_fn: impl FnOnce(&crate::request::HotpathRequest) -> Result<(), DevError>,
+) -> Result<(), DevError> {
+    project::require(
+        req.project,
+        Project::Nidhogg,
+        command,
+    )?;
+
+    match req.mode {
+        MeasureMode::Run | MeasureMode::Bench { .. } => {
+            let bench_req = crate::request::BenchRequest {
+                dev_config: req.dev_config,
+                project: req.project,
+                project_root: req.project_root,
+                build_root: req.build_root,
+                dataset: req.dataset,
+                variant: req.variant,
+                runs: req.runs,
+                features: req.features,
+                force: req.force,
+            };
+            bench_fn(&bench_req)
+        }
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
+            let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
+            let feature = harness::hotpath_feature(alloc);
+            let mut all_features: Vec<&str> = vec![feature];
+            all_features.extend(req.features.iter().map(String::as_str));
+            let hotpath_req = crate::request::HotpathRequest {
+                dev_config: req.dev_config,
+                project: req.project,
+                project_root: req.project_root,
+                build_root: req.build_root,
+                dataset: req.dataset,
+                variant: req.variant,
+                runs: req.runs,
+                all_features: &all_features,
+                alloc,
+                no_mem_check: req.no_mem_check,
+                force: req.force,
+            };
+            hotpath_fn(&hotpath_req)
+        }
     }
 }
