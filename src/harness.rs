@@ -190,7 +190,6 @@ impl BenchHarness {
             // in background threads, and returns everything when the child exits.
             let result = sidecar::run_sidecar(child, &mut fifo, i, start);
 
-            // Check exit status using captured stderr for error messages.
             let captured = output::CapturedOutput {
                 status: result.exit_status,
                 stdout: result.stdout,
@@ -198,15 +197,26 @@ impl BenchHarness {
                 elapsed: result.elapsed,
             };
             let ms = elapsed_to_ms(&captured.elapsed);
-            captured.check_success(&prog_str)?;
+
+            // Always collect sidecar data — especially valuable when the
+            // child is OOM-killed, since the /proc trajectory shows what
+            // happened before the kill.
+            sidecar_runs.push(result.data);
+
+            let exit_err = captured.check_success(&prog_str).err();
+
+            if exit_err.is_some() {
+                // Store sidecar data from the failed run before propagating.
+                drop(fifo);
+                self.store_sidecar(None, &sidecar_runs).ok();
+                return Err(exit_err.unwrap());
+            }
 
             if best_ms.is_none_or(|best| ms < best) {
                 best_ms = Some(ms);
             }
-            sidecar_runs.push(result.data);
         }
 
-        // FIFO cleaned up by Drop (also handles error paths).
         drop(fifo);
 
         let elapsed_ms =
@@ -220,7 +230,6 @@ impl BenchHarness {
         };
 
         let uuid = self.record_result(config, &bench_result)?;
-
         self.store_sidecar(uuid.as_deref(), &sidecar_runs)?;
 
         Ok(bench_result)
@@ -320,7 +329,15 @@ impl BenchHarness {
                 stderr: sidecar_result.stderr,
                 elapsed: sidecar_result.elapsed,
             };
-            captured.check_success(&prog_str)?;
+
+            sidecar_runs.push(sidecar_result.data);
+
+            let exit_err = captured.check_success(&prog_str).err();
+            if let Some(err) = exit_err {
+                drop(fifo);
+                self.store_sidecar(None, &sidecar_runs).ok();
+                return Err(err);
+            }
 
             let result = parse_kv_stderr(&captured.stderr)?;
             let is_new_best = best
@@ -330,7 +347,6 @@ impl BenchHarness {
                 best_stderr = captured.stderr;
             }
             best = Some(pick_best(best, result));
-            sidecar_runs.push(sidecar_result.data);
         }
 
         drop(fifo);
