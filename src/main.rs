@@ -71,7 +71,6 @@ where
             force: mode.force,
             mode: mm,
             no_mem_check: mode.no_mem_check,
-            sidecar: mode.sidecar,
         };
         f(&req)
     })
@@ -229,10 +228,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
-            |req| {
-                warn_sidecar_ignored(req);
-                pbfhogg::cmd::bench_read(req, &modes)
-            },
+            |req| pbfhogg::cmd::bench_read(req, &modes),
         ),
         Command::Write {
             mode,
@@ -245,10 +241,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
-            |req| {
-                warn_sidecar_ignored(req);
-                pbfhogg::cmd::bench_write(req, &compression)
-            },
+            |req| pbfhogg::cmd::bench_write(req, &compression),
         ),
         Command::MergeBench {
             mode,
@@ -264,7 +257,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &pbf.dataset,
             &pbf.variant,
             |req| {
-                warn_sidecar_ignored(req);
                 pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compression)
             },
         ),
@@ -483,7 +475,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &dataset,
             &variant,
             |req| {
-                warn_sidecar_ignored(req);
                 if !matches!(
                     req.mode,
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
@@ -803,19 +794,7 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
         }
         _ => {}
     }
-    if mode.sidecar && !matches!(result, measure::MeasureMode::Bench { .. }) {
-        return Err(DevError::Config(
-            "--sidecar currently requires --bench".into(),
-        ));
-    }
     Ok(result)
-}
-
-/// Warn if `--sidecar` was requested but the command does not support it.
-fn warn_sidecar_ignored(req: &measure::MeasureRequest) {
-    if req.sidecar {
-        output::error("WARNING: --sidecar is not supported for this command — ignoring");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2260,7 +2239,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
     };
 
     ctx.harness.run_internal(&config, |_i| {
-        let (result, _stderr) = harness::run_hotpath_capture(
+        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &[],
             &ctx.paths.scratch_dir,

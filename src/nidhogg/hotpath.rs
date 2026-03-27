@@ -71,7 +71,7 @@ pub fn run(
     };
 
     harness.run_internal(&config, |_i| {
-        let (result, _stderr) =
+        let (result, _stderr, _sidecar) =
             harness::run_hotpath_capture(binary_str, &args, scratch_dir, project_root, &[])?;
         Ok(result)
     })?;

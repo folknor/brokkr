@@ -142,18 +142,8 @@ fn run_pbfhogg_wallclock(
         req.runs,
     ));
 
-    if req.sidecar {
-        ctx.harness.run_external_with_sidecar(
-            &config,
-            &ctx.binary,
-            &arg_refs,
-            req.project_root,
-            &ctx.paths.scratch_dir,
-        )?;
-    } else {
-        ctx.harness
-            .run_external(&config, &ctx.binary, &arg_refs, req.project_root)?;
-    }
+    ctx.harness
+        .run_external(&config, &ctx.binary, &arg_refs, req.project_root)?;
 
     // Clean up scratch output files.
     cleanup_pbfhogg_output(command, &cmd_ctx);
@@ -249,7 +239,7 @@ fn run_pbfhogg_hotpath(
 
     ctx.harness.run_internal(&config, |_i| {
         output::hotpath_msg(command.id());
-        let (result, _stderr) = harness::run_hotpath_capture(
+        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &subprocess_args,
             &scratch_dir,
@@ -409,20 +399,6 @@ pub fn run_elivagar_command(
     // External tools (Planetiler, Tilemaker) keep their old dispatch path.
     if command.is_external() {
         return run_elivagar_external(req, command);
-    }
-
-    // Sidecar is supported for Tilegen bench mode (MainBinary via run_elivagar_wallclock).
-    // Warn for other paths where it would be silently ignored.
-    if req.sidecar
-        && !matches!(
-            (&req.mode, command.build_config()),
-            (
-                MeasureMode::Bench { .. },
-                crate::elivagar::commands::BuildKind::MainBinary
-            )
-        )
-    {
-        output::error("WARNING: --sidecar only supported for elivagar tilegen --bench — ignoring");
     }
 
     match req.mode {
@@ -609,29 +585,20 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         metadata: command.metadata(),
     };
 
-    if req.sidecar {
-        ctx.harness.run_external_with_sidecar(
-            &bench_config,
-            &ctx.binary,
-            &arg_refs,
-            req.project_root,
-            &ctx.paths.scratch_dir,
-        )?;
-    } else {
-        // Use kv parsing: elivagar emits timing/metrics to stderr.
-        let (result, stderr) = ctx.harness.run_external_with_kv_raw(
-            &bench_config,
-            &ctx.binary,
-            &arg_refs,
-            req.project_root,
-        )?;
-        let detected = elivagar::detect_locations_on_ways_stderr(&stderr);
-        bench_config.metadata.push(KvPair::text(
-            "meta.locations_on_ways_detected",
-            detected.to_string(),
-        ));
-        ctx.harness.record_result(&bench_config, &result)?;
-    }
+    // Use kv parsing: elivagar emits timing/metrics to stderr.
+    // Sidecar monitoring runs automatically via run_external_with_kv_raw.
+    let (result, stderr) = ctx.harness.run_external_with_kv_raw(
+        &bench_config,
+        &ctx.binary,
+        &arg_refs,
+        req.project_root,
+    )?;
+    let detected = elivagar::detect_locations_on_ways_stderr(&stderr);
+    bench_config.metadata.push(KvPair::text(
+        "meta.locations_on_ways_detected",
+        detected.to_string(),
+    ));
+    ctx.harness.record_result(&bench_config, &result)?;
 
     // Clean up output files.
     for path in command.output_files(&ctx.paths.scratch_dir) {
@@ -796,7 +763,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             };
 
             ctx.harness.run_internal(&config, |_i| {
-                let (mut result, stderr) = harness::run_hotpath_capture(
+                let (mut result, stderr, _sidecar) = harness::run_hotpath_capture(
                     &binary_str,
                     &arg_refs,
                     &ctx.paths.scratch_dir,
@@ -868,7 +835,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             };
 
             ctx.harness.run_internal(&config, |_i| {
-                let (result, _stderr) = harness::run_hotpath_capture(
+                let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
                     &binary_str,
                     &arg_refs,
                     &ctx.paths.scratch_dir,
@@ -920,10 +887,6 @@ pub fn run_nidhogg_command(
     use crate::nidhogg::commands::NidhoggCommand;
 
     project::require(req.project, Project::Nidhogg, command.id())?;
-
-    if req.sidecar {
-        output::error("WARNING: --sidecar is not yet supported for nidhogg — ignoring");
-    }
 
     match req.mode {
         MeasureMode::Run | MeasureMode::Bench { .. } => match command {

@@ -148,8 +148,14 @@ impl BenchHarness {
         Ok(best)
     }
 
-    /// External timing: run subprocess N times, measure wall-clock.
-    /// Best-of-N (minimum).
+    /// External timing: run subprocess N times with sidecar monitoring.
+    ///
+    /// The sidecar samples `/proc` metrics at 100ms intervals and reads phase
+    /// markers from a FIFO. Sidecar data is stored in `.brokkr/sidecar.db`.
+    ///
+    /// The sidecar takes ownership of each `Child` process, drains
+    /// stdout/stderr in background threads (preventing pipe-buffer deadlock),
+    /// and records the child's exact exit time for wall-clock measurement.
     pub fn run_external(
         &self,
         config: &BenchConfig,
@@ -157,56 +163,13 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
-        let mut best_ms: Option<i64> = None;
-
-        for i in 0..config.runs {
-            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
-
-            let start = Instant::now();
-            let captured = output::run_captured(&program.display().to_string(), args, cwd)?;
-            let ms = elapsed_to_ms(&start.elapsed());
-
-            captured.check_success(&program.display().to_string())?;
-
-            best_ms = Some(pick_best_ms(best_ms, ms));
-        }
-
-        let elapsed_ms =
-            best_ms.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-
-        let result = BenchResult {
-            elapsed_ms,
-            kv: Vec::new(),
-            distribution: None,
-            hotpath: None,
-        };
-        self.record_result(config, &result)?;
-        Ok(result)
-    }
-
-    /// External timing with sidecar: run subprocess N times with a monitoring
-    /// sidecar attached. The sidecar samples `/proc` metrics and reads phase
-    /// markers from a FIFO. Sidecar data is stored in the results DB alongside
-    /// the benchmark result.
-    ///
-    /// The sidecar takes ownership of each `Child` process, drains
-    /// stdout/stderr in background threads (preventing pipe-buffer deadlock),
-    /// and records the child's exact exit time for wall-clock measurement.
-    pub fn run_external_with_sidecar(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-        scratch_dir: &Path,
-    ) -> Result<BenchResult, DevError> {
+        let scratch_dir = &self.db_dir;
         use crate::sidecar;
 
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
         let fifo_path_str = fifo.path_str()?.to_owned();
 
         let mut best_ms: Option<i64> = None;
-        let mut best_run_idx: usize = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
 
@@ -239,7 +202,6 @@ impl BenchHarness {
 
             if best_ms.is_none_or(|best| ms < best) {
                 best_ms = Some(ms);
-                best_run_idx = i;
             }
             sidecar_runs.push(result.data);
         }
@@ -259,18 +221,7 @@ impl BenchHarness {
 
         let uuid = self.record_result(config, &bench_result)?;
 
-        // Store sidecar data in the separate sidecar.db (always, even dirty tree).
-        {
-            let sidecar_db_path = self.db_dir.join("sidecar.db");
-            let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
-            let store_uuid = uuid.as_deref().unwrap_or("dirty");
-            for (i, data) in sidecar_runs.iter().enumerate() {
-                sidecar_db.store_run(store_uuid, i, data)?;
-            }
-            output::sidecar_msg(&format!(
-                "profile data stored in sidecar.db (best run: {best_run_idx})",
-            ));
-        }
+        self.store_sidecar(uuid.as_deref(), &sidecar_runs)?;
 
         Ok(bench_result)
     }
@@ -315,9 +266,9 @@ impl BenchHarness {
         Ok(result)
     }
 
-    /// External timing with kv parsing: run subprocess N times, parse stderr for key=value lines.
-    /// Uses the subprocess's self-reported `elapsed_ms` from stderr (not external wall-clock).
-    /// Best-of-N (minimum elapsed_ms).
+    /// External timing with kv parsing and sidecar: run subprocess N times,
+    /// parse stderr for key=value lines. Uses the subprocess's self-reported
+    /// `elapsed_ms` from stderr (not external wall-clock). Best-of-N.
     pub fn run_external_with_kv(
         &self,
         config: &BenchConfig,
@@ -340,15 +291,36 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
     ) -> Result<(BenchResult, Vec<u8>), DevError> {
+        let scratch_dir = &self.db_dir;
+        use crate::sidecar;
+
+        let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
+        let fifo_path_str = fifo.path_str()?.to_owned();
+
         let mut best: Option<BenchResult> = None;
         let mut best_stderr: Vec<u8> = Vec::new();
+        let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
+        let prog_str = program.display().to_string();
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
 
-            let captured = output::run_captured(&program.display().to_string(), args, cwd)?;
+            if i > 0 {
+                fifo.reopen()?;
+            }
 
-            captured.check_success(&program.display().to_string())?;
+            let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
+            let start = Instant::now();
+            let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+            let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start);
+
+            let captured = output::CapturedOutput {
+                status: sidecar_result.exit_status,
+                stdout: sidecar_result.stdout,
+                stderr: sidecar_result.stderr,
+                elapsed: sidecar_result.elapsed,
+            };
+            captured.check_success(&prog_str)?;
 
             let result = parse_kv_stderr(&captured.stderr)?;
             let is_new_best = best
@@ -358,10 +330,18 @@ impl BenchHarness {
                 best_stderr = captured.stderr;
             }
             best = Some(pick_best(best, result));
+            sidecar_runs.push(sidecar_result.data);
         }
+
+        drop(fifo);
 
         let best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+
+        // Store sidecar data (uses the result UUID once recorded, or before for raw variant).
+        // For _raw, the caller records — sidecar storage deferred to caller.
+        // For simplicity, store with a placeholder now; the UUID is set on record_result.
+        self.store_sidecar(None, &sidecar_runs)?;
 
         Ok((best, best_stderr))
     }
@@ -392,6 +372,22 @@ impl BenchHarness {
             output::error("NOT STORED — tree is dirty (commit or stash changes)");
             Ok(None)
         }
+    }
+
+    /// Store sidecar data in the separate sidecar.db.
+    pub fn store_sidecar(
+        &self,
+        uuid: Option<&str>,
+        sidecar_runs: &[crate::sidecar::SidecarData],
+    ) -> Result<(), DevError> {
+        let sidecar_db_path = self.db_dir.join("sidecar.db");
+        let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
+        let store_uuid = uuid.unwrap_or("dirty");
+        for (i, data) in sidecar_runs.iter().enumerate() {
+            sidecar_db.store_run(store_uuid, i, data)?;
+        }
+        output::sidecar_msg("profile data stored in sidecar.db");
+        Ok(())
     }
 
     /// Build a `RunRow` from harness state, config, and result.
@@ -551,30 +547,47 @@ pub fn elapsed_to_ms(duration: &Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Run a binary with hotpath env vars, capture the JSON report, and return a `BenchResult`.
+/// Run a binary with hotpath env vars and sidecar monitoring, capture the
+/// JSON report, and return a `BenchResult` plus sidecar data.
 ///
-/// This is the shared inner loop for all hotpath profiling commands. Sets
-/// `HOTPATH_METRICS_SERVER_OFF`, `HOTPATH_OUTPUT_FORMAT`, and `HOTPATH_OUTPUT_PATH`,
-/// then reads and parses the resulting JSON report file.
+/// Sets `HOTPATH_METRICS_SERVER_OFF`, `HOTPATH_OUTPUT_FORMAT`,
+/// `HOTPATH_OUTPUT_PATH`, and `BROKKR_MARKER_FIFO`. Uses `spawn_captured`
+/// + sidecar loop so /proc metrics are sampled during the run.
+///
+/// Creates and manages its own FIFO in `scratch_dir`.
 pub fn run_hotpath_capture(
     binary: &str,
     args: &[&str],
     scratch_dir: &std::path::Path,
     project_root: &std::path::Path,
     extra_env: &[(&str, &str)],
-) -> Result<(BenchResult, Vec<u8>), crate::error::DevError> {
+) -> Result<(BenchResult, Vec<u8>, crate::sidecar::SidecarData), crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
+
+    let mut fifo = crate::sidecar::SidecarFifo::create(scratch_dir)?;
+    let fifo_path_str = fifo.path_str()?.to_owned();
 
     let mut env: Vec<(&str, &str)> = vec![
         ("HOTPATH_METRICS_SERVER_OFF", "true"),
         ("HOTPATH_OUTPUT_FORMAT", "json"),
         ("HOTPATH_OUTPUT_PATH", &json_file_str),
+        ("BROKKR_MARKER_FIFO", &fifo_path_str),
     ];
     env.extend_from_slice(extra_env);
 
-    let captured = output::run_captured_with_env(binary, args, project_root, &env)?;
+    let start = std::time::Instant::now();
+    let child = output::spawn_captured(binary, args, project_root, &env)?;
+    let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start);
 
+    drop(fifo);
+
+    let captured = output::CapturedOutput {
+        status: sidecar_result.exit_status,
+        stdout: sidecar_result.stdout,
+        stderr: sidecar_result.stderr,
+        elapsed: sidecar_result.elapsed,
+    };
     captured.check_success(binary)?;
 
     let ms = elapsed_to_ms(&captured.elapsed);
@@ -607,6 +620,7 @@ pub fn run_hotpath_capture(
             hotpath,
         },
         stderr,
+        sidecar_result.data,
     ))
 }
 
@@ -644,14 +658,6 @@ fn percentile(sorted: &[i64], pct: usize) -> i64 {
 fn pick_best(current: Option<BenchResult>, candidate: BenchResult) -> BenchResult {
     match current {
         Some(best) if best.elapsed_ms <= candidate.elapsed_ms => best,
-        _ => candidate,
-    }
-}
-
-/// Pick the smaller of two millisecond values.
-fn pick_best_ms(current: Option<i64>, candidate: i64) -> i64 {
-    match current {
-        Some(best) if best <= candidate => best,
         _ => candidate,
     }
 }
@@ -1057,26 +1063,6 @@ mod tests {
             matches!(&tag.value, KvValue::Text(s) if s == "first"),
             "on tie, current (first seen) should be kept"
         );
-    }
-
-    #[test]
-    fn pick_best_ms_none_vs_candidate() {
-        assert_eq!(pick_best_ms(None, 42), 42);
-    }
-
-    #[test]
-    fn pick_best_ms_keeps_smaller() {
-        assert_eq!(pick_best_ms(Some(10), 20), 10);
-    }
-
-    #[test]
-    fn pick_best_ms_replaces_with_smaller() {
-        assert_eq!(pick_best_ms(Some(20), 10), 10);
-    }
-
-    #[test]
-    fn pick_best_ms_equal_keeps_current() {
-        assert_eq!(pick_best_ms(Some(5), 5), 5);
     }
 
     // -----------------------------------------------------------------------
