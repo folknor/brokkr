@@ -200,7 +200,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
 
-    let root: toml::Value = text.parse()?;
+    let root: toml::Value = toml::from_str(&text)?;
 
     let table = root
         .as_table()
@@ -619,7 +619,7 @@ sha256 = "bbb"
 file = "dk-4705.osc.gz"
 sha256 = "ccc"
 "#;
-        let root: toml::Value = toml_str.parse().unwrap();
+        let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
         let hosts = parse_hosts(table).unwrap();
         let host = hosts.get("myhost").unwrap();
@@ -646,7 +646,7 @@ file = "test.pbf"
 sha256 = "aaa"
 xxhash = "bbb"
 "#;
-        let root: toml::Value = toml_str.parse().unwrap();
+        let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
         let result = parse_hosts(table);
         assert!(
@@ -658,7 +658,7 @@ xxhash = "bbb"
     #[test]
     fn parse_no_host_section() {
         let toml_str = r#"project = "pbfhogg""#;
-        let root: toml::Value = toml_str.parse().unwrap();
+        let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
         let hosts = parse_hosts(table).unwrap();
         assert!(hosts.is_empty());
@@ -673,7 +673,7 @@ project = "nidhogg"
 file = "denmark-elivagar.pmtiles"
 sha256 = "ddd"
 "#;
-        let root: toml::Value = toml_str.parse().unwrap();
+        let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
         let hosts = parse_hosts(table).unwrap();
         let host = hosts.get("myhost").unwrap();
