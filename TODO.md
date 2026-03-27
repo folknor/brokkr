@@ -197,8 +197,8 @@ Elivagar run mode now has a lightweight `run_elivagar_run` path that skips DB fo
 ### Nidhogg hotpath ignores command-specific context
 `RunApi --hotpath` ignores `--query`, `RunTiles --hotpath` ignores `--tiles`/`--uring`. Nidhogg hotpath is a single generic function. Pre-existing.
 
-### Remove --runs from elivagar/nidhogg CLI variants
-The `--runs` field on these commands is now fully dead — `mm.runs()` is always used. Should be removed from cli.rs to avoid confusion. Harmless but misleading.
+### ~~Remove --runs from elivagar/nidhogg CLI variants~~ FIXED
+Dead `--runs` flags were removed in an earlier commit (e71a4cc).
 
 ### ~~read/write/merge expose unsupported --hotpath/--alloc flags~~ FIXED
 Read/write/merge now use `BenchOnlyModeArgs` which only exposes `--bench`, `--verbose`, `--commit`, `--features`, `--force`.
