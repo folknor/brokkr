@@ -20,8 +20,8 @@ Single crate, single binary. No workspace.
 
 ### Source layout
 
-- `src/main.rs` — `main()`, command dispatch, `pbfhogg_cmd!` macro, `resolve_mode()`, `resolve_bench_only_mode()`
-- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `BenchOnlyModeArgs`, `PbfArgs`, `VerifyCommand`, `LitehtmlCommand`
+- `src/main.rs` — `main()`, command dispatch, `run_measured()`, `resolve_mode()`
+- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `LitehtmlCommand`, `Command::as_pbfhogg()`
 - `src/measure.rs` — `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
 - `src/dispatch.rs` — Unified dispatch: `run_pbfhogg_command_with_params()` (handles all modes for any pbfhogg command), `run_elivagar_command()`, `run_pbfhogg_run()` (lightweight default), `run_pbfhogg_wallclock()` (bench with DB), `run_pbfhogg_hotpath()` (hotpath/alloc)
 - `src/pbfhogg/commands.rs` — `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` — single source of truth for all pbfhogg command argument construction
