@@ -12,6 +12,7 @@ use crate::context::BenchContext;
 use crate::db::KvPair;
 use crate::elivagar;
 use crate::elivagar::commands::ElivagarCommand;
+use crate::nidhogg;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{CommandContext, MeasureMode, MeasureRequest};
@@ -624,19 +625,20 @@ fn default_pipeline_opts<'a>() -> elivagar::PipelineOpts<'a> {
 /// Run a nidhogg command with the specified measurement mode.
 ///
 /// Nidhogg commands have complex lifecycle requirements (running servers,
-/// HTTP requests, etc.) so most modes delegate to handlers via closures.
-/// The main benefit here is a unified entry point and the `nidhogg_cmd!`
-/// macro in main.rs that eliminates boilerplate.
+/// HTTP requests, etc.) that prevent a simple `build_args + run_external`
+/// pattern. Instead, each command's bench path delegates to its existing
+/// per-module function, but identity, metadata, and capability checks
+/// come from `NidhoggCommand`.
 pub fn run_nidhogg_command(
     req: &MeasureRequest,
-    command: &str,
-    bench_fn: impl FnOnce(&MeasureRequest) -> Result<(), DevError>,
-    hotpath_fn: impl FnOnce(&MeasureRequest) -> Result<(), DevError>,
+    command: &crate::nidhogg::commands::NidhoggCommand,
 ) -> Result<(), DevError> {
+    use crate::nidhogg::commands::NidhoggCommand;
+
     project::require(
         req.project,
         Project::Nidhogg,
-        command,
+        command.id(),
     )?;
 
     if req.sidecar {
@@ -644,7 +646,23 @@ pub fn run_nidhogg_command(
     }
 
     match req.mode {
-        MeasureMode::Run | MeasureMode::Bench { .. } => bench_fn(req),
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => hotpath_fn(req),
+        MeasureMode::Run | MeasureMode::Bench { .. } => match command {
+            NidhoggCommand::Api { query } => {
+                nidhogg::cmd::bench_api(req, query.as_deref())
+            }
+            NidhoggCommand::Ingest => nidhogg::cmd::bench_ingest(req),
+            NidhoggCommand::Tiles { tiles_variant, uring } => {
+                nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring)
+            }
+        },
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
+            if !command.supports_hotpath() {
+                return Err(DevError::Config(format!(
+                    "command '{}' does not support hotpath/alloc profiling",
+                    command.id(),
+                )));
+            }
+            nidhogg::cmd::hotpath(req)
+        }
     }
 }

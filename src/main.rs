@@ -281,29 +281,22 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
 
         // ----- nidhogg commands -----
-        Command::RunApi { mode, dataset, 
- query } => {
-            let query = query.clone();
+        Command::RunApi { mode, dataset, query } => {
+            let cmd = nidhogg::commands::NidhoggCommand::Api { query };
             run_measured(&mode, &dev_config, project, &project_root, &dataset, "raw", |req| {
-                dispatch::run_nidhogg_command(req, "api",
-                    |req| nidhogg::cmd::bench_api(req, query.as_deref()),
-                    |req| nidhogg::cmd::hotpath(req))
+                dispatch::run_nidhogg_command(req, &cmd)
             })
         }
         Command::RunNidIngest { mode, dataset, variant } => {
+            let cmd = nidhogg::commands::NidhoggCommand::Ingest;
             run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
-                dispatch::run_nidhogg_command(req, "nid-ingest",
-                    |req| nidhogg::cmd::bench_ingest(req),
-                    |req| nidhogg::cmd::hotpath(req))
+                dispatch::run_nidhogg_command(req, &cmd)
             })
         }
-        Command::RunTiles { mode, dataset, tiles, 
- uring } => {
-            let tiles = tiles.clone();
+        Command::RunTiles { mode, dataset, tiles, uring } => {
+            let cmd = nidhogg::commands::NidhoggCommand::Tiles { tiles_variant: tiles, uring };
             run_measured(&mode, &dev_config, project, &project_root, &dataset, "raw", |req| {
-                dispatch::run_nidhogg_command(req, "tiles",
-                    |req| nidhogg::cmd::bench_tiles(req, tiles.as_deref(), uring),
-                    |req| nidhogg::cmd::hotpath(req))
+                dispatch::run_nidhogg_command(req, &cmd)
             })
         }
 
