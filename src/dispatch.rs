@@ -718,10 +718,16 @@ fn run_elivagar_internal(
 
 /// Elivagar hotpath/alloc: build with hotpath feature, run with instrumentation.
 ///
-/// Tilegen uses the main binary with hotpath features. Micro-benchmarks use
-/// their cargo example with hotpath features. Both go through
-/// `run_hotpath_capture` for JSON report collection.
+/// Uses `ElivagarCommand::build_config()` to determine build type:
+/// - MainBinary (Tilegen): `BenchContext::new` with hotpath features, `build_args()`,
+///   OOM check, locations_on_ways detection, output cleanup.
+/// - Example (PmtilesWriter, NodeStore): `cargo_build` with example + hotpath feature,
+///   `build_args()`, `run_hotpath_capture`.
+///
+/// Both paths go through `run_hotpath_capture` for JSON report collection.
 fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
+    use crate::elivagar::commands::BuildKind;
+
     if !command.supports_hotpath() {
         return Err(DevError::Config(format!(
             "command '{}' does not support hotpath/alloc profiling",
@@ -729,29 +735,158 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
         )));
     }
 
-    // Tilegen hotpath still delegates to its module because it has special
-    // concerns (PBF resolution, OOM check, locations_on_ways detection,
-    // output cleanup, pipeline opts for arg construction).
-    // Micro-benchmarks delegate to their modules for hotpath feature builds.
-    match command {
-        ElivagarCommand::Tilegen { opts, .. } => {
-            elivagar::cmd::hotpath(req, None, 0, 0, opts)
+    let alloc = req.is_alloc();
+    let feature = harness::hotpath_feature(alloc);
+    let variant_suffix = harness::hotpath_variant_suffix(alloc);
+    let variant = format!("{}{variant_suffix}", command.id());
+
+    output::hotpath_msg(&format!("=== {} {feature} ===", command.id()));
+    if alloc {
+        output::hotpath_msg("NOTE: alloc profiling — wall-clock times are not meaningful");
+    }
+
+    match command.build_config() {
+        BuildKind::MainBinary => {
+            // Tilegen: build main binary with hotpath features, resolve PBF, OOM check.
+            let hotpath_features = req.hotpath_features();
+            let ctx = BenchContext::new(
+                req.dev_config,
+                req.project,
+                req.project_root,
+                req.build_root,
+                command.package(),
+                &hotpath_features,
+                true,
+                &format!("hotpath {}", command.id()),
+                req.force,
+            )?;
+
+            let (pbf_path, file_mb) =
+                resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+            let risk = if alloc {
+                oom::MemoryRisk::AllocTracking
+            } else {
+                oom::MemoryRisk::Normal
+            };
+            oom::check_memory(file_mb, &risk, req.no_mem_check)?;
+
+            let pbf_str = pbf_path
+                .to_str()
+                .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+
+            let basename = pbf_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned();
+
+            let args =
+                command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+            let binary_str = ctx.binary.display().to_string();
+
+            let mut metadata = command.metadata();
+            metadata.push(KvPair::text("meta.alloc", alloc.to_string()));
+
+            let config = BenchConfig {
+                command: "hotpath".into(),
+                variant: Some(variant),
+                input_file: Some(basename),
+                input_mb: Some(file_mb),
+                cargo_features: None,
+                cargo_profile: "release".into(),
+                runs: req.runs,
+                cli_args: Some(harness::format_cli_args(&binary_str, &arg_refs)),
+                metadata,
+            };
+
+            ctx.harness.run_internal(&config, |_i| {
+                let (mut result, stderr) = harness::run_hotpath_capture(
+                    &binary_str,
+                    &arg_refs,
+                    &ctx.paths.scratch_dir,
+                    req.project_root,
+                    &[("ELIVAGAR_NODE_STATS", "1")],
+                )?;
+                result.kv.push(KvPair::text(
+                    "meta.locations_on_ways_detected",
+                    elivagar::detect_locations_on_ways_stderr(&stderr).to_string(),
+                ));
+                Ok(result)
+            })?;
+
+            // Clean up output files.
+            for path in command.output_files(&ctx.paths.scratch_dir) {
+                std::fs::remove_file(path).ok();
+            }
+            // Also clean hotpath-specific output.
+            let suffix = if alloc { "alloc-" } else { "" };
+            let hp_output = ctx.paths.scratch_dir.join(format!("hotpath-{suffix}output.pmtiles"));
+            std::fs::remove_file(hp_output).ok();
+
+            Ok(())
         }
-        ElivagarCommand::PmtilesWriter { tiles } => elivagar::cmd::hotpath(
-            req,
-            Some("pmtiles"),
-            *tiles,
-            0,
-            &default_pipeline_opts(),
-        ),
-        ElivagarCommand::NodeStore { nodes } => elivagar::cmd::hotpath(
-            req,
-            Some("node-store"),
-            0,
-            *nodes,
-            &default_pipeline_opts(),
-        ),
-        _ => unreachable!("supports_hotpath() check above"),
+        BuildKind::Example(example) => {
+            // Micro-benchmarks: build example with hotpath feature.
+            let ctx = crate::context::HarnessContext::new(
+                req.dev_config,
+                req.project,
+                req.project_root,
+                req.build_root,
+                &format!("hotpath {}", command.id()),
+                req.force,
+            )?;
+
+            let binary = crate::build::cargo_build(
+                &crate::build::BuildConfig {
+                    package: None,
+                    bin: None,
+                    example: Some(example.into()),
+                    features: vec![feature.into()],
+                    default_features: true,
+                    profile: "release",
+                },
+                req.effective_build_root(),
+            )?;
+            let binary_str = binary.display().to_string();
+
+            let args =
+                command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+            let mut metadata = command.metadata();
+            metadata.push(KvPair::text("meta.alloc", alloc.to_string()));
+
+            let config = BenchConfig {
+                command: "hotpath".into(),
+                variant: Some(variant),
+                input_file: None,
+                input_mb: None,
+                cargo_features: Some(feature.into()),
+                cargo_profile: "release".into(),
+                runs: 1,
+                cli_args: None,
+                metadata,
+            };
+
+            ctx.harness.run_internal(&config, |_i| {
+                let (result, _stderr) = harness::run_hotpath_capture(
+                    &binary_str,
+                    &arg_refs,
+                    &ctx.paths.scratch_dir,
+                    req.project_root,
+                    &[],
+                )?;
+                Ok(result)
+            })?;
+
+            Ok(())
+        }
+        BuildKind::NoBuild => Err(DevError::Config(format!(
+            "command '{}' does not support hotpath/alloc profiling",
+            command.id(),
+        ))),
     }
 }
 
@@ -770,23 +905,6 @@ fn run_elivagar_external(
             "command '{}' does not support hotpath/alloc profiling",
             command.id(),
         ))),
-    }
-}
-
-/// Default pipeline opts for hotpath calls that don't need pipeline flags.
-fn default_pipeline_opts<'a>() -> elivagar::PipelineOpts<'a> {
-    elivagar::PipelineOpts {
-        no_ocean: false,
-        force_sorted: false,
-        allow_unsafe_flat_index: false,
-        tile_format: None,
-        tile_compression: None,
-        compress_sort_chunks: None,
-        in_memory: false,
-        locations_on_ways: false,
-        fanout_cap_default: None,
-        fanout_cap: None,
-        polygon_simplify_factor: None,
     }
 }
 

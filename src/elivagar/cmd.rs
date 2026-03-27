@@ -1,10 +1,9 @@
 use std::path::Path;
 
 use crate::config;
-use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
+use crate::context::{HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
-use crate::oom;
 use crate::project::{self, Project};
 use crate::resolve::{resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_path};
 
@@ -129,88 +128,3 @@ pub(crate) fn verify(
     super::verify::run(&pmtiles_path, effective, features)
 }
 
-pub(crate) fn hotpath(
-    req: &MeasureRequest,
-    variant: Option<&str>,
-    tiles: usize,
-    nodes: usize,
-    opts: &super::PipelineOpts,
-) -> Result<(), DevError> {
-    // Micro-benchmark variants: build the example with hotpath and run it.
-    if let Some(v) = variant {
-        return match v {
-            "pmtiles" => {
-                let ctx = HarnessContext::new(
-                    req.dev_config,
-                    req.project,
-                    req.project_root,
-                    req.build_root,
-                    "hotpath pmtiles",
-                    req.force,
-                )?;
-                super::bench_pmtiles::run_hotpath(
-                    &ctx.harness,
-                    &ctx.paths.scratch_dir,
-                    req.effective_build_root(),
-                    tiles,
-                    req.runs,
-                    req.is_alloc(),
-                )
-            }
-            "node-store" => {
-                let ctx = HarnessContext::new(
-                    req.dev_config,
-                    req.project,
-                    req.project_root,
-                    req.build_root,
-                    "hotpath node-store",
-                    req.force,
-                )?;
-                super::bench_node_store::run_hotpath(
-                    &ctx.harness,
-                    &ctx.paths.scratch_dir,
-                    req.effective_build_root(),
-                    nodes,
-                    req.runs,
-                    req.is_alloc(),
-                )
-            }
-            other => Err(DevError::Config(format!(
-                "unknown hotpath variant '{other}' for elivagar (expected: pmtiles, node-store)"
-            ))),
-        };
-    }
-
-    let hotpath_features = req.hotpath_features();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        None,
-        &hotpath_features,
-        true,
-        "hotpath",
-        req.force,
-    )?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let risk = if req.is_alloc() {
-        oom::MemoryRisk::AllocTracking
-    } else {
-        oom::MemoryRisk::Normal
-    };
-    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
-    super::hotpath::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        file_mb,
-        req.runs,
-        req.is_alloc(),
-        opts,
-        req.project_root,
-    )
-}
