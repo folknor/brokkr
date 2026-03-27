@@ -401,6 +401,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             markers,
             summary,
             durations,
+            fields,
+            every,
+            head,
+            tail,
+            r#where,
+            stat,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -415,6 +421,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 markers,
                 summary,
                 durations,
+                fields,
+                every,
+                head,
+                tail,
+                where_cond: r#where,
+                stat,
             };
             cmd_results(&project_root, &rq)
         }
@@ -971,9 +983,18 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             } else if q.summary {
                 let markers = results_db.query_sidecar_markers(uuid_prefix)?;
                 print_phase_summary(&samples, &markers);
+            } else if let Some(ref field) = q.stat {
+                let filtered = apply_timeline_filter(&samples, q);
+                print_field_stat(&filtered, field)?;
             } else {
-                for s in &samples {
-                    println!("{}", sidecar_sample_json(s));
+                let filtered = apply_timeline_filter(&samples, q);
+                let fields = if q.fields.is_empty() {
+                    None
+                } else {
+                    Some(&q.fields)
+                };
+                for s in &filtered {
+                    println!("{}", sidecar_sample_json_projected(s, fields));
                 }
             }
             return Ok(());
@@ -1055,75 +1076,256 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Format a sidecar sample as a compact JSON object (single line).
+// ---------------------------------------------------------------------------
+// Timeline query helpers
+// ---------------------------------------------------------------------------
+
+/// All known sample field names and their accessor functions.
+fn sample_field_value(s: &sidecar::Sample, field: &str) -> Option<i64> {
+    match field {
+        "i" => Some(i64::from(s.sample_idx)),
+        "rss" => Some(s.rss_kb),
+        "anon" => Some(s.anon_kb),
+        "file" => Some(s.file_kb),
+        "shmem" => Some(s.shmem_kb),
+        "swap" => Some(s.swap_kb),
+        "vsize" => Some(s.vsize_kb),
+        "hwm" => Some(s.vm_hwm_kb),
+        "utime" => Some(s.utime),
+        "stime" => Some(s.stime),
+        "threads" => Some(s.num_threads),
+        "minflt" => Some(s.minflt),
+        "majflt" => Some(s.majflt),
+        "rchar" => Some(s.rchar),
+        "wchar" => Some(s.wchar),
+        "rd" => Some(s.read_bytes),
+        "wr" => Some(s.write_bytes),
+        "cwr" => Some(s.cancelled_write_bytes),
+        "syscr" => Some(s.syscr),
+        "syscw" => Some(s.syscw),
+        "vcs" => Some(s.vol_cs),
+        "nvcs" => Some(s.nonvol_cs),
+        _ => None,
+    }
+}
+
+/// Parse a --where condition like "majflt>0" or "anon>100000".
 ///
-/// Short keys for compactness (~150 bytes/line instead of ~400).
-/// 30K samples × 150 bytes = ~4.5 MB. Streamable, greppable, pipe to jq.
-fn sidecar_sample_json(s: &sidecar::Sample) -> String {
-    format!(
-        concat!(
-            "{{",
-            "\"i\":{},",         // sample_idx
-            "\"t\":{},",         // timestamp_us
-            "\"rss\":{},",       // rss_kb
-            "\"anon\":{},",      // anon_kb
-            "\"file\":{},",      // file_kb
-            "\"shmem\":{},",     // shmem_kb
-            "\"swap\":{},",      // swap_kb
-            "\"vsize\":{},",     // vsize_kb
-            "\"hwm\":{},",       // vm_hwm_kb
-            "\"utime\":{},",     // utime (clock ticks)
-            "\"stime\":{},",     // stime (clock ticks)
-            "\"threads\":{},",   // num_threads
-            "\"minflt\":{},",    // minflt
-            "\"majflt\":{},",    // majflt
-            "\"rchar\":{},",     // rchar (bytes)
-            "\"wchar\":{},",     // wchar (bytes)
-            "\"rd\":{},",        // read_bytes (disk)
-            "\"wr\":{},",        // write_bytes (disk)
-            "\"cwr\":{},",       // cancelled_write_bytes
-            "\"syscr\":{},",     // syscr
-            "\"syscw\":{},",     // syscw
-            "\"vcs\":{},",       // voluntary context switches
-            "\"nvcs\":{}",       // nonvoluntary context switches
-            "}}",
-        ),
-        s.sample_idx,
-        s.timestamp_us,
-        s.rss_kb,
-        s.anon_kb,
-        s.file_kb,
-        s.shmem_kb,
-        s.swap_kb,
-        s.vsize_kb,
-        s.vm_hwm_kb,
-        s.utime,
-        s.stime,
-        s.num_threads,
-        s.minflt,
-        s.majflt,
-        s.rchar,
-        s.wchar,
-        s.read_bytes,
-        s.write_bytes,
-        s.cancelled_write_bytes,
-        s.syscr,
-        s.syscw,
-        s.vol_cs,
-        s.nonvol_cs,
-    )
+/// Returns (field, op, threshold). Supported ops: >, <, >=, <=, ==, !=.
+fn parse_where_cond(cond: &str) -> Result<(&str, &str, i64), DevError> {
+    // Try two-char operators first, then single-char.
+    for op in &[">=", "<=", "==", "!=", ">", "<"] {
+        if let Some(pos) = cond.find(op) {
+            let field = cond[..pos].trim();
+            let val_str = cond[pos + op.len()..].trim();
+            let val: i64 = val_str.parse().map_err(|_| {
+                DevError::Config(format!("--where: cannot parse '{val_str}' as integer"))
+            })?;
+            return Ok((field, op, val));
+        }
+    }
+    Err(DevError::Config(format!(
+        "--where: invalid condition '{cond}' (expected e.g. 'majflt>0')"
+    )))
+}
+
+/// Apply --where, --every, --head, --tail filters to a sample list.
+fn apply_timeline_filter<'a>(
+    samples: &'a [sidecar::Sample],
+    q: &ResultsQuery,
+) -> Vec<&'a sidecar::Sample> {
+    let mut result: Vec<&sidecar::Sample> = samples.iter().collect();
+
+    // --where filter
+    if let Some(ref cond) = q.where_cond {
+        if let Ok((field, op, threshold)) = parse_where_cond(cond) {
+            result.retain(|s| {
+                if let Some(val) = sample_field_value(s, field) {
+                    match op {
+                        ">" => val > threshold,
+                        "<" => val < threshold,
+                        ">=" => val >= threshold,
+                        "<=" => val <= threshold,
+                        "==" => val == threshold,
+                        "!=" => val != threshold,
+                        _ => true,
+                    }
+                } else {
+                    false
+                }
+            });
+        }
+    }
+
+    // --every N (downsample)
+    if let Some(n) = q.every {
+        if n > 1 {
+            result = result.into_iter().step_by(n).collect();
+        }
+    }
+
+    // --tail N (take last N before head, so --tail 100 --head 10 = last 100 then first 10 of those)
+    if let Some(n) = q.tail {
+        let len = result.len();
+        if n < len {
+            result = result.split_off(len - n);
+        }
+    }
+
+    // --head N
+    if let Some(n) = q.head {
+        result.truncate(n);
+    }
+
+    result
+}
+
+/// Print min/max/avg/p50/p95 for a field across the given samples.
+fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Result<(), DevError> {
+    let mut values: Vec<i64> = samples
+        .iter()
+        .filter_map(|s| sample_field_value(s, field))
+        .collect();
+
+    if values.is_empty() {
+        return Err(DevError::Config(format!(
+            "unknown field '{field}' or no samples"
+        )));
+    }
+
+    values.sort_unstable();
+    let n = values.len();
+
+    #[allow(clippy::cast_precision_loss)]
+    let avg = values.iter().sum::<i64>() as f64 / n as f64;
+    let min = values[0];
+    let max = values[n - 1];
+
+    // Linear interpolation percentiles (same as harness::percentile).
+    let pct = |p: usize| -> i64 {
+        if n == 1 {
+            return values[0];
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let pos = (p as f64 / 100.0) * (n - 1) as f64;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let lo = pos as usize;
+        let hi = (lo + 1).min(n - 1);
+        #[allow(clippy::cast_precision_loss)]
+        let frac = pos - lo as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let result = values[lo] as f64 + frac * (values[hi] - values[lo]) as f64;
+        #[allow(clippy::cast_possible_truncation)]
+        { result.round() as i64 }
+    };
+
+    println!("field    {field}");
+    println!("samples  {n}");
+    println!("min      {min}");
+    println!("max      {max}");
+    println!("avg      {avg:.1}");
+    println!("p50      {}", pct(50));
+    println!("p95      {}", pct(95));
+    Ok(())
+}
+
+/// Format a sample as JSONL, optionally projecting only selected fields.
+///
+/// `t` is output as fractional seconds (e.g. `1.234`) not microseconds.
+/// When `fields` is `None`, all fields are output. When `Some`, only the
+/// listed fields are included (plus `t` is always included).
+fn sidecar_sample_json_projected(
+    s: &sidecar::Sample,
+    fields: Option<&Vec<String>>,
+) -> String {
+    // t is always fractional seconds.
+    #[allow(clippy::cast_precision_loss)]
+    let t_sec = s.timestamp_us as f64 / 1_000_000.0;
+
+    match fields {
+        None => {
+            // All fields.
+            format!(
+                concat!(
+                    "{{",
+                    "\"t\":{:.3},",
+                    "\"rss\":{},",
+                    "\"anon\":{},",
+                    "\"file\":{},",
+                    "\"shmem\":{},",
+                    "\"swap\":{},",
+                    "\"vsize\":{},",
+                    "\"hwm\":{},",
+                    "\"utime\":{},",
+                    "\"stime\":{},",
+                    "\"threads\":{},",
+                    "\"minflt\":{},",
+                    "\"majflt\":{},",
+                    "\"rchar\":{},",
+                    "\"wchar\":{},",
+                    "\"rd\":{},",
+                    "\"wr\":{},",
+                    "\"cwr\":{},",
+                    "\"syscr\":{},",
+                    "\"syscw\":{},",
+                    "\"vcs\":{},",
+                    "\"nvcs\":{}",
+                    "}}",
+                ),
+                t_sec,
+                s.rss_kb,
+                s.anon_kb,
+                s.file_kb,
+                s.shmem_kb,
+                s.swap_kb,
+                s.vsize_kb,
+                s.vm_hwm_kb,
+                s.utime,
+                s.stime,
+                s.num_threads,
+                s.minflt,
+                s.majflt,
+                s.rchar,
+                s.wchar,
+                s.read_bytes,
+                s.write_bytes,
+                s.cancelled_write_bytes,
+                s.syscr,
+                s.syscw,
+                s.vol_cs,
+                s.nonvol_cs,
+            )
+        }
+        Some(field_list) => {
+            // Projected: only requested fields + always t.
+            let mut parts: Vec<String> = Vec::with_capacity(field_list.len() + 1);
+            parts.push(format!("\"t\":{t_sec:.3}"));
+            for f in field_list {
+                if f == "t" {
+                    continue; // already included
+                }
+                if let Some(val) = sample_field_value(s, f) {
+                    parts.push(format!("\"{f}\":{val}"));
+                }
+            }
+            format!("{{{}}}", parts.join(","))
+        }
+    }
 }
 
 /// Format a sidecar marker as a compact JSON object (single line).
+/// `t` is fractional seconds.
 fn sidecar_marker_json(m: &sidecar::Marker) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let t_sec = m.timestamp_us as f64 / 1_000_000.0;
     let name = m
         .name
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n");
     format!(
-        "{{\"i\":{},\"t\":{},\"name\":\"{}\"}}",
-        m.marker_idx, m.timestamp_us, name,
+        "{{\"i\":{},\"t\":{t_sec:.3},\"name\":\"{}\"}}",
+        m.marker_idx, name,
     )
 }
 

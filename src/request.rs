@@ -12,4 +12,10 @@ pub(crate) struct ResultsQuery {
     pub(crate) markers: bool,
     pub(crate) summary: bool,
     pub(crate) durations: bool,
+    pub(crate) fields: Vec<String>,
+    pub(crate) every: Option<usize>,
+    pub(crate) head: Option<usize>,
+    pub(crate) tail: Option<usize>,
+    pub(crate) where_cond: Option<String>,
+    pub(crate) stat: Option<String>,
 }

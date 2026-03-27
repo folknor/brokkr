@@ -603,6 +603,30 @@ Examples:
         /// Show duration between _START/_END marker pairs (use with --markers)
         #[arg(long, requires = "markers")]
         durations: bool,
+
+        /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt")
+        #[arg(long, requires = "timeline", value_delimiter = ',')]
+        fields: Vec<String>,
+
+        /// Output every Nth sample (downsample)
+        #[arg(long, requires = "timeline")]
+        every: Option<usize>,
+
+        /// Output only the first N samples
+        #[arg(long, requires = "timeline")]
+        head: Option<usize>,
+
+        /// Output only the last N samples
+        #[arg(long, requires = "timeline")]
+        tail: Option<usize>,
+
+        /// Filter samples where a field meets a condition (e.g. "majflt>0", "anon>100000")
+        #[arg(long, requires = "timeline", name = "COND")]
+        r#where: Option<String>,
+
+        /// Compute min/max/avg/p50/p95 for a field
+        #[arg(long, requires = "timeline")]
+        stat: Option<String>,
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 4)]
