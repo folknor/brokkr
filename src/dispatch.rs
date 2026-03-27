@@ -12,10 +12,10 @@ use crate::context::BenchContext;
 use crate::db::KvPair;
 use crate::elivagar;
 use crate::elivagar::commands::ElivagarCommand;
-use crate::nidhogg;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{CommandContext, MeasureMode, MeasureRequest};
+use crate::nidhogg;
 use crate::oom;
 use crate::output;
 use crate::pbfhogg::commands::{InputKind, OutputKind, PbfhoggCommand};
@@ -39,11 +39,7 @@ pub fn run_pbfhogg_command_with_params(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    project::require(
-        req.project,
-        Project::Pbfhogg,
-        command.id(),
-    )?;
+    project::require(req.project, Project::Pbfhogg, command.id())?;
 
     match req.mode {
         MeasureMode::Run => run_pbfhogg_run(req, command, osc_seq, extra_params),
@@ -408,11 +404,7 @@ pub fn run_elivagar_command(
     req: &MeasureRequest,
     command: &ElivagarCommand,
 ) -> Result<(), DevError> {
-    project::require(
-        req.project,
-        Project::Elivagar,
-        command.id(),
-    )?;
+    project::require(req.project, Project::Elivagar, command.id())?;
 
     // External tools (Planetiler, Tilemaker) keep their old dispatch path.
     if command.is_external() {
@@ -424,7 +416,10 @@ pub fn run_elivagar_command(
     if req.sidecar
         && !matches!(
             (&req.mode, command.build_config()),
-            (MeasureMode::Bench { .. }, crate::elivagar::commands::BuildKind::MainBinary)
+            (
+                MeasureMode::Bench { .. },
+                crate::elivagar::commands::BuildKind::MainBinary
+            )
         )
     {
         output::error("WARNING: --sidecar only supported for elivagar tilegen --bench — ignoring");
@@ -443,10 +438,7 @@ pub fn run_elivagar_command(
 ///
 /// Uses `ElivagarCommand::build_config()` to determine build type and
 /// `ElivagarCommand::build_args()` for argument construction.
-fn run_elivagar_run(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::elivagar::commands::BuildKind;
 
     match command.build_config() {
@@ -466,12 +458,8 @@ fn run_elivagar_run(
             )?;
 
             let pbf_str = if command.needs_pbf() {
-                let (p, _) = resolve_pbf_with_size(
-                    req.dataset,
-                    req.variant,
-                    &ctx.paths,
-                    req.project_root,
-                )?;
+                let (p, _) =
+                    resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
                 p.to_str()
                     .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?
                     .to_owned()
@@ -479,8 +467,7 @@ fn run_elivagar_run(
                 String::new()
             };
 
-            let args =
-                command.build_args(&pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let args = command.build_args(&pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let binary_str = ctx.binary.display().to_string();
@@ -515,7 +502,8 @@ fn run_elivagar_run(
             )?;
             let binary_str = binary.display().to_string();
 
-            let args = command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
+            let args =
+                command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
@@ -543,10 +531,7 @@ fn run_elivagar_run(
 /// `ElivagarCommand::build_args()` to get the argument vector. Tilegen uses
 /// `run_external_with_kv` (parses kv from stderr); micro-benchmarks use
 /// `run_internal` (examples handle their own iteration).
-fn run_elivagar_bench(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_bench(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::elivagar::commands::BuildKind;
 
     match command.build_config() {
@@ -563,10 +548,7 @@ fn run_elivagar_bench(
 ///
 /// Builds the main binary, runs via `run_external_with_kv`, parses kv metrics
 /// from stderr, detects `locations_on_ways`, and stores results.
-fn run_elivagar_wallclock(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(
         req.dev_config,
@@ -607,8 +589,16 @@ fn run_elivagar_wallclock(
     let mut bench_config = BenchConfig {
         command: command.result_command().into(),
         variant: command.result_variant(),
-        input_file: if command.needs_pbf() { Some(basename) } else { None },
-        input_mb: if command.needs_pbf() { Some(file_mb) } else { None },
+        input_file: if command.needs_pbf() {
+            Some(basename)
+        } else {
+            None
+        },
+        input_mb: if command.needs_pbf() {
+            Some(file_mb)
+        } else {
+            None
+        },
         cargo_features: None,
         cargo_profile: "release".into(),
         runs: req.runs,
@@ -656,10 +646,7 @@ fn run_elivagar_wallclock(
 /// Builds the example binary, runs via `run_internal` (the example handles
 /// its own iteration), and stores results. The harness does 1 external run
 /// while the example does N internal runs.
-fn run_elivagar_internal(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::context::HarnessContext;
 
     let ctx = HarnessContext::new(
@@ -788,8 +775,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 .unwrap_or_default()
                 .to_owned();
 
-            let args =
-                command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let args = command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let binary_str = ctx.binary.display().to_string();
@@ -830,7 +816,10 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             }
             // Also clean hotpath-specific output.
             let suffix = if alloc { "alloc-" } else { "" };
-            let hp_output = ctx.paths.scratch_dir.join(format!("hotpath-{suffix}output.pmtiles"));
+            let hp_output = ctx
+                .paths
+                .scratch_dir
+                .join(format!("hotpath-{suffix}output.pmtiles"));
             std::fs::remove_file(hp_output).ok();
 
             Ok(())
@@ -899,10 +888,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 }
 
 /// External tool dispatch (Planetiler, Tilemaker). Only bench mode is supported.
-fn run_elivagar_external(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_external(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     match req.mode {
         MeasureMode::Run | MeasureMode::Bench { .. } => match command {
             ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(req),
@@ -933,11 +919,7 @@ pub fn run_nidhogg_command(
 ) -> Result<(), DevError> {
     use crate::nidhogg::commands::NidhoggCommand;
 
-    project::require(
-        req.project,
-        Project::Nidhogg,
-        command.id(),
-    )?;
+    project::require(req.project, Project::Nidhogg, command.id())?;
 
     if req.sidecar {
         output::error("WARNING: --sidecar is not yet supported for nidhogg — ignoring");
@@ -945,13 +927,12 @@ pub fn run_nidhogg_command(
 
     match req.mode {
         MeasureMode::Run | MeasureMode::Bench { .. } => match command {
-            NidhoggCommand::Api { query } => {
-                nidhogg::cmd::bench_api(req, query.as_deref())
-            }
+            NidhoggCommand::Api { query } => nidhogg::cmd::bench_api(req, query.as_deref()),
             NidhoggCommand::Ingest => nidhogg::cmd::bench_ingest(req),
-            NidhoggCommand::Tiles { tiles_variant, uring } => {
-                nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring)
-            }
+            NidhoggCommand::Tiles {
+                tiles_variant,
+                uring,
+            } => nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring),
         },
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
             if !command.supports_hotpath() {

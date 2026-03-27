@@ -697,6 +697,9 @@ mod tests {
         assert!(io.is_some());
         let io = io.unwrap();
         // All standard fields should be populated.
-        assert!(io.syscr > 0 || io.rchar > 0, "at least one I/O counter should be nonzero");
+        assert!(
+            io.syscr > 0 || io.rchar > 0,
+            "at least one I/O counter should be nonzero"
+        );
     }
 }

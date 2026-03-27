@@ -38,7 +38,6 @@ impl ResultsDb {
         let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
         collect_rows(rows)
     }
-
 }
 
 // ---------------------------------------------------------------------------

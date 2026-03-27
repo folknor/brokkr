@@ -165,11 +165,13 @@ mod tests {
     fn only_ingest_supports_hotpath() {
         assert!(!NidhoggCommand::Api { query: None }.supports_hotpath());
         assert!(NidhoggCommand::Ingest.supports_hotpath());
-        assert!(!NidhoggCommand::Tiles {
-            tiles_variant: None,
-            uring: false,
-        }
-        .supports_hotpath());
+        assert!(
+            !NidhoggCommand::Tiles {
+                tiles_variant: None,
+                uring: false,
+            }
+            .supports_hotpath()
+        );
     }
 
     #[test]

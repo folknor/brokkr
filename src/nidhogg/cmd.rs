@@ -4,11 +4,11 @@ use crate::build;
 use crate::config;
 use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
+use crate::measure::MeasureRequest;
 use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::measure::MeasureRequest;
 use crate::resolve::{
     self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path,
     resolve_pbf_with_size,

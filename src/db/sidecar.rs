@@ -183,7 +183,10 @@ impl SidecarDb {
     // -------------------------------------------------------------------
 
     /// Query sidecar samples for a result UUID prefix.
-    pub fn query_samples(&self, uuid_prefix: &str) -> Result<Vec<crate::sidecar::Sample>, DevError> {
+    pub fn query_samples(
+        &self,
+        uuid_prefix: &str,
+    ) -> Result<Vec<crate::sidecar::Sample>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT sample_idx, timestamp_us,
                     rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
@@ -225,7 +228,10 @@ impl SidecarDb {
     }
 
     /// Query sidecar markers for a result UUID prefix.
-    pub fn query_markers(&self, uuid_prefix: &str) -> Result<Vec<crate::sidecar::Marker>, DevError> {
+    pub fn query_markers(
+        &self,
+        uuid_prefix: &str,
+    ) -> Result<Vec<crate::sidecar::Marker>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT marker_idx, timestamp_us, name
              FROM sidecar_markers

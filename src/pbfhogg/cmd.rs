@@ -4,10 +4,10 @@ use crate::cli::VerifyCommand;
 use crate::config;
 use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
+use crate::measure::MeasureRequest;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::measure::MeasureRequest;
 use crate::resolve::{
     self, resolve_bbox, resolve_default_osc_path, resolve_pbf_path, resolve_pbf_with_size,
 };

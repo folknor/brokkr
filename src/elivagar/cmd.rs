@@ -127,4 +127,3 @@ pub(crate) fn verify(
     let effective = build_root.unwrap_or(project_root);
     super::verify::run(&pmtiles_path, effective, features)
 }
-

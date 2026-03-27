@@ -132,29 +132,48 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
     // Pbfhogg measured commands: 28 commands → single dispatch path.
     if let Some((mode, pbf, pbf_cmd, osc, params)) = cli.command.as_pbfhogg() {
-        return run_measured(mode, &dev_config, project, &project_root,
-            &pbf.dataset, &pbf.variant, |req| {
-                dispatch::run_pbfhogg_command_with_params(req, &pbf_cmd, osc, &params)
-            });
+        return run_measured(
+            mode,
+            &dev_config,
+            project,
+            &project_root,
+            &pbf.dataset,
+            &pbf.variant,
+            |req| dispatch::run_pbfhogg_command_with_params(req, &pbf_cmd, osc, &params),
+        );
     }
 
     match cli.command {
         // Already handled by as_pbfhogg() above the match.
-        Command::Lock | Command::History { .. }
-        | Command::Inspect { .. } | Command::InspectNodes { .. }
-        | Command::InspectTags { .. } | Command::InspectTagsWay { .. }
-        | Command::CheckRefs { .. } | Command::CheckIds { .. }
-        | Command::Sort { .. } | Command::CatWay { .. }
-        | Command::CatRelation { .. } | Command::CatDedupe { .. }
-        | Command::TagsFilterWay { .. } | Command::TagsFilterAmenity { .. }
-        | Command::TagsFilterTwopass { .. } | Command::TagsFilterOsc { .. }
-        | Command::Getid { .. } | Command::Getparents { .. }
-        | Command::GetidInvert { .. } | Command::Renumber { .. }
-        | Command::MergeChanges { .. } | Command::ApplyChanges { .. }
+        Command::Lock
+        | Command::History { .. }
+        | Command::Inspect { .. }
+        | Command::InspectNodes { .. }
+        | Command::InspectTags { .. }
+        | Command::InspectTagsWay { .. }
+        | Command::CheckRefs { .. }
+        | Command::CheckIds { .. }
+        | Command::Sort { .. }
+        | Command::CatWay { .. }
+        | Command::CatRelation { .. }
+        | Command::CatDedupe { .. }
+        | Command::TagsFilterWay { .. }
+        | Command::TagsFilterAmenity { .. }
+        | Command::TagsFilterTwopass { .. }
+        | Command::TagsFilterOsc { .. }
+        | Command::Getid { .. }
+        | Command::Getparents { .. }
+        | Command::GetidInvert { .. }
+        | Command::Renumber { .. }
+        | Command::MergeChanges { .. }
+        | Command::ApplyChanges { .. }
         | Command::AddLocationsToWays { .. }
-        | Command::ExtractSimple { .. } | Command::ExtractComplete { .. }
-        | Command::ExtractSmart { .. } | Command::TimeFilter { .. }
-        | Command::Diff { .. } | Command::DiffOsc { .. }
+        | Command::ExtractSimple { .. }
+        | Command::ExtractComplete { .. }
+        | Command::ExtractSmart { .. }
+        | Command::TimeFilter { .. }
+        | Command::Diff { .. }
+        | Command::DiffOsc { .. }
         | Command::BuildGeocodeIndex { .. } => unreachable!(),
         Command::Check {
             features,
@@ -180,11 +199,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
             if let Some(ref b) = bbox {
                 params.insert("bbox".into(), b.clone());
             }
-            run_measured(&mode, &dev_config, project, &project_root,
-                &pbf.dataset, &pbf.variant, |req| {
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &pbf.dataset,
+                &pbf.variant,
+                |req| {
                     if strategy == "all" {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
-                            let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: *strat };
+                            let cmd =
+                                pbfhogg::commands::PbfhoggCommand::Extract { strategy: *strat };
                             dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)?;
                         }
                         Ok(())
@@ -193,36 +219,61 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: strat };
                         dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)
                     }
-                })
+                },
+            )
         }
-        Command::Read { mode, pbf, modes } => {
-            run_measured(&mode, &dev_config, project, &project_root,
-                &pbf.dataset, &pbf.variant, |req| {
-                    warn_sidecar_ignored(req);
-                    pbfhogg::cmd::bench_read(req, &modes)
-                })
-        }
-        Command::Write { mode, pbf, compression } => {
-            run_measured(&mode, &dev_config, project, &project_root,
-                &pbf.dataset, &pbf.variant, |req| {
-                    warn_sidecar_ignored(req);
-                    pbfhogg::cmd::bench_write(req, &compression)
-                })
-        }
-        Command::MergeBench { mode, pbf, compression, uring, osc_seq } => {
-            run_measured(&mode, &dev_config, project, &project_root,
-                &pbf.dataset, &pbf.variant, |req| {
-                    warn_sidecar_ignored(req);
-                    pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compression)
-                })
-        }
+        Command::Read { mode, pbf, modes } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            &pbf.dataset,
+            &pbf.variant,
+            |req| {
+                warn_sidecar_ignored(req);
+                pbfhogg::cmd::bench_read(req, &modes)
+            },
+        ),
+        Command::Write {
+            mode,
+            pbf,
+            compression,
+        } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            &pbf.dataset,
+            &pbf.variant,
+            |req| {
+                warn_sidecar_ignored(req);
+                pbfhogg::cmd::bench_write(req, &compression)
+            },
+        ),
+        Command::MergeBench {
+            mode,
+            pbf,
+            compression,
+            uring,
+            osc_seq,
+        } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            &pbf.dataset,
+            &pbf.variant,
+            |req| {
+                warn_sidecar_ignored(req);
+                pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compression)
+            },
+        ),
 
         // ----- elivagar commands -----
         Command::Tilegen {
             mode,
             dataset,
             variant,
-            
 
             skip_to,
             compression_level,
@@ -256,53 +307,136 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 skip_to: skip_to.as_deref(),
                 compression_level,
             };
-            run_measured(&mode, &dev_config, project, &project_root,
-                &dataset, &variant, |req| dispatch::run_elivagar_command(req, &cmd))
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                &variant,
+                |req| dispatch::run_elivagar_command(req, &cmd),
+            )
         }
         Command::PmtilesWriter { mode, tiles } => {
             let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
-            run_measured(&mode, &dev_config, project, &project_root,
-                "denmark", "raw", |req| dispatch::run_elivagar_command(req, &cmd))
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                "denmark",
+                "raw",
+                |req| dispatch::run_elivagar_command(req, &cmd),
+            )
         }
         Command::NodeStore { mode, nodes } => {
             let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
-            run_measured(&mode, &dev_config, project, &project_root,
-                "denmark", "raw", |req| dispatch::run_elivagar_command(req, &cmd))
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                "denmark",
+                "raw",
+                |req| dispatch::run_elivagar_command(req, &cmd),
+            )
         }
-        Command::ElivPlanetiler { mode, dataset, variant } => {
+        Command::ElivPlanetiler {
+            mode,
+            dataset,
+            variant,
+        } => {
             let cmd = elivagar::commands::ElivagarCommand::Planetiler;
-            run_measured(&mode, &dev_config, project, &project_root,
-                &dataset, &variant, |req| dispatch::run_elivagar_command(req, &cmd))
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                &variant,
+                |req| dispatch::run_elivagar_command(req, &cmd),
+            )
         }
-        Command::ElivTilemaker { mode, dataset, variant } => {
+        Command::ElivTilemaker {
+            mode,
+            dataset,
+            variant,
+        } => {
             let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
-            run_measured(&mode, &dev_config, project, &project_root,
-                &dataset, &variant, |req| dispatch::run_elivagar_command(req, &cmd))
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                &variant,
+                |req| dispatch::run_elivagar_command(req, &cmd),
+            )
         }
 
         // ----- nidhogg commands -----
-        Command::RunApi { mode, dataset, query } => {
+        Command::RunApi {
+            mode,
+            dataset,
+            query,
+        } => {
             let cmd = nidhogg::commands::NidhoggCommand::Api { query };
-            run_measured(&mode, &dev_config, project, &project_root, &dataset, "raw", |req| {
-                dispatch::run_nidhogg_command(req, &cmd)
-            })
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                "raw",
+                |req| dispatch::run_nidhogg_command(req, &cmd),
+            )
         }
-        Command::RunNidIngest { mode, dataset, variant } => {
+        Command::RunNidIngest {
+            mode,
+            dataset,
+            variant,
+        } => {
             let cmd = nidhogg::commands::NidhoggCommand::Ingest;
-            run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
-                dispatch::run_nidhogg_command(req, &cmd)
-            })
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                &variant,
+                |req| dispatch::run_nidhogg_command(req, &cmd),
+            )
         }
-        Command::RunTiles { mode, dataset, tiles, uring } => {
-            let cmd = nidhogg::commands::NidhoggCommand::Tiles { tiles_variant: tiles, uring };
-            run_measured(&mode, &dev_config, project, &project_root, &dataset, "raw", |req| {
-                dispatch::run_nidhogg_command(req, &cmd)
-            })
+        Command::RunTiles {
+            mode,
+            dataset,
+            tiles,
+            uring,
+        } => {
+            let cmd = nidhogg::commands::NidhoggCommand::Tiles {
+                tiles_variant: tiles,
+                uring,
+            };
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                "raw",
+                |req| dispatch::run_nidhogg_command(req, &cmd),
+            )
         }
 
         // ----- sluggrs commands -----
-        Command::SluggrsHotpath { mode } => {
-            run_measured(&mode, &dev_config, project, &project_root, "n/a", "n/a", |req| {
+        Command::SluggrsHotpath { mode } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            "n/a",
+            "n/a",
+            |req| {
                 project::require(project, Project::Sluggrs, "sluggrs-hotpath")?;
                 if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
                     return Err(DevError::Config(
@@ -310,26 +444,30 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     ));
                 }
                 sluggrs::hotpath::cmd(req)
-            })
-        }
+            },
+        ),
 
         // ----- generic commands -----
         Command::GenericHotpath {
             mode,
             dataset,
             variant,
-            
-
-        } => {
-            run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
+        } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            &dataset,
+            &variant,
+            |req| {
                 if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
                     return Err(DevError::Config(
                         "generic-hotpath only supports --hotpath or --alloc modes".into(),
                     ));
                 }
                 cmd_hotpath_generic(req)
-            })
-        }
+            },
+        ),
 
         // ----- suites -----
         Command::Suite {
@@ -337,10 +475,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
             name,
             dataset,
             variant,
-            
-
-        } => {
-            run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
+        } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            &dataset,
+            &variant,
+            |req| {
                 warn_sidecar_ignored(req);
                 if !matches!(
                     req.mode,
@@ -368,8 +510,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
                     ))),
                 }
-            })
-        }
+            },
+        ),
         Command::Passthrough {
             features,
             time,
@@ -1009,7 +1151,9 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         }
         let markers_a = sdb.query_markers(uuid_a)?;
         let markers_b = sdb.query_markers(uuid_b)?;
-        print_compare_timeline(uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b);
+        print_compare_timeline(
+            uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b,
+        );
         return Ok(());
     }
 
@@ -1094,7 +1238,10 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                     println!("\n{report}");
                 }
                 // Note if sidecar data exists.
-                if sidecar_db.as_ref().is_some_and(|sdb| sdb.has_data(&row.uuid)) {
+                if sidecar_db
+                    .as_ref()
+                    .is_some_and(|sdb| sdb.has_data(&row.uuid))
+                {
                     output::sidecar_msg("profile data available (use --timeline or --markers)");
                 }
             }
@@ -1191,11 +1338,15 @@ fn resolve_phase_range(
 /// Parse a time range string like "10.0..82.0" (seconds) into (start_us, end_us).
 fn parse_time_range(range: &str) -> Result<(i64, i64), DevError> {
     let (start_str, end_str) = range.split_once("..").ok_or_else(|| {
-        DevError::Config(format!("--range: expected 'start..end' in seconds, got '{range}'"))
+        DevError::Config(format!(
+            "--range: expected 'start..end' in seconds, got '{range}'"
+        ))
     })?;
 
     let start_sec: f64 = start_str.trim().parse().map_err(|_| {
-        DevError::Config(format!("--range: cannot parse start '{start_str}' as number"))
+        DevError::Config(format!(
+            "--range: cannot parse start '{start_str}' as number"
+        ))
     })?;
     let end_sec: f64 = end_str.trim().parse().map_err(|_| {
         DevError::Config(format!("--range: cannot parse end '{end_str}' as number"))
@@ -1345,7 +1496,9 @@ fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Result<(), Dev
         #[allow(clippy::cast_precision_loss)]
         let result = values[lo] as f64 + frac * (values[hi] - values[lo]) as f64;
         #[allow(clippy::cast_possible_truncation)]
-        { result.round() as i64 }
+        {
+            result.round() as i64
+        }
     };
 
     println!("field    {field}");
@@ -1363,10 +1516,7 @@ fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Result<(), Dev
 /// `t` is output as fractional seconds (e.g. `1.234`) not microseconds.
 /// When `fields` is `None`, all fields are output. When `Some`, only the
 /// listed fields are included (plus `t` is always included).
-fn sidecar_sample_json_projected(
-    s: &sidecar::Sample,
-    fields: Option<&Vec<String>>,
-) -> String {
+fn sidecar_sample_json_projected(s: &sidecar::Sample, fields: Option<&Vec<String>>) -> String {
     // t is always fractional seconds.
     #[allow(clippy::cast_precision_loss)]
     let t_sec = s.timestamp_us as f64 / 1_000_000.0;
@@ -1479,7 +1629,9 @@ fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker])
     } else {
         let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
         for (i, m) in markers.iter().enumerate() {
-            let phase_end = markers.get(i + 1).map_or(final_us, |next| next.timestamp_us);
+            let phase_end = markers
+                .get(i + 1)
+                .map_or(final_us, |next| next.timestamp_us);
             phases.push((&m.name, m.timestamp_us, phase_end));
         }
     }
@@ -1498,9 +1650,16 @@ fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker])
         let mut last_io: (i64, i64) = (0, 0);
         let mut count = 0;
 
-        for s in samples.iter().filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < *end_us) {
-            if s.rss_kb > peak_rss { peak_rss = s.rss_kb; }
-            if s.anon_kb > peak_anon { peak_anon = s.anon_kb; }
+        for s in samples
+            .iter()
+            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < *end_us)
+        {
+            if s.rss_kb > peak_rss {
+                peak_rss = s.rss_kb;
+            }
+            if s.anon_kb > peak_anon {
+                peak_anon = s.anon_kb;
+            }
             if first_io.is_none() {
                 first_io = Some((s.read_bytes, s.write_bytes));
             }
@@ -1569,7 +1728,10 @@ fn print_marker_durations(markers: &[sidecar::Marker]) {
     }
 
     if !pairs.is_empty() {
-        println!("{:<32} {:>12} {:>12} {:>12}", "Phase", "Start", "End", "Duration");
+        println!(
+            "{:<32} {:>12} {:>12} {:>12}",
+            "Phase", "Start", "End", "Duration"
+        );
         println!("{}", "-".repeat(71));
         for (name, start_us, end_us) in &pairs {
             match end_us {
@@ -1581,7 +1743,10 @@ fn print_marker_durations(markers: &[sidecar::Marker]) {
                 }
                 None => {
                     let start_ms = start_us / 1_000;
-                    println!("{name:<32} {:>9}ms {:>12} {:>12}", start_ms, "(no end)", "—");
+                    println!(
+                        "{name:<32} {:>9}ms {:>12} {:>12}",
+                        start_ms, "(no end)", "—"
+                    );
                 }
             }
         }
@@ -1723,7 +1888,9 @@ fn build_phases<'a>(
     } else {
         let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
         for (i, m) in markers.iter().enumerate() {
-            let phase_end = markers.get(i + 1).map_or(final_us, |next| next.timestamp_us);
+            let phase_end = markers
+                .get(i + 1)
+                .map_or(final_us, |next| next.timestamp_us);
             phases.push((m.name.as_str(), m.timestamp_us, phase_end));
         }
     }
@@ -1767,9 +1934,8 @@ fn print_marker_phases(markers: &[sidecar::Marker], samples: &[sidecar::Sample])
     println!("{}", "-".repeat(68));
 
     for (name, start_us, end_us) in &pairs {
-        let end = end_us.unwrap_or_else(|| {
-            samples.last().map_or(*start_us, |s| s.timestamp_us + 1)
-        });
+        let end =
+            end_us.unwrap_or_else(|| samples.last().map_or(*start_us, |s| s.timestamp_us + 1));
         let dur_ms = (end - start_us) / 1_000;
 
         let mut peak_rss: i64 = 0;
@@ -1781,12 +1947,18 @@ fn print_marker_phases(markers: &[sidecar::Marker], samples: &[sidecar::Sample])
             .iter()
             .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < end)
         {
-            if s.rss_kb > peak_rss { peak_rss = s.rss_kb; }
-            if s.anon_kb > peak_anon { peak_anon = s.anon_kb; }
+            if s.rss_kb > peak_rss {
+                peak_rss = s.rss_kb;
+            }
+            if s.anon_kb > peak_anon {
+                peak_anon = s.anon_kb;
+            }
             // majflt is cumulative — compute delta rate per sample.
             if let Some(prev) = prev_majflt {
                 let delta = s.majflt - prev;
-                if delta > peak_majflt { peak_majflt = delta; }
+                if delta > peak_majflt {
+                    peak_majflt = delta;
+                }
             }
             prev_majflt = Some(s.majflt);
         }
