@@ -202,25 +202,6 @@ pub fn spawn_captured(
     })
 }
 
-/// Collect output from a spawned child process.
-///
-/// Returns `CapturedOutput` with the exit status, stdout, stderr, and elapsed time
-/// (measured from `start`).
-pub fn collect_child(
-    child: std::process::Child,
-    start: Instant,
-) -> Result<CapturedOutput, DevError> {
-    let output = child.wait_with_output().map_err(|e| DevError::Io(e))?;
-    let elapsed = start.elapsed();
-
-    Ok(CapturedOutput {
-        status: output.status,
-        stdout: output.stdout,
-        stderr: output.stderr,
-        elapsed,
-    })
-}
-
 /// Run a subprocess with inherited stdio (passthrough mode), returning timing.
 ///
 /// If the process is killed by a signal (e.g. OOM killer SIGKILL), returns a

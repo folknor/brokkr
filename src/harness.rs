@@ -186,6 +186,10 @@ impl BenchHarness {
     /// sidecar attached. The sidecar samples `/proc` metrics and reads phase
     /// markers from a FIFO. Sidecar data is stored in the results DB alongside
     /// the benchmark result.
+    ///
+    /// The sidecar takes ownership of each `Child` process, drains
+    /// stdout/stderr in background threads (preventing pipe-buffer deadlock),
+    /// and records the child's exact exit time for wall-clock measurement.
     pub fn run_external_with_sidecar(
         &self,
         config: &BenchConfig,
@@ -197,57 +201,73 @@ impl BenchHarness {
         use crate::sidecar;
 
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
-        let fifo_path_str = fifo
-            .path
-            .to_str()
-            .ok_or_else(|| DevError::Config("FIFO path not UTF-8".into()))?
-            .to_owned();
+        let fifo_path_str = fifo.path_str()?.to_owned();
 
         let mut best_ms: Option<i64> = None;
+        let mut best_run_idx: usize = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
 
-            let env = [("PBFHOGG_MARKER_FIFO", fifo_path_str.as_str())];
+            // Reopen FIFO read end between runs so the next child's write
+            // end connects to a fresh reader (not one stuck at EOF).
+            if i > 0 {
+                fifo.reopen()?;
+            }
+
+            let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
-            let mut child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+            let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
 
-            let sidecar_data = sidecar::run_sidecar(&mut child, &mut fifo, i);
+            // run_sidecar takes ownership of the child, drains stdout/stderr
+            // in background threads, and returns everything when the child exits.
+            let result = sidecar::run_sidecar(child, &mut fifo, i, start);
 
-            let captured = output::collect_child(child, start)?;
+            // Check exit status using captured stderr for error messages.
+            let captured = output::CapturedOutput {
+                status: result.exit_status,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                elapsed: result.elapsed,
+            };
             let ms = elapsed_to_ms(&captured.elapsed);
-
             captured.check_success(&prog_str)?;
 
-            best_ms = Some(pick_best_ms(best_ms, ms));
-            sidecar_runs.push(sidecar_data);
+            if best_ms.is_none() || ms < best_ms.unwrap() {
+                best_ms = Some(ms);
+                best_run_idx = i;
+            }
+            sidecar_runs.push(result.data);
         }
 
-        fifo.cleanup();
+        // FIFO cleaned up by Drop (also handles error paths).
+        drop(fifo);
 
         let elapsed_ms =
             best_ms.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
-        let result = BenchResult {
+        let bench_result = BenchResult {
             elapsed_ms,
             kv: Vec::new(),
             distribution: None,
             hotpath: None,
         };
 
-        let uuid = self.record_result(config, &result)?;
+        let uuid = self.record_result(config, &bench_result)?;
 
         // Store sidecar data if we got a UUID (clean tree).
-        if let Some(uuid) = uuid {
+        if let Some(ref uuid) = uuid {
             for (i, data) in sidecar_runs.iter().enumerate() {
-                sidecar::store_sidecar_data(self.db_conn(), &uuid, i, data)?;
+                self.db.store_sidecar_run(uuid, i, data)?;
             }
-            output::sidecar_msg("profile data stored in results.db");
+            output::sidecar_msg(&format!(
+                "profile data stored in results.db (best run: {best_run_idx})",
+            ));
         }
 
-        Ok(result)
+        Ok(bench_result)
     }
 
     /// Distribution timing: collect all N samples, compute min/p50/p95/max.
@@ -367,13 +387,6 @@ impl BenchHarness {
             output::error("NOT STORED — tree is dirty (commit or stash changes)");
             Ok(None)
         }
-    }
-
-    /// Get a reference to the underlying database connection.
-    ///
-    /// Used for storing sidecar profile data alongside benchmark results.
-    pub fn db_conn(&self) -> &rusqlite::Connection {
-        self.db.conn()
     }
 
     /// Build a `RunRow` from harness state, config, and result.

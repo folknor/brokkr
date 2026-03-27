@@ -89,6 +89,26 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Backlog
 
+### Sidecar: extend to --hotpath/--alloc and elivagar/nidhogg
+
+`--sidecar` only works with `--bench` on pbfhogg unified-dispatch commands. Extending to `--hotpath`/`--alloc` requires threading the FIFO env var through `run_hotpath_capture` and using `spawn_captured` + sidecar loop instead of `run_captured_with_env`. Elivagar and nidhogg bench paths also need sidecar wiring.
+
+### Sidecar: store best_run_idx in DB
+
+The benchmark result is best-of-N but all N sidecar runs are stored under the same UUID. There is no column recording which `run_idx` produced the reported elapsed_ms. Add a `best_run_idx` column to `sidecar_summary` or `runs` so analysis tools can identify the authoritative run.
+
+### Sidecar: result+sidecar persistence is not atomic
+
+The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
+
+### Sidecar: no query/read API yet
+
+`store_sidecar_run` exists but there is no `load_sidecar_data` or CSV export. Needed for `brokkr results <uuid> --timeline` and `--compare-timeline`. The schema supports efficient range scans via the PK.
+
+### Sidecar: no foreign keys on sidecar tables
+
+`sidecar_samples`, `sidecar_markers`, `sidecar_summary` use `result_uuid TEXT` without a foreign key to the `runs` table. Orphaned rows can accumulate if results are ever deleted. Minor — brokkr never deletes results today.
+
 ### Make default binary configurable per-project in brokkr.toml
 
 Currently `find_executable` infers the expected binary name from `BuildConfig.bin` or `BuildConfig.package`. This should be configurable in `brokkr.toml` (e.g. a `default_bin` field per project) so projects with multiple binaries can declare which one brokkr should run by default.

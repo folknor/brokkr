@@ -197,15 +197,22 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Read { mode, pbf, modes } => {
             run_measured(&mode, &dev_config, project, &project_root,
-                &pbf.dataset, &pbf.variant, |req| pbfhogg::cmd::bench_read(req, &modes))
+                &pbf.dataset, &pbf.variant, |req| {
+                    warn_sidecar_ignored(req);
+                    pbfhogg::cmd::bench_read(req, &modes)
+                })
         }
         Command::Write { mode, pbf, compression } => {
             run_measured(&mode, &dev_config, project, &project_root,
-                &pbf.dataset, &pbf.variant, |req| pbfhogg::cmd::bench_write(req, &compression))
+                &pbf.dataset, &pbf.variant, |req| {
+                    warn_sidecar_ignored(req);
+                    pbfhogg::cmd::bench_write(req, &compression)
+                })
         }
         Command::MergeBench { mode, pbf, compression, uring, osc_seq } => {
             run_measured(&mode, &dev_config, project, &project_root,
                 &pbf.dataset, &pbf.variant, |req| {
+                    warn_sidecar_ignored(req);
                     pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compression)
                 })
         }
@@ -341,6 +348,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
         } => {
             run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
+                warn_sidecar_ignored(req);
                 if !matches!(
                     req.mode,
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
@@ -638,6 +646,13 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
         ));
     }
     Ok(result)
+}
+
+/// Warn if `--sidecar` was requested but the command does not support it.
+fn warn_sidecar_ignored(req: &measure::MeasureRequest) {
+    if req.sidecar {
+        output::error("WARNING: --sidecar is not supported for this command — ignoring");
+    }
 }
 
 // ---------------------------------------------------------------------------

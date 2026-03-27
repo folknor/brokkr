@@ -34,7 +34,8 @@ Single crate, single binary. No workspace.
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
 - `src/request.rs` — `ResultsQuery` struct for the results command
 - `src/db/` — ResultsDb, schema, migrations, queries, formatting, comparison
-- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[error]`), subprocess runners (`run_captured`, `run_passthrough_timed`)
+- `src/sidecar.rs` — Monitoring sidecar: `/proc` sampling, FIFO marker protocol, `run_sidecar()`, `SidecarFifo`, `SidecarRunResult`. Activated via `--bench --sidecar`
+- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners (`run_captured`, `spawn_captured`, `run_passthrough_timed`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive access
 - `src/oom.rs` — OOM protection (`protect_child`, `check_memory`, `MemoryRisk`)
@@ -111,13 +112,14 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 Every measurable command is a top-level brokkr subcommand. Measurement mode is a flag:
 
 ```
-brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
+brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [--sidecar] [command options]
 ```
 
 - No flag — build, run once, print timing. Acquires lockfile, no DB storage.
 - `--bench` — full benchmark: lockfile, 3 runs (or N), best-of-N stored in DB.
 - `--hotpath` — function-level timing via hotpath feature. 1 run (or N).
 - `--alloc` — per-function allocation tracking via hotpath-alloc feature. 1 run (or N).
+- `--sidecar` — attach monitoring sidecar that samples `/proc` metrics at 100ms. Requires `--bench`. Profile data stored in `sidecar_samples`/`sidecar_markers`/`sidecar_summary` tables alongside benchmark results. Child process receives `BROKKR_MARKER_FIFO` env var for phase markers.
 
 Dataset paths resolve from `brokkr.toml` automatically. All flags go after the command name.
 
@@ -179,6 +181,16 @@ Results in `.brokkr/results.db` per project (gitignored).
 - `DevError` variants for structured error handling (no `.unwrap()`)
 - Project gating via `project::require()` — wrong-project commands fail with helpful message
 - Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries). When no expected name is provided, requires exactly one executable — errors if multiple are found.
+
+## Sidecar profiler
+
+The `--sidecar` flag attaches a monitoring sidecar to `--bench` runs. The sidecar samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and reads phase markers from a FIFO. All data is buffered in memory during the benchmark and bulk-inserted to SQLite after the child exits.
+
+Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external_with_sidecar`), `src/db/write.rs` (`store_sidecar_run`), `src/db/schema.rs` + `src/db/migrate.rs` (v8 schema).
+
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement.
+
+Currently supports pbfhogg `--bench` via unified dispatch only. Elivagar, nidhogg, and old-style pbfhogg bench commands (read/write/merge) warn and ignore the flag.
 
 ## Removed features
 

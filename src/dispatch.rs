@@ -417,6 +417,10 @@ pub fn run_elivagar_command(
         return run_elivagar_external(req, command);
     }
 
+    if req.sidecar {
+        output::error("WARNING: --sidecar is not yet supported for elivagar — ignoring");
+    }
+
     match req.mode {
         MeasureMode::Run => run_elivagar_run(req, command),
         MeasureMode::Bench { .. } => run_elivagar_bench(req, command),
@@ -632,6 +636,10 @@ pub fn run_nidhogg_command(
         Project::Nidhogg,
         command,
     )?;
+
+    if req.sidecar {
+        output::error("WARNING: --sidecar is not yet supported for nidhogg — ignoring");
+    }
 
     match req.mode {
         MeasureMode::Run | MeasureMode::Bench { .. } => bench_fn(req),

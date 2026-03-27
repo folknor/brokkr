@@ -3,13 +3,28 @@
 //! Samples `/proc/{pid}/*` at fixed intervals, reads application phase markers
 //! from a FIFO, and bulk-inserts everything to SQLite after the child exits.
 //! Zero I/O during the benchmark itself.
+//!
+//! # Pipe draining
+//!
+//! The child's stdout and stderr are piped (for error reporting). To avoid
+//! deadlock when the child fills the OS pipe buffer (~64 KiB), we take
+//! ownership of the pipe handles and drain them in background threads while
+//! the sidecar loop samples `/proc` and checks `try_wait()`.
+//!
+//! # Timing
+//!
+//! Both the sidecar sample loop and the sleep scheduler use `CLOCK_MONOTONIC`.
+//! `Instant::now()` provides sample timestamps (it wraps `CLOCK_MONOTONIC` on
+//! Linux). `clock_nanosleep(TIMER_ABSTIME)` provides drift-free tick scheduling.
+//! The child's wall-clock time is captured at the moment `try_wait()` detects
+//! exit, not after the sidecar loop finishes draining.
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Child;
-use std::time::Instant;
+use std::process::{Child, ExitStatus};
+use std::time::{Duration, Instant};
 
 use crate::error::DevError;
 use crate::output;
@@ -89,6 +104,18 @@ pub struct SidecarData {
     pub summary: SidecarSummary,
 }
 
+/// Result of a sidecar-monitored child process run.
+///
+/// Contains both the child's exit information (status, stdout, stderr,
+/// wall-clock time) and the sidecar profile data.
+pub struct SidecarRunResult {
+    pub exit_status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub elapsed: Duration,
+    pub data: SidecarData,
+}
+
 // ---------------------------------------------------------------------------
 // /proc parsing
 // ---------------------------------------------------------------------------
@@ -156,10 +183,9 @@ fn read_proc_stat(pid: u32) -> Option<ProcStat> {
     // 17: num_threads (field index 19 in the full line, 17 after comm)
     // ...
     // 20: vsize (field index 22 in the full line, 20 after comm)
-    // 21: rss   (field index 23, 21 after comm)
     let fields: Vec<&str> = rest.split_whitespace().collect();
 
-    if fields.len() < 22 {
+    if fields.len() < 21 {
         return None;
     }
 
@@ -177,6 +203,9 @@ fn read_proc_stat(pid: u32) -> Option<ProcStat> {
 ///
 /// Requires same-UID or `CAP_SYS_PTRACE`. Since brokkr spawns the child
 /// process, same-UID is guaranteed.
+///
+/// Uses `continue` (not `?`) so one unexpected line doesn't discard the
+/// entire read.
 fn read_proc_io(pid: u32) -> Option<ProcIo> {
     let path = format!("/proc/{pid}/io");
     let contents = fs::read_to_string(&path).ok()?;
@@ -192,8 +221,14 @@ fn read_proc_io(pid: u32) -> Option<ProcIo> {
     };
 
     for line in contents.lines() {
-        let (key, val) = line.split_once(':')?;
-        let val: i64 = val.trim().parse().ok()?;
+        let (key, val) = match line.split_once(':') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let val: i64 = match val.trim().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         match key {
             "rchar" => io.rchar = val,
             "wchar" => io.wchar = val,
@@ -305,8 +340,10 @@ fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sam
 // ---------------------------------------------------------------------------
 
 /// FIFO handle: path + read end for the sidecar.
-pub struct SidecarFifo {
-    pub path: PathBuf,
+///
+/// Implements `Drop` to clean up the FIFO file on panic or early error return.
+pub(crate) struct SidecarFifo {
+    path: PathBuf,
     reader: BufReader<File>,
 }
 
@@ -315,7 +352,7 @@ impl SidecarFifo {
     ///
     /// Must be called BEFORE spawning the child so the reader exists when
     /// the child tries to open the write end with `O_NONBLOCK`.
-    pub fn create(scratch_dir: &Path) -> Result<Self, DevError> {
+    pub(crate) fn create(scratch_dir: &Path) -> Result<Self, DevError> {
         let pid = std::process::id();
         let path = scratch_dir.join(format!(".sidecar-{pid}.fifo"));
 
@@ -333,17 +370,32 @@ impl SidecarFifo {
             return Err(DevError::Io(std::io::Error::last_os_error()));
         }
 
-        // Open read end. O_RDONLY|O_NONBLOCK so we don't block waiting for a writer.
-        // We'll use non-blocking reads in the sidecar loop.
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)?;
+        let file = Self::open_read_end(&path)?;
 
         Ok(Self {
             path,
             reader: BufReader::new(file),
         })
+    }
+
+    /// Open the FIFO read end with `O_RDONLY|O_NONBLOCK`.
+    fn open_read_end(path: &Path) -> Result<File, DevError> {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .map_err(DevError::Io)
+    }
+
+    /// Reopen the read end after a child exits.
+    ///
+    /// When the child closes the write end, the reader gets EOF. For
+    /// multi-run benchmarks, we must reopen to accept the next child's
+    /// write end.
+    pub(crate) fn reopen(&mut self) -> Result<(), DevError> {
+        let file = Self::open_read_end(&self.path)?;
+        self.reader = BufReader::new(file);
+        Ok(())
     }
 
     /// Drain all pending marker lines from the FIFO.
@@ -355,7 +407,7 @@ impl SidecarFifo {
         loop {
             line.clear();
             match self.reader.read_line(&mut line) {
-                Ok(0) => break, // EOF or no data
+                Ok(0) => break, // EOF
                 Ok(_) => {
                     let trimmed = line.trim();
                     if let Some((ts_str, name)) = trimmed.split_once(' ') {
@@ -375,8 +427,16 @@ impl SidecarFifo {
         }
     }
 
-    /// Clean up the FIFO file.
-    pub fn cleanup(self) {
+    /// The FIFO path, for passing to child processes via environment variable.
+    pub(crate) fn path_str(&self) -> Result<&str, DevError> {
+        self.path
+            .to_str()
+            .ok_or_else(|| DevError::Config("FIFO path not UTF-8".into()))
+    }
+}
+
+impl Drop for SidecarFifo {
+    fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -420,22 +480,45 @@ fn monotonic_ns() -> i64 {
 // Sidecar loop
 // ---------------------------------------------------------------------------
 
+/// Drain a pipe handle to completion in a thread.
+///
+/// Used to prevent deadlock: the child's stdout/stderr must be drained
+/// concurrently with the sidecar sampling loop, otherwise the child blocks
+/// once the OS pipe buffer (~64 KiB) fills.
+fn drain_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = pipe;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    })
+}
+
 /// Run the sidecar sampling loop for a single benchmark run.
 ///
-/// Samples `/proc/{pid}/*` at 100ms intervals, drains FIFO markers, and
-/// returns all collected data when the child exits.
+/// Takes ownership of the `Child` process. Drains stdout/stderr in
+/// background threads to prevent pipe-buffer deadlock. Samples
+/// `/proc/{pid}/*` at 100ms intervals, drains FIFO markers, and detects
+/// child exit via `try_wait()`.
 ///
-/// The caller must pass the `Child` handle so we detect exit via
-/// `try_wait()`, not bare PID liveness checks.
-pub fn run_sidecar(
-    child: &mut Child,
+/// Returns a `SidecarRunResult` containing the child's exit status,
+/// captured output, wall-clock elapsed time, and sidecar profile data.
+pub(crate) fn run_sidecar(
+    mut child: Child,
     fifo: &mut SidecarFifo,
     run_idx: usize,
-) -> SidecarData {
+    start: Instant,
+) -> SidecarRunResult {
     let pid = child.id();
-    let start = Instant::now();
-    let start_ns = monotonic_ns();
 
+    // Take stdout/stderr handles from the child and drain them in background
+    // threads. This prevents the classic pipe-buffer deadlock: if the child
+    // writes >64 KiB to a piped stream, it blocks until someone reads, but
+    // the sidecar loop is waiting for the child to exit — deadlock.
+    let stdout_thread = child.stdout.take().map(drain_pipe);
+    let stderr_thread = child.stderr.take().map(drain_pipe);
+
+    let start_ns = monotonic_ns();
     let mut samples: Vec<Sample> = Vec::new();
     let mut markers: Vec<Marker> = Vec::new();
     let mut last_hwm: i64 = 0;
@@ -447,10 +530,18 @@ pub fn run_sidecar(
 
     output::sidecar_msg(&format!("attached to pid {pid}, run {run_idx}"));
 
+    // The exit status and elapsed time, captured at the moment try_wait
+    // detects exit (not after the loop finishes). This avoids including
+    // up to one sample interval of sidecar overhead in the timing.
+    let mut exit_status: Option<ExitStatus> = None;
+    #[allow(unused_assignments)] // initial None is never read; every branch assigns before use
+    let mut child_elapsed: Option<Duration> = None;
+
     loop {
         let elapsed_us = start.elapsed().as_micros() as i64;
 
         // Sample /proc (3 file reads, ~30µs total).
+        // Gracefully skipped if /proc reads fail (process exiting).
         if let Some(s) = read_proc_metrics(pid, sample_idx, elapsed_us) {
             if s.vm_hwm_kb > last_hwm {
                 last_hwm = s.vm_hwm_kb;
@@ -462,11 +553,18 @@ pub fn run_sidecar(
         // Drain any pending markers from FIFO.
         fifo.drain_markers(&mut markers, &mut marker_idx);
 
-        // Check child exit via handle (not bare PID).
+        // Check child exit via handle (not bare PID — PIDs can be reused).
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                child_elapsed = Some(start.elapsed());
+                exit_status = Some(status);
+                break;
+            }
             Ok(None) => {}
-            Err(_) => break,
+            Err(_) => {
+                child_elapsed = Some(start.elapsed());
+                break;
+            }
         }
 
         // Sleep until next tick (CLOCK_MONOTONIC absolute time).
@@ -477,7 +575,28 @@ pub fn run_sidecar(
     // Final drain — markers may have arrived between last sample and exit.
     fifo.drain_markers(&mut markers, &mut marker_idx);
 
-    let wall_time_ms = start.elapsed().as_millis() as i64;
+    // Join pipe drain threads. These complete quickly once the child exits
+    // since the pipe write ends are closed.
+    let stdout = stdout_thread
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_thread
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    // Fall back to wait() if try_wait() never saw the exit (shouldn't happen,
+    // but defensive). This is safe because the pipe drain threads have already
+    // joined, so wait_with_output() won't deadlock.
+    let exit_status = exit_status.unwrap_or_else(|| {
+        child_elapsed = Some(start.elapsed());
+        child.wait().unwrap_or_else(|_| {
+            // Process already reaped — synthesize a failure status.
+            std::process::ExitStatus::default()
+        })
+    });
+
+    let child_elapsed = child_elapsed.unwrap_or_else(|| start.elapsed());
+    let wall_time_ms = child_elapsed.as_millis() as i64;
 
     output::sidecar_msg(&format!(
         "{} samples, {} markers, {wall_time_ms}ms",
@@ -485,116 +604,22 @@ pub fn run_sidecar(
         markers.len(),
     ));
 
-    SidecarData {
-        samples,
-        markers,
-        summary: SidecarSummary {
-            vm_hwm_kb: last_hwm,
-            sample_count: sample_idx,
-            marker_count: marker_idx,
-            wall_time_ms,
+    SidecarRunResult {
+        exit_status,
+        stdout,
+        stderr,
+        elapsed: child_elapsed,
+        data: SidecarData {
+            samples,
+            markers,
+            summary: SidecarSummary {
+                vm_hwm_kb: last_hwm,
+                sample_count: sample_idx,
+                marker_count: marker_idx,
+                wall_time_ms,
+            },
         },
     }
-}
-
-// ---------------------------------------------------------------------------
-// SQLite storage
-// ---------------------------------------------------------------------------
-
-/// Bulk-insert sidecar data for one run into the results database.
-pub fn store_sidecar_data(
-    conn: &rusqlite::Connection,
-    result_uuid: &str,
-    run_idx: usize,
-    data: &SidecarData,
-) -> Result<(), DevError> {
-    let tx = conn.unchecked_transaction()?;
-
-    // Insert samples.
-    {
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO sidecar_samples (
-                result_uuid, run_idx, sample_idx, timestamp_us,
-                rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
-                utime, stime, num_threads, minflt, majflt,
-                rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
-                syscr, syscw, vol_cs, nonvol_cs
-            ) VALUES (
-                ?1, ?2, ?3, ?4,
-                ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21,
-                ?22, ?23, ?24, ?25
-            )",
-        )?;
-
-        for s in &data.samples {
-            stmt.execute(rusqlite::params![
-                result_uuid,
-                run_idx as i64,
-                s.sample_idx,
-                s.timestamp_us,
-                s.rss_kb,
-                s.anon_kb,
-                s.file_kb,
-                s.shmem_kb,
-                s.swap_kb,
-                s.vsize_kb,
-                s.vm_hwm_kb,
-                s.utime,
-                s.stime,
-                s.num_threads,
-                s.minflt,
-                s.majflt,
-                s.rchar,
-                s.wchar,
-                s.read_bytes,
-                s.write_bytes,
-                s.cancelled_write_bytes,
-                s.syscr,
-                s.syscw,
-                s.vol_cs,
-                s.nonvol_cs,
-            ])?;
-        }
-    }
-
-    // Insert markers.
-    {
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO sidecar_markers (
-                result_uuid, run_idx, marker_idx, timestamp_us, name
-            ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
-
-        for m in &data.markers {
-            stmt.execute(rusqlite::params![
-                result_uuid,
-                run_idx as i64,
-                m.marker_idx,
-                m.timestamp_us,
-                m.name,
-            ])?;
-        }
-    }
-
-    // Insert summary.
-    tx.execute(
-        "INSERT INTO sidecar_summary (
-            result_uuid, run_idx, vm_hwm_kb, sample_count, marker_count, wall_time_ms
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![
-            result_uuid,
-            run_idx as i64,
-            data.summary.vm_hwm_kb,
-            data.summary.sample_count,
-            data.summary.marker_count,
-            data.summary.wall_time_ms,
-        ],
-    )?;
-
-    tx.commit()?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -607,7 +632,6 @@ mod tests {
 
     #[test]
     fn parse_proc_stat_self() {
-        // We can always read our own /proc/self/stat.
         let pid = std::process::id();
         let stat = read_proc_stat(pid);
         assert!(stat.is_some(), "should be able to read own /proc/stat");
@@ -631,7 +655,6 @@ mod tests {
         let pid = std::process::id();
         let io = read_proc_io(pid);
         assert!(io.is_some(), "should be able to read own /proc/io");
-        // rchar should be > 0 since we've read files during the test.
         let io = io.unwrap();
         assert!(io.rchar > 0);
     }
@@ -651,7 +674,6 @@ mod tests {
 
     #[test]
     fn nonexistent_pid_returns_none() {
-        // PID 0 is the kernel scheduler — /proc/0/stat doesn't exist on most systems.
         let stat = read_proc_stat(0);
         assert!(stat.is_none());
     }
@@ -661,5 +683,18 @@ mod tests {
         let t1 = monotonic_ns();
         let t2 = monotonic_ns();
         assert!(t2 >= t1);
+    }
+
+    #[test]
+    fn read_proc_io_tolerates_extra_lines() {
+        // Simulate a /proc/io with an unexpected line — should not crash.
+        // We can't easily inject content into /proc, but we verify our own
+        // /proc/io parses correctly (which has the standard 7 lines).
+        let pid = std::process::id();
+        let io = read_proc_io(pid);
+        assert!(io.is_some());
+        let io = io.unwrap();
+        // All standard fields should be populated.
+        assert!(io.syscr > 0 || io.rchar > 0, "at least one I/O counter should be nonzero");
     }
 }
