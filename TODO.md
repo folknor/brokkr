@@ -137,7 +137,7 @@ Makes performance triage easier without external tooling.
 ## CLI redesign remaining issues
 
 ### Elivagar/nidhogg default mode runs through full harness
-`brokkr tilegen` (no `--bench` flag) still goes through `BenchHarness` with DB storage. Pbfhogg has a lightweight `run_pbfhogg_run` path; elivagar and nidhogg need equivalents.
+`brokkr tilegen` (no `--bench` flag) still goes through `BenchHarness` with DB storage (but now only 1 run, not 3). Pbfhogg has a lightweight `run_pbfhogg_run` path that skips DB; elivagar and nidhogg need equivalents. Requires extracting arg construction from `bench_self.rs` into `elivagar/commands.rs`.
 
 ### Suite without --bench stores results in DB
 `brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
@@ -155,7 +155,7 @@ Makes performance triage easier without external tooling.
 `RunApi --hotpath` ignores `--query`, `RunTiles --hotpath` ignores `--tiles`/`--uring`. Nidhogg hotpath is a single generic function. Pre-existing.
 
 ### Remove --runs from elivagar/nidhogg CLI variants
-Mode-based run counts (`--bench 5`) now take precedence. The standalone `--runs` field is dead when a mode flag is set. Should be removed.
+The `--runs` field on these commands is now fully dead — `mm.runs()` is always used. Should be removed from cli.rs to avoid confusion. Harmless but misleading.
 
 ### ~~read/write/merge expose unsupported --hotpath/--alloc flags~~ FIXED
 Read/write/merge now use `BenchOnlyModeArgs` which only exposes `--bench`, `--verbose`, `--commit`, `--features`, `--force`.

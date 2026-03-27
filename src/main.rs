@@ -550,11 +550,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config,
                     project,
@@ -594,11 +590,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config,
                     project,
@@ -621,11 +613,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config,
                     project,
@@ -653,11 +641,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config,
                     project,
@@ -685,11 +669,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config,
                     project,
@@ -720,11 +700,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "api")?;
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
@@ -774,11 +750,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "nid-ingest")?;
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
@@ -829,11 +801,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "tiles")?;
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
-                    runs
-                } else {
-                    mm.runs()
-                };
+                let effective_runs = mm.runs();
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
