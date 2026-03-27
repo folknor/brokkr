@@ -20,43 +20,34 @@ Single crate, single binary. No workspace.
 
 ### Source layout
 
-- `src/main.rs` — `main()`, command dispatch, all `cmd_*` handler functions
-- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command`, `BenchCommand`, `VerifyCommand`, `LitehtmlCommand`
+- `src/main.rs` — `main()`, command dispatch, `pbfhogg_cmd!` macro, `resolve_mode()`, `resolve_bench_only_mode()`
+- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `BenchOnlyModeArgs`, `PbfArgs`, `VerifyCommand`, `LitehtmlCommand`
+- `src/measure.rs` — `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
+- `src/dispatch.rs` — Unified dispatch: `run_pbfhogg_command_with_params()` (handles all modes for any pbfhogg command), `run_elivagar_command()`, `run_pbfhogg_run()` (lightweight default), `run_pbfhogg_wallclock()` (bench with DB), `run_pbfhogg_hotpath()` (hotpath/alloc)
+- `src/pbfhogg/commands.rs` — `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` — single source of truth for all pbfhogg command argument construction
+- `src/elivagar/commands.rs` — `ElivagarCommand` enum (Tilegen, PmtilesWriter, NodeStore, Planetiler, Tilemaker)
 - `src/context.rs` — `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
 - `src/resolve.rs` — Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
-- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml), `detect()` (delegates to `config::load()`), `require()` gating
+- `src/project.rs` — `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs), `detect()` (delegates to `config::load()`), `require()` gating
 - `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/request.rs` — Shared request structs (`BenchRequest`, `HotpathRequest`, `ProfileRequest`, `ResultsQuery`)
-- `src/db/mod.rs` — `ResultsDb` wrapper, re-exports
-- `src/db/types.rs` — `StoredRow`, `Distribution`, `KvPair`, `HotpathData`
-- `src/db/schema.rs` — Table definitions, column constants
-- `src/db/write.rs` — Insert/record result rows
-- `src/db/query.rs` — Query by UUID prefix, commit, command, variant; comparison queries
-- `src/db/format.rs` — Result formatting: `format_table`, `format_details`, `format_compare`
-- `src/db/compare.rs` — Side-by-side commit comparison logic
-- `src/db/hotpath.rs` — Hotpath report formatting for result detail view
-- `src/db/migrate.rs` — Migration framework (v0→v3), `run_migrations()`
-- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, etc.), subprocess runners (`run_captured`, `run_passthrough_timed`)
+- `src/request.rs` — Legacy request structs (`BenchRequest`, `HotpathRequest`, `ResultsQuery`) — still used by multi-variant benchmarks and elivagar/nidhogg delegation
+- `src/db/` — ResultsDb, schema, migrations, queries, formatting, comparison
+- `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[error]`), subprocess runners (`run_captured`, `run_passthrough_timed`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
-- `src/env.rs` — `EnvInfo` collection (hostname, kernel, governor, memory, drives, tool versions)
-- `src/git.rs` — `GitInfo` (commit hash, dirty flag, branch)
-- `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive bench/verify/hotpath access
-- `src/hotpath_fmt.rs` — Hotpath JSON report formatting
-- `src/pmtiles.rs` — PMTiles v3 parser (header, varint, directory decoding, stats)
+- `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive access
 - `src/oom.rs` — OOM protection (`protect_child`, `check_memory`, `MemoryRisk`)
 - `src/preflight.rs` — Pre-benchmark system checks (`Check` enum framework)
-- `src/profiler.rs` — Sampling profiler integration (perf/samply)
-- `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config), cache-first network checks
+- `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config)
 - `src/worktree.rs` — Git worktree creation/cleanup for retroactive benchmarking
-- `src/history.rs` — `HistoryDb` — global command history at `$XDG_DATA_HOME/brokkr/history.db`. Schema v1, migration framework, insert/query/format
+- `src/history.rs` — `HistoryDb` — global command history at `$XDG_DATA_HOME/brokkr/history.db`
 
 ### Project-specific modules
 
-- `src/pbfhogg/` — 25 modules: benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), hotpath, profile, download
-- `src/elivagar/` — 12 modules: benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath, profile
-- `src/nidhogg/` — 13 modules: server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath, profile. `mod.rs` has shared curl helpers. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
+- `src/pbfhogg/` — `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), download
+- `src/elivagar/` — `commands.rs` (command registry), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
+- `src/nidhogg/` — server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath. `mod.rs` has shared curl helpers. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
 - `src/litehtml/` — 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.
 - `scripts/litehtml-prepare/` — Node.js fixture preprocessing (cheerio + pngjs). `prepare.js` handles `prepare`, `extract`, and `outline` subcommands. Dependencies managed via pnpm (`package.json`, `pnpm-lock.yaml`).
 
@@ -100,7 +91,7 @@ file = "denmark-elivagar.pmtiles"
 xxhash = "9a3b2c1d..."
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (`run`, `bench`, `hotpath`, `profile`, `verify`, `serve`, `ingest`, `update`) — NOT applied to `check`. CLI `--features` are additive on top of host features (deduped).
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`) — NOT applied to `check`. CLI `--features` are additive on top of host features (deduped).
 
 ### Dataset structure
 
@@ -115,18 +106,30 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `--osc-seq <seq>` — selects from `osc.<seq>` in config. Auto-selects if exactly one OSC is configured.
 - `--tiles <variant>` — selects from `pmtiles.<variant>` in config. Auto-selects if exactly one PMTiles entry is configured.
 
-## Shared commands (all projects)
+## CLI model
+
+Every measurable command is a top-level brokkr subcommand. Measurement mode is a flag:
+
+```
+brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
+```
+
+- No flag — build, run once, print timing. Acquires lockfile, no DB storage.
+- `--bench` — full benchmark: lockfile, 3 runs (or N), best-of-N stored in DB.
+- `--hotpath` — function-level timing via hotpath feature. 1 run (or N).
+- `--alloc` — per-function allocation tracking via hotpath-alloc feature. 1 run (or N).
+
+Dataset paths resolve from `brokkr.toml` automatically. All flags go after the command name.
+
+### Shared commands (all projects)
 
 - `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features` and `--no-default-features`
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
-- `run` — build release binary and run with passthrough args; supports `--time` (stable key=value timing), `--json` (structured timing), `--runs N` (min/median/p95 summary), `--no-build` (skip build)
-- `results [UUID]` — look up specific result by UUID prefix (shows full detail + hotpath report)
-- `results [--commit X] [--compare A B] [--compare-last] [--command CMD] [--variant V] [-n N] [--top N]` — query/compare benchmark results from SQLite. `--top 0` shows all hotpath functions. `--compare-last --command hotpath` diffs two most recent hotpath runs.
+- `results` — query the results database (`.brokkr/results.db`). Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
 - `clean` — remove scratch/temp files
-- `hotpath [target]` — function-level timing/allocation profiling via `hotpath` feature. Elivagar supports targets: `pmtiles`, `node-store` (micro-benchmark hotpath). No target = main pipeline. Pbfhogg supports `--test <name>` to run a single test (inspect-tags, check-refs, cat, apply-changes-zlib, apply-changes-none).
-- `profile` — sampling profiler (perf/samply)
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
-- `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Every invocation (except `history` itself) is recorded with timing, exit status, project, commit, and system context. Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
+- `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
+- `passthrough` — build and run with raw passthrough args (hidden, for ad-hoc use)
 
 ## Litehtml commands (`brokkr litehtml <subcommand>`)
 
@@ -179,7 +182,9 @@ Results in `.brokkr/results.db` per project (gitignored).
 
 ## Removed features
 
-- `--profile` flag and `Command::Profile` removed in b17a219. Previously did two-pass hotpath (pbfhogg) or sampling profiler via perf/samply (elivagar). Restore from that commit if elivagar needs sampling profiler support again. The old `src/elivagar/profile.rs` and `src/pbfhogg/profile.rs` modules still exist but are only reachable via the deprecated `brokkr profile` path.
+- `--profile` flag and `Command::Profile` removed in b17a219. Previously did two-pass hotpath (pbfhogg) or sampling profiler via perf/samply (elivagar). Restore from that commit if elivagar needs sampling profiler support again.
+- `Command::Bench`, `Command::Hotpath`, `BenchCommand` enum removed in 893e3fd. Replaced by top-level measured commands with `--bench`/`--hotpath`/`--alloc` flags.
+- `src/profiler.rs` (perf/samply integration) removed in 6c8d846. Restore from that commit if needed.
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.

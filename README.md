@@ -14,78 +14,88 @@ Run `brokkr` from any project root. It reads `./brokkr.toml` to detect which pro
 
 ```
 cd ~/Programs/pbfhogg
-brokkr bench read              # pbfhogg read benchmark
-brokkr verify sort             # cross-validate sort against osmium
+brokkr inspect-tags --dataset denmark              # run once, print timing
+brokkr inspect-tags --dataset denmark --bench       # 3 runs, store in DB
+brokkr inspect-tags --dataset denmark --hotpath      # function-level timing
+brokkr verify sort                                  # cross-validate against osmium
 
 cd ~/Programs/elivagar
-brokkr bench self              # elivagar full pipeline benchmark
-brokkr hotpath pmtiles         # pmtiles micro-benchmark hotpath
+brokkr tilegen --dataset denmark --bench            # full pipeline benchmark
+brokkr pmtiles-writer --hotpath                     # micro-benchmark hotpath
 
 cd ~/Programs/nidhogg
-brokkr serve                   # start the nidhogg server
-brokkr bench api               # API query benchmark
+brokkr serve                                       # start the nidhogg server
+brokkr api --dataset denmark --bench                # API query benchmark
 
 cd ~/Programs/litehtml-rs
-brokkr litehtml test --all     # visual reference tests
-brokkr litehtml outline fixtures/prepared.html --selectors
+brokkr litehtml test --all                          # visual reference tests
 ```
 
 ## Commands
+
+### Measurement modes
+
+Every measurable command supports these flags:
+
+| Flag | Behavior |
+|------|----------|
+| *(none)* | Build, run once, print timing. No DB storage. |
+| `--bench` | Full benchmark: lockfile, 3 runs, best-of-N stored in DB |
+| `--bench N` | Same but N runs |
+| `--hotpath` | Function-level timing via hotpath feature (1 run) |
+| `--hotpath N` | Same but N runs |
+| `--alloc` | Per-function allocation tracking (1 run) |
+
+All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`.
 
 ### Shared (all projects)
 
 | Command | Description |
 |---------|-------------|
-| `check` | Run clippy + tests (extra args forwarded to `cargo test`). Supports `--features` and `--no-default-features` |
-| `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status (with XXH128 hashes) |
-| `run` | Build (or `--no-build`) and run with passthrough args; supports `--time`, `--json`, `--runs N` |
+| `check` | Run clippy + tests (extra args forwarded to `cargo test`) |
+| `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `clean` | Remove scratch/temp files |
-| `hotpath` | Function-level timing/allocation profiling via `hotpath` feature |
-| `profile` | Sampling profiler (perf/samply) |
-| `pmtiles-stats` | PMTiles v3 file statistics (zoom distribution, tile sizes, compression) |
+| `pmtiles-stats` | PMTiles v3 file statistics |
+| `history` | Browse global command history |
 | `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
 | `lock` | Show who holds the benchmark lock |
 
 ### pbfhogg
 
-**Benchmarks** (`brokkr bench <subcommand>`):
+Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect-tags`, `check-refs`, `sort`, `cat-way`, `add-locations-to-ways`, `build-geocode-index`, `apply-changes`, `extract`, `diff`, etc.
 
-| Subcommand | Description |
-|------------|-------------|
-| `read` | Read benchmark (sequential, parallel, pipelined, mmap, blobreader) |
-| `write` | Write benchmark (sync + pipelined x compression) |
-| `merge` | Merge benchmark (I/O modes x compression) |
-| `commands` | CLI commands benchmark (external timing) |
-| `extract` | Extract strategies (simple/complete/smart) |
-| `allocator` | Allocator comparison (default/jemalloc/mimalloc) |
-| `blob-filter` | Indexed vs non-indexed PBF performance |
-| `planetiler` | Planetiler Java PBF read comparison |
-| `all` | Full benchmark suite |
+Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`, `--modes`, `--compression` flags).
 
-**Verification** (`brokkr verify <subcommand>`): cross-validates output against osmium, osmosis, and osmconvert for sort, cat, extract, tags-filter, getid/removeid, add-locations-to-ways, check-refs, merge, derive-changes, and diff.
+`suite pbfhogg` runs the full benchmark suite.
+
+**Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert.
 
 **Other**: `download <region>` fetches datasets from Geofabrik.
 
 ### elivagar
 
-**Benchmarks**: `self` (full pipeline), `node-store`, `pmtiles`, `planetiler`, `tilemaker`, `all`.
+| Command | Description |
+|---------|-------------|
+| `tilegen` | Full tile generation pipeline (with all pipeline flags) |
+| `pmtiles-writer` | PMTiles writer micro-benchmark (`--tiles N`) |
+| `node-store` | SortedNodeStore micro-benchmark (`--nodes N`) |
+| `eliv-planetiler` | Planetiler comparison |
+| `eliv-tilemaker` | Tilemaker comparison |
 
-For `elivagar`-specific node-store behavior, `brokkr bench self`, `brokkr hotpath`, and `brokkr profile` also forward:
-- `--force-sorted`
-- `--allow-unsafe-flat-index`
+`suite elivagar` runs the full benchmark suite.
 
-**Other**: `compare-tiles` (feature count comparison between PMTiles archives), `download-ocean` (ocean shapefiles).
+**Other**: `compare-tiles`, `download-ocean`, `download-natural-earth`.
 
 ### nidhogg
 
 **Server**: `serve`, `stop`, `status`.
 
-**Operations**: `ingest` (PBF to disk format), `update` (diff application), `query`, `geocode`.
+**Operations**: `ingest`, `update`, `query`, `geocode`.
 
-**Benchmarks**: `api` (query performance), `nid-ingest` (ingest performance).
+**Benchmarks**: `api` (query performance), `nid-ingest` (ingest), `tiles` (tile serving).
 
-**Verification**: `batch [--dataset]` (batch query, bbox from dataset config), `nid-geocode`, `readonly [--dataset]` (read-only filesystem).
+**Verification**: `batch`, `nid-geocode`, `readonly`.
 
 ### litehtml-rs
 
@@ -169,23 +179,23 @@ The compare view shows timing, output size, peak RSS, rewrite ratio, and blob di
 
 ## Quick runtime timing
 
-`brokkr run` supports ad-hoc machine-readable timing without the full benchmark harness:
+By default, every measurable command builds and runs once with timing output — no DB, no harness overhead:
 
 ```
-brokkr run --time -- --help
-# elapsed_ms=52 build_ms=51 run_ms=1
-
-brokkr run --json -- --version
-# {"build_ms":...,"run_ms":...,"elapsed_ms":...}
-
-brokkr run --json --runs 5 --no-build -- --version
-# {"build_ms":0,"run_ms":...,"elapsed_ms":...,"runs":5,"min_ms":...,"median_ms":...,"p95_ms":...}
+brokkr inspect-tags --dataset denmark
+# [run] /path/to/pbfhogg inspect tags denmark.osm.pbf --min-count 999999999
+# ... command output ...
+# [run] elapsed=1234ms
 ```
 
-- `--time`: stable `key=value` timing line.
-- `--json`: structured timing JSON.
-- `--runs N`: executes the command N times (single build) and reports min/median/p95.
-- `--no-build`: skips build and runs the existing release binary.
+Add `--bench` to enable the full harness with DB storage:
+
+```
+brokkr inspect-tags --dataset denmark --bench      # 3 runs, best-of-N stored
+brokkr inspect-tags --dataset denmark --bench 10   # 10 runs
+```
+
+For ad-hoc passthrough with raw args: `brokkr passthrough -- <args>`.
 
 ## Configuration
 
@@ -233,7 +243,7 @@ nidhogg = "/home/folk/Programs/nidhogg"
 - `[hostname.datasets.*]` — named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
 - `xxhash` — optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` — per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
-- `features` — cargo features appended to every build (`run`, `bench`, `hotpath`, `profile`, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top
+- `features` — cargo features appended to every build (all measurable commands, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top
 
 ## License
 
