@@ -302,33 +302,33 @@ Examples:
         #[arg(long)]
         bbox: Option<String>,
     },
-    /// [pbfhogg] Read benchmark
+    /// [pbfhogg] Read benchmark (bench-only, no hotpath/alloc support)
     #[command(name = "read", display_order = 2)]
     Read {
         #[command(flatten)]
-        mode: ModeArgs,
+        mode: BenchOnlyModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
         /// Read modes (comma-separated: sequential,parallel,pipelined,blobreader)
         #[arg(long, default_value = "sequential,parallel,pipelined,blobreader")]
         modes: String,
     },
-    /// [pbfhogg] Write benchmark
+    /// [pbfhogg] Write benchmark (bench-only, no hotpath/alloc support)
     #[command(name = "write", display_order = 2)]
     Write {
         #[command(flatten)]
-        mode: ModeArgs,
+        mode: BenchOnlyModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
         /// Compression (comma-separated: none,zlib:6,zstd:3)
         #[arg(long, default_value = "none,zlib:6,zstd:3")]
         compression: String,
     },
-    /// [pbfhogg] Merge benchmark
+    /// [pbfhogg] Merge benchmark (bench-only, no hotpath/alloc support)
     #[command(name = "merge", display_order = 2)]
     MergeBench {
         #[command(flatten)]
-        mode: ModeArgs,
+        mode: BenchOnlyModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
         /// Compression (comma-separated: zlib,none)
@@ -825,6 +825,30 @@ pub(crate) struct ModeArgs {
     /// Skip memory availability check
     #[arg(long)]
     pub(crate) no_mem_check: bool,
+}
+
+/// Mode args for bench-only commands (read, write, merge) that don't support hotpath/alloc.
+#[derive(Args, Clone)]
+pub(crate) struct BenchOnlyModeArgs {
+    /// Full benchmark: lockfile, N runs (default 3), DB storage
+    #[arg(long, num_args = 0..=1, default_missing_value = "3")]
+    pub(crate) bench: Option<usize>,
+
+    /// Print full build/bench/result output
+    #[arg(short, long)]
+    pub(crate) verbose: bool,
+
+    /// Build and benchmark an old commit via git worktree
+    #[arg(long)]
+    pub(crate) commit: Option<String>,
+
+    /// Cargo features to enable (e.g. linux-io-uring)
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) features: Vec<String>,
+
+    /// Run even if the git tree is dirty (results will not be stored)
+    #[arg(long)]
+    pub(crate) force: bool,
 }
 
 // ---------------------------------------------------------------------------

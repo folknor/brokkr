@@ -487,92 +487,40 @@ fn run(cli: Cli) -> Result<(), DevError> {
             })
         }
         Command::Read { mode, pbf, modes } => {
-            let mm = resolve_mode(&mode)?;
+            let mm = resolve_bench_only_mode(&mode);
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if !matches!(
-                    mm,
-                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-                ) {
-                    return Err(DevError::Config(
-                        "read benchmark does not support hotpath/alloc/profile modes".into(),
-                    ));
-                }
                 let bench_req = request::BenchRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: &pbf.dataset,
-                    variant: &pbf.variant,
-                    runs: mm.runs(),
-                    features: &features,
-                    force: mode.force,
+                    dev_config: &dev_config, project, project_root: &project_root, build_root,
+                    dataset: &pbf.dataset, variant: &pbf.variant,
+                    runs: mm.runs(), features: &features, force: mode.force,
                 };
                 pbfhogg::cmd::bench_read(&bench_req, &modes)
             })
         }
-        Command::Write {
-            mode,
-            pbf,
-            compression,
-        } => {
-            let mm = resolve_mode(&mode)?;
+        Command::Write { mode, pbf, compression } => {
+            let mm = resolve_bench_only_mode(&mode);
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if !matches!(
-                    mm,
-                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-                ) {
-                    return Err(DevError::Config(
-                        "write benchmark does not support hotpath/alloc/profile modes".into(),
-                    ));
-                }
                 let bench_req = request::BenchRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: &pbf.dataset,
-                    variant: &pbf.variant,
-                    runs: mm.runs(),
-                    features: &features,
-                    force: mode.force,
+                    dev_config: &dev_config, project, project_root: &project_root, build_root,
+                    dataset: &pbf.dataset, variant: &pbf.variant,
+                    runs: mm.runs(), features: &features, force: mode.force,
                 };
                 pbfhogg::cmd::bench_write(&bench_req, &compression)
             })
         }
-        Command::MergeBench {
-            mode,
-            pbf,
-            compression,
-            uring,
-            osc_seq,
-        } => {
-            let mm = resolve_mode(&mode)?;
+        Command::MergeBench { mode, pbf, compression, uring, osc_seq } => {
+            let mm = resolve_bench_only_mode(&mode);
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if !matches!(
-                    mm,
-                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-                ) {
-                    return Err(DevError::Config(
-                        "merge benchmark does not support hotpath/alloc/profile modes".into(),
-                    ));
-                }
                 let bench_req = request::BenchRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root,
-                    dataset: &pbf.dataset,
-                    variant: &pbf.variant,
-                    runs: mm.runs(),
-                    features: &features,
-                    force: mode.force,
+                    dev_config: &dev_config, project, project_root: &project_root, build_root,
+                    dataset: &pbf.dataset, variant: &pbf.variant,
+                    runs: mm.runs(), features: &features, force: mode.force,
                 };
                 pbfhogg::cmd::bench_merge(&bench_req, osc_seq.as_deref(), uring, &compression)
             })
@@ -1354,6 +1302,14 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
         _ => {}
     }
     Ok(result)
+}
+
+fn resolve_bench_only_mode(mode: &cli::BenchOnlyModeArgs) -> measure::MeasureMode {
+    if let Some(runs) = mode.bench {
+        measure::MeasureMode::Bench { runs }
+    } else {
+        measure::MeasureMode::Run
+    }
 }
 
 // ---------------------------------------------------------------------------
