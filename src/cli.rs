@@ -1173,6 +1173,66 @@ fn validate_since(s: &str) -> Result<String, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pbfhogg command extraction
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use crate::pbfhogg::commands::PbfhoggCommand;
+
+impl Command {
+    /// Extract the pbfhogg measured-command parts from a CLI command variant.
+    ///
+    /// Returns `None` for non-pbfhogg commands (elivagar, nidhogg, shared, etc.).
+    /// The returned tuple is `(mode, pbf, command, osc_seq, extra_params)`.
+    pub(crate) fn as_pbfhogg(&self) -> Option<(&ModeArgs, &PbfArgs, PbfhoggCommand, Option<&str>, HashMap<String, String>)> {
+        let empty = HashMap::new();
+        match self {
+            // Simple commands: mode + pbf, no extras
+            Self::Inspect { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Inspect, None, empty)),
+            Self::InspectNodes { mode, pbf } => Some((mode, pbf, PbfhoggCommand::InspectNodes, None, empty)),
+            Self::InspectTags { mode, pbf } => Some((mode, pbf, PbfhoggCommand::InspectTags, None, empty)),
+            Self::InspectTagsWay { mode, pbf } => Some((mode, pbf, PbfhoggCommand::InspectTagsWay, None, empty)),
+            Self::CheckRefs { mode, pbf } => Some((mode, pbf, PbfhoggCommand::CheckRefs, None, empty)),
+            Self::CheckIds { mode, pbf } => Some((mode, pbf, PbfhoggCommand::CheckIds, None, empty)),
+            Self::Sort { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Sort, None, empty)),
+            Self::CatWay { mode, pbf } => Some((mode, pbf, PbfhoggCommand::CatWay, None, empty)),
+            Self::CatRelation { mode, pbf } => Some((mode, pbf, PbfhoggCommand::CatRelation, None, empty)),
+            Self::CatDedupe { mode, pbf } => Some((mode, pbf, PbfhoggCommand::CatDedupe, None, empty)),
+            Self::TagsFilterWay { mode, pbf } => Some((mode, pbf, PbfhoggCommand::TagsFilterWay, None, empty)),
+            Self::TagsFilterAmenity { mode, pbf } => Some((mode, pbf, PbfhoggCommand::TagsFilterAmenity, None, empty)),
+            Self::TagsFilterTwopass { mode, pbf } => Some((mode, pbf, PbfhoggCommand::TagsFilterTwopass, None, empty)),
+            Self::Getid { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Getid, None, empty)),
+            Self::Getparents { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Getparents, None, empty)),
+            Self::GetidInvert { mode, pbf } => Some((mode, pbf, PbfhoggCommand::GetidInvert, None, empty)),
+            Self::Renumber { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Renumber, None, empty)),
+            Self::ExtractSimple { mode, pbf } => Some((mode, pbf, PbfhoggCommand::ExtractSimple, None, empty)),
+            Self::ExtractComplete { mode, pbf } => Some((mode, pbf, PbfhoggCommand::ExtractComplete, None, empty)),
+            Self::ExtractSmart { mode, pbf } => Some((mode, pbf, PbfhoggCommand::ExtractSmart, None, empty)),
+            Self::TimeFilter { mode, pbf } => Some((mode, pbf, PbfhoggCommand::TimeFilter, None, empty)),
+            Self::BuildGeocodeIndex { mode, pbf } => Some((mode, pbf, PbfhoggCommand::BuildGeocodeIndex, None, empty)),
+
+            // Commands with OSC sequence
+            Self::TagsFilterOsc { mode, pbf, osc_seq } => Some((mode, pbf, PbfhoggCommand::TagsFilterOsc, osc_seq.as_deref(), empty)),
+            Self::MergeChanges { mode, pbf, osc_seq } => Some((mode, pbf, PbfhoggCommand::MergeChanges, osc_seq.as_deref(), empty)),
+            Self::ApplyChanges { mode, pbf, osc_seq } => Some((mode, pbf, PbfhoggCommand::ApplyChanges, osc_seq.as_deref(), empty)),
+            Self::Diff { mode, pbf, osc_seq } => Some((mode, pbf, PbfhoggCommand::Diff, osc_seq.as_deref(), empty)),
+            Self::DiffOsc { mode, pbf, osc_seq } => Some((mode, pbf, PbfhoggCommand::DiffOsc, osc_seq.as_deref(), empty)),
+
+            // Command with extra params
+            Self::AddLocationsToWays { mode, pbf, index_type } => {
+                let mut params = HashMap::new();
+                if let Some(it) = index_type {
+                    params.insert("index_type".into(), it.clone());
+                }
+                Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))
+            }
+
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
