@@ -27,6 +27,7 @@ fn build_test_suite(
     cat_output_str: &str,
     geocode_output_str: &str,
     bbox: Option<&str>,
+    altw_external_str: &str,
     extract_simple_str: &str,
     extract_complete_str: &str,
     extract_smart_str: &str,
@@ -91,6 +92,18 @@ fn build_test_suite(
             ],
         },
         HotpathTest {
+            label: "altw-external",
+            args: vec![
+                binary_str.into(),
+                "add-locations-to-ways".into(),
+                "--index-type".into(),
+                "external".into(),
+                pbf_str.into(),
+                "-o".into(),
+                altw_external_str.into(),
+            ],
+        },
+        HotpathTest {
             label: "build-geocode-index",
             args: vec![
                 binary_str.into(),
@@ -144,7 +157,7 @@ fn build_test_suite(
 /// Tests that fail are reported but do not abort the suite — remaining tests
 /// continue to run.  The command exits successfully if at least one test passed.
 /// Available test labels for `--test` filtering.
-pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none", "build-geocode-index", "extract-simple", "extract-complete", "extract-smart"];
+pub const TEST_LABELS: &[&str] = &["inspect-tags", "check-refs", "cat", "apply-changes-zlib", "apply-changes-none", "altw-external", "build-geocode-index", "extract-simple", "extract-complete", "extract-smart"];
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -170,6 +183,7 @@ pub fn run(
     std::fs::create_dir_all(scratch_dir)?;
     let merged_path = scratch_dir.join("hotpath-merged.osm.pbf");
     let cat_output_path = scratch_dir.join("hotpath-cat-output.osm.pbf");
+    let altw_external_path = scratch_dir.join("hotpath-altw-external.osm.pbf");
     let geocode_output_path = scratch_dir.join(format!("geocode-{dataset}"));
     let extract_simple_path = scratch_dir.join("hotpath-extract-simple.osm.pbf");
     let extract_complete_path = scratch_dir.join("hotpath-extract-complete.osm.pbf");
@@ -190,6 +204,9 @@ pub fn run(
     let cat_output_str = cat_output_path
         .to_str()
         .ok_or_else(|| DevError::Config("cat output path is not valid UTF-8".into()))?;
+    let altw_external_str = altw_external_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("altw output path is not valid UTF-8".into()))?;
     let geocode_output_str = geocode_output_path
         .to_str()
         .ok_or_else(|| DevError::Config("geocode output path is not valid UTF-8".into()))?;
@@ -209,7 +226,7 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str, geocode_output_str, bbox, extract_simple_str, extract_complete_str, extract_smart_str);
+    let tests = build_test_suite(binary_str, pbf_str, osc_str, merged_str, cat_output_str, geocode_output_str, bbox, altw_external_str, extract_simple_str, extract_complete_str, extract_smart_str);
 
     let mut passed = 0usize;
     let mut failed: Vec<(&str, String)> = Vec::new();
@@ -255,6 +272,7 @@ pub fn run(
     // Clean up output files (ignore errors if they don't exist).
     std::fs::remove_file(&merged_path).ok();
     std::fs::remove_file(&cat_output_path).ok();
+    std::fs::remove_file(&altw_external_path).ok();
     std::fs::remove_file(&extract_simple_path).ok();
     std::fs::remove_file(&extract_complete_path).ok();
     std::fs::remove_file(&extract_smart_path).ok();
