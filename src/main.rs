@@ -981,6 +981,7 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
 
@@ -1265,31 +1266,31 @@ fn apply_timeline_filter<'a>(
     let mut result: Vec<&sidecar::Sample> = samples.iter().collect();
 
     // --where filter
-    if let Some(ref cond) = q.where_cond {
-        if let Ok((field, op, threshold)) = parse_where_cond(cond) {
-            result.retain(|s| {
-                if let Some(val) = sample_field_value(s, field) {
-                    match op {
-                        ">" => val > threshold,
-                        "<" => val < threshold,
-                        ">=" => val >= threshold,
-                        "<=" => val <= threshold,
-                        "==" => val == threshold,
-                        "!=" => val != threshold,
-                        _ => true,
-                    }
-                } else {
-                    false
+    if let Some(ref cond) = q.where_cond
+        && let Ok((field, op, threshold)) = parse_where_cond(cond)
+    {
+        result.retain(|s| {
+            if let Some(val) = sample_field_value(s, field) {
+                match op {
+                    ">" => val > threshold,
+                    "<" => val < threshold,
+                    ">=" => val >= threshold,
+                    "<=" => val <= threshold,
+                    "==" => val == threshold,
+                    "!=" => val != threshold,
+                    _ => true,
                 }
-            });
-        }
+            } else {
+                false
+            }
+        });
     }
 
     // --every N (downsample)
-    if let Some(n) = q.every {
-        if n > 1 {
-            result = result.into_iter().step_by(n).collect();
-        }
+    if let Some(n) = q.every
+        && n > 1
+    {
+        result = result.into_iter().step_by(n).collect();
     }
 
     // --tail N (take last N before head, so --tail 100 --head 10 = last 100 then first 10 of those)
@@ -1576,7 +1577,7 @@ fn print_marker_durations(markers: &[sidecar::Marker]) {
                     let dur_ms = (end - start_us) / 1_000;
                     let start_ms = start_us / 1_000;
                     let end_ms = end / 1_000;
-                    println!("{name:<32} {:>9}ms {:>9}ms {:>9}ms", start_ms, end_ms, dur_ms);
+                    println!("{name:<32} {start_ms:>9}ms {end_ms:>9}ms {dur_ms:>9}ms");
                 }
                 None => {
                     let start_ms = start_us / 1_000;
@@ -1645,9 +1646,9 @@ fn print_compare_timeline(
                     .map(|(_, s, e)| (e - s) / 1_000)
                     .unwrap_or(0);
 
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 let delta_pct = if dur_a > 0 {
-                    #[allow(clippy::cast_precision_loss)]
-                    { ((dur_b - dur_a) as f64 / dur_a as f64 * 100.0) as i64 }
+                    ((dur_b - dur_a) as f64 / dur_a as f64 * 100.0) as i64
                 } else {
                     0
                 };

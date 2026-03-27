@@ -85,6 +85,7 @@ impl SidecarDb {
     // -------------------------------------------------------------------
 
     /// Bulk-insert sidecar profile data for one benchmark run.
+    #[allow(clippy::cast_possible_wrap)]
     pub fn store_run(
         &self,
         result_uuid: &str,

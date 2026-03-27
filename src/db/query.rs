@@ -636,7 +636,7 @@ mod tests {
             }),
         };
 
-        let short = db.insert(&row).expect("insert");
+        let (_, short) = db.insert(&row).expect("insert");
 
         // query_by_uuid triggers load_children for each row.
         let rows = db.query_by_uuid(&short).expect("query_by_uuid");

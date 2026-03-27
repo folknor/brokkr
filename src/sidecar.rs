@@ -538,6 +538,7 @@ pub(crate) fn run_sidecar(
     let mut child_elapsed: Option<Duration> = None;
 
     loop {
+        #[allow(clippy::cast_possible_truncation)]
         let elapsed_us = start.elapsed().as_micros() as i64;
 
         // Sample /proc (3 file reads, ~30µs total).
@@ -596,6 +597,7 @@ pub(crate) fn run_sidecar(
     });
 
     let child_elapsed = child_elapsed.unwrap_or_else(|| start.elapsed());
+    #[allow(clippy::cast_possible_truncation)]
     let wall_time_ms = child_elapsed.as_millis() as i64;
 
     output::sidecar_msg(&format!(

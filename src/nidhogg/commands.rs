@@ -36,6 +36,7 @@ pub enum NidhoggCommand {
     },
 }
 
+#[allow(dead_code)] // methods prepared for future dispatch unification
 impl NidhoggCommand {
     /// The command ID string used in CLI and result DB.
     pub fn id(&self) -> &'static str {

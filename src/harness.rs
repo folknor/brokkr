@@ -237,7 +237,7 @@ impl BenchHarness {
             let ms = elapsed_to_ms(&captured.elapsed);
             captured.check_success(&prog_str)?;
 
-            if best_ms.is_none() || ms < best_ms.unwrap() {
+            if best_ms.is_none_or(|best| ms < best) {
                 best_ms = Some(ms);
                 best_run_idx = i;
             }
@@ -380,7 +380,7 @@ impl BenchHarness {
     ) -> Result<Option<String>, DevError> {
         if self.git.is_clean {
             let row = self.build_row(config, result);
-            let (uuid, short) = self.db.insert_full(&row)?;
+            let (uuid, short) = self.db.insert(&row)?;
             emit_result_lines(config, result, &self.git);
             output::bench_msg(&format!("stored in results.db ({short})"));
             println!("{short}");

@@ -732,6 +732,7 @@ fn run_elivagar_internal(
 ///   `build_args()`, `run_hotpath_capture`.
 ///
 /// Both paths go through `run_hotpath_capture` for JSON report collection.
+#[allow(clippy::too_many_lines)]
 fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::elivagar::commands::BuildKind;
 

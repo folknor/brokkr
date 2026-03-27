@@ -122,6 +122,7 @@ impl<'a> ElivagarCommand<'a> {
     ///
     /// Tilegen needs it for ocean data and tmp storage. External tools need it
     /// for their own data. Micro-benchmarks are self-contained.
+    #[allow(dead_code)] // prepared for future nidhogg-style dispatch unification
     pub fn needs_data_dir(&self) -> bool {
         match self {
             Self::Tilegen { .. } | Self::Planetiler | Self::Tilemaker => true,
@@ -174,6 +175,7 @@ impl<'a> ElivagarCommand<'a> {
     }
 
     /// Whether this command needs the scratch directory to be created.
+    #[allow(dead_code)]
     pub fn needs_scratch(&self) -> bool {
         matches!(self, Self::Tilegen { .. })
     }
