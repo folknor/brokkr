@@ -724,32 +724,6 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
     }
 }
 
-/// Dispatch a pbfhogg command with mode/pbf args.
-///
-/// Short form (no osc_seq, no extra params):
-///   `pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, cmd)`
-///
-/// Long form (with osc_seq and extra params):
-///   `pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, cmd, osc, params)`
-macro_rules! pbfhogg_cmd {
-    ($mode:expr, $pbf:expr, $dev_config:expr, $project:expr, $project_root:expr, $cmd:expr) => {{
-        pbfhogg_cmd!($mode, $pbf, $dev_config, $project, $project_root, $cmd, None, &std::collections::HashMap::new())
-    }};
-    ($mode:expr, $pbf:expr, $dev_config:expr, $project:expr, $project_root:expr, $cmd:expr, $osc:expr, $params:expr) => {{
-        let mm = resolve_mode(&$mode)?;
-        let features = resolve_features(&$dev_config, &$mode.features);
-        output::set_quiet(!$mode.verbose);
-        context::with_worktree(&$project_root, $mode.commit.as_deref(), |build_root| {
-            let req = measure::MeasureRequest {
-                dev_config: &$dev_config, project: $project, project_root: &$project_root, build_root,
-                dataset: &$pbf.dataset, variant: &$pbf.variant, runs: mm.runs(),
-                features: &features, force: $mode.force, mode: mm, no_mem_check: $mode.no_mem_check,
-            };
-            dispatch::run_pbfhogg_command_with_params(&req, &$cmd, $osc, $params)
-        })
-    }};
-}
-
 // ---------------------------------------------------------------------------
 // Shared commands
 // ---------------------------------------------------------------------------
