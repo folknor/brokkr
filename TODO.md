@@ -89,9 +89,9 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Backlog
 
-### Sidecar: extend to --hotpath/--alloc and elivagar/nidhogg
+### Sidecar: extend to --hotpath/--alloc and nidhogg
 
-`--sidecar` only works with `--bench` on pbfhogg unified-dispatch commands. Extending to `--hotpath`/`--alloc` requires threading the FIFO env var through `run_hotpath_capture` and using `spawn_captured` + sidecar loop instead of `run_captured_with_env`. Elivagar and nidhogg bench paths also need sidecar wiring.
+`--sidecar` works with `--bench` on pbfhogg (all commands) and elivagar Tilegen. Remaining: `--hotpath`/`--alloc` modes (requires threading the FIFO env var through `run_hotpath_capture` and using `spawn_captured` + sidecar loop instead of `run_captured_with_env`). Nidhogg bench paths have divergent lifecycles (server management, curl requests) that make sidecar integration non-trivial.
 
 ### Sidecar: store best_run_idx in DB
 
@@ -101,17 +101,16 @@ The benchmark result is best-of-N but all N sidecar runs are stored under the sa
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
 
-### Sidecar: --timeline --phase <name> filter
+### ~~Sidecar: --timeline --phase <name> filter~~ FIXED
+Implemented with exact, base-name (STAGE2 → STAGE2_START..STAGE2_END), and substring matching.
 
-Filter timeline output to samples within a specific phase (between two markers). `--phase STAGE2` would output only samples between the `STAGE2_START` and `STAGE2_END` markers (or between `STAGE2_START` and the next marker if no `_END`).
+### ~~Sidecar: --timeline --range <start>..<end> filter~~ FIXED
+Implemented with seconds (e.g. `--range 10.0..82.0`). Composes with all other flags.
 
-### Sidecar: --timeline --range <start_us>..<end_us> filter
+### ~~Sidecar: --timeline --stat <field>~~ FIXED
+Computes min/max/avg/p50/p95. Composes with --phase, --range, --where.
 
-Filter timeline output by absolute timestamp range. Useful for zooming into a specific window without knowing marker names. Works with both raw JSONL and `--summary`.
-
-### Sidecar: --timeline --stat <field>
-
-Compute min/max/avg/p50/p95 for a single field across the selected range. Combines with `--phase` or `--range` for targeted analysis. E.g. `--timeline --phase EXTJOIN_STAGE2 --stat anon` to see allocator retention slope.
+Also implemented but not in original TODO: `--fields`, `--every`, `--where`, `--head`, `--tail` for agent-friendly pipe-free querying. Time output changed from microseconds to fractional seconds.
 
 ### Sidecar: --markers --phases
 
