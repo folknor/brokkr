@@ -604,6 +604,10 @@ Examples:
         #[arg(long, requires = "markers")]
         durations: bool,
 
+        /// Show phase pairs with duration + peak RSS/majflt from samples (use with --markers)
+        #[arg(long, requires = "markers")]
+        phases: bool,
+
         /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt")
         #[arg(long, requires = "timeline", value_delimiter = ',')]
         fields: Vec<String>,
@@ -635,6 +639,11 @@ Examples:
         /// Filter by time range in seconds (e.g. "10.0..82.0")
         #[arg(long, requires = "timeline")]
         range: Option<String>,
+
+        /// Compare sidecar timelines of two results (phase-aligned summary)
+        #[arg(long, num_args = 2, value_names = ["UUID_A", "UUID_B"],
+              conflicts_with_all = ["query", "commit", "compare", "compare_last", "timeline", "markers"])]
+        compare_timeline: Option<Vec<String>>,
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 4)]

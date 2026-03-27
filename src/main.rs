@@ -409,6 +409,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             stat,
             phase,
             range,
+            compare_timeline,
+            phases,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -431,6 +433,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 stat,
                 phase,
                 range,
+                compare_timeline,
+                phases,
             };
             cmd_results(&project_root, &rq)
         }
@@ -978,6 +982,22 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
 
     let results_db = db::ResultsDb::open(&db_path)?;
 
+    // --compare-timeline <uuid_a> <uuid_b>
+    if let Some(ref uuids) = q.compare_timeline {
+        let uuid_a = &uuids[0];
+        let uuid_b = &uuids[1];
+        let samples_a = results_db.query_sidecar_samples(uuid_a)?;
+        let samples_b = results_db.query_sidecar_samples(uuid_b)?;
+        if samples_a.is_empty() || samples_b.is_empty() {
+            output::result_msg("one or both results have no sidecar data");
+            return Ok(());
+        }
+        let markers_a = results_db.query_sidecar_markers(uuid_a)?;
+        let markers_b = results_db.query_sidecar_markers(uuid_b)?;
+        print_compare_timeline(uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b);
+        return Ok(());
+    }
+
     if let Some(ref uuid_prefix) = q.query {
         // Sidecar output modes.
         if q.timeline {
@@ -1022,6 +1042,9 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             let markers = results_db.query_sidecar_markers(uuid_prefix)?;
             if markers.is_empty() {
                 output::result_msg("no sidecar markers for this result");
+            } else if q.phases {
+                let samples = results_db.query_sidecar_samples(uuid_prefix)?;
+                print_marker_phases(&markers, &samples);
             } else if q.durations {
                 print_marker_durations(&markers);
             } else {
@@ -1552,6 +1575,211 @@ fn print_marker_durations(markers: &[sidecar::Marker]) {
             let ms = m.timestamp_us / 1_000;
             println!("  {:<32} {:>9}ms", m.name, ms);
         }
+    }
+}
+
+/// Print phase-aligned comparison of two sidecar timelines.
+///
+/// For each phase (defined by markers in run A), shows duration, peak anon RSS,
+/// total disk read, and the delta between the two runs.
+fn print_compare_timeline(
+    uuid_a: &str,
+    samples_a: &[sidecar::Sample],
+    markers_a: &[sidecar::Marker],
+    uuid_b: &str,
+    samples_b: &[sidecar::Sample],
+    markers_b: &[sidecar::Marker],
+) {
+    // Build phases from run A's markers (or all markers if A has none).
+    let phases_a = build_phases(markers_a, samples_a);
+    let phases_b = build_phases(markers_b, samples_b);
+
+    let short_a = &uuid_a[..8.min(uuid_a.len())];
+    let short_b = &uuid_b[..8.min(uuid_b.len())];
+
+    println!(
+        "{:<20} {:>22} {:>22} {:>8}",
+        "Phase",
+        format!("Run A ({short_a})"),
+        format!("Run B ({short_b})"),
+        "Delta",
+    );
+    println!("{}", "-".repeat(76));
+
+    for (name, start_a, end_a) in &phases_a {
+        let stats_a = phase_stats(samples_a, *start_a, *end_a);
+
+        // Find matching phase in B by name.
+        let stats_b = phases_b
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, start, end)| phase_stats(samples_b, *start, *end));
+
+        let dur_a = (end_a - start_a) / 1_000;
+
+        match stats_b {
+            Some(sb) => {
+                let dur_b = phases_b
+                    .iter()
+                    .find(|(n, _, _)| n == name)
+                    .map(|(_, s, e)| (e - s) / 1_000)
+                    .unwrap_or(0);
+
+                let delta_pct = if dur_a > 0 {
+                    #[allow(clippy::cast_precision_loss)]
+                    { ((dur_b - dur_a) as f64 / dur_a as f64 * 100.0) as i64 }
+                } else {
+                    0
+                };
+
+                println!(
+                    "{:<20} {:>5}ms {:>6}kB {:>5}MB  {:>5}ms {:>6}kB {:>5}MB  {:>+5}%",
+                    name,
+                    dur_a,
+                    stats_a.peak_anon,
+                    stats_a.disk_read_kb / 1024,
+                    dur_b,
+                    sb.peak_anon,
+                    sb.disk_read_kb / 1024,
+                    delta_pct,
+                );
+            }
+            None => {
+                println!(
+                    "{:<20} {:>5}ms {:>6}kB {:>5}MB  {:>22} {:>8}",
+                    name,
+                    dur_a,
+                    stats_a.peak_anon,
+                    stats_a.disk_read_kb / 1024,
+                    "(no match)",
+                    "—",
+                );
+            }
+        }
+    }
+}
+
+struct PhaseStats {
+    peak_anon: i64,
+    disk_read_kb: i64,
+}
+
+fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> PhaseStats {
+    let mut peak_anon: i64 = 0;
+    let mut first_rd: Option<i64> = None;
+    let mut last_rd: i64 = 0;
+
+    for s in samples
+        .iter()
+        .filter(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us)
+    {
+        if s.anon_kb > peak_anon {
+            peak_anon = s.anon_kb;
+        }
+        if first_rd.is_none() {
+            first_rd = Some(s.read_bytes);
+        }
+        last_rd = s.read_bytes;
+    }
+
+    PhaseStats {
+        peak_anon,
+        disk_read_kb: (last_rd - first_rd.unwrap_or(0)) / 1024,
+    }
+}
+
+/// Build phase boundaries from markers (or single "(all)" phase if no markers).
+fn build_phases<'a>(
+    markers: &'a [sidecar::Marker],
+    samples: &[sidecar::Sample],
+) -> Vec<(&'a str, i64, i64)> {
+    let mut phases = Vec::new();
+    if markers.is_empty() {
+        if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+            // Use a static str for the lifetime.
+            phases.push(("(all)" as &str, first.timestamp_us, last.timestamp_us + 1));
+        }
+    } else {
+        let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
+        for (i, m) in markers.iter().enumerate() {
+            let phase_end = markers.get(i + 1).map_or(final_us, |next| next.timestamp_us);
+            phases.push((m.name.as_str(), m.timestamp_us, phase_end));
+        }
+    }
+    phases
+}
+
+/// Print START/END marker pairs with duration + peak RSS and majflt from samples.
+fn print_marker_phases(markers: &[sidecar::Marker], samples: &[sidecar::Sample]) {
+    // Pair START/END markers (same logic as print_marker_durations).
+    let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
+    let mut consumed = vec![false; markers.len()];
+
+    for (i, m) in markers.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        if let Some(base) = m.name.strip_suffix("_START") {
+            consumed[i] = true;
+            let end_name = format!("{base}_END");
+            let end_us = markers[i + 1..]
+                .iter()
+                .enumerate()
+                .find(|(_, m2)| m2.name == end_name)
+                .map(|(j, m2)| {
+                    consumed[i + 1 + j] = true;
+                    m2.timestamp_us
+                });
+            pairs.push((base.to_owned(), m.timestamp_us, end_us));
+        }
+    }
+
+    if pairs.is_empty() {
+        output::result_msg("no _START/_END marker pairs found");
+        return;
+    }
+
+    println!(
+        "{:<24} {:>10} {:>10} {:>10} {:>10}",
+        "Phase", "Duration", "Peak RSS", "Peak Anon", "Peak Mflt",
+    );
+    println!("{}", "-".repeat(68));
+
+    for (name, start_us, end_us) in &pairs {
+        let end = end_us.unwrap_or_else(|| {
+            samples.last().map_or(*start_us, |s| s.timestamp_us + 1)
+        });
+        let dur_ms = (end - start_us) / 1_000;
+
+        let mut peak_rss: i64 = 0;
+        let mut peak_anon: i64 = 0;
+        let mut peak_majflt: i64 = 0;
+        let mut prev_majflt: Option<i64> = None;
+
+        for s in samples
+            .iter()
+            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < end)
+        {
+            if s.rss_kb > peak_rss { peak_rss = s.rss_kb; }
+            if s.anon_kb > peak_anon { peak_anon = s.anon_kb; }
+            // majflt is cumulative — compute delta rate per sample.
+            if let Some(prev) = prev_majflt {
+                let delta = s.majflt - prev;
+                if delta > peak_majflt { peak_majflt = delta; }
+            }
+            prev_majflt = Some(s.majflt);
+        }
+
+        let end_marker = if end_us.is_some() { "" } else { " (no end)" };
+
+        println!(
+            "{:<24} {:>7}ms {:>7}kB {:>7}kB {:>10}",
+            format!("{name}{end_marker}"),
+            dur_ms,
+            peak_rss,
+            peak_anon,
+            peak_majflt,
+        );
     }
 }
 
