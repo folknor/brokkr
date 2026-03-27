@@ -41,7 +41,7 @@ pub fn run_pbfhogg_command_with_params(
     project::require(
         req.project,
         Project::Pbfhogg,
-        &format!("run {}", command.id()),
+        command.id(),
     )?;
 
     match req.mode {
@@ -396,7 +396,7 @@ pub fn run_elivagar_command(
     project::require(
         req.project,
         Project::Elivagar,
-        &format!("run {}", command.id()),
+        command.id(),
     )?;
 
     match req.mode {

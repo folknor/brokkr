@@ -157,6 +157,15 @@ Makes performance triage easier without external tooling.
 ### Remove --runs from elivagar/nidhogg CLI variants
 Mode-based run counts (`--bench 5`) now take precedence. The standalone `--runs` field is dead when a mode flag is set. Should be removed.
 
+### read/write/merge expose unsupported --hotpath/--alloc flags
+These commands flatten `ModeArgs`, so `brokkr read --help`, `brokkr write --help`, and `brokkr merge --help` advertise `--hotpath` and `--alloc`. At runtime they reject those modes in `main.rs`. Either give them command-specific mode args or implement the advertised modes.
+
+### read/write/merge expose dead --no-mem-check flag
+The same shared `ModeArgs` also exposes `--no-mem-check`, but these commands build `BenchRequest`, which has no `no_mem_check` field. The flag is silently ignored on the read/write/merge paths and should be removed or plumbed through to an actual memory check.
+
+### check does not really forward args raw to cargo test
+`brokkr check` help says extra args are forwarded raw to `cargo test`, but every invocation runs clippy first. That means `brokkr check -- --help` and single-test workflows are blocked by clippy failures and do not behave like a clean cargo-test passthrough. The help text should be tightened or the command split.
+
 ---
 
 ## CLI sync backlog
@@ -206,4 +215,3 @@ The following elivagar flags are not forwarded through `bench self`, `hotpath`, 
 - Memory budgets (`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget`) — tuning knobs, lower priority
 
 No schema changes needed: `bench_self.rs` already stores flags as `meta.*` kv pairs in `run_kv` and the full command line in `cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>", ...)` entries in the metadata vec.
-
