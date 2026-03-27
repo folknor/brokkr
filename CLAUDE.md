@@ -32,7 +32,7 @@ Single crate, single binary. No workspace.
 - `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/request.rs` — Legacy request structs (`BenchRequest`, `HotpathRequest`, `ResultsQuery`) — still used by multi-variant benchmarks and elivagar/nidhogg delegation
+- `src/request.rs` — `ResultsQuery` struct for the results command
 - `src/db/` — ResultsDb, schema, migrations, queries, formatting, comparison
 - `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[error]`), subprocess runners (`run_captured`, `run_passthrough_timed`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)

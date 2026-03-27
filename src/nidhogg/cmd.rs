@@ -8,7 +8,7 @@ use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::request::{BenchRequest, HotpathRequest};
+use crate::measure::MeasureRequest;
 use crate::resolve::{
     self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path,
     resolve_pbf_with_size,
@@ -158,7 +158,7 @@ pub(crate) fn geocode(
     super::geocode::run(port, term)
 }
 
-pub(crate) fn bench_api(req: &BenchRequest, query: Option<&str>) -> Result<(), DevError> {
+pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
@@ -189,8 +189,8 @@ pub(crate) fn bench_api(req: &BenchRequest, query: Option<&str>) -> Result<(), D
     )
 }
 
-pub(crate) fn bench_ingest(req: &BenchRequest) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+pub(crate) fn bench_ingest(req: &MeasureRequest) -> Result<(), DevError> {
+    let feat_refs = req.feat_refs();
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
@@ -216,14 +216,14 @@ pub(crate) fn bench_ingest(req: &BenchRequest) -> Result<(), DevError> {
 }
 
 pub(crate) fn bench_tiles(
-    req: &BenchRequest,
+    req: &MeasureRequest,
     tiles_variant: Option<&str>,
     uring: bool,
 ) -> Result<(), DevError> {
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
-    let mut all_features: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let mut all_features = req.feat_refs();
     if uring {
         all_features.push("linux-io-uring");
     }
@@ -332,21 +332,22 @@ pub(crate) fn verify_readonly(
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)
 }
 
-pub(crate) fn hotpath(req: &HotpathRequest) -> Result<(), DevError> {
+pub(crate) fn hotpath(req: &MeasureRequest) -> Result<(), DevError> {
+    let hotpath_features = req.hotpath_features();
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
         req.project_root,
         req.build_root,
         Some("nidhogg"),
-        req.all_features,
+        &hotpath_features,
         true,
         "hotpath",
         req.force,
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let risk = if req.alloc {
+    let risk = if req.is_alloc() {
         oom::MemoryRisk::AllocTracking
     } else {
         oom::MemoryRisk::Normal
@@ -359,7 +360,7 @@ pub(crate) fn hotpath(req: &HotpathRequest) -> Result<(), DevError> {
         &ctx.paths.scratch_dir,
         file_mb,
         req.runs,
-        req.alloc,
+        req.is_alloc(),
         req.project_root,
     )
 }

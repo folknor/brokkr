@@ -11,10 +11,10 @@
 use std::path::Path;
 
 use crate::build;
-use crate::config;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness};
+use crate::measure::MeasureRequest;
 use crate::output;
 
 // ---------------------------------------------------------------------------
@@ -110,44 +110,34 @@ pub fn run(
 ///
 /// Handles lock acquisition, building the example binary with the correct
 /// features, and delegating to [`run`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd(
-    dev_config: &config::DevConfig,
-    project: crate::project::Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    runs: usize,
-    alloc: bool,
-    force: bool,
-    features: &[String],
-) -> Result<(), DevError> {
-    let effective_root = build_root.unwrap_or(project_root);
-    let pi = crate::context::bootstrap(build_root)?;
-    let paths = crate::context::bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+pub(crate) fn cmd(req: &MeasureRequest) -> Result<(), DevError> {
+    let effective_root = req.effective_build_root();
+    let pi = crate::context::bootstrap(req.build_root)?;
+    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
 
     let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
-        project: project.name(),
+        project: req.project.name(),
         command: "hotpath",
-        project_root: &project_root.display().to_string(),
+        project_root: &req.project_root.display().to_string(),
     })?;
 
-    let binary = build_hotpath_example(effective_root, alloc, features)?;
+    let binary = build_hotpath_example(effective_root, req.is_alloc(), req.features)?;
 
-    let db_root = build_root.map(|_| project_root);
+    let db_root = req.build_root.map(|_| req.project_root);
     let harness = harness::BenchHarness::new_with_lock(
         lock,
         &paths,
         effective_root,
         db_root,
-        project,
-        force,
+        req.project,
+        req.force,
     )?;
 
     run(
         &harness,
         &binary,
-        runs,
-        alloc,
+        req.runs,
+        req.is_alloc(),
         effective_root,
         &paths.scratch_dir,
     )

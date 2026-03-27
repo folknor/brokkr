@@ -74,6 +74,33 @@ pub struct MeasureRequest<'a> {
     pub no_mem_check: bool,
 }
 
+impl MeasureRequest<'_> {
+    /// Whether we are in allocation profiling mode.
+    pub fn is_alloc(&self) -> bool {
+        matches!(self.mode, MeasureMode::Alloc { .. })
+    }
+
+    /// Build the full feature list for hotpath/alloc builds.
+    ///
+    /// Prepends the hotpath (or hotpath-alloc) feature to the user/host features.
+    pub fn hotpath_features(&self) -> Vec<&str> {
+        let feature = crate::harness::hotpath_feature(self.is_alloc());
+        let mut all: Vec<&str> = vec![feature];
+        all.extend(self.features.iter().map(String::as_str));
+        all
+    }
+
+    /// Feature refs as `&str` slices (for passing to build functions).
+    pub fn feat_refs(&self) -> Vec<&str> {
+        self.features.iter().map(String::as_str).collect()
+    }
+
+    /// The effective build root (worktree if set, otherwise project root).
+    pub fn effective_build_root(&self) -> &Path {
+        self.build_root.unwrap_or(self.project_root)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CommandContext
 // ---------------------------------------------------------------------------

@@ -3,66 +3,42 @@ use std::path::Path;
 use crate::config;
 use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
+use crate::measure::MeasureRequest;
 use crate::oom;
 use crate::project::{self, Project};
-use crate::request::{BenchRequest, HotpathRequest};
 use crate::resolve::{resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_path};
 
-pub(crate) fn bench_node_store(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    nodes: usize,
-    runs: usize,
-    force: bool,
-) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let db_root = build_root.map(|_| project_root);
-    let effective = build_root.unwrap_or(project_root);
-    let harness = crate::harness::BenchHarness::new(
-        &paths,
-        effective,
-        db_root,
-        project,
+pub(crate) fn bench_node_store(req: &MeasureRequest, nodes: usize) -> Result<(), DevError> {
+    let ctx = HarnessContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
         "bench node-store",
-        force,
+        req.force,
     )?;
-    super::bench_node_store::run(&harness, effective, nodes, runs)
+    super::bench_node_store::run(&ctx.harness, req.effective_build_root(), nodes, req.runs)
 }
 
-pub(crate) fn bench_pmtiles(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    tiles: usize,
-    runs: usize,
-    force: bool,
-) -> Result<(), DevError> {
-    let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let db_root = build_root.map(|_| project_root);
-    let effective = build_root.unwrap_or(project_root);
-    let harness = crate::harness::BenchHarness::new(
-        &paths,
-        effective,
-        db_root,
-        project,
+pub(crate) fn bench_pmtiles(req: &MeasureRequest, tiles: usize) -> Result<(), DevError> {
+    let ctx = HarnessContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
         "bench pmtiles",
-        force,
+        req.force,
     )?;
-    super::bench_pmtiles::run(&harness, effective, tiles, runs)
+    super::bench_pmtiles::run(&ctx.harness, req.effective_build_root(), tiles, req.runs)
 }
 
 pub(crate) fn bench_self(
-    req: &BenchRequest,
+    req: &MeasureRequest,
     skip_to: Option<&str>,
     compression_level: Option<u32>,
     opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let feat_refs = req.feat_refs();
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
@@ -91,7 +67,7 @@ pub(crate) fn bench_self(
     )
 }
 
-pub(crate) fn bench_planetiler(req: &BenchRequest) -> Result<(), DevError> {
+pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
@@ -113,7 +89,7 @@ pub(crate) fn bench_planetiler(req: &BenchRequest) -> Result<(), DevError> {
     )
 }
 
-pub(crate) fn bench_tilemaker(req: &BenchRequest) -> Result<(), DevError> {
+pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
@@ -135,7 +111,7 @@ pub(crate) fn bench_tilemaker(req: &BenchRequest) -> Result<(), DevError> {
     )
 }
 
-pub(crate) fn bench_all(req: &BenchRequest) -> Result<(), DevError> {
+pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
@@ -146,11 +122,10 @@ pub(crate) fn bench_all(req: &BenchRequest) -> Result<(), DevError> {
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let effective = req.build_root.unwrap_or(req.project_root);
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,
-        effective,
+        req.effective_build_root(),
         &pbf_path,
         file_mb,
         req.runs,
@@ -214,7 +189,7 @@ pub(crate) fn verify(
 }
 
 pub(crate) fn hotpath(
-    req: &HotpathRequest,
+    req: &MeasureRequest,
     variant: Option<&str>,
     tiles: usize,
     nodes: usize,
@@ -235,10 +210,10 @@ pub(crate) fn hotpath(
                 super::bench_pmtiles::run_hotpath(
                     &ctx.harness,
                     &ctx.paths.scratch_dir,
-                    req.build_root.unwrap_or(req.project_root),
+                    req.effective_build_root(),
                     tiles,
                     req.runs,
-                    req.alloc,
+                    req.is_alloc(),
                 )
             }
             "node-store" => {
@@ -253,10 +228,10 @@ pub(crate) fn hotpath(
                 super::bench_node_store::run_hotpath(
                     &ctx.harness,
                     &ctx.paths.scratch_dir,
-                    req.build_root.unwrap_or(req.project_root),
+                    req.effective_build_root(),
                     nodes,
                     req.runs,
-                    req.alloc,
+                    req.is_alloc(),
                 )
             }
             other => Err(DevError::Config(format!(
@@ -265,20 +240,21 @@ pub(crate) fn hotpath(
         };
     }
 
+    let hotpath_features = req.hotpath_features();
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
         req.project_root,
         req.build_root,
         None,
-        req.all_features,
+        &hotpath_features,
         true,
         "hotpath",
         req.force,
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let risk = if req.alloc {
+    let risk = if req.is_alloc() {
         oom::MemoryRisk::AllocTracking
     } else {
         oom::MemoryRisk::Normal
@@ -292,7 +268,7 @@ pub(crate) fn hotpath(
         &ctx.paths.scratch_dir,
         file_mb,
         req.runs,
-        req.alloc,
+        req.is_alloc(),
         opts,
         req.project_root,
     )

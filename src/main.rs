@@ -37,7 +37,7 @@ use cli::{Cli, Command, LitehtmlCommand, SluggrsCommand, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
-use request::{HotpathRequest, ResultsQuery};
+use request::ResultsQuery;
 use resolve::results_db_path;
 
 macro_rules! pbfhogg_cmd {
@@ -543,12 +543,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let bench_req = request::BenchRequest {
+                let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &pbf.dataset, variant: &pbf.variant,
                     runs: mm.runs(), features: &features, force: mode.force,
+                    mode: mm, no_mem_check: false,
                 };
-                pbfhogg::cmd::bench_read(&bench_req, &modes)
+                pbfhogg::cmd::bench_read(&req, &modes)
             })
         }
         Command::Write { mode, pbf, compression } => {
@@ -556,12 +557,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let bench_req = request::BenchRequest {
+                let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &pbf.dataset, variant: &pbf.variant,
                     runs: mm.runs(), features: &features, force: mode.force,
+                    mode: mm, no_mem_check: false,
                 };
-                pbfhogg::cmd::bench_write(&bench_req, &compression)
+                pbfhogg::cmd::bench_write(&req, &compression)
             })
         }
         Command::MergeBench { mode, pbf, compression, uring, osc_seq } => {
@@ -569,12 +571,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let bench_req = request::BenchRequest {
+                let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &pbf.dataset, variant: &pbf.variant,
                     runs: mm.runs(), features: &features, force: mode.force,
+                    mode: mm, no_mem_check: false,
                 };
-                pbfhogg::cmd::bench_merge(&bench_req, osc_seq.as_deref(), uring, &compression)
+                pbfhogg::cmd::bench_merge(&req, osc_seq.as_deref(), uring, &compression)
             })
         }
 
@@ -641,16 +644,16 @@ fn run(cli: Cli) -> Result<(), DevError> {
             nidhogg_cmd!(
                 mode, dev_config, project, project_root, dataset, "raw",
                 "api",
-                |req: &request::BenchRequest| nidhogg::cmd::bench_api(req, query.as_deref()),
-                |req: &request::HotpathRequest| nidhogg::cmd::hotpath(req)
+                |req: &measure::MeasureRequest| nidhogg::cmd::bench_api(req, query.as_deref()),
+                |req: &measure::MeasureRequest| nidhogg::cmd::hotpath(req)
             )
         }
         Command::RunNidIngest { mode, dataset, variant, runs: _ } => {
             nidhogg_cmd!(
                 mode, dev_config, project, project_root, dataset, variant,
                 "nid-ingest",
-                |req: &request::BenchRequest| nidhogg::cmd::bench_ingest(req),
-                |req: &request::HotpathRequest| nidhogg::cmd::hotpath(req)
+                |req: &measure::MeasureRequest| nidhogg::cmd::bench_ingest(req),
+                |req: &measure::MeasureRequest| nidhogg::cmd::hotpath(req)
             )
         }
         Command::RunTiles { mode, dataset, tiles, runs: _, uring } => {
@@ -658,13 +661,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             nidhogg_cmd!(
                 mode, dev_config, project, project_root, dataset, "raw",
                 "tiles",
-                |req: &request::BenchRequest| nidhogg::cmd::bench_tiles(req, tiles.as_deref(), uring),
-                |req: &request::HotpathRequest| nidhogg::cmd::hotpath(req)
+                |req: &measure::MeasureRequest| nidhogg::cmd::bench_tiles(req, tiles.as_deref(), uring),
+                |req: &measure::MeasureRequest| nidhogg::cmd::hotpath(req)
             )
         }
 
         // ----- sluggrs commands -----
-        Command::SluggrsHotpath { mode, runs } => {
+        Command::SluggrsHotpath { mode, runs: _ } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
@@ -672,18 +675,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 project::require(project, Project::Sluggrs, "sluggrs-hotpath")?;
                 match mm {
                     measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
-                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
-                        let owned_features: Vec<String> = features.clone();
-                        sluggrs::hotpath::cmd(
-                            &dev_config,
+                        let req = measure::MeasureRequest {
+                            dev_config: &dev_config,
                             project,
-                            &project_root,
+                            project_root: &project_root,
                             build_root,
-                            runs,
-                            alloc,
-                            mode.force,
-                            &owned_features,
-                        )
+                            dataset: "n/a",
+                            variant: "n/a",
+                            runs: mm.runs(),
+                            features: &features,
+                            force: mode.force,
+                            mode: mm,
+                            no_mem_check: mode.no_mem_check,
+                        };
+                        sluggrs::hotpath::cmd(&req)
                     }
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         Err(DevError::Config(
@@ -699,7 +704,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             mode,
             dataset,
             variant,
-            runs,
+            runs: _,
         } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
@@ -709,24 +714,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 mode.commit.as_deref(),
                 |build_root| match mm {
                     measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
-                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
-                        let feature = harness::hotpath_feature(alloc);
-                        let mut all_features: Vec<&str> = vec![feature];
-                        all_features.extend(features.iter().map(String::as_str));
-                        let hotpath_req = request::HotpathRequest {
+                        let req = measure::MeasureRequest {
                             dev_config: &dev_config,
                             project,
                             project_root: &project_root,
                             build_root,
                             dataset: &dataset,
                             variant: &variant,
-                            runs,
-                            all_features: &all_features,
-                            alloc,
-                            no_mem_check: mode.no_mem_check,
+                            runs: mm.runs(),
+                            features: &features,
                             force: mode.force,
+                            mode: mm,
+                            no_mem_check: mode.no_mem_check,
                         };
-                        cmd_hotpath_generic(&hotpath_req)
+                        cmd_hotpath_generic(&req)
                     }
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         Err(DevError::Config(
@@ -751,80 +752,46 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(
                 &project_root,
                 mode.commit.as_deref(),
-                |build_root| match name.as_str() {
-                    "pbfhogg" => {
-                        project::require(project, Project::Pbfhogg, "suite pbfhogg")?;
-                        if !matches!(
-                            mm,
-                            measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-                        ) {
-                            return Err(DevError::Config(
-                                "suite mode only supports wall-clock timing".into(),
-                            ));
-                        }
-                        let bench_req = request::BenchRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: &variant,
-                            runs,
-                            features: &features,
-                            force: mode.force,
-                        };
-                        pbfhogg::cmd::bench_all(&bench_req)
+                |build_root| {
+                    if !matches!(
+                        mm,
+                        measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                    ) {
+                        return Err(DevError::Config(
+                            "suite mode only supports wall-clock timing".into(),
+                        ));
                     }
-                    "elivagar" => {
-                        project::require(project, Project::Elivagar, "suite elivagar")?;
-                        if !matches!(
-                            mm,
-                            measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-                        ) {
-                            return Err(DevError::Config(
-                                "suite mode only supports wall-clock timing".into(),
-                            ));
+                    let req = measure::MeasureRequest {
+                        dev_config: &dev_config,
+                        project,
+                        project_root: &project_root,
+                        build_root,
+                        dataset: &dataset,
+                        variant: &variant,
+                        runs,
+                        features: &features,
+                        force: mode.force,
+                        mode: mm,
+                        no_mem_check: false,
+                    };
+                    match name.as_str() {
+                        "pbfhogg" => {
+                            project::require(project, Project::Pbfhogg, "suite pbfhogg")?;
+                            pbfhogg::cmd::bench_all(&req)
                         }
-                        let bench_req = request::BenchRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: &variant,
-                            runs,
-                            features: &features,
-                            force: mode.force,
-                        };
-                        elivagar::cmd::bench_all(&bench_req)
-                    }
-                    "nidhogg" => {
-                        project::require(project, Project::Nidhogg, "suite nidhogg")?;
-                        if !matches!(
-                            mm,
-                            measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
-                        ) {
-                            return Err(DevError::Config(
-                                "suite mode only supports wall-clock timing".into(),
-                            ));
+                        "elivagar" => {
+                            project::require(project, Project::Elivagar, "suite elivagar")?;
+                            elivagar::cmd::bench_all(&req)
                         }
-                        let bench_req = request::BenchRequest {
-                            dev_config: &dev_config,
-                            project,
-                            project_root: &project_root,
-                            build_root,
-                            dataset: &dataset,
-                            variant: &variant,
-                            runs,
-                            features: &features,
-                            force: mode.force,
-                        };
-                        nidhogg::cmd::bench_api(&bench_req, None)?;
-                        nidhogg::cmd::bench_ingest(&bench_req)
+                        "nidhogg" => {
+                            project::require(project, Project::Nidhogg, "suite nidhogg")?;
+                            nidhogg::cmd::bench_api(&req, None)?;
+                            nidhogg::cmd::bench_ingest(&req)
+                        }
+                        other => Err(DevError::Config(format!(
+                            "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
+                        ))),
                     }
-                    other => Err(DevError::Config(format!(
-                        "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
-                    ))),
                 },
             )
         }
@@ -1712,27 +1679,29 @@ fn cmd_verify(
 /// Builds the binary with `--features hotpath` (or `hotpath-alloc`), runs it
 /// with no extra arguments, and collects the JSON hotpath report via the
 /// standard env-var mechanism.
-fn cmd_hotpath_generic(req: &HotpathRequest) -> Result<(), DevError> {
+fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
+    let hotpath_features = req.hotpath_features();
     let ctx = context::BenchContext::new(
         req.dev_config,
         req.project,
         req.project_root,
         req.build_root,
         req.project.cli_package(),
-        req.all_features,
+        &hotpath_features,
         true,
         "hotpath",
         req.force,
     )?;
 
-    let label = harness::hotpath_feature(req.alloc);
+    let alloc = req.is_alloc();
+    let label = harness::hotpath_feature(alloc);
     output::hotpath_msg(&format!("=== {} {label} ===", req.project));
 
-    if req.alloc {
+    if alloc {
         output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
-    let variant_suffix = harness::hotpath_variant_suffix(req.alloc);
+    let variant_suffix = harness::hotpath_variant_suffix(alloc);
     let variant = format!("default{variant_suffix}");
 
     let binary_str = ctx.binary.display().to_string();
@@ -1746,7 +1715,7 @@ fn cmd_hotpath_generic(req: &HotpathRequest) -> Result<(), DevError> {
         cargo_profile: "release".into(),
         runs: req.runs,
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
-        metadata: vec![db::KvPair::text("meta.alloc", req.alloc.to_string())],
+        metadata: vec![db::KvPair::text("meta.alloc", alloc.to_string())],
     };
 
     ctx.harness.run_internal(&config, |_i| {

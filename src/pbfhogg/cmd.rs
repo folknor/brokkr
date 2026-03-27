@@ -7,14 +7,14 @@ use crate::error::DevError;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::request::BenchRequest;
+use crate::measure::MeasureRequest;
 use crate::resolve::{
     self, resolve_bbox, resolve_default_osc_path, resolve_pbf_path, resolve_pbf_with_size,
 };
 use crate::tools;
 
-pub(crate) fn bench_read(req: &BenchRequest, modes_str: &str) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), DevError> {
+    let feat_refs = req.feat_refs();
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
@@ -40,8 +40,8 @@ pub(crate) fn bench_read(req: &BenchRequest, modes_str: &str) -> Result<(), DevE
     )
 }
 
-pub(crate) fn bench_write(req: &BenchRequest, compression_str: &str) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result<(), DevError> {
+    let feat_refs = req.feat_refs();
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
@@ -68,7 +68,7 @@ pub(crate) fn bench_write(req: &BenchRequest, compression_str: &str) -> Result<(
 }
 
 pub(crate) fn bench_merge(
-    req: &BenchRequest,
+    req: &MeasureRequest,
     osc_seq: Option<&str>,
     uring: bool,
     compression_str: &str,
@@ -77,7 +77,7 @@ pub(crate) fn bench_merge(
         preflight::run_preflight(&preflight::uring_checks())?;
     }
 
-    let mut all_features: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let mut all_features = req.feat_refs();
     if uring {
         all_features.push("linux-io-uring");
     }
@@ -113,7 +113,7 @@ pub(crate) fn bench_merge(
     )
 }
 
-pub(crate) fn bench_all(req: &BenchRequest) -> Result<(), DevError> {
+pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
