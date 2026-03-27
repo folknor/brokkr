@@ -8,4 +8,6 @@ pub(crate) struct ResultsQuery {
     pub(crate) variant: Option<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
+    pub(crate) timeline: bool,
+    pub(crate) markers: bool,
 }

@@ -587,6 +587,14 @@ Examples:
         /// Maximum number of functions shown in hotpath reports (0 = all)
         #[arg(long, default_value = "10")]
         top: usize,
+
+        /// Output sidecar samples as JSONL (requires UUID argument)
+        #[arg(long, requires = "query")]
+        timeline: bool,
+
+        /// Output sidecar markers as JSONL (requires UUID argument)
+        #[arg(long, requires = "query")]
+        markers: bool,
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 4)]

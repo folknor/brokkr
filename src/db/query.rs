@@ -38,6 +38,80 @@ impl ResultsDb {
         let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
         collect_rows(rows)
     }
+
+    /// Query sidecar samples for a result UUID prefix.
+    /// Returns rows ordered by run_idx, sample_idx.
+    pub fn query_sidecar_samples(&self, uuid_prefix: &str) -> Result<Vec<crate::sidecar::Sample>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sample_idx, timestamp_us,
+                    rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
+                    utime, stime, num_threads, minflt, majflt,
+                    rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
+                    syscr, syscw, vol_cs, nonvol_cs
+             FROM sidecar_samples
+             WHERE result_uuid LIKE ?1||'%'
+             ORDER BY run_idx, sample_idx",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| {
+            Ok(crate::sidecar::Sample {
+                sample_idx: row.get(0)?,
+                timestamp_us: row.get(1)?,
+                rss_kb: row.get(2)?,
+                anon_kb: row.get(3)?,
+                file_kb: row.get(4)?,
+                shmem_kb: row.get(5)?,
+                swap_kb: row.get(6)?,
+                vsize_kb: row.get(7)?,
+                vm_hwm_kb: row.get(8)?,
+                utime: row.get(9)?,
+                stime: row.get(10)?,
+                num_threads: row.get(11)?,
+                minflt: row.get(12)?,
+                majflt: row.get(13)?,
+                rchar: row.get(14)?,
+                wchar: row.get(15)?,
+                read_bytes: row.get(16)?,
+                write_bytes: row.get(17)?,
+                cancelled_write_bytes: row.get(18)?,
+                syscr: row.get(19)?,
+                syscw: row.get(20)?,
+                vol_cs: row.get(21)?,
+                nonvol_cs: row.get(22)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// Query sidecar markers for a result UUID prefix.
+    /// Returns rows ordered by run_idx, marker_idx.
+    pub fn query_sidecar_markers(&self, uuid_prefix: &str) -> Result<Vec<crate::sidecar::Marker>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT marker_idx, timestamp_us, name
+             FROM sidecar_markers
+             WHERE result_uuid LIKE ?1||'%'
+             ORDER BY run_idx, marker_idx",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| {
+            Ok(crate::sidecar::Marker {
+                marker_idx: row.get(0)?,
+                timestamp_us: row.get(1)?,
+                name: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// Check whether sidecar data exists for a result UUID prefix.
+    pub fn has_sidecar_data(&self, uuid_prefix: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM sidecar_summary WHERE result_uuid LIKE ?1||'%'",
+                rusqlite::params![uuid_prefix],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false)
+    }
 }
 
 // ---------------------------------------------------------------------------

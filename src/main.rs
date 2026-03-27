@@ -404,6 +404,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
             limit,
             top,
+            timeline,
+            markers,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -414,6 +416,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 variant,
                 limit,
                 top,
+                timeline,
+                markers,
             };
             cmd_results(&project_root, &rq)
         }
@@ -962,6 +966,30 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let results_db = db::ResultsDb::open(&db_path)?;
 
     if let Some(ref uuid_prefix) = q.query {
+        // Sidecar JSONL output modes.
+        if q.timeline {
+            let samples = results_db.query_sidecar_samples(uuid_prefix)?;
+            if samples.is_empty() {
+                output::result_msg("no sidecar data for this result");
+            } else {
+                for s in &samples {
+                    println!("{}", sidecar_sample_json(s));
+                }
+            }
+            return Ok(());
+        }
+        if q.markers {
+            let markers = results_db.query_sidecar_markers(uuid_prefix)?;
+            if markers.is_empty() {
+                output::result_msg("no sidecar markers for this result");
+            } else {
+                for m in &markers {
+                    println!("{}", sidecar_marker_json(m));
+                }
+            }
+            return Ok(());
+        }
+
         let rows = results_db.query_by_uuid(uuid_prefix)?;
         if rows.is_empty() {
             output::result_msg("no matching results");
@@ -978,6 +1006,10 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                     && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, q.top)
                 {
                     println!("\n{report}");
+                }
+                // Note if sidecar data exists.
+                if results_db.has_sidecar_data(&row.uuid) {
+                    output::sidecar_msg("profile data available (use --timeline or --markers)");
                 }
             }
         }
@@ -1019,6 +1051,78 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+/// Format a sidecar sample as a compact JSON object (single line).
+///
+/// Short keys for compactness (~150 bytes/line instead of ~400).
+/// 30K samples × 150 bytes = ~4.5 MB. Streamable, greppable, pipe to jq.
+fn sidecar_sample_json(s: &sidecar::Sample) -> String {
+    format!(
+        concat!(
+            "{{",
+            "\"i\":{},",         // sample_idx
+            "\"t\":{},",         // timestamp_us
+            "\"rss\":{},",       // rss_kb
+            "\"anon\":{},",      // anon_kb
+            "\"file\":{},",      // file_kb
+            "\"shmem\":{},",     // shmem_kb
+            "\"swap\":{},",      // swap_kb
+            "\"vsize\":{},",     // vsize_kb
+            "\"hwm\":{},",       // vm_hwm_kb
+            "\"utime\":{},",     // utime (clock ticks)
+            "\"stime\":{},",     // stime (clock ticks)
+            "\"threads\":{},",   // num_threads
+            "\"minflt\":{},",    // minflt
+            "\"majflt\":{},",    // majflt
+            "\"rchar\":{},",     // rchar (bytes)
+            "\"wchar\":{},",     // wchar (bytes)
+            "\"rd\":{},",        // read_bytes (disk)
+            "\"wr\":{},",        // write_bytes (disk)
+            "\"cwr\":{},",       // cancelled_write_bytes
+            "\"syscr\":{},",     // syscr
+            "\"syscw\":{},",     // syscw
+            "\"vcs\":{},",       // voluntary context switches
+            "\"nvcs\":{}",       // nonvoluntary context switches
+            "}}",
+        ),
+        s.sample_idx,
+        s.timestamp_us,
+        s.rss_kb,
+        s.anon_kb,
+        s.file_kb,
+        s.shmem_kb,
+        s.swap_kb,
+        s.vsize_kb,
+        s.vm_hwm_kb,
+        s.utime,
+        s.stime,
+        s.num_threads,
+        s.minflt,
+        s.majflt,
+        s.rchar,
+        s.wchar,
+        s.read_bytes,
+        s.write_bytes,
+        s.cancelled_write_bytes,
+        s.syscr,
+        s.syscw,
+        s.vol_cs,
+        s.nonvol_cs,
+    )
+}
+
+/// Format a sidecar marker as a compact JSON object (single line).
+fn sidecar_marker_json(m: &sidecar::Marker) -> String {
+    let name = m
+        .name
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!(
+        "{{\"i\":{},\"t\":{},\"name\":\"{}\"}}",
+        m.marker_idx, m.timestamp_us, name,
+    )
 }
 
 fn cmd_clean(
