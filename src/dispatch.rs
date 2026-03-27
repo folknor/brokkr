@@ -29,22 +29,9 @@ use crate::resolve::{
 
 /// Run a single pbfhogg command with the specified measurement mode.
 ///
-/// This ONE function handles wall-clock, hotpath, alloc, and profile for ANY
-/// pbfhogg command. It replaces the scattered `bench_commands`, `hotpath`,
-/// and `profile` modules' dispatch logic.
-///
-/// `extra_params` allows passing command-specific parameters (e.g. `index_type`
-/// for `add-locations-to-ways`) that get injected into the `CommandContext`.
-#[allow(clippy::too_many_lines)]
-pub fn run_pbfhogg_command(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-) -> Result<(), DevError> {
-    run_pbfhogg_command_with_params(req, command, osc_seq, &HashMap::new())
-}
-
-/// Like `run_pbfhogg_command` but with extra context parameters.
+/// Handles run, bench, hotpath, and alloc for any pbfhogg command.
+/// `extra_params` carries command-specific parameters (e.g. `index_type`
+/// for `add-locations-to-ways`, `bbox` for extract).
 pub fn run_pbfhogg_command_with_params(
     req: &MeasureRequest,
     command: &PbfhoggCommand,

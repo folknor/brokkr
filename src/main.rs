@@ -321,9 +321,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: "denmark", variant: "raw", runs: mm.runs(),
+                    dataset: "denmark", variant: "raw", runs: effective_runs,
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
@@ -335,9 +336,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: "denmark", variant: "raw", runs: mm.runs(),
+                    dataset: "denmark", variant: "raw", runs: effective_runs,
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
@@ -349,9 +351,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs: mm.runs(),
+                    dataset: &dataset, variant: &variant, runs: effective_runs,
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::Planetiler;
@@ -363,9 +366,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs: mm.runs(),
+                    dataset: &dataset, variant: &variant, runs: effective_runs,
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
@@ -380,12 +384,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "api")?;
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: "raw",
-                            runs, features: &features, force: mode.force,
+                            runs: effective_runs, features: &features, force: mode.force,
                         };
                         nidhogg::cmd::bench_api(&bench_req, query.as_deref())
                     }
@@ -397,7 +402,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let hotpath_req = request::HotpathRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: "raw",
-                            runs, all_features: &all_features,
+                            runs: effective_runs, all_features: &all_features,
                             alloc, no_mem_check: mode.no_mem_check, force: mode.force,
                         };
                         nidhogg::cmd::hotpath(&hotpath_req)
@@ -411,12 +416,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "nid-ingest")?;
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: &variant,
-                            runs, features: &features, force: mode.force,
+                            runs: effective_runs, features: &features, force: mode.force,
                         };
                         nidhogg::cmd::bench_ingest(&bench_req)
                     }
@@ -428,7 +434,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let hotpath_req = request::HotpathRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: &variant,
-                            runs, all_features: &all_features,
+                            runs: effective_runs, all_features: &all_features,
                             alloc, no_mem_check: mode.no_mem_check, force: mode.force,
                         };
                         nidhogg::cmd::hotpath(&hotpath_req)
@@ -442,12 +448,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "tiles")?;
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: "raw",
-                            runs, features: &features, force: mode.force,
+                            runs: effective_runs, features: &features, force: mode.force,
                         };
                         nidhogg::cmd::bench_tiles(&bench_req, tiles.as_deref(), uring)
                     }
@@ -459,7 +466,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let hotpath_req = request::HotpathRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: "raw",
-                            runs, all_features: &all_features,
+                            runs: effective_runs, all_features: &all_features,
                             alloc, no_mem_check: mode.no_mem_check, force: mode.force,
                         };
                         nidhogg::cmd::hotpath(&hotpath_req)
@@ -718,15 +725,24 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
     if set_count > 1 {
         return Err(DevError::Config("--bench, --hotpath, and --alloc are mutually exclusive".into()));
     }
-    if let Some(runs) = mode.bench {
-        Ok(measure::MeasureMode::Bench { runs })
+    let result = if let Some(runs) = mode.bench {
+        measure::MeasureMode::Bench { runs }
     } else if let Some(runs) = mode.hotpath {
-        Ok(measure::MeasureMode::Hotpath { runs })
+        measure::MeasureMode::Hotpath { runs }
     } else if let Some(runs) = mode.alloc {
-        Ok(measure::MeasureMode::Alloc { runs })
+        measure::MeasureMode::Alloc { runs }
     } else {
-        Ok(measure::MeasureMode::Run)
+        measure::MeasureMode::Run
+    };
+    match &result {
+        measure::MeasureMode::Bench { runs: 0 }
+        | measure::MeasureMode::Hotpath { runs: 0 }
+        | measure::MeasureMode::Alloc { runs: 0 } => {
+            return Err(DevError::Config("run count must be >= 1".into()));
+        }
+        _ => {}
     }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
