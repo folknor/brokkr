@@ -4,6 +4,7 @@ mod hotpath;
 mod migrate;
 mod query;
 mod schema;
+pub(crate) mod sidecar;
 mod types;
 mod write;
 

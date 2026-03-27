@@ -358,6 +358,11 @@ pub(crate) fn results_db_path(project_root: &Path) -> PathBuf {
     project_root.join(".brokkr").join("results.db")
 }
 
+/// Path to the sidecar profile database (gitignored, local-only).
+pub(crate) fn sidecar_db_path(project_root: &Path) -> PathBuf {
+    project_root.join(".brokkr").join("sidecar.db")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

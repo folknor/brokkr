@@ -972,6 +972,15 @@ fn cmd_run(
     Ok(())
 }
 
+fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
+    let path = resolve::sidecar_db_path(project_root);
+    if path.exists() {
+        db::sidecar::SidecarDb::open(&path).ok()
+    } else {
+        None
+    }
+}
+
 fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
 
@@ -981,19 +990,24 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     }
 
     let results_db = db::ResultsDb::open(&db_path)?;
+    let sidecar_db = open_sidecar_db(project_root);
 
     // --compare-timeline <uuid_a> <uuid_b>
     if let Some(ref uuids) = q.compare_timeline {
+        let Some(ref sdb) = sidecar_db else {
+            output::result_msg("no sidecar.db found");
+            return Ok(());
+        };
         let uuid_a = &uuids[0];
         let uuid_b = &uuids[1];
-        let samples_a = results_db.query_sidecar_samples(uuid_a)?;
-        let samples_b = results_db.query_sidecar_samples(uuid_b)?;
+        let samples_a = sdb.query_samples(uuid_a)?;
+        let samples_b = sdb.query_samples(uuid_b)?;
         if samples_a.is_empty() || samples_b.is_empty() {
             output::result_msg("one or both results have no sidecar data");
             return Ok(());
         }
-        let markers_a = results_db.query_sidecar_markers(uuid_a)?;
-        let markers_b = results_db.query_sidecar_markers(uuid_b)?;
+        let markers_a = sdb.query_markers(uuid_a)?;
+        let markers_b = sdb.query_markers(uuid_b)?;
         print_compare_timeline(uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b);
         return Ok(());
     }
@@ -1001,21 +1015,23 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     if let Some(ref uuid_prefix) = q.query {
         // Sidecar output modes.
         if q.timeline {
-            let mut samples = results_db.query_sidecar_samples(uuid_prefix)?;
+            let Some(ref sdb) = sidecar_db else {
+                output::result_msg("no sidecar.db found");
+                return Ok(());
+            };
+            let mut samples = sdb.query_samples(uuid_prefix)?;
             if samples.is_empty() {
                 output::result_msg("no sidecar data for this result");
             } else if q.summary {
-                let markers = results_db.query_sidecar_markers(uuid_prefix)?;
+                let markers = sdb.query_markers(uuid_prefix)?;
                 print_phase_summary(&samples, &markers);
             } else {
-                // --phase: resolve to a time range from markers, then filter.
                 if let Some(ref phase_name) = q.phase {
-                    let markers = results_db.query_sidecar_markers(uuid_prefix)?;
+                    let markers = sdb.query_markers(uuid_prefix)?;
                     let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
                     samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
                 }
 
-                // --range: filter by time range in seconds.
                 if let Some(ref range_str) = q.range {
                     let (start_us, end_us) = parse_time_range(range_str)?;
                     samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
@@ -1039,11 +1055,15 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             return Ok(());
         }
         if q.markers {
-            let markers = results_db.query_sidecar_markers(uuid_prefix)?;
+            let Some(ref sdb) = sidecar_db else {
+                output::result_msg("no sidecar.db found");
+                return Ok(());
+            };
+            let markers = sdb.query_markers(uuid_prefix)?;
             if markers.is_empty() {
                 output::result_msg("no sidecar markers for this result");
             } else if q.phases {
-                let samples = results_db.query_sidecar_samples(uuid_prefix)?;
+                let samples = sdb.query_samples(uuid_prefix)?;
                 print_marker_phases(&markers, &samples);
             } else if q.durations {
                 print_marker_durations(&markers);
@@ -1073,7 +1093,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                     println!("\n{report}");
                 }
                 // Note if sidecar data exists.
-                if results_db.has_sidecar_data(&row.uuid) {
+                if sidecar_db.as_ref().is_some_and(|sdb| sdb.has_data(&row.uuid)) {
                     output::sidecar_msg("profile data available (use --timeline or --markers)");
                 }
             }

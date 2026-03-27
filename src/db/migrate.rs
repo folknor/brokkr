@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 8;
+pub(super) const SCHEMA_VERSION: i64 = 9;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -39,6 +39,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 8 {
         migrate_v7_to_v8(conn)?;
+    }
+    if current < 9 {
+        migrate_v8_to_v9(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -299,6 +302,21 @@ fn migrate_v7_to_v8(conn: &rusqlite::Connection) -> Result<(), DevError> {
                 wall_time_ms INTEGER,
                 PRIMARY KEY (result_uuid, run_idx)
             );",
+        )?;
+    }
+    Ok(())
+}
+
+/// Migration v8 -> v9: drop sidecar tables from results.db.
+///
+/// Sidecar data now lives in a separate `.brokkr/sidecar.db` (gitignored)
+/// to keep the tracked results.db small.
+fn migrate_v8_to_v9(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if has_table(conn, "sidecar_samples") {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS sidecar_samples;
+             DROP TABLE IF EXISTS sidecar_markers;
+             DROP TABLE IF EXISTS sidecar_summary;",
         )?;
     }
     Ok(())

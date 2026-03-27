@@ -42,6 +42,7 @@ pub struct BenchResult {
 pub struct BenchHarness {
     _lock: LockGuard,
     db: ResultsDb,
+    db_dir: std::path::PathBuf,
     env: EnvInfo,
     git: GitInfo,
     storage_notes: Option<String>,
@@ -107,6 +108,7 @@ impl BenchHarness {
         Ok(Self {
             _lock: lock,
             db,
+            db_dir,
             env,
             git,
             storage_notes,
@@ -257,13 +259,16 @@ impl BenchHarness {
 
         let uuid = self.record_result(config, &bench_result)?;
 
-        // Store sidecar data if we got a UUID (clean tree).
-        if let Some(ref uuid) = uuid {
+        // Store sidecar data in the separate sidecar.db (always, even dirty tree).
+        {
+            let sidecar_db_path = self.db_dir.join("sidecar.db");
+            let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
+            let store_uuid = uuid.as_deref().unwrap_or("dirty");
             for (i, data) in sidecar_runs.iter().enumerate() {
-                self.db.store_sidecar_run(uuid, i, data)?;
+                sidecar_db.store_run(store_uuid, i, data)?;
             }
             output::sidecar_msg(&format!(
-                "profile data stored in results.db (best run: {best_run_idx})",
+                "profile data stored in sidecar.db (best run: {best_run_idx})",
             ));
         }
 
