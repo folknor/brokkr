@@ -134,6 +134,31 @@ Makes performance triage easier without external tooling.
 
 ---
 
+## CLI redesign remaining issues
+
+### Elivagar/nidhogg default mode runs through full harness
+`brokkr tilegen` (no `--bench` flag) still goes through `BenchHarness` with DB storage. Pbfhogg has a lightweight `run_pbfhogg_run` path; elivagar and nidhogg need equivalents.
+
+### Suite without --bench stores results in DB
+`brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
+
+### Suite builds without host features
+`bench_all.rs` calls `cargo_build` without host features from `brokkr.toml`. Individual commands correctly include them via `BenchContext::new`. Pre-existing.
+
+### Standalone extract commands use hardcoded Copenhagen bbox
+`ExtractSimple/Complete/Smart` (bench_commands variants) hardcode `12.4,55.6,12.7,55.8`. The `Extract { strategy }` variant uses dataset bbox. Pre-existing, intentional for consistent benchmarking.
+
+### --bench 0 not validated early
+Harness catches it after building. Low priority.
+
+### Nidhogg hotpath ignores command-specific context
+`RunApi --hotpath` ignores `--query`, `RunTiles --hotpath` ignores `--tiles`/`--uring`. Nidhogg hotpath is a single generic function. Pre-existing.
+
+### Remove --runs from elivagar/nidhogg CLI variants
+Mode-based run counts (`--bench 5`) now take precedence. The standalone `--runs` field is dead when a mode flag is set. Should be removed.
+
+---
+
 ## CLI sync backlog
 
 Last synced at brokkr commit `e9bb402` (2026-03-03). Both pbfhogg and elivagar have expanded significantly since then.

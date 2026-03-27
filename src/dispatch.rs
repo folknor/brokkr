@@ -60,7 +60,7 @@ pub fn run_pbfhogg_command_with_params(
     }
 }
 
-/// Default run mode: build, run once, print timing. Lockfile but no DB storage.
+/// Default run mode: build, run once, print timing. Acquires lockfile, no DB storage.
 fn run_pbfhogg_run(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
@@ -80,8 +80,7 @@ fn run_pbfhogg_run(
         req.force,
     )?;
 
-    let mut cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths)?;
-    cmd_ctx.params.extend(extra_params.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let args = command.build_args(&cmd_ctx)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -122,8 +121,7 @@ fn run_pbfhogg_wallclock(
         req.force,
     )?;
 
-    let mut cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths)?;
-    cmd_ctx.params.extend(extra_params.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let args = command.build_args(&cmd_ctx)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (_, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -201,8 +199,7 @@ fn run_pbfhogg_hotpath(
     };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
 
-    let mut cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths)?;
-    cmd_ctx.params.extend(extra_params.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
 
     let label = feature;
@@ -252,6 +249,8 @@ fn run_pbfhogg_hotpath(
         Ok(result)
     })?;
 
+    cleanup_pbfhogg_output(command, &cmd_ctx);
+
     Ok(())
 }
 
@@ -262,6 +261,7 @@ fn build_pbfhogg_context(
     osc_seq: Option<&str>,
     binary: &Path,
     paths: &config::ResolvedPaths,
+    extra_params: &HashMap<String, String>,
 ) -> Result<CommandContext, DevError> {
     let pbf_path = resolve_pbf_path(req.dataset, req.variant, paths, req.project_root)?;
 
@@ -286,9 +286,10 @@ fn build_pbfhogg_context(
         None
     };
 
-    // Resolve bbox if needed.
+    // Resolve bbox if needed. Check extra_params for a CLI override first.
     let bbox = if command.needs_bbox() {
-        Some(resolve_bbox(None, req.dataset, paths)?)
+        let cli_bbox = extra_params.get("bbox").map(String::as_str);
+        Some(resolve_bbox(cli_bbox, req.dataset, paths)?)
     } else {
         None
     };
@@ -301,7 +302,7 @@ fn build_pbfhogg_context(
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
         bbox,
-        params: HashMap::new(),
+        params: extra_params.clone(),
     })
 }
 

@@ -198,7 +198,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::BuildGeocodeIndex { mode, pbf } => {
             pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::BuildGeocodeIndex)
         }
-        Command::Extract { mode, pbf, strategy, bbox: _ } => {
+        Command::Extract { mode, pbf, strategy, bbox } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
@@ -208,16 +208,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     dataset: &pbf.dataset, variant: &pbf.variant, runs: mm.runs(),
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
+                let mut params = std::collections::HashMap::new();
+                if let Some(ref b) = bbox {
+                    params.insert("bbox".into(), b.clone());
+                }
                 if strategy == "all" {
                     for strat in pbfhogg::commands::ExtractStrategy::all() {
                         let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: *strat };
-                        dispatch::run_pbfhogg_command(&req, &cmd, None)?;
+                        dispatch::run_pbfhogg_command_with_params(&req, &cmd, None, &params)?;
                     }
                     Ok(())
                 } else {
                     let strat = pbfhogg::commands::ExtractStrategy::parse(&strategy)?;
                     let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: strat };
-                    dispatch::run_pbfhogg_command(&req, &cmd, None)
+                    dispatch::run_pbfhogg_command_with_params(&req, &cmd, None, &params)
                 }
             })
         }
@@ -288,9 +292,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs,
+                    dataset: &dataset, variant: &variant, runs: effective_runs,
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let opts = elivagar::PipelineOpts {
@@ -318,7 +323,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: "denmark", variant: "raw", runs,
+                    dataset: "denmark", variant: "raw", runs: mm.runs(),
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
@@ -332,7 +337,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: "denmark", variant: "raw", runs,
+                    dataset: "denmark", variant: "raw", runs: mm.runs(),
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
@@ -346,7 +351,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs,
+                    dataset: &dataset, variant: &variant, runs: mm.runs(),
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::Planetiler;
@@ -360,7 +365,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs,
+                    dataset: &dataset, variant: &variant, runs: mm.runs(),
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::Tilemaker;

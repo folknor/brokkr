@@ -1193,7 +1193,7 @@ mod tests {
         let Command::InspectTags { mode, pbf } = parsed.command else {
             panic!("expected inspect-tags command");
         };
-        assert!(mode.hotpath);
+        assert!(mode.hotpath.is_some());
         assert_eq!(pbf.dataset, "japan");
     }
 }
