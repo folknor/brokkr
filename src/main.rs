@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use cli::{BenchCommand, Cli, Command, LitehtmlCommand, MeasureCommand, SluggrsCommand, VerifyCommand};
+use cli::{BenchCommand, Cli, Command, LitehtmlCommand, RunCommand, SluggrsCommand, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
@@ -91,18 +91,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
             cmd_check(project, &project_root, &features, no_default_features, package.as_deref(), &args)
         }
         Command::Env => cmd_env(&dev_config, project, &project_root),
-        Command::Run { features, time, json, runs, no_build, args } => {
+        Command::Run { hotpath, alloc, profile, verbose, commit, features, force, no_mem_check, tool, command: run_cmd } => {
+            let features = resolve_features(&dev_config, &features);
+            output::set_quiet(!verbose);
+            context::with_worktree(&project_root, commit.as_deref(), |build_root| {
+                cmd_measure(&dev_config, project, &project_root, build_root, &features, force, no_mem_check, hotpath, alloc, profile, tool.as_deref(), run_cmd)
+            })
+        }
+        Command::Passthrough { features, time, json, runs, no_build, args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "run")?;
             let features = resolve_features(&dev_config, &features);
             let opts = RunOptions { time, json, runs, no_build };
             cmd_run(&dev_config, project, &project_root, &features, &args, &opts)
-        }
-        Command::Measure { hotpath, alloc, profile, verbose, commit, features, force, no_mem_check, tool, command: measure_cmd } => {
-            let features = resolve_features(&dev_config, &features);
-            output::set_quiet(!verbose);
-            context::with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_measure(&dev_config, project, &project_root, build_root, &features, force, no_mem_check, hotpath, alloc, profile, tool.as_deref(), measure_cmd)
-            })
         }
         Command::Results {
             query,
@@ -122,6 +122,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             cmd_clean(&dev_config, project, &project_root)
         }
         Command::Bench { verbose, commit, features, force, bench } => {
+            eprintln!("[warn] `brokkr bench` is deprecated — use `brokkr run <command>` instead");
             let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
@@ -162,6 +163,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             no_mem_check,
             force,
         } => {
+            eprintln!("[warn] `brokkr hotpath` is deprecated — use `brokkr run <command> --hotpath` instead");
             let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
@@ -207,6 +209,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             polygon_simplify_factor,
             no_mem_check,
         } => {
+            eprintln!("[warn] `brokkr profile` is deprecated — use `brokkr run <command> --profile` instead");
             let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
@@ -1209,7 +1212,7 @@ fn cmd_measure(
     alloc: bool,
     profile: bool,
     profiler_tool: Option<&str>,
-    command: MeasureCommand,
+    command: RunCommand,
 ) -> Result<(), DevError> {
     // Determine measurement mode from flags.
     let mode_count = usize::from(hotpath) + usize::from(alloc) + usize::from(profile);
@@ -1248,87 +1251,87 @@ fn cmd_measure(
 
     match command {
         // ----- pbfhogg tool CLI commands -----
-        MeasureCommand::Inspect { pbf } => {
+        RunCommand::Inspect { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::Inspect, None)
         }
-        MeasureCommand::InspectNodes { pbf } => {
+        RunCommand::InspectNodes { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::InspectNodes, None)
         }
-        MeasureCommand::InspectTags { pbf } => {
+        RunCommand::InspectTags { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::InspectTags, None)
         }
-        MeasureCommand::InspectTagsWay { pbf } => {
+        RunCommand::InspectTagsWay { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::InspectTagsWay, None)
         }
-        MeasureCommand::CheckRefs { pbf } => {
+        RunCommand::CheckRefs { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::CheckRefs, None)
         }
-        MeasureCommand::CheckIds { pbf } => {
+        RunCommand::CheckIds { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::CheckIds, None)
         }
-        MeasureCommand::Sort { pbf } => {
+        RunCommand::Sort { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::Sort, None)
         }
-        MeasureCommand::CatWay { pbf } => {
+        RunCommand::CatWay { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::CatWay, None)
         }
-        MeasureCommand::CatRelation { pbf } => {
+        RunCommand::CatRelation { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::CatRelation, None)
         }
-        MeasureCommand::CatDedupe { pbf } => {
+        RunCommand::CatDedupe { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::CatDedupe, None)
         }
-        MeasureCommand::TagsFilterWay { pbf } => {
+        RunCommand::TagsFilterWay { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::TagsFilterWay, None)
         }
-        MeasureCommand::TagsFilterAmenity { pbf } => {
+        RunCommand::TagsFilterAmenity { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::TagsFilterAmenity, None)
         }
-        MeasureCommand::TagsFilterTwopass { pbf } => {
+        RunCommand::TagsFilterTwopass { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::TagsFilterTwopass, None)
         }
-        MeasureCommand::TagsFilterOsc { pbf, osc_seq } => {
+        RunCommand::TagsFilterOsc { pbf, osc_seq } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::TagsFilterOsc, osc_seq.as_deref())
         }
-        MeasureCommand::Getid { pbf } => {
+        RunCommand::Getid { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::Getid, None)
         }
-        MeasureCommand::Getparents { pbf } => {
+        RunCommand::Getparents { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::Getparents, None)
         }
-        MeasureCommand::GetidInvert { pbf } => {
+        RunCommand::GetidInvert { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::GetidInvert, None)
         }
-        MeasureCommand::Renumber { pbf } => {
+        RunCommand::Renumber { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::Renumber, None)
         }
-        MeasureCommand::MergeChanges { pbf, osc_seq } => {
+        RunCommand::MergeChanges { pbf, osc_seq } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::MergeChanges, osc_seq.as_deref())
         }
-        MeasureCommand::ApplyChanges { pbf, osc_seq } => {
+        RunCommand::ApplyChanges { pbf, osc_seq } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::ApplyChanges, osc_seq.as_deref())
         }
-        MeasureCommand::AddLocationsToWays { pbf, index_type } => {
+        RunCommand::AddLocationsToWays { pbf, index_type } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             let cmd = pbfhogg::commands::PbfhoggCommand::AddLocationsToWays;
             let mut params = std::collections::HashMap::new();
@@ -1337,37 +1340,37 @@ fn cmd_measure(
             }
             dispatch::run_pbfhogg_command_with_params(&req, &cmd, None, &params)
         }
-        MeasureCommand::ExtractSimple { pbf } => {
+        RunCommand::ExtractSimple { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::ExtractSimple, None)
         }
-        MeasureCommand::ExtractComplete { pbf } => {
+        RunCommand::ExtractComplete { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::ExtractComplete, None)
         }
-        MeasureCommand::ExtractSmart { pbf } => {
+        RunCommand::ExtractSmart { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::ExtractSmart, None)
         }
-        MeasureCommand::TimeFilter { pbf } => {
+        RunCommand::TimeFilter { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::TimeFilter, None)
         }
-        MeasureCommand::Diff { pbf, osc_seq } => {
+        RunCommand::Diff { pbf, osc_seq } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::Diff, osc_seq.as_deref())
         }
-        MeasureCommand::DiffOsc { pbf, osc_seq } => {
+        RunCommand::DiffOsc { pbf, osc_seq } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::DiffOsc, osc_seq.as_deref())
         }
-        MeasureCommand::BuildGeocodeIndex { pbf } => {
+        RunCommand::BuildGeocodeIndex { pbf } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             dispatch::run_pbfhogg_command(&req, &pbfhogg::commands::PbfhoggCommand::BuildGeocodeIndex, None)
         }
 
         // ----- pbfhogg multi-variant commands -----
-        MeasureCommand::Extract { pbf, strategy, bbox: _ } => {
+        RunCommand::Extract { pbf, strategy, bbox: _ } => {
             let req = make_req!(&pbf.dataset, &pbf.variant, pbf.runs);
             if strategy == "all" {
                 for strat in pbfhogg::commands::ExtractStrategy::all() {
@@ -1381,7 +1384,7 @@ fn cmd_measure(
                 dispatch::run_pbfhogg_command(&req, &cmd, None)
             }
         }
-        MeasureCommand::Read { pbf, modes } => {
+        RunCommand::Read { pbf, modes } => {
             // Multi-variant: delegates to existing bench path.
             let bench_req = request::BenchRequest {
                 dev_config, project, project_root, build_root,
@@ -1395,7 +1398,7 @@ fn cmd_measure(
             }
             pbfhogg::cmd::bench_read(&bench_req, &modes)
         }
-        MeasureCommand::Write { pbf, compression } => {
+        RunCommand::Write { pbf, compression } => {
             if mode != measure::MeasureMode::WallClock {
                 return Err(DevError::Config(
                     "write benchmark does not support hotpath/alloc/profile modes".into(),
@@ -1408,7 +1411,7 @@ fn cmd_measure(
             };
             pbfhogg::cmd::bench_write(&bench_req, &compression)
         }
-        MeasureCommand::Merge { pbf, compression, uring, osc_seq } => {
+        RunCommand::Merge { pbf, compression, uring, osc_seq } => {
             if mode != measure::MeasureMode::WallClock {
                 return Err(DevError::Config(
                     "merge benchmark does not support hotpath/alloc/profile modes".into(),
@@ -1423,7 +1426,7 @@ fn cmd_measure(
         }
 
         // ----- elivagar commands -----
-        MeasureCommand::Tilegen {
+        RunCommand::Tilegen {
             dataset, variant, runs, skip_to, compression_level,
             no_ocean, force_sorted, allow_unsafe_flat_index,
             tile_format, tile_compression, compress_sort_chunks,
@@ -1448,29 +1451,29 @@ fn cmd_measure(
             };
             dispatch::run_elivagar_command(&req, &cmd, profiler_tool)
         }
-        MeasureCommand::PmtilesWriter { tiles, runs } => {
+        RunCommand::PmtilesWriter { tiles, runs } => {
             let req = make_req!("denmark", "raw", runs);
             let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
             dispatch::run_elivagar_command(&req, &cmd, None)
         }
-        MeasureCommand::NodeStore { nodes, runs } => {
+        RunCommand::NodeStore { nodes, runs } => {
             let req = make_req!("denmark", "raw", runs);
             let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
             dispatch::run_elivagar_command(&req, &cmd, None)
         }
-        MeasureCommand::Planetiler { dataset, variant, runs } => {
+        RunCommand::Planetiler { dataset, variant, runs } => {
             let req = make_req!(&dataset, &variant, runs);
             let cmd = elivagar::commands::ElivagarCommand::Planetiler;
             dispatch::run_elivagar_command(&req, &cmd, None)
         }
-        MeasureCommand::Tilemaker { dataset, variant, runs } => {
+        RunCommand::Tilemaker { dataset, variant, runs } => {
             let req = make_req!(&dataset, &variant, runs);
             let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
             dispatch::run_elivagar_command(&req, &cmd, None)
         }
 
         // ----- nidhogg commands -----
-        MeasureCommand::Api { dataset, runs, query } => {
+        RunCommand::Api { dataset, runs, query } => {
             project::require(project, Project::Nidhogg, "measure api")?;
             match mode {
                 measure::MeasureMode::WallClock => {
@@ -1504,7 +1507,7 @@ fn cmd_measure(
                 }
             }
         }
-        MeasureCommand::NidIngest { dataset, variant, runs } => {
+        RunCommand::NidIngest { dataset, variant, runs } => {
             project::require(project, Project::Nidhogg, "measure nid-ingest")?;
             match mode {
                 measure::MeasureMode::WallClock => {
@@ -1538,7 +1541,7 @@ fn cmd_measure(
                 }
             }
         }
-        MeasureCommand::Tiles { dataset, tiles, runs, uring } => {
+        RunCommand::Tiles { dataset, tiles, runs, uring } => {
             project::require(project, Project::Nidhogg, "measure tiles")?;
             match mode {
                 measure::MeasureMode::WallClock => {
@@ -1574,7 +1577,7 @@ fn cmd_measure(
         }
 
         // ----- sluggrs commands -----
-        MeasureCommand::SluggrsHotpath { runs } => {
+        RunCommand::SluggrsHotpath { runs } => {
             project::require(project, Project::Sluggrs, "measure sluggrs-hotpath")?;
             match mode {
                 measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
@@ -1599,7 +1602,7 @@ fn cmd_measure(
         }
 
         // ----- generic commands -----
-        MeasureCommand::GenericHotpath { dataset, variant, runs } => {
+        RunCommand::GenericHotpath { dataset, variant, runs } => {
             match mode {
                 measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
                     let alloc = mode == measure::MeasureMode::Alloc;
@@ -1628,7 +1631,7 @@ fn cmd_measure(
         }
 
         // ----- suites -----
-        MeasureCommand::Suite { name, dataset, variant, runs } => {
+        RunCommand::Suite { name, dataset, variant, runs } => {
             match name.as_str() {
                 "pbfhogg" => {
                     project::require(project, Project::Pbfhogg, "measure suite pbfhogg")?;

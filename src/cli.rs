@@ -42,31 +42,9 @@ Examples:
     /// Show environment information
     #[command(display_order = 1)]
     Env,
-    /// Build and run the project binary
+    /// Run a measured command, or passthrough with `--`
     #[command(display_order = 2)]
     Run {
-        /// Cargo features to enable (e.g. linux-io-uring)
-        #[arg(long, value_delimiter = ',')]
-        features: Vec<String>,
-        /// Print machine-readable timing line (key=value pairs)
-        #[arg(long)]
-        time: bool,
-        /// Print machine-readable JSON timing summary
-        #[arg(long)]
-        json: bool,
-        /// Number of times to run the command (build happens once)
-        #[arg(long, default_value_t = 1)]
-        runs: usize,
-        /// Skip build step and run existing release binary
-        #[arg(long)]
-        no_build: bool,
-        /// Arguments passed to the binary
-        #[arg(last = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Run a measured command (wall-clock, hotpath, alloc, or profile)
-    #[command(display_order = 2)]
-    Measure {
         /// Function-level timing via hotpath feature
         #[arg(long)]
         hotpath: bool,
@@ -104,7 +82,29 @@ Examples:
         tool: Option<String>,
 
         #[command(subcommand)]
-        command: MeasureCommand,
+        command: RunCommand,
+    },
+    /// Build and run with passthrough args (deprecated — use `run` subcommands instead)
+    #[command(name = "passthrough", display_order = 99, hide = true)]
+    Passthrough {
+        /// Cargo features to enable (e.g. linux-io-uring)
+        #[arg(long, value_delimiter = ',')]
+        features: Vec<String>,
+        /// Print machine-readable timing line (key=value pairs)
+        #[arg(long)]
+        time: bool,
+        /// Print machine-readable JSON timing summary
+        #[arg(long)]
+        json: bool,
+        /// Number of times to run the command (build happens once)
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
+        /// Skip build step and run existing release binary
+        #[arg(long)]
+        no_build: bool,
+        /// Arguments passed to the binary
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Query benchmark results
     #[command(display_order = 3, long_about = "\
@@ -204,7 +204,7 @@ Examples:
         #[arg(long)]
         all: bool,
     },
-    /// Run benchmarks
+    /// Run benchmarks (deprecated — use `brokkr run <command>` instead)
     #[command(display_order = 10)]
     Bench {
         /// Print full build/bench/result output
@@ -240,7 +240,7 @@ Examples:
         #[command(subcommand)]
         verify: VerifyCommand,
     },
-    /// Run hotpath profiling (timing or allocation instrumentation)
+    /// Run hotpath profiling (deprecated — use `brokkr run <command> --hotpath` instead)
     #[command(display_order = 12)]
     Hotpath {
         /// Target to profile (default: main pipeline; elivagar also supports pmtiles, node-store)
@@ -335,7 +335,7 @@ Examples:
         #[arg(long)]
         no_mem_check: bool,
     },
-    /// Run two-pass profiling (timing + allocation) for a dataset
+    /// Run two-pass profiling (deprecated — use `brokkr run <command> --profile` instead)
     #[command(display_order = 13)]
     Profile {
         /// Print full build/bench/result output
@@ -807,11 +807,11 @@ pub(crate) struct PbfArgs {
 }
 
 // ---------------------------------------------------------------------------
-// MeasureCommand — subcommands for `brokkr measure <command>`
+// RunCommand — subcommands for `brokkr measure <command>`
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Subcommand)]
-pub(crate) enum MeasureCommand {
+pub(crate) enum RunCommand {
     // ----- pbfhogg tool CLI commands -----
 
     /// [pbfhogg] Inspect PBF metadata
