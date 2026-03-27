@@ -1190,13 +1190,17 @@ pub(crate) enum BenchCommand {
 
 #[derive(Args, Clone)]
 pub(crate) struct ModeArgs {
-    /// Function-level timing via hotpath feature
-    #[arg(long)]
-    pub(crate) hotpath: bool,
+    /// Full benchmark: lockfile, N runs (default 3), DB storage
+    #[arg(long, num_args = 0..=1, default_missing_value = "3")]
+    pub(crate) bench: Option<usize>,
 
-    /// Per-function allocation tracking via hotpath-alloc feature
-    #[arg(long)]
-    pub(crate) alloc: bool,
+    /// Function-level timing via hotpath feature (optional run count, default 1)
+    #[arg(long, num_args = 0..=1, default_missing_value = "1")]
+    pub(crate) hotpath: Option<usize>,
+
+    /// Per-function allocation tracking via hotpath-alloc feature (optional run count, default 1)
+    #[arg(long, num_args = 0..=1, default_missing_value = "1")]
+    pub(crate) alloc: Option<usize>,
 
     /// Print full build/bench/result output
     #[arg(short, long)]
@@ -1231,9 +1235,6 @@ pub(crate) struct PbfArgs {
     /// PBF variant to use (raw, indexed, locations)
     #[arg(long, default_value = "indexed")]
     pub(crate) variant: String,
-    /// Number of measurement runs (best-of-N stored)
-    #[arg(long, default_value = "3")]
-    pub(crate) runs: usize,
 }
 
 

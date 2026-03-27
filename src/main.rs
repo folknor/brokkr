@@ -52,7 +52,7 @@ macro_rules! pbfhogg_cmd {
         context::with_worktree(&$project_root, $mode.commit.as_deref(), |build_root| {
             let req = measure::MeasureRequest {
                 dev_config: &$dev_config, project: $project, project_root: &$project_root, build_root,
-                dataset: &$pbf.dataset, variant: &$pbf.variant, runs: $pbf.runs,
+                dataset: &$pbf.dataset, variant: &$pbf.variant, runs: mm.runs(),
                 features: &features, force: $mode.force, mode: mm, no_mem_check: $mode.no_mem_check,
             };
             dispatch::run_pbfhogg_command_with_params(&req, &$cmd, $osc, $params)
@@ -206,7 +206,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 let req = measure::MeasureRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant, runs: pbf.runs,
+                    dataset: &pbf.dataset, variant: &pbf.variant, runs: mm.runs(),
                     features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
                 };
                 if strategy == "all" {
@@ -227,7 +227,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if mm != measure::MeasureMode::WallClock {
+                if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
                     return Err(DevError::Config(
                         "read benchmark does not support hotpath/alloc/profile modes".into(),
                     ));
@@ -235,7 +235,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 let bench_req = request::BenchRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: pbf.runs, features: &features, force: mode.force,
+                    runs: mm.runs(), features: &features, force: mode.force,
                 };
                 pbfhogg::cmd::bench_read(&bench_req, &modes)
             })
@@ -245,7 +245,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if mm != measure::MeasureMode::WallClock {
+                if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
                     return Err(DevError::Config(
                         "write benchmark does not support hotpath/alloc/profile modes".into(),
                     ));
@@ -253,7 +253,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 let bench_req = request::BenchRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: pbf.runs, features: &features, force: mode.force,
+                    runs: mm.runs(), features: &features, force: mode.force,
                 };
                 pbfhogg::cmd::bench_write(&bench_req, &compression)
             })
@@ -263,7 +263,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if mm != measure::MeasureMode::WallClock {
+                if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
                     return Err(DevError::Config(
                         "merge benchmark does not support hotpath/alloc/profile modes".into(),
                     ));
@@ -271,7 +271,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 let bench_req = request::BenchRequest {
                     dev_config: &dev_config, project, project_root: &project_root, build_root,
                     dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: pbf.runs, features: &features, force: mode.force,
+                    runs: mm.runs(), features: &features, force: mode.force,
                 };
                 pbfhogg::cmd::bench_merge(&bench_req, osc_seq.as_deref(), uring, &compression)
             })
@@ -377,7 +377,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "api")?;
                 match mm {
-                    measure::MeasureMode::WallClock => {
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: "raw",
@@ -385,8 +385,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         };
                         nidhogg::cmd::bench_api(&bench_req, query.as_deref())
                     }
-                    measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
-                        let alloc = mm == measure::MeasureMode::Alloc;
+                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
+                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let feature = harness::hotpath_feature(alloc);
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
@@ -408,7 +408,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "nid-ingest")?;
                 match mm {
-                    measure::MeasureMode::WallClock => {
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: &variant,
@@ -416,8 +416,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         };
                         nidhogg::cmd::bench_ingest(&bench_req)
                     }
-                    measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
-                        let alloc = mm == measure::MeasureMode::Alloc;
+                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
+                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let feature = harness::hotpath_feature(alloc);
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
@@ -439,7 +439,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "tiles")?;
                 match mm {
-                    measure::MeasureMode::WallClock => {
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
                             dev_config: &dev_config, project, project_root: &project_root, build_root,
                             dataset: &dataset, variant: "raw",
@@ -447,8 +447,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         };
                         nidhogg::cmd::bench_tiles(&bench_req, tiles.as_deref(), uring)
                     }
-                    measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
-                        let alloc = mm == measure::MeasureMode::Alloc;
+                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
+                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let feature = harness::hotpath_feature(alloc);
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
@@ -472,15 +472,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Sluggrs, "sluggrs-hotpath")?;
                 match mm {
-                    measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
-                        let alloc = mm == measure::MeasureMode::Alloc;
+                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
+                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let owned_features: Vec<String> = features.to_vec();
                         sluggrs::hotpath::cmd(
                             &dev_config, project, &project_root, build_root,
                             runs, alloc, mode.force, &owned_features,
                         )
                     }
-                    measure::MeasureMode::WallClock => {
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         Err(DevError::Config(
                             "sluggrs-hotpath only supports --hotpath or --alloc modes".into(),
                         ))
@@ -496,8 +496,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 match mm {
-                    measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
-                        let alloc = mm == measure::MeasureMode::Alloc;
+                    measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
+                        let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let feature = harness::hotpath_feature(alloc);
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
@@ -509,7 +509,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         };
                         cmd_hotpath_generic(&hotpath_req)
                     }
-                    measure::MeasureMode::WallClock => {
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         Err(DevError::Config(
                             "generic-hotpath only supports --hotpath or --alloc modes".into(),
                         ))
@@ -527,7 +527,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 match name.as_str() {
                     "pbfhogg" => {
                         project::require(project, Project::Pbfhogg, "suite pbfhogg")?;
-                        if mm != measure::MeasureMode::WallClock {
+                        if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
                             return Err(DevError::Config(
                                 "suite mode only supports wall-clock timing".into(),
                             ));
@@ -541,7 +541,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     }
                     "elivagar" => {
                         project::require(project, Project::Elivagar, "suite elivagar")?;
-                        if mm != measure::MeasureMode::WallClock {
+                        if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
                             return Err(DevError::Config(
                                 "suite mode only supports wall-clock timing".into(),
                             ));
@@ -555,7 +555,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     }
                     "nidhogg" => {
                         project::require(project, Project::Nidhogg, "suite nidhogg")?;
-                        if mm != measure::MeasureMode::WallClock {
+                        if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
                             return Err(DevError::Config(
                                 "suite mode only supports wall-clock timing".into(),
                             ));
@@ -778,15 +778,18 @@ fn resolve_features(dev_config: &config::DevConfig, cli_features: &[String]) -> 
 }
 
 fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> {
-    if mode.hotpath && mode.alloc {
-        return Err(DevError::Config("--hotpath and --alloc are mutually exclusive".into()));
+    let set_count = mode.bench.is_some() as u8 + mode.hotpath.is_some() as u8 + mode.alloc.is_some() as u8;
+    if set_count > 1 {
+        return Err(DevError::Config("--bench, --hotpath, and --alloc are mutually exclusive".into()));
     }
-    if mode.hotpath {
-        Ok(measure::MeasureMode::Hotpath)
-    } else if mode.alloc {
-        Ok(measure::MeasureMode::Alloc)
+    if let Some(runs) = mode.bench {
+        Ok(measure::MeasureMode::Bench { runs })
+    } else if let Some(runs) = mode.hotpath {
+        Ok(measure::MeasureMode::Hotpath { runs })
+    } else if let Some(runs) = mode.alloc {
+        Ok(measure::MeasureMode::Alloc { runs })
     } else {
-        Ok(measure::MeasureMode::WallClock)
+        Ok(measure::MeasureMode::Run)
     }
 }
 
@@ -808,7 +811,7 @@ macro_rules! pbfhogg_cmd {
         context::with_worktree(&$project_root, $mode.commit.as_deref(), |build_root| {
             let req = measure::MeasureRequest {
                 dev_config: &$dev_config, project: $project, project_root: &$project_root, build_root,
-                dataset: &$pbf.dataset, variant: &$pbf.variant, runs: $pbf.runs,
+                dataset: &$pbf.dataset, variant: &$pbf.variant, runs: mm.runs(),
                 features: &features, force: $mode.force, mode: mm, no_mem_check: $mode.no_mem_check,
             };
             dispatch::run_pbfhogg_command_with_params(&req, &$cmd, $osc, $params)

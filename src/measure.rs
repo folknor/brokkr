@@ -16,44 +16,52 @@ use crate::project::Project;
 // MeasureMode
 // ---------------------------------------------------------------------------
 
-/// How to measure: wall-clock, function timing, allocation tracking, or
-/// profiling.
+/// How to measure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeasureMode {
-    /// Wall-clock timing via `run_external()`.  Default.
-    WallClock,
+    /// Run once, print timing. No lockfile, no DB. Default.
+    Run,
+    /// Full benchmark: lockfile, N runs (best-of-N), DB storage.
+    Bench { runs: usize },
     /// Function-level timing via `--features hotpath` + `run_hotpath_capture()`.
-    Hotpath,
+    Hotpath { runs: usize },
     /// Per-function allocation tracking via `--features hotpath-alloc` +
     /// `run_hotpath_capture()`.
-    Alloc,
+    Alloc { runs: usize },
 }
 
 impl MeasureMode {
     /// The cargo feature name required for this mode, if any.
     pub fn cargo_feature(self) -> Option<&'static str> {
         match self {
-            Self::WallClock => None,
-            Self::Hotpath => Some("hotpath"),
-            Self::Alloc => Some("hotpath-alloc"),
+            Self::Run | Self::Bench { .. } => None,
+            Self::Hotpath { .. } => Some("hotpath"),
+            Self::Alloc { .. } => Some("hotpath-alloc"),
         }
     }
 
     /// Whether this mode uses hotpath-style capture (JSON report file).
     pub fn is_hotpath_capture(self) -> bool {
-        matches!(self, Self::Hotpath | Self::Alloc)
+        matches!(self, Self::Hotpath { .. } | Self::Alloc { .. })
     }
 
     /// Whether this mode tracks allocations (affects OOM risk assessment).
     pub fn is_alloc(self) -> bool {
-        matches!(self, Self::Alloc)
+        matches!(self, Self::Alloc { .. })
+    }
+
+    /// Number of runs for this mode.
+    pub fn runs(self) -> usize {
+        match self {
+            Self::Run => 1,
+            Self::Bench { runs } | Self::Hotpath { runs } | Self::Alloc { runs } => runs,
+        }
     }
 
     /// The variant suffix appended to result variant names.
-    /// Mirrors `harness::hotpath_variant_suffix()`.
     pub fn variant_suffix(self) -> &'static str {
         match self {
-            Self::Alloc => "/alloc",
+            Self::Alloc { .. } => "/alloc",
             _ => "",
         }
     }

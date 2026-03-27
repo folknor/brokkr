@@ -55,8 +55,8 @@ pub fn run_pbfhogg_command_with_params(
     project::require(req.project, Project::Pbfhogg, &format!("run {}", command.id()))?;
 
     match req.mode {
-        MeasureMode::WallClock => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
-        MeasureMode::Hotpath | MeasureMode::Alloc => run_pbfhogg_hotpath(req, command, osc_seq, extra_params),
+        MeasureMode::Run | MeasureMode::Bench { .. } => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => run_pbfhogg_hotpath(req, command, osc_seq, extra_params),
     }
 }
 
@@ -131,7 +131,7 @@ fn run_pbfhogg_hotpath(
         )));
     }
 
-    let alloc = req.mode == MeasureMode::Alloc;
+    let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
     let feature = harness::hotpath_feature(alloc);
 
     // Build features: hotpath + user features.
@@ -346,8 +346,8 @@ pub fn run_elivagar_command(
     project::require(req.project, Project::Elivagar, &format!("run {}", command.id()))?;
 
     match req.mode {
-        MeasureMode::WallClock => run_elivagar_wallclock(req, command),
-        MeasureMode::Hotpath | MeasureMode::Alloc => run_elivagar_hotpath(req, command),
+        MeasureMode::Run | MeasureMode::Bench { .. } => run_elivagar_wallclock(req, command),
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => run_elivagar_hotpath(req, command),
     }
 }
 
@@ -415,7 +415,7 @@ fn run_elivagar_hotpath(
         )));
     }
 
-    let alloc = req.mode == MeasureMode::Alloc;
+    let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
     let feature = harness::hotpath_feature(alloc);
 
     let mut all_features: Vec<&str> = vec![feature];
