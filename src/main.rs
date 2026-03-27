@@ -34,11 +34,11 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use cli::{BenchCommand, Cli, Command, LitehtmlCommand, SluggrsCommand, VerifyCommand};
+use cli::{Cli, Command, LitehtmlCommand, SluggrsCommand, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
-use request::{BenchRequest, HotpathRequest, ProfileRequest, ResultsQuery};
+use request::{BenchRequest, HotpathRequest, ResultsQuery};
 use resolve::results_db_path;
 
 macro_rules! pbfhogg_cmd {
@@ -597,71 +597,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             cmd_clean(&dev_config, project, &project_root)
         }
-        Command::Bench { verbose, commit, features, force, bench } => {
-            eprintln!("[warn] `brokkr bench` is deprecated — use `brokkr run <command>` instead");
-            let features = resolve_features(&dev_config, &features);
-            output::set_quiet(!verbose);
-            with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_bench(&dev_config, project, &project_root, build_root, bench, &features, force)
-            })
-        }
         Command::Verify { verbose, commit, verify } => {
             let features = resolve_features(&dev_config, &[]);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
                 cmd_verify(&dev_config, project, &project_root, build_root, verify, &features)
-            })
-        }
-        Command::Hotpath {
-            target,
-            verbose,
-            commit,
-            features,
-            dataset,
-            variant,
-            osc_seq,
-            alloc,
-            no_ocean,
-            force_sorted,
-            allow_unsafe_flat_index,
-            tile_format,
-            tile_compression,
-            compress_sort_chunks,
-            in_memory,
-            locations_on_ways,
-            fanout_cap_default,
-            fanout_cap,
-            polygon_simplify_factor,
-            runs,
-            tiles,
-            nodes,
-            test,
-            no_mem_check,
-            force,
-        } => {
-            eprintln!("[warn] `brokkr hotpath` is deprecated — use `brokkr run <command> --hotpath` instead");
-            let features = resolve_features(&dev_config, &features);
-            output::set_quiet(!verbose);
-            with_worktree(&project_root, commit.as_deref(), |build_root| {
-                let feature = harness::hotpath_feature(alloc);
-                let mut all_features: Vec<&str> = vec![feature];
-                all_features.extend(features.iter().map(String::as_str));
-                let req = HotpathRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs,
-                    all_features: &all_features, alloc, no_mem_check, force,
-                };
-                let opts = elivagar::PipelineOpts {
-                    no_ocean, force_sorted, allow_unsafe_flat_index,
-                    tile_format: tile_format.as_deref(),
-                    tile_compression: tile_compression.as_deref(),
-                    compress_sort_chunks: compress_sort_chunks.as_deref(),
-                    in_memory, locations_on_ways,
-                    fanout_cap_default,
-                    fanout_cap: fanout_cap.as_deref(),
-                    polygon_simplify_factor,
-                };
-                cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, test.as_deref(), &opts)
             })
         }
         Command::Download { region, osc_url } => {
@@ -741,14 +681,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 SluggrsCommand::Status => sluggrs::cmd::status(project, &project_root, sluggrs_config),
                 SluggrsCommand::Report { run_id } => {
                     sluggrs::cmd::report(project, &project_root, &run_id)
-                }
-                SluggrsCommand::Hotpath { alloc, runs, force, features, commit } => {
-                    context::with_worktree(&project_root, commit.as_deref(), |build_root| {
-                        sluggrs::hotpath::cmd(
-                            &dev_config, project, &project_root, build_root,
-                            runs, alloc, force, &features,
-                        )
-                    })
                 }
             }
         }
@@ -1339,144 +1271,6 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Bench dispatch
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_lines)]
-fn cmd_bench(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, bench: BenchCommand, features: &[String], force: bool) -> Result<(), DevError> {
-    match bench {
-        // ----- generic bench (all projects) -----
-        BenchCommand::Run { runs, variant, command, args } => {
-            cmd_bench_run(dev_config, project, project_root, build_root, features, force, runs, variant, command, &args)
-        }
-        // ----- pbfhogg bench variants -----
-        BenchCommand::Commands { command, dataset, variant, osc_seq, runs, index_type } => {
-            project::require(project, Project::Pbfhogg, "bench commands")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_commands(&req, &command, osc_seq.as_deref(), index_type.as_deref())
-        }
-        BenchCommand::Extract { dataset, variant, runs, bbox, strategies } => {
-            project::require(project, Project::Pbfhogg, "bench extract")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_extract(&req, bbox.as_deref(), &strategies)
-        }
-        BenchCommand::Allocator { dataset, variant, runs } => {
-            project::require(project, Project::Pbfhogg, "bench allocator")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_allocator(&req)
-        }
-        BenchCommand::BlobFilter { dataset, indexed_variant, raw_variant, runs } => {
-            project::require(project, Project::Pbfhogg, "bench blob-filter")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &indexed_variant, runs, features, force };
-            pbfhogg::cmd::bench_blob_filter(&req, &raw_variant)
-        }
-        BenchCommand::Planetiler { dataset, variant, runs } => {
-            project::require(project, Project::Pbfhogg, "bench planetiler")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_planetiler(&req)
-        }
-        BenchCommand::Read { dataset, variant, runs, modes } => {
-            project::require(project, Project::Pbfhogg, "bench read")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_read(&req, &modes)
-        }
-        BenchCommand::Write { dataset, variant, runs, compression } => {
-            project::require(project, Project::Pbfhogg, "bench write")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_write(&req, &compression)
-        }
-        BenchCommand::Merge { dataset, variant, osc_seq, runs, uring, compression } => {
-            project::require(project, Project::Pbfhogg, "bench merge")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_merge(&req, osc_seq.as_deref(), uring, &compression)
-        }
-        BenchCommand::BuildGeocodeIndex { dataset, variant, runs } => {
-            project::require(project, Project::Pbfhogg, "bench build-geocode-index")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_build_geocode_index(&req)
-        }
-        BenchCommand::All { dataset, variant, runs } => {
-            project::require(project, Project::Pbfhogg, "bench all")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            pbfhogg::cmd::bench_all(&req)
-        }
-
-        // ----- elivagar bench variants -----
-        BenchCommand::ElivSelf {
-            dataset,
-            variant,
-            runs,
-            skip_to,
-            no_ocean,
-            force_sorted,
-            compression_level,
-            allow_unsafe_flat_index,
-            tile_format,
-            tile_compression,
-            compress_sort_chunks,
-            in_memory,
-            locations_on_ways,
-            fanout_cap_default,
-            fanout_cap,
-            polygon_simplify_factor,
-        } => {
-            project::require(project, Project::Elivagar, "bench self")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            let opts = elivagar::PipelineOpts {
-                no_ocean, force_sorted, allow_unsafe_flat_index,
-                tile_format: tile_format.as_deref(),
-                tile_compression: tile_compression.as_deref(),
-                compress_sort_chunks: compress_sort_chunks.as_deref(),
-                in_memory, locations_on_ways,
-                fanout_cap_default,
-                fanout_cap: fanout_cap.as_deref(),
-                polygon_simplify_factor,
-            };
-            elivagar::cmd::bench_self(&req, skip_to.as_deref(), compression_level, &opts)
-        }
-        BenchCommand::NodeStore { nodes, runs } => {
-            project::require(project, Project::Elivagar, "bench node-store")?;
-            elivagar::cmd::bench_node_store(dev_config, project, project_root, build_root, nodes, runs, force)
-        }
-        BenchCommand::Pmtiles { tiles, runs } => {
-            project::require(project, Project::Elivagar, "bench pmtiles")?;
-            elivagar::cmd::bench_pmtiles(dev_config, project, project_root, build_root, tiles, runs, force)
-        }
-        BenchCommand::ElivPlanetiler { dataset, variant, runs } => {
-            project::require(project, Project::Elivagar, "bench eliv-planetiler")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            elivagar::cmd::bench_planetiler(&req)
-        }
-        BenchCommand::Tilemaker { dataset, variant, runs } => {
-            project::require(project, Project::Elivagar, "bench tilemaker")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            elivagar::cmd::bench_tilemaker(&req)
-        }
-        BenchCommand::ElivAll { dataset, variant, runs } => {
-            project::require(project, Project::Elivagar, "bench eliv-all")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            elivagar::cmd::bench_all(&req)
-        }
-
-        // ----- nidhogg bench variants -----
-        BenchCommand::Api { dataset, runs, query } => {
-            project::require(project, Project::Nidhogg, "bench api")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: "raw", runs, features, force };
-            nidhogg::cmd::bench_api(&req, query.as_deref())
-        }
-        BenchCommand::NidIngest { dataset, variant, runs } => {
-            project::require(project, Project::Nidhogg, "bench ingest")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: &variant, runs, features, force };
-            nidhogg::cmd::bench_ingest(&req)
-        }
-        BenchCommand::Tiles { dataset, tiles, runs, uring } => {
-            project::require(project, Project::Nidhogg, "bench tiles")?;
-            let req = BenchRequest { dev_config, project, project_root, build_root, dataset: &dataset, variant: "", runs, features, force };
-            nidhogg::cmd::bench_tiles(&req, tiles.as_deref(), uring)
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Verify dispatch
@@ -1512,89 +1306,8 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
 }
 
 // ---------------------------------------------------------------------------
-// Generic bench run (all projects)
+// Generic hotpath
 // ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn cmd_bench_run(
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
-    features: &[String],
-    force: bool,
-    runs: usize,
-    variant: Option<String>,
-    command_label: Option<String>,
-    args: &[String],
-) -> Result<(), DevError> {
-    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let ctx = context::BenchContext::new(
-        dev_config, project, project_root, build_root,
-        project.cli_package(), &feature_refs, true, "bench run", force,
-    )?;
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let binary_str = ctx.binary.display().to_string();
-
-    let config = harness::BenchConfig {
-        command: command_label.unwrap_or_else(|| "bench run".into()),
-        variant,
-        input_file: None,
-        input_mb: None,
-        cargo_features: None,
-        cargo_profile: "release".into(),
-        runs,
-        cli_args: Some(harness::format_cli_args(&binary_str, &arg_refs)),
-        metadata: vec![],
-    };
-
-    ctx.harness.run_external_with_kv(&config, &ctx.binary, &arg_refs, project_root)?;
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Hotpath / Profile dispatch
-// ---------------------------------------------------------------------------
-
-fn cmd_hotpath(
-    req: &HotpathRequest,
-    osc_seq: Option<&str>,
-    target: Option<&str>,
-    tiles: usize,
-    nodes: usize,
-    test: Option<&str>,
-    opts: &elivagar::PipelineOpts,
-) -> Result<(), DevError> {
-    if target.is_some() && req.project != Project::Elivagar {
-        return Err(DevError::Config(
-            "hotpath targets (pmtiles, node-store) are only available for elivagar".into(),
-        ));
-    }
-    if test.is_some() && req.project != Project::Pbfhogg {
-        return Err(DevError::Config(
-            "--test filter is only available for pbfhogg hotpath".into(),
-        ));
-    }
-
-    match req.project {
-        Project::Elivagar => elivagar::cmd::hotpath(req, target, tiles, nodes, opts),
-        Project::Nidhogg => nidhogg::cmd::hotpath(req),
-        Project::Sluggrs => {
-            let features: Vec<String> = req.all_features.iter().map(|s| (*s).to_owned()).collect();
-            sluggrs::hotpath::cmd(
-                req.dev_config, req.project, req.project_root, req.build_root,
-                req.runs, req.alloc, req.force, &features,
-            )
-        }
-        Project::Litehtml | Project::Other(_) => cmd_hotpath_generic(req),
-        _ => {
-            project::require(req.project, Project::Pbfhogg, "hotpath")?;
-            pbfhogg::cmd::hotpath(req, osc_seq, test)
-        }
-    }
-}
 
 /// Generic hotpath for projects without dedicated modules.
 ///
@@ -1651,23 +1364,3 @@ fn cmd_hotpath_generic(req: &HotpathRequest) -> Result<(), DevError> {
 
     Ok(())
 }
-
-fn cmd_profile(
-    req: &ProfileRequest,
-    osc_seq: Option<&str>,
-    tool: Option<&str>,
-    opts: &elivagar::PipelineOpts,
-) -> Result<(), DevError> {
-    match req.project {
-        Project::Elivagar => elivagar::cmd::profile(req, tool, opts),
-        Project::Nidhogg => nidhogg::cmd::profile(req, tool),
-        Project::Litehtml | Project::Sluggrs | Project::Other(_) => Err(DevError::Config(
-            "profile is not supported for generic projects (use hotpath instead)".into(),
-        )),
-        _ => {
-            project::require(req.project, Project::Pbfhogg, "profile")?;
-            pbfhogg::cmd::profile(req, osc_seq)
-        }
-    }
-}
-

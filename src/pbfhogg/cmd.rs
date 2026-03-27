@@ -4,84 +4,14 @@ use crate::cli::VerifyCommand;
 use crate::config;
 use crate::context::{bootstrap, bootstrap_config, BenchContext, HarnessContext};
 use crate::error::DevError;
-use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
+use crate::request::BenchRequest;
 use crate::resolve::{
     self, resolve_bbox, resolve_default_osc_path, resolve_pbf_path, resolve_pbf_with_size,
 };
 use crate::tools;
-
-pub(crate) fn bench_commands(
-    req: &BenchRequest,
-    command: &str,
-    osc_seq: Option<&str>,
-    index_type: Option<&str>,
-) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench commands", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let commands = super::bench_commands::parse_command(command)?;
-    let osc_path = match osc_seq {
-        Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root).ok(),
-        None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root).ok(),
-    };
-    super::bench_commands::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        osc_path.as_deref(),
-        Some(&ctx.paths.scratch_dir),
-        file_mb,
-        req.runs,
-        &commands,
-        req.project_root,
-        index_type,
-    )
-}
-
-pub(crate) fn bench_extract(
-    req: &BenchRequest,
-    bbox: Option<&str>,
-    strategies_str: &str,
-) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench extract", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let bbox = resolve_bbox(bbox, req.dataset, &ctx.paths)?;
-    let strategies = super::bench_extract::parse_strategies(strategies_str)?;
-    super::bench_extract::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &bbox, &strategies, req.project_root, &ctx.paths.scratch_dir)
-}
-
-pub(crate) fn bench_allocator(
-    req: &BenchRequest,
-) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench allocator", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let effective = req.build_root.unwrap_or(req.project_root);
-    super::bench_allocator::run(&ctx.harness, &pbf_path, file_mb, req.runs, effective)
-}
-
-pub(crate) fn bench_blob_filter(
-    req: &BenchRequest,
-    raw_variant: &str,
-) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench blob-filter", req.force)?;
-    let (indexed_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let raw_path = resolve_pbf_path(req.dataset, raw_variant, &ctx.paths, req.project_root)?;
-    super::bench_blob_filter::run(&ctx.harness, &ctx.binary, &indexed_path, &raw_path, file_mb, req.runs, req.project_root, &ctx.paths.scratch_dir)
-}
-
-pub(crate) fn bench_planetiler(
-    req: &BenchRequest,
-) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench planetiler", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    super::bench_planetiler::run(&ctx.harness, &pbf_path, file_mb, req.runs, &ctx.paths.data_dir, req.project_root)
-}
 
 pub(crate) fn bench_read(
     req: &BenchRequest,
@@ -136,24 +66,6 @@ pub(crate) fn bench_merge(
         &compressions,
         uring,
         &ctx.paths.scratch_dir,
-        req.project_root,
-    )
-}
-
-pub(crate) fn bench_build_geocode_index(
-    req: &BenchRequest,
-) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench build-geocode-index", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    super::bench_build_geocode_index::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        file_mb,
-        req.runs,
-        &ctx.paths.scratch_dir,
-        req.dataset,
         req.project_root,
     )
 }
@@ -279,61 +191,3 @@ pub(crate) fn download(
     )
 }
 
-pub(crate) fn hotpath(
-    req: &HotpathRequest,
-    osc_seq: Option<&str>,
-    test: Option<&str>,
-) -> Result<(), DevError> {
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), req.all_features, true, "hotpath", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let risk = if req.alloc { oom::MemoryRisk::AllocTracking } else { oom::MemoryRisk::Normal };
-    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
-    let osc_path = match osc_seq {
-        Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root)?,
-        None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
-    };
-
-    let bbox = resolve_bbox(None, req.dataset, &ctx.paths).ok();
-
-    super::hotpath::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        &osc_path,
-        file_mb,
-        req.runs,
-        req.alloc,
-        &ctx.paths.scratch_dir,
-        req.project_root,
-        test,
-        req.dataset,
-        bbox.as_deref(),
-    )
-}
-
-pub(crate) fn profile(
-    req: &ProfileRequest,
-    osc_seq: Option<&str>,
-) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile", false)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
-    let osc_path = match osc_seq {
-        Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root)?,
-        None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
-    };
-
-    let bbox = resolve_bbox(None, req.dataset, &ctx.paths).ok();
-
-    super::profile::run(
-        &ctx.harness,
-        &pbf_path,
-        &osc_path,
-        req.dataset,
-        file_mb,
-        &ctx.paths.scratch_dir,
-        req.features,
-        req.build_root.unwrap_or(req.project_root),
-        bbox.as_deref(),
-    )
-}
