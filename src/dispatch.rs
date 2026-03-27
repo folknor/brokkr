@@ -419,8 +419,15 @@ pub fn run_elivagar_command(
         return run_elivagar_external(req, command);
     }
 
-    if req.sidecar {
-        output::error("WARNING: --sidecar is not yet supported for elivagar — ignoring");
+    // Sidecar is supported for Tilegen bench mode (MainBinary via run_elivagar_wallclock).
+    // Warn for other paths where it would be silently ignored.
+    if req.sidecar
+        && !matches!(
+            (&req.mode, command.build_config()),
+            (MeasureMode::Bench { .. }, crate::elivagar::commands::BuildKind::MainBinary)
+        )
+    {
+        output::error("WARNING: --sidecar only supported for elivagar tilegen --bench — ignoring");
     }
 
     match req.mode {

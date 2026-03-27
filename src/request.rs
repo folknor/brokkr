@@ -18,4 +18,6 @@ pub(crate) struct ResultsQuery {
     pub(crate) tail: Option<usize>,
     pub(crate) where_cond: Option<String>,
     pub(crate) stat: Option<String>,
+    pub(crate) phase: Option<String>,
+    pub(crate) range: Option<String>,
 }

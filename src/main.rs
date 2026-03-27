@@ -407,6 +407,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             tail,
             r#where,
             stat,
+            phase,
+            range,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -427,6 +429,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 tail,
                 where_cond: r#where,
                 stat,
+                phase,
+                range,
             };
             cmd_results(&project_root, &rq)
         }
@@ -977,24 +981,39 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     if let Some(ref uuid_prefix) = q.query {
         // Sidecar output modes.
         if q.timeline {
-            let samples = results_db.query_sidecar_samples(uuid_prefix)?;
+            let mut samples = results_db.query_sidecar_samples(uuid_prefix)?;
             if samples.is_empty() {
                 output::result_msg("no sidecar data for this result");
             } else if q.summary {
                 let markers = results_db.query_sidecar_markers(uuid_prefix)?;
                 print_phase_summary(&samples, &markers);
-            } else if let Some(ref field) = q.stat {
-                let filtered = apply_timeline_filter(&samples, q);
-                print_field_stat(&filtered, field)?;
             } else {
-                let filtered = apply_timeline_filter(&samples, q);
-                let fields = if q.fields.is_empty() {
-                    None
+                // --phase: resolve to a time range from markers, then filter.
+                if let Some(ref phase_name) = q.phase {
+                    let markers = results_db.query_sidecar_markers(uuid_prefix)?;
+                    let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
+                    samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
+                }
+
+                // --range: filter by time range in seconds.
+                if let Some(ref range_str) = q.range {
+                    let (start_us, end_us) = parse_time_range(range_str)?;
+                    samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
+                }
+
+                if let Some(ref field) = q.stat {
+                    let filtered = apply_timeline_filter(&samples, q);
+                    print_field_stat(&filtered, field)?;
                 } else {
-                    Some(&q.fields)
-                };
-                for s in &filtered {
-                    println!("{}", sidecar_sample_json_projected(s, fields));
+                    let filtered = apply_timeline_filter(&samples, q);
+                    let fields = if q.fields.is_empty() {
+                        None
+                    } else {
+                        Some(&q.fields)
+                    };
+                    for s in &filtered {
+                        println!("{}", sidecar_sample_json_projected(s, fields));
+                    }
                 }
             }
             return Ok(());
@@ -1079,6 +1098,72 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
 // ---------------------------------------------------------------------------
 // Timeline query helpers
 // ---------------------------------------------------------------------------
+
+/// Resolve a phase name to a (start_us, end_us) range from markers.
+///
+/// Matches by:
+/// 1. Exact marker name (e.g. "STAGE2_START" → that marker to the next)
+/// 2. Base name (e.g. "STAGE2" → STAGE2_START to STAGE2_END)
+/// 3. Substring match on marker name
+fn resolve_phase_range(
+    phase: &str,
+    markers: &[sidecar::Marker],
+    samples: &[sidecar::Sample],
+) -> Result<(i64, i64), DevError> {
+    let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
+
+    // Try exact match first.
+    if let Some(idx) = markers.iter().position(|m| m.name == phase) {
+        let start = markers[idx].timestamp_us;
+        let end = markers.get(idx + 1).map_or(final_us, |m| m.timestamp_us);
+        return Ok((start, end));
+    }
+
+    // Try base name: phase "STAGE2" matches "STAGE2_START".
+    let start_name = format!("{phase}_START");
+    let end_name = format!("{phase}_END");
+    if let Some(start_idx) = markers.iter().position(|m| m.name == start_name) {
+        let start = markers[start_idx].timestamp_us;
+        let end = markers
+            .iter()
+            .find(|m| m.name == end_name)
+            .map_or(final_us, |m| m.timestamp_us);
+        return Ok((start, end));
+    }
+
+    // Try substring match.
+    if let Some(idx) = markers.iter().position(|m| m.name.contains(phase)) {
+        let start = markers[idx].timestamp_us;
+        let end = markers.get(idx + 1).map_or(final_us, |m| m.timestamp_us);
+        return Ok((start, end));
+    }
+
+    let available: Vec<&str> = markers.iter().map(|m| m.name.as_str()).collect();
+    Err(DevError::Config(format!(
+        "--phase: no marker matching '{phase}'. Available: {available:?}"
+    )))
+}
+
+/// Parse a time range string like "10.0..82.0" (seconds) into (start_us, end_us).
+fn parse_time_range(range: &str) -> Result<(i64, i64), DevError> {
+    let (start_str, end_str) = range.split_once("..").ok_or_else(|| {
+        DevError::Config(format!("--range: expected 'start..end' in seconds, got '{range}'"))
+    })?;
+
+    let start_sec: f64 = start_str.trim().parse().map_err(|_| {
+        DevError::Config(format!("--range: cannot parse start '{start_str}' as number"))
+    })?;
+    let end_sec: f64 = end_str.trim().parse().map_err(|_| {
+        DevError::Config(format!("--range: cannot parse end '{end_str}' as number"))
+    })?;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let start_us = (start_sec * 1_000_000.0) as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let end_us = (end_sec * 1_000_000.0) as i64;
+
+    Ok((start_us, end_us))
+}
 
 /// All known sample field names and their accessor functions.
 fn sample_field_value(s: &sidecar::Sample, field: &str) -> Option<i64> {

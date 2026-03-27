@@ -627,6 +627,14 @@ Examples:
         /// Compute min/max/avg/p50/p95 for a field
         #[arg(long, requires = "timeline")]
         stat: Option<String>,
+
+        /// Filter to samples within a marker phase (e.g. "STAGE2")
+        #[arg(long, requires = "timeline")]
+        phase: Option<String>,
+
+        /// Filter by time range in seconds (e.g. "10.0..82.0")
+        #[arg(long, requires = "timeline")]
+        range: Option<String>,
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 4)]
