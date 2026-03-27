@@ -720,6 +720,22 @@ fn cmd_clean(dev_config: &config::DevConfig, project: Project, project_root: &Pa
                             }
                         }
                     }
+                    // Clean orphaned external-join scratch dirs (.pbfhogg-external-join-{pid}).
+                    // These survive OOM kills (SIGKILL prevents Drop cleanup).
+                    if path.is_dir() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if let Some(pid_str) = name.strip_prefix(".pbfhogg-external-join-") {
+                                if let Ok(pid) = pid_str.parse::<i32>() {
+                                    // kill(pid, 0) returns -1/ESRCH if process doesn't exist.
+                                    let alive = unsafe { libc::kill(pid, 0) } == 0;
+                                    if !alive {
+                                        std::fs::remove_dir_all(&path).ok();
+                                        removed += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if removed > 0 {
