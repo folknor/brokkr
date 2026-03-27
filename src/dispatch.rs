@@ -61,6 +61,7 @@ fn run_pbfhogg_run(
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    // Run mode never stores results, so dirty tree is always fine.
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
@@ -70,7 +71,7 @@ fn run_pbfhogg_run(
         &feat_refs,
         true,
         &format!("run {}", command.id()),
-        req.force,
+        true,
     )?;
 
     let cmd_ctx =
@@ -438,6 +439,7 @@ fn run_elivagar_run(
     match command {
         ElivagarCommand::Tilegen { .. } => {
             let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+            // Run mode never stores results, so dirty tree is always fine.
             let ctx = BenchContext::new(
                 req.dev_config,
                 req.project,
@@ -447,7 +449,7 @@ fn run_elivagar_run(
                 &feat_refs,
                 true,
                 &format!("run {}", command.id()),
-                req.force,
+                true,
             )?;
 
             let (pbf_path, _) =
