@@ -302,33 +302,33 @@ Examples:
         #[arg(long)]
         bbox: Option<String>,
     },
-    /// [pbfhogg] Read benchmark (bench-only, no hotpath/alloc support)
+    /// [pbfhogg] Read benchmark
     #[command(name = "read", display_order = 2)]
     Read {
         #[command(flatten)]
-        mode: BenchOnlyModeArgs,
+        mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
         /// Read modes (comma-separated: sequential,parallel,pipelined,blobreader)
         #[arg(long, default_value = "sequential,parallel,pipelined,blobreader")]
         modes: String,
     },
-    /// [pbfhogg] Write benchmark (bench-only, no hotpath/alloc support)
+    /// [pbfhogg] Write benchmark
     #[command(name = "write", display_order = 2)]
     Write {
         #[command(flatten)]
-        mode: BenchOnlyModeArgs,
+        mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
         /// Compression (comma-separated: none,zlib:6,zstd:3)
         #[arg(long, default_value = "none,zlib:6,zstd:3")]
         compression: String,
     },
-    /// [pbfhogg] Merge benchmark (bench-only, no hotpath/alloc support)
+    /// [pbfhogg] Merge benchmark
     #[command(name = "merge", display_order = 2)]
     MergeBench {
         #[command(flatten)]
-        mode: BenchOnlyModeArgs,
+        mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
         /// Compression (comma-separated: zlib,none)
@@ -354,9 +354,6 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "raw")]
         variant: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "3")]
-        runs: usize,
         /// Resume from checkpoint: ocean or sort
         #[arg(long)]
         skip_to: Option<String>,
@@ -405,9 +402,6 @@ Examples:
         /// Number of synthetic tiles
         #[arg(long, default_value = "500000")]
         tiles: usize,
-        /// Number of runs
-        #[arg(long, default_value = "1")]
-        runs: usize,
     },
     /// [elivagar] SortedNodeStore micro-benchmark
     #[command(name = "node-store", display_order = 3)]
@@ -417,9 +411,6 @@ Examples:
         /// Nodes in millions
         #[arg(long, default_value = "50")]
         nodes: usize,
-        /// Number of runs
-        #[arg(long, default_value = "1")]
-        runs: usize,
     },
     /// [elivagar] Planetiler comparison baseline
     #[command(name = "planetiler", display_order = 3)]
@@ -432,9 +423,6 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "raw")]
         variant: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "3")]
-        runs: usize,
     },
     /// [elivagar] Tilemaker comparison baseline
     #[command(name = "tilemaker", display_order = 3)]
@@ -447,9 +435,6 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "raw")]
         variant: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "3")]
-        runs: usize,
     },
 
     // ----- nidhogg commands (display_order = 4) -----
@@ -461,9 +446,6 @@ Examples:
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "10")]
-        runs: usize,
         /// Specific query name to benchmark
         #[arg(long)]
         query: Option<String>,
@@ -479,9 +461,6 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "raw")]
         variant: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "3")]
-        runs: usize,
     },
     /// [nidhogg] Tile serving benchmark
     #[command(name = "tiles", display_order = 4)]
@@ -494,9 +473,6 @@ Examples:
         /// PMTiles variant from config
         #[arg(long)]
         tiles: Option<String>,
-        /// Number of measurement runs
-        #[arg(long, default_value = "1")]
-        runs: usize,
         /// Use io_uring for tile serving
         #[arg(long)]
         uring: bool,
@@ -508,9 +484,6 @@ Examples:
     SluggrsHotpath {
         #[command(flatten)]
         mode: ModeArgs,
-        /// Number of measurement runs
-        #[arg(long, default_value = "1")]
-        runs: usize,
     },
 
     // ----- generic commands (display_order = 5) -----
@@ -525,9 +498,6 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "indexed")]
         variant: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "1")]
-        runs: usize,
     },
 
     // ----- suites (display_order = 6) -----
@@ -544,9 +514,6 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "indexed")]
         variant: String,
-        /// Number of measurement runs
-        #[arg(long, default_value = "3")]
-        runs: usize,
     },
     /// Build and run with passthrough args (deprecated — use `run` subcommands instead)
     #[command(name = "passthrough", display_order = 99, hide = true)]
@@ -825,30 +792,6 @@ pub(crate) struct ModeArgs {
     /// Skip memory availability check
     #[arg(long)]
     pub(crate) no_mem_check: bool,
-}
-
-/// Mode args for bench-only commands (read, write, merge) that don't support hotpath/alloc.
-#[derive(Args, Clone)]
-pub(crate) struct BenchOnlyModeArgs {
-    /// Full benchmark: lockfile, N runs (default 3), DB storage
-    #[arg(long, num_args = 0..=1, default_missing_value = "3")]
-    pub(crate) bench: Option<usize>,
-
-    /// Print full build/bench/result output
-    #[arg(short, long)]
-    pub(crate) verbose: bool,
-
-    /// Build and benchmark an old commit via git worktree
-    #[arg(long)]
-    pub(crate) commit: Option<String>,
-
-    /// Cargo features to enable (e.g. linux-io-uring)
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) features: Vec<String>,
-
-    /// Run even if the git tree is dirty (results will not be stored)
-    #[arg(long)]
-    pub(crate) force: bool,
 }
 
 // ---------------------------------------------------------------------------

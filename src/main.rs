@@ -194,46 +194,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 })
         }
         Command::Read { mode, pbf, modes } => {
-            let mm = resolve_bench_only_mode(&mode);
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: mm.runs(), features: &features, force: mode.force,
-                    mode: mm, no_mem_check: false,
-                };
-                pbfhogg::cmd::bench_read(&req, &modes)
-            })
+            run_measured(&mode, &dev_config, project, &project_root,
+                &pbf.dataset, &pbf.variant, |req| pbfhogg::cmd::bench_read(req, &modes))
         }
         Command::Write { mode, pbf, compression } => {
-            let mm = resolve_bench_only_mode(&mode);
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: mm.runs(), features: &features, force: mode.force,
-                    mode: mm, no_mem_check: false,
-                };
-                pbfhogg::cmd::bench_write(&req, &compression)
-            })
+            run_measured(&mode, &dev_config, project, &project_root,
+                &pbf.dataset, &pbf.variant, |req| pbfhogg::cmd::bench_write(req, &compression))
         }
         Command::MergeBench { mode, pbf, compression, uring, osc_seq } => {
-            let mm = resolve_bench_only_mode(&mode);
-            let features = resolve_features(&dev_config, &mode.features);
-            output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: mm.runs(), features: &features, force: mode.force,
-                    mode: mm, no_mem_check: false,
-                };
-                pbfhogg::cmd::bench_merge(&req, osc_seq.as_deref(), uring, &compression)
-            })
+            run_measured(&mode, &dev_config, project, &project_root,
+                &pbf.dataset, &pbf.variant, |req| {
+                    pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compression)
+                })
         }
 
         // ----- elivagar commands -----
@@ -241,7 +213,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             mode,
             dataset,
             variant,
-            runs: _,
+            
+
             skip_to,
             compression_level,
             no_ocean,
@@ -277,29 +250,30 @@ fn run(cli: Cli) -> Result<(), DevError> {
             run_measured(&mode, &dev_config, project, &project_root,
                 &dataset, &variant, |req| dispatch::run_elivagar_command(req, &cmd))
         }
-        Command::PmtilesWriter { mode, tiles, runs: _ } => {
+        Command::PmtilesWriter { mode, tiles } => {
             let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
             run_measured(&mode, &dev_config, project, &project_root,
                 "denmark", "raw", |req| dispatch::run_elivagar_command(req, &cmd))
         }
-        Command::NodeStore { mode, nodes, runs: _ } => {
+        Command::NodeStore { mode, nodes } => {
             let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
             run_measured(&mode, &dev_config, project, &project_root,
                 "denmark", "raw", |req| dispatch::run_elivagar_command(req, &cmd))
         }
-        Command::ElivPlanetiler { mode, dataset, variant, runs: _ } => {
+        Command::ElivPlanetiler { mode, dataset, variant } => {
             let cmd = elivagar::commands::ElivagarCommand::Planetiler;
             run_measured(&mode, &dev_config, project, &project_root,
                 &dataset, &variant, |req| dispatch::run_elivagar_command(req, &cmd))
         }
-        Command::ElivTilemaker { mode, dataset, variant, runs: _ } => {
+        Command::ElivTilemaker { mode, dataset, variant } => {
             let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
             run_measured(&mode, &dev_config, project, &project_root,
                 &dataset, &variant, |req| dispatch::run_elivagar_command(req, &cmd))
         }
 
         // ----- nidhogg commands -----
-        Command::RunApi { mode, dataset, runs: _, query } => {
+        Command::RunApi { mode, dataset, 
+ query } => {
             let query = query.clone();
             run_measured(&mode, &dev_config, project, &project_root, &dataset, "raw", |req| {
                 dispatch::run_nidhogg_command(req, "api",
@@ -307,14 +281,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     |req| nidhogg::cmd::hotpath(req))
             })
         }
-        Command::RunNidIngest { mode, dataset, variant, runs: _ } => {
+        Command::RunNidIngest { mode, dataset, variant } => {
             run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
                 dispatch::run_nidhogg_command(req, "nid-ingest",
                     |req| nidhogg::cmd::bench_ingest(req),
                     |req| nidhogg::cmd::hotpath(req))
             })
         }
-        Command::RunTiles { mode, dataset, tiles, runs: _, uring } => {
+        Command::RunTiles { mode, dataset, tiles, 
+ uring } => {
             let tiles = tiles.clone();
             run_measured(&mode, &dev_config, project, &project_root, &dataset, "raw", |req| {
                 dispatch::run_nidhogg_command(req, "tiles",
@@ -324,7 +299,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
 
         // ----- sluggrs commands -----
-        Command::SluggrsHotpath { mode, runs: _ } => {
+        Command::SluggrsHotpath { mode } => {
             run_measured(&mode, &dev_config, project, &project_root, "n/a", "n/a", |req| {
                 project::require(project, Project::Sluggrs, "sluggrs-hotpath")?;
                 if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
@@ -341,7 +316,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             mode,
             dataset,
             variant,
-            runs: _,
+            
+
         } => {
             run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
                 if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
@@ -359,7 +335,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             name,
             dataset,
             variant,
-            runs: _,
+            
+
         } => {
             run_measured(&mode, &dev_config, project, &project_root, &dataset, &variant, |req| {
                 if !matches!(
@@ -654,14 +631,6 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
         _ => {}
     }
     Ok(result)
-}
-
-fn resolve_bench_only_mode(mode: &cli::BenchOnlyModeArgs) -> measure::MeasureMode {
-    if let Some(runs) = mode.bench {
-        measure::MeasureMode::Bench { runs }
-    } else {
-        measure::MeasureMode::Run
-    }
 }
 
 // ---------------------------------------------------------------------------
