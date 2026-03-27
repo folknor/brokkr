@@ -1136,59 +1136,63 @@ fn sidecar_marker_json(m: &sidecar::Marker) -> String {
 
 /// Print per-phase summary table from sidecar samples and markers.
 ///
-/// Phases are defined by marker pairs: a marker ending in `_START` begins a
-/// phase and the next marker (or child exit) ends it. For each phase, shows
-/// duration, peak RSS (anon), peak majflt rate, and total disk I/O.
+/// Each marker defines a phase boundary. The phase runs from the marker's
+/// timestamp up to (but not including) the next marker's timestamp. The
+/// last phase runs to the final sample. Shows duration, peak RSS, peak
+/// anon RSS, and disk I/O deltas per phase.
 ///
 /// If there are no markers, treats the entire run as a single phase.
 fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker]) {
-    // Build phase boundaries from markers.
+    // Build phase boundaries: [start_us, end_us) — exclusive end to avoid
+    // double-counting samples at boundaries.
     let mut phases: Vec<(&str, i64, i64)> = Vec::new(); // (name, start_us, end_us)
 
     if markers.is_empty() {
-        // No markers — single phase covering all samples.
         if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-            phases.push(("(all)", first.timestamp_us, last.timestamp_us));
+            // Single phase — inclusive end since there's no next phase to overlap.
+            phases.push(("(all)", first.timestamp_us, last.timestamp_us + 1));
         }
     } else {
-        // Walk markers, pairing _START with the next marker or end of samples.
-        let end_us = samples.last().map_or(0, |s| s.timestamp_us);
+        let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
         for (i, m) in markers.iter().enumerate() {
-            let phase_end = markers
-                .get(i + 1)
-                .map_or(end_us, |next| next.timestamp_us);
+            let phase_end = markers.get(i + 1).map_or(final_us, |next| next.timestamp_us);
             phases.push((&m.name, m.timestamp_us, phase_end));
         }
     }
 
-    // Header.
     println!(
         "{:<24} {:>8} {:>10} {:>10} {:>12} {:>12}",
         "Phase", "Duration", "Peak RSS", "Peak Anon", "Disk Read", "Disk Write",
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(81));
 
     for (name, start_us, end_us) in &phases {
-        // Find samples within this phase.
-        let phase_samples: Vec<&sidecar::Sample> = samples
-            .iter()
-            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us <= *end_us)
-            .collect();
+        // Samples in [start_us, end_us).
+        let mut peak_rss: i64 = 0;
+        let mut peak_anon: i64 = 0;
+        let mut first_io: Option<(i64, i64)> = None;
+        let mut last_io: (i64, i64) = (0, 0);
+        let mut count = 0;
 
-        if phase_samples.is_empty() {
+        for s in samples.iter().filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < *end_us) {
+            if s.rss_kb > peak_rss { peak_rss = s.rss_kb; }
+            if s.anon_kb > peak_anon { peak_anon = s.anon_kb; }
+            if first_io.is_none() {
+                first_io = Some((s.read_bytes, s.write_bytes));
+            }
+            last_io = (s.read_bytes, s.write_bytes);
+            count += 1;
+        }
+
+        if count == 0 {
             println!("{name:<24} {:>8}", "(no samples)");
             continue;
         }
 
         let duration_ms = (end_us - start_us) / 1_000;
-        let peak_rss = phase_samples.iter().map(|s| s.rss_kb).max().unwrap_or(0);
-        let peak_anon = phase_samples.iter().map(|s| s.anon_kb).max().unwrap_or(0);
-
-        // Disk I/O delta across the phase (last - first, cumulative counters).
-        let first = phase_samples.first().unwrap();
-        let last = phase_samples.last().unwrap();
-        let disk_read = last.read_bytes - first.read_bytes;
-        let disk_write = last.write_bytes - first.write_bytes;
+        let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
+        let disk_read = last_io.0 - first_rd;
+        let disk_write = last_io.1 - first_wr;
 
         println!(
             "{name:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB",
@@ -1242,7 +1246,7 @@ fn print_marker_durations(markers: &[sidecar::Marker]) {
 
     if !pairs.is_empty() {
         println!("{:<32} {:>12} {:>12} {:>12}", "Phase", "Start", "End", "Duration");
-        println!("{}", "-".repeat(72));
+        println!("{}", "-".repeat(71));
         for (name, start_us, end_us) in &pairs {
             match end_us {
                 Some(end) => {

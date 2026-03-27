@@ -589,11 +589,11 @@ Examples:
         top: usize,
 
         /// Output sidecar samples as JSONL (requires UUID argument)
-        #[arg(long, requires = "query")]
+        #[arg(long, requires = "query", conflicts_with = "markers")]
         timeline: bool,
 
         /// Output sidecar markers as JSONL (requires UUID argument)
-        #[arg(long, requires = "query")]
+        #[arg(long, requires = "query", conflicts_with = "timeline")]
         markers: bool,
 
         /// Show per-phase summary table (use with --timeline)

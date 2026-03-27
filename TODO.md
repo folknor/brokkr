@@ -101,9 +101,32 @@ The benchmark result is best-of-N but all N sidecar runs are stored under the sa
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
 
-### Sidecar: no query/read API yet
+### Sidecar: --timeline --phase <name> filter
 
-`store_sidecar_run` exists but there is no `load_sidecar_data` or CSV export. Needed for `brokkr results <uuid> --timeline` and `--compare-timeline`. The schema supports efficient range scans via the PK.
+Filter timeline output to samples within a specific phase (between two markers). `--phase STAGE2` would output only samples between the `STAGE2_START` and `STAGE2_END` markers (or between `STAGE2_START` and the next marker if no `_END`).
+
+### Sidecar: --timeline --range <start_us>..<end_us> filter
+
+Filter timeline output by absolute timestamp range. Useful for zooming into a specific window without knowing marker names. Works with both raw JSONL and `--summary`.
+
+### Sidecar: --timeline --stat <field>
+
+Compute min/max/avg/p50/p95 for a single field across the selected range. Combines with `--phase` or `--range` for targeted analysis. E.g. `--timeline --phase EXTJOIN_STAGE2 --stat anon` to see allocator retention slope.
+
+### Sidecar: --markers --phases
+
+Show only paired phase markers (filter out standalone markers), with duration and peak RSS/majflt from samples within each phase. A richer version of `--durations` that cross-references sample data.
+
+### Sidecar: --compare-timeline <uuid1> <uuid2>
+
+Phase-aligned comparison of two sidecar runs. Aligns phases by marker name, shows per-phase deltas for duration, peak RSS, disk I/O, and CPU%. The table view from the spec:
+
+```
+Phase         | Run 1 (ee9b19f)       | Run 2 (d272b49)       | Delta
+--------------+-----------------------+-----------------------+--------
+STAGE1        |   82s   69MB  0 mflt  |   82s   69MB  0 mflt  |   0%
+STAGE2        |  331s   69MB  0 mflt  |  301s   69MB  0 mflt  |  -9%
+```
 
 ### Sidecar: no foreign keys on sidecar tables
 
