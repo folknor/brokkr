@@ -23,7 +23,7 @@ Single crate, single binary. No workspace.
 - `src/main.rs` — `main()`, command dispatch, `run_measured()`, `resolve_mode()`
 - `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `LitehtmlCommand`, `Command::as_pbfhogg()`
 - `src/measure.rs` — `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
-- `src/dispatch.rs` — Unified dispatch: `run_pbfhogg_command_with_params()` (handles all modes for any pbfhogg command), `run_elivagar_command()`, `run_pbfhogg_run()` (lightweight default), `run_pbfhogg_wallclock()` (bench with DB), `run_pbfhogg_hotpath()` (hotpath/alloc)
+- `src/dispatch.rs` — Unified dispatch for all three projects: `run_pbfhogg_command_with_params()`, `run_elivagar_command()`, `run_nidhogg_command()`. Each routes through run/bench/hotpath/alloc based on command enum + mode. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions due to divergent lifecycles
 - `src/pbfhogg/commands.rs` — `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` — single source of truth for all pbfhogg command argument construction
 - `src/elivagar/commands.rs` — `ElivagarCommand` enum (Tilegen, PmtilesWriter, NodeStore, Planetiler, Tilemaker)
 - `src/context.rs` — `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
@@ -47,8 +47,8 @@ Single crate, single binary. No workspace.
 ### Project-specific modules
 
 - `src/pbfhogg/` — `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), download
-- `src/elivagar/` — `commands.rs` (command registry), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
-- `src/nidhogg/` — server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest), verify (batch, geocode, readonly), hotpath. `mod.rs` has shared curl helpers. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
+- `src/elivagar/` — `commands.rs` (`ElivagarCommand` enum with `build_args()`, `build_config()`, `needs_pbf()`, `output_files()`, `metadata()`), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
+- `src/nidhogg/` — `commands.rs` (`NidhoggCommand` enum: Api/Ingest/Tiles with `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`, `metadata()`), server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode, readonly), hotpath. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
 - `src/litehtml/` — 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.
 - `scripts/litehtml-prepare/` — Node.js fixture preprocessing (cheerio + pngjs). `prepare.js` handles `prepare`, `extract`, and `outline` subcommands. Dependencies managed via pnpm (`package.json`, `pnpm-lock.yaml`).
 

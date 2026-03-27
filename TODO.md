@@ -179,8 +179,8 @@ Makes performance triage easier without external tooling.
 
 ## CLI redesign remaining issues
 
-### Elivagar/nidhogg default mode runs through full harness
-`brokkr tilegen` (no `--bench` flag) still goes through `BenchHarness` with DB storage (but now only 1 run, not 3). Pbfhogg has a lightweight `run_pbfhogg_run` path that skips DB; elivagar and nidhogg need equivalents. Requires extracting arg construction from `bench_self.rs` into `elivagar/commands.rs`.
+### ~~Elivagar/nidhogg default mode runs through full harness~~ PARTIALLY FIXED
+Elivagar run mode now has a lightweight `run_elivagar_run` path that skips DB for Tilegen (using `build_args` from `ElivagarCommand`). PmtilesWriter/NodeStore also skip DB via `run_elivagar_example_run`. Nidhogg run mode still goes through the full bench path (Run and Bench share the same dispatch). Nidhogg `NidhoggCommand` enum is in place but per-module functions still own lifecycle.
 
 ### Suite without --bench stores results in DB
 `brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
