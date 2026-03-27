@@ -127,35 +127,12 @@ impl CapturedOutput {
 /// Returns `CapturedOutput` on success (even if the process exited non-zero).
 /// Returns `DevError::Subprocess` only if the process could not be spawned.
 pub fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<CapturedOutput, DevError> {
-    let start = Instant::now();
-
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::oom::protect_child(&mut cmd);
-
-    let output = cmd.output().map_err(|e| DevError::Subprocess {
-        program: program.to_owned(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-
-    let elapsed = start.elapsed();
-
-    Ok(CapturedOutput {
-        status: output.status,
-        stdout: output.stdout,
-        stderr: output.stderr,
-        elapsed,
-    })
+    run_captured_with_env(program, args, cwd, &[])
 }
 
 /// Run a subprocess with extra environment variables, capturing stdout and stderr.
 ///
-/// Same as `run_captured` but injects additional environment variables into the
-/// subprocess. Variables are added on top of the inherited environment.
+/// Variables are added on top of the inherited environment.
 pub fn run_captured_with_env(
     program: &str,
     args: &[&str],

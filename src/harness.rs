@@ -302,21 +302,8 @@ impl BenchHarness {
 
     /// Build a `RunRow` from harness state, config, and result.
     fn build_row(&self, config: &BenchConfig, result: &BenchResult) -> RunRow {
-        // Merge config metadata + result kv into a single Vec.
-        // We can't move out of references so we must clone/reconstruct.
-        // Extract peak_rss_kb from result kv (promoted to the runs column).
-        let mut kv = Vec::with_capacity(config.metadata.len() + result.kv.len());
+        let mut kv = config.metadata.clone();
         let mut peak_rss_mb: Option<f64> = None;
-        for pair in &config.metadata {
-            kv.push(KvPair {
-                key: pair.key.clone(),
-                value: match &pair.value {
-                    KvValue::Int(v) => KvValue::Int(*v),
-                    KvValue::Real(v) => KvValue::Real(*v),
-                    KvValue::Text(v) => KvValue::Text(v.clone()),
-                },
-            });
-        }
         for pair in &result.kv {
             if pair.key == "peak_rss_kb" {
                 if let KvValue::Int(kb) = &pair.value {
@@ -327,14 +314,7 @@ impl BenchHarness {
                 }
                 continue; // promoted to column, don't duplicate in run_kv
             }
-            kv.push(KvPair {
-                key: pair.key.clone(),
-                value: match &pair.value {
-                    KvValue::Int(v) => KvValue::Int(*v),
-                    KvValue::Real(v) => KvValue::Real(*v),
-                    KvValue::Text(v) => KvValue::Text(v.clone()),
-                },
-            });
+            kv.push(pair.clone());
         }
 
         RunRow {

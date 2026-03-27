@@ -1098,7 +1098,6 @@ fn validate_since(s: &str) -> Result<String, String> {
 
     let datetime_ok = s.len() == 19
         && !date_ok
-        && s[..10].len() == 10
         && validate_since(&s[..10]).is_ok()
         && s.as_bytes().get(10) == Some(&b' ')
         && s[11..13].chars().all(|c| c.is_ascii_digit())

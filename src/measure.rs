@@ -19,7 +19,7 @@ use crate::project::Project;
 /// How to measure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeasureMode {
-    /// Run once, print timing. No lockfile, no DB. Default.
+    /// Run once, print timing. Acquires lockfile but no DB storage. Default.
     Run,
     /// Full benchmark: lockfile, N runs (best-of-N), DB storage.
     Bench { runs: usize },
