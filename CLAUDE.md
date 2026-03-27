@@ -177,5 +177,9 @@ Results in `.brokkr/results.db` per project (gitignored).
 - Project gating via `project::require()` — wrong-project commands fail with helpful message
 - Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries). When no expected name is provided, requires exactly one executable — errors if multiple are found.
 
+## Removed features
+
+- `--profile` flag and `Command::Profile` removed in b17a219. Previously did two-pass hotpath (pbfhogg) or sampling profiler via perf/samply (elivagar). Restore from that commit if elivagar needs sampling profiler support again. The old `src/elivagar/profile.rs` and `src/pbfhogg/profile.rs` modules still exist but are only reachable via the deprecated `brokkr profile` path.
+
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
