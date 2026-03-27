@@ -55,9 +55,52 @@ pub fn run_pbfhogg_command_with_params(
     project::require(req.project, Project::Pbfhogg, &format!("run {}", command.id()))?;
 
     match req.mode {
-        MeasureMode::Run | MeasureMode::Bench { .. } => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
+        MeasureMode::Run => run_pbfhogg_run(req, command, osc_seq, extra_params),
+        MeasureMode::Bench { .. } => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => run_pbfhogg_hotpath(req, command, osc_seq, extra_params),
     }
+}
+
+/// Default run mode: build, run once, print timing. Lockfile but no DB storage.
+fn run_pbfhogg_run(
+    req: &MeasureRequest,
+    command: &PbfhoggCommand,
+    osc_seq: Option<&str>,
+    extra_params: &HashMap<String, String>,
+) -> Result<(), DevError> {
+    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let ctx = BenchContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        Some("pbfhogg-cli"),
+        &feat_refs,
+        true,
+        &format!("run {}", command.id()),
+        req.force,
+    )?;
+
+    let mut cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths)?;
+    cmd_ctx.params.extend(extra_params.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let args = command.build_args(&cmd_ctx)?;
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let binary_str = ctx.binary.display().to_string();
+    output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
+
+    let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+
+    cleanup_pbfhogg_output(command, &cmd_ctx);
+
+    if out.code != 0 {
+        return Err(DevError::ExitCode(out.code));
+    }
+
+    let ms = crate::duration_ms(out.elapsed);
+    output::run_msg(&format!("elapsed={}ms", ms));
+
+    Ok(())
 }
 
 /// Wall-clock benchmark: build release binary, run externally, record timing.
