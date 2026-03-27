@@ -39,9 +39,9 @@ impl Worktree {
         let subject = run_git(project_root, &["log", "-1", "--format=%s", commit_ref])?;
 
         // Place worktree as a sibling so relative path deps still work.
-        let parent = project_root.parent().ok_or_else(|| {
-            DevError::Config("project root has no parent directory".into())
-        })?;
+        let parent = project_root
+            .parent()
+            .ok_or_else(|| DevError::Config("project root has no parent directory".into()))?;
         let project_name = project_root
             .file_name()
             .and_then(|n| n.to_str())
@@ -50,10 +50,18 @@ impl Worktree {
 
         // Clean up stale worktree at this path if it exists.
         if worktree_dir.exists() {
-            output::run_msg(&format!("removing stale worktree at {}", worktree_dir.display()));
+            output::run_msg(&format!(
+                "removing stale worktree at {}",
+                worktree_dir.display()
+            ));
             drop(run_git(
                 project_root,
-                &["worktree", "remove", "--force", &worktree_dir.display().to_string()],
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree_dir.display().to_string(),
+                ],
             ));
             // If git worktree remove failed, try manual cleanup.
             if worktree_dir.exists() {

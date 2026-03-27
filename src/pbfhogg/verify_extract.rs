@@ -2,13 +2,18 @@
 
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg extract` against `osmium extract` for
 /// simple, complete-ways, and smart strategies.
-pub fn run(harness: &VerifyHarness, pbf: &Path, bbox: &str, direct_io: bool) -> Result<(), DevError> {
+pub fn run(
+    harness: &VerifyHarness,
+    pbf: &Path,
+    bbox: &str,
+    direct_io: bool,
+) -> Result<(), DevError> {
     let outdir = harness.subdir("extract")?;
 
     let pbf_str = pbf.display().to_string();

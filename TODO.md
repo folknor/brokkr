@@ -148,8 +148,8 @@ Makes performance triage easier without external tooling.
 ### Standalone extract commands use hardcoded Copenhagen bbox
 `ExtractSimple/Complete/Smart` (bench_commands variants) hardcode `12.4,55.6,12.7,55.8`. The `Extract { strategy }` variant uses dataset bbox. Pre-existing, intentional for consistent benchmarking.
 
-### --bench 0 not validated early
-Harness catches it after building. Low priority.
+### ~~--bench 0 not validated early~~ FIXED
+`resolve_mode()` now rejects zero run counts upfront.
 
 ### Nidhogg hotpath ignores command-specific context
 `RunApi --hotpath` ignores `--query`, `RunTiles --hotpath` ignores `--tiles`/`--uring`. Nidhogg hotpath is a single generic function. Pre-existing.

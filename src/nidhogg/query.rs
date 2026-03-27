@@ -31,7 +31,9 @@ pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
         Some(arr) => {
             let (ways, relations, other) = count_by_type(arr);
             let total = arr.len();
-            output::result_msg(&format!("{total} elements: way={ways}, relation={relations}, other={other}"));
+            output::result_msg(&format!(
+                "{total} elements: way={ways}, relation={relations}, other={other}"
+            ));
         }
         None => {
             output::result_msg("no elements in response");

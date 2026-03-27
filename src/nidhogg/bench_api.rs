@@ -34,9 +34,10 @@ pub fn run(
 
     for (name, body) in &queries {
         if let Some(filter) = only
-            && name != filter {
-                continue;
-            }
+            && name != filter
+        {
+            continue;
+        }
 
         output::bench_msg(&format!("=== {name} ==="));
 
@@ -53,7 +54,10 @@ pub fn run(
             cargo_profile: "release".into(),
             runs,
             cli_args: None,
-            metadata: vec![KvPair::int("meta.port", port as i64), KvPair::text("meta.query", name)],
+            metadata: vec![
+                KvPair::int("meta.port", port as i64),
+                KvPair::text("meta.query", name),
+            ],
         };
 
         let url_clone = url.clone();
@@ -84,12 +88,17 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
         .args([
             "-s",
             "--compressed",
-            "-o", "/dev/null",
-            "-w", "\n%{time_total}",
-            "-X", "POST",
+            "-o",
+            "/dev/null",
+            "-w",
+            "\n%{time_total}",
+            "-X",
+            "POST",
             url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -115,9 +124,7 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
 
     // time_total is in seconds with fractional part (e.g., "0.042367").
     let seconds: f64 = time_str.parse().map_err(|_| {
-        DevError::Verify(format!(
-            "curl time_total not a valid number: '{time_str}'"
-        ))
+        DevError::Verify(format!("curl time_total not a valid number: '{time_str}'"))
     })?;
     #[allow(clippy::cast_possible_truncation)]
     let ms = (seconds * 1000.0) as i64;
@@ -131,11 +138,15 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
         .args([
             "-s",
             "--compressed",
-            "-w", "\n%{size_download}",
-            "-X", "POST",
+            "-w",
+            "\n%{size_download}",
+            "-X",
+            "POST",
             url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -156,10 +167,7 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
     // Split on the last newline to separate JSON body from write-out.
     let (json_body, size_str) = split_curl_output(&stdout);
 
-    let download_bytes: u64 = size_str
-        .trim()
-        .parse()
-        .unwrap_or(0);
+    let download_bytes: u64 = size_str.trim().parse().unwrap_or(0);
 
     let count = match serde_json::from_str::<serde_json::Value>(json_body) {
         Ok(val) => super::client::element_count(&val),

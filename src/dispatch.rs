@@ -10,9 +10,9 @@ use std::path::Path;
 use crate::config;
 use crate::context::BenchContext;
 use crate::db::KvPair;
-use crate::error::DevError;
 use crate::elivagar;
 use crate::elivagar::commands::ElivagarCommand;
+use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{CommandContext, MeasureMode, MeasureRequest};
 use crate::oom;
@@ -38,12 +38,18 @@ pub fn run_pbfhogg_command_with_params(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    project::require(req.project, Project::Pbfhogg, &format!("run {}", command.id()))?;
+    project::require(
+        req.project,
+        Project::Pbfhogg,
+        &format!("run {}", command.id()),
+    )?;
 
     match req.mode {
         MeasureMode::Run => run_pbfhogg_run(req, command, osc_seq, extra_params),
         MeasureMode::Bench { .. } => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => run_pbfhogg_hotpath(req, command, osc_seq, extra_params),
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
+            run_pbfhogg_hotpath(req, command, osc_seq, extra_params)
+        }
     }
 }
 
@@ -67,7 +73,8 @@ fn run_pbfhogg_run(
         req.force,
     )?;
 
-    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
+    let cmd_ctx =
+        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let args = command.build_args(&cmd_ctx)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -108,10 +115,12 @@ fn run_pbfhogg_wallclock(
         req.force,
     )?;
 
-    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
+    let cmd_ctx =
+        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let args = command.build_args(&cmd_ctx)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (_, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let (_, file_mb) =
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let basename = cmd_ctx.pbf_basename();
 
     let config = BenchConfig {
@@ -173,12 +182,17 @@ fn run_pbfhogg_hotpath(
         Some("pbfhogg-cli"),
         &all_features,
         true,
-        &format!("run {} --{}", command.id(), if alloc { "alloc" } else { "hotpath" }),
+        &format!(
+            "run {} --{}",
+            command.id(),
+            if alloc { "alloc" } else { "hotpath" }
+        ),
         req.force,
     )?;
 
     // OOM check.
-    let (_, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let (_, file_mb) =
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let risk = if alloc {
         oom::MemoryRisk::AllocTracking
     } else {
@@ -186,7 +200,8 @@ fn run_pbfhogg_hotpath(
     };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
 
-    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
+    let cmd_ctx =
+        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
 
     let label = feature;
@@ -265,10 +280,16 @@ fn build_pbfhogg_context(
 
     // Resolve merged PBF if needed (diff/diff-osc commands).
     let merged_pbf_path = if command.input_kind() == InputKind::PbfAndMerged {
-        let osc = osc_path.as_ref().ok_or_else(|| {
-            DevError::Config("merged PBF requires an OSC file".into())
-        })?;
-        Some(ensure_merged_pbf(binary, &pbf_path, osc, &paths.scratch_dir, req.project_root)?)
+        let osc = osc_path
+            .as_ref()
+            .ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
+        Some(ensure_merged_pbf(
+            binary,
+            &pbf_path,
+            osc,
+            &paths.scratch_dir,
+            req.project_root,
+        )?)
     } else {
         None
     };
@@ -336,9 +357,8 @@ fn ensure_merged_pbf(
         return Ok(merged_path);
     }
 
-    std::fs::create_dir_all(scratch_dir).map_err(|e| {
-        DevError::Config(format!("failed to create scratch dir: {e}"))
-    })?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     output::bench_msg(&format!("generating merged PBF: {merged_name}"));
     let pbf_str = pbf_path
@@ -373,19 +393,22 @@ pub fn run_elivagar_command(
     req: &MeasureRequest,
     command: &ElivagarCommand,
 ) -> Result<(), DevError> {
-    project::require(req.project, Project::Elivagar, &format!("run {}", command.id()))?;
+    project::require(
+        req.project,
+        Project::Elivagar,
+        &format!("run {}", command.id()),
+    )?;
 
     match req.mode {
         MeasureMode::Run | MeasureMode::Bench { .. } => run_elivagar_wallclock(req, command),
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => run_elivagar_hotpath(req, command),
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
+            run_elivagar_hotpath(req, command)
+        }
     }
 }
 
 /// Elivagar wall-clock: delegates to existing bench modules based on command variant.
-fn run_elivagar_wallclock(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     let bench_req = crate::request::BenchRequest {
         dev_config: req.dev_config,
         project: req.project,
@@ -403,41 +426,32 @@ fn run_elivagar_wallclock(
             opts,
             skip_to,
             compression_level,
-        } => {
-            elivagar::cmd::bench_self(&bench_req, *skip_to, *compression_level, opts)
-        }
-        ElivagarCommand::PmtilesWriter { tiles } => {
-            elivagar::cmd::bench_pmtiles(
-                req.dev_config,
-                req.project,
-                req.project_root,
-                req.build_root,
-                *tiles,
-                req.runs,
-                req.force,
-            )
-        }
-        ElivagarCommand::NodeStore { nodes } => {
-            elivagar::cmd::bench_node_store(
-                req.dev_config,
-                req.project,
-                req.project_root,
-                req.build_root,
-                *nodes,
-                req.runs,
-                req.force,
-            )
-        }
+        } => elivagar::cmd::bench_self(&bench_req, *skip_to, *compression_level, opts),
+        ElivagarCommand::PmtilesWriter { tiles } => elivagar::cmd::bench_pmtiles(
+            req.dev_config,
+            req.project,
+            req.project_root,
+            req.build_root,
+            *tiles,
+            req.runs,
+            req.force,
+        ),
+        ElivagarCommand::NodeStore { nodes } => elivagar::cmd::bench_node_store(
+            req.dev_config,
+            req.project,
+            req.project_root,
+            req.build_root,
+            *nodes,
+            req.runs,
+            req.force,
+        ),
         ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(&bench_req),
         ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(&bench_req),
     }
 }
 
 /// Elivagar hotpath/alloc: build with hotpath feature, run with instrumentation.
-fn run_elivagar_hotpath(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-) -> Result<(), DevError> {
+fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     if !command.supports_hotpath() {
         return Err(DevError::Config(format!(
             "command '{}' does not support hotpath/alloc profiling",
@@ -470,18 +484,24 @@ fn run_elivagar_hotpath(
         ElivagarCommand::Tilegen { opts, .. } => {
             elivagar::cmd::hotpath(&hotpath_req, None, 0, 0, opts)
         }
-        ElivagarCommand::PmtilesWriter { tiles } => {
-            elivagar::cmd::hotpath(&hotpath_req, Some("pmtiles"), *tiles, 0, &default_pipeline_opts())
-        }
-        ElivagarCommand::NodeStore { nodes } => {
-            elivagar::cmd::hotpath(&hotpath_req, Some("node-store"), 0, *nodes, &default_pipeline_opts())
-        }
-        ElivagarCommand::Planetiler | ElivagarCommand::Tilemaker => {
-            Err(DevError::Config(format!(
-                "command '{}' does not support hotpath/alloc profiling",
-                command.id(),
-            )))
-        }
+        ElivagarCommand::PmtilesWriter { tiles } => elivagar::cmd::hotpath(
+            &hotpath_req,
+            Some("pmtiles"),
+            *tiles,
+            0,
+            &default_pipeline_opts(),
+        ),
+        ElivagarCommand::NodeStore { nodes } => elivagar::cmd::hotpath(
+            &hotpath_req,
+            Some("node-store"),
+            0,
+            *nodes,
+            &default_pipeline_opts(),
+        ),
+        ElivagarCommand::Planetiler | ElivagarCommand::Tilemaker => Err(DevError::Config(format!(
+            "command '{}' does not support hotpath/alloc profiling",
+            command.id(),
+        ))),
     }
 }
 

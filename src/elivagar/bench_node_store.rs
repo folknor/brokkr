@@ -51,7 +51,10 @@ pub fn run(
         runs: 1, // example handles its own iterations
         cli_args: None,
         #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![KvPair::int("meta.nodes_millions", nodes_millions as i64), KvPair::int("meta.internal_runs", runs as i64)],
+        metadata: vec![
+            KvPair::int("meta.nodes_millions", nodes_millions as i64),
+            KvPair::int("meta.internal_runs", runs as i64),
+        ],
     };
 
     harness.run_internal(&config, |_i| {
@@ -78,7 +81,10 @@ pub fn run(
         Ok(BenchResult {
             elapsed_ms: ms,
             #[allow(clippy::cast_possible_wrap)]
-            kv: vec![KvPair::int("nodes_millions", nodes_millions as i64), KvPair::int("internal_runs", runs as i64)],
+            kv: vec![
+                KvPair::int("nodes_millions", nodes_millions as i64),
+                KvPair::int("internal_runs", runs as i64),
+            ],
             distribution: None,
             hotpath: None,
         })
@@ -134,7 +140,11 @@ pub fn run_hotpath(
         runs: 1,
         cli_args: None,
         #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![KvPair::int("meta.nodes_millions", nodes_millions as i64), KvPair::int("meta.internal_runs", runs as i64), KvPair::text("meta.alloc", alloc.to_string())],
+        metadata: vec![
+            KvPair::int("meta.nodes_millions", nodes_millions as i64),
+            KvPair::int("meta.internal_runs", runs as i64),
+            KvPair::text("meta.alloc", alloc.to_string()),
+        ],
     };
 
     harness.run_internal(&config, |_i| {

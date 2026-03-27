@@ -44,11 +44,7 @@ pub fn run(
     let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let binary_str = binary.display().to_string();
 
-    let captured = output::run_captured(
-        &binary_str,
-        &args_refs,
-        project_root,
-    )?;
+    let captured = output::run_captured(&binary_str, &args_refs, project_root)?;
 
     // Print stdout.
     let stdout = String::from_utf8_lossy(&captured.stdout);

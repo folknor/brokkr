@@ -36,10 +36,7 @@ pub fn run(
 
     let full_link = sb_data.join("water-polygons-split-4326");
     if !full_link.exists() {
-        std::os::unix::fs::symlink(
-            data_dir.join("water-polygons-split-4326"),
-            &full_link,
-        )?;
+        std::os::unix::fs::symlink(data_dir.join("water-polygons-split-4326"), &full_link)?;
     }
 
     let simplified_link = sb_data.join("simplified-water-polygons-split-4326");
@@ -92,7 +89,10 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "cmake".into(),
         runs,
-        cli_args: Some(harness::format_cli_args(&tm.tilemaker.display().to_string(), &args_refs)),
+        cli_args: Some(harness::format_cli_args(
+            &tm.tilemaker.display().to_string(),
+            &args_refs,
+        )),
         metadata: vec![],
     };
 

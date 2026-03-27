@@ -59,13 +59,12 @@ struct DecodedPng {
 }
 
 fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
-    let file = std::fs::File::open(path).map_err(|e| {
-        DevError::Verify(format!("cannot open {}: {e}", path.display()))
-    })?;
+    let file = std::fs::File::open(path)
+        .map_err(|e| DevError::Verify(format!("cannot open {}: {e}", path.display())))?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let mut reader = decoder.read_info().map_err(|e| {
-        DevError::Verify(format!("invalid PNG {}: {e}", path.display()))
-    })?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| DevError::Verify(format!("invalid PNG {}: {e}", path.display())))?;
 
     let info = reader.info();
     let width = info.width;
@@ -74,22 +73,35 @@ fn decode_png(path: &Path) -> Result<DecodedPng, DevError> {
     let bit_depth = info.bit_depth;
 
     let buf_size = reader.output_buffer_size().ok_or_else(|| {
-        DevError::Verify(format!("cannot determine buffer size for {}", path.display()))
+        DevError::Verify(format!(
+            "cannot determine buffer size for {}",
+            path.display()
+        ))
     })?;
     let mut buf = vec![0u8; buf_size];
-    let output_info = reader.next_frame(&mut buf).map_err(|e| {
-        DevError::Verify(format!("PNG decode error {}: {e}", path.display()))
-    })?;
+    let output_info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| DevError::Verify(format!("PNG decode error {}: {e}", path.display())))?;
     buf.truncate(output_info.buffer_size());
 
     let rgba = to_rgba(&buf, color_type, bit_depth)?;
 
-    Ok(DecodedPng { width, height, rgba })
+    Ok(DecodedPng {
+        width,
+        height,
+        rgba,
+    })
 }
 
-fn to_rgba(buf: &[u8], color_type: png::ColorType, bit_depth: png::BitDepth) -> Result<Vec<u8>, DevError> {
+fn to_rgba(
+    buf: &[u8],
+    color_type: png::ColorType,
+    bit_depth: png::BitDepth,
+) -> Result<Vec<u8>, DevError> {
     if bit_depth != png::BitDepth::Eight {
-        return Err(DevError::Verify(format!("unsupported bit depth: {bit_depth:?}")));
+        return Err(DevError::Verify(format!(
+            "unsupported bit depth: {bit_depth:?}"
+        )));
     }
 
     match color_type {
@@ -119,7 +131,9 @@ fn to_rgba(buf: &[u8], color_type: png::ColorType, bit_depth: png::BitDepth) -> 
             }
             Ok(rgba)
         }
-        _ => Err(DevError::Verify(format!("unsupported color type: {color_type:?}"))),
+        _ => Err(DevError::Verify(format!(
+            "unsupported color type: {color_type:?}"
+        ))),
     }
 }
 
@@ -139,7 +153,8 @@ fn pad_to_size(img: &DecodedPng, target_w: u32, target_h: u32) -> Vec<u8> {
     for y in 0..(img.height as usize).min(th) {
         let src_start = y * src_stride;
         let dst_start = y * dst_stride;
-        out[dst_start..dst_start + copy_w].copy_from_slice(&img.rgba[src_start..src_start + copy_w]);
+        out[dst_start..dst_start + copy_w]
+            .copy_from_slice(&img.rgba[src_start..src_start + copy_w]);
     }
 
     out
@@ -153,12 +168,12 @@ fn write_diff_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
     let mut encoder = png::Encoder::new(w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| {
-        DevError::Verify(format!("PNG encode error: {e}"))
-    })?;
-    writer.write_image_data(rgba).map_err(|e| {
-        DevError::Verify(format!("PNG write error: {e}"))
-    })?;
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| DevError::Verify(format!("PNG encode error: {e}")))?;
+    writer
+        .write_image_data(rgba)
+        .map_err(|e| DevError::Verify(format!("PNG write error: {e}")))?;
     Ok(())
 }
 
@@ -215,10 +230,16 @@ pub(crate) fn compare_pixels(
         0.0
     } else {
         #[allow(clippy::cast_precision_loss)]
-        { (diff_pixels as f64 / total_pixels as f64) * 100.0 }
+        {
+            (diff_pixels as f64 / total_pixels as f64) * 100.0
+        }
     };
 
-    Ok(PixelDiffResult { diff_pct, total_pixels, diff_pixels })
+    Ok(PixelDiffResult {
+        diff_pct,
+        total_pixels,
+        diff_pixels,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -247,24 +268,24 @@ pub(crate) fn compare_elements(
     pipeline_json: &Path,
     reference_json: &Path,
 ) -> Result<ElementMatchResult, DevError> {
-    let pipeline_text = std::fs::read_to_string(pipeline_json).map_err(|e| {
-        DevError::Verify(format!("cannot read {}: {e}", pipeline_json.display()))
-    })?;
-    let reference_text = std::fs::read_to_string(reference_json).map_err(|e| {
-        DevError::Verify(format!("cannot read {}: {e}", reference_json.display()))
-    })?;
+    let pipeline_text = std::fs::read_to_string(pipeline_json)
+        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", pipeline_json.display())))?;
+    let reference_text = std::fs::read_to_string(reference_json)
+        .map_err(|e| DevError::Verify(format!("cannot read {}: {e}", reference_json.display())))?;
 
     let pipeline_elems: Vec<LayoutElement> = serde_json::from_str(&pipeline_text)
         .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", pipeline_json.display())))?;
     let reference_elems: Vec<LayoutElement> = serde_json::from_str(&reference_text)
         .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", reference_json.display())))?;
 
-    let pipeline_by_path: HashMap<&str, &LayoutElement> = pipeline_elems.iter()
+    let pipeline_by_path: HashMap<&str, &LayoutElement> = pipeline_elems
+        .iter()
         .filter(|e| !is_head_path(&e.path))
         .map(|e| (e.path.as_str(), e))
         .collect();
 
-    let reference_by_path: HashMap<&str, &LayoutElement> = reference_elems.iter()
+    let reference_by_path: HashMap<&str, &LayoutElement> = reference_elems
+        .iter()
         .filter(|e| !is_head_path(&e.path))
         .map(|e| (e.path.as_str(), e))
         .collect();
@@ -289,7 +310,9 @@ pub(crate) fn compare_elements(
         100.0
     } else {
         #[allow(clippy::cast_precision_loss)]
-        { (exact as f64 / denominator as f64) * 100.0 }
+        {
+            (exact as f64 / denominator as f64) * 100.0
+        }
     };
 
     Ok(ElementMatchResult {
@@ -384,15 +407,43 @@ mod tests {
 
     #[test]
     fn geometry_matches_exact() {
-        let a = LayoutElement { path: String::new(), tag: None, x: Some(0.0), y: Some(0.0), w: Some(100.0), h: Some(50.0) };
-        let b = LayoutElement { path: String::new(), tag: None, x: Some(1.0), y: Some(1.0), w: Some(103.0), h: Some(54.0) };
+        let a = LayoutElement {
+            path: String::new(),
+            tag: None,
+            x: Some(0.0),
+            y: Some(0.0),
+            w: Some(100.0),
+            h: Some(50.0),
+        };
+        let b = LayoutElement {
+            path: String::new(),
+            tag: None,
+            x: Some(1.0),
+            y: Some(1.0),
+            w: Some(103.0),
+            h: Some(54.0),
+        };
         assert!(geometry_matches(&a, &b));
     }
 
     #[test]
     fn geometry_matches_outside_tolerance() {
-        let a = LayoutElement { path: String::new(), tag: None, x: Some(0.0), y: Some(0.0), w: Some(100.0), h: Some(50.0) };
-        let b = LayoutElement { path: String::new(), tag: None, x: Some(0.0), y: Some(0.0), w: Some(106.0), h: Some(50.0) };
+        let a = LayoutElement {
+            path: String::new(),
+            tag: None,
+            x: Some(0.0),
+            y: Some(0.0),
+            w: Some(100.0),
+            h: Some(50.0),
+        };
+        let b = LayoutElement {
+            path: String::new(),
+            tag: None,
+            x: Some(0.0),
+            y: Some(0.0),
+            w: Some(106.0),
+            h: Some(50.0),
+        };
         assert!(!geometry_matches(&a, &b));
     }
 
@@ -449,7 +500,8 @@ mod tests {
     #[test]
     fn to_rgba_grayscale_input() {
         let gray = vec![128, 64];
-        let rgba = to_rgba(&gray, png::ColorType::Grayscale, png::BitDepth::Eight).expect("convert");
+        let rgba =
+            to_rgba(&gray, png::ColorType::Grayscale, png::BitDepth::Eight).expect("convert");
         assert_eq!(rgba, vec![128, 128, 128, 255, 64, 64, 64, 255]);
     }
 

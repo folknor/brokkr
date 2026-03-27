@@ -15,18 +15,30 @@ pub(crate) trait FileEntry {
 }
 
 impl FileEntry for config::PbfEntry {
-    fn file(&self) -> &str { &self.file }
-    fn xxhash(&self) -> Option<&str> { self.xxhash.as_deref() }
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&str> {
+        self.xxhash.as_deref()
+    }
 }
 
 impl FileEntry for config::OscEntry {
-    fn file(&self) -> &str { &self.file }
-    fn xxhash(&self) -> Option<&str> { self.xxhash.as_deref() }
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&str> {
+        self.xxhash.as_deref()
+    }
 }
 
 impl FileEntry for config::PmtilesEntry {
-    fn file(&self) -> &str { &self.file }
-    fn xxhash(&self) -> Option<&str> { self.xxhash.as_deref() }
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&str> {
+        self.xxhash.as_deref()
+    }
 }
 
 /// Generic file resolver: lookup entry in map → join path → check exists → verify hash.
@@ -44,7 +56,11 @@ fn resolve_entry_path<E: FileEntry>(
         available.sort();
         DevError::Config(format!(
             "dataset '{dataset}' has no {kind} '{key}' (available: {})",
-            if available.is_empty() { "none".to_string() } else { available.join(", ") }
+            if available.is_empty() {
+                "none".to_string()
+            } else {
+                available.join(", ")
+            }
         ))
     })?;
     let path = data_dir.join(entry.file());
@@ -101,9 +117,10 @@ fn get_dataset<'a>(
     dataset: &str,
     paths: &'a config::ResolvedPaths,
 ) -> Result<&'a config::Dataset, DevError> {
-    paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })
+    paths
+        .datasets
+        .get(dataset)
+        .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))
 }
 
 /// Resolve the PBF path from --dataset + --variant.
@@ -114,7 +131,15 @@ pub(crate) fn resolve_pbf_path(
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let ds = get_dataset(dataset, paths)?;
-    resolve_entry_path(&ds.pbf, variant, dataset, "pbf variant", &paths.data_dir, ds.origin.as_deref(), project_root)
+    resolve_entry_path(
+        &ds.pbf,
+        variant,
+        dataset,
+        "pbf variant",
+        &paths.data_dir,
+        ds.origin.as_deref(),
+        project_root,
+    )
 }
 
 /// Resolve the OSC path from --dataset + --osc-seq.
@@ -125,7 +150,15 @@ pub(crate) fn resolve_osc_path(
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let ds = get_dataset(dataset, paths)?;
-    resolve_entry_path(&ds.osc, seq, dataset, "osc seq", &paths.data_dir, ds.origin.as_deref(), project_root)
+    resolve_entry_path(
+        &ds.osc,
+        seq,
+        dataset,
+        "osc seq",
+        &paths.data_dir,
+        ds.origin.as_deref(),
+        project_root,
+    )
 }
 
 /// Resolve the default OSC path when no --osc-seq is specified.
@@ -138,7 +171,15 @@ pub(crate) fn resolve_default_osc_path(
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let ds = get_dataset(dataset, paths)?;
-    resolve_default_entry_path(&ds.osc, dataset, "osc", "--osc-seq", &paths.data_dir, ds.origin.as_deref(), project_root)
+    resolve_default_entry_path(
+        &ds.osc,
+        dataset,
+        "osc",
+        "--osc-seq",
+        &paths.data_dir,
+        ds.origin.as_deref(),
+        project_root,
+    )
 }
 
 /// Resolve the bbox from --bbox or dataset config.
@@ -152,9 +193,10 @@ pub(crate) fn resolve_bbox(
     let value = if let Some(b) = bbox {
         b.to_owned()
     } else {
-        let ds = paths.datasets.get(dataset).ok_or_else(|| {
-            DevError::Config(format!("unknown dataset: {dataset}"))
-        })?;
+        let ds = paths
+            .datasets
+            .get(dataset)
+            .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))?;
         ds.bbox.clone().ok_or_else(|| {
             DevError::Config(format!(
                 "dataset '{dataset}' has no bbox configured (use --bbox)"
@@ -178,7 +220,8 @@ fn validate_bbox(bbox: &str) -> Result<(), DevError> {
     for (i, part) in parts.iter().enumerate() {
         if part.trim().parse::<f64>().is_err() {
             return Err(DevError::Config(format!(
-                "bbox component {i} is not a number: '{}'", part.trim()
+                "bbox component {i} is not a number: '{}'",
+                part.trim()
             )));
         }
     }
@@ -193,7 +236,15 @@ pub(crate) fn resolve_pmtiles_path(
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let ds = get_dataset(dataset, paths)?;
-    resolve_entry_path(&ds.pmtiles, variant, dataset, "pmtiles variant", &paths.data_dir, ds.origin.as_deref(), project_root)
+    resolve_entry_path(
+        &ds.pmtiles,
+        variant,
+        dataset,
+        "pmtiles variant",
+        &paths.data_dir,
+        ds.origin.as_deref(),
+        project_root,
+    )
 }
 
 /// Resolve the default PMTiles path when no variant is specified.
@@ -206,7 +257,15 @@ pub(crate) fn resolve_default_pmtiles_path(
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
     let ds = get_dataset(dataset, paths)?;
-    resolve_default_entry_path(&ds.pmtiles, dataset, "pmtiles", "--tiles", &paths.data_dir, ds.origin.as_deref(), project_root)
+    resolve_default_entry_path(
+        &ds.pmtiles,
+        dataset,
+        "pmtiles",
+        "--tiles",
+        &paths.data_dir,
+        ds.origin.as_deref(),
+        project_root,
+    )
 }
 
 /// Resolve PMTiles path and its size in one call.
@@ -255,9 +314,10 @@ pub(crate) fn resolve_nidhogg_data_dir(
     dataset: &str,
     paths: &config::ResolvedPaths,
 ) -> Result<PathBuf, DevError> {
-    let ds = paths.datasets.get(dataset).ok_or_else(|| {
-        DevError::Config(format!("unknown dataset: {dataset}"))
-    })?;
+    let ds = paths
+        .datasets
+        .get(dataset)
+        .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))?;
     let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
         DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
     })?;
@@ -346,13 +406,27 @@ mod tests {
     #[test]
     fn resolve_default_osc_path_errors_when_multiple_variants_exist() {
         let mut ds = empty_dataset();
-        ds.osc.insert(String::from("4706"), OscEntry { file: String::from("b.osc.gz"), xxhash: None });
-        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("a.osc.gz"), xxhash: None });
+        ds.osc.insert(
+            String::from("4706"),
+            OscEntry {
+                file: String::from("b.osc.gz"),
+                xxhash: None,
+            },
+        );
+        ds.osc.insert(
+            String::from("4705"),
+            OscEntry {
+                file: String::from("a.osc.gz"),
+                xxhash: None,
+            },
+        );
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
 
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
-        let err = resolve_default_osc_path("denmark", &paths, Path::new(".")).unwrap_err().to_string();
+        let err = resolve_default_osc_path("denmark", &paths, Path::new("."))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("multiple osc entries"));
         assert!(err.contains("4705, 4706"));
     }
@@ -365,12 +439,19 @@ mod tests {
         std::fs::write(&osc, "x").expect("write");
 
         let mut ds = empty_dataset();
-        ds.osc.insert(String::from("4705"), OscEntry { file: String::from("one.osc.gz"), xxhash: None });
+        ds.osc.insert(
+            String::from("4705"),
+            OscEntry {
+                file: String::from("one.osc.gz"),
+                xxhash: None,
+            },
+        );
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let resolved = resolve_default_osc_path("denmark", &paths, Path::new(".")).expect("resolve");
+        let resolved =
+            resolve_default_osc_path("denmark", &paths, Path::new(".")).expect("resolve");
         assert_eq!(resolved, osc);
 
         drop(std::fs::remove_dir_all(&dir));
@@ -379,13 +460,27 @@ mod tests {
     #[test]
     fn resolve_default_pmtiles_path_errors_when_multiple_variants_exist() {
         let mut ds = empty_dataset();
-        ds.pmtiles.insert(String::from("z"), PmtilesEntry { file: String::from("z.pmtiles"), xxhash: None });
-        ds.pmtiles.insert(String::from("a"), PmtilesEntry { file: String::from("a.pmtiles"), xxhash: None });
+        ds.pmtiles.insert(
+            String::from("z"),
+            PmtilesEntry {
+                file: String::from("z.pmtiles"),
+                xxhash: None,
+            },
+        );
+        ds.pmtiles.insert(
+            String::from("a"),
+            PmtilesEntry {
+                file: String::from("a.pmtiles"),
+                xxhash: None,
+            },
+        );
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
 
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
-        let err = resolve_default_pmtiles_path("denmark", &paths, Path::new(".")).unwrap_err().to_string();
+        let err = resolve_default_pmtiles_path("denmark", &paths, Path::new("."))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("multiple pmtiles entries"));
         assert!(err.contains("a, z"));
     }
@@ -410,13 +505,19 @@ mod tests {
         let mut ds = empty_dataset();
         ds.pbf.insert(
             String::from("raw"),
-            PbfEntry { file: String::from("raw.osm.pbf"), xxhash: None, seq: None },
+            PbfEntry {
+                file: String::from("raw.osm.pbf"),
+                xxhash: None,
+                seq: None,
+            },
         );
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
         let paths = mk_paths(Path::new("/data-root"), datasets);
 
-        let err = resolve_nidhogg_data_dir("denmark", &paths).unwrap_err().to_string();
+        let err = resolve_nidhogg_data_dir("denmark", &paths)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("has no data_dir configured"));
     }
 }

@@ -31,7 +31,12 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
     if let Some(threads_val) = obj.get("threads")
         && let Some(threads_obj) = threads_val.as_object()
     {
-        for key in &["rss_bytes", "total_alloc_bytes", "total_dealloc_bytes", "alloc_dealloc_diff"] {
+        for key in &[
+            "rss_bytes",
+            "total_alloc_bytes",
+            "total_dealloc_bytes",
+            "alloc_dealloc_diff",
+        ] {
             if let Some(v) = threads_obj.get(*key).and_then(|v| v.as_str()) {
                 thread_summary.push(KvPair::text(format!("threads.{key}"), v));
             }
@@ -57,13 +62,26 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
         return None;
     }
 
-    Some(HotpathData { functions, threads, thread_summary })
+    Some(HotpathData {
+        functions,
+        threads,
+        thread_summary,
+    })
 }
 
-fn parse_functions_section(value: &serde_json::Value, section: &str, out: &mut Vec<HotpathFunction>) {
+fn parse_functions_section(
+    value: &serde_json::Value,
+    section: &str,
+    out: &mut Vec<HotpathFunction>,
+) {
     let Some(obj) = value.as_object() else { return };
-    let description = obj.get("description").and_then(|v| v.as_str()).map(String::from);
-    let Some(data) = obj.get("data").and_then(|v| v.as_array()) else { return };
+    let description = obj
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let Some(data) = obj.get("data").and_then(|v| v.as_array()) else {
+        return;
+    };
 
     for (ordinal, entry) in data.iter().enumerate() {
         let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
@@ -154,8 +172,18 @@ mod tests {
         assert_eq!(parsed.functions[1].section, "alloc");
         assert_eq!(parsed.threads.len(), 1);
         assert_eq!(parsed.threads[0].name, "worker-0");
-        assert!(parsed.thread_summary.iter().any(|kv| kv.key == "threads.rss_bytes"));
-        assert!(parsed.thread_summary.iter().any(|kv| kv.key == "threads.alloc_dealloc_diff"));
+        assert!(
+            parsed
+                .thread_summary
+                .iter()
+                .any(|kv| kv.key == "threads.rss_bytes")
+        );
+        assert!(
+            parsed
+                .thread_summary
+                .iter()
+                .any(|kv| kv.key == "threads.alloc_dealloc_diff")
+        );
     }
 
     #[test]

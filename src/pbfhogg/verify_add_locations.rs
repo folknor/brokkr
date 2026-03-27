@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg add-locations-to-ways` against `osmium add-locations-to-ways`.
 ///
@@ -116,7 +116,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
             verify_msg("  diff (hash vs dense): FAIL (differences found)");
         }
     } else {
-        verify_msg("  dense index skipped (allocation failed — expected on systems without vm.overcommit_memory=1)");
+        verify_msg(
+            "  dense index skipped (allocation failed — expected on systems without vm.overcommit_memory=1)",
+        );
     }
 
     Ok(())

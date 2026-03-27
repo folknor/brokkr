@@ -11,7 +11,6 @@ use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness};
 use crate::output;
 
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -69,7 +68,7 @@ pub fn run(
 
     if alloc {
         output::hotpath_msg(
-            "NOTE: mimalloc is disabled for alloc profiling -- wall-clock times are not meaningful"
+            "NOTE: mimalloc is disabled for alloc profiling -- wall-clock times are not meaningful",
         );
     }
 
@@ -92,7 +91,10 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
-        cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
+        cli_args: Some(crate::harness::format_cli_args(
+            &binary.display().to_string(),
+            &args_refs,
+        )),
         metadata: {
             let mut m = opts.metadata();
             m.push(KvPair::text("meta.alloc", alloc.to_string()));
@@ -102,10 +104,15 @@ pub fn run(
 
     harness.run_internal(&config, |_i| {
         let (mut result, stderr) = harness::run_hotpath_capture(
-            binary_str, &args_refs, scratch_dir, project_root, &[("ELIVAGAR_NODE_STATS", "1")],
+            binary_str,
+            &args_refs,
+            scratch_dir,
+            project_root,
+            &[("ELIVAGAR_NODE_STATS", "1")],
         )?;
         result.kv.push(KvPair::text(
-            "meta.locations_on_ways_detected", super::detect_locations_on_ways_stderr(&stderr).to_string(),
+            "meta.locations_on_ways_detected",
+            super::detect_locations_on_ways_stderr(&stderr).to_string(),
         ));
         Ok(result)
     })?;

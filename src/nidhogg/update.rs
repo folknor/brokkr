@@ -13,17 +13,10 @@ use crate::output;
 // ---------------------------------------------------------------------------
 
 /// Run the `nidhogg-update` binary with the given arguments.
-pub fn run(
-    binary: &Path,
-    args: &[String],
-    project_root: &Path,
-) -> Result<(), DevError> {
+pub fn run(binary: &Path, args: &[String], project_root: &Path) -> Result<(), DevError> {
     let binary_str = super::client::path_str(binary)?;
 
-    output::run_msg(&format!(
-        "nidhogg-update {}",
-        args.join(" "),
-    ));
+    output::run_msg(&format!("nidhogg-update {}", args.join(" "),));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 

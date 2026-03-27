@@ -52,7 +52,10 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
-        cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args)),
+        cli_args: Some(crate::harness::format_cli_args(
+            &binary.display().to_string(),
+            &args,
+        )),
         metadata: vec![],
     };
 
@@ -68,11 +71,7 @@ pub fn run(
 
         let start = std::time::Instant::now();
 
-        let captured = output::run_captured(
-            &binary.display().to_string(),
-            &args,
-            project_root,
-        )?;
+        let captured = output::run_captured(&binary.display().to_string(), &args, project_root)?;
 
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 

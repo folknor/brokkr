@@ -117,7 +117,10 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "java".into(),
         runs,
-        cli_args: Some(crate::harness::format_cli_args(&pt.java.display().to_string(), &args_refs)),
+        cli_args: Some(crate::harness::format_cli_args(
+            &pt.java.display().to_string(),
+            &args_refs,
+        )),
         metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
     };
 

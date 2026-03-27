@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg sort` against `osmium sort`.
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
@@ -28,8 +28,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
     let osmium_out = outdir.join("osmium.osm.pbf");
     let osmium_out_str = osmium_out.display().to_string();
 
-    let captured =
-        harness.run_tool("osmium", &["sort", &pbf_str, "-o", &osmium_out_str, "--overwrite"])?;
+    let captured = harness.run_tool(
+        "osmium",
+        &["sort", &pbf_str, "-o", &osmium_out_str, "--overwrite"],
+    )?;
     harness.check_exit(&captured, "osmium sort")?;
 
     // --- Element counts ---

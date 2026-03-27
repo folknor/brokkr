@@ -34,7 +34,10 @@ pub fn run(
 ) -> Result<(), DevError> {
     // 1. bench commands -- all
     output::bench_msg("=== bench commands ===");
-    let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
+    let binary = build::cargo_build(
+        &build::BuildConfig::release(Some("pbfhogg-cli")),
+        project_root,
+    )?;
     let osc_path = crate::resolve::get_default_osc_entry(dataset, paths)
         .map(|entry| paths.data_dir.join(&entry.file))
         .filter(|p| p.exists());
@@ -76,7 +79,16 @@ pub fn run(
         project_root,
     )?;
 
-    run_dataset_dependent(harness, paths, dataset, &binary, pbf_path, file_mb, runs, project_root)?;
+    run_dataset_dependent(
+        harness,
+        paths,
+        dataset,
+        &binary,
+        pbf_path,
+        file_mb,
+        runs,
+        project_root,
+    )?;
 
     // bench allocator -- default, jemalloc, mimalloc
     output::bench_msg("=== bench allocator ===");
@@ -108,8 +120,16 @@ fn run_dataset_dependent(
         output::bench_msg("=== bench merge ===");
         let merge_compressions = super::parse_compressions("zlib,none", false)?;
         bench_merge::run(
-            harness, binary, pbf_path, osc_path, file_mb, runs,
-            &merge_compressions, false, &paths.scratch_dir, project_root,
+            harness,
+            binary,
+            pbf_path,
+            osc_path,
+            file_mb,
+            runs,
+            &merge_compressions,
+            false,
+            &paths.scratch_dir,
+            project_root,
         )?;
     } else {
         output::bench_msg("=== bench merge === (skipped, no osc file)");
@@ -121,8 +141,14 @@ fn run_dataset_dependent(
     if let Some(bbox) = bbox {
         output::bench_msg("=== bench extract ===");
         bench_extract::run(
-            harness, binary, pbf_path, file_mb, runs,
-            bbox, bench_extract::ALL_STRATEGIES, project_root,
+            harness,
+            binary,
+            pbf_path,
+            file_mb,
+            runs,
+            bbox,
+            bench_extract::ALL_STRATEGIES,
+            project_root,
             &paths.scratch_dir,
         )?;
     } else {
@@ -137,11 +163,19 @@ fn run_dataset_dependent(
     if let Some(ref raw_path) = raw_pbf_path {
         output::bench_msg("=== bench blob-filter ===");
         bench_blob_filter::run(
-            harness, binary, pbf_path, raw_path, file_mb, runs, project_root,
+            harness,
+            binary,
+            pbf_path,
+            raw_path,
+            file_mb,
+            runs,
+            project_root,
             &paths.scratch_dir,
         )?;
     } else {
-        output::bench_msg("=== bench blob-filter === (skipped, no raw pbf variant in dataset config)");
+        output::bench_msg(
+            "=== bench blob-filter === (skipped, no raw pbf variant in dataset config)",
+        );
     }
 
     Ok(())
@@ -172,13 +206,26 @@ fn run_baselines(
     // osmium -- if available
     output::bench_msg("=== osmium baseline ===");
     if super::verify::which_exists("osmium") {
-        run_osmium_baseline(harness, pbf_path, file_mb, runs, &paths.scratch_dir, project_root)?;
+        run_osmium_baseline(
+            harness,
+            pbf_path,
+            file_mb,
+            runs,
+            &paths.scratch_dir,
+            project_root,
+        )?;
     }
 
     // planetiler -- if available
     output::bench_msg("=== planetiler baseline ===");
-    match bench_planetiler::run(harness, pbf_path, file_mb, runs, &paths.data_dir, project_root)
-    {
+    match bench_planetiler::run(
+        harness,
+        pbf_path,
+        file_mb,
+        runs,
+        &paths.data_dir,
+        project_root,
+    ) {
         Ok(()) => {}
         Err(e) => output::bench_msg(&format!("planetiler skipped: {e}")),
     }
@@ -229,11 +276,7 @@ fn run_osmpbf_baseline(
     let runs_str = runs.to_string();
     let binary_str = binary.display().to_string();
 
-    let captured = output::run_captured(
-        &binary_str,
-        &[pbf_str, &runs_str],
-        project_root,
-    )?;
+    let captured = output::run_captured(&binary_str, &[pbf_str, &runs_str], project_root)?;
 
     captured.check_success(&binary_str)?;
 
@@ -308,7 +351,15 @@ fn run_osmium_baseline(
         .unwrap_or_default()
         .to_owned();
 
-    let osmium_args: Vec<&str> = vec!["cat", pbf_str, "-o", "/dev/null", "-f", "opl", "--overwrite"];
+    let osmium_args: Vec<&str> = vec![
+        "cat",
+        pbf_str,
+        "-o",
+        "/dev/null",
+        "-f",
+        "opl",
+        "--overwrite",
+    ];
 
     let config = BenchConfig {
         command: "bench baseline".into(),
@@ -322,17 +373,11 @@ fn run_osmium_baseline(
         metadata: vec![],
     };
 
-    harness.run_external(
-        &config,
-        Path::new("osmium"),
-        &osmium_args,
-        project_root,
-    )?;
+    harness.run_external(&config, Path::new("osmium"), &osmium_args, project_root)?;
 
     // osmium add-locations-to-ways baseline
-    std::fs::create_dir_all(scratch_dir).map_err(|e| {
-        DevError::Config(format!("failed to create scratch dir: {e}"))
-    })?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     let altw_output = scratch_dir.join("bench-osmium-altw-output.osm.pbf");
     let altw_output_str = altw_output
@@ -340,7 +385,11 @@ fn run_osmium_baseline(
         .ok_or_else(|| DevError::Config("scratch path is not valid UTF-8".into()))?;
 
     let altw_args: Vec<&str> = vec![
-        "add-locations-to-ways", pbf_str, "-o", altw_output_str, "--overwrite",
+        "add-locations-to-ways",
+        pbf_str,
+        "-o",
+        altw_output_str,
+        "--overwrite",
     ];
 
     let altw_config = BenchConfig {
@@ -355,12 +404,7 @@ fn run_osmium_baseline(
         metadata: vec![],
     };
 
-    harness.run_external(
-        &altw_config,
-        Path::new("osmium"),
-        &altw_args,
-        project_root,
-    )?;
+    harness.run_external(&altw_config, Path::new("osmium"), &altw_args, project_root)?;
 
     std::fs::remove_file(&altw_output).ok();
 
@@ -384,24 +428,27 @@ fn parse_stderr_blocks(stderr: &str) -> Vec<HashMap<String, String>> {
         if trimmed == "---" {
             // Start a new block, pushing the previous one if it exists.
             if let Some(block) = current.take()
-                && !block.is_empty() {
-                    blocks.push(block);
-                }
+                && !block.is_empty()
+            {
+                blocks.push(block);
+            }
             current = Some(HashMap::new());
             continue;
         }
 
         if let Some(ref mut block) = current
-            && let Some((key, value)) = trimmed.split_once('=') {
-                block.insert(key.to_owned(), value.to_owned());
-            }
+            && let Some((key, value)) = trimmed.split_once('=')
+        {
+            block.insert(key.to_owned(), value.to_owned());
+        }
     }
 
     // Push the final block.
     if let Some(block) = current
-        && !block.is_empty() {
-            blocks.push(block);
-        }
+        && !block.is_empty()
+    {
+        blocks.push(block);
+    }
 
     blocks
 }

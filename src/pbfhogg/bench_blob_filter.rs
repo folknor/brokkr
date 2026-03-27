@@ -6,13 +6,40 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
-const COMMANDS: &[&str] = &["cat-way", "cat-relation", "inspect-tags-way", "inspect-nodes"];
+const COMMANDS: &[&str] = &[
+    "cat-way",
+    "cat-relation",
+    "inspect-tags-way",
+    "inspect-nodes",
+];
 
 fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Vec<String> {
     let mut args = match name {
-        "cat-way" => vec!["cat".into(), pbf.into(), "--type".into(), "way".into(), "-o".into(), output.into()],
-        "cat-relation" => vec!["cat".into(), pbf.into(), "--type".into(), "relation".into(), "-o".into(), output.into()],
-        "inspect-tags-way" => vec!["inspect".into(), "tags".into(), pbf.into(), "--type".into(), "way".into(), "--min-count".into(), "999999999".into()],
+        "cat-way" => vec![
+            "cat".into(),
+            pbf.into(),
+            "--type".into(),
+            "way".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "cat-relation" => vec![
+            "cat".into(),
+            pbf.into(),
+            "--type".into(),
+            "relation".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "inspect-tags-way" => vec![
+            "inspect".into(),
+            "tags".into(),
+            pbf.into(),
+            "--type".into(),
+            "way".into(),
+            "--min-count".into(),
+            "999999999".into(),
+        ],
         "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
         _ => unreachable!("unknown command: {name}"),
     };
@@ -61,7 +88,10 @@ pub fn run(
                 cargo_features: None,
                 cargo_profile: "release".into(),
                 runs,
-                cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
+                cli_args: Some(crate::harness::format_cli_args(
+                    &binary.display().to_string(),
+                    &args_refs,
+                )),
                 metadata: vec![],
             };
 

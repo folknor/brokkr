@@ -72,11 +72,7 @@ impl VerifyHarness {
     /// Does **not** check the exit status — the caller decides whether
     /// non-zero is an error (some commands exit non-zero normally).
     pub fn run_pbfhogg(&self, args: &[&str]) -> Result<CapturedOutput, DevError> {
-        output::run_captured(
-            &self.binary.display().to_string(),
-            args,
-            &self.project_root,
-        )
+        output::run_captured(&self.binary.display().to_string(), args, &self.project_root)
     }
 
     /// Run an external tool (e.g. `osmium`, `osmconvert`) with the given arguments.

@@ -10,7 +10,9 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Run clippy + tests
-    #[command(display_order = 0, long_about = "\
+    #[command(
+        display_order = 0,
+        long_about = "\
 Run clippy + tests. Extra args are forwarded raw to `cargo test`.
 
 Examples:
@@ -21,7 +23,8 @@ Examples:
   brokkr check --no-default-features               # check without default features
   brokkr check --features commands                  # check with specific features
   brokkr check --package pbfhogg-cli                # check only the CLI crate
-  brokkr check --package pbfhogg-cli -- --test cli  # one test file in the CLI crate")]
+  brokkr check --package pbfhogg-cli -- --test cli  # one test file in the CLI crate"
+    )]
     Check {
         /// Cargo features to enable
         #[arg(long, value_delimiter = ',')]
@@ -43,7 +46,6 @@ Examples:
     #[command(display_order = 1)]
     Env,
     // ----- pbfhogg tool CLI commands (display_order = 2) -----
-
     /// [pbfhogg] Inspect PBF metadata
     #[command(name = "inspect", display_order = 2)]
     Inspect {
@@ -341,7 +343,6 @@ Examples:
     },
 
     // ----- elivagar commands (display_order = 3) -----
-
     /// [elivagar] Full tile generation pipeline
     #[command(name = "tilegen", display_order = 3)]
     Tilegen {
@@ -452,7 +453,6 @@ Examples:
     },
 
     // ----- nidhogg commands (display_order = 4) -----
-
     /// [nidhogg] API query benchmark
     #[command(name = "api", display_order = 4)]
     RunApi {
@@ -503,7 +503,6 @@ Examples:
     },
 
     // ----- sluggrs commands (display_order = 5) -----
-
     /// [sluggrs] Rendering hotpath (hotpath/alloc mode only)
     #[command(name = "sluggrs-hotpath", display_order = 5)]
     SluggrsHotpath {
@@ -515,7 +514,6 @@ Examples:
     },
 
     // ----- generic commands (display_order = 5) -----
-
     /// Generic hotpath for projects without dedicated modules
     #[command(name = "generic-hotpath", display_order = 5)]
     GenericHotpath {
@@ -533,7 +531,6 @@ Examples:
     },
 
     // ----- suites (display_order = 6) -----
-
     /// Run a full benchmark suite (pbfhogg, elivagar, or nidhogg)
     #[command(name = "suite", display_order = 6)]
     Suite {
@@ -574,7 +571,9 @@ Examples:
         args: Vec<String>,
     },
     /// Query benchmark results
-    #[command(display_order = 3, long_about = "\
+    #[command(
+        display_order = 3,
+        long_about = "\
 Query benchmark results from .brokkr/results.db.
 
 Examples:
@@ -587,7 +586,8 @@ Examples:
   brokkr results --compare a65a 911c                # compare two commits
   brokkr results --compare a65a 911c --variant sync # compare, filtered
   brokkr results --compare-last                     # compare two most recent commits
-  brokkr results --compare-last --command hotpath   # compare hotpath runs (shows function diff)")]
+  brokkr results --compare-last --command hotpath   # compare hotpath runs (shows function diff)"
+    )]
     Results {
         /// UUID prefix to look up specific result(s)
         #[arg(conflicts_with_all = ["commit", "compare"])]
@@ -628,7 +628,9 @@ Examples:
     #[command(display_order = 5)]
     Lock,
     /// Browse command history
-    #[command(display_order = 6, long_about = "\
+    #[command(
+        display_order = 6,
+        long_about = "\
 Browse the global command history log (~/.local/share/brokkr/history.db).
 
 Every brokkr invocation is recorded with timing and exit status.
@@ -641,7 +643,8 @@ Examples:
   brokkr history --project pbfhogg      # filter by project
   brokkr history --failed               # only non-zero exit
   brokkr history --since 2026-03-01     # from date (YYYY-MM-DD)
-  brokkr history --slow 10000           # commands that took >10s")]
+  brokkr history --slow 10000           # commands that took >10s"
+    )]
     History {
         /// Filter by command (substring match)
         #[arg(long)]
@@ -837,7 +840,6 @@ pub(crate) struct PbfArgs {
     #[arg(long, default_value = "indexed")]
     pub(crate) variant: String,
 }
-
 
 #[derive(Subcommand)]
 pub(crate) enum VerifyCommand {
@@ -1141,7 +1143,9 @@ fn validate_since(s: &str) -> Result<String, String> {
     if date_ok || datetime_ok {
         Ok(s.to_owned())
     } else {
-        Err(format!("invalid date format '{s}', expected YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"))
+        Err(format!(
+            "invalid date format '{s}', expected YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+        ))
     }
 }
 
@@ -1151,44 +1155,27 @@ mod tests {
 
     #[test]
     fn results_compare_last_conflicts_with_query() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "results",
-            "abc123",
-            "--compare-last",
-        ]);
+        let parsed = Cli::try_parse_from(["brokkr", "results", "abc123", "--compare-last"]);
         assert!(parsed.is_err());
     }
 
     #[test]
     fn results_compare_requires_two_commits() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "results",
-            "--compare",
-            "abc123",
-        ]);
+        let parsed = Cli::try_parse_from(["brokkr", "results", "--compare", "abc123"]);
         assert!(parsed.is_err());
     }
 
     #[test]
     fn pmtiles_stats_requires_at_least_one_file() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "pmtiles-stats",
-        ]);
+        let parsed = Cli::try_parse_from(["brokkr", "pmtiles-stats"]);
         assert!(parsed.is_err());
     }
 
     #[test]
     fn inspect_tags_accepts_mode_flags() {
-        let parsed = Cli::try_parse_from([
-            "brokkr",
-            "inspect-tags",
-            "--hotpath",
-            "--dataset",
-            "japan",
-        ]).expect("parse");
+        let parsed =
+            Cli::try_parse_from(["brokkr", "inspect-tags", "--hotpath", "--dataset", "japan"])
+                .expect("parse");
 
         let Command::InspectTags { mode, pbf } = parsed.command else {
             panic!("expected inspect-tags command");

@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) mod cmd;
 pub mod bench_all;
-pub mod commands;
 pub mod bench_node_store;
 pub mod bench_planetiler;
 pub mod bench_pmtiles;
 pub mod bench_self;
 pub mod bench_tilemaker;
+pub(crate) mod cmd;
+pub mod commands;
 pub mod compare_tiles;
 pub mod download_natural_earth;
 pub mod download_ocean;
@@ -95,8 +95,14 @@ impl PipelineOpts<'_> {
             "meta.compress_sort_chunks",
             self.compress_sort_chunks.unwrap_or("none"),
         ));
-        m.push(crate::db::KvPair::text("meta.in_memory", self.in_memory.to_string()));
-        m.push(crate::db::KvPair::text("meta.locations_on_ways_cli", self.locations_on_ways.to_string()));
+        m.push(crate::db::KvPair::text(
+            "meta.in_memory",
+            self.in_memory.to_string(),
+        ));
+        m.push(crate::db::KvPair::text(
+            "meta.locations_on_ways_cli",
+            self.locations_on_ways.to_string(),
+        ));
         if let Some(n) = self.fanout_cap_default {
             m.push(crate::db::KvPair::int("meta.fanout_cap_default", n as i64));
         }

@@ -95,9 +95,7 @@ impl BenchHarness {
 
         if !git.is_clean {
             if force {
-                output::error(
-                    "WARNING: dirty tree — results will NOT be stored in database",
-                );
+                output::error("WARNING: dirty tree — results will NOT be stored in database");
             } else {
                 return Err(DevError::Preflight(vec![
                     "dirty tree — commit or stash changes before benchmarking".into(),
@@ -129,11 +127,7 @@ impl BenchHarness {
 
     /// Internal timing: closure called N times, returns `BenchResult`.
     /// Best-of-N (minimum `elapsed_ms`).
-    pub fn run_internal<F>(
-        &self,
-        config: &BenchConfig,
-        f: F,
-    ) -> Result<BenchResult, DevError>
+    pub fn run_internal<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
     where
         F: Fn(usize) -> Result<BenchResult, DevError>,
     {
@@ -145,9 +139,8 @@ impl BenchHarness {
             best = Some(pick_best(best, result));
         }
 
-        let best = best.ok_or_else(|| {
-            DevError::Config("benchmark requires at least 1 run".into())
-        })?;
+        let best =
+            best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
         self.record_result(config, &best)?;
         Ok(best)
@@ -168,11 +161,7 @@ impl BenchHarness {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
 
             let start = Instant::now();
-            let captured = output::run_captured(
-                &program.display().to_string(),
-                args,
-                cwd,
-            )?;
+            let captured = output::run_captured(&program.display().to_string(), args, cwd)?;
             let ms = elapsed_to_ms(&start.elapsed());
 
             captured.check_success(&program.display().to_string())?;
@@ -180,9 +169,8 @@ impl BenchHarness {
             best_ms = Some(pick_best_ms(best_ms, ms));
         }
 
-        let elapsed_ms = best_ms.ok_or_else(|| {
-            DevError::Config("benchmark requires at least 1 run".into())
-        })?;
+        let elapsed_ms =
+            best_ms.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
         let result = BenchResult {
             elapsed_ms,
@@ -195,11 +183,7 @@ impl BenchHarness {
     }
 
     /// Distribution timing: collect all N samples, compute min/p50/p95/max.
-    pub fn run_distribution<F>(
-        &self,
-        config: &BenchConfig,
-        f: F,
-    ) -> Result<BenchResult, DevError>
+    pub fn run_distribution<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
     where
         F: Fn(usize) -> Result<i64, DevError>,
     {
@@ -269,25 +253,22 @@ impl BenchHarness {
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
 
-            let captured = output::run_captured(
-                &program.display().to_string(),
-                args,
-                cwd,
-            )?;
+            let captured = output::run_captured(&program.display().to_string(), args, cwd)?;
 
             captured.check_success(&program.display().to_string())?;
 
             let result = parse_kv_stderr(&captured.stderr)?;
-            let is_new_best = best.as_ref().is_none_or(|b| result.elapsed_ms < b.elapsed_ms);
+            let is_new_best = best
+                .as_ref()
+                .is_none_or(|b| result.elapsed_ms < b.elapsed_ms);
             if is_new_best {
                 best_stderr = captured.stderr;
             }
             best = Some(pick_best(best, result));
         }
 
-        let best = best.ok_or_else(|| {
-            DevError::Config("benchmark requires at least 1 run".into())
-        })?;
+        let best =
+            best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
         Ok((best, best_stderr))
     }
@@ -340,7 +321,9 @@ impl BenchHarness {
             if pair.key == "peak_rss_kb" {
                 if let KvValue::Int(kb) = &pair.value {
                     #[allow(clippy::cast_precision_loss)]
-                    { peak_rss_mb = Some(*kb as f64 / 1024.0); }
+                    {
+                        peak_rss_mb = Some(*kb as f64 / 1024.0);
+                    }
                 }
                 continue; // promoted to column, don't duplicate in run_kv
             }
@@ -363,7 +346,10 @@ impl BenchHarness {
             input_file: config.input_file.clone(),
             input_mb: config.input_mb,
             peak_rss_mb,
-            cargo_features: config.cargo_features.clone().or_else(|| self.cargo_features.clone()),
+            cargo_features: config
+                .cargo_features
+                .clone()
+                .or_else(|| self.cargo_features.clone()),
             cargo_profile: config.cargo_profile.clone(),
             elapsed_ms: result.elapsed_ms,
             kernel: Some(self.env.kernel.clone()),
@@ -384,11 +370,7 @@ impl BenchHarness {
 // ---------------------------------------------------------------------------
 
 /// Build a result summary string with key=value pairs.
-fn format_result_line(
-    config: &BenchConfig,
-    result: &BenchResult,
-    git: &GitInfo,
-) -> String {
+fn format_result_line(config: &BenchConfig, result: &BenchResult, git: &GitInfo) -> String {
     let mut parts = Vec::with_capacity(8);
     parts.push(format!("command={}", config.command));
 
@@ -433,30 +415,24 @@ fn format_result_line(
 }
 
 /// Emit a `[result]` line (respects quiet mode).
-fn emit_result_lines(
-    config: &BenchConfig,
-    result: &BenchResult,
-    git: &GitInfo,
-) {
+fn emit_result_lines(config: &BenchConfig, result: &BenchResult, git: &GitInfo) {
     output::result_msg(&format_result_line(config, result, git));
 }
 
 /// Emit a `[result]` line unconditionally (ignores quiet mode).
 /// Used for dirty-tree results that can't be looked up later.
-fn force_emit_result_lines(
-    config: &BenchConfig,
-    result: &BenchResult,
-    git: &GitInfo,
-) {
+fn force_emit_result_lines(config: &BenchConfig, result: &BenchResult, git: &GitInfo) {
     println!("[result]  {}", format_result_line(config, result, git));
 }
 
 /// Look up an integer KV pair by key.
 fn find_kv_int(kv: &[KvPair], key: &str) -> Option<i64> {
-    kv.iter().find(|p| p.key == key).and_then(|p| match &p.value {
-        KvValue::Int(v) => Some(*v),
-        _ => None,
-    })
+    kv.iter()
+        .find(|p| p.key == key)
+        .and_then(|p| match &p.value {
+            KvValue::Int(v) => Some(*v),
+            _ => None,
+        })
 }
 
 /// Flatten key-value pairs into the result line.
@@ -523,12 +499,7 @@ pub fn run_hotpath_capture(
     ];
     env.extend_from_slice(extra_env);
 
-    let captured = output::run_captured_with_env(
-        binary,
-        args,
-        project_root,
-        &env,
-    )?;
+    let captured = output::run_captured_with_env(binary, args, project_root, &env)?;
 
     captured.check_success(binary)?;
 
@@ -545,18 +516,24 @@ pub fn run_hotpath_capture(
             }
         },
         Err(e) => {
-            output::error(&format!("failed to read hotpath report {}: {e}", json_file.display()));
+            output::error(&format!(
+                "failed to read hotpath report {}: {e}",
+                json_file.display()
+            ));
             None
         }
     };
     std::fs::remove_file(&json_file).ok();
 
-    Ok((BenchResult {
-        elapsed_ms: ms,
-        kv,
-        distribution: None,
-        hotpath,
-    }, stderr))
+    Ok((
+        BenchResult {
+            elapsed_ms: ms,
+            kv,
+            distribution: None,
+            hotpath,
+        },
+        stderr,
+    ))
 }
 
 /// Compute a percentile from a sorted slice using linear interpolation.
@@ -584,7 +561,9 @@ fn percentile(sorted: &[i64], pct: usize) -> i64 {
     #[allow(clippy::cast_precision_loss)]
     let result = sorted[lo] as f64 + frac * (sorted[hi] - sorted[lo]) as f64;
     #[allow(clippy::cast_possible_truncation)]
-    { result.round() as i64 }
+    {
+        result.round() as i64
+    }
 }
 
 /// Pick the `BenchResult` with the smaller `elapsed_ms`.
@@ -705,7 +684,11 @@ mod tests {
         // [100, 200]: p0=100, p50=150, p100=200
         let data = vec![100, 200];
         assert_eq!(percentile(&data, 0), 100);
-        assert_eq!(percentile(&data, 50), 150, "midpoint should interpolate to 150");
+        assert_eq!(
+            percentile(&data, 50),
+            150,
+            "midpoint should interpolate to 150"
+        );
         assert_eq!(percentile(&data, 100), 200);
         // p25 = 100 + 0.25*(200-100) = 125
         assert_eq!(percentile(&data, 25), 125);
@@ -717,7 +700,11 @@ mod tests {
     fn percentile_five_elements_at_boundaries() {
         let data = vec![10, 20, 30, 40, 50];
         assert_eq!(percentile(&data, 0), 10);
-        assert_eq!(percentile(&data, 25), 20, "p25 of [10,20,30,40,50] should be 20");
+        assert_eq!(
+            percentile(&data, 25),
+            20,
+            "p25 of [10,20,30,40,50] should be 20"
+        );
         assert_eq!(percentile(&data, 50), 30, "p50 should be median");
         assert_eq!(percentile(&data, 75), 40);
         assert_eq!(percentile(&data, 100), 50);
@@ -730,8 +717,14 @@ mod tests {
         // result = 100 + 0.9 * 900 = 910
         let data = vec![0, 100, 1000];
         let p95 = percentile(&data, 95);
-        assert_eq!(p95, 910, "linear interpolation should yield 910, not nearest-rank 1000");
-        assert!(p95 < 1000, "interpolated p95 must be less than max for non-degenerate data");
+        assert_eq!(
+            p95, 910,
+            "linear interpolation should yield 910, not nearest-rank 1000"
+        );
+        assert!(
+            p95 < 1000,
+            "interpolated p95 must be less than max for non-degenerate data"
+        );
     }
 
     #[test]
@@ -751,14 +744,20 @@ mod tests {
         let stderr = b"elapsed_ms=1234\n";
         let result = parse_kv_stderr(stderr).unwrap();
         assert_eq!(result.elapsed_ms, 1234);
-        assert!(result.kv.is_empty(), "no extra fields => kv should be empty");
+        assert!(
+            result.kv.is_empty(),
+            "no extra fields => kv should be empty"
+        );
     }
 
     #[test]
     fn parse_kv_stderr_total_ms_alias() {
         let stderr = b"total_ms=999\n";
         let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(result.elapsed_ms, 999, "total_ms should be accepted as elapsed_ms alias");
+        assert_eq!(
+            result.elapsed_ms, 999,
+            "total_ms should be accepted as elapsed_ms alias"
+        );
     }
 
     #[test]
@@ -766,7 +765,10 @@ mod tests {
         // Both present: last one wins (due to overwrite semantics)
         let stderr = b"total_ms=100\nelapsed_ms=200\n";
         let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(result.elapsed_ms, 200, "elapsed_ms should overwrite earlier total_ms");
+        assert_eq!(
+            result.elapsed_ms, 200,
+            "elapsed_ms should overwrite earlier total_ms"
+        );
 
         // Reverse order: total_ms overwrites elapsed_ms
         let stderr2 = b"elapsed_ms=200\ntotal_ms=100\n";
@@ -807,7 +809,10 @@ mod tests {
     fn parse_kv_stderr_mixed_garbage_lines() {
         let stderr = b"some random log output\nwarning: something\nelapsed_ms=777\nmore junk\n";
         let result = parse_kv_stderr(stderr).unwrap();
-        assert_eq!(result.elapsed_ms, 777, "should find elapsed_ms among garbage lines");
+        assert_eq!(
+            result.elapsed_ms, 777,
+            "should find elapsed_ms among garbage lines"
+        );
     }
 
     #[test]
@@ -816,7 +821,10 @@ mod tests {
         let stderr = b"elapsed_ms=100\ntag=\n";
         let result = parse_kv_stderr(stderr).unwrap();
         let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
-        assert!(matches!(&find("tag").value, KvValue::Text(s) if s.is_empty()), "empty value should become empty string");
+        assert!(
+            matches!(&find("tag").value, KvValue::Text(s) if s.is_empty()),
+            "empty value should become empty string"
+        );
     }
 
     #[test]
@@ -849,7 +857,10 @@ mod tests {
         let stderr = b"elapsed_ms=100\nweird=NaN\n";
         let result = parse_kv_stderr(stderr).unwrap();
         let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
-        assert!(matches!(&find("weird").value, KvValue::Text(s) if s == "NaN"), "NaN should fall through to string");
+        assert!(
+            matches!(&find("weird").value, KvValue::Text(s) if s == "NaN"),
+            "NaN should fall through to string"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -889,7 +900,11 @@ mod tests {
 
     #[test]
     fn maybe_quote_empty_string() {
-        assert_eq!(maybe_quote(""), "", "empty string has no spaces, should not be quoted");
+        assert_eq!(
+            maybe_quote(""),
+            "",
+            "empty string has no spaces, should not be quoted"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -898,23 +913,51 @@ mod tests {
 
     #[test]
     fn pick_best_none_vs_candidate() {
-        let candidate = BenchResult { elapsed_ms: 500, kv: vec![], distribution: None, hotpath: None };
+        let candidate = BenchResult {
+            elapsed_ms: 500,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        };
         let result = pick_best(None, candidate);
-        assert_eq!(result.elapsed_ms, 500, "None current should always take candidate");
+        assert_eq!(
+            result.elapsed_ms, 500,
+            "None current should always take candidate"
+        );
     }
 
     #[test]
     fn pick_best_keeps_better() {
-        let current = BenchResult { elapsed_ms: 100, kv: vec![], distribution: None, hotpath: None };
-        let candidate = BenchResult { elapsed_ms: 200, kv: vec![], distribution: None, hotpath: None };
+        let current = BenchResult {
+            elapsed_ms: 100,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        };
+        let candidate = BenchResult {
+            elapsed_ms: 200,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        };
         let result = pick_best(Some(current), candidate);
         assert_eq!(result.elapsed_ms, 100, "should keep the lower value");
     }
 
     #[test]
     fn pick_best_replaces_with_better() {
-        let current = BenchResult { elapsed_ms: 300, kv: vec![], distribution: None, hotpath: None };
-        let candidate = BenchResult { elapsed_ms: 150, kv: vec![], distribution: None, hotpath: None };
+        let current = BenchResult {
+            elapsed_ms: 300,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        };
+        let candidate = BenchResult {
+            elapsed_ms: 150,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        };
         let result = pick_best(Some(current), candidate);
         assert_eq!(result.elapsed_ms, 150, "should replace with lower value");
     }

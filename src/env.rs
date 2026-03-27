@@ -34,11 +34,7 @@ pub enum DatasetStatus {
 }
 
 /// Collect all environment information.
-pub fn collect(
-    paths: &ResolvedPaths,
-    project: Project,
-    project_root: &Path,
-) -> EnvInfo {
+pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> EnvInfo {
     let (mem_total, mem_avail) = read_memory();
 
     EnvInfo {
@@ -103,8 +99,12 @@ fn print_datasets(info: &EnvInfo) {
 fn format_dataset(name: &str, status: &DatasetStatus) -> String {
     match status {
         DatasetStatus::Verified => format!("{name} \u{2713}"),
-        DatasetStatus::Present(hash) => format!("{name} \u{2713} (no hash configured, actual: {hash})"),
-        DatasetStatus::HashMismatch(hash) => format!("{name} \u{2717} (hash mismatch, actual: {hash})"),
+        DatasetStatus::Present(hash) => {
+            format!("{name} \u{2713} (no hash configured, actual: {hash})")
+        }
+        DatasetStatus::HashMismatch(hash) => {
+            format!("{name} \u{2717} (hash mismatch, actual: {hash})")
+        }
         DatasetStatus::Missing => format!("{name} \u{2717} (missing)"),
         DatasetStatus::NoFiles => format!("{name} (no files configured)"),
     }
@@ -257,16 +257,23 @@ fn push_drive(out: &mut Vec<(String, String)>, label: &str, value: Option<&str>)
 // ---------------------------------------------------------------------------
 
 fn collect_tools(project: Project) -> Vec<(String, String)> {
-    let mut tools = vec![
-        ("cargo".to_owned(), read_tool_version("cargo", &["--version"])),
-    ];
+    let mut tools = vec![(
+        "cargo".to_owned(),
+        read_tool_version("cargo", &["--version"]),
+    )];
 
     match project {
         Project::Pbfhogg => {
-            tools.push(("osmium".to_owned(), read_tool_version("osmium", &["--version"])));
+            tools.push((
+                "osmium".to_owned(),
+                read_tool_version("osmium", &["--version"]),
+            ));
         }
         Project::Elivagar => {
-            tools.push(("samply".to_owned(), read_tool_version("samply", &["--version"])));
+            tools.push((
+                "samply".to_owned(),
+                read_tool_version("samply", &["--version"]),
+            ));
         }
         Project::Nidhogg => {
             tools.push(("curl".to_owned(), read_tool_version("curl", &["--version"])));
@@ -339,7 +346,14 @@ fn check_datasets(
     for (name, ds) in datasets {
         check_file_entries(&mut out, name, &ds.pbf, "", data_dir, project_root);
         check_file_entries(&mut out, name, &ds.osc, "osc.", data_dir, project_root);
-        check_file_entries(&mut out, name, &ds.pmtiles, "pmtiles.", data_dir, project_root);
+        check_file_entries(
+            &mut out,
+            name,
+            &ds.pmtiles,
+            "pmtiles.",
+            data_dir,
+            project_root,
+        );
 
         if ds.pbf.is_empty() && ds.osc.is_empty() && ds.pmtiles.is_empty() {
             out.push((name.clone(), DatasetStatus::NoFiles));

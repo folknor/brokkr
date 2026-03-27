@@ -1,10 +1,10 @@
 //! Comparison queries for the results database.
 
-use crate::error::DevError;
-use super::ResultsDb;
-use super::schema::SELECT_COLS;
-use super::query::{query_commit_filtered, load_children};
 use super::CompareResult;
+use super::ResultsDb;
+use super::query::{load_children, query_commit_filtered};
+use super::schema::SELECT_COLS;
+use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -70,8 +70,10 @@ impl ResultsDb {
         }
         sql.push_str(" GROUP BY [commit] ORDER BY MAX(id) DESC LIMIT 2");
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
         let mut stmt = self.conn.prepare(&sql)?;
         let commits: Vec<String> = stmt
             .query_map(param_refs.as_slice(), |row| row.get(0))?
@@ -83,7 +85,12 @@ impl ResultsDb {
         }
 
         let (rows_a, rows_b) = self.query_compare(&commits[1], &commits[0], command, variant)?;
-        Ok(Some((commits[1].clone(), rows_a, commits[0].clone(), rows_b)))
+        Ok(Some((
+            commits[1].clone(),
+            rows_a,
+            commits[0].clone(),
+            rows_b,
+        )))
     }
 }
 
@@ -137,7 +144,8 @@ mod tests {
             std::fs::create_dir_all(parent).expect("mkdir");
         }
         let db = ResultsDb::open(&db_path).expect("open");
-        db.insert(&make_row("aaaa1111", "bench read", "sequential")).expect("insert");
+        db.insert(&make_row("aaaa1111", "bench read", "sequential"))
+            .expect("insert");
 
         let result = db.query_compare_last(None, None).expect("query");
         assert!(result.is_none());
@@ -154,9 +162,12 @@ mod tests {
         }
         let db = ResultsDb::open(&db_path).expect("open");
 
-        db.insert(&make_row("aaaa1111", "bench read", "sequential")).expect("insert");
-        db.insert(&make_row("bbbb2222", "bench read", "sequential")).expect("insert");
-        db.insert(&make_row("cccc3333", "bench write", "sync-zlib")).expect("insert");
+        db.insert(&make_row("aaaa1111", "bench read", "sequential"))
+            .expect("insert");
+        db.insert(&make_row("bbbb2222", "bench read", "sequential"))
+            .expect("insert");
+        db.insert(&make_row("cccc3333", "bench write", "sync-zlib"))
+            .expect("insert");
 
         let compared = db
             .query_compare_last(Some("bench read"), None)

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::cli::VerifyCommand;
 use crate::config;
-use crate::context::{bootstrap, bootstrap_config, BenchContext, HarnessContext};
+use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::output;
 use crate::preflight;
@@ -13,26 +13,58 @@ use crate::resolve::{
 };
 use crate::tools;
 
-pub(crate) fn bench_read(
-    req: &BenchRequest,
-    modes_str: &str,
-) -> Result<(), DevError> {
+pub(crate) fn bench_read(req: &BenchRequest, modes_str: &str) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench read", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let ctx = BenchContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        Some("pbfhogg-cli"),
+        &feat_refs,
+        true,
+        "bench read",
+        req.force,
+    )?;
+    let (pbf_path, file_mb) =
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
-    super::bench_read::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &modes, req.project_root)
+    super::bench_read::run(
+        &ctx.harness,
+        &ctx.binary,
+        &pbf_path,
+        file_mb,
+        req.runs,
+        &modes,
+        req.project_root,
+    )
 }
 
-pub(crate) fn bench_write(
-    req: &BenchRequest,
-    compression_str: &str,
-) -> Result<(), DevError> {
+pub(crate) fn bench_write(req: &BenchRequest, compression_str: &str) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &feat_refs, true, "bench write", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let ctx = BenchContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        Some("pbfhogg-cli"),
+        &feat_refs,
+        true,
+        "bench write",
+        req.force,
+    )?;
+    let (pbf_path, file_mb) =
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, true)?;
-    super::bench_write::run(&ctx.harness, &ctx.binary, &pbf_path, file_mb, req.runs, &compressions, req.project_root)
+    super::bench_write::run(
+        &ctx.harness,
+        &ctx.binary,
+        &pbf_path,
+        file_mb,
+        req.runs,
+        &compressions,
+        req.project_root,
+    )
 }
 
 pub(crate) fn bench_merge(
@@ -49,8 +81,19 @@ pub(crate) fn bench_merge(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = BenchContext::new(req.dev_config, req.project, req.project_root, req.build_root, Some("pbfhogg-cli"), &all_features, true, "bench merge", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let ctx = BenchContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        Some("pbfhogg-cli"),
+        &all_features,
+        true,
+        "bench merge",
+        req.force,
+    )?;
+    let (pbf_path, file_mb) =
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let osc_path = match osc_seq {
         Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root)?,
         None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
@@ -70,52 +113,108 @@ pub(crate) fn bench_merge(
     )
 }
 
-pub(crate) fn bench_all(
-    req: &BenchRequest,
-) -> Result<(), DevError> {
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "bench all", req.force)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+pub(crate) fn bench_all(req: &BenchRequest) -> Result<(), DevError> {
+    let ctx = HarnessContext::new(
+        req.dev_config,
+        req.project,
+        req.project_root,
+        req.build_root,
+        "bench all",
+        req.force,
+    )?;
+    let (pbf_path, file_mb) =
+        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let effective = req.build_root.unwrap_or(req.project_root);
-    super::bench_all::run(&ctx.harness, &ctx.paths, effective, &pbf_path, file_mb, req.runs, req.dataset)
+    super::bench_all::run(
+        &ctx.harness,
+        &ctx.paths,
+        effective,
+        &pbf_path,
+        file_mb,
+        req.runs,
+        req.dataset,
+    )
 }
 
-pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand, features: &[String]) -> Result<(), DevError> {
+pub(crate) fn verify(
+    dev_config: &config::DevConfig,
+    _project: Project,
+    project_root: &Path,
+    build_root: Option<&Path>,
+    verify: VerifyCommand,
+    features: &[String],
+) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let harness = super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
+    let harness =
+        super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
 
     match verify {
-        VerifyCommand::Sort { dataset, variant, direct_io } => {
+        VerifyCommand::Sort {
+            dataset,
+            variant,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_sort::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::Cat { dataset, variant, direct_io } => {
+        VerifyCommand::Cat {
+            dataset,
+            variant,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_cat::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::Extract { dataset, variant, bbox, direct_io } => {
+        VerifyCommand::Extract {
+            dataset,
+            variant,
+            bbox,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let bbox = resolve_bbox(bbox.as_deref(), &dataset, &paths)?;
             super::verify_extract::run(&harness, &pbf_path, &bbox, direct_io)
         }
-        VerifyCommand::TagsFilter { dataset, variant, direct_io } => {
+        VerifyCommand::TagsFilter {
+            dataset,
+            variant,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_tags_filter::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::GetidRemoveid { dataset, variant, direct_io } => {
+        VerifyCommand::GetidRemoveid {
+            dataset,
+            variant,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_getid_removeid::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::AddLocationsToWays { dataset, variant, direct_io } => {
+        VerifyCommand::AddLocationsToWays {
+            dataset,
+            variant,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_add_locations::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::CheckRefs { dataset, variant, direct_io } => {
+        VerifyCommand::CheckRefs {
+            dataset,
+            variant,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             super::verify_check_refs::run(&harness, &pbf_path, direct_io)
         }
-        VerifyCommand::Merge { dataset, variant, osc_seq, direct_io } => {
+        VerifyCommand::Merge {
+            dataset,
+            variant,
+            osc_seq,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root)?,
@@ -130,7 +229,12 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
             };
             super::verify_merge::run(&harness, &pbf_path, &osc_path, osmosis.as_ref(), direct_io)
         }
-        VerifyCommand::DeriveChanges { dataset, variant, osc_seq, direct_io } => {
+        VerifyCommand::DeriveChanges {
+            dataset,
+            variant,
+            osc_seq,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root)?,
@@ -138,7 +242,11 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
             };
             super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, direct_io)
         }
-        VerifyCommand::Diff { dataset, variant, osc_seq } => {
+        VerifyCommand::Diff {
+            dataset,
+            variant,
+            osc_seq,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root)?,
@@ -146,7 +254,13 @@ pub(crate) fn verify(dev_config: &config::DevConfig, _project: Project, project_
             };
             super::verify_diff::run(&harness, &pbf_path, &osc_path)
         }
-        VerifyCommand::All { dataset, variant, osc_seq, bbox, direct_io } => {
+        VerifyCommand::All {
+            dataset,
+            variant,
+            osc_seq,
+            bbox,
+            direct_io,
+        } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
             let osc_path = match osc_seq.as_deref() {
                 Some(seq) => resolve::resolve_osc_path(&dataset, seq, &paths, project_root).ok(),
@@ -183,11 +297,5 @@ pub(crate) fn download(
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    super::download::run(
-        region,
-        osc_url,
-        &paths.data_dir,
-        project_root,
-    )
+    super::download::run(region, osc_url, &paths.data_dir, project_root)
 }
-

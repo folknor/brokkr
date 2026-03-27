@@ -47,58 +47,226 @@ const NEEDS_OSC: &[&str] = &["tags-filter-osc", "merge-changes", "apply-changes"
 const OSC_OUTPUT: &[&str] = &["tags-filter-osc", "merge-changes", "diff-osc"];
 
 /// Commands that produce no output file (no `-o` flag). Everything else writes to scratch.
-const NO_OUTPUT_FILE: &[&str] = &["inspect", "inspect-nodes", "inspect-tags", "inspect-tags-way", "check-refs", "check-ids", "diff"];
+const NO_OUTPUT_FILE: &[&str] = &[
+    "inspect",
+    "inspect-nodes",
+    "inspect-tags",
+    "inspect-tags-way",
+    "check-refs",
+    "check-ids",
+    "diff",
+];
 
-fn command_args(name: &str, pbf: &str, merged_pbf: Option<&str>, osc: Option<&str>, output: &str, index_type: Option<&str>) -> Result<Vec<String>, DevError> {
+fn command_args(
+    name: &str,
+    pbf: &str,
+    merged_pbf: Option<&str>,
+    osc: Option<&str>,
+    output: &str,
+    index_type: Option<&str>,
+) -> Result<Vec<String>, DevError> {
     let args = match name {
         "inspect" => vec!["inspect".into(), pbf.into()],
         "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
-        "inspect-tags" => vec!["inspect".into(), "tags".into(), pbf.into(), "--min-count".into(), "999999999".into()],
-        "inspect-tags-way" => vec!["inspect".into(), "tags".into(), pbf.into(), "--type".into(), "way".into(), "--min-count".into(), "999999999".into()],
+        "inspect-tags" => vec![
+            "inspect".into(),
+            "tags".into(),
+            pbf.into(),
+            "--min-count".into(),
+            "999999999".into(),
+        ],
+        "inspect-tags-way" => vec![
+            "inspect".into(),
+            "tags".into(),
+            pbf.into(),
+            "--type".into(),
+            "way".into(),
+            "--min-count".into(),
+            "999999999".into(),
+        ],
         "check-refs" => vec!["check".into(), "--refs".into(), pbf.into()],
         "check-ids" => vec!["check".into(), "--ids".into(), pbf.into()],
         "sort" => vec!["sort".into(), pbf.into(), "-o".into(), output.into()],
-        "cat-way" => vec!["cat".into(), pbf.into(), "--type".into(), "way".into(), "-o".into(), output.into()],
-        "cat-relation" => vec!["cat".into(), pbf.into(), "--type".into(), "relation".into(), "-o".into(), output.into()],
-        "cat-dedupe" => vec!["cat".into(), "--dedupe".into(), pbf.into(), pbf.into(), "-o".into(), output.into()],
-        "tags-filter-way" => vec!["tags-filter".into(), pbf.into(), "-R".into(), "w/highway=primary".into(), "-o".into(), output.into()],
-        "tags-filter-amenity" => vec!["tags-filter".into(), pbf.into(), "-R".into(), "amenity=restaurant".into(), "-o".into(), output.into()],
-        "tags-filter-twopass" => vec!["tags-filter".into(), pbf.into(), "highway=primary".into(), "-o".into(), output.into()],
+        "cat-way" => vec![
+            "cat".into(),
+            pbf.into(),
+            "--type".into(),
+            "way".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "cat-relation" => vec![
+            "cat".into(),
+            pbf.into(),
+            "--type".into(),
+            "relation".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "cat-dedupe" => vec![
+            "cat".into(),
+            "--dedupe".into(),
+            pbf.into(),
+            pbf.into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "tags-filter-way" => vec![
+            "tags-filter".into(),
+            pbf.into(),
+            "-R".into(),
+            "w/highway=primary".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "tags-filter-amenity" => vec![
+            "tags-filter".into(),
+            pbf.into(),
+            "-R".into(),
+            "amenity=restaurant".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "tags-filter-twopass" => vec![
+            "tags-filter".into(),
+            pbf.into(),
+            "highway=primary".into(),
+            "-o".into(),
+            output.into(),
+        ],
         "tags-filter-osc" => {
-            let o = osc.ok_or_else(|| DevError::Config("tags-filter-osc requires an OSC file".into()))?;
-            vec!["tags-filter".into(), "--input-kind".into(), "osc".into(), o.into(), "highway=primary".into(), "-o".into(), output.into()]
+            let o =
+                osc.ok_or_else(|| DevError::Config("tags-filter-osc requires an OSC file".into()))?;
+            vec![
+                "tags-filter".into(),
+                "--input-kind".into(),
+                "osc".into(),
+                o.into(),
+                "highway=primary".into(),
+                "-o".into(),
+                output.into(),
+            ]
         }
-        "getid" => vec!["getid".into(), pbf.into(), "n115722".into(), "n115723".into(), "n115724".into(), "w2080".into(), "w2081".into(), "w2082".into(), "r174".into(), "r213".into(), "r339".into(), "-o".into(), output.into()],
-        "getparents" => vec!["getparents".into(), pbf.into(), "n115722".into(), "n115723".into(), "w2080".into(), "-o".into(), output.into()],
-        "getid-invert" => vec!["getid".into(), "--invert".into(), pbf.into(), "n115722".into(), "n115723".into(), "n115724".into(), "w2080".into(), "w2081".into(), "w2082".into(), "r174".into(), "r213".into(), "r339".into(), "-o".into(), output.into()],
+        "getid" => vec![
+            "getid".into(),
+            pbf.into(),
+            "n115722".into(),
+            "n115723".into(),
+            "n115724".into(),
+            "w2080".into(),
+            "w2081".into(),
+            "w2082".into(),
+            "r174".into(),
+            "r213".into(),
+            "r339".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "getparents" => vec![
+            "getparents".into(),
+            pbf.into(),
+            "n115722".into(),
+            "n115723".into(),
+            "w2080".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "getid-invert" => vec![
+            "getid".into(),
+            "--invert".into(),
+            pbf.into(),
+            "n115722".into(),
+            "n115723".into(),
+            "n115724".into(),
+            "w2080".into(),
+            "w2081".into(),
+            "w2082".into(),
+            "r174".into(),
+            "r213".into(),
+            "r339".into(),
+            "-o".into(),
+            output.into(),
+        ],
         "renumber" => vec!["renumber".into(), pbf.into(), "-o".into(), output.into()],
         "merge-changes" => {
-            let o = osc.ok_or_else(|| DevError::Config("merge-changes requires an OSC file".into()))?;
+            let o =
+                osc.ok_or_else(|| DevError::Config("merge-changes requires an OSC file".into()))?;
             vec!["merge-changes".into(), o.into(), "-o".into(), output.into()]
         }
         "apply-changes" => {
-            let o = osc.ok_or_else(|| DevError::Config("apply-changes requires an OSC file".into()))?;
-            vec!["apply-changes".into(), pbf.into(), o.into(), "-o".into(), output.into()]
+            let o =
+                osc.ok_or_else(|| DevError::Config("apply-changes requires an OSC file".into()))?;
+            vec![
+                "apply-changes".into(),
+                pbf.into(),
+                o.into(),
+                "-o".into(),
+                output.into(),
+            ]
         }
         "add-locations-to-ways" => {
-            let mut args = vec!["add-locations-to-ways".into(), pbf.into(), "-o".into(), output.into()];
+            let mut args = vec![
+                "add-locations-to-ways".into(),
+                pbf.into(),
+                "-o".into(),
+                output.into(),
+            ];
             if let Some(it) = index_type {
                 args.push("--index-type".into());
                 args.push(it.into());
             }
             args
         }
-        "extract-simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), output.into()],
-        "extract-complete" => vec!["extract".into(), pbf.into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), output.into()],
-        "extract-smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), "12.4,55.6,12.7,55.8".into(), "-o".into(), output.into()],
-        "time-filter" => vec!["time-filter".into(), pbf.into(), "2024-01-01T00:00:00Z".into(), "-o".into(), output.into()],
+        "extract-simple" => vec![
+            "extract".into(),
+            pbf.into(),
+            "--simple".into(),
+            "-b".into(),
+            "12.4,55.6,12.7,55.8".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "extract-complete" => vec![
+            "extract".into(),
+            pbf.into(),
+            "-b".into(),
+            "12.4,55.6,12.7,55.8".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "extract-smart" => vec![
+            "extract".into(),
+            pbf.into(),
+            "--smart".into(),
+            "-b".into(),
+            "12.4,55.6,12.7,55.8".into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "time-filter" => vec![
+            "time-filter".into(),
+            pbf.into(),
+            "2024-01-01T00:00:00Z".into(),
+            "-o".into(),
+            output.into(),
+        ],
         "diff" => {
-            let m = merged_pbf.ok_or_else(|| DevError::Config("diff requires merged PBF".into()))?;
+            let m =
+                merged_pbf.ok_or_else(|| DevError::Config("diff requires merged PBF".into()))?;
             vec!["diff".into(), pbf.into(), m.into(), "-c".into()]
         }
         "diff-osc" => {
-            let m = merged_pbf.ok_or_else(|| DevError::Config("diff-osc requires merged PBF".into()))?;
-            vec!["diff".into(), "--format".into(), "osc".into(), pbf.into(), m.into(), "-o".into(), output.into()]
+            let m = merged_pbf
+                .ok_or_else(|| DevError::Config("diff-osc requires merged PBF".into()))?;
+            vec![
+                "diff".into(),
+                "--format".into(),
+                "osc".into(),
+                pbf.into(),
+                m.into(),
+                "-o".into(),
+                output.into(),
+            ]
         }
         _ => unreachable!("unknown command: {name}"),
     };
@@ -136,14 +304,19 @@ fn ensure_merged_pbf(
         return Ok(merged_path);
     }
 
-    std::fs::create_dir_all(scratch_dir).map_err(|e| {
-        DevError::Config(format!("failed to create scratch dir: {e}"))
-    })?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     output::bench_msg(&format!("generating merged PBF: {merged_name}"));
-    let pbf_str = pbf_path.to_str().ok_or_else(|| DevError::Config("PBF path not UTF-8".into()))?;
-    let osc_str = osc_path.to_str().ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?;
-    let merged_str = merged_path.to_str().ok_or_else(|| DevError::Config("merged path not UTF-8".into()))?;
+    let pbf_str = pbf_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("PBF path not UTF-8".into()))?;
+    let osc_str = osc_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?;
+    let merged_str = merged_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("merged path not UTF-8".into()))?;
     let binary_str = binary.display().to_string();
 
     let captured = output::run_captured(
@@ -177,7 +350,11 @@ pub fn run(
         let osc = osc_path.ok_or_else(|| {
             DevError::Config("tags-filter-osc/merge-changes/apply-changes require an OSC file (dataset must have osc configured)".into())
         })?;
-        Some(osc.to_str().ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?.to_owned())
+        Some(
+            osc.to_str()
+                .ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?
+                .to_owned(),
+        )
     } else {
         None
     };
@@ -185,12 +362,19 @@ pub fn run(
     // Generate merged PBF if any requested command needs it.
     let merged_pbf = if needs_merged_pbf(commands) {
         let osc = osc_path.ok_or_else(|| {
-            DevError::Config("diff/diff-osc require an OSC file (dataset must have osc configured)".into())
+            DevError::Config(
+                "diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
+            )
         })?;
-        let scratch = scratch_dir.ok_or_else(|| {
-            DevError::Config("diff/diff-osc require a scratch directory".into())
-        })?;
-        Some(ensure_merged_pbf(binary, pbf_path, osc, scratch, project_root)?)
+        let scratch = scratch_dir
+            .ok_or_else(|| DevError::Config("diff/diff-osc require a scratch directory".into()))?;
+        Some(ensure_merged_pbf(
+            binary,
+            pbf_path,
+            osc,
+            scratch,
+            project_root,
+        )?)
     } else {
         None
     };
@@ -198,12 +382,9 @@ pub fn run(
 
     // Ensure scratch dir exists for commands that write output files.
     let has_output_commands = commands.iter().any(|c| !NO_OUTPUT_FILE.contains(c));
-    if has_output_commands
-        && let Some(sd) = scratch_dir
-    {
-        std::fs::create_dir_all(sd).map_err(|e| {
-            DevError::Config(format!("failed to create scratch dir: {e}"))
-        })?;
+    if has_output_commands && let Some(sd) = scratch_dir {
+        std::fs::create_dir_all(sd)
+            .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
     }
 
     for &name in commands {
@@ -211,7 +392,11 @@ pub fn run(
 
         // Commands that produce output files write to scratch; others have no -o flag.
         let scratch_output_path = if !NO_OUTPUT_FILE.contains(&name) {
-            let ext = if OSC_OUTPUT.contains(&name) { "osc.gz" } else { "osm.pbf" };
+            let ext = if OSC_OUTPUT.contains(&name) {
+                "osc.gz"
+            } else {
+                "osm.pbf"
+            };
             scratch_dir.map(|sd| sd.join(format!("bench-{name}-output.{ext}")))
         } else {
             None
@@ -219,12 +404,21 @@ pub fn run(
         let output_str = match scratch_output_path.as_ref().and_then(|p| p.to_str()) {
             Some(s) => s.to_owned(),
             None if NO_OUTPUT_FILE.contains(&name) => String::new(), // unused
-            None => return Err(DevError::Config(format!(
-                "command '{name}' produces output but no scratch directory is configured"
-            ))),
+            None => {
+                return Err(DevError::Config(format!(
+                    "command '{name}' produces output but no scratch directory is configured"
+                )));
+            }
         };
 
-        let args = command_args(name, pbf_str, merged_str, osc_str.as_deref(), &output_str, index_type)?;
+        let args = command_args(
+            name,
+            pbf_str,
+            merged_str,
+            osc_str.as_deref(),
+            &output_str,
+            index_type,
+        )?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
@@ -235,7 +429,10 @@ pub fn run(
             cargo_features: None,
             cargo_profile: "release".into(),
             runs,
-            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &args_refs,
+            )),
             metadata: match index_type {
                 Some(it) => vec![KvPair::text("meta.index_type", it)],
                 None => vec![],
@@ -252,4 +449,3 @@ pub fn run(
 
     Ok(())
 }
-

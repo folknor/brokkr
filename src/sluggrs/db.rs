@@ -191,7 +191,10 @@ impl SnapshotDb {
         Ok(())
     }
 
-    pub fn latest_result_for_snapshot(&self, snapshot_id: &str) -> Result<Option<ResultRow>, DevError> {
+    pub fn latest_result_for_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT r.run_id, r.snapshot_id, r.pixel_diff_pct, r.status \
              FROM snapshot_results r \

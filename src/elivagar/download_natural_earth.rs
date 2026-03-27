@@ -27,21 +27,69 @@ struct NaturalEarthLayer {
 
 const LAYERS: &[NaturalEarthLayer] = &[
     // Ocean
-    NaturalEarthLayer { name: "ne_110m_ocean", category: "physical", scale: "110m" },
-    NaturalEarthLayer { name: "ne_50m_ocean", category: "physical", scale: "50m" },
-    NaturalEarthLayer { name: "ne_10m_ocean", category: "physical", scale: "10m" },
+    NaturalEarthLayer {
+        name: "ne_110m_ocean",
+        category: "physical",
+        scale: "110m",
+    },
+    NaturalEarthLayer {
+        name: "ne_50m_ocean",
+        category: "physical",
+        scale: "50m",
+    },
+    NaturalEarthLayer {
+        name: "ne_10m_ocean",
+        category: "physical",
+        scale: "10m",
+    },
     // Lakes
-    NaturalEarthLayer { name: "ne_110m_lakes", category: "physical", scale: "110m" },
-    NaturalEarthLayer { name: "ne_50m_lakes", category: "physical", scale: "50m" },
-    NaturalEarthLayer { name: "ne_10m_lakes", category: "physical", scale: "10m" },
+    NaturalEarthLayer {
+        name: "ne_110m_lakes",
+        category: "physical",
+        scale: "110m",
+    },
+    NaturalEarthLayer {
+        name: "ne_50m_lakes",
+        category: "physical",
+        scale: "50m",
+    },
+    NaturalEarthLayer {
+        name: "ne_10m_lakes",
+        category: "physical",
+        scale: "10m",
+    },
     // Glaciated areas
-    NaturalEarthLayer { name: "ne_110m_glaciated_areas", category: "physical", scale: "110m" },
-    NaturalEarthLayer { name: "ne_50m_glaciated_areas", category: "physical", scale: "50m" },
-    NaturalEarthLayer { name: "ne_10m_glaciated_areas", category: "physical", scale: "10m" },
+    NaturalEarthLayer {
+        name: "ne_110m_glaciated_areas",
+        category: "physical",
+        scale: "110m",
+    },
+    NaturalEarthLayer {
+        name: "ne_50m_glaciated_areas",
+        category: "physical",
+        scale: "50m",
+    },
+    NaturalEarthLayer {
+        name: "ne_10m_glaciated_areas",
+        category: "physical",
+        scale: "10m",
+    },
     // Country boundaries
-    NaturalEarthLayer { name: "ne_110m_admin_0_boundary_lines_land", category: "cultural", scale: "110m" },
-    NaturalEarthLayer { name: "ne_50m_admin_0_boundary_lines_land", category: "cultural", scale: "50m" },
-    NaturalEarthLayer { name: "ne_10m_admin_0_boundary_lines_land", category: "cultural", scale: "10m" },
+    NaturalEarthLayer {
+        name: "ne_110m_admin_0_boundary_lines_land",
+        category: "cultural",
+        scale: "110m",
+    },
+    NaturalEarthLayer {
+        name: "ne_50m_admin_0_boundary_lines_land",
+        category: "cultural",
+        scale: "50m",
+    },
+    NaturalEarthLayer {
+        name: "ne_10m_admin_0_boundary_lines_land",
+        category: "cultural",
+        scale: "10m",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -80,11 +128,8 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
         let ne_str = ne_dir.display().to_string();
         let zip_str = zip_path.display().to_string();
 
-        let captured = output::run_captured(
-            "unzip",
-            &["-o", "-j", &zip_str, "-d", &ne_str],
-            &ne_dir,
-        )?;
+        let captured =
+            output::run_captured("unzip", &["-o", "-j", &zip_str, "-d", &ne_str], &ne_dir)?;
 
         captured.check_success("unzip")?;
 

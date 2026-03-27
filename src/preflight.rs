@@ -12,20 +12,11 @@ use crate::error::DevError;
 #[allow(dead_code)]
 pub enum Check {
     /// Binary must exist in PATH.
-    Binary {
-        name: String,
-        help: String,
-    },
+    Binary { name: String, help: String },
     /// File must exist at path.
-    File {
-        path: PathBuf,
-        description: String,
-    },
+    File { path: PathBuf, description: String },
     /// Minimum free disk space in bytes.
-    DiskSpace {
-        path: PathBuf,
-        min_bytes: u64,
-    },
+    DiskSpace { path: PathBuf, min_bytes: u64 },
     /// Read a /proc or /sys file and check it contains expected value.
     KernelParam {
         path: &'static str,
@@ -118,10 +109,7 @@ fn check_disk_space(path: &Path, min_bytes: u64) -> Option<String> {
             avail / (1024 * 1024),
             min_bytes / (1024 * 1024),
         )),
-        None => Some(format!(
-            "could not check disk space at {}",
-            path.display()
-        )),
+        None => Some(format!("could not check disk space at {}", path.display())),
     }
 }
 
@@ -173,11 +161,17 @@ fn check_kernel_param_at_most(path: &str, max_value: i32, description: &str) -> 
     if value <= max_value {
         None
     } else {
-        Some(format!("{description}: {path} is {value}, need <= {max_value}"))
+        Some(format!(
+            "{description}: {path} is {value}, need <= {max_value}"
+        ))
     }
 }
 
-fn check_rlimit(resource: libc::__rlimit_resource_t, min_bytes: u64, description: &str) -> Option<String> {
+fn check_rlimit(
+    resource: libc::__rlimit_resource_t,
+    min_bytes: u64,
+    description: &str,
+) -> Option<String> {
     let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::getrlimit(resource, &mut rlim) };
     if ret != 0 {
@@ -188,10 +182,11 @@ fn check_rlimit(resource: libc::__rlimit_resource_t, min_bytes: u64, description
     } else {
         let cur_mb = rlim.rlim_cur / (1024 * 1024);
         let min_mb = min_bytes / (1024 * 1024);
-        Some(format!("{description}: current {cur_mb} MB, need >= {min_mb} MB"))
+        Some(format!(
+            "{description}: current {cur_mb} MB, need >= {min_mb} MB"
+        ))
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Convenience check sets
@@ -345,11 +340,7 @@ fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex
     let mut lines: Vec<String> = std::fs::read_to_string(cache_path)
         .unwrap_or_default()
         .lines()
-        .filter(|line| {
-            line.split('\t')
-                .next()
-                .is_none_or(|p| p != path_str)
-        })
+        .filter(|line| line.split('\t').next().is_none_or(|p| p != path_str))
         .map(String::from)
         .collect();
 

@@ -44,7 +44,10 @@ pub fn run(
             cargo_features: features_label,
             cargo_profile: "release".into(),
             runs,
-            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args)),
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &args,
+            )),
             metadata: vec![],
         };
 

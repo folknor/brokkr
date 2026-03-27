@@ -39,9 +39,7 @@ pub fn run(port: u16, bbox: &str) -> Result<(), DevError> {
     let individual_results = run_individual_queries(port, &individual_queries)?;
 
     for (name, count, elapsed_ms) in &individual_results {
-        output::verify_msg(&format!(
-            "  {name}: {count} elements ({elapsed_ms} ms)"
-        ));
+        output::verify_msg(&format!("  {name}: {count} elements ({elapsed_ms} ms)"));
         if *count == 0 {
             output::error(&format!("{name}: returned 0 elements"));
             failures += 1;
@@ -70,9 +68,7 @@ pub fn run(port: u16, bbox: &str) -> Result<(), DevError> {
                 failures += 1;
             }
             None => {
-                output::error(&format!(
-                    "{ind_name}: missing from batch response"
-                ));
+                output::error(&format!("{ind_name}: missing from batch response"));
                 failures += 1;
             }
         }
@@ -144,7 +140,10 @@ fn report_batch_results(result: &BatchResult) -> Result<usize, DevError> {
 }
 
 /// Run individual queries and return (name, element_count, elapsed_ms).
-fn run_individual_queries(port: u16, queries: &[(String, String)]) -> Result<Vec<(String, usize, i64)>, DevError> {
+fn run_individual_queries(
+    port: u16,
+    queries: &[(String, String)],
+) -> Result<Vec<(String, usize, i64)>, DevError> {
     let url = super::client::query_url(port);
     let mut results = Vec::with_capacity(queries.len());
 
@@ -154,7 +153,7 @@ fn run_individual_queries(port: u16, queries: &[(String, String)]) -> Result<Vec
         let elapsed_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
         let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .map_err(|e| DevError::Verify(format!("invalid JSON from batch API: {e}")))?;
+            .map_err(|e| DevError::Verify(format!("invalid JSON from batch API: {e}")))?;
 
         let count = super::client::element_count(&parsed);
 

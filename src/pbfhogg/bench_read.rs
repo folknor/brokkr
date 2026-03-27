@@ -83,16 +83,14 @@ pub fn run(
             cargo_features: None,
             cargo_profile: "release".into(),
             runs,
-            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &bench_args,
+            )),
             metadata: vec![KvPair::text("meta.mode", mode.name())],
         };
 
-        harness.run_external_with_kv(
-            &config,
-            binary,
-            &bench_args,
-            project_root,
-        )?;
+        harness.run_external_with_kv(&config, binary, &bench_args, project_root)?;
     }
 
     Ok(())

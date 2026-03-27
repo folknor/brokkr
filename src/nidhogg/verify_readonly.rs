@@ -42,10 +42,7 @@ pub fn run(
     }
 
     // Make read-only.
-    output::verify_msg(&format!(
-        "making read-only: {}",
-        geocode_dir.display()
-    ));
+    output::verify_msg(&format!("making read-only: {}", geocode_dir.display()));
     set_permissions(&geocode_dir, false, project_root)?;
 
     // Run tests with cleanup guarantee.
@@ -121,9 +118,7 @@ fn run_tests(
         }
     }
 
-    output::verify_msg(&format!(
-        "readonly: {passed} passed, {failed} failed"
-    ));
+    output::verify_msg(&format!("readonly: {passed} passed, {failed} failed"));
 
     if failed > 0 {
         return Err(DevError::Config(format!(
@@ -174,11 +169,7 @@ fn run_query_check(port: u16, bbox: &str) -> Result<bool, DevError> {
 }
 
 /// Set permissions on a directory tree: writable (true) or read-only (false).
-fn set_permissions(
-    dir: &Path,
-    writable: bool,
-    project_root: &Path,
-) -> Result<(), DevError> {
+fn set_permissions(dir: &Path, writable: bool, project_root: &Path) -> Result<(), DevError> {
     let mode_arg = if writable { "u+w" } else { "u-w" };
     let dir_str = dir.display().to_string();
 

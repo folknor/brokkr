@@ -32,11 +32,7 @@ pub fn run(
         data_dir.display(),
     ));
 
-    let captured = output::run_captured(
-        binary_str,
-        &["ingest", pbf_str, data_str],
-        project_root,
-    )?;
+    let captured = output::run_captured(binary_str, &["ingest", pbf_str, data_str], project_root)?;
 
     // Show stderr (progress output).
     let stderr = String::from_utf8_lossy(&captured.stderr);

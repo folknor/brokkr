@@ -4,11 +4,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use super::verify::{self, VerifyHarness};
 use crate::error::DevError;
 use crate::output;
 use crate::output::verify_msg;
 use crate::tools::OsmosisTools;
-use super::verify::{self, VerifyHarness};
 
 /// Cross-validate `pbfhogg apply-changes` against osmium, osmosis, and osmconvert.
 pub fn run(
@@ -46,7 +46,14 @@ pub fn run(
     verify_msg("--- osmium apply-changes ---");
     let captured = harness.run_tool(
         "osmium",
-        &["apply-changes", &pbf_str, &osc_str, "-o", &osmium_out_str, "--overwrite"],
+        &[
+            "apply-changes",
+            &pbf_str,
+            &osc_str,
+            "-o",
+            &osmium_out_str,
+            "--overwrite",
+        ],
     )?;
     harness.check_exit(&captured, "osmium apply-changes")?;
 

@@ -197,9 +197,8 @@ pub struct ResolvedPaths {
 /// This is the **single code path** that reads and parses `brokkr.toml`.
 pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let path = project_root.join("brokkr.toml");
-    let text = std::fs::read_to_string(&path).map_err(|e| {
-        DevError::Config(format!("{}: {e}", path.display()))
-    })?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
 
     let root: toml::Value = text.parse()?;
 
@@ -210,9 +209,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let project_str = table
         .get("project")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            DevError::Config("brokkr.toml missing required 'project' field".into())
-        })?;
+        .ok_or_else(|| DevError::Config("brokkr.toml missing required 'project' field".into()))?;
 
     let project = match project_str {
         "pbfhogg" => Project::Pbfhogg,
@@ -229,7 +226,14 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
 
-    Ok((project, DevConfig { hosts, litehtml, sluggrs }))
+    Ok((
+        project,
+        DevConfig {
+            hosts,
+            litehtml,
+            sluggrs,
+        },
+    ))
 }
 
 /// Every top-level key that is a table and is not `project` is
@@ -247,9 +251,10 @@ fn parse_hosts(
                 "unknown key '{key}' in brokkr.toml"
             )));
         }
-        let hc: HostConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
-            DevError::Config(format!("{key}: {e}"))
-        })?;
+        let hc: HostConfig = value
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| DevError::Config(format!("{key}: {e}")))?;
         out.insert(key.clone(), hc);
     }
     Ok(out)
@@ -262,9 +267,10 @@ fn parse_litehtml(
     let Some(value) = table.get("litehtml") else {
         return Ok(None);
     };
-    let config: LitehtmlConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
-        DevError::Config(format!("litehtml: {e}"))
-    })?;
+    let config: LitehtmlConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("litehtml: {e}")))?;
     Ok(Some(config))
 }
 
@@ -275,9 +281,10 @@ fn parse_sluggrs(
     let Some(value) = table.get("sluggrs") else {
         return Ok(None);
     };
-    let config: SluggrsConfig = value.clone().try_into().map_err(|e: toml::de::Error| {
-        DevError::Config(format!("sluggrs: {e}"))
-    })?;
+    let config: SluggrsConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("sluggrs: {e}")))?;
     Ok(Some(config))
 }
 
@@ -317,8 +324,12 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
 
 /// Return the default cargo features configured for the current host.
 pub fn host_features(config: &DevConfig) -> Vec<String> {
-    let Ok(name) = hostname() else { return Vec::new() };
-    config.hosts.get(&name)
+    let Ok(name) = hostname() else {
+        return Vec::new();
+    };
+    config
+        .hosts
+        .get(&name)
         .map(|h| h.features.clone())
         .unwrap_or_default()
 }
@@ -360,9 +371,7 @@ pub fn resolve_paths(
 ) -> ResolvedPaths {
     let host = config.hosts.get(hostname);
 
-    let data_rel = host
-        .and_then(|h| h.data.as_deref())
-        .unwrap_or("data");
+    let data_rel = host.and_then(|h| h.data.as_deref()).unwrap_or("data");
 
     let scratch_rel = host
         .and_then(|h| h.scratch.as_deref())
@@ -378,13 +387,9 @@ pub fn resolve_paths(
 
     let drives = host.and_then(|h| h.drives.clone());
 
-    let features = host
-        .map(|h| h.features.clone())
-        .unwrap_or_default();
+    let features = host.map(|h| h.features.clone()).unwrap_or_default();
 
-    let datasets = host
-        .map(|h| h.datasets.clone())
-        .unwrap_or_default();
+    let datasets = host.map(|h| h.datasets.clone()).unwrap_or_default();
 
     ResolvedPaths {
         hostname: hostname.to_owned(),
@@ -413,13 +418,22 @@ mod tests {
     use super::*;
 
     fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {
-        DevConfig { hosts, litehtml: None, sluggrs: None }
+        DevConfig {
+            hosts,
+            litehtml: None,
+            sluggrs: None,
+        }
     }
 
     fn empty_dataset() -> Dataset {
         Dataset {
-            origin: None, download_date: None, bbox: None, data_dir: None,
-            pbf: HashMap::new(), osc: HashMap::new(), pmtiles: HashMap::new(),
+            origin: None,
+            download_date: None,
+            bbox: None,
+            data_dir: None,
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+            pmtiles: HashMap::new(),
         }
     }
 
@@ -430,20 +444,36 @@ mod tests {
     #[test]
     fn host_datasets_resolved() {
         let mut pbf = HashMap::new();
-        pbf.insert("indexed".into(), PbfEntry {
-            file: "dk-indexed.osm.pbf".into(), xxhash: None, seq: Some(4704),
-        });
+        pbf.insert(
+            "indexed".into(),
+            PbfEntry {
+                file: "dk-indexed.osm.pbf".into(),
+                xxhash: None,
+                seq: Some(4704),
+            },
+        );
         let mut host_ds = HashMap::new();
-        host_ds.insert("dk".into(), Dataset {
-            bbox: Some("1,2,3,4".into()),
-            pbf,
-            ..empty_dataset()
-        });
+        host_ds.insert(
+            "dk".into(),
+            Dataset {
+                bbox: Some("1,2,3,4".into()),
+                pbf,
+                ..empty_dataset()
+            },
+        );
         let mut hosts = HashMap::new();
-        hosts.insert("myhost".into(), HostConfig {
-            data: None, scratch: None, target: None, port: None,
-            drives: None, features: Vec::new(), datasets: host_ds,
-        });
+        hosts.insert(
+            "myhost".into(),
+            HostConfig {
+                data: None,
+                scratch: None,
+                target: None,
+                port: None,
+                drives: None,
+                features: Vec::new(),
+                datasets: host_ds,
+            },
+        );
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
@@ -461,46 +491,100 @@ mod tests {
     #[test]
     fn multiple_pbf_variants() {
         let mut pbf = HashMap::new();
-        pbf.insert("raw".into(), PbfEntry {
-            file: "dk-raw.osm.pbf".into(), xxhash: Some("aaa".into()), seq: Some(4704),
-        });
-        pbf.insert("indexed".into(), PbfEntry {
-            file: "dk-indexed.osm.pbf".into(), xxhash: Some("bbb".into()), seq: None,
-        });
-        pbf.insert("locations".into(), PbfEntry {
-            file: "dk-locations.osm.pbf".into(), xxhash: None, seq: None,
-        });
+        pbf.insert(
+            "raw".into(),
+            PbfEntry {
+                file: "dk-raw.osm.pbf".into(),
+                xxhash: Some("aaa".into()),
+                seq: Some(4704),
+            },
+        );
+        pbf.insert(
+            "indexed".into(),
+            PbfEntry {
+                file: "dk-indexed.osm.pbf".into(),
+                xxhash: Some("bbb".into()),
+                seq: None,
+            },
+        );
+        pbf.insert(
+            "locations".into(),
+            PbfEntry {
+                file: "dk-locations.osm.pbf".into(),
+                xxhash: None,
+                seq: None,
+            },
+        );
         let mut host_ds = HashMap::new();
-        host_ds.insert("dk".into(), Dataset { pbf, ..empty_dataset() });
+        host_ds.insert(
+            "dk".into(),
+            Dataset {
+                pbf,
+                ..empty_dataset()
+            },
+        );
         let mut hosts = HashMap::new();
-        hosts.insert("myhost".into(), HostConfig {
-            data: None, scratch: None, target: None, port: None,
-            drives: None, features: Vec::new(), datasets: host_ds,
-        });
+        hosts.insert(
+            "myhost".into(),
+            HostConfig {
+                data: None,
+                scratch: None,
+                target: None,
+                port: None,
+                drives: None,
+                features: Vec::new(),
+                datasets: host_ds,
+            },
+        );
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.len(), 3);
         assert_eq!(dk.pbf.get("raw").unwrap().xxhash.as_deref(), Some("aaa"));
-        assert_eq!(dk.pbf.get("indexed").unwrap().xxhash.as_deref(), Some("bbb"));
+        assert_eq!(
+            dk.pbf.get("indexed").unwrap().xxhash.as_deref(),
+            Some("bbb")
+        );
     }
 
     #[test]
     fn multiple_osc_entries() {
         let mut osc = HashMap::new();
-        osc.insert("4705".into(), OscEntry {
-            file: "dk-4705.osc.gz".into(), xxhash: Some("ccc".into()),
-        });
-        osc.insert("4706".into(), OscEntry {
-            file: "dk-4706.osc.gz".into(), xxhash: None,
-        });
+        osc.insert(
+            "4705".into(),
+            OscEntry {
+                file: "dk-4705.osc.gz".into(),
+                xxhash: Some("ccc".into()),
+            },
+        );
+        osc.insert(
+            "4706".into(),
+            OscEntry {
+                file: "dk-4706.osc.gz".into(),
+                xxhash: None,
+            },
+        );
         let mut host_ds = HashMap::new();
-        host_ds.insert("dk".into(), Dataset { osc, ..empty_dataset() });
+        host_ds.insert(
+            "dk".into(),
+            Dataset {
+                osc,
+                ..empty_dataset()
+            },
+        );
         let mut hosts = HashMap::new();
-        hosts.insert("myhost".into(), HostConfig {
-            data: None, scratch: None, target: None, port: None,
-            drives: None, features: Vec::new(), datasets: host_ds,
-        });
+        hosts.insert(
+            "myhost".into(),
+            HostConfig {
+                data: None,
+                scratch: None,
+                target: None,
+                port: None,
+                drives: None,
+                features: Vec::new(),
+                datasets: host_ds,
+            },
+        );
         let config = make_config(hosts);
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
@@ -545,7 +629,10 @@ sha256 = "ccc"
         assert_eq!(dk.bbox.as_deref(), Some("8.0,54.5,13.0,58.0"));
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
         assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
-        assert_eq!(dk.pbf.get("indexed").unwrap().xxhash.as_deref(), Some("bbb"));
+        assert_eq!(
+            dk.pbf.get("indexed").unwrap().xxhash.as_deref(),
+            Some("bbb")
+        );
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
     }
 
@@ -562,7 +649,10 @@ xxhash = "bbb"
         let root: toml::Value = toml_str.parse().unwrap();
         let table = root.as_table().unwrap();
         let result = parse_hosts(table);
-        assert!(result.is_err(), "should reject entry with both sha256 and xxhash");
+        assert!(
+            result.is_err(),
+            "should reject entry with both sha256 and xxhash"
+        );
     }
 
     #[test]
@@ -589,7 +679,13 @@ sha256 = "ddd"
         let host = hosts.get("myhost").unwrap();
         let dk = host.datasets.get("denmark").unwrap();
         assert_eq!(dk.pmtiles.len(), 1);
-        assert_eq!(dk.pmtiles.get("elivagar").unwrap().file, "denmark-elivagar.pmtiles");
-        assert_eq!(dk.pmtiles.get("elivagar").unwrap().xxhash.as_deref(), Some("ddd"));
+        assert_eq!(
+            dk.pmtiles.get("elivagar").unwrap().file,
+            "denmark-elivagar.pmtiles"
+        );
+        assert_eq!(
+            dk.pmtiles.get("elivagar").unwrap().xxhash.as_deref(),
+            Some("ddd")
+        );
     }
 }

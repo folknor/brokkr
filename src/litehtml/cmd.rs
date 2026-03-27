@@ -47,7 +47,8 @@ fn run_pipeline(
     let fixture_html = project_root.join(&fixture.path);
     if !fixture_html.exists() {
         return Err(DevError::Config(format!(
-            "fixture HTML not found: {}", fixture_html.display(),
+            "fixture HTML not found: {}",
+            fixture_html.display(),
         )));
     }
 
@@ -55,8 +56,7 @@ fn run_pipeline(
     let html_str = fixture_html.display().to_string();
     let output_dir_str = artifact_dir.display().to_string();
 
-    let mode = fixture.mode.as_deref()
-        .unwrap_or(&config.mode);
+    let mode = fixture.mode.as_deref().unwrap_or(&config.mode);
 
     let mut args = vec![&html_str as &str, "--output-dir", &output_dir_str];
     if mode == "ahem" {
@@ -70,7 +70,8 @@ fn run_pipeline(
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Verify(format!(
-            "pipeline failed for {}: {stderr}", fixture.id,
+            "pipeline failed for {}: {stderr}",
+            fixture.id,
         )));
     }
 
@@ -81,10 +82,7 @@ fn run_pipeline(
 // Per-fixture test
 // ---------------------------------------------------------------------------
 
-fn run_fixture(
-    ctx: &TestContext,
-    fixture: &LitehtmlFixture,
-) -> Result<FixtureOutcome, DevError> {
+fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOutcome, DevError> {
     let fixture_dir = ctx.project_root.join("fixtures").join(&fixture.id);
     std::fs::create_dir_all(&fixture_dir)?;
 
@@ -105,15 +103,27 @@ fn run_fixture(
 
     if !ref_png.exists() {
         ctx.db.insert_result(
-            ctx.run_id, &fixture.id, None, None, compare::Status::Error.as_str(),
+            ctx.run_id,
+            &fixture.id,
+            None,
+            None,
+            compare::Status::Error.as_str(),
         )?;
         return Ok(FixtureOutcome {
-            pixel_diff_pct: None, element_match_pct: None, status: compare::Status::Error,
+            pixel_diff_pct: None,
+            element_match_pct: None,
+            status: compare::Status::Error,
         });
     }
 
     // Run the pipeline to produce pipeline.png + pipeline.json.
-    run_pipeline(ctx.binary, fixture, ctx.config, ctx.project_root, &fixture_dir)?;
+    run_pipeline(
+        ctx.binary,
+        fixture,
+        ctx.config,
+        ctx.project_root,
+        &fixture_dir,
+    )?;
 
     let pipeline_png = fixture_dir.join("pipeline.png");
     let pipeline_json = fixture_dir.join("pipeline.json");
@@ -121,10 +131,16 @@ fn run_fixture(
 
     if !pipeline_png.exists() {
         ctx.db.insert_result(
-            ctx.run_id, &fixture.id, None, None, compare::Status::Error.as_str(),
+            ctx.run_id,
+            &fixture.id,
+            None,
+            None,
+            compare::Status::Error.as_str(),
         )?;
         return Ok(FixtureOutcome {
-            pixel_diff_pct: None, element_match_pct: None, status: compare::Status::Error,
+            pixel_diff_pct: None,
+            element_match_pct: None,
+            status: compare::Status::Error,
         });
     }
 
@@ -152,8 +168,12 @@ fn run_fixture(
                 _ => None,
             };
             let s = compare::determine_status(
-                px.diff_pct, elem_pct, pixel_threshold, element_threshold,
-                expected_fail, approved_pixel,
+                px.diff_pct,
+                elem_pct,
+                pixel_threshold,
+                element_threshold,
+                expected_fail,
+                approved_pixel,
             );
             (Some(px.diff_pct), elem_pct, s)
         }
@@ -161,10 +181,18 @@ fn run_fixture(
     };
 
     ctx.db.insert_result(
-        ctx.run_id, &fixture.id, pixel_diff_pct, element_match_pct, status.as_str(),
+        ctx.run_id,
+        &fixture.id,
+        pixel_diff_pct,
+        element_match_pct,
+        status.as_str(),
     )?;
 
-    Ok(FixtureOutcome { pixel_diff_pct, element_match_pct, status })
+    Ok(FixtureOutcome {
+        pixel_diff_pct,
+        element_match_pct,
+        status,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -180,16 +208,22 @@ fn format_pct(v: Option<f64>, decimals: usize) -> String {
 
 fn print_table_header() {
     output::litehtml_msg(&format!(
-        "  {:<25} {:<9} {:<11} {}", "Fixture", "Pixels", "Elements", "Status",
+        "  {:<25} {:<9} {:<11} {}",
+        "Fixture", "Pixels", "Elements", "Status",
     ));
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 }
 
-fn resolve_fixture<'a>(manifest: &'a LitehtmlConfig, id: &str) -> Result<&'a LitehtmlFixture, DevError> {
+fn resolve_fixture<'a>(
+    manifest: &'a LitehtmlConfig,
+    id: &str,
+) -> Result<&'a LitehtmlFixture, DevError> {
     if let Some(entry) = manifest.fixture_by_id(id) {
         return Ok(entry);
     }
-    let matches: Vec<_> = manifest.fixtures.iter()
+    let matches: Vec<_> = manifest
+        .fixtures
+        .iter()
         .filter(|f| f.id.starts_with(id))
         .collect();
     match matches.len() {
@@ -198,7 +232,8 @@ fn resolve_fixture<'a>(manifest: &'a LitehtmlConfig, id: &str) -> Result<&'a Lit
         _ => {
             let ids: Vec<&str> = matches.iter().map(|f| f.id.as_str()).collect();
             Err(DevError::Config(format!(
-                "ambiguous fixture prefix '{id}', matches: {}", ids.join(", "),
+                "ambiguous fixture prefix '{id}', matches: {}",
+                ids.join(", "),
             )))
         }
     }
@@ -221,7 +256,9 @@ fn resolve_fixtures<'a>(
     } else if let Some(id) = fixture_id {
         Ok(vec![resolve_fixture(manifest, id)?])
     } else {
-        Err(DevError::Config("specify a fixture ID, --suite, or --all".into()))
+        Err(DevError::Config(
+            "specify a fixture ID, --suite, or --all".into(),
+        ))
     }
 }
 
@@ -291,7 +328,8 @@ pub(crate) fn test(
         let px = format_pct(outcome.pixel_diff_pct, 1);
         let el = format_pct(outcome.element_match_pct, 0);
         output::litehtml_msg(&format!(
-            "  {:<25} {:<9} {:<11} {}", fixture.id, px, el, outcome.status,
+            "  {:<25} {:<9} {:<11} {}",
+            fixture.id, px, el, outcome.status,
         ));
 
         match outcome.status {
@@ -314,7 +352,9 @@ fn print_run_summary(counts: &[u32; 4]) -> Result<(), DevError> {
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 
     let labels = ["passed", "failed", "expected fail", "error"];
-    let parts: Vec<String> = counts.iter().zip(labels.iter())
+    let parts: Vec<String> = counts
+        .iter()
+        .zip(labels.iter())
         .filter(|&(&c, _)| c > 0)
         .map(|(&c, &l)| format!("{c} {l}"))
         .collect();
@@ -340,7 +380,8 @@ pub(crate) fn list(
     let db = open_db(project_root)?;
 
     output::litehtml_msg(&format!(
-        "  {:<25} {:<30} {:<10} {}", "ID", "Tags", "Expected", "Approved",
+        "  {:<25} {:<30} {:<10} {}",
+        "ID", "Tags", "Expected", "Approved",
     ));
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(75)));
 
@@ -351,7 +392,8 @@ pub(crate) fn list(
             None => "\u{2014}".into(),
         };
         output::litehtml_msg(&format!(
-            "  {:<25} {:<30} {:<10} {}", fixture.id, tags, fixture.expected, approved,
+            "  {:<25} {:<30} {:<10} {}",
+            fixture.id, tags, fixture.expected, approved,
         ));
     }
 
@@ -439,9 +481,11 @@ const absPath = path.resolve(htmlPath);
 
 fn write_capture_script(project_root: &Path) -> Result<PathBuf, DevError> {
     let script_path = project_root.join(".brokkr").join("capture.js");
-    std::fs::create_dir_all(script_path.parent().ok_or_else(|| {
-        DevError::Config("cannot determine .brokkr directory".into())
-    })?)?;
+    std::fs::create_dir_all(
+        script_path
+            .parent()
+            .ok_or_else(|| DevError::Config("cannot determine .brokkr directory".into()))?,
+    )?;
     std::fs::write(&script_path, CAPTURE_JS)?;
     Ok(script_path)
 }
@@ -474,7 +518,8 @@ fn capture_fixture(
     let fixture_html = project_root.join(&fixture.path);
     if !fixture_html.exists() {
         return Err(DevError::Config(format!(
-            "fixture HTML not found: {}", fixture_html.display(),
+            "fixture HTML not found: {}",
+            fixture_html.display(),
         )));
     }
 
@@ -498,7 +543,8 @@ fn capture_fixture(
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Verify(format!(
-            "Chrome capture failed for {}: {stderr}", fixture.id,
+            "Chrome capture failed for {}: {stderr}",
+            fixture.id,
         )));
     }
 
@@ -520,7 +566,9 @@ pub(crate) fn approve(
 
     let git_info = git::collect(project_root)?;
     if !git_info.is_clean {
-        return Err(DevError::Verify("litehtml approve requires a clean git tree".into()));
+        return Err(DevError::Verify(
+            "litehtml approve requires a clean git tree".into(),
+        ));
     }
 
     let db = open_db(project_root)?;
@@ -542,7 +590,9 @@ pub(crate) fn approve(
     output::litehtml_msg(&format!(
         "approved '{}' at pixel={pixel_pct:.1}%{} (commit {})",
         fixture.id,
-        element_pct.map(|e| format!(", elements={e:.0}%")).unwrap_or_default(),
+        element_pct
+            .map(|e| format!(", elements={e:.0}%"))
+            .unwrap_or_default(),
         git_info.commit,
     ));
 
@@ -553,18 +603,16 @@ pub(crate) fn approve(
 // Report command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn report(
-    project: Project,
-    project_root: &Path,
-    run_id: &str,
-) -> Result<(), DevError> {
+pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "litehtml report")?;
 
     let db = open_db(project_root)?;
     let results = db.run_results(run_id)?;
 
     if results.is_empty() {
-        return Err(DevError::Config(format!("no results found for run '{run_id}'")));
+        return Err(DevError::Config(format!(
+            "no results found for run '{run_id}'"
+        )));
     }
 
     print_table_header();
@@ -573,7 +621,8 @@ pub(crate) fn report(
         let px = format_pct(row.pixel_diff_pct, 1);
         let el = format_pct(row.element_match_pct, 0);
         output::litehtml_msg(&format!(
-            "  {:<25} {:<9} {:<11} {}", row.fixture_id, px, el, row.status,
+            "  {:<25} {:<9} {:<11} {}",
+            row.fixture_id, px, el, row.status,
         ));
     }
 
@@ -595,7 +644,8 @@ pub(crate) fn status(
     let approvals = db.all_approvals()?;
 
     output::litehtml_msg(&format!(
-        "  {:<25} {:<11} {:<11} {:<9} {}", "Fixture", "Approved", "Last Run", "Delta", "Status",
+        "  {:<25} {:<11} {:<11} {:<9} {}",
+        "Fixture", "Approved", "Last Run", "Delta", "Status",
     ));
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(70)));
 
@@ -642,7 +692,11 @@ fn format_status_columns(
     let delta = match (r.pixel_diff_pct, approval) {
         (Some(current), Some(appr)) => {
             let d = current - appr.pixel_diff_pct;
-            if d.abs() < 0.05 { "\u{2014}".into() } else { format!("{d:+.1}%") }
+            if d.abs() < 0.05 {
+                "\u{2014}".into()
+            } else {
+                format!("{d:+.1}%")
+            }
         }
         _ => "\u{2014}".into(),
     };
@@ -674,7 +728,9 @@ fn format_status_columns(
 /// Directory containing the prepare/extract Node.js scripts.
 fn scripts_dir() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir).join("scripts").join("litehtml-prepare")
+    PathBuf::from(manifest_dir)
+        .join("scripts")
+        .join("litehtml-prepare")
 }
 
 /// Ensure pnpm dependencies are installed, then return path to prepare.js.
@@ -684,7 +740,8 @@ fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
 
     if !script.exists() {
         return Err(DevError::Config(format!(
-            "prepare script not found: {}", script.display(),
+            "prepare script not found: {}",
+            script.display(),
         )));
     }
 
@@ -692,14 +749,10 @@ fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
     if !node_modules.exists() {
         output::litehtml_msg("installing prepare dependencies...");
         let dir_str = dir.display().to_string();
-        let captured = output::run_captured(
-            "pnpm", &["install", "--dir", &dir_str], project_root,
-        )?;
+        let captured = output::run_captured("pnpm", &["install", "--dir", &dir_str], project_root)?;
         if !captured.status.success() {
             let stderr = String::from_utf8_lossy(&captured.stderr);
-            return Err(DevError::Verify(format!(
-                "pnpm install failed: {stderr}",
-            )));
+            return Err(DevError::Verify(format!("pnpm install failed: {stderr}",)));
         }
     }
 
@@ -725,7 +778,8 @@ pub(crate) fn prepare(
     let input_path = project_root.join(input);
     if !input_path.exists() {
         return Err(DevError::Config(format!(
-            "input file not found: {}", input_path.display(),
+            "input file not found: {}",
+            input_path.display(),
         )));
     }
 
@@ -742,7 +796,8 @@ pub(crate) fn prepare(
     let ahem_str = ahem_path.display().to_string();
     if !ahem_path.exists() {
         return Err(DevError::Config(format!(
-            "Ahem font not found: {}", ahem_path.display(),
+            "Ahem font not found: {}",
+            ahem_path.display(),
         )));
     }
 
@@ -754,9 +809,12 @@ pub(crate) fn prepare(
         "prepare",
         &input_str,
         &output_str,
-        "--cache-dir", &cache_str,
-        "--ahem-font", &ahem_str,
-        "--fallback-aspect-ratio", &ratio_str,
+        "--cache-dir",
+        &cache_str,
+        "--ahem-font",
+        &ahem_str,
+        "--fallback-aspect-ratio",
+        &ratio_str,
     ];
 
     output::litehtml_msg(&format!("preparing {input}"));
@@ -772,9 +830,7 @@ pub(crate) fn prepare(
     }
 
     if !captured.status.success() {
-        return Err(DevError::Verify(format!(
-            "prepare failed for {input}",
-        )));
+        return Err(DevError::Verify(format!("prepare failed for {input}",)));
     }
 
     output::litehtml_msg(&format!("wrote {output_path}"));
@@ -802,7 +858,8 @@ pub(crate) fn extract(
     let input_path = project_root.join(input);
     if !input_path.exists() {
         return Err(DevError::Config(format!(
-            "input file not found: {}", input_path.display(),
+            "input file not found: {}",
+            input_path.display(),
         )));
     }
 
@@ -810,12 +867,7 @@ pub(crate) fn extract(
     let output_resolved = project_root.join(output_path);
     let output_str = output_resolved.display().to_string();
 
-    let mut args = vec![
-        script_str.as_str(),
-        "extract",
-        &input_str,
-        &output_str,
-    ];
+    let mut args = vec![script_str.as_str(), "extract", &input_str, &output_str];
 
     let label: String;
     if let Some(sel) = selector {
@@ -829,9 +881,7 @@ pub(crate) fn extract(
         args.push(t);
         label = format!("extracting range from {input}");
     } else {
-        return Err(DevError::Config(
-            "specify --selector or --from/--to".into(),
-        ));
+        return Err(DevError::Config("specify --selector or --from/--to".into()));
     }
 
     output::litehtml_msg(&label);
@@ -846,9 +896,7 @@ pub(crate) fn extract(
     }
 
     if !captured.status.success() {
-        return Err(DevError::Verify(format!(
-            "extract failed for {input}",
-        )));
+        return Err(DevError::Verify(format!("extract failed for {input}",)));
     }
 
     output::litehtml_msg(&format!("wrote {output_path}"));
@@ -875,7 +923,8 @@ pub(crate) fn outline(
     let input_path = project_root.join(input);
     if !input_path.exists() {
         return Err(DevError::Config(format!(
-            "input file not found: {}", input_path.display(),
+            "input file not found: {}",
+            input_path.display(),
         )));
     }
 
@@ -886,7 +935,8 @@ pub(crate) fn outline(
         script_str.as_str(),
         "outline",
         &input_str,
-        "--depth", &depth_str,
+        "--depth",
+        &depth_str,
     ];
     if full {
         args.push("--full");
@@ -911,9 +961,7 @@ pub(crate) fn outline(
     }
 
     if !captured.status.success() {
-        return Err(DevError::Verify(format!(
-            "outline failed for {input}",
-        )));
+        return Err(DevError::Verify(format!("outline failed for {input}",)));
     }
 
     Ok(())

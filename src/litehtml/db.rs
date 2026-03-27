@@ -94,7 +94,13 @@ impl MechanicalDb {
             "INSERT INTO mechanical_results \
              (run_id, fixture_id, pixel_diff_pct, element_match_pct, status) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![run_id, fixture_id, pixel_diff_pct, element_match_pct, status],
+            rusqlite::params![
+                run_id,
+                fixture_id,
+                pixel_diff_pct,
+                element_match_pct,
+                status
+            ],
         )?;
         Ok(())
     }
@@ -168,7 +174,10 @@ impl MechanicalDb {
         Ok(out)
     }
 
-    pub fn latest_result_for_fixture(&self, fixture_id: &str) -> Result<Option<ResultRow>, DevError> {
+    pub fn latest_result_for_fixture(
+        &self,
+        fixture_id: &str,
+    ) -> Result<Option<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT r.run_id, r.fixture_id, r.pixel_diff_pct, r.element_match_pct, r.status \
              FROM mechanical_results r \
@@ -223,7 +232,10 @@ fn migrate(conn: &Connection) -> Result<(), DevError> {
             .prepare("SELECT artifact_dir FROM mechanical_results LIMIT 0")
             .is_ok();
         if has_column {
-            conn.execute("ALTER TABLE mechanical_results DROP COLUMN artifact_dir", [])?;
+            conn.execute(
+                "ALTER TABLE mechanical_results DROP COLUMN artifact_dir",
+                [],
+            )?;
         }
         conn.pragma_update(None, "user_version", 1)?;
     }

@@ -1,9 +1,9 @@
 //! Insert operations for the results database.
 
-use crate::error::DevError;
 use super::ResultsDb;
 use super::schema::INSERT_SQL;
-use super::types::{generate_uuid, short_uuid, KvPair, KvValue, RunRow};
+use super::types::{KvPair, KvValue, RunRow, generate_uuid, short_uuid};
+use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -63,7 +63,14 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
         conn.execute(
             "INSERT INTO run_distribution (run_id, samples, min_ms, p50_ms, p95_ms, max_ms) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![run_id, dist.samples, dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms],
+            rusqlite::params![
+                run_id,
+                dist.samples,
+                dist.min_ms,
+                dist.p50_ms,
+                dist.p95_ms,
+                dist.max_ms
+            ],
         )?;
     }
 
@@ -93,9 +100,15 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
                   alloc_bytes, dealloc_bytes, mem_diff) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
-                    run_id, thread.name, thread.status, thread.cpu_percent,
-                    thread.cpu_percent_max, thread.cpu_percent_avg,
-                    thread.alloc_bytes, thread.dealloc_bytes, thread.mem_diff,
+                    run_id,
+                    thread.name,
+                    thread.status,
+                    thread.cpu_percent,
+                    thread.cpu_percent_max,
+                    thread.cpu_percent_avg,
+                    thread.alloc_bytes,
+                    thread.dealloc_bytes,
+                    thread.mem_diff,
                 ],
             )?;
         }

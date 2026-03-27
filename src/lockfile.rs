@@ -43,9 +43,8 @@ fn lock_path() -> Result<PathBuf, DevError> {
     }
 
     // Fallback: ~/.cache/brokkr/
-    let home = std::env::var("HOME").map_err(|_| {
-        DevError::Lock("neither XDG_RUNTIME_DIR nor HOME is set".into())
-    })?;
+    let home = std::env::var("HOME")
+        .map_err(|_| DevError::Lock("neither XDG_RUNTIME_DIR nor HOME is set".into()))?;
     let dir = PathBuf::from(home).join(".cache").join("brokkr");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("brokkr.lock"))
@@ -205,16 +204,25 @@ fn write_lock_contents(fd: RawFd, ctx: &LockContext<'_>) {
 
     unsafe {
         if libc::ftruncate(fd, 0) == -1 {
-            eprintln!("[lock] warning: failed to truncate lock file: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "[lock] warning: failed to truncate lock file: {}",
+                std::io::Error::last_os_error()
+            );
             return;
         }
         if libc::lseek(fd, 0, libc::SEEK_SET) == -1 {
-            eprintln!("[lock] warning: failed to seek lock file: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "[lock] warning: failed to seek lock file: {}",
+                std::io::Error::last_os_error()
+            );
             return;
         }
         let n = libc::write(fd, contents.as_ptr().cast(), contents.len());
         if n == -1 {
-            eprintln!("[lock] warning: failed to write lock metadata: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "[lock] warning: failed to write lock metadata: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 }
@@ -266,10 +274,6 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
 fn path_to_cstring(path: &std::path::Path) -> Result<std::ffi::CString, DevError> {
     use std::os::unix::ffi::OsStrExt;
 
-    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        DevError::Lock(format!(
-            "lock path contains nul byte: {}",
-            path.display()
-        ))
-    })
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| DevError::Lock(format!("lock path contains nul byte: {}", path.display())))
 }

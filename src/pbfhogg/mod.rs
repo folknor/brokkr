@@ -17,17 +17,17 @@ pub fn path_strs(path: &Path) -> Result<(String, &str), DevError> {
     Ok((basename, path_str))
 }
 
-pub(crate) mod cmd;
-pub mod bench_allocator;
 pub mod bench_all;
+pub mod bench_allocator;
 pub mod bench_blob_filter;
 pub mod bench_commands;
-pub mod commands;
 pub mod bench_extract;
 pub mod bench_merge;
 pub mod bench_planetiler;
 pub mod bench_read;
 pub mod bench_write;
+pub(crate) mod cmd;
+pub mod commands;
 pub mod download;
 pub mod verify;
 pub mod verify_add_locations;
@@ -46,10 +46,7 @@ pub mod verify_tags_filter;
 ///
 /// When `add_default_levels` is true, bare `"zlib"` becomes `"zlib:6"` and
 /// bare `"zstd"` becomes `"zstd:3"`. When false, they pass through as-is.
-pub fn parse_compressions(
-    input: &str,
-    add_default_levels: bool,
-) -> Result<Vec<String>, DevError> {
+pub fn parse_compressions(input: &str, add_default_levels: bool) -> Result<Vec<String>, DevError> {
     let mut result = Vec::new();
     for token in input.split(',') {
         let trimmed = token.trim();
@@ -69,9 +66,7 @@ pub fn parse_compressions(
                 trimmed.to_owned()
             }
             _ => {
-                return Err(DevError::Config(format!(
-                    "unknown compression: {trimmed}"
-                )));
+                return Err(DevError::Config(format!("unknown compression: {trimmed}")));
             }
         };
         result.push(label);

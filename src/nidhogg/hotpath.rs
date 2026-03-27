@@ -46,9 +46,7 @@ pub fn run(
     output::hotpath_msg(&format!("=== nidhogg {label} ==="));
 
     if alloc {
-        output::hotpath_msg(
-            "NOTE: alloc profiling -- wall-clock times are not meaningful"
-        );
+        output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
     let basename = pbf_path
@@ -73,7 +71,8 @@ pub fn run(
     };
 
     harness.run_internal(&config, |_i| {
-        let (result, _stderr) = harness::run_hotpath_capture(binary_str, &args, scratch_dir, project_root, &[])?;
+        let (result, _stderr) =
+            harness::run_hotpath_capture(binary_str, &args, scratch_dir, project_root, &[])?;
         Ok(result)
     })?;
 

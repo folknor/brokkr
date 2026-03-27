@@ -77,7 +77,6 @@ impl ExtractStrategy {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // PbfhoggCommand — the unified command enum
 // ---------------------------------------------------------------------------
@@ -167,7 +166,9 @@ impl PbfhoggCommand {
             Self::MergeChanges => InputKind::OscOnly,
             Self::ApplyChanges => InputKind::PbfAndOsc,
             Self::Diff | Self::DiffOsc => InputKind::PbfAndMerged,
-            Self::ExtractSimple | Self::ExtractComplete | Self::ExtractSmart => InputKind::PbfAndBbox,
+            Self::ExtractSimple | Self::ExtractComplete | Self::ExtractSmart => {
+                InputKind::PbfAndBbox
+            }
             Self::Extract { .. } => InputKind::PbfAndBbox,
             _ => InputKind::Pbf,
         }
@@ -328,151 +329,204 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
             // -----------------------------------------------------------------
-            Self::Inspect => {
-                Ok(vec!["inspect".into(), ctx.pbf_str()?.into()])
-            }
-            Self::InspectNodes => {
-                Ok(vec!["inspect".into(), "--nodes".into(), ctx.pbf_str()?.into()])
-            }
-            Self::InspectTags => {
-                Ok(vec![
-                    "inspect".into(), "tags".into(), ctx.pbf_str()?.into(),
-                    "--min-count".into(), "999999999".into(),
-                ])
-            }
-            Self::InspectTagsWay => {
-                Ok(vec![
-                    "inspect".into(), "tags".into(), ctx.pbf_str()?.into(),
-                    "--type".into(), "way".into(),
-                    "--min-count".into(), "999999999".into(),
-                ])
-            }
-            Self::CheckRefs => {
-                Ok(vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()])
-            }
-            Self::CheckIds => {
-                Ok(vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()])
-            }
+            Self::Inspect => Ok(vec!["inspect".into(), ctx.pbf_str()?.into()]),
+            Self::InspectNodes => Ok(vec![
+                "inspect".into(),
+                "--nodes".into(),
+                ctx.pbf_str()?.into(),
+            ]),
+            Self::InspectTags => Ok(vec![
+                "inspect".into(),
+                "tags".into(),
+                ctx.pbf_str()?.into(),
+                "--min-count".into(),
+                "999999999".into(),
+            ]),
+            Self::InspectTagsWay => Ok(vec![
+                "inspect".into(),
+                "tags".into(),
+                ctx.pbf_str()?.into(),
+                "--type".into(),
+                "way".into(),
+                "--min-count".into(),
+                "999999999".into(),
+            ]),
+            Self::CheckRefs => Ok(vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()]),
+            Self::CheckIds => Ok(vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()]),
             Self::Sort => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "sort".into(), ctx.pbf_str()?.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "sort".into(),
+                    ctx.pbf_str()?.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::CatWay => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "cat".into(), ctx.pbf_str()?.into(),
-                    "--type".into(), "way".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "cat".into(),
+                    ctx.pbf_str()?.into(),
+                    "--type".into(),
+                    "way".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::CatRelation => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "cat".into(), ctx.pbf_str()?.into(),
-                    "--type".into(), "relation".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "cat".into(),
+                    ctx.pbf_str()?.into(),
+                    "--type".into(),
+                    "relation".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::CatDedupe => {
                 let output = scratch_output_path(ctx, self);
                 let pbf = ctx.pbf_str()?;
                 Ok(vec![
-                    "cat".into(), "--dedupe".into(), pbf.into(), pbf.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "cat".into(),
+                    "--dedupe".into(),
+                    pbf.into(),
+                    pbf.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::TagsFilterWay => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "tags-filter".into(), ctx.pbf_str()?.into(),
-                    "-R".into(), "w/highway=primary".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "tags-filter".into(),
+                    ctx.pbf_str()?.into(),
+                    "-R".into(),
+                    "w/highway=primary".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::TagsFilterAmenity => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "tags-filter".into(), ctx.pbf_str()?.into(),
-                    "-R".into(), "amenity=restaurant".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "tags-filter".into(),
+                    ctx.pbf_str()?.into(),
+                    "-R".into(),
+                    "amenity=restaurant".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::TagsFilterTwopass => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "tags-filter".into(), ctx.pbf_str()?.into(),
+                    "tags-filter".into(),
+                    ctx.pbf_str()?.into(),
                     "highway=primary".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::TagsFilterOsc => {
                 let output = scratch_output_path(ctx, self);
                 let osc = ctx.osc_str()?;
                 Ok(vec![
-                    "tags-filter".into(), "--input-kind".into(), "osc".into(),
-                    osc.into(), "highway=primary".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "tags-filter".into(),
+                    "--input-kind".into(),
+                    "osc".into(),
+                    osc.into(),
+                    "highway=primary".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::Getid => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "getid".into(), ctx.pbf_str()?.into(),
-                    "n115722".into(), "n115723".into(), "n115724".into(),
-                    "w2080".into(), "w2081".into(), "w2082".into(),
-                    "r174".into(), "r213".into(), "r339".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "getid".into(),
+                    ctx.pbf_str()?.into(),
+                    "n115722".into(),
+                    "n115723".into(),
+                    "n115724".into(),
+                    "w2080".into(),
+                    "w2081".into(),
+                    "w2082".into(),
+                    "r174".into(),
+                    "r213".into(),
+                    "r339".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::Getparents => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "getparents".into(), ctx.pbf_str()?.into(),
-                    "n115722".into(), "n115723".into(), "w2080".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "getparents".into(),
+                    ctx.pbf_str()?.into(),
+                    "n115722".into(),
+                    "n115723".into(),
+                    "w2080".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::GetidInvert => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "getid".into(), "--invert".into(), ctx.pbf_str()?.into(),
-                    "n115722".into(), "n115723".into(), "n115724".into(),
-                    "w2080".into(), "w2081".into(), "w2082".into(),
-                    "r174".into(), "r213".into(), "r339".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "getid".into(),
+                    "--invert".into(),
+                    ctx.pbf_str()?.into(),
+                    "n115722".into(),
+                    "n115723".into(),
+                    "n115724".into(),
+                    "w2080".into(),
+                    "w2081".into(),
+                    "w2082".into(),
+                    "r174".into(),
+                    "r213".into(),
+                    "r339".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::Renumber => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "renumber".into(), ctx.pbf_str()?.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "renumber".into(),
+                    ctx.pbf_str()?.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::MergeChanges => {
                 let output = scratch_output_path(ctx, self);
                 let osc = ctx.osc_str()?;
                 Ok(vec![
-                    "merge-changes".into(), osc.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "merge-changes".into(),
+                    osc.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::ApplyChanges => {
                 let output = scratch_output_path(ctx, self);
                 let osc = ctx.osc_str()?;
                 Ok(vec![
-                    "apply-changes".into(), ctx.pbf_str()?.into(), osc.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "apply-changes".into(),
+                    ctx.pbf_str()?.into(),
+                    osc.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::AddLocationsToWays => {
                 let output = scratch_output_path(ctx, self);
                 let mut args = vec![
-                    "add-locations-to-ways".into(), ctx.pbf_str()?.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "add-locations-to-ways".into(),
+                    ctx.pbf_str()?.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ];
                 if let Some(it) = ctx.param("index_type") {
                     args.push("--index-type".into());
@@ -483,41 +537,54 @@ impl PbfhoggCommand {
             Self::ExtractSimple => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "extract".into(), ctx.pbf_str()?.into(),
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
                     "--simple".into(),
-                    "-b".into(), "12.4,55.6,12.7,55.8".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-b".into(),
+                    "12.4,55.6,12.7,55.8".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::ExtractComplete => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "extract".into(), ctx.pbf_str()?.into(),
-                    "-b".into(), "12.4,55.6,12.7,55.8".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
+                    "-b".into(),
+                    "12.4,55.6,12.7,55.8".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::ExtractSmart => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "extract".into(), ctx.pbf_str()?.into(),
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
                     "--smart".into(),
-                    "-b".into(), "12.4,55.6,12.7,55.8".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-b".into(),
+                    "12.4,55.6,12.7,55.8".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::TimeFilter => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
-                    "time-filter".into(), ctx.pbf_str()?.into(),
+                    "time-filter".into(),
+                    ctx.pbf_str()?.into(),
                     "2024-01-01T00:00:00Z".into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
             Self::Diff => {
                 let merged = ctx.merged_pbf_str()?;
                 Ok(vec![
-                    "diff".into(), ctx.pbf_str()?.into(), merged.into(),
+                    "diff".into(),
+                    ctx.pbf_str()?.into(),
+                    merged.into(),
                     "-c".into(),
                 ])
             }
@@ -525,9 +592,13 @@ impl PbfhoggCommand {
                 let output = scratch_output_path(ctx, self);
                 let merged = ctx.merged_pbf_str()?;
                 Ok(vec![
-                    "diff".into(), "--format".into(), "osc".into(),
-                    ctx.pbf_str()?.into(), merged.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "diff".into(),
+                    "--format".into(),
+                    "osc".into(),
+                    ctx.pbf_str()?.into(),
+                    merged.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ])
             }
 
@@ -536,12 +607,14 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             Self::BuildGeocodeIndex => {
                 let output_dir = ctx.scratch_dir.join(format!("geocode-{}", ctx.dataset));
-                let output_dir_str = output_dir
-                    .to_str()
-                    .ok_or_else(|| DevError::Config("geocode output dir path is not valid UTF-8".into()))?;
+                let output_dir_str = output_dir.to_str().ok_or_else(|| {
+                    DevError::Config("geocode output dir path is not valid UTF-8".into())
+                })?;
                 Ok(vec![
-                    "build-geocode-index".into(), ctx.pbf_str()?.into(),
-                    "--output-dir".into(), output_dir_str.into(),
+                    "build-geocode-index".into(),
+                    ctx.pbf_str()?.into(),
+                    "--output-dir".into(),
+                    output_dir_str.into(),
                     "--force".into(),
                 ])
             }
@@ -550,32 +623,41 @@ impl PbfhoggCommand {
             // Multi-variant: extract (with resolved bbox)
             // -----------------------------------------------------------------
             Self::Extract { strategy } => {
-                let bbox = ctx.bbox.as_deref().ok_or_else(|| {
-                    DevError::Config("extract requires a bbox".into())
-                })?;
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = ctx.scratch_output("bench-extract-output", "osm.pbf");
                 let output_str = path_to_string(&output)?;
                 match strategy {
                     ExtractStrategy::Simple => Ok(vec![
-                        "extract".into(), ctx.pbf_str()?.into(),
+                        "extract".into(),
+                        ctx.pbf_str()?.into(),
                         "--simple".into(),
-                        "-b".into(), bbox.into(),
-                        "-o".into(), output_str,
+                        "-b".into(),
+                        bbox.into(),
+                        "-o".into(),
+                        output_str,
                     ]),
                     ExtractStrategy::Complete => Ok(vec![
-                        "extract".into(), ctx.pbf_str()?.into(),
-                        "-b".into(), bbox.into(),
-                        "-o".into(), output_str,
+                        "extract".into(),
+                        ctx.pbf_str()?.into(),
+                        "-b".into(),
+                        bbox.into(),
+                        "-o".into(),
+                        output_str,
                     ]),
                     ExtractStrategy::Smart => Ok(vec![
-                        "extract".into(), ctx.pbf_str()?.into(),
+                        "extract".into(),
+                        ctx.pbf_str()?.into(),
                         "--smart".into(),
-                        "-b".into(), bbox.into(),
-                        "-o".into(), output_str,
+                        "-b".into(),
+                        bbox.into(),
+                        "-o".into(),
+                        output_str,
                     ]),
                 }
             }
-
         }
     }
 
@@ -593,14 +675,10 @@ impl PbfhoggCommand {
             // Hotpath versions of commands may differ slightly from bench
             // versions (e.g. the hotpath "cat" test uses different flags).
             Self::InspectTags => {
-                args.extend([
-                    "inspect".into(), "tags".into(), ctx.pbf_str()?.into(),
-                ]);
+                args.extend(["inspect".into(), "tags".into(), ctx.pbf_str()?.into()]);
             }
             Self::CheckRefs => {
-                args.extend([
-                    "check".into(), "--refs".into(), ctx.pbf_str()?.into(),
-                ]);
+                args.extend(["check".into(), "--refs".into(), ctx.pbf_str()?.into()]);
             }
             Self::ApplyChanges => {
                 // Hotpath apply-changes needs compression param from context.
@@ -608,9 +686,13 @@ impl PbfhoggCommand {
                 let compression = ctx.param("compression").unwrap_or("zlib");
                 let output = ctx.scratch_output("hotpath-merged", "osm.pbf");
                 args.extend([
-                    "apply-changes".into(), ctx.pbf_str()?.into(), osc.into(),
-                    "--compression".into(), compression.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "apply-changes".into(),
+                    ctx.pbf_str()?.into(),
+                    osc.into(),
+                    "--compression".into(),
+                    compression.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ]);
             }
             Self::AddLocationsToWays => {
@@ -618,55 +700,80 @@ impl PbfhoggCommand {
                 let output = ctx.scratch_output("hotpath-altw-external", "osm.pbf");
                 args.extend([
                     "add-locations-to-ways".into(),
-                    "--index-type".into(), index_type.into(),
+                    "--index-type".into(),
+                    index_type.into(),
                     ctx.pbf_str()?.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ]);
             }
             Self::BuildGeocodeIndex => {
                 let output_dir = ctx.scratch_dir.join(format!("geocode-{}", ctx.dataset));
-                let output_dir_str = output_dir
-                    .to_str()
-                    .ok_or_else(|| DevError::Config("geocode output dir path is not valid UTF-8".into()))?;
+                let output_dir_str = output_dir.to_str().ok_or_else(|| {
+                    DevError::Config("geocode output dir path is not valid UTF-8".into())
+                })?;
                 args.extend([
-                    "build-geocode-index".into(), ctx.pbf_str()?.into(),
-                    "--output-dir".into(), output_dir_str.into(),
+                    "build-geocode-index".into(),
+                    ctx.pbf_str()?.into(),
+                    "--output-dir".into(),
+                    output_dir_str.into(),
                     "--force".into(),
                 ]);
             }
-            Self::ExtractSimple | Self::Extract { strategy: ExtractStrategy::Simple } => {
-                let bbox = ctx.bbox.as_deref().ok_or_else(|| {
-                    DevError::Config("extract requires a bbox".into())
-                })?;
+            Self::ExtractSimple
+            | Self::Extract {
+                strategy: ExtractStrategy::Simple,
+            } => {
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = ctx.scratch_output("hotpath-extract-simple", "osm.pbf");
                 args.extend([
-                    "extract".into(), ctx.pbf_str()?.into(),
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
                     "--simple".into(),
-                    "-b".into(), bbox.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-b".into(),
+                    bbox.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ]);
             }
-            Self::ExtractComplete | Self::Extract { strategy: ExtractStrategy::Complete } => {
-                let bbox = ctx.bbox.as_deref().ok_or_else(|| {
-                    DevError::Config("extract requires a bbox".into())
-                })?;
+            Self::ExtractComplete
+            | Self::Extract {
+                strategy: ExtractStrategy::Complete,
+            } => {
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = ctx.scratch_output("hotpath-extract-complete", "osm.pbf");
                 args.extend([
-                    "extract".into(), ctx.pbf_str()?.into(),
-                    "-b".into(), bbox.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
+                    "-b".into(),
+                    bbox.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ]);
             }
-            Self::ExtractSmart | Self::Extract { strategy: ExtractStrategy::Smart } => {
-                let bbox = ctx.bbox.as_deref().ok_or_else(|| {
-                    DevError::Config("extract requires a bbox".into())
-                })?;
+            Self::ExtractSmart
+            | Self::Extract {
+                strategy: ExtractStrategy::Smart,
+            } => {
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = ctx.scratch_output("hotpath-extract-smart", "osm.pbf");
                 args.extend([
-                    "extract".into(), ctx.pbf_str()?.into(),
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
                     "--smart".into(),
-                    "-b".into(), bbox.into(),
-                    "-o".into(), path_to_string(&output)?,
+                    "-b".into(),
+                    bbox.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
                 ]);
             }
             // For all other hotpath-capable commands, the args are identical
@@ -679,9 +786,7 @@ impl PbfhoggCommand {
 
         Ok(args)
     }
-
 }
-
 
 // ---------------------------------------------------------------------------
 // Helper functions
@@ -691,9 +796,7 @@ impl PbfhoggCommand {
 fn path_to_string(path: &Path) -> Result<String, DevError> {
     path.to_str()
         .map(String::from)
-        .ok_or_else(|| DevError::Config(format!(
-            "path is not valid UTF-8: {}", path.display()
-        )))
+        .ok_or_else(|| DevError::Config(format!("path is not valid UTF-8: {}", path.display())))
 }
 
 /// Compute the scratch output path for a command based on its output kind.
@@ -702,7 +805,9 @@ fn scratch_output_path(ctx: &CommandContext, cmd: &PbfhoggCommand) -> PathBuf {
     match cmd.output_kind() {
         OutputKind::ScratchPbf(_) => ctx.scratch_dir.join(format!("bench-{name}-output.osm.pbf")),
         OutputKind::ScratchOsc(_) => ctx.scratch_dir.join(format!("bench-{name}-output.osc.gz")),
-        OutputKind::ScratchDir(dir_name) => ctx.scratch_dir.join(format!("{dir_name}-{}", ctx.dataset)),
+        OutputKind::ScratchDir(dir_name) => {
+            ctx.scratch_dir.join(format!("{dir_name}-{}", ctx.dataset))
+        }
         OutputKind::None => PathBuf::new(), // Should not be used.
     }
 }
@@ -742,10 +847,16 @@ mod tests {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::InspectTags;
         let args = cmd.build_args(&ctx).unwrap();
-        assert_eq!(args, vec![
-            "inspect", "tags", "/data/denmark.osm.pbf",
-            "--min-count", "999999999",
-        ]);
+        assert_eq!(
+            args,
+            vec![
+                "inspect",
+                "tags",
+                "/data/denmark.osm.pbf",
+                "--min-count",
+                "999999999",
+            ]
+        );
     }
 
     #[test]
@@ -764,9 +875,15 @@ mod tests {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Diff;
         let args = cmd.build_args(&ctx).unwrap();
-        assert_eq!(args, vec![
-            "diff", "/data/denmark.osm.pbf", "/data/scratch/merged.osm.pbf", "-c",
-        ]);
+        assert_eq!(
+            args,
+            vec![
+                "diff",
+                "/data/denmark.osm.pbf",
+                "/data/scratch/merged.osm.pbf",
+                "-c",
+            ]
+        );
     }
 
     #[test]

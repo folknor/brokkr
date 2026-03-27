@@ -25,13 +25,22 @@ pub enum KvValue {
 
 impl KvPair {
     pub fn int(key: impl Into<String>, value: i64) -> Self {
-        Self { key: key.into(), value: KvValue::Int(value) }
+        Self {
+            key: key.into(),
+            value: KvValue::Int(value),
+        }
     }
     pub fn real(key: impl Into<String>, value: f64) -> Self {
-        Self { key: key.into(), value: KvValue::Real(value) }
+        Self {
+            key: key.into(),
+            value: KvValue::Real(value),
+        }
     }
     pub fn text(key: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { key: key.into(), value: KvValue::Text(value.into()) }
+        Self {
+            key: key.into(),
+            value: KvValue::Text(value.into()),
+        }
     }
 }
 

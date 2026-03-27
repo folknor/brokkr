@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg cat` against `osmium cat` for node/way/relation types.
 pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
@@ -33,7 +33,15 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
 
         let captured = harness.run_tool(
             "osmium",
-            &["cat", &pbf_str, "-t", elem_type, "-o", &osmium_out_str, "--overwrite"],
+            &[
+                "cat",
+                &pbf_str,
+                "-t",
+                elem_type,
+                "-o",
+                &osmium_out_str,
+                "--overwrite",
+            ],
         )?;
         harness.check_exit(&captured, "osmium cat")?;
 

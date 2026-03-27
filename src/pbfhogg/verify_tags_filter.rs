@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Expression and output label pairs for the three test cases.
 const EXPRESSIONS: &[(&str, &str)] = &[
@@ -24,14 +24,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
         // pbfhogg: tags-filter <pbf> -R <expr> -o <out>
         let pbfhogg_out = outdir.join(format!("pbfhogg-{label}.osm.pbf"));
         let pbfhogg_out_str = pbfhogg_out.display().to_string();
-        let mut pbfhogg_args = vec![
-            "tags-filter",
-            &pbf_str,
-            "-R",
-            expr,
-            "-o",
-            &pbfhogg_out_str,
-        ];
+        let mut pbfhogg_args = vec!["tags-filter", &pbf_str, "-R", expr, "-o", &pbfhogg_out_str];
         if direct_io {
             pbfhogg_args.push("--direct-io");
         }
@@ -41,15 +34,18 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
         // osmium: tags-filter <pbf> <expr> -R -o <out> --overwrite
         let osmium_out = outdir.join(format!("osmium-{label}.osm.pbf"));
         let osmium_out_str = osmium_out.display().to_string();
-        let captured = harness.run_tool("osmium", &[
-            "tags-filter",
-            &pbf_str,
-            expr,
-            "-R",
-            "-o",
-            &osmium_out_str,
-            "--overwrite",
-        ])?;
+        let captured = harness.run_tool(
+            "osmium",
+            &[
+                "tags-filter",
+                &pbf_str,
+                expr,
+                "-R",
+                "-o",
+                &osmium_out_str,
+                "--overwrite",
+            ],
+        )?;
         harness.check_exit(&captured, "osmium tags-filter")?;
 
         // Print inspect output for both outputs.

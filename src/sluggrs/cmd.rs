@@ -40,7 +40,8 @@ fn format_pct(v: Option<f64>, decimals: usize) -> String {
 
 fn print_table_header() {
     sluggrs_msg(&format!(
-        "  {:<25} {:<9} {}", "Snapshot", "Pixels", "Status",
+        "  {:<25} {:<9} {}",
+        "Snapshot", "Pixels", "Status",
     ));
     sluggrs_msg(&format!("  {}", "\u{2500}".repeat(50)));
 }
@@ -53,11 +54,16 @@ fn snapshot_dir(project_root: &Path, id: &str) -> PathBuf {
     snapshots_dir(project_root).join(id)
 }
 
-fn resolve_snapshot<'a>(config: &'a SluggrsConfig, id: &str) -> Result<&'a SluggrsSnapshot, DevError> {
+fn resolve_snapshot<'a>(
+    config: &'a SluggrsConfig,
+    id: &str,
+) -> Result<&'a SluggrsSnapshot, DevError> {
     if let Some(entry) = config.snapshot_by_id(id) {
         return Ok(entry);
     }
-    let matches: Vec<_> = config.snapshots.iter()
+    let matches: Vec<_> = config
+        .snapshots
+        .iter()
         .filter(|s| s.id.starts_with(id))
         .collect();
     match matches.len() {
@@ -66,7 +72,8 @@ fn resolve_snapshot<'a>(config: &'a SluggrsConfig, id: &str) -> Result<&'a Slugg
         _ => {
             let ids: Vec<&str> = matches.iter().map(|s| s.id.as_str()).collect();
             Err(DevError::Config(format!(
-                "ambiguous snapshot prefix '{id}', matches: {}", ids.join(", "),
+                "ambiguous snapshot prefix '{id}', matches: {}",
+                ids.join(", "),
             )))
         }
     }
@@ -106,13 +113,14 @@ fn parse_snapshot_metadata(stdout: &[u8]) -> Result<SnapshotMeta, DevError> {
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('{') {
-            let meta: SnapshotMeta = serde_json::from_str(line).map_err(|e| {
-                DevError::Verify(format!("invalid snapshot JSON output: {e}"))
-            })?;
+            let meta: SnapshotMeta = serde_json::from_str(line)
+                .map_err(|e| DevError::Verify(format!("invalid snapshot JSON output: {e}")))?;
             return Ok(meta);
         }
     }
-    Err(DevError::Verify("snapshot binary did not emit JSON metadata line".into()))
+    Err(DevError::Verify(
+        "snapshot binary did not emit JSON metadata line".into(),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -147,14 +155,20 @@ fn run_snapshot(
     let binary_str = binary.display().to_string();
 
     let mut args: Vec<&str> = vec![
-        "--id", &snapshot.id,
-        "--output", &output_str,
-        "--width", &width_str,
-        "--height", &height_str,
+        "--id",
+        &snapshot.id,
+        "--output",
+        &output_str,
+        "--width",
+        &width_str,
+        "--height",
+        &height_str,
     ];
 
     // Pass font paths.
-    let font_strs: Vec<String> = snapshot.fonts.iter()
+    let font_strs: Vec<String> = snapshot
+        .fonts
+        .iter()
         .map(|f| project_root.join(f).display().to_string())
         .collect();
     for font in &font_strs {
@@ -163,7 +177,9 @@ fn run_snapshot(
     }
 
     // Pass optional font paths.
-    let opt_font_strs: Vec<String> = snapshot.optional_fonts.as_deref()
+    let opt_font_strs: Vec<String> = snapshot
+        .optional_fonts
+        .as_deref()
         .unwrap_or(&[])
         .iter()
         .map(|f| project_root.join(f).display().to_string())
@@ -179,12 +195,18 @@ fn run_snapshot(
 
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        sluggrs_msg(&format!("  ERROR: {}", stderr.lines().next().unwrap_or("unknown error")));
+        sluggrs_msg(&format!(
+            "  ERROR: {}",
+            stderr.lines().next().unwrap_or("unknown error")
+        ));
         db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
-        return Ok((SnapshotOutcome {
-            pixel_diff_pct: None,
-            status: compare::Status::Error,
-        }, None));
+        return Ok((
+            SnapshotOutcome {
+                pixel_diff_pct: None,
+                status: compare::Status::Error,
+            },
+            None,
+        ));
     }
 
     // Parse adapter name from stdout JSON.
@@ -193,20 +215,31 @@ fn run_snapshot(
 
     if !output_png.exists() {
         db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
-        return Ok((SnapshotOutcome {
-            pixel_diff_pct: None,
-            status: compare::Status::Error,
-        }, Some(adapter_name)));
+        return Ok((
+            SnapshotOutcome {
+                pixel_diff_pct: None,
+                status: compare::Status::Error,
+            },
+            Some(adapter_name),
+        ));
     }
 
     // If no approved baseline exists, record as FAIL_THRESHOLD (unapproved).
     if !approved_png.exists() {
-        db.insert_result(run_id, &snapshot.id, None, compare::Status::FailThreshold.as_str())?;
+        db.insert_result(
+            run_id,
+            &snapshot.id,
+            None,
+            compare::Status::FailThreshold.as_str(),
+        )?;
         sluggrs_msg(&format!("    no approved baseline for {}", snapshot.id));
-        return Ok((SnapshotOutcome {
-            pixel_diff_pct: None,
-            status: compare::Status::FailThreshold,
-        }, Some(adapter_name)));
+        return Ok((
+            SnapshotOutcome {
+                pixel_diff_pct: None,
+                status: compare::Status::FailThreshold,
+            },
+            Some(adapter_name),
+        ));
     }
 
     // Pixel diff against approved baseline.
@@ -218,7 +251,12 @@ fn run_snapshot(
     let (pixel_diff_pct, status) = match pixel_result {
         Ok(px) => {
             let s = compare::determine_status(
-                px.diff_pct, None, pixel_threshold, None, false, approved_pixel,
+                px.diff_pct,
+                None,
+                pixel_threshold,
+                None,
+                false,
+                approved_pixel,
             );
             (Some(px.diff_pct), s)
         }
@@ -227,7 +265,13 @@ fn run_snapshot(
 
     db.insert_result(run_id, &snapshot.id, pixel_diff_pct, status.as_str())?;
 
-    Ok((SnapshotOutcome { pixel_diff_pct, status }, Some(adapter_name)))
+    Ok((
+        SnapshotOutcome {
+            pixel_diff_pct,
+            status,
+        },
+        Some(adapter_name),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +313,12 @@ pub(crate) fn test(
 
     for snapshot in &snapshots {
         let (outcome, adapter) = run_snapshot(
-            &binary, snapshot, sluggrs_config, project_root, &db, &run_id,
+            &binary,
+            snapshot,
+            sluggrs_config,
+            project_root,
+            &db,
+            &run_id,
         )?;
 
         if first_adapter.is_none()
@@ -280,7 +329,8 @@ pub(crate) fn test(
 
         let px = format_pct(outcome.pixel_diff_pct, 1);
         sluggrs_msg(&format!(
-            "  {:<25} {:<9} {}", snapshot.id, px, outcome.status,
+            "  {:<25} {:<9} {}",
+            snapshot.id, px, outcome.status,
         ));
 
         match outcome.status {
@@ -303,7 +353,9 @@ fn print_run_summary(counts: &[u32; 3]) -> Result<(), DevError> {
     sluggrs_msg(&format!("  {}", "\u{2500}".repeat(50)));
 
     let labels = ["passed", "failed", "error"];
-    let parts: Vec<String> = counts.iter().zip(labels.iter())
+    let parts: Vec<String> = counts
+        .iter()
+        .zip(labels.iter())
         .filter(|&(&c, _)| c > 0)
         .map(|(&c, &l)| format!("{c} {l}"))
         .collect();
@@ -329,7 +381,8 @@ pub(crate) fn list(
     let db = open_db(project_root)?;
 
     sluggrs_msg(&format!(
-        "  {:<25} {:<40} {}", "ID", "Description", "Approved",
+        "  {:<25} {:<40} {}",
+        "ID", "Description", "Approved",
     ));
     sluggrs_msg(&format!("  {}", "\u{2500}".repeat(75)));
 
@@ -339,7 +392,8 @@ pub(crate) fn list(
             None => "\u{2014}".into(),
         };
         sluggrs_msg(&format!(
-            "  {:<25} {:<40} {}", snapshot.id, snapshot.description, approved,
+            "  {:<25} {:<40} {}",
+            snapshot.id, snapshot.description, approved,
         ));
     }
 
@@ -360,7 +414,9 @@ pub(crate) fn approve(
 
     let git_info = git::collect(project_root)?;
     if !git_info.is_clean {
-        return Err(DevError::Verify("sluggrs approve requires a clean git tree".into()));
+        return Err(DevError::Verify(
+            "sluggrs approve requires a clean git tree".into(),
+        ));
     }
 
     let db = open_db(project_root)?;
@@ -418,7 +474,8 @@ pub(crate) fn status(
     let approvals = db.all_approvals()?;
 
     sluggrs_msg(&format!(
-        "  {:<25} {:<11} {:<11} {:<9} {}", "Snapshot", "Approved", "Last Run", "Delta", "Status",
+        "  {:<25} {:<11} {:<11} {:<9} {}",
+        "Snapshot", "Approved", "Last Run", "Delta", "Status",
     ));
     sluggrs_msg(&format!("  {}", "\u{2500}".repeat(70)));
 
@@ -465,7 +522,11 @@ fn format_status_columns(
     let delta = match (r.pixel_diff_pct, approval) {
         (Some(current), Some(appr)) => {
             let d = current - appr.pixel_diff_pct;
-            if d.abs() < 0.05 { "\u{2014}".into() } else { format!("{d:+.1}%") }
+            if d.abs() < 0.05 {
+                "\u{2014}".into()
+            } else {
+                format!("{d:+.1}%")
+            }
         }
         _ => "\u{2014}".into(),
     };
@@ -494,18 +555,16 @@ fn format_status_columns(
 // Report command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn report(
-    project: Project,
-    project_root: &Path,
-    run_id: &str,
-) -> Result<(), DevError> {
+pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "sluggrs report")?;
 
     let db = open_db(project_root)?;
     let results = db.run_results(run_id)?;
 
     if results.is_empty() {
-        return Err(DevError::Config(format!("no results found for run '{run_id}'")));
+        return Err(DevError::Config(format!(
+            "no results found for run '{run_id}'"
+        )));
     }
 
     if let Some(summary) = db.run_summary(run_id)? {
@@ -524,7 +583,8 @@ pub(crate) fn report(
     for row in &results {
         let px = format_pct(row.pixel_diff_pct, 1);
         sluggrs_msg(&format!(
-            "  {:<25} {:<9} {}", row.snapshot_id, px, row.status,
+            "  {:<25} {:<9} {}",
+            row.snapshot_id, px, row.status,
         ));
     }
 

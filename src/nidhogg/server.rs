@@ -97,9 +97,10 @@ pub fn stop(project_root: &Path) -> Result<(), DevError> {
     // Try PID file first.
     if pid_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&pid_path)
-            && let Ok(pid) = content.trim().parse::<i32>() {
-                stopped = stop_pid(pid);
-            }
+            && let Ok(pid) = content.trim().parse::<i32>()
+        {
+            stopped = stop_pid(pid);
+        }
         std::fs::remove_file(&pid_path).ok();
     }
 
@@ -145,7 +146,9 @@ fn stop_pid(pid: i32) -> bool {
         return true;
     }
 
-    output::run_msg(&format!("PID {pid} did not exit after SIGTERM, sending SIGKILL"));
+    output::run_msg(&format!(
+        "PID {pid} did not exit after SIGTERM, sending SIGKILL"
+    ));
     unsafe { libc::kill(pid, libc::SIGKILL) };
     std::thread::sleep(std::time::Duration::from_millis(100));
     true

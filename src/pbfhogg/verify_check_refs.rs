@@ -14,9 +14,9 @@
 use std::fs;
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Parsed check-refs counts for structural comparison.
 #[derive(Default)]
@@ -152,19 +152,29 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
         pbf_ways_args.push("--direct-io");
     }
     let pbfhogg_text = capture_and_log(
-        harness, "pbfhogg", &pbf_ways_args,
-        &outdir.join("pbfhogg-ways.txt"), "pbfhogg (ways only)",
+        harness,
+        "pbfhogg",
+        &pbf_ways_args,
+        &outdir.join("pbfhogg-ways.txt"),
+        "pbfhogg (ways only)",
     )?;
     let osmium_text = capture_and_log(
-        harness, "osmium", &["check-refs", &pbf_str],
-        &outdir.join("osmium-ways.txt"), "osmium (ways only)",
+        harness,
+        "osmium",
+        &["check-refs", &pbf_str],
+        &outdir.join("osmium-ways.txt"),
+        "osmium (ways only)",
     )?;
 
     let pbf_counts = parse_pbfhogg(&pbfhogg_text);
     let osm_counts = parse_osmium(&osmium_text);
 
     // pbfhogg reports "Referential integrity: OK" with no count line when 0.
-    let pbf_ways = if pbf_counts.integrity_ok { Some(0) } else { pbf_counts.nodes_in_ways };
+    let pbf_ways = if pbf_counts.integrity_ok {
+        Some(0)
+    } else {
+        pbf_counts.nodes_in_ways
+    };
     let ways_ok = compare_count("ways only", pbf_ways, osm_counts.nodes_in_ways);
 
     // --- With relations ---
@@ -174,26 +184,38 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
         pbf_all_args.push("--direct-io");
     }
     let pbfhogg_text = capture_and_log(
-        harness, "pbfhogg", &pbf_all_args,
-        &outdir.join("pbfhogg-all.txt"), "pbfhogg (with relations)",
+        harness,
+        "pbfhogg",
+        &pbf_all_args,
+        &outdir.join("pbfhogg-all.txt"),
+        "pbfhogg (with relations)",
     )?;
     let osmium_text = capture_and_log(
-        harness, "osmium", &["check-refs", "-r", &pbf_str],
-        &outdir.join("osmium-all.txt"), "osmium (with relations)",
+        harness,
+        "osmium",
+        &["check-refs", "-r", &pbf_str],
+        &outdir.join("osmium-all.txt"),
+        "osmium (with relations)",
     )?;
 
     let pbf_counts = parse_pbfhogg(&pbfhogg_text);
     let osm_counts = parse_osmium(&osmium_text);
 
     let nodes_ok = compare_count(
-        "nodes in relations", pbf_counts.nodes_in_relations, osm_counts.nodes_in_relations,
+        "nodes in relations",
+        pbf_counts.nodes_in_relations,
+        osm_counts.nodes_in_relations,
     );
     let ways_rel_ok = compare_count(
-        "ways in relations", pbf_counts.ways_in_relations, osm_counts.ways_in_relations,
+        "ways in relations",
+        pbf_counts.ways_in_relations,
+        osm_counts.ways_in_relations,
     );
 
     let rels_ok = compare_count(
-        "relation members", pbf_counts.relations_in_relations, osm_counts.relations_in_relations,
+        "relation members",
+        pbf_counts.relations_in_relations,
+        osm_counts.relations_in_relations,
     );
 
     if !ways_ok || !nodes_ok || !ways_rel_ok || !rels_ok {
@@ -216,7 +238,9 @@ fn compare_count(label: &str, pbfhogg: Option<u64>, osmium: Option<u64>) -> bool
             false
         }
         _ => {
-            verify_msg(&format!("  FAIL ({label}): could not parse counts (pbfhogg={pbfhogg:?}, osmium={osmium:?})"));
+            verify_msg(&format!(
+                "  FAIL ({label}): could not parse counts (pbfhogg={pbfhogg:?}, osmium={osmium:?})"
+            ));
             false
         }
     }

@@ -141,7 +141,7 @@ fn migrate_v2_to_v3(conn: &rusqlite::Connection) -> Result<(), DevError> {
             alloc_bytes TEXT, dealloc_bytes TEXT, mem_diff TEXT);
         CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id);
 
-        CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);"
+        CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);",
     )?;
 
     // Phase 2: Migrate existing extra/metadata JSON to child tables.
@@ -157,23 +157,23 @@ fn migrate_v2_to_v3(conn: &rusqlite::Connection) -> Result<(), DevError> {
 fn migrate_v3_to_v4(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // Variant renames in bench commands / bench blob-filter / hotpath.
     const RENAMES: &[(&str, &str)] = &[
-        ("tags-count",      "inspect-tags"),
-        ("tags-count-way",  "inspect-tags-way"),
-        ("node-stats",      "inspect-nodes"),
-        ("removeid",        "getid-invert"),
-        ("merge-pbf",       "cat-dedupe"),
-        ("derive-changes",  "diff-osc"),
+        ("tags-count", "inspect-tags"),
+        ("tags-count-way", "inspect-tags-way"),
+        ("node-stats", "inspect-nodes"),
+        ("removeid", "getid-invert"),
+        ("merge-pbf", "cat-dedupe"),
+        ("derive-changes", "diff-osc"),
         // blob-filter compound variants
-        ("tags-count-way+indexed",  "inspect-tags-way+indexed"),
-        ("tags-count-way+raw",      "inspect-tags-way+raw"),
-        ("node-stats+indexed",      "inspect-nodes+indexed"),
-        ("node-stats+raw",          "inspect-nodes+raw"),
+        ("tags-count-way+indexed", "inspect-tags-way+indexed"),
+        ("tags-count-way+raw", "inspect-tags-way+raw"),
+        ("node-stats+indexed", "inspect-nodes+indexed"),
+        ("node-stats+raw", "inspect-nodes+raw"),
         // hotpath variants
-        ("merge-zlib",        "apply-changes-zlib"),
-        ("merge-none",        "apply-changes-none"),
-        ("merge-zlib/alloc",  "apply-changes-zlib/alloc"),
-        ("merge-none/alloc",  "apply-changes-none/alloc"),
-        ("tags-count/alloc",  "inspect-tags/alloc"),
+        ("merge-zlib", "apply-changes-zlib"),
+        ("merge-none", "apply-changes-none"),
+        ("merge-zlib/alloc", "apply-changes-zlib/alloc"),
+        ("merge-none/alloc", "apply-changes-none/alloc"),
+        ("tags-count/alloc", "inspect-tags/alloc"),
     ];
 
     let mut stmt = conn.prepare(
@@ -239,7 +239,7 @@ fn migrate_v6_to_v7(conn: &rusqlite::Connection) -> Result<(), DevError> {
             FROM hotpath_threads;
         DROP TABLE hotpath_threads;
         ALTER TABLE hotpath_threads_new RENAME TO hotpath_threads;
-        CREATE INDEX idx_hotpath_threads_run_id ON hotpath_threads(run_id);"
+        CREATE INDEX idx_hotpath_threads_run_id ON hotpath_threads(run_id);",
     )?;
     Ok(())
 }
@@ -247,7 +247,7 @@ fn migrate_v6_to_v7(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// Parse existing extra/metadata JSON and insert into child tables.
 fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError> {
     let mut stmt = conn.prepare(
-        "SELECT id, extra, metadata FROM runs WHERE extra IS NOT NULL OR metadata IS NOT NULL"
+        "SELECT id, extra, metadata FROM runs WHERE extra IS NOT NULL OR metadata IS NOT NULL",
     )?;
     let rows: Vec<(i64, Option<String>, Option<String>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -318,7 +318,12 @@ fn migrate_extra_object(
             && let Some(threads_obj) = threads_val.as_object()
         {
             // Thread summary stats -> run_kv with threads. prefix.
-            for key in &["rss_bytes", "total_alloc_bytes", "total_dealloc_bytes", "alloc_dealloc_diff"] {
+            for key in &[
+                "rss_bytes",
+                "total_alloc_bytes",
+                "total_dealloc_bytes",
+                "alloc_dealloc_diff",
+            ] {
                 if let Some(v) = threads_obj.get(*key) {
                     let prefixed = format!("threads.{key}");
                     insert_kv_from_json(conn, run_id, &prefixed, v)?;
@@ -363,10 +368,16 @@ fn migrate_hotpath_section(
     json_key: &str,
     section_name: &str,
 ) -> Result<(), DevError> {
-    let Some(section_val) = obj.get(json_key) else { return Ok(()) };
-    let Some(section_obj) = section_val.as_object() else { return Ok(()) };
+    let Some(section_val) = obj.get(json_key) else {
+        return Ok(());
+    };
+    let Some(section_obj) = section_val.as_object() else {
+        return Ok(());
+    };
     let description = section_obj.get("description").and_then(|v| v.as_str());
-    let Some(data) = section_obj.get("data").and_then(|v| v.as_array()) else { return Ok(()) };
+    let Some(data) = section_obj.get("data").and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
 
     for (ordinal, entry) in data.iter().enumerate() {
         let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
@@ -500,19 +511,22 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(V0_SCHEMA).unwrap();
-            conn.execute(V0_INSERT, rusqlite::params![rusqlite::types::Null]).unwrap();
+            conn.execute(V0_INSERT, rusqlite::params![rusqlite::types::Null])
+                .unwrap();
         }
 
         // Open via ResultsDb — triggers all migrations.
         let db = ResultsDb::open(&db_path).expect("open should migrate v0 to v3");
 
         // Row is preserved and queryable.
-        let rows = db.query(&QueryFilter {
-            commit: Some(String::from("aabb")),
-            command: None,
-            variant: None,
-            limit: 10,
-        }).expect("query");
+        let rows = db
+            .query(&QueryFilter {
+                commit: Some(String::from("aabb")),
+                command: None,
+                variant: None,
+                limit: 10,
+            })
+            .expect("query");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].command, "bench read");
         assert_eq!(rows[0].elapsed_ms, 1234);
@@ -524,14 +538,25 @@ mod tests {
         assert_eq!(rows[0].project, "pbfhogg");
 
         // Schema version is current.
-        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
         // Child tables exist (can query without error).
-        db.conn.execute_batch("SELECT COUNT(*) FROM run_distribution").unwrap();
-        db.conn.execute_batch("SELECT COUNT(*) FROM run_kv").unwrap();
-        db.conn.execute_batch("SELECT COUNT(*) FROM hotpath_functions").unwrap();
-        db.conn.execute_batch("SELECT COUNT(*) FROM hotpath_threads").unwrap();
+        db.conn
+            .execute_batch("SELECT COUNT(*) FROM run_distribution")
+            .unwrap();
+        db.conn
+            .execute_batch("SELECT COUNT(*) FROM run_kv")
+            .unwrap();
+        db.conn
+            .execute_batch("SELECT COUNT(*) FROM hotpath_functions")
+            .unwrap();
+        db.conn
+            .execute_batch("SELECT COUNT(*) FROM hotpath_threads")
+            .unwrap();
 
         // New columns exist.
         assert!(has_column(&db.conn, "runs", "peak_rss_mb"));
@@ -557,16 +582,21 @@ mod tests {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(V2_SCHEMA).unwrap();
             conn.pragma_update(None, "user_version", 2).unwrap();
-            conn.execute(V2_INSERT, rusqlite::params![extra, rusqlite::types::Null]).unwrap();
+            conn.execute(V2_INSERT, rusqlite::params![extra, rusqlite::types::Null])
+                .unwrap();
         }
 
         let db = ResultsDb::open(&db_path).expect("open should migrate v2 to v3");
 
         // project column added with default.
-        let rows = db.query(&QueryFilter {
-            commit: Some(String::from("aabb")),
-            command: None, variant: None, limit: 10,
-        }).expect("query");
+        let rows = db
+            .query(&QueryFilter {
+                commit: Some(String::from("aabb")),
+                command: None,
+                variant: None,
+                limit: 10,
+            })
+            .expect("query");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].project, "pbfhogg");
 
@@ -578,13 +608,20 @@ mod tests {
         assert_eq!(dist, (10, 100, 150, 200, 250));
 
         // Extra kv (output_bytes) migrated to run_kv.
-        let val: i64 = db.conn.query_row(
-            "SELECT value_int FROM run_kv WHERE run_id = 1 AND key = 'output_bytes'",
-            [], |r| r.get(0),
-        ).expect("output_bytes kv should exist");
+        let val: i64 = db
+            .conn
+            .query_row(
+                "SELECT value_int FROM run_kv WHERE run_id = 1 AND key = 'output_bytes'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("output_bytes kv should exist");
         assert_eq!(val, 999);
 
-        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
         drop(db);
@@ -619,15 +656,21 @@ mod tests {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(V2_SCHEMA).unwrap();
             conn.pragma_update(None, "user_version", 2).unwrap();
-            conn.execute(V2_INSERT, rusqlite::params![extra, rusqlite::types::Null]).unwrap();
+            conn.execute(V2_INSERT, rusqlite::params![extra, rusqlite::types::Null])
+                .unwrap();
         }
 
         let db = ResultsDb::open(&db_path).expect("open should migrate hotpath");
 
         // Hotpath functions migrated.
-        let count: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM hotpath_functions WHERE run_id = 1", [], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM hotpath_functions WHERE run_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 2, "should have 2 hotpath function rows");
 
         // Check first function.
@@ -640,16 +683,25 @@ mod tests {
         assert_eq!(section, "timing");
 
         // Thread data migrated.
-        let thread_name: String = db.conn.query_row(
-            "SELECT name FROM hotpath_threads WHERE run_id = 1", [], |r| r.get(0),
-        ).unwrap();
+        let thread_name: String = db
+            .conn
+            .query_row(
+                "SELECT name FROM hotpath_threads WHERE run_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(thread_name, "main");
 
         // Thread summary kv migrated.
-        let rss: String = db.conn.query_row(
-            "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'threads.rss_bytes'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let rss: String = db
+            .conn
+            .query_row(
+                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'threads.rss_bytes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(rss, "1048576");
 
         drop(db);
@@ -670,24 +722,34 @@ mod tests {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(V2_SCHEMA).unwrap();
             conn.pragma_update(None, "user_version", 2).unwrap();
-            conn.execute(V2_INSERT, rusqlite::params![
-                rusqlite::types::Null, metadata
-            ]).unwrap();
+            conn.execute(
+                V2_INSERT,
+                rusqlite::params![rusqlite::types::Null, metadata],
+            )
+            .unwrap();
         }
 
         let db = ResultsDb::open(&db_path).expect("open should migrate metadata");
 
         // Metadata migrated to run_kv with meta. prefix.
-        let compression: String = db.conn.query_row(
-            "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.compression'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let compression: String = db
+            .conn
+            .query_row(
+                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.compression'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(compression, "zlib");
 
-        let io_mode: String = db.conn.query_row(
-            "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.io_mode'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let io_mode: String = db
+            .conn
+            .query_row(
+                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.io_mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(io_mode, "buffered");
 
         drop(db);
@@ -726,44 +788,87 @@ mod tests {
             conn.pragma_update(None, "user_version", 3).unwrap();
 
             // pbfhogg rows that should be renamed.
-            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "tags-count", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "node-stats", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "removeid", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "derive-changes", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "merge-pbf", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["bench blob-filter", "node-stats+raw", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["hotpath", "merge-zlib", "pbfhogg"]).unwrap();
-            conn.execute(V3_INSERT, rusqlite::params!["hotpath", "tags-count/alloc", "pbfhogg"]).unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "tags-count", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "node-stats", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "removeid", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "derive-changes", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "merge-pbf", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench blob-filter", "node-stats+raw", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "merge-zlib", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "tags-count/alloc", "pbfhogg"],
+            )
+            .unwrap();
 
             // pbfhogg row that should NOT be renamed (already correct).
-            conn.execute(V3_INSERT, rusqlite::params!["bench commands", "inspect", "pbfhogg"]).unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "inspect", "pbfhogg"],
+            )
+            .unwrap();
 
             // elivagar row with same old variant name — should NOT be touched.
-            conn.execute(V3_INSERT, rusqlite::params!["bench self", "tags-count", "elivagar"]).unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench self", "tags-count", "elivagar"],
+            )
+            .unwrap();
         }
 
         let db = ResultsDb::open(&db_path).expect("open should migrate v3 to v4");
 
-        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
         // Helper to query variant by row id.
         let variant_of = |id: i64| -> String {
-            db.conn.query_row(
-                "SELECT variant FROM runs WHERE id = ?1", [id], |r| r.get(0),
-            ).unwrap()
+            db.conn
+                .query_row("SELECT variant FROM runs WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
         };
 
-        assert_eq!(variant_of(1), "inspect-tags");       // tags-count -> inspect-tags
-        assert_eq!(variant_of(2), "inspect-nodes");       // node-stats -> inspect-nodes
-        assert_eq!(variant_of(3), "getid-invert");        // removeid -> getid-invert
-        assert_eq!(variant_of(4), "diff-osc");            // derive-changes -> diff-osc
-        assert_eq!(variant_of(5), "cat-dedupe");           // merge-pbf -> cat-dedupe
-        assert_eq!(variant_of(6), "inspect-nodes+raw");   // node-stats+raw -> inspect-nodes+raw
-        assert_eq!(variant_of(7), "apply-changes-zlib");  // merge-zlib -> apply-changes-zlib
-        assert_eq!(variant_of(8), "inspect-tags/alloc");  // tags-count/alloc -> inspect-tags/alloc
-        assert_eq!(variant_of(9), "inspect");             // unchanged
-        assert_eq!(variant_of(10), "tags-count");         // elivagar row: NOT renamed
+        assert_eq!(variant_of(1), "inspect-tags"); // tags-count -> inspect-tags
+        assert_eq!(variant_of(2), "inspect-nodes"); // node-stats -> inspect-nodes
+        assert_eq!(variant_of(3), "getid-invert"); // removeid -> getid-invert
+        assert_eq!(variant_of(4), "diff-osc"); // derive-changes -> diff-osc
+        assert_eq!(variant_of(5), "cat-dedupe"); // merge-pbf -> cat-dedupe
+        assert_eq!(variant_of(6), "inspect-nodes+raw"); // node-stats+raw -> inspect-nodes+raw
+        assert_eq!(variant_of(7), "apply-changes-zlib"); // merge-zlib -> apply-changes-zlib
+        assert_eq!(variant_of(8), "inspect-tags/alloc"); // tags-count/alloc -> inspect-tags/alloc
+        assert_eq!(variant_of(9), "inspect"); // unchanged
+        assert_eq!(variant_of(10), "tags-count"); // elivagar row: NOT renamed
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -779,7 +884,10 @@ mod tests {
 
         let db = ResultsDb::open(&db_path).expect("open fresh db");
 
-        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
         drop(db);

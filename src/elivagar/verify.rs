@@ -9,11 +9,7 @@ use crate::build;
 use crate::error::DevError;
 use crate::output;
 
-pub fn run(
-    pmtiles_path: &Path,
-    project_root: &Path,
-    features: &[String],
-) -> Result<(), DevError> {
+pub fn run(pmtiles_path: &Path, project_root: &Path, features: &[String]) -> Result<(), DevError> {
     let build_config = if features.is_empty() {
         build::BuildConfig::release(None)
     } else {

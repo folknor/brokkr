@@ -11,9 +11,32 @@ pub const ALL_STRATEGIES: &[&str] = &["simple", "complete", "smart"];
 
 fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Vec<String> {
     match name {
-        "simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), bbox.into(), "-o".into(), output.into()],
-        "complete" => vec!["extract".into(), pbf.into(), "-b".into(), bbox.into(), "-o".into(), output.into()],
-        "smart" => vec!["extract".into(), pbf.into(), "--smart".into(), "-b".into(), bbox.into(), "-o".into(), output.into()],
+        "simple" => vec![
+            "extract".into(),
+            pbf.into(),
+            "--simple".into(),
+            "-b".into(),
+            bbox.into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "complete" => vec![
+            "extract".into(),
+            pbf.into(),
+            "-b".into(),
+            bbox.into(),
+            "-o".into(),
+            output.into(),
+        ],
+        "smart" => vec![
+            "extract".into(),
+            pbf.into(),
+            "--smart".into(),
+            "-b".into(),
+            bbox.into(),
+            "-o".into(),
+            output.into(),
+        ],
         _ => unreachable!("unknown strategy: {name}"),
     }
 }
@@ -49,8 +72,14 @@ pub fn run(
             cargo_features: None,
             cargo_profile: "release".into(),
             runs,
-            cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &args_refs)),
-            metadata: vec![KvPair::text("meta.strategy", name), KvPair::text("meta.bbox", bbox)],
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &args_refs,
+            )),
+            metadata: vec![
+                KvPair::text("meta.strategy", name),
+                KvPair::text("meta.bbox", bbox),
+            ],
         };
 
         harness.run_external(&config, binary, &args_refs, project_root)?;

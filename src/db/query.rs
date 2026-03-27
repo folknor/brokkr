@@ -1,12 +1,12 @@
 //! Query operations for the results database.
 
-use crate::error::DevError;
 use super::ResultsDb;
 use super::schema::SELECT_COLS;
 use super::{
-    Distribution, HotpathData, HotpathFunction, HotpathThread,
-    KvPair, KvValue, QueryFilter, StoredRow,
+    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, QueryFilter,
+    StoredRow,
 };
+use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -15,7 +15,8 @@ use super::{
 impl ResultsDb {
     /// Query rows by UUID prefix. Loads all child data (kv, distribution, hotpath).
     pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
-        let sql = format!("SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1||'%' ORDER BY id DESC");
+        let sql =
+            format!("SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1||'%' ORDER BY id DESC");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![prefix], map_stored_row)?;
         let mut result = collect_rows(rows)?;
@@ -29,8 +30,10 @@ impl ResultsDb {
     /// Results ordered by id descending, limited to `filter.limit`.
     pub fn query(&self, filter: &QueryFilter) -> Result<Vec<StoredRow>, DevError> {
         let (sql, params) = build_query_sql(filter);
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|p| p as &dyn rusqlite::types::ToSql)
+            .collect();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
         collect_rows(rows)
@@ -49,14 +52,19 @@ pub(super) fn query_commit_filtered(
 ) -> Result<Vec<StoredRow>, DevError> {
     let mut bound = params.to_vec();
     bound[0] = commit.to_owned();
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        bound.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = bound
+        .iter()
+        .map(|p| p as &dyn rusqlite::types::ToSql)
+        .collect();
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
     collect_rows(rows)
 }
 
-pub(super) fn load_children(conn: &rusqlite::Connection, row: &mut StoredRow) -> Result<(), DevError> {
+pub(super) fn load_children(
+    conn: &rusqlite::Connection,
+    row: &mut StoredRow,
+) -> Result<(), DevError> {
     row.distribution = load_distribution(conn, row.id)?;
     row.kv = load_kv(conn, row.id)?;
     row.hotpath = load_hotpath(conn, row.id, &row.kv)?;
@@ -86,19 +94,33 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         subject: row.get("subject")?,
         command: row.get("command")?,
         variant: row.get::<_, Option<String>>("variant")?.unwrap_or_default(),
-        input_file: row.get::<_, Option<String>>("input_file")?.unwrap_or_default(),
+        input_file: row
+            .get::<_, Option<String>>("input_file")?
+            .unwrap_or_default(),
         input_mb: row.get("input_mb")?,
         elapsed_ms: row.get("elapsed_ms")?,
         peak_rss_mb: row.get("peak_rss_mb")?,
-        cargo_features: row.get::<_, Option<String>>("cargo_features")?.unwrap_or_default(),
-        cargo_profile: row.get::<_, Option<String>>("cargo_profile")?.unwrap_or_default(),
+        cargo_features: row
+            .get::<_, Option<String>>("cargo_features")?
+            .unwrap_or_default(),
+        cargo_profile: row
+            .get::<_, Option<String>>("cargo_profile")?
+            .unwrap_or_default(),
         kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),
-        cpu_governor: row.get::<_, Option<String>>("cpu_governor")?.unwrap_or_default(),
+        cpu_governor: row
+            .get::<_, Option<String>>("cpu_governor")?
+            .unwrap_or_default(),
         avail_memory_mb: row.get("avail_memory_mb")?,
-        storage_notes: row.get::<_, Option<String>>("storage_notes")?.unwrap_or_default(),
+        storage_notes: row
+            .get::<_, Option<String>>("storage_notes")?
+            .unwrap_or_default(),
         uuid: row.get::<_, Option<String>>("uuid")?.unwrap_or_default(),
-        cli_args: row.get::<_, Option<String>>("cli_args")?.unwrap_or_default(),
-        project: row.get::<_, Option<String>>("project")?.unwrap_or_else(|| "pbfhogg".to_owned()),
+        cli_args: row
+            .get::<_, Option<String>>("cli_args")?
+            .unwrap_or_default(),
+        project: row
+            .get::<_, Option<String>>("project")?
+            .unwrap_or_else(|| "pbfhogg".to_owned()),
         kv: Vec::new(),
         distribution: None,
         hotpath: None,
@@ -135,9 +157,12 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     (sql, params)
 }
 
-fn load_distribution(conn: &rusqlite::Connection, run_id: i64) -> Result<Option<Distribution>, DevError> {
+fn load_distribution(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<Option<Distribution>, DevError> {
     let mut stmt = conn.prepare(
-        "SELECT samples, min_ms, p50_ms, p95_ms, max_ms FROM run_distribution WHERE run_id = ?1"
+        "SELECT samples, min_ms, p50_ms, p95_ms, max_ms FROM run_distribution WHERE run_id = ?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![run_id], |row| {
         Ok(Distribution {
@@ -157,7 +182,7 @@ fn load_distribution(conn: &rusqlite::Connection, run_id: i64) -> Result<Option<
 
 fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevError> {
     let mut stmt = conn.prepare(
-        "SELECT key, value_int, value_real, value_text FROM run_kv WHERE run_id = ?1 ORDER BY key"
+        "SELECT key, value_int, value_real, value_text FROM run_kv WHERE run_id = ?1 ORDER BY key",
     )?;
     let rows = stmt.query_map(rusqlite::params![run_id], |row| {
         let key: String = row.get(0)?;
@@ -191,14 +216,22 @@ fn load_hotpath(
         return Ok(None);
     }
     // Thread summary stats are stored in run_kv with "threads." prefix.
-    let thread_summary: Vec<KvPair> = kv.iter()
+    let thread_summary: Vec<KvPair> = kv
+        .iter()
         .filter(|p| p.key.starts_with("threads."))
         .cloned()
         .collect();
-    Ok(Some(HotpathData { functions, threads, thread_summary }))
+    Ok(Some(HotpathData {
+        functions,
+        threads,
+        thread_summary,
+    }))
 }
 
-fn load_hotpath_functions(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<HotpathFunction>, DevError> {
+fn load_hotpath_functions(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<Vec<HotpathFunction>, DevError> {
     let mut stmt = conn.prepare(
         "SELECT section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99 \
          FROM hotpath_functions WHERE run_id = ?1 ORDER BY section, ordinal"
@@ -225,11 +258,14 @@ fn load_hotpath_functions(conn: &rusqlite::Connection, run_id: i64) -> Result<Ve
     Ok(result)
 }
 
-fn load_hotpath_threads(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<HotpathThread>, DevError> {
+fn load_hotpath_threads(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<Vec<HotpathThread>, DevError> {
     let mut stmt = conn.prepare(
         "SELECT name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
          alloc_bytes, dealloc_bytes, mem_diff \
-         FROM hotpath_threads WHERE run_id = ?1"
+         FROM hotpath_threads WHERE run_id = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![run_id], |row| {
         Ok(HotpathThread {
@@ -307,8 +343,14 @@ mod tests {
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("[commit] LIKE ?1||'%'"), "commit should be ?1");
-        assert!(sql.contains("command LIKE '%'||?2||'%'"), "command should be ?2 contains");
-        assert!(sql.contains("variant LIKE '%'||?3||'%'"), "variant should be ?3 contains");
+        assert!(
+            sql.contains("command LIKE '%'||?2||'%'"),
+            "command should be ?2 contains"
+        );
+        assert!(
+            sql.contains("variant LIKE '%'||?3||'%'"),
+            "variant should be ?3 contains"
+        );
         assert!(sql.contains("LIMIT ?4"), "limit should be ?4");
         assert_eq!(params.len(), 4);
         assert_eq!(params[0], "abc123");
@@ -382,55 +424,72 @@ mod tests {
             subject: String::from("test"),
             command: String::from(cmd),
             variant: Some(String::from(variant)),
-            input_file: None, input_mb: None,
+            input_file: None,
+            input_mb: None,
             elapsed_ms: 100,
-            peak_rss_mb: None, cargo_features: None,
+            peak_rss_mb: None,
+            cargo_features: None,
             cargo_profile: String::from("release"),
-            kernel: None, cpu_governor: None, avail_memory_mb: None,
-            storage_notes: None, cli_args: None,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
             project: String::from("test"),
-            kv: vec![], distribution: None, hotpath: None,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
         };
 
-        db.insert(&make_row("bench merge", "buffered+zlib")).unwrap();
-        db.insert(&make_row("bench merge", "buffered+none")).unwrap();
+        db.insert(&make_row("bench merge", "buffered+zlib"))
+            .unwrap();
+        db.insert(&make_row("bench merge", "buffered+none"))
+            .unwrap();
         db.insert(&make_row("bench read", "mmap")).unwrap();
 
         // "merge" matches "bench merge" rows only.
-        let rows = db.query(&QueryFilter {
-            commit: None,
-            command: Some(String::from("merge")),
-            variant: None,
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: Some(String::from("merge")),
+                variant: None,
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 2, "merge should match 2 bench merge rows");
 
         // "bench" matches all 3 rows.
-        let rows = db.query(&QueryFilter {
-            commit: None,
-            command: Some(String::from("bench")),
-            variant: None,
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: Some(String::from("bench")),
+                variant: None,
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 3, "bench should match all rows");
 
         // "read" matches only bench read.
-        let rows = db.query(&QueryFilter {
-            commit: None,
-            command: Some(String::from("read")),
-            variant: None,
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: Some(String::from("read")),
+                variant: None,
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].command, "bench read");
 
         // Full exact value still works.
-        let rows = db.query(&QueryFilter {
-            commit: None,
-            command: Some(String::from("bench merge")),
-            variant: None,
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: Some(String::from("bench merge")),
+                variant: None,
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 2);
 
         drop(db);
@@ -449,14 +508,21 @@ mod tests {
             subject: String::from("test"),
             command: String::from("bench merge"),
             variant: Some(String::from(variant)),
-            input_file: None, input_mb: None,
+            input_file: None,
+            input_mb: None,
             elapsed_ms: 100,
-            peak_rss_mb: None, cargo_features: None,
+            peak_rss_mb: None,
+            cargo_features: None,
             cargo_profile: String::from("release"),
-            kernel: None, cpu_governor: None, avail_memory_mb: None,
-            storage_notes: None, cli_args: None,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
             project: String::from("test"),
-            kv: vec![], distribution: None, hotpath: None,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
         };
 
         db.insert(&make_row("buffered+zlib")).unwrap();
@@ -464,27 +530,36 @@ mod tests {
         db.insert(&make_row("direct+zlib")).unwrap();
 
         // "zlib" matches buffered+zlib and direct+zlib.
-        let rows = db.query(&QueryFilter {
-            commit: None, command: None,
-            variant: Some(String::from("zlib")),
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                variant: Some(String::from("zlib")),
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 2, "zlib should match 2 rows");
 
         // "buffered" matches both buffered variants.
-        let rows = db.query(&QueryFilter {
-            commit: None, command: None,
-            variant: Some(String::from("buffered")),
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                variant: Some(String::from("buffered")),
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 2, "buffered should match 2 rows");
 
         // "none" matches only buffered+none.
-        let rows = db.query(&QueryFilter {
-            commit: None, command: None,
-            variant: Some(String::from("none")),
-            limit: 50,
-        }).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                variant: Some(String::from("none")),
+                limit: 50,
+            })
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].variant, "buffered+none");
 
@@ -509,12 +584,17 @@ mod tests {
             subject: String::from("test"),
             command: String::from("hotpath"),
             variant: Some(String::from("default")),
-            input_file: None, input_mb: None,
+            input_file: None,
+            input_mb: None,
             elapsed_ms: 500,
-            peak_rss_mb: None, cargo_features: None,
+            peak_rss_mb: None,
+            cargo_features: None,
             cargo_profile: String::from("release"),
-            kernel: None, cpu_governor: None, avail_memory_mb: None,
-            storage_notes: None, cli_args: None,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
             project: String::from("test"),
             kv: vec![
                 KvPair::int("elapsed_ms", 500),
@@ -537,19 +617,21 @@ mod tests {
                     avg: Some(String::from("50ms")),
                     total: Some(String::from("500ms")),
                     percent_total: Some(String::from("100%")),
-                    p50: None, p95: None, p99: None,
+                    p50: None,
+                    p95: None,
+                    p99: None,
                 }],
                 threads: vec![HotpathThread {
                     name: String::from("main"),
                     status: Some(String::from("running")),
                     cpu_percent: Some(String::from("95%")),
-                    cpu_percent_max: None, cpu_percent_avg: None,
-                    alloc_bytes: None, dealloc_bytes: None,
+                    cpu_percent_max: None,
+                    cpu_percent_avg: None,
+                    alloc_bytes: None,
+                    dealloc_bytes: None,
                     mem_diff: None,
                 }],
-                thread_summary: vec![
-                    KvPair::text("threads.rss_bytes", "1024"),
-                ],
+                thread_summary: vec![KvPair::text("threads.rss_bytes", "1024")],
             }),
         };
 
@@ -561,7 +643,10 @@ mod tests {
         let r = &rows[0];
 
         // Distribution.
-        let dist = r.distribution.as_ref().expect("distribution should be loaded");
+        let dist = r
+            .distribution
+            .as_ref()
+            .expect("distribution should be loaded");
         assert_eq!(dist.samples, 5);
         assert_eq!(dist.min_ms, 100);
         assert_eq!(dist.p50_ms, 110);
@@ -570,8 +655,14 @@ mod tests {
 
         // KV pairs.
         assert!(r.kv.len() >= 2, "should have at least 2 kv pairs");
-        assert!(r.kv.iter().any(|p| p.key == "elapsed_ms"), "should have elapsed_ms kv");
-        assert!(r.kv.iter().any(|p| p.key == "threads.rss_bytes"), "should have threads.rss_bytes kv");
+        assert!(
+            r.kv.iter().any(|p| p.key == "elapsed_ms"),
+            "should have elapsed_ms kv"
+        );
+        assert!(
+            r.kv.iter().any(|p| p.key == "threads.rss_bytes"),
+            "should have threads.rss_bytes kv"
+        );
 
         // Hotpath.
         let hp = r.hotpath.as_ref().expect("hotpath should be loaded");

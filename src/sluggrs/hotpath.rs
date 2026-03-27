@@ -75,9 +75,7 @@ pub fn run(
     output::hotpath_msg(&format!("=== sluggrs {label} ==="));
 
     if alloc {
-        output::hotpath_msg(
-            "NOTE: alloc profiling -- wall-clock times are not meaningful",
-        );
+        output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
     let variant_suffix = harness::hotpath_variant_suffix(alloc);
@@ -137,8 +135,20 @@ pub(crate) fn cmd(
 
     let db_root = build_root.map(|_| project_root);
     let harness = harness::BenchHarness::new_with_lock(
-        lock, &paths, effective_root, db_root, project, force,
+        lock,
+        &paths,
+        effective_root,
+        db_root,
+        project,
+        force,
     )?;
 
-    run(&harness, &binary, runs, alloc, effective_root, &paths.scratch_dir)
+    run(
+        &harness,
+        &binary,
+        runs,
+        alloc,
+        effective_root,
+        &paths.scratch_dir,
+    )
 }

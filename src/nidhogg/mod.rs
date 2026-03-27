@@ -1,8 +1,8 @@
-pub(crate) mod cmd;
 pub mod bench_api;
 pub mod bench_ingest;
 pub mod bench_tiles;
 pub mod client;
+pub(crate) mod cmd;
 pub mod geocode;
 pub mod hotpath;
 pub mod ingest;

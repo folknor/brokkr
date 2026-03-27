@@ -148,21 +148,28 @@ pub fn run(
     let indexed_dest = data_dir.join(format!("{region}-latest-with-indexdata.osm.pbf"));
 
     if indexed_dest.exists() && is_nonempty(&indexed_dest) {
-        output::download_msg(&format!(
-            "  SKIP (exists): {}",
-            indexed_dest.display()
-        ));
+        output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
     } else {
         output::download_msg("  generating indexed PBF via cat");
 
-        let binary = build::cargo_build(&build::BuildConfig::release(Some("pbfhogg-cli")), project_root)?;
+        let binary = build::cargo_build(
+            &build::BuildConfig::release(Some("pbfhogg-cli")),
+            project_root,
+        )?;
         let binary_str = binary.display().to_string();
         let pbf_str = pbf_dest.display().to_string();
         let indexed_str = indexed_dest.display().to_string();
 
         let captured = output::run_captured(
             &binary_str,
-            &["cat", &pbf_str, "--type", "node,way,relation", "-o", &indexed_str],
+            &[
+                "cat",
+                &pbf_str,
+                "--type",
+                "node,way,relation",
+                "-o",
+                &indexed_str,
+            ],
             project_root,
         )?;
 

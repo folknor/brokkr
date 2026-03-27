@@ -46,9 +46,7 @@ pub fn run(port: u16, queries: &[&str]) -> Result<(), DevError> {
         }
     }
 
-    output::verify_msg(&format!(
-        "geocode: {passed} passed, {failed} failed"
-    ));
+    output::verify_msg(&format!("geocode: {passed} passed, {failed} failed"));
 
     if failed > 0 {
         return Err(DevError::Config(format!(
@@ -94,9 +92,7 @@ fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
                     })
                 }
                 Some(_) => Ok(GeoResult::Empty),
-                None => Ok(GeoResult::Error(
-                    "response is not an array".into(),
-                )),
+                None => Ok(GeoResult::Error("response is not an array".into())),
             }
         }
         Err(e) => Ok(GeoResult::Error(format!("JSON parse error: {e}"))),

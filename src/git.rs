@@ -65,29 +65,45 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
 fn check_clean(workspace_root: &Path) -> bool {
     // Exclude .brokkr/results.db (modified by benchmarks) and *.md (docs).
     let unstaged = Command::new("git")
-        .args(["diff", "--quiet", "HEAD", "--", ":(exclude).brokkr/results.db", ":(exclude)*.md"])
+        .args([
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            ":(exclude).brokkr/results.db",
+            ":(exclude)*.md",
+        ])
         .current_dir(workspace_root)
         .output();
 
     let staged = Command::new("git")
-        .args(["diff", "--quiet", "--cached", "HEAD", "--", ":(exclude).brokkr/results.db", ":(exclude)*.md"])
+        .args([
+            "diff",
+            "--quiet",
+            "--cached",
+            "HEAD",
+            "--",
+            ":(exclude).brokkr/results.db",
+            ":(exclude)*.md",
+        ])
         .current_dir(workspace_root)
         .output();
 
     let untracked = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard", "--", ":(exclude).brokkr/", ":(exclude)*.md"])
+        .args([
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ":(exclude).brokkr/",
+            ":(exclude)*.md",
+        ])
         .current_dir(workspace_root)
         .output();
 
-    let unstaged_ok = unstaged
-        .as_ref()
-        .ok()
-        .is_some_and(|o| o.status.success());
+    let unstaged_ok = unstaged.as_ref().ok().is_some_and(|o| o.status.success());
 
-    let staged_ok = staged
-        .as_ref()
-        .ok()
-        .is_some_and(|o| o.status.success());
+    let staged_ok = staged.as_ref().ok().is_some_and(|o| o.status.success());
 
     let no_untracked = untracked
         .as_ref()

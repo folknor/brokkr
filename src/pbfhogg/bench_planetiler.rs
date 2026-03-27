@@ -52,7 +52,11 @@ fn parse_planetiler_output(stderr: &str) -> Vec<ParsedResult> {
                 KvPair::int("relations", relations.unwrap_or(0)),
             ];
 
-            results.push(ParsedResult { mode, elapsed_ms, kv });
+            results.push(ParsedResult {
+                mode,
+                elapsed_ms,
+                kv,
+            });
         }
     }
 
@@ -68,11 +72,22 @@ fn run_planetiler_subprocess(
     project_root: &Path,
 ) -> Result<Vec<ParsedResult>, DevError> {
     let heap_arg = format!("-Xmx{heap_mb}m");
-    let pbf_str = pbf_path.to_str().ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let pbf_str = pbf_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
     let runs_str = runs.to_string();
-    let java_str = java.to_str().ok_or_else(|| DevError::Config("Java path is not valid UTF-8".into()))?;
+    let java_str = java
+        .to_str()
+        .ok_or_else(|| DevError::Config("Java path is not valid UTF-8".into()))?;
 
-    let args: Vec<&str> = vec![&heap_arg, "-cp", classpath, "BenchPbfRead", pbf_str, &runs_str];
+    let args: Vec<&str> = vec![
+        &heap_arg,
+        "-cp",
+        classpath,
+        "BenchPbfRead",
+        pbf_str,
+        &runs_str,
+    ];
 
     let captured = output::run_captured(java_str, &args, project_root)?;
 
@@ -94,23 +109,23 @@ pub fn run(
 
     #[allow(clippy::cast_possible_truncation)]
     let heap_mb = std::cmp::max((file_mb as i64) * 2, 2048);
-    let classpath = format!("{}:{}", pt.planetiler_jar.display(), pt.bench_class_dir.display());
+    let classpath = format!(
+        "{}:{}",
+        pt.planetiler_jar.display(),
+        pt.bench_class_dir.display()
+    );
 
     let (basename, _) = super::path_strs(pbf_path)?;
 
     output::bench_msg("running planetiler benchmark");
 
-    let results = run_planetiler_subprocess(
-        &pt.java,
-        &classpath,
-        pbf_path,
-        heap_mb,
-        runs,
-        project_root,
-    )?;
+    let results =
+        run_planetiler_subprocess(&pt.java, &classpath, pbf_path, heap_mb, runs, project_root)?;
 
     if results.is_empty() {
-        return Err(DevError::Build("no results from planetiler benchmark".into()));
+        return Err(DevError::Build(
+            "no results from planetiler benchmark".into(),
+        ));
     }
 
     for result in &results {

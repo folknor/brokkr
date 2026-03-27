@@ -126,11 +126,7 @@ impl CapturedOutput {
 ///
 /// Returns `CapturedOutput` on success (even if the process exited non-zero).
 /// Returns `DevError::Subprocess` only if the process could not be spawned.
-pub fn run_captured(
-    program: &str,
-    args: &[&str],
-    cwd: &Path,
-) -> Result<CapturedOutput, DevError> {
+pub fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<CapturedOutput, DevError> {
     let start = Instant::now();
 
     let mut cmd = Command::new(program);
@@ -200,10 +196,7 @@ pub fn run_captured_with_env(
 /// If the process is killed by a signal (e.g. OOM killer SIGKILL), returns a
 /// `DevError::Subprocess` with the signal number instead of silently mapping
 /// to exit code 1.
-pub fn run_passthrough_timed(
-    program: &str,
-    args: &[&str],
-) -> Result<PassthroughOutput, DevError> {
+pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<PassthroughOutput, DevError> {
     use std::os::unix::process::ExitStatusExt;
 
     let start = Instant::now();

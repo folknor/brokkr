@@ -70,10 +70,7 @@ pub fn ensure_osmosis(
 
     let osmosis = ensure_osmosis_binary(data_dir)?;
 
-    Ok(OsmosisTools {
-        osmosis,
-        java_home,
-    })
+    Ok(OsmosisTools { osmosis, java_home })
 }
 
 // ---------------------------------------------------------------------------
@@ -88,9 +85,10 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
     // Check cached version.
     if osmosis_bin.exists()
         && let Ok(cached) = fs::read_to_string(&version_file)
-            && cached.trim() == OSMOSIS_VERSION {
-                return Ok(osmosis_bin);
-            }
+        && cached.trim() == OSMOSIS_VERSION
+    {
+        return Ok(osmosis_bin);
+    }
 
     let download_url = format!(
         "https://github.com/openstreetmap/osmosis/releases/download/{OSMOSIS_VERSION}/osmosis-{OSMOSIS_VERSION}.tgz"
@@ -177,34 +175,25 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     let first = api_json
         .as_array()
         .and_then(|arr| arr.first())
-        .ok_or_else(|| {
-            DevError::Config("adoptium API returned empty response".into())
-        })?;
+        .ok_or_else(|| DevError::Config("adoptium API returned empty response".into()))?;
 
     let release_name = first
         .get("release_name")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            DevError::Config("adoptium API missing release_name".into())
-        })?;
+        .ok_or_else(|| DevError::Config("adoptium API missing release_name".into()))?;
 
     let download_url = first
         .get("binary")
         .and_then(|b| b.get("package"))
         .and_then(|p| p.get("link"))
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            DevError::Config("adoptium API missing binary.package.link".into())
-        })?;
+        .ok_or_else(|| DevError::Config("adoptium API missing binary.package.link".into()))?;
 
     // Download.
     let tarball = data_dir.join("jdk-download.tar.gz");
     let tarball_str = tarball.display().to_string();
     output::bench_msg(&format!("downloading JDK {release_name}"));
-    run_curl(
-        &["-fsSL", "-o", &tarball_str, download_url],
-        Path::new("."),
-    )?;
+    run_curl(&["-fsSL", "-o", &tarball_str, download_url], Path::new("."))?;
 
     // Remove old JDK dir and recreate.
     if jdk_dir.exists() {
@@ -216,7 +205,13 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     let jdk_dir_str = jdk_dir.display().to_string();
     let captured = output::run_captured(
         "tar",
-        &["xzf", &tarball_str, "-C", &jdk_dir_str, "--strip-components=1"],
+        &[
+            "xzf",
+            &tarball_str,
+            "-C",
+            &jdk_dir_str,
+            "--strip-components=1",
+        ],
         Path::new("."),
     )?;
     captured.check_success("tar")?;
@@ -245,8 +240,7 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
         return Ok(jar_path);
     }
 
-    let api_url =
-        "https://api.github.com/repos/onthegomap/planetiler/releases/latest";
+    let api_url = "https://api.github.com/repos/onthegomap/planetiler/releases/latest";
 
     let api_body = run_curl(&["-sfL", api_url], Path::new("."))?;
     let api_json: serde_json::Value = serde_json::from_slice(&api_body)?;
@@ -254,38 +248,26 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
     let tag_name = api_json
         .get("tag_name")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            DevError::Config("github API missing tag_name".into())
-        })?;
+        .ok_or_else(|| DevError::Config("github API missing tag_name".into()))?;
 
     let assets = api_json
         .get("assets")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            DevError::Config("github API missing assets array".into())
-        })?;
+        .ok_or_else(|| DevError::Config("github API missing assets array".into()))?;
 
     let download_url = assets
         .iter()
-        .find(|a| {
-            a.get("name")
-                .and_then(serde_json::Value::as_str) == Some("planetiler.jar")
-        })
+        .find(|a| a.get("name").and_then(serde_json::Value::as_str) == Some("planetiler.jar"))
         .and_then(|a| a.get("browser_download_url"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            DevError::Config(
-                "github API: no planetiler.jar asset found in release".into(),
-            )
+            DevError::Config("github API: no planetiler.jar asset found in release".into())
         })?;
 
     // Download.
     let jar_str = jar_path.display().to_string();
     output::bench_msg(&format!("downloading Planetiler {tag_name}"));
-    run_curl(
-        &["-fsSL", "-o", &jar_str, download_url],
-        Path::new("."),
-    )?;
+    run_curl(&["-fsSL", "-o", &jar_str, download_url], Path::new("."))?;
 
     // Write version file.
     fs::write(&version_file, tag_name)?;
@@ -304,16 +286,16 @@ fn compile_bench(
     javac: &Path,
     planetiler_jar: &Path,
 ) -> Result<PathBuf, DevError> {
-    let bench_src = workspace_root
-        .join("bench/planetiler-baseline/BenchPbfRead.java");
+    let bench_src = workspace_root.join("bench/planetiler-baseline/BenchPbfRead.java");
     let class_dir = data_dir.join("planetiler-bench-classes");
     let class_file = class_dir.join("BenchPbfRead.class");
 
     // Check if recompilation is needed.
     if class_file.exists()
-        && let Some(false) = needs_recompile(&class_file, &bench_src, planetiler_jar) {
-            return Ok(class_dir);
-        }
+        && let Some(false) = needs_recompile(&class_file, &bench_src, planetiler_jar)
+    {
+        return Ok(class_dir);
+    }
 
     fs::create_dir_all(&class_dir)?;
 
@@ -324,7 +306,14 @@ fn compile_bench(
 
     let captured = output::run_captured(
         &javac_str,
-        &["-proc:none", "-cp", &jar_str, "-d", &class_dir_str, &bench_src_str],
+        &[
+            "-proc:none",
+            "-cp",
+            &jar_str,
+            "-d",
+            &class_dir_str,
+            &bench_src_str,
+        ],
         workspace_root,
     )?;
 
@@ -336,11 +325,7 @@ fn compile_bench(
 
 /// Returns `Some(true)` if the class file is older than any source, `Some(false)`
 /// if it is up to date, or `None` if timestamps could not be compared.
-fn needs_recompile(
-    class_file: &Path,
-    bench_src: &Path,
-    planetiler_jar: &Path,
-) -> Option<bool> {
+fn needs_recompile(class_file: &Path, bench_src: &Path, planetiler_jar: &Path) -> Option<bool> {
     let class_mtime = file_mtime(class_file)?;
     let src_mtime = file_mtime(bench_src)?;
     let jar_mtime = file_mtime(planetiler_jar)?;
@@ -370,9 +355,7 @@ fn detect_os() -> Result<&'static str, DevError> {
     match std::env::consts::OS {
         "linux" => Ok("linux"),
         "macos" => Ok("mac"),
-        other => Err(DevError::Config(format!(
-            "unsupported OS: {other}"
-        ))),
+        other => Err(DevError::Config(format!("unsupported OS: {other}"))),
     }
 }
 
@@ -431,9 +414,9 @@ fn check_build_tool(name: &str) -> Result<(), DevError> {
 
     match result {
         Ok(status) if status.success() => Ok(()),
-        _ => Err(DevError::Preflight(vec![
-            format!("'{name}' not found in PATH (required to build tilemaker)"),
-        ])),
+        _ => Err(DevError::Preflight(vec![format!(
+            "'{name}' not found in PATH (required to build tilemaker)"
+        )])),
     }
 }
 
@@ -488,15 +471,16 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
     // Check if build can be skipped.
     if tilemaker_bin.exists()
         && let Ok(cached) = fs::read_to_string(&version_file)
-            && cached.trim() == commit {
-                // Version matches and binary exists — skip build.
-                let shortbread_dir = ensure_shortbread_config(data_dir)?;
-                return Ok(TilemakerTools {
-                    tilemaker: tilemaker_bin,
-                    config: shortbread_dir.join("config.json"),
-                    process: shortbread_dir.join("process.lua"),
-                });
-            }
+        && cached.trim() == commit
+    {
+        // Version matches and binary exists — skip build.
+        let shortbread_dir = ensure_shortbread_config(data_dir)?;
+        return Ok(TilemakerTools {
+            tilemaker: tilemaker_bin,
+            config: shortbread_dir.join("config.json"),
+            process: shortbread_dir.join("process.lua"),
+        });
+    }
 
     // CMake build.
     fs::create_dir_all(&build_dir)?;
@@ -519,11 +503,8 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
     let nproc = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let jobs = format!("-j{nproc}");
     output::bench_msg("building tilemaker");
-    let captured = output::run_captured(
-        "cmake",
-        &["--build", &build_dir_str, "--", &jobs],
-        data_dir,
-    )?;
+    let captured =
+        output::run_captured("cmake", &["--build", &build_dir_str, "--", &jobs], data_dir)?;
     captured.check_success("cmake")?;
 
     // Write version file.

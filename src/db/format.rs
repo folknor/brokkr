@@ -85,15 +85,25 @@ pub fn format_details(row: &StoredRow) -> String {
     }
 
     // Metadata kv pairs (meta. prefix).
-    let mut meta_kv: Vec<&KvPair> = row.kv.iter().filter(|kv| kv.key.starts_with("meta.")).collect();
+    let mut meta_kv: Vec<&KvPair> = row
+        .kv
+        .iter()
+        .filter(|kv| kv.key.starts_with("meta."))
+        .collect();
     meta_kv.sort_by_key(|kv| &kv.key);
     for kv in &meta_kv {
-        let label = kv.key.strip_prefix("meta.").unwrap_or(&kv.key).replace('_', " ");
+        let label = kv
+            .key
+            .strip_prefix("meta.")
+            .unwrap_or(&kv.key)
+            .replace('_', " ");
         fields.push((label, kv.value.to_string()));
     }
 
     // Runtime kv pairs (non-meta, non-threads).
-    let mut runtime_kv: Vec<&KvPair> = row.kv.iter()
+    let mut runtime_kv: Vec<&KvPair> = row
+        .kv
+        .iter()
         .filter(|kv| !kv.key.starts_with("meta.") && !kv.key.starts_with("threads."))
         .collect();
     runtime_kv.sort_by_key(|kv| &kv.key);
@@ -149,11 +159,18 @@ pub fn format_compare(
             && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ha, hb, top)
         {
             let (cmd, var, _) = split_pair_key(&pair.key);
-            let label = if var.is_empty() { cmd.to_owned() } else { format!("{cmd} {var}") };
+            let label = if var.is_empty() {
+                cmd.to_owned()
+            } else {
+                format!("{cmd} {var}")
+            };
             let heading = if pair.input_display.is_empty() {
                 format!("\n{label} — {commit_a} vs {commit_b}")
             } else {
-                format!("\n{label} - {} — {commit_a} vs {commit_b}", pair.input_display)
+                format!(
+                    "\n{label} - {} — {commit_a} vs {commit_b}",
+                    pair.input_display
+                )
             };
             out.push_str(&heading);
             out.push('\n');
@@ -333,10 +350,12 @@ struct ComparisonPair {
 
 /// Find an integer KV pair by key name.
 fn find_kv_int(kv: &[KvPair], key: &str) -> Option<i64> {
-    kv.iter().find(|p| p.key == key).and_then(|p| match &p.value {
-        KvValue::Int(v) => Some(*v),
-        _ => None,
-    })
+    kv.iter()
+        .find(|p| p.key == key)
+        .and_then(|p| match &p.value {
+            KvValue::Int(v) => Some(*v),
+            _ => None,
+        })
 }
 
 /// Find output_bytes in a StoredRow's kv pairs.
@@ -349,7 +368,9 @@ fn compute_rewrite_pct(kv: &[KvPair]) -> Option<f64> {
     let pass = find_kv_int(kv, "bytes_passthrough")?;
     let rw = find_kv_int(kv, "bytes_rewritten")?;
     let total = pass + rw;
-    if total == 0 { return None; }
+    if total == 0 {
+        return None;
+    }
     #[allow(clippy::cast_precision_loss)]
     Some(rw as f64 / total as f64 * 100.0)
 }
@@ -361,10 +382,7 @@ fn format_blob_counts(kv: &[KvPair]) -> Option<String> {
     Some(format!("{pass}pt/{rw}rw"))
 }
 
-fn build_comparison_pairs(
-    rows_a: &[StoredRow],
-    rows_b: &[StoredRow],
-) -> Vec<ComparisonPair> {
+fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<ComparisonPair> {
     use std::collections::HashMap;
 
     struct RowData {
@@ -418,7 +436,9 @@ fn build_comparison_pairs(
         .map(|k| {
             let a = a_map.remove(&k);
             let b = b_map.remove(&k);
-            let input_display = a.as_ref().or(b.as_ref())
+            let input_display = a
+                .as_ref()
+                .or(b.as_ref())
                 .map(|r| r.input_display.clone())
                 .unwrap_or_default();
             let a_output_bytes = a.as_ref().and_then(|r| r.output_bytes);
@@ -466,10 +486,18 @@ fn compute_compare_widths(
     commit_b: &str,
     pairs: &[ComparisonPair],
 ) -> CompareWidths {
-    let has_output = pairs.iter().any(|p| p.a_output_bytes.is_some() || p.b_output_bytes.is_some());
-    let has_rss = pairs.iter().any(|p| p.a_rss_mb.is_some() || p.b_rss_mb.is_some());
-    let has_rewrite = pairs.iter().any(|p| p.a_rewrite_pct.is_some() || p.b_rewrite_pct.is_some());
-    let has_blobs = pairs.iter().any(|p| p.a_blobs.is_some() || p.b_blobs.is_some());
+    let has_output = pairs
+        .iter()
+        .any(|p| p.a_output_bytes.is_some() || p.b_output_bytes.is_some());
+    let has_rss = pairs
+        .iter()
+        .any(|p| p.a_rss_mb.is_some() || p.b_rss_mb.is_some());
+    let has_rewrite = pairs
+        .iter()
+        .any(|p| p.a_rewrite_pct.is_some() || p.b_rewrite_pct.is_some());
+    let has_blobs = pairs
+        .iter()
+        .any(|p| p.a_blobs.is_some() || p.b_blobs.is_some());
     let mut w = CompareWidths {
         command: 7,
         variant: 7,
@@ -501,18 +529,30 @@ fn compute_compare_widths(
         w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms).len());
         w.change = w.change.max(format_change(pair.a_ms, pair.b_ms).len());
         if has_output {
-            w.output_a = w.output_a.max(format_bytes_or_dash(pair.a_output_bytes).len());
-            w.output_b = w.output_b.max(format_bytes_or_dash(pair.b_output_bytes).len());
-            w.output_change = w.output_change.max(format_change_bytes(pair.a_output_bytes, pair.b_output_bytes).len());
+            w.output_a = w
+                .output_a
+                .max(format_bytes_or_dash(pair.a_output_bytes).len());
+            w.output_b = w
+                .output_b
+                .max(format_bytes_or_dash(pair.b_output_bytes).len());
+            w.output_change = w
+                .output_change
+                .max(format_change_bytes(pair.a_output_bytes, pair.b_output_bytes).len());
         }
         if has_rss {
             w.rss_a = w.rss_a.max(format_rss_or_dash(pair.a_rss_mb).len());
             w.rss_b = w.rss_b.max(format_rss_or_dash(pair.b_rss_mb).len());
-            w.rss_change = w.rss_change.max(format_change_rss(pair.a_rss_mb, pair.b_rss_mb).len());
+            w.rss_change = w
+                .rss_change
+                .max(format_change_rss(pair.a_rss_mb, pair.b_rss_mb).len());
         }
         if has_rewrite {
-            w.rewrite_a = w.rewrite_a.max(format_pct_or_dash(pair.a_rewrite_pct).len());
-            w.rewrite_b = w.rewrite_b.max(format_pct_or_dash(pair.b_rewrite_pct).len());
+            w.rewrite_a = w
+                .rewrite_a
+                .max(format_pct_or_dash(pair.a_rewrite_pct).len());
+            w.rewrite_b = w
+                .rewrite_b
+                .max(format_pct_or_dash(pair.b_rewrite_pct).len());
         }
         if has_blobs {
             w.blobs_a = w.blobs_a.max(format_opt_str_or_dash(&pair.a_blobs).len());
@@ -522,12 +562,7 @@ fn compute_compare_widths(
     w
 }
 
-fn append_compare_header(
-    out: &mut String,
-    commit_a: &str,
-    commit_b: &str,
-    w: &CompareWidths,
-) {
+fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &CompareWidths) {
     use std::fmt::Write;
     write!(
         out,
@@ -596,11 +631,7 @@ fn append_compare_header(
     }
 }
 
-fn append_compare_row(
-    out: &mut String,
-    pair: &ComparisonPair,
-    w: &CompareWidths,
-) {
+fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths) {
     use std::fmt::Write;
     let (cmd, var, _) = split_pair_key(&pair.key);
     let a_str = format_ms_or_dash(pair.a_ms);
@@ -905,7 +936,11 @@ mod tests {
         let pairs = build_comparison_pairs(&a, &b);
 
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].a_ms, Some(100), "first A entry should win, not 999");
+        assert_eq!(
+            pairs[0].a_ms,
+            Some(100),
+            "first A entry should win, not 999"
+        );
         assert_eq!(pairs[0].b_ms, Some(50), "first B entry should win, not 888");
     }
 
@@ -914,14 +949,8 @@ mod tests {
         // A has benchmarks X and Y (in that order).
         // B has benchmarks Y and Z (in that order).
         // Expected key order: X, Y (from A), then Z (new from B).
-        let a = vec![
-            row("x-cmd", "", "", 10),
-            row("y-cmd", "", "", 20),
-        ];
-        let b = vec![
-            row("y-cmd", "", "", 25),
-            row("z-cmd", "", "", 30),
-        ];
+        let a = vec![row("x-cmd", "", "", 10), row("y-cmd", "", "", 20)];
+        let b = vec![row("y-cmd", "", "", 25), row("z-cmd", "", "", 30)];
         let pairs = build_comparison_pairs(&a, &b);
 
         assert_eq!(pairs.len(), 3);
@@ -950,9 +979,7 @@ mod tests {
             row("read", "stdio", "dk.pbf", 200),
             row("read", "mmap", "se.pbf", 300),
         ];
-        let b = vec![
-            row("read", "mmap", "dk.pbf", 90),
-        ];
+        let b = vec![row("read", "mmap", "dk.pbf", 90)];
         let pairs = build_comparison_pairs(&a, &b);
 
         assert_eq!(pairs.len(), 3);
@@ -1219,10 +1246,22 @@ mod tests {
         assert!(output.contains("rewrite_b"), "should have rewrite_b header");
         assert!(output.contains("blobs_a"), "should have blobs_a header");
         assert!(output.contains("blobs_b"), "should have blobs_b header");
-        assert!(output.contains("8.0%"), "should show 8.0% rewrite ratio for A");
-        assert!(output.contains("10.0%"), "should show 10.0% rewrite ratio for B");
-        assert!(output.contains("100pt/10rw"), "should show blob counts for A");
-        assert!(output.contains("95pt/15rw"), "should show blob counts for B");
+        assert!(
+            output.contains("8.0%"),
+            "should show 8.0% rewrite ratio for A"
+        );
+        assert!(
+            output.contains("10.0%"),
+            "should show 10.0% rewrite ratio for B"
+        );
+        assert!(
+            output.contains("100pt/10rw"),
+            "should show blob counts for A"
+        );
+        assert!(
+            output.contains("95pt/15rw"),
+            "should show blob counts for B"
+        );
     }
 
     #[test]
@@ -1230,7 +1269,10 @@ mod tests {
         let a = row("read", "mmap", "dk.pbf", 100);
         let b = row("read", "mmap", "dk.pbf", 90);
         let output = format_compare("aaa", &[a], "bbb", &[b], 10);
-        assert!(!output.contains("rewrite_a"), "no rewrite columns for non-merge");
+        assert!(
+            !output.contains("rewrite_a"),
+            "no rewrite columns for non-merge"
+        );
         assert!(!output.contains("blobs_a"), "no blob columns for non-merge");
     }
 }

@@ -79,18 +79,17 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
 
     let zip_path = data_dir.join(variant.zip_name);
 
-    output::download_msg(&format!("downloading {} ({})", variant.label, variant.size_hint));
+    output::download_msg(&format!(
+        "downloading {} ({})",
+        variant.label, variant.size_hint
+    ));
     tools::download_file(variant.url, &zip_path)?;
 
     output::download_msg("extracting...");
     let zip_str = zip_path.display().to_string();
     let data_str = data_dir.display().to_string();
 
-    let captured = output::run_captured(
-        "unzip",
-        &["-o", &zip_str, "-d", &data_str],
-        data_dir,
-    )?;
+    let captured = output::run_captured("unzip", &["-o", &zip_str, "-d", &data_str], data_dir)?;
 
     captured.check_success("unzip")?;
 
@@ -168,9 +167,7 @@ pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
 
         std::fs::create_dir_all(&simplified_dir)?;
 
-        let src = data_dir
-            .join(SIMPLIFIED.dir_name)
-            .join(SIMPLIFIED.shp_name);
+        let src = data_dir.join(SIMPLIFIED.dir_name).join(SIMPLIFIED.shp_name);
         let dst_str = simplified.display().to_string();
         let src_str = src.display().to_string();
 

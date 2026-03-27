@@ -80,7 +80,9 @@ pub fn run(
 ) -> Result<(), DevError> {
     let tile_coords = pmtiles::sample_tile_coords(Path::new(tiles))?;
     if tile_coords.is_empty() {
-        return Err(DevError::Config("PMTiles archive contains no tile entries".into()));
+        return Err(DevError::Config(
+            "PMTiles archive contains no tile entries".into(),
+        ));
     }
     let min_z = tile_coords.iter().map(|&(z, _, _)| z).min().unwrap_or(0);
     let max_z = tile_coords.iter().map(|&(z, _, _)| z).max().unwrap_or(0);
@@ -120,7 +122,14 @@ pub fn run(
     let project_root = project_root.to_owned();
 
     harness.run_internal(&config, |_i| {
-        run_lifecycle(&binary, &data_dir, &tiles, port, &project_root, &tile_coords)
+        run_lifecycle(
+            &binary,
+            &data_dir,
+            &tiles,
+            port,
+            &project_root,
+            &tile_coords,
+        )
     })?;
 
     Ok(())
@@ -143,16 +152,18 @@ fn run_lifecycle(
 
     // 1. Spawn server with piped stderr. ChildGuard ensures cleanup on error.
     let mut guard = ChildGuard::new(spawn_server(binary, data_dir, tiles, port, project_root)?);
-    let child = guard.0.as_mut().ok_or_else(|| {
-        DevError::Config("failed to get child process".into())
-    })?;
+    let child = guard
+        .0
+        .as_mut()
+        .ok_or_else(|| DevError::Config("failed to get child process".into()))?;
 
     // 2. Take stderr and start a reader thread that watches for a ready signal.
     //    After the ready signal, the thread continues reading to EOF so it
     //    captures the shutdown KV pairs emitted after SIGTERM.
-    let stderr = child.stderr.take().ok_or_else(|| {
-        DevError::Config("failed to capture server stderr".into())
-    })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| DevError::Config("failed to capture server stderr".into()))?;
 
     let (tx, rx) = mpsc::sync_channel::<bool>(1);
     let reader_handle = std::thread::spawn(move || -> (Vec<String>, Vec<u8>) {
@@ -164,7 +175,10 @@ fn run_lifecycle(
         loop {
             line.clear();
             match reader.read_line(&mut line) {
-                Ok(0) => { tx.send(false).ok(); return (pre_ready, Vec::new()); }
+                Ok(0) => {
+                    tx.send(false).ok();
+                    return (pre_ready, Vec::new());
+                }
                 Ok(_) => {
                     if is_ready_line(&line) {
                         tx.send(true).ok();
@@ -172,7 +186,10 @@ fn run_lifecycle(
                     }
                     pre_ready.push(line.clone());
                 }
-                Err(_) => { tx.send(false).ok(); return (pre_ready, Vec::new()); }
+                Err(_) => {
+                    tx.send(false).ok();
+                    return (pre_ready, Vec::new());
+                }
             }
         }
 
@@ -227,9 +244,9 @@ fn run_lifecycle(
 
     // 5. Send SIGTERM for graceful shutdown. Take child from guard so we
     //    control the shutdown sequence (guard no longer kills on drop).
-    let mut child = guard.take().ok_or_else(|| {
-        DevError::Config("child process already consumed".into())
-    })?;
+    let mut child = guard
+        .take()
+        .ok_or_else(|| DevError::Config("child process already consumed".into()))?;
     output::bench_msg("sending SIGTERM");
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
@@ -261,7 +278,10 @@ fn run_lifecycle(
     // 7. Parse KV pairs from remaining stderr (shutdown output after ready signal).
     let (_stderr_ms, kv) = harness::parse_kv_lines(&remaining_stderr);
 
-    output::bench_msg(&format!("captured {} KV pairs from server shutdown", kv.len()));
+    output::bench_msg(&format!(
+        "captured {} KV pairs from server shutdown",
+        kv.len()
+    ));
 
     Ok(BenchResult {
         elapsed_ms,

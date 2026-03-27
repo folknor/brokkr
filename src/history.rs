@@ -114,7 +114,11 @@ impl HistoryDb {
             format!(" WHERE {}", clauses.join(" AND "))
         };
 
-        let limit = if filter.all { String::new() } else { format!(" LIMIT {}", filter.limit) };
+        let limit = if filter.all {
+            String::new()
+        } else {
+            format!(" LIMIT {}", filter.limit)
+        };
 
         let sql = format!(
             "SELECT id, timestamp, project, cwd, command, elapsed_ms, exit_status, \
@@ -126,22 +130,25 @@ impl HistoryDb {
             params.iter().map(AsRef::as_ref).collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok(HistoryEntry {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                project: row.get(2)?,
-                cwd: row.get(3)?,
-                command: row.get(4)?,
-                elapsed_ms: row.get(5)?,
-                exit_status: row.get(6)?,
-                hostname: row.get(7)?,
-                commit_hash: row.get(8)?,
-                dirty: row.get(9)?,
-                kernel: row.get(10)?,
-                avail_memory_mb: row.get(11)?,
-            })
-        })?.filter_map(Result::ok).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(HistoryEntry {
+                    id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    project: row.get(2)?,
+                    cwd: row.get(3)?,
+                    command: row.get(4)?,
+                    elapsed_ms: row.get(5)?,
+                    exit_status: row.get(6)?,
+                    hostname: row.get(7)?,
+                    commit_hash: row.get(8)?,
+                    dirty: row.get(9)?,
+                    kernel: row.get(10)?,
+                    avail_memory_mb: row.get(11)?,
+                })
+            })?
+            .filter_map(Result::ok)
+            .collect();
 
         Ok(rows)
     }
@@ -305,7 +312,8 @@ mod tests {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.execute_batch(CREATE_TABLE).unwrap();
         conn.execute_batch(CREATE_INDEXES).unwrap();
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
         HistoryDb { conn }
     }
 
@@ -331,8 +339,13 @@ mod tests {
         db.insert(&make_row("check", 1)).unwrap();
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: false,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: None,
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 2);
@@ -349,8 +362,13 @@ mod tests {
         db.insert(&make_row("bench read", 0)).unwrap();
 
         let filter = HistoryFilter {
-            command: Some("bench".into()), project: None, failed: false,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: Some("bench".into()),
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 2);
@@ -366,8 +384,13 @@ mod tests {
         db.insert(&row).unwrap();
 
         let filter = HistoryFilter {
-            command: None, project: Some("elivagar".into()), failed: false,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: None,
+            project: Some("elivagar".into()),
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 1);
@@ -381,8 +404,13 @@ mod tests {
         db.insert(&make_row("bench self", 1)).unwrap();
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: true,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: None,
+            project: None,
+            failed: true,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 1);
@@ -397,8 +425,13 @@ mod tests {
         }
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: false,
-            since: None, slow_ms: None, limit: 3, all: false,
+            command: None,
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 3,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 3);
@@ -412,8 +445,13 @@ mod tests {
         }
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: false,
-            since: None, slow_ms: None, limit: 3, all: true,
+            command: None,
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 3,
+            all: true,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 10);
@@ -430,8 +468,13 @@ mod tests {
         db.insert(&make_row("check", 1)).unwrap();
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: false,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: None,
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         let output = format_history(&entries);
@@ -455,13 +498,24 @@ mod tests {
         db.insert(&row).unwrap();
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: false,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: None,
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         let output = format_history(&entries);
-        assert!(output.contains("2.0m"), "120s should show as minutes: {output}");
-        assert!(output.contains("5.5s"), "5500ms should show as seconds: {output}");
+        assert!(
+            output.contains("2.0m"),
+            "120s should show as minutes: {output}"
+        );
+        assert!(
+            output.contains("5.5s"),
+            "5500ms should show as seconds: {output}"
+        );
         assert!(output.contains("50ms"), "50ms should show as ms: {output}");
     }
 
@@ -475,8 +529,13 @@ mod tests {
         db.insert(&row).unwrap();
 
         let filter = HistoryFilter {
-            command: None, project: None, failed: false,
-            since: None, slow_ms: None, limit: 25, all: false,
+            command: None,
+            project: None,
+            failed: false,
+            since: None,
+            slow_ms: None,
+            limit: 25,
+            all: false,
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 1);
@@ -502,7 +561,10 @@ mod tests {
     #[test]
     fn fresh_db_schema_version() {
         let db = test_db();
-        let version: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
 }

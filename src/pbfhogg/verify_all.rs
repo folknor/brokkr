@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use crate::error::DevError;
-use crate::output::verify_msg;
 use super::verify::VerifyHarness;
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
     verify_extract, verify_getid_removeid, verify_merge, verify_sort, verify_tags_filter,
 };
+use crate::error::DevError;
+use crate::output::verify_msg;
 
 /// Run all verify commands sequentially.
 ///
@@ -29,16 +29,14 @@ pub fn run(
     let mut skipped: u32 = 0;
 
     // Helper: run one verify command, track pass/fail.
-    let mut run_one = |name: &str, result: Result<(), DevError>| {
-        match result {
-            Ok(()) => {
-                verify_msg(&format!("{name}: PASS"));
-                passed += 1;
-            }
-            Err(e) => {
-                verify_msg(&format!("{name} failed: {e}"));
-                failed += 1;
-            }
+    let mut run_one = |name: &str, result: Result<(), DevError>| match result {
+        Ok(()) => {
+            verify_msg(&format!("{name}: PASS"));
+            passed += 1;
+        }
+        Err(e) => {
+            verify_msg(&format!("{name} failed: {e}"));
+            failed += 1;
         }
     };
 
@@ -66,11 +64,17 @@ pub fn run(
 
     // 4. tags-filter
     verify_msg("========== tags-filter ==========");
-    run_one("tags-filter", verify_tags_filter::run(harness, pbf, direct_io));
+    run_one(
+        "tags-filter",
+        verify_tags_filter::run(harness, pbf, direct_io),
+    );
 
     // 5. getid-removeid
     verify_msg("========== getid-removeid ==========");
-    run_one("getid-removeid", verify_getid_removeid::run(harness, pbf, direct_io));
+    run_one(
+        "getid-removeid",
+        verify_getid_removeid::run(harness, pbf, direct_io),
+    );
 
     // 6. add-locations-to-ways
     verify_msg("========== add-locations-to-ways ==========");
@@ -81,7 +85,10 @@ pub fn run(
 
     // 7. check-refs
     verify_msg("========== check-refs ==========");
-    run_one("check-refs", verify_check_refs::run(harness, pbf, direct_io));
+    run_one(
+        "check-refs",
+        verify_check_refs::run(harness, pbf, direct_io),
+    );
 
     // 8. apply-changes
     verify_msg("========== apply-changes ==========");
@@ -128,7 +135,9 @@ pub fn run(
     ));
 
     if failed > 0 {
-        return Err(DevError::Verify(format!("{failed} verify command(s) failed")));
+        return Err(DevError::Verify(format!(
+            "{failed} verify command(s) failed"
+        )));
     }
     Ok(())
 }

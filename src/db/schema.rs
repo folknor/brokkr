@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use crate::error::DevError;
 use super::ResultsDb;
 use super::migrate;
+use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
 // Schema DDL

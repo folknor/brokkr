@@ -170,9 +170,9 @@ fn decompress(data: &[u8], compression: u8) -> Result<Vec<u8>, DevError> {
         2 => {
             let mut decoder = flate2::read::GzDecoder::new(data);
             let mut out = Vec::new();
-            decoder.read_to_end(&mut out).map_err(|e| {
-                DevError::Config(format!("gzip decompression failed: {e}"))
-            })?;
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| DevError::Config(format!("gzip decompression failed: {e}")))?;
             Ok(out)
         }
         other => Err(DevError::Config(format!(
@@ -361,14 +361,12 @@ pub fn run(path: &str) -> Result<(), DevError> {
 
 /// Read header and all directory entries (resolving leaf pointers).
 fn read_all_entries(path: &Path) -> Result<(Header, Vec<DirEntry>), DevError> {
-    let mut file = File::open(path).map_err(|e| {
-        DevError::Config(format!("{}: {e}", path.display()))
-    })?;
+    let mut file =
+        File::open(path).map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
 
     let mut header_buf = [0u8; HEADER_SIZE];
-    file.read_exact(&mut header_buf).map_err(|e| {
-        DevError::Config(format!("{}: failed to read header: {e}", path.display()))
-    })?;
+    file.read_exact(&mut header_buf)
+        .map_err(|e| DevError::Config(format!("{}: failed to read header: {e}", path.display())))?;
     let header = parse_header(&header_buf)?;
 
     let root_entries = {
@@ -390,7 +388,10 @@ fn read_all_entries(path: &Path) -> Result<(Header, Vec<DirEntry>), DevError> {
                 if end > leaf_blob.len() {
                     return Err(DevError::Config(format!(
                         "{}: leaf pointer out of bounds (offset={}, length={}, blob={})",
-                        path.display(), entry.offset, entry.length, leaf_blob.len(),
+                        path.display(),
+                        entry.offset,
+                        entry.length,
+                        leaf_blob.len(),
                     )));
                 }
                 let leaf_data = decompress(&leaf_blob[start..end], header.internal_compression)?;
@@ -636,7 +637,10 @@ mod tests {
         assert_eq!(entries[1].tile_id, 8);
         assert_eq!(entries[2].tile_id, 15);
         assert_eq!(entries[0].offset, 0);
-        assert_eq!(entries[1].offset, 50, "contiguous: prev offset 0 + prev length 50");
+        assert_eq!(
+            entries[1].offset, 50,
+            "contiguous: prev offset 0 + prev length 50"
+        );
         assert_eq!(entries[2].offset, 200, "explicit: 201 - 1 = 200");
     }
 
@@ -681,7 +685,10 @@ mod tests {
         let result = decompress(b"data", 3);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("brotli"), "error should mention brotli, got: {msg}");
+        assert!(
+            msg.contains("brotli"),
+            "error should mention brotli, got: {msg}"
+        );
     }
 
     // -- hilbert_d2xy -------------------------------------------------------

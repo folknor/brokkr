@@ -42,10 +42,15 @@ pub fn run(
             output::bench_msg(&format!("variant: {variant}"));
 
             let bench_args: Vec<&str> = vec![
-                "bench-merge", pbf_str, osc_str,
-                "-o", &output_str,
-                "--compression", compression,
-                "--io-mode", io_mode,
+                "bench-merge",
+                pbf_str,
+                osc_str,
+                "-o",
+                &output_str,
+                "--compression",
+                compression,
+                "--io-mode",
+                io_mode,
             ];
 
             let config = BenchConfig {
@@ -56,16 +61,17 @@ pub fn run(
                 cargo_features: None,
                 cargo_profile: "release".into(),
                 runs,
-                cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &bench_args)),
-                metadata: vec![KvPair::text("meta.compression", compression.as_str()), KvPair::text("meta.io_mode", *io_mode)],
+                cli_args: Some(crate::harness::format_cli_args(
+                    &binary.display().to_string(),
+                    &bench_args,
+                )),
+                metadata: vec![
+                    KvPair::text("meta.compression", compression.as_str()),
+                    KvPair::text("meta.io_mode", *io_mode),
+                ],
             };
 
-            harness.run_external_with_kv(
-                &config,
-                binary,
-                &bench_args,
-                project_root,
-            )?;
+            harness.run_external_with_kv(&config, binary, &bench_args, project_root)?;
         }
     }
 

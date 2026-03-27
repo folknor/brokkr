@@ -61,9 +61,8 @@ impl std::fmt::Display for Project {
 /// (cwd). This is the single entry point — `brokkr.toml` is read and parsed
 /// exactly once via [`config::load`].
 pub fn detect() -> Result<(Project, DevConfig, PathBuf), DevError> {
-    let cwd = std::env::current_dir().map_err(|e| {
-        DevError::Config(format!("cannot determine current directory: {e}"))
-    })?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
 
     let (project, dev_config) = config::load(&cwd)?;
 

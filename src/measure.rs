@@ -38,7 +38,6 @@ impl MeasureMode {
             Self::Bench { runs } | Self::Hotpath { runs } | Self::Alloc { runs } => runs,
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------

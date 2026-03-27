@@ -4,26 +4,26 @@ mod config;
 mod context;
 mod db;
 mod dispatch;
+mod elivagar;
 mod env;
 mod error;
 mod git;
 mod harness;
 mod history;
 mod hotpath_fmt;
+mod litehtml;
 mod lockfile;
 mod measure;
+mod nidhogg;
 mod oom;
 mod output;
-mod litehtml;
-mod sluggrs;
 mod pbfhogg;
 mod pmtiles;
-mod elivagar;
-mod nidhogg;
 mod preflight;
 mod project;
 mod request;
 mod resolve;
+mod sluggrs;
 mod tools;
 mod worktree;
 
@@ -42,7 +42,16 @@ use resolve::results_db_path;
 
 macro_rules! pbfhogg_cmd {
     ($mode:expr, $pbf:expr, $dev_config:expr, $project:expr, $project_root:expr, $cmd:expr) => {{
-        pbfhogg_cmd!($mode, $pbf, $dev_config, $project, $project_root, $cmd, None, &std::collections::HashMap::new())
+        pbfhogg_cmd!(
+            $mode,
+            $pbf,
+            $dev_config,
+            $project,
+            $project_root,
+            $cmd,
+            None,
+            &std::collections::HashMap::new()
+        )
     }};
     ($mode:expr, $pbf:expr, $dev_config:expr, $project:expr, $project_root:expr, $cmd:expr, $osc:expr, $params:expr) => {{
         let mm = resolve_mode(&$mode)?;
@@ -50,9 +59,17 @@ macro_rules! pbfhogg_cmd {
         output::set_quiet(!$mode.verbose);
         context::with_worktree(&$project_root, $mode.commit.as_deref(), |build_root| {
             let req = measure::MeasureRequest {
-                dev_config: &$dev_config, project: $project, project_root: &$project_root, build_root,
-                dataset: &$pbf.dataset, variant: &$pbf.variant, runs: mm.runs(),
-                features: &features, force: $mode.force, mode: mm, no_mem_check: $mode.no_mem_check,
+                dev_config: &$dev_config,
+                project: $project,
+                project_root: &$project_root,
+                build_root,
+                dataset: &$pbf.dataset,
+                variant: &$pbf.variant,
+                runs: mm.runs(),
+                features: &features,
+                force: $mode.force,
+                mode: mm,
+                no_mem_check: $mode.no_mem_check,
             };
             dispatch::run_pbfhogg_command_with_params(&req, &$cmd, $osc, $params)
         })
@@ -97,7 +114,16 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if matches!(cli.command, Command::Lock) {
         return cmd_lock();
     }
-    if let Command::History { command, project, failed, since, slow, limit, all } = cli.command {
+    if let Command::History {
+        command,
+        project,
+        failed,
+        since,
+        slow,
+        limit,
+        all,
+    } = cli.command
+    {
         return cmd_history(command, project, failed, since, slow, limit, all);
     }
 
@@ -105,108 +131,343 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
     match cli.command {
         Command::Lock | Command::History { .. } => unreachable!(),
-        Command::Check { features, no_default_features, package, args } => {
-            cmd_check(project, &project_root, &features, no_default_features, package.as_deref(), &args)
-        }
+        Command::Check {
+            features,
+            no_default_features,
+            package,
+            args,
+        } => cmd_check(
+            project,
+            &project_root,
+            &features,
+            no_default_features,
+            package.as_deref(),
+            &args,
+        ),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         // ----- pbfhogg tool CLI commands -----
         Command::Inspect { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::Inspect)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::Inspect
+            )
         }
         Command::InspectNodes { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::InspectNodes)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::InspectNodes
+            )
         }
         Command::InspectTags { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::InspectTags)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::InspectTags
+            )
         }
         Command::InspectTagsWay { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::InspectTagsWay)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::InspectTagsWay
+            )
         }
         Command::CheckRefs { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::CheckRefs)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::CheckRefs
+            )
         }
         Command::CheckIds { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::CheckIds)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::CheckIds
+            )
         }
         Command::Sort { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::Sort)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::Sort
+            )
         }
         Command::CatWay { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::CatWay)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::CatWay
+            )
         }
         Command::CatRelation { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::CatRelation)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::CatRelation
+            )
         }
         Command::CatDedupe { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::CatDedupe)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::CatDedupe
+            )
         }
         Command::TagsFilterWay { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::TagsFilterWay)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::TagsFilterWay
+            )
         }
         Command::TagsFilterAmenity { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::TagsFilterAmenity)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::TagsFilterAmenity
+            )
         }
         Command::TagsFilterTwopass { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::TagsFilterTwopass)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::TagsFilterTwopass
+            )
         }
         Command::TagsFilterOsc { mode, pbf, osc_seq } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::TagsFilterOsc, osc_seq.as_deref(), &std::collections::HashMap::new())
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::TagsFilterOsc,
+                osc_seq.as_deref(),
+                &std::collections::HashMap::new()
+            )
         }
         Command::Getid { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::Getid)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::Getid
+            )
         }
         Command::Getparents { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::Getparents)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::Getparents
+            )
         }
         Command::GetidInvert { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::GetidInvert)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::GetidInvert
+            )
         }
         Command::Renumber { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::Renumber)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::Renumber
+            )
         }
         Command::MergeChanges { mode, pbf, osc_seq } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::MergeChanges, osc_seq.as_deref(), &std::collections::HashMap::new())
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::MergeChanges,
+                osc_seq.as_deref(),
+                &std::collections::HashMap::new()
+            )
         }
         Command::ApplyChanges { mode, pbf, osc_seq } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::ApplyChanges, osc_seq.as_deref(), &std::collections::HashMap::new())
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::ApplyChanges,
+                osc_seq.as_deref(),
+                &std::collections::HashMap::new()
+            )
         }
-        Command::AddLocationsToWays { mode, pbf, index_type } => {
+        Command::AddLocationsToWays {
+            mode,
+            pbf,
+            index_type,
+        } => {
             let mut params = std::collections::HashMap::new();
             if let Some(ref it) = index_type {
                 params.insert("index_type".into(), it.clone());
             }
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::AddLocationsToWays, None, &params)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::AddLocationsToWays,
+                None,
+                &params
+            )
         }
         Command::ExtractSimple { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::ExtractSimple)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::ExtractSimple
+            )
         }
         Command::ExtractComplete { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::ExtractComplete)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::ExtractComplete
+            )
         }
         Command::ExtractSmart { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::ExtractSmart)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::ExtractSmart
+            )
         }
         Command::TimeFilter { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::TimeFilter)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::TimeFilter
+            )
         }
         Command::Diff { mode, pbf, osc_seq } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::Diff, osc_seq.as_deref(), &std::collections::HashMap::new())
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::Diff,
+                osc_seq.as_deref(),
+                &std::collections::HashMap::new()
+            )
         }
         Command::DiffOsc { mode, pbf, osc_seq } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::DiffOsc, osc_seq.as_deref(), &std::collections::HashMap::new())
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::DiffOsc,
+                osc_seq.as_deref(),
+                &std::collections::HashMap::new()
+            )
         }
         Command::BuildGeocodeIndex { mode, pbf } => {
-            pbfhogg_cmd!(mode, pbf, dev_config, project, project_root, pbfhogg::commands::PbfhoggCommand::BuildGeocodeIndex)
+            pbfhogg_cmd!(
+                mode,
+                pbf,
+                dev_config,
+                project,
+                project_root,
+                pbfhogg::commands::PbfhoggCommand::BuildGeocodeIndex
+            )
         }
-        Command::Extract { mode, pbf, strategy, bbox } => {
+        Command::Extract {
+            mode,
+            pbf,
+            strategy,
+            bbox,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant, runs: mm.runs(),
-                    features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &pbf.dataset,
+                    variant: &pbf.variant,
+                    runs: mm.runs(),
+                    features: &features,
+                    force: mode.force,
+                    mode: mm,
+                    no_mem_check: mode.no_mem_check,
                 };
                 let mut params = std::collections::HashMap::new();
                 if let Some(ref b) = bbox {
@@ -230,51 +491,88 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
+                if !matches!(
+                    mm,
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                ) {
                     return Err(DevError::Config(
                         "read benchmark does not support hotpath/alloc/profile modes".into(),
                     ));
                 }
                 let bench_req = request::BenchRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: mm.runs(), features: &features, force: mode.force,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &pbf.dataset,
+                    variant: &pbf.variant,
+                    runs: mm.runs(),
+                    features: &features,
+                    force: mode.force,
                 };
                 pbfhogg::cmd::bench_read(&bench_req, &modes)
             })
         }
-        Command::Write { mode, pbf, compression } => {
+        Command::Write {
+            mode,
+            pbf,
+            compression,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
+                if !matches!(
+                    mm,
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                ) {
                     return Err(DevError::Config(
                         "write benchmark does not support hotpath/alloc/profile modes".into(),
                     ));
                 }
                 let bench_req = request::BenchRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: mm.runs(), features: &features, force: mode.force,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &pbf.dataset,
+                    variant: &pbf.variant,
+                    runs: mm.runs(),
+                    features: &features,
+                    force: mode.force,
                 };
                 pbfhogg::cmd::bench_write(&bench_req, &compression)
             })
         }
-        Command::MergeBench { mode, pbf, compression, uring, osc_seq } => {
+        Command::MergeBench {
+            mode,
+            pbf,
+            compression,
+            uring,
+            osc_seq,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
+                if !matches!(
+                    mm,
+                    measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                ) {
                     return Err(DevError::Config(
                         "merge benchmark does not support hotpath/alloc/profile modes".into(),
                     ));
                 }
                 let bench_req = request::BenchRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &pbf.dataset, variant: &pbf.variant,
-                    runs: mm.runs(), features: &features, force: mode.force,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &pbf.dataset,
+                    variant: &pbf.variant,
+                    runs: mm.runs(),
+                    features: &features,
+                    force: mode.force,
                 };
                 pbfhogg::cmd::bench_merge(&bench_req, osc_seq.as_deref(), uring, &compression)
             })
@@ -282,28 +580,55 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
         // ----- elivagar commands -----
         Command::Tilegen {
-            mode, dataset, variant, runs, skip_to, compression_level,
-            no_ocean, force_sorted, allow_unsafe_flat_index,
-            tile_format, tile_compression, compress_sort_chunks,
-            in_memory, locations_on_ways, fanout_cap_default,
-            fanout_cap, polygon_simplify_factor,
+            mode,
+            dataset,
+            variant,
+            runs,
+            skip_to,
+            compression_level,
+            no_ocean,
+            force_sorted,
+            allow_unsafe_flat_index,
+            tile_format,
+            tile_compression,
+            compress_sort_chunks,
+            in_memory,
+            locations_on_ways,
+            fanout_cap_default,
+            fanout_cap,
+            polygon_simplify_factor,
         } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs: effective_runs,
-                    features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &dataset,
+                    variant: &variant,
+                    runs: effective_runs,
+                    features: &features,
+                    force: mode.force,
+                    mode: mm,
+                    no_mem_check: mode.no_mem_check,
                 };
                 let opts = elivagar::PipelineOpts {
-                    no_ocean, force_sorted, allow_unsafe_flat_index,
+                    no_ocean,
+                    force_sorted,
+                    allow_unsafe_flat_index,
                     tile_format: tile_format.as_deref(),
                     tile_compression: tile_compression.as_deref(),
                     compress_sort_chunks: compress_sort_chunks.as_deref(),
-                    in_memory, locations_on_ways,
+                    in_memory,
+                    locations_on_ways,
                     fanout_cap_default,
                     fanout_cap: fanout_cap.as_deref(),
                     polygon_simplify_factor,
@@ -321,11 +646,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: "denmark", variant: "raw", runs: effective_runs,
-                    features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: "denmark",
+                    variant: "raw",
+                    runs: effective_runs,
+                    features: &features,
+                    force: mode.force,
+                    mode: mm,
+                    no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
                 dispatch::run_elivagar_command(&req, &cmd)
@@ -336,41 +673,87 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: "denmark", variant: "raw", runs: effective_runs,
-                    features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: "denmark",
+                    variant: "raw",
+                    runs: effective_runs,
+                    features: &features,
+                    force: mode.force,
+                    mode: mm,
+                    no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
                 dispatch::run_elivagar_command(&req, &cmd)
             })
         }
-        Command::ElivPlanetiler { mode, dataset, variant, runs } => {
+        Command::ElivPlanetiler {
+            mode,
+            dataset,
+            variant,
+            runs,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs: effective_runs,
-                    features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &dataset,
+                    variant: &variant,
+                    runs: effective_runs,
+                    features: &features,
+                    force: mode.force,
+                    mode: mm,
+                    no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::Planetiler;
                 dispatch::run_elivagar_command(&req, &cmd)
             })
         }
-        Command::ElivTilemaker { mode, dataset, variant, runs } => {
+        Command::ElivTilemaker {
+            mode,
+            dataset,
+            variant,
+            runs,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 let req = measure::MeasureRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, runs: effective_runs,
-                    features: &features, force: mode.force, mode: mm, no_mem_check: mode.no_mem_check,
+                    dev_config: &dev_config,
+                    project,
+                    project_root: &project_root,
+                    build_root,
+                    dataset: &dataset,
+                    variant: &variant,
+                    runs: effective_runs,
+                    features: &features,
+                    force: mode.force,
+                    mode: mm,
+                    no_mem_check: mode.no_mem_check,
                 };
                 let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
                 dispatch::run_elivagar_command(&req, &cmd)
@@ -378,19 +761,34 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
 
         // ----- nidhogg commands -----
-        Command::RunApi { mode, dataset, runs, query } => {
+        Command::RunApi {
+            mode,
+            dataset,
+            runs,
+            query,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "api")?;
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: "raw",
-                            runs: effective_runs, features: &features, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: "raw",
+                            runs: effective_runs,
+                            features: &features,
+                            force: mode.force,
                         };
                         nidhogg::cmd::bench_api(&bench_req, query.as_deref())
                     }
@@ -400,29 +798,51 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
                         let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: "raw",
-                            runs: effective_runs, all_features: &all_features,
-                            alloc, no_mem_check: mode.no_mem_check, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: "raw",
+                            runs: effective_runs,
+                            all_features: &all_features,
+                            alloc,
+                            no_mem_check: mode.no_mem_check,
+                            force: mode.force,
                         };
                         nidhogg::cmd::hotpath(&hotpath_req)
                     }
                 }
             })
         }
-        Command::RunNidIngest { mode, dataset, variant, runs } => {
+        Command::RunNidIngest {
+            mode,
+            dataset,
+            variant,
+            runs,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "nid-ingest")?;
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: &variant,
-                            runs: effective_runs, features: &features, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: &variant,
+                            runs: effective_runs,
+                            features: &features,
+                            force: mode.force,
                         };
                         nidhogg::cmd::bench_ingest(&bench_req)
                     }
@@ -432,29 +852,52 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
                         let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: &variant,
-                            runs: effective_runs, all_features: &all_features,
-                            alloc, no_mem_check: mode.no_mem_check, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: &variant,
+                            runs: effective_runs,
+                            all_features: &all_features,
+                            alloc,
+                            no_mem_check: mode.no_mem_check,
+                            force: mode.force,
                         };
                         nidhogg::cmd::hotpath(&hotpath_req)
                     }
                 }
             })
         }
-        Command::RunTiles { mode, dataset, tiles, runs, uring } => {
+        Command::RunTiles {
+            mode,
+            dataset,
+            tiles,
+            runs,
+            uring,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
             context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
                 project::require(project, Project::Nidhogg, "tiles")?;
-                let effective_runs = if matches!(mm, measure::MeasureMode::Run) { runs } else { mm.runs() };
+                let effective_runs = if matches!(mm, measure::MeasureMode::Run) {
+                    runs
+                } else {
+                    mm.runs()
+                };
                 match mm {
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
                         let bench_req = request::BenchRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: "raw",
-                            runs: effective_runs, features: &features, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: "raw",
+                            runs: effective_runs,
+                            features: &features,
+                            force: mode.force,
                         };
                         nidhogg::cmd::bench_tiles(&bench_req, tiles.as_deref(), uring)
                     }
@@ -464,10 +907,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
                         let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: "raw",
-                            runs: effective_runs, all_features: &all_features,
-                            alloc, no_mem_check: mode.no_mem_check, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: "raw",
+                            runs: effective_runs,
+                            all_features: &all_features,
+                            alloc,
+                            no_mem_check: mode.no_mem_check,
+                            force: mode.force,
                         };
                         nidhogg::cmd::hotpath(&hotpath_req)
                     }
@@ -487,8 +937,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let owned_features: Vec<String> = features.clone();
                         sluggrs::hotpath::cmd(
-                            &dev_config, project, &project_root, build_root,
-                            runs, alloc, mode.force, &owned_features,
+                            &dev_config,
+                            project,
+                            &project_root,
+                            build_root,
+                            runs,
+                            alloc,
+                            mode.force,
+                            &owned_features,
                         )
                     }
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. } => {
@@ -501,22 +957,36 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
 
         // ----- generic commands -----
-        Command::GenericHotpath { mode, dataset, variant, runs } => {
+        Command::GenericHotpath {
+            mode,
+            dataset,
+            variant,
+            runs,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                match mm {
+            context::with_worktree(
+                &project_root,
+                mode.commit.as_deref(),
+                |build_root| match mm {
                     measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
                         let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
                         let feature = harness::hotpath_feature(alloc);
                         let mut all_features: Vec<&str> = vec![feature];
                         all_features.extend(features.iter().map(String::as_str));
                         let hotpath_req = request::HotpathRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: &variant,
-                            runs, all_features: &all_features,
-                            alloc, no_mem_check: mode.no_mem_check, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: &variant,
+                            runs,
+                            all_features: &all_features,
+                            alloc,
+                            no_mem_check: mode.no_mem_check,
+                            force: mode.force,
                         };
                         cmd_hotpath_generic(&hotpath_req)
                     }
@@ -525,56 +995,91 @@ fn run(cli: Cli) -> Result<(), DevError> {
                             "generic-hotpath only supports --hotpath or --alloc modes".into(),
                         ))
                     }
-                }
-            })
+                },
+            )
         }
 
         // ----- suites -----
-        Command::Suite { mode, name, dataset, variant, runs } => {
+        Command::Suite {
+            mode,
+            name,
+            dataset,
+            variant,
+            runs,
+        } => {
             let mm = resolve_mode(&mode)?;
             let features = resolve_features(&dev_config, &mode.features);
             output::set_quiet(!mode.verbose);
-            context::with_worktree(&project_root, mode.commit.as_deref(), |build_root| {
-                match name.as_str() {
+            context::with_worktree(
+                &project_root,
+                mode.commit.as_deref(),
+                |build_root| match name.as_str() {
                     "pbfhogg" => {
                         project::require(project, Project::Pbfhogg, "suite pbfhogg")?;
-                        if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
+                        if !matches!(
+                            mm,
+                            measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                        ) {
                             return Err(DevError::Config(
                                 "suite mode only supports wall-clock timing".into(),
                             ));
                         }
                         let bench_req = request::BenchRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: &variant,
-                            runs, features: &features, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: &variant,
+                            runs,
+                            features: &features,
+                            force: mode.force,
                         };
                         pbfhogg::cmd::bench_all(&bench_req)
                     }
                     "elivagar" => {
                         project::require(project, Project::Elivagar, "suite elivagar")?;
-                        if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
+                        if !matches!(
+                            mm,
+                            measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                        ) {
                             return Err(DevError::Config(
                                 "suite mode only supports wall-clock timing".into(),
                             ));
                         }
                         let bench_req = request::BenchRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: &variant,
-                            runs, features: &features, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: &variant,
+                            runs,
+                            features: &features,
+                            force: mode.force,
                         };
                         elivagar::cmd::bench_all(&bench_req)
                     }
                     "nidhogg" => {
                         project::require(project, Project::Nidhogg, "suite nidhogg")?;
-                        if !matches!(mm, measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }) {
+                        if !matches!(
+                            mm,
+                            measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
+                        ) {
                             return Err(DevError::Config(
                                 "suite mode only supports wall-clock timing".into(),
                             ));
                         }
                         let bench_req = request::BenchRequest {
-                            dev_config: &dev_config, project, project_root: &project_root, build_root,
-                            dataset: &dataset, variant: &variant,
-                            runs, features: &features, force: mode.force,
+                            dev_config: &dev_config,
+                            project,
+                            project_root: &project_root,
+                            build_root,
+                            dataset: &dataset,
+                            variant: &variant,
+                            runs,
+                            features: &features,
+                            force: mode.force,
                         };
                         nidhogg::cmd::bench_api(&bench_req, None)?;
                         nidhogg::cmd::bench_ingest(&bench_req)
@@ -582,13 +1087,25 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     other => Err(DevError::Config(format!(
                         "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
                     ))),
-                }
-            })
+                },
+            )
         }
-        Command::Passthrough { features, time, json, runs, no_build, args } => {
+        Command::Passthrough {
+            features,
+            time,
+            json,
+            runs,
+            no_build,
+            args,
+        } => {
             let _lock = acquire_cmd_lock(project, &project_root, "run")?;
             let features = resolve_features(&dev_config, &features);
-            let opts = RunOptions { time, json, runs, no_build };
+            let opts = RunOptions {
+                time,
+                json,
+                runs,
+                no_build,
+            };
             cmd_run(&dev_config, project, &project_root, &features, &args, &opts)
         }
         Command::Results {
@@ -601,27 +1118,55 @@ fn run(cli: Cli) -> Result<(), DevError> {
             limit,
             top,
         } => {
-            let rq = ResultsQuery { query, commit, compare, compare_last, command, variant, limit, top };
+            let rq = ResultsQuery {
+                query,
+                commit,
+                compare,
+                compare_last,
+                command,
+                variant,
+                limit,
+                top,
+            };
             cmd_results(&project_root, &rq)
         }
         Command::Clean => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             cmd_clean(&dev_config, project, &project_root)
         }
-        Command::Verify { verbose, commit, verify } => {
+        Command::Verify {
+            verbose,
+            commit,
+            verify,
+        } => {
             let features = resolve_features(&dev_config, &[]);
             output::set_quiet(!verbose);
             with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_verify(&dev_config, project, &project_root, build_root, verify, &features)
+                cmd_verify(
+                    &dev_config,
+                    project,
+                    &project_root,
+                    build_root,
+                    verify,
+                    &features,
+                )
             })
         }
         Command::Download { region, osc_url } => {
             let _lock = acquire_cmd_lock(project, &project_root, "download")?;
-            pbfhogg::cmd::download(&dev_config, project, &project_root, &region, osc_url.as_deref())
+            pbfhogg::cmd::download(
+                &dev_config,
+                project,
+                &project_root,
+                &region,
+                osc_url.as_deref(),
+            )
         }
-        Command::CompareTiles { file_a, file_b, sample } => {
-            elivagar::cmd::compare_tiles(project, &project_root, &file_a, &file_b, sample)
-        }
+        Command::CompareTiles {
+            file_a,
+            file_b,
+            sample,
+        } => elivagar::cmd::compare_tiles(project, &project_root, &file_a, &file_b, sample),
         Command::DownloadOcean => {
             let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
             elivagar::cmd::download_ocean(&dev_config, project, &project_root)
@@ -631,65 +1176,128 @@ fn run(cli: Cli) -> Result<(), DevError> {
             elivagar::cmd::download_natural_earth(&dev_config, project, &project_root)
         }
         Command::PmtilesStats { files } => cmd_pmtiles_stats(&files),
-        Command::Serve { data_dir, dataset, tiles } => {
+        Command::Serve {
+            data_dir,
+            dataset,
+            tiles,
+        } => {
             let _lock = acquire_cmd_lock(project, &project_root, "serve")?;
             let features = resolve_features(&dev_config, &[]);
-            nidhogg::cmd::serve(&dev_config, project, &project_root, data_dir.as_deref(), &dataset, tiles.as_deref(), &features)
+            nidhogg::cmd::serve(
+                &dev_config,
+                project,
+                &project_root,
+                data_dir.as_deref(),
+                &dataset,
+                tiles.as_deref(),
+                &features,
+            )
         }
         Command::Stop => nidhogg::cmd::stop(project, &project_root),
         Command::Status => nidhogg::cmd::status(&dev_config, project, &project_root),
         Command::Ingest { variant, dataset } => {
             let _lock = acquire_cmd_lock(project, &project_root, "ingest")?;
             let features = resolve_features(&dev_config, &[]);
-            nidhogg::cmd::ingest(&dev_config, project, &project_root, &variant, &dataset, &features)
+            nidhogg::cmd::ingest(
+                &dev_config,
+                project,
+                &project_root,
+                &variant,
+                &dataset,
+                &features,
+            )
         }
         Command::Update { args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "update")?;
             let features = resolve_features(&dev_config, &[]);
             nidhogg::cmd::update(project, &project_root, &args, &features)
         }
-        Command::Query { json } => nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref()),
-        Command::Geocode { term } => nidhogg::cmd::geocode(&dev_config, project, &project_root, &term),
-        Command::Litehtml { litehtml: litehtml_cmd } => {
+        Command::Query { json } => {
+            nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref())
+        }
+        Command::Geocode { term } => {
+            nidhogg::cmd::geocode(&dev_config, project, &project_root, &term)
+        }
+        Command::Litehtml {
+            litehtml: litehtml_cmd,
+        } => {
             let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
                 error::DevError::Config("no [litehtml] section in brokkr.toml".into())
             })?;
             match litehtml_cmd {
-                LitehtmlCommand::Test { fixture, suite, all, recapture } => {
-                    litehtml::cmd::test(project, &project_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
+                LitehtmlCommand::Test {
+                    fixture,
+                    suite,
+                    all,
+                    recapture,
+                } => litehtml::cmd::test(
+                    project,
+                    &project_root,
+                    litehtml_config,
+                    fixture.as_deref(),
+                    suite.as_deref(),
+                    all,
+                    recapture,
+                ),
+                LitehtmlCommand::List => {
+                    litehtml::cmd::list(project, &project_root, litehtml_config)
                 }
-                LitehtmlCommand::List => litehtml::cmd::list(project, &project_root, litehtml_config),
                 LitehtmlCommand::Approve { fixture } => {
                     litehtml::cmd::approve(project, &project_root, litehtml_config, &fixture)
                 }
                 LitehtmlCommand::Report { run_id } => {
                     litehtml::cmd::report(project, &project_root, &run_id)
                 }
-                LitehtmlCommand::Status => litehtml::cmd::status(project, &project_root, litehtml_config),
+                LitehtmlCommand::Status => {
+                    litehtml::cmd::status(project, &project_root, litehtml_config)
+                }
                 LitehtmlCommand::Prepare { input, output } => {
                     litehtml::cmd::prepare(project, &project_root, litehtml_config, &input, &output)
                 }
-                LitehtmlCommand::Extract { input, selector, from, to, output } => {
-                    litehtml::cmd::extract(project, &project_root, &input, selector.as_deref(), from.as_deref(), to.as_deref(), &output)
-                }
-                LitehtmlCommand::Outline { input, depth, full, selectors } => {
-                    litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
-                }
+                LitehtmlCommand::Extract {
+                    input,
+                    selector,
+                    from,
+                    to,
+                    output,
+                } => litehtml::cmd::extract(
+                    project,
+                    &project_root,
+                    &input,
+                    selector.as_deref(),
+                    from.as_deref(),
+                    to.as_deref(),
+                    &output,
+                ),
+                LitehtmlCommand::Outline {
+                    input,
+                    depth,
+                    full,
+                    selectors,
+                } => litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors),
             }
         }
-        Command::Sluggrs { sluggrs: sluggrs_cmd } => {
+        Command::Sluggrs {
+            sluggrs: sluggrs_cmd,
+        } => {
             let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
                 error::DevError::Config("no [sluggrs] section in brokkr.toml".into())
             })?;
             match sluggrs_cmd {
-                SluggrsCommand::Test { snapshot, all } => {
-                    sluggrs::cmd::test(project, &project_root, sluggrs_config, snapshot.as_deref(), all)
-                }
+                SluggrsCommand::Test { snapshot, all } => sluggrs::cmd::test(
+                    project,
+                    &project_root,
+                    sluggrs_config,
+                    snapshot.as_deref(),
+                    all,
+                ),
                 SluggrsCommand::List => sluggrs::cmd::list(project, &project_root, sluggrs_config),
                 SluggrsCommand::Approve { snapshot } => {
                     sluggrs::cmd::approve(project, &project_root, sluggrs_config, &snapshot)
                 }
-                SluggrsCommand::Status => sluggrs::cmd::status(project, &project_root, sluggrs_config),
+                SluggrsCommand::Status => {
+                    sluggrs::cmd::status(project, &project_root, sluggrs_config)
+                }
                 SluggrsCommand::Report { run_id } => {
                     sluggrs::cmd::report(project, &project_root, &run_id)
                 }
@@ -721,9 +1329,12 @@ fn resolve_features(dev_config: &config::DevConfig, cli_features: &[String]) -> 
 }
 
 fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> {
-    let set_count = mode.bench.is_some() as u8 + mode.hotpath.is_some() as u8 + mode.alloc.is_some() as u8;
+    let set_count =
+        mode.bench.is_some() as u8 + mode.hotpath.is_some() as u8 + mode.alloc.is_some() as u8;
     if set_count > 1 {
-        return Err(DevError::Config("--bench, --hotpath, and --alloc are mutually exclusive".into()));
+        return Err(DevError::Config(
+            "--bench, --hotpath, and --alloc are mutually exclusive".into(),
+        ));
     }
     let result = if let Some(runs) = mode.bench {
         measure::MeasureMode::Bench { runs }
@@ -758,7 +1369,14 @@ fn cmd_check(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     run_clippy(project_root, features, no_default_features, package)?;
-    run_tests(project, project_root, features, no_default_features, package, extra_args)?;
+    run_tests(
+        project,
+        project_root,
+        features,
+        no_default_features,
+        package,
+        extra_args,
+    )?;
     output::result_msg("check passed");
     Ok(())
 }
@@ -853,7 +1471,11 @@ fn run_tests(
     Ok(())
 }
 
-fn cmd_env(dev_config: &config::DevConfig, project: Project, project_root: &Path) -> Result<(), DevError> {
+fn cmd_env(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+) -> Result<(), DevError> {
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
@@ -904,10 +1526,19 @@ fn summarize_runs(samples_ms: &[u64]) -> Result<RunStats, DevError> {
     let p95_index = p95_rank.saturating_sub(1);
     let p95_ms = sorted[p95_index];
 
-    Ok(RunStats { min_ms, median_ms, p95_ms })
+    Ok(RunStats {
+        min_ms,
+        median_ms,
+        p95_ms,
+    })
 }
 
-fn print_run_timing(opts: &RunOptions, build_ms: u64, run_ms: u64, samples_ms: &[u64]) -> Result<(), DevError> {
+fn print_run_timing(
+    opts: &RunOptions,
+    build_ms: u64,
+    run_ms: u64,
+    samples_ms: &[u64],
+) -> Result<(), DevError> {
     let elapsed_ms = build_ms.saturating_add(run_ms);
     let stats = summarize_runs(samples_ms)?;
 
@@ -945,10 +1576,7 @@ fn print_run_timing(opts: &RunOptions, build_ms: u64, run_ms: u64, samples_ms: &
         } else {
             println!(
                 "elapsed_ms={elapsed_ms} build_ms={build_ms} run_ms={run_ms} runs={} min_ms={} median_ms={} p95_ms={}",
-                opts.runs,
-                stats.min_ms,
-                stats.median_ms,
-                stats.p95_ms,
+                opts.runs, stats.min_ms, stats.median_ms, stats.p95_ms,
             );
         }
         return Ok(());
@@ -957,18 +1585,21 @@ fn print_run_timing(opts: &RunOptions, build_ms: u64, run_ms: u64, samples_ms: &
     if opts.runs > 1 {
         output::run_msg(&format!(
             "runs={} min={}ms median={}ms p95={}ms total={}ms",
-            opts.runs,
-            stats.min_ms,
-            stats.median_ms,
-            stats.p95_ms,
-            run_ms,
+            opts.runs, stats.min_ms, stats.median_ms, stats.p95_ms, run_ms,
         ));
     }
 
     Ok(())
 }
 
-fn cmd_run(dev_config: &config::DevConfig, project: Project, project_root: &Path, features: &[String], args: &[String], opts: &RunOptions) -> Result<(), DevError> {
+fn cmd_run(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    features: &[String],
+    args: &[String],
+    opts: &RunOptions,
+) -> Result<(), DevError> {
     if opts.runs == 0 {
         return Err(DevError::Config("--runs must be >= 1".into()));
     }
@@ -1054,7 +1685,12 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     } else if let Some(ref commits) = q.compare {
         let commit_a = commits.first().map_or("", String::as_str);
         let commit_b = commits.get(1).map_or("", String::as_str);
-        let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, q.command.as_deref(), q.variant.as_deref())?;
+        let (rows_a, rows_b) = results_db.query_compare(
+            commit_a,
+            commit_b,
+            q.command.as_deref(),
+            q.variant.as_deref(),
+        )?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top);
         println!("{table}");
     } else if q.compare_last {
@@ -1086,7 +1722,11 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     Ok(())
 }
 
-fn cmd_clean(dev_config: &config::DevConfig, project: Project, project_root: &Path) -> Result<(), DevError> {
+fn cmd_clean(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+) -> Result<(), DevError> {
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
@@ -1211,16 +1851,18 @@ fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
 
         // Try to detect project and git info — these are optional.
         let (project_name, commit_hash, dirty) = match project::detect() {
-            Ok((project, _config, project_root)) => {
-                match git::collect(&project_root) {
-                    Ok(gi) => (
-                        Some(project.name().to_owned()),
-                        if gi.commit.is_empty() { None } else { Some(gi.commit) },
-                        Some(!gi.is_clean),
-                    ),
-                    Err(_) => (Some(project.name().to_owned()), None, None),
-                }
-            }
+            Ok((project, _config, project_root)) => match git::collect(&project_root) {
+                Ok(gi) => (
+                    Some(project.name().to_owned()),
+                    if gi.commit.is_empty() {
+                        None
+                    } else {
+                        Some(gi.commit)
+                    },
+                    Some(!gi.is_clean),
+                ),
+                Err(_) => (Some(project.name().to_owned()), None, None),
+            },
             Err(_) => (None, None, None),
         };
 
@@ -1260,17 +1902,31 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
     Ok(())
 }
 
-
 // ---------------------------------------------------------------------------
 // Verify dispatch
 // ---------------------------------------------------------------------------
 
-fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &Path, build_root: Option<&Path>, verify: VerifyCommand, features: &[String]) -> Result<(), DevError> {
+fn cmd_verify(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    build_root: Option<&Path>,
+    verify: VerifyCommand,
+    features: &[String],
+) -> Result<(), DevError> {
     match verify {
         // ----- elivagar verify variants -----
         VerifyCommand::ElivVerify { dataset, tiles } => {
             project::require(project, Project::Elivagar, "verify")?;
-            elivagar::cmd::verify(dev_config, project, project_root, build_root, &dataset, tiles.as_deref(), features)
+            elivagar::cmd::verify(
+                dev_config,
+                project,
+                project_root,
+                build_root,
+                &dataset,
+                tiles.as_deref(),
+                features,
+            )
         }
 
         // ----- nidhogg verify variants -----
@@ -1289,7 +1945,14 @@ fn cmd_verify(dev_config: &config::DevConfig, project: Project, project_root: &P
         // ----- pbfhogg verify variants -----
         _ => {
             project::require(project, Project::Pbfhogg, "verify")?;
-            pbfhogg::cmd::verify(dev_config, project, project_root, build_root, verify, features)
+            pbfhogg::cmd::verify(
+                dev_config,
+                project,
+                project_root,
+                build_root,
+                verify,
+                features,
+            )
         }
     }
 }

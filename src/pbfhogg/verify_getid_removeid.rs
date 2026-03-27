@@ -2,15 +2,13 @@
 
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Element IDs known to exist in Denmark PBFs.
 const IDS: &[&str] = &[
-    "n115722", "n115723", "n115724",
-    "w2080", "w2081", "w2082",
-    "r174", "r213", "r339",
+    "n115722", "n115723", "n115724", "w2080", "w2081", "w2082", "r174", "r213", "r339",
 ];
 
 /// Run getid cross-validation: pbfhogg getid vs osmium getid,

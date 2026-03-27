@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 
+use super::verify::VerifyHarness;
 use crate::error::DevError;
 use crate::output::verify_msg;
-use super::verify::VerifyHarness;
 
 /// Cross-validate `pbfhogg diff` against `osmium diff --summary`.
 ///
@@ -16,7 +16,10 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
 
     verify_msg("=== verify diff ===");
     verify_msg(&format!("  old: {}", pbf.display()));
-    verify_msg(&format!("  osc: {} (used to create 'new' via apply-changes)", osc.display()));
+    verify_msg(&format!(
+        "  osc: {} (used to create 'new' via apply-changes)",
+        osc.display()
+    ));
 
     let pbf_str = pbf.display().to_string();
     let osc_str = osc.display().to_string();
@@ -41,8 +44,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
 
     // osmium diff — exits non-zero when differences exist, so do NOT check_exit.
     verify_msg("--- osmium diff ---");
-    let captured =
-        harness.run_tool("osmium", &["diff", &pbf_str, &new_pbf_str, "--summary"])?;
+    let captured = harness.run_tool("osmium", &["diff", &pbf_str, &new_pbf_str, "--summary"])?;
 
     fs::write(outdir.join("osmium-diff.txt"), &captured.stdout)?;
     fs::write(outdir.join("osmium-summary.txt"), &captured.stderr)?;

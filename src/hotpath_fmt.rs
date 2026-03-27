@@ -11,8 +11,16 @@ use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair};
 ///
 /// Returns `None` if `data` contains no functions and no threads.
 pub fn format_hotpath_report(data: &HotpathData, top: usize) -> Option<String> {
-    let timing: Vec<&HotpathFunction> = data.functions.iter().filter(|f| f.section == "timing").collect();
-    let alloc: Vec<&HotpathFunction> = data.functions.iter().filter(|f| f.section == "alloc").collect();
+    let timing: Vec<&HotpathFunction> = data
+        .functions
+        .iter()
+        .filter(|f| f.section == "timing")
+        .collect();
+    let alloc: Vec<&HotpathFunction> = data
+        .functions
+        .iter()
+        .filter(|f| f.section == "alloc")
+        .collect();
 
     if timing.is_empty() && alloc.is_empty() && data.threads.is_empty() {
         return None;
@@ -38,18 +46,19 @@ pub fn format_hotpath_report(data: &HotpathData, top: usize) -> Option<String> {
         format_threads_table(&mut out, &data.threads, &data.thread_summary);
     }
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 // ---------------------------------------------------------------------------
 // Functions table (timing or alloc)
 // ---------------------------------------------------------------------------
 
-fn format_functions_table(out: &mut String, functions: &[&HotpathFunction], label: &str, top: usize) {
+fn format_functions_table(
+    out: &mut String,
+    functions: &[&HotpathFunction],
+    label: &str,
+    top: usize,
+) {
     if functions.is_empty() {
         return;
     }
@@ -102,12 +111,8 @@ fn format_functions_table(out: &mut String, functions: &[&HotpathFunction], labe
         write!(out, "  {:>width$}", key.to_uppercase(), width = w_pcts[i])
             .expect("write to String");
     }
-    writeln!(
-        out,
-        "  {:>w_total$}  {:>w_pct_total$}",
-        "Total", "% Total",
-    )
-    .expect("write to String");
+    writeln!(out, "  {:>w_total$}  {:>w_pct_total$}", "Total", "% Total",)
+        .expect("write to String");
 
     // Data rows.
     for f in data {
@@ -120,8 +125,13 @@ fn format_functions_table(out: &mut String, functions: &[&HotpathFunction], labe
         )
         .expect("write to String");
         for (i, key) in percentile_keys.iter().enumerate() {
-            write!(out, "  {:>width$}", percentile_value(f, key), width = w_pcts[i])
-                .expect("write to String");
+            write!(
+                out,
+                "  {:>width$}",
+                percentile_value(f, key),
+                width = w_pcts[i]
+            )
+            .expect("write to String");
         }
         writeln!(
             out,
@@ -181,12 +191,19 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
     if let Some(rss) = summary.iter().find(|kv| kv.key == "threads.rss_bytes") {
         header_parts.push(format!("RSS: {}", kv_value_str(rss)));
     }
-    let alloc_kv = summary.iter().find(|kv| kv.key == "threads.total_alloc_bytes");
-    let dealloc_kv = summary.iter().find(|kv| kv.key == "threads.total_dealloc_bytes");
+    let alloc_kv = summary
+        .iter()
+        .find(|kv| kv.key == "threads.total_alloc_bytes");
+    let dealloc_kv = summary
+        .iter()
+        .find(|kv| kv.key == "threads.total_dealloc_bytes");
     if let (Some(alloc), Some(dealloc)) = (alloc_kv, dealloc_kv) {
         header_parts.push(format!("Alloc: {}", kv_value_str(alloc)));
         header_parts.push(format!("Dealloc: {}", kv_value_str(dealloc)));
-        if let Some(diff) = summary.iter().find(|kv| kv.key == "threads.alloc_dealloc_diff") {
+        if let Some(diff) = summary
+            .iter()
+            .find(|kv| kv.key == "threads.alloc_dealloc_diff")
+        {
             header_parts.push(format!("Diff: {}", kv_value_str(diff)));
         }
     }
@@ -289,10 +306,26 @@ pub fn format_hotpath_diff(
     data_b: &HotpathData,
     top: usize,
 ) -> Option<String> {
-    let timing_a: Vec<&HotpathFunction> = data_a.functions.iter().filter(|f| f.section == "timing").collect();
-    let timing_b: Vec<&HotpathFunction> = data_b.functions.iter().filter(|f| f.section == "timing").collect();
-    let alloc_a: Vec<&HotpathFunction> = data_a.functions.iter().filter(|f| f.section == "alloc").collect();
-    let alloc_b: Vec<&HotpathFunction> = data_b.functions.iter().filter(|f| f.section == "alloc").collect();
+    let timing_a: Vec<&HotpathFunction> = data_a
+        .functions
+        .iter()
+        .filter(|f| f.section == "timing")
+        .collect();
+    let timing_b: Vec<&HotpathFunction> = data_b
+        .functions
+        .iter()
+        .filter(|f| f.section == "timing")
+        .collect();
+    let alloc_a: Vec<&HotpathFunction> = data_a
+        .functions
+        .iter()
+        .filter(|f| f.section == "alloc")
+        .collect();
+    let alloc_b: Vec<&HotpathFunction> = data_b
+        .functions
+        .iter()
+        .filter(|f| f.section == "alloc")
+        .collect();
 
     let has_timing = !timing_a.is_empty() || !timing_b.is_empty();
     let has_alloc = !alloc_a.is_empty() || !alloc_b.is_empty();
@@ -316,11 +349,7 @@ pub fn format_hotpath_diff(
         out.push_str(&section);
     }
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn format_section_diff(
@@ -497,50 +526,74 @@ mod tests {
     #[test]
     fn parse_metric_duration_ns() {
         let v = parse_metric("500 ns").unwrap();
-        assert!((v - 0.0005).abs() < 1e-10, "500 ns should be 0.0005 ms, got {v}");
+        assert!(
+            (v - 0.0005).abs() < 1e-10,
+            "500 ns should be 0.0005 ms, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_duration_us() {
         let v = parse_metric("1.5 \u{b5}s").unwrap();
-        assert!((v - 0.0015).abs() < 1e-10, "1.5 \u{b5}s should be 0.0015 ms, got {v}");
+        assert!(
+            (v - 0.0015).abs() < 1e-10,
+            "1.5 \u{b5}s should be 0.0015 ms, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_duration_ms() {
         let v = parse_metric("42.3 ms").unwrap();
-        assert!((v - 42.3).abs() < 1e-10, "42.3 ms should be 42.3 ms, got {v}");
+        assert!(
+            (v - 42.3).abs() < 1e-10,
+            "42.3 ms should be 42.3 ms, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_duration_s() {
         let v = parse_metric("2.5 s").unwrap();
-        assert!((v - 2500.0).abs() < 1e-10, "2.5 s should be 2500 ms, got {v}");
+        assert!(
+            (v - 2500.0).abs() < 1e-10,
+            "2.5 s should be 2500 ms, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_bytes_b() {
         let v = parse_metric("100 B").unwrap();
-        assert!((v - 100.0).abs() < 1e-10, "100 B should be 100 bytes, got {v}");
+        assert!(
+            (v - 100.0).abs() < 1e-10,
+            "100 B should be 100 bytes, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_bytes_kb() {
         let v = parse_metric("2 KB").unwrap();
-        assert!((v - 2048.0).abs() < 1e-10, "2 KB should be 2048 bytes, got {v}");
+        assert!(
+            (v - 2048.0).abs() < 1e-10,
+            "2 KB should be 2048 bytes, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_bytes_mb() {
         let v = parse_metric("1 MB").unwrap();
-        assert!((v - 1_048_576.0).abs() < 1e-10, "1 MB should be 1048576 bytes, got {v}");
+        assert!(
+            (v - 1_048_576.0).abs() < 1e-10,
+            "1 MB should be 1048576 bytes, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_bytes_gb() {
         let v = parse_metric("1.5 GB").unwrap();
         let expected = 1.5 * 1_073_741_824.0;
-        assert!((v - expected).abs() < 1.0, "1.5 GB should be {expected} bytes, got {v}");
+        assert!(
+            (v - expected).abs() < 1.0,
+            "1.5 GB should be {expected} bytes, got {v}"
+        );
     }
 
     #[test]
@@ -554,34 +607,52 @@ mod tests {
         // "42.5 %" has a space before %, so strip_suffix('%') gives "42.5 "
         // which trims to "42.5" and parses fine.
         let v = parse_metric("42.5 %").unwrap();
-        assert!((v - 42.5).abs() < 1e-10, "42.5 % should parse as 42.5, got {v}");
+        assert!(
+            (v - 42.5).abs() < 1e-10,
+            "42.5 % should parse as 42.5, got {v}"
+        );
     }
 
     #[test]
     fn parse_metric_empty_string() {
-        assert!(parse_metric("").is_none(), "empty string should return None");
+        assert!(
+            parse_metric("").is_none(),
+            "empty string should return None"
+        );
     }
 
     #[test]
     fn parse_metric_whitespace_only() {
-        assert!(parse_metric("   ").is_none(), "whitespace-only should return None");
+        assert!(
+            parse_metric("   ").is_none(),
+            "whitespace-only should return None"
+        );
     }
 
     #[test]
     fn parse_metric_no_space_between_number_and_unit() {
         // "42ms" has no space, rfind(' ') returns None, and it doesn't end with '%'
-        assert!(parse_metric("42ms").is_none(), "no-space metric should return None");
+        assert!(
+            parse_metric("42ms").is_none(),
+            "no-space metric should return None"
+        );
     }
 
     #[test]
     fn parse_metric_unknown_unit() {
-        assert!(parse_metric("10 furlongs").is_none(), "unknown unit should return None");
+        assert!(
+            parse_metric("10 furlongs").is_none(),
+            "unknown unit should return None"
+        );
     }
 
     #[test]
     fn parse_metric_leading_trailing_whitespace() {
         let v = parse_metric("  42.3 ms  ").unwrap();
-        assert!((v - 42.3).abs() < 1e-10, "trimmed '42.3 ms' should parse, got {v}");
+        assert!(
+            (v - 42.3).abs() < 1e-10,
+            "trimmed '42.3 ms' should parse, got {v}"
+        );
     }
 
     #[test]
@@ -600,7 +671,10 @@ mod tests {
     #[test]
     fn parse_metric_bare_number_no_unit_no_pct() {
         // "42" -- no space, no %, so rfind(' ') returns None -> None.
-        assert!(parse_metric("42").is_none(), "bare number without unit should return None");
+        assert!(
+            parse_metric("42").is_none(),
+            "bare number without unit should return None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -673,7 +747,10 @@ mod tests {
         // Baseline is essentially zero (below f64::EPSILON).
         // The guard `fa.abs() > f64::EPSILON` should prevent division by near-zero.
         let result = format_change_str(Some("0 ms"), Some("100 ms"));
-        assert_eq!(result, "--", "zero baseline should yield -- to avoid division by zero");
+        assert_eq!(
+            result, "--",
+            "zero baseline should yield -- to avoid division by zero"
+        );
     }
 
     #[test]
@@ -687,7 +764,12 @@ mod tests {
     // detect_percentile_keys
     // -----------------------------------------------------------------------
 
-    fn make_fn(name: &str, p50: Option<&str>, p95: Option<&str>, p99: Option<&str>) -> HotpathFunction {
+    fn make_fn(
+        name: &str,
+        p50: Option<&str>,
+        p95: Option<&str>,
+        p99: Option<&str>,
+    ) -> HotpathFunction {
         HotpathFunction {
             section: "timing".to_string(),
             description: None,
@@ -705,10 +787,19 @@ mod tests {
 
     #[test]
     fn detect_percentile_keys_standard() {
-        let funcs = vec![make_fn("foo", Some("0.9 ms"), Some("1.5 ms"), Some("2.0 ms"))];
+        let funcs = vec![make_fn(
+            "foo",
+            Some("0.9 ms"),
+            Some("1.5 ms"),
+            Some("2.0 ms"),
+        )];
         let refs: Vec<&HotpathFunction> = funcs.iter().collect();
         let keys = detect_percentile_keys(&refs);
-        assert_eq!(keys, vec!["p50", "p95", "p99"], "should find p50, p95, p99 in numeric order");
+        assert_eq!(
+            keys,
+            vec!["p50", "p95", "p99"],
+            "should find p50, p95, p99 in numeric order"
+        );
     }
 
     #[test]
@@ -724,7 +815,10 @@ mod tests {
         let funcs = vec![make_fn("baz", None, None, None)];
         let refs: Vec<&HotpathFunction> = funcs.iter().collect();
         let keys = detect_percentile_keys(&refs);
-        assert!(keys.is_empty(), "no percentile keys should return empty vec");
+        assert!(
+            keys.is_empty(),
+            "no percentile keys should return empty vec"
+        );
     }
 
     #[test]
@@ -743,7 +837,11 @@ mod tests {
         ];
         let refs: Vec<&HotpathFunction> = funcs.iter().collect();
         let keys = detect_percentile_keys(&refs);
-        assert_eq!(keys, vec!["p50", "p99"], "should detect p50 from first and p99 from second");
+        assert_eq!(
+            keys,
+            vec!["p50", "p99"],
+            "should detect p50 from first and p99 from second"
+        );
     }
 
     #[test]
@@ -751,7 +849,11 @@ mod tests {
         let funcs = vec![make_fn("fn", None, Some("2 ms"), Some("5 ms"))];
         let refs: Vec<&HotpathFunction> = funcs.iter().collect();
         let keys = detect_percentile_keys(&refs);
-        assert_eq!(keys, vec!["p95", "p99"], "should find p95 and p99 without p50");
+        assert_eq!(
+            keys,
+            vec!["p95", "p99"],
+            "should find p95 and p99 without p50"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -790,7 +892,11 @@ mod tests {
         // Line 0: "timing - wall clock"
         // Line 1: column headers
         // Lines 2..6: data rows
-        assert_eq!(lines.len(), 7, "top=0 should show all 5 data rows + 2 header lines");
+        assert_eq!(
+            lines.len(),
+            7,
+            "top=0 should show all 5 data rows + 2 header lines"
+        );
     }
 
     #[test]
@@ -799,7 +905,11 @@ mod tests {
         let output = format_hotpath_report(&data, 3).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         // 2 header lines + 3 data rows = 5 lines total
-        assert_eq!(lines.len(), 5, "top=3 should show 3 data rows + 2 header lines");
+        assert_eq!(
+            lines.len(),
+            5,
+            "top=3 should show 3 data rows + 2 header lines"
+        );
         assert!(lines[2].contains("fn_0"), "first data row should be fn_0");
         assert!(lines[4].contains("fn_2"), "last data row should be fn_2");
         assert!(!output.contains("fn_3"), "fn_3 should be truncated");
@@ -810,7 +920,11 @@ mod tests {
         let data = make_timing_data(3);
         let output = format_hotpath_report(&data, 100).unwrap();
         let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 5, "top=100 with 3 entries should show all 3 + 2 headers");
+        assert_eq!(
+            lines.len(),
+            5,
+            "top=100 with 3 entries should show all 3 + 2 headers"
+        );
     }
 
     #[test]
@@ -820,7 +934,10 @@ mod tests {
             threads: Vec::new(),
             thread_summary: Vec::new(),
         };
-        assert!(format_hotpath_report(&data, 0).is_none(), "empty data -> None");
+        assert!(
+            format_hotpath_report(&data, 0).is_none(),
+            "empty data -> None"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -856,10 +973,22 @@ mod tests {
         let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
         let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
         let result = format_section_diff("timing", &refs_a, &refs_b, 0);
-        assert!(result.contains("alpha"), "output should contain matched fn 'alpha'");
-        assert!(result.contains("beta"), "output should contain matched fn 'beta'");
-        assert!(result.contains("+10.0%"), "alpha 100->110 should show +10.0%");
-        assert!(result.contains("-10.0%"), "beta 200->180 should show -10.0%");
+        assert!(
+            result.contains("alpha"),
+            "output should contain matched fn 'alpha'"
+        );
+        assert!(
+            result.contains("beta"),
+            "output should contain matched fn 'beta'"
+        );
+        assert!(
+            result.contains("+10.0%"),
+            "alpha 100->110 should show +10.0%"
+        );
+        assert!(
+            result.contains("-10.0%"),
+            "beta 200->180 should show -10.0%"
+        );
     }
 
     #[test]
@@ -869,12 +998,24 @@ mod tests {
         let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
         let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
         let result = format_section_diff("timing", &refs_a, &refs_b, 0);
-        assert!(result.contains("only_in_a"), "should contain function only in A");
-        assert!(result.contains("only_in_b"), "should contain function only in B");
+        assert!(
+            result.contains("only_in_a"),
+            "should contain function only in A"
+        );
+        assert!(
+            result.contains("only_in_b"),
+            "should contain function only in B"
+        );
         // only_in_a is present in A but absent in B -> (gone)
-        assert!(result.contains("(gone)"), "function only in A should show (gone)");
+        assert!(
+            result.contains("(gone)"),
+            "function only in A should show (gone)"
+        );
         // only_in_b is absent in A but present in B -> (new)
-        assert!(result.contains("(new)"), "function only in B should show (new)");
+        assert!(
+            result.contains("(new)"),
+            "function only in B should show (new)"
+        );
     }
 
     #[test]
@@ -930,8 +1071,16 @@ mod tests {
         let result = format_section_diff("t", &refs_a, &refs_b, 2);
         let lines: Vec<&str> = result.lines().collect();
         // 1 header + 1 col header + 2 data rows = 4
-        assert_eq!(lines.len(), 4, "top=2 should yield 4 lines total, got {}", lines.len());
-        assert!(!result.contains("\"c\"") && !result.contains("  c  "), "c should be truncated");
+        assert_eq!(
+            lines.len(),
+            4,
+            "top=2 should yield 4 lines total, got {}",
+            lines.len()
+        );
+        assert!(
+            !result.contains("\"c\"") && !result.contains("  c  "),
+            "c should be truncated"
+        );
         assert!(!result.contains("  d  "), "d should be truncated");
         assert!(!result.contains("  e  "), "e should be truncated");
     }
@@ -941,7 +1090,10 @@ mod tests {
         let refs_a: Vec<&HotpathFunction> = Vec::new();
         let refs_b: Vec<&HotpathFunction> = Vec::new();
         let result = format_section_diff("t", &refs_a, &refs_b, 0);
-        assert!(result.is_empty(), "both sides empty should yield empty string");
+        assert!(
+            result.is_empty(),
+            "both sides empty should yield empty string"
+        );
     }
 
     #[test]
@@ -951,7 +1103,10 @@ mod tests {
         let refs_b: Vec<&HotpathFunction> = data_b.iter().collect();
         let result = format_section_diff("t", &refs_a, &refs_b, 0);
         assert!(result.contains("fn1"), "function from B side should appear");
-        assert!(result.contains("(new)"), "function absent from A should show (new)");
+        assert!(
+            result.contains("(new)"),
+            "function absent from A should show (new)"
+        );
         assert!(result.contains("--"), "A's total should be placeholder --");
     }
 
@@ -976,14 +1131,18 @@ mod tests {
     #[test]
     fn format_section_diff_empty_named_entries_skipped() {
         // Entries with empty name should be excluded from the union.
-        let data_a = vec![
-            make_diff_fn("", "1 ms"),
-            make_diff_fn("real", "2 ms"),
-        ];
+        let data_a = vec![make_diff_fn("", "1 ms"), make_diff_fn("real", "2 ms")];
         let refs_a: Vec<&HotpathFunction> = data_a.iter().collect();
         let result = format_section_diff("t", &refs_a, &refs_a, 0);
         let data_lines: Vec<&str> = result.lines().skip(2).collect();
-        assert_eq!(data_lines.len(), 1, "empty-name entry should be excluded, leaving 1 row");
-        assert!(data_lines[0].starts_with("real"), "only 'real' should appear");
+        assert_eq!(
+            data_lines.len(),
+            1,
+            "empty-name entry should be excluded, leaving 1 row"
+        );
+        assert!(
+            data_lines[0].starts_with("real"),
+            "only 'real' should appear"
+        );
     }
 }

@@ -90,16 +90,23 @@ pub fn run(
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
-        cli_args: Some(crate::harness::format_cli_args(&binary.display().to_string(), &arg_refs)),
+        cli_args: Some(crate::harness::format_cli_args(
+            &binary.display().to_string(),
+            &arg_refs,
+        )),
         metadata,
     };
 
     // Use kv parsing: elivagar emits elapsed_ms, phase12_ms, ocean_ms,
     // phase3_ms, phase4_ms, features, tiles, output_bytes to stderr.
     // Use _raw so we can detect LocationsOnWays from stderr before recording.
-    let (result, stderr) = harness.run_external_with_kv_raw(&config, binary, &arg_refs, project_root)?;
+    let (result, stderr) =
+        harness.run_external_with_kv_raw(&config, binary, &arg_refs, project_root)?;
     let detected = super::detect_locations_on_ways_stderr(&stderr);
-    config.metadata.push(KvPair::text("meta.locations_on_ways_detected", detected.to_string()));
+    config.metadata.push(KvPair::text(
+        "meta.locations_on_ways_detected",
+        detected.to_string(),
+    ));
     harness.record_result(&config, &result)?;
 
     // Clean up output.

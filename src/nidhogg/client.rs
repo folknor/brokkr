@@ -26,7 +26,10 @@ pub fn bbox_to_api(bbox: &str) -> Result<String, crate::error::DevError> {
     }
     // brokkr.toml: lon_min,lat_min,lon_max,lat_max
     // nidhogg API: [lat_min,lon_min,lat_max,lon_max]
-    Ok(format!("[{},{},{},{}]", parts[1], parts[0], parts[3], parts[2]))
+    Ok(format!(
+        "[{},{},{},{}]",
+        parts[1], parts[0], parts[3], parts[2]
+    ))
 }
 
 /// Build a default spatial query JSON from a bbox string (brokkr.toml format).
@@ -41,12 +44,16 @@ pub fn default_api_query(bbox: &str) -> Result<String, crate::error::DevError> {
 fn shrink_bbox(bbox: &str) -> Result<String, crate::error::DevError> {
     let parts: Vec<f64> = bbox
         .split(',')
-        .map(|s| s.trim().parse::<f64>().map_err(|_| {
-            crate::error::DevError::Config(format!("invalid bbox component: {s}"))
-        }))
+        .map(|s| {
+            s.trim()
+                .parse::<f64>()
+                .map_err(|_| crate::error::DevError::Config(format!("invalid bbox component: {s}")))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if parts.len() != 4 {
-        return Err(crate::error::DevError::Config("bbox must have 4 values".into()));
+        return Err(crate::error::DevError::Config(
+            "bbox must have 4 values".into(),
+        ));
     }
     let (lon_min, lat_min, lon_max, lat_max) = (parts[0], parts[1], parts[2], parts[3]);
     let lon_mid = (lon_min + lon_max) / 2.0;
@@ -55,8 +62,10 @@ fn shrink_bbox(bbox: &str) -> Result<String, crate::error::DevError> {
     let lat_q = (lat_max - lat_min) / 4.0;
     Ok(format!(
         "{},{},{},{}",
-        lon_mid - lon_q, lat_mid - lat_q,
-        lon_mid + lon_q, lat_mid + lat_q,
+        lon_mid - lon_q,
+        lat_mid - lat_q,
+        lon_mid + lon_q,
+        lat_mid + lat_q,
     ))
 }
 
@@ -74,11 +83,15 @@ pub fn build_api_queries(bbox: &str) -> Result<Vec<(String, String)>, crate::err
     Ok(vec![
         (
             "highways".into(),
-            format!(r#"{{"bbox":{medium},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#),
+            format!(
+                r#"{{"bbox":{medium},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
+            ),
         ),
         (
             "highways_large".into(),
-            format!(r#"{{"bbox":{full},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#),
+            format!(
+                r#"{{"bbox":{full},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
+            ),
         ),
         (
             "small_nofilter".into(),
@@ -92,7 +105,9 @@ pub fn build_api_queries(bbox: &str) -> Result<Vec<(String, String)>, crate::err
 }
 
 /// Build the standard batch verification queries from a dataset bbox.
-pub fn build_batch_queries(bbox: &str) -> Result<(String, Vec<(String, String)>), crate::error::DevError> {
+pub fn build_batch_queries(
+    bbox: &str,
+) -> Result<(String, Vec<(String, String)>), crate::error::DevError> {
     let api_bbox = bbox_to_api(bbox)?;
 
     let batch_body = format!(
@@ -100,10 +115,24 @@ pub fn build_batch_queries(bbox: &str) -> Result<(String, Vec<(String, String)>)
     );
 
     let individual = vec![
-        ("roads".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#)),
-        ("infra".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"railway":true}}]}}"#)),
-        ("coastline".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"natural":["coastline"]}}]}}"#)),
-        ("landcover".into(), format!(r#"{{"bbox":{api_bbox},"query":[{{"landuse":true}}]}}"#)),
+        (
+            "roads".into(),
+            format!(
+                r#"{{"bbox":{api_bbox},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
+            ),
+        ),
+        (
+            "infra".into(),
+            format!(r#"{{"bbox":{api_bbox},"query":[{{"railway":true}}]}}"#),
+        ),
+        (
+            "coastline".into(),
+            format!(r#"{{"bbox":{api_bbox},"query":[{{"natural":["coastline"]}}]}}"#),
+        ),
+        (
+            "landcover".into(),
+            format!(r#"{{"bbox":{api_bbox},"query":[{{"landuse":true}}]}}"#),
+        ),
     ];
 
     Ok((batch_body, individual))
@@ -143,7 +172,14 @@ pub fn geocode_url(port: u16, term: &str) -> String {
 /// Fails on HTTP 4xx/5xx via `--fail-with-body`. Times out after 30s.
 pub fn curl_get(url: &str) -> Result<String, DevError> {
     let output = Command::new("curl")
-        .args(["-s", "--compressed", "--fail-with-body", "--max-time", "30", url])
+        .args([
+            "-s",
+            "--compressed",
+            "--fail-with-body",
+            "--max-time",
+            "30",
+            url,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -174,11 +210,15 @@ pub fn curl_post(url: &str, body: &str) -> Result<String, DevError> {
             "-s",
             "--compressed",
             "--fail-with-body",
-            "--max-time", "30",
-            "-X", "POST",
+            "--max-time",
+            "30",
+            "-X",
+            "POST",
             url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -212,13 +252,19 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
     let result = Command::new("curl")
         .args([
             "-s",
-            "-o", "/dev/null",
-            "-w", "%{http_code}",
-            "-X", "POST",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
             &url,
-            "-H", "Content-Type: application/json",
-            "-d", body,
-            "--connect-timeout", "2",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+            "--connect-timeout",
+            "2",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -240,10 +286,7 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
 /// Convert a path to a `&str`, returning a clear error if it's not valid UTF-8.
 pub fn path_str(path: &std::path::Path) -> Result<&str, crate::error::DevError> {
     path.to_str().ok_or_else(|| {
-        crate::error::DevError::Config(format!(
-            "path is not valid UTF-8: {}",
-            path.display()
-        ))
+        crate::error::DevError::Config(format!("path is not valid UTF-8: {}", path.display()))
     })
 }
 
@@ -261,11 +304,7 @@ pub fn element_count(parsed: &serde_json::Value) -> usize {
 
 /// Extract the top geocode result's display name from a JSON response array.
 pub fn geocode_top_name(parsed: &serde_json::Value) -> Option<&str> {
-    parsed
-        .as_array()?
-        .first()?
-        .get("displayName")?
-        .as_str()
+    parsed.as_array()?.first()?.get("displayName")?.as_str()
 }
 
 // ---------------------------------------------------------------------------
@@ -277,13 +316,9 @@ pub fn url_encode(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len() * 2);
     for byte in input.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => encoded.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
             _ => {
                 encoded.push('%');
                 encoded.push_str(&format!("{byte:02X}"));

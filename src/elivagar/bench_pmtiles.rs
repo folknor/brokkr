@@ -37,9 +37,7 @@ pub fn run(
     let tiles_str = tiles.to_string();
     let runs_str = runs.to_string();
 
-    output::bench_msg(&format!(
-        "bench_pmtiles: {tiles} tiles, {runs} runs"
-    ));
+    output::bench_msg(&format!("bench_pmtiles: {tiles} tiles, {runs} runs"));
 
     let config = BenchConfig {
         command: "bench pmtiles".into(),
@@ -51,7 +49,10 @@ pub fn run(
         runs: 1, // example handles its own iterations
         cli_args: None,
         #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![KvPair::int("meta.tiles", tiles as i64), KvPair::int("meta.internal_runs", runs as i64)],
+        metadata: vec![
+            KvPair::int("meta.tiles", tiles as i64),
+            KvPair::int("meta.internal_runs", runs as i64),
+        ],
     };
 
     harness.run_internal(&config, |_i| {
@@ -78,7 +79,10 @@ pub fn run(
         Ok(BenchResult {
             elapsed_ms: ms,
             #[allow(clippy::cast_possible_wrap)]
-            kv: vec![KvPair::int("tiles", tiles as i64), KvPair::int("internal_runs", runs as i64)],
+            kv: vec![
+                KvPair::int("tiles", tiles as i64),
+                KvPair::int("internal_runs", runs as i64),
+            ],
             distribution: None,
             hotpath: None,
         })
@@ -134,7 +138,11 @@ pub fn run_hotpath(
         runs: 1,
         cli_args: None,
         #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![KvPair::int("meta.tiles", tiles as i64), KvPair::int("meta.internal_runs", runs as i64), KvPair::text("meta.alloc", alloc.to_string())],
+        metadata: vec![
+            KvPair::int("meta.tiles", tiles as i64),
+            KvPair::int("meta.internal_runs", runs as i64),
+            KvPair::text("meta.alloc", alloc.to_string()),
+        ],
     };
 
     harness.run_internal(&config, |_i| {
