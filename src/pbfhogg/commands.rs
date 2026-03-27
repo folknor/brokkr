@@ -5,7 +5,7 @@
 //! definitions across `bench_commands.rs`, `bench_build_geocode_index.rs`,
 //! and `hotpath.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
 use crate::measure::CommandContext;
@@ -322,6 +322,7 @@ impl PbfhoggCommand {
     /// The returned `Vec<String>` contains arguments to pass to the pbfhogg
     /// binary (or external tool binary).  The binary path itself is NOT
     /// included — the caller prepends it.
+    #[allow(clippy::too_many_lines)]
     pub fn build_args(&self, ctx: &CommandContext) -> Result<Vec<String>, DevError> {
         match self {
             // -----------------------------------------------------------------
@@ -687,7 +688,7 @@ impl PbfhoggCommand {
 // ---------------------------------------------------------------------------
 
 /// Convert a `PathBuf` to a `String`, returning a `DevError` if not UTF-8.
-fn path_to_string(path: &PathBuf) -> Result<String, DevError> {
+fn path_to_string(path: &Path) -> Result<String, DevError> {
     path.to_str()
         .map(String::from)
         .ok_or_else(|| DevError::Config(format!(

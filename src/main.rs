@@ -473,7 +473,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 match mm {
                     measure::MeasureMode::Hotpath { .. } | measure::MeasureMode::Alloc { .. } => {
                         let alloc = matches!(mm, measure::MeasureMode::Alloc { .. });
-                        let owned_features: Vec<String> = features.to_vec();
+                        let owned_features: Vec<String> = features.clone();
                         sluggrs::hotpath::cmd(
                             &dev_config, project, &project_root, build_root,
                             runs, alloc, mode.force, &owned_features,
@@ -1131,27 +1131,22 @@ fn cmd_clean(dev_config: &config::DevConfig, project: Project, project_root: &Pa
                         removed += 1;
                     }
                     // Clean geocode output directories (geocode-<dataset>/).
-                    if path.is_dir() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("geocode-") {
+                    if path.is_dir()
+                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    {
+                        if name.starts_with("geocode-") {
+                            std::fs::remove_dir_all(&path).ok();
+                            removed += 1;
+                        }
+                        // Clean orphaned external-join scratch dirs (.pbfhogg-external-join-{pid}).
+                        // These survive OOM kills (SIGKILL prevents Drop cleanup).
+                        if let Some(pid_str) = name.strip_prefix(".pbfhogg-external-join-")
+                            && let Ok(pid) = pid_str.parse::<i32>()
+                        {
+                            let alive = unsafe { libc::kill(pid, 0) } == 0;
+                            if !alive {
                                 std::fs::remove_dir_all(&path).ok();
                                 removed += 1;
-                            }
-                        }
-                    }
-                    // Clean orphaned external-join scratch dirs (.pbfhogg-external-join-{pid}).
-                    // These survive OOM kills (SIGKILL prevents Drop cleanup).
-                    if path.is_dir() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if let Some(pid_str) = name.strip_prefix(".pbfhogg-external-join-") {
-                                if let Ok(pid) = pid_str.parse::<i32>() {
-                                    // kill(pid, 0) returns -1/ESRCH if process doesn't exist.
-                                    let alive = unsafe { libc::kill(pid, 0) } == 0;
-                                    if !alive {
-                                        std::fs::remove_dir_all(&path).ok();
-                                        removed += 1;
-                                    }
-                                }
                             }
                         }
                     }

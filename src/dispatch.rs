@@ -97,7 +97,7 @@ fn run_pbfhogg_run(
     }
 
     let ms = crate::duration_ms(out.elapsed);
-    output::run_msg(&format!("elapsed={}ms", ms));
+    output::run_msg(&format!("elapsed={ms}ms"));
 
     Ok(())
 }

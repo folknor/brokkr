@@ -272,10 +272,10 @@ pub(crate) fn test(
             &binary, snapshot, sluggrs_config, project_root, &db, &run_id,
         )?;
 
-        if first_adapter.is_none() {
-            if let Some(ref a) = adapter {
-                first_adapter = Some(a.clone());
-            }
+        if first_adapter.is_none()
+            && let Some(ref a) = adapter
+        {
+            first_adapter = Some(a.clone());
         }
 
         let px = format_pct(outcome.pixel_diff_pct, 1);

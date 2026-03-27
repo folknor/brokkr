@@ -112,6 +112,7 @@ pub fn run(
 ///
 /// Handles lock acquisition, building the example binary with the correct
 /// features, and delegating to [`run`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd(
     dev_config: &config::DevConfig,
     project: crate::project::Project,
