@@ -23,6 +23,7 @@ mod preflight;
 mod project;
 mod request;
 mod resolve;
+mod sidecar;
 mod sluggrs;
 mod tools;
 mod worktree;
@@ -70,6 +71,7 @@ where
             force: mode.force,
             mode: mm,
             no_mem_check: mode.no_mem_check,
+            sidecar: mode.sidecar,
         };
         f(&req)
     })
@@ -629,6 +631,11 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
             return Err(DevError::Config("run count must be >= 1".into()));
         }
         _ => {}
+    }
+    if mode.sidecar && !matches!(result, measure::MeasureMode::Bench { .. }) {
+        return Err(DevError::Config(
+            "--sidecar currently requires --bench".into(),
+        ));
     }
     Ok(result)
 }

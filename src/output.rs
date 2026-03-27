@@ -75,6 +75,12 @@ pub fn history_msg(msg: &str) {
     println!("[history] {msg}");
 }
 
+pub fn sidecar_msg(msg: &str) {
+    if !is_quiet() {
+        println!("[sidecar] {msg}");
+    }
+}
+
 pub fn litehtml_msg(msg: &str) {
     println!("[litehtml] {msg}");
 }
@@ -158,6 +164,53 @@ pub fn run_captured_with_env(
         stderr: e.to_string(),
     })?;
 
+    let elapsed = start.elapsed();
+
+    Ok(CapturedOutput {
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        elapsed,
+    })
+}
+
+/// Spawn a subprocess with captured stdio, returning the `Child` handle.
+///
+/// The caller is responsible for waiting on the child and collecting output.
+/// Used by the sidecar to run sampling alongside the child process.
+pub fn spawn_captured(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> Result<std::process::Child, DevError> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for &(key, value) in env {
+        cmd.env(key, value);
+    }
+    crate::oom::protect_child(&mut cmd);
+
+    cmd.spawn().map_err(|e| DevError::Subprocess {
+        program: program.to_owned(),
+        code: None,
+        stderr: e.to_string(),
+    })
+}
+
+/// Collect output from a spawned child process.
+///
+/// Returns `CapturedOutput` with the exit status, stdout, stderr, and elapsed time
+/// (measured from `start`).
+pub fn collect_child(
+    child: std::process::Child,
+    start: Instant,
+) -> Result<CapturedOutput, DevError> {
+    let output = child.wait_with_output().map_err(|e| DevError::Io(e))?;
     let elapsed = start.elapsed();
 
     Ok(CapturedOutput {

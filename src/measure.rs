@@ -72,6 +72,8 @@ pub struct MeasureRequest<'a> {
     pub mode: MeasureMode,
     /// Skip the OOM memory check.
     pub no_mem_check: bool,
+    /// Attach a monitoring sidecar to sample /proc metrics.
+    pub sidecar: bool,
 }
 
 impl MeasureRequest<'_> {

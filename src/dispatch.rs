@@ -144,8 +144,18 @@ fn run_pbfhogg_wallclock(
         req.runs,
     ));
 
-    ctx.harness
-        .run_external(&config, &ctx.binary, &arg_refs, req.project_root)?;
+    if req.sidecar {
+        ctx.harness.run_external_with_sidecar(
+            &config,
+            &ctx.binary,
+            &arg_refs,
+            req.project_root,
+            &ctx.paths.scratch_dir,
+        )?;
+    } else {
+        ctx.harness
+            .run_external(&config, &ctx.binary, &arg_refs, req.project_root)?;
+    }
 
     // Clean up scratch output files.
     cleanup_pbfhogg_output(command, &cmd_ctx);

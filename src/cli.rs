@@ -792,6 +792,10 @@ pub(crate) struct ModeArgs {
     /// Skip memory availability check
     #[arg(long)]
     pub(crate) no_mem_check: bool,
+
+    /// Attach a monitoring sidecar that samples /proc metrics at 100ms intervals
+    #[arg(long)]
+    pub(crate) sidecar: bool,
 }
 
 // ---------------------------------------------------------------------------

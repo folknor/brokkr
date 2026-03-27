@@ -182,6 +182,74 @@ impl BenchHarness {
         Ok(result)
     }
 
+    /// External timing with sidecar: run subprocess N times with a monitoring
+    /// sidecar attached. The sidecar samples `/proc` metrics and reads phase
+    /// markers from a FIFO. Sidecar data is stored in the results DB alongside
+    /// the benchmark result.
+    pub fn run_external_with_sidecar(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        scratch_dir: &Path,
+    ) -> Result<BenchResult, DevError> {
+        use crate::sidecar;
+
+        let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
+        let fifo_path_str = fifo
+            .path
+            .to_str()
+            .ok_or_else(|| DevError::Config("FIFO path not UTF-8".into()))?
+            .to_owned();
+
+        let mut best_ms: Option<i64> = None;
+        let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
+        let prog_str = program.display().to_string();
+
+        for i in 0..config.runs {
+            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+
+            let env = [("PBFHOGG_MARKER_FIFO", fifo_path_str.as_str())];
+            let start = Instant::now();
+            let mut child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+
+            let sidecar_data = sidecar::run_sidecar(&mut child, &mut fifo, i);
+
+            let captured = output::collect_child(child, start)?;
+            let ms = elapsed_to_ms(&captured.elapsed);
+
+            captured.check_success(&prog_str)?;
+
+            best_ms = Some(pick_best_ms(best_ms, ms));
+            sidecar_runs.push(sidecar_data);
+        }
+
+        fifo.cleanup();
+
+        let elapsed_ms =
+            best_ms.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+
+        let result = BenchResult {
+            elapsed_ms,
+            kv: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        };
+
+        let uuid = self.record_result(config, &result)?;
+
+        // Store sidecar data if we got a UUID (clean tree).
+        if let Some(uuid) = uuid {
+            for (i, data) in sidecar_runs.iter().enumerate() {
+                sidecar::store_sidecar_data(self.db_conn(), &uuid, i, data)?;
+            }
+            output::sidecar_msg("profile data stored in results.db");
+        }
+
+        Ok(result)
+    }
+
     /// Distribution timing: collect all N samples, compute min/p50/p95/max.
     pub fn run_distribution<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
     where
@@ -279,25 +347,33 @@ impl BenchHarness {
 
     /// Record a result: always emit to stdout, store in DB if tree is clean.
     /// Prints the short UUID to stdout (always, regardless of quiet mode).
+    /// Returns the full UUID if stored, `None` if the tree was dirty.
     pub fn record_result(
         &self,
         config: &BenchConfig,
         result: &BenchResult,
-    ) -> Result<(), DevError> {
+    ) -> Result<Option<String>, DevError> {
         if self.git.is_clean {
             let row = self.build_row(config, result);
-            let short = self.db.insert(&row)?;
+            let (uuid, short) = self.db.insert_full(&row)?;
             emit_result_lines(config, result, &self.git);
             output::bench_msg(&format!("stored in results.db ({short})"));
             println!("{short}");
+            Ok(Some(uuid))
         } else {
             // Dirty tree: no DB insert, no UUID. Always print result line
             // since the data can't be looked up later.
             force_emit_result_lines(config, result, &self.git);
             output::error("NOT STORED — tree is dirty (commit or stash changes)");
+            Ok(None)
         }
+    }
 
-        Ok(())
+    /// Get a reference to the underlying database connection.
+    ///
+    /// Used for storing sidecar profile data alongside benchmark results.
+    pub fn db_conn(&self) -> &rusqlite::Connection {
+        self.db.conn()
     }
 
     /// Build a `RunRow` from harness state, config, and result.

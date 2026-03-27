@@ -90,6 +90,54 @@ CREATE TABLE IF NOT EXISTS hotpath_threads (
     mem_diff        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id);
+
+CREATE TABLE IF NOT EXISTS sidecar_samples (
+    result_uuid TEXT NOT NULL,
+    run_idx     INTEGER NOT NULL DEFAULT 0,
+    sample_idx  INTEGER NOT NULL,
+    timestamp_us INTEGER NOT NULL,
+    rss_kb      INTEGER,
+    anon_kb     INTEGER,
+    file_kb     INTEGER,
+    shmem_kb    INTEGER,
+    swap_kb     INTEGER,
+    vsize_kb    INTEGER,
+    vm_hwm_kb   INTEGER,
+    utime       INTEGER,
+    stime       INTEGER,
+    num_threads INTEGER,
+    minflt      INTEGER,
+    majflt      INTEGER,
+    rchar       INTEGER,
+    wchar       INTEGER,
+    read_bytes  INTEGER,
+    write_bytes INTEGER,
+    cancelled_write_bytes INTEGER,
+    syscr       INTEGER,
+    syscw       INTEGER,
+    vol_cs      INTEGER,
+    nonvol_cs   INTEGER,
+    PRIMARY KEY (result_uuid, run_idx, sample_idx)
+);
+
+CREATE TABLE IF NOT EXISTS sidecar_markers (
+    result_uuid  TEXT NOT NULL,
+    run_idx      INTEGER NOT NULL DEFAULT 0,
+    marker_idx   INTEGER NOT NULL,
+    timestamp_us INTEGER NOT NULL,
+    name         TEXT NOT NULL,
+    PRIMARY KEY (result_uuid, run_idx, marker_idx)
+);
+
+CREATE TABLE IF NOT EXISTS sidecar_summary (
+    result_uuid  TEXT NOT NULL,
+    run_idx      INTEGER NOT NULL DEFAULT 0,
+    vm_hwm_kb    INTEGER,
+    sample_count INTEGER,
+    marker_count INTEGER,
+    wall_time_ms INTEGER,
+    PRIMARY KEY (result_uuid, run_idx)
+);
 ";
 
 // ---------------------------------------------------------------------------
