@@ -458,7 +458,7 @@ fn run_elivagar_run(
                 .to_str()
                 .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
 
-            let args = command.build_tilegen_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let args = command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let binary_str = ctx.binary.display().to_string();

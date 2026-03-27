@@ -5,12 +5,30 @@
 //! command. This is the single source of truth — bench, hotpath, profile, and
 //! the `brokkr run` surface all derive their behaviour from these definitions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::db::KvPair;
 use crate::error::DevError;
 
 use super::PipelineOpts;
+
+// ---------------------------------------------------------------------------
+// BuildKind — how to build a command
+// ---------------------------------------------------------------------------
+
+/// Describes how to build the binary for an elivagar command.
+pub enum BuildKind {
+    /// Build the main project binary (e.g. `elivagar`).
+    MainBinary,
+    /// Build a cargo example by name (e.g. `bench_pmtiles`, `bench_node_store`).
+    Example(&'static str),
+    /// No Rust build needed (external tools like Planetiler, Tilemaker).
+    NoBuild,
+}
+
+// ---------------------------------------------------------------------------
+// ElivagarCommand — the unified command enum
+// ---------------------------------------------------------------------------
 
 /// All elivagar measurable commands.
 ///
@@ -89,6 +107,54 @@ impl<'a> ElivagarCommand<'a> {
         matches!(self, Self::Planetiler | Self::Tilemaker)
     }
 
+    /// Whether this command needs a PBF input file.
+    ///
+    /// Tilegen and external tools process PBF files. Micro-benchmarks
+    /// (PmtilesWriter, NodeStore) are synthetic and need no PBF.
+    pub fn needs_pbf(&self) -> bool {
+        match self {
+            Self::Tilegen { .. } | Self::Planetiler | Self::Tilemaker => true,
+            Self::PmtilesWriter { .. } | Self::NodeStore { .. } => false,
+        }
+    }
+
+    /// Whether this command needs a data directory (for ocean shapefiles, tmp, etc.).
+    ///
+    /// Tilegen needs it for ocean data and tmp storage. External tools need it
+    /// for their own data. Micro-benchmarks are self-contained.
+    pub fn needs_data_dir(&self) -> bool {
+        match self {
+            Self::Tilegen { .. } | Self::Planetiler | Self::Tilemaker => true,
+            Self::PmtilesWriter { .. } | Self::NodeStore { .. } => false,
+        }
+    }
+
+    /// Files to clean up after a run.
+    ///
+    /// Returns paths relative to the given scratch directory that should be
+    /// removed after execution completes.
+    pub fn output_files(&self, scratch_dir: &Path) -> Vec<PathBuf> {
+        match self {
+            Self::Tilegen { .. } => {
+                vec![scratch_dir.join("bench-self-output.pmtiles")]
+            }
+            Self::PmtilesWriter { .. }
+            | Self::NodeStore { .. }
+            | Self::Planetiler
+            | Self::Tilemaker => vec![],
+        }
+    }
+
+    /// Describes how to build the binary for this command.
+    pub fn build_config(&self) -> BuildKind {
+        match self {
+            Self::Tilegen { .. } => BuildKind::MainBinary,
+            Self::PmtilesWriter { .. } => BuildKind::Example("bench_pmtiles"),
+            Self::NodeStore { .. } => BuildKind::Example("bench_node_store"),
+            Self::Planetiler | Self::Tilemaker => BuildKind::NoBuild,
+        }
+    }
+
     /// Cargo package to build for this command (main binary).
     ///
     /// Returns `None` for the default package and external tools.
@@ -128,12 +194,16 @@ impl<'a> ElivagarCommand<'a> {
         None
     }
 
-    /// Build the argument vector for the tilegen pipeline command.
+    /// Build the argument vector for this command.
     ///
-    /// `pbf_str` is the resolved PBF path, `scratch_dir` is the output
-    /// directory, and `data_dir` is the data directory for ocean shapefiles
-    /// and tmp storage.
-    pub fn build_tilegen_args(
+    /// - **Tilegen**: full pipeline args (`run <pbf> -o <output> --tmp-dir <tmp> [flags]`).
+    ///   `pbf_str` is the resolved PBF path, `scratch_dir` is the output
+    ///   directory, and `data_dir` is the data directory for ocean shapefiles
+    ///   and tmp storage.
+    /// - **PmtilesWriter**: `["--tiles", "<N>", "--runs", "1"]`.
+    /// - **NodeStore**: `["--nodes", "<N>", "--runs", "1"]`.
+    /// - **Planetiler/Tilemaker**: returns an error (external tools have their own setup).
+    pub fn build_args(
         &self,
         pbf_str: &str,
         scratch_dir: &Path,
@@ -175,8 +245,20 @@ impl<'a> ElivagarCommand<'a> {
 
                 Ok(args)
             }
-            _ => Err(DevError::Config(format!(
-                "build_tilegen_args called on non-tilegen command '{}'",
+            Self::PmtilesWriter { tiles } => Ok(vec![
+                "--tiles".into(),
+                tiles.to_string(),
+                "--runs".into(),
+                "1".into(),
+            ]),
+            Self::NodeStore { nodes } => Ok(vec![
+                "--nodes".into(),
+                nodes.to_string(),
+                "--runs".into(),
+                "1".into(),
+            ]),
+            Self::Planetiler | Self::Tilemaker => Err(DevError::Config(format!(
+                "build_args called on external command '{}' — external tools have their own arg construction",
                 self.id()
             ))),
         }
