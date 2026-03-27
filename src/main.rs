@@ -1469,6 +1469,164 @@ fn cmd_measure(
             dispatch::run_elivagar_command(&req, &cmd, None)
         }
 
+        // ----- nidhogg commands -----
+        MeasureCommand::Api { dataset, runs, query } => {
+            project::require(project, Project::Nidhogg, "measure api")?;
+            match mode {
+                measure::MeasureMode::WallClock => {
+                    let bench_req = request::BenchRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: "raw",
+                        runs, features, force,
+                    };
+                    nidhogg::cmd::bench_api(&bench_req, query.as_deref())
+                }
+                measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
+                    let alloc = mode == measure::MeasureMode::Alloc;
+                    let feature = harness::hotpath_feature(alloc);
+                    let mut all_features: Vec<&str> = vec![feature];
+                    all_features.extend(features.iter().map(String::as_str));
+                    let hotpath_req = request::HotpathRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: "raw",
+                        runs, all_features: &all_features,
+                        alloc, no_mem_check, force,
+                    };
+                    nidhogg::cmd::hotpath(&hotpath_req)
+                }
+                measure::MeasureMode::Profile => {
+                    let profile_req = request::ProfileRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: "raw",
+                        features, no_mem_check,
+                    };
+                    nidhogg::cmd::profile(&profile_req, profiler_tool)
+                }
+            }
+        }
+        MeasureCommand::NidIngest { dataset, variant, runs } => {
+            project::require(project, Project::Nidhogg, "measure nid-ingest")?;
+            match mode {
+                measure::MeasureMode::WallClock => {
+                    let bench_req = request::BenchRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: &variant,
+                        runs, features, force,
+                    };
+                    nidhogg::cmd::bench_ingest(&bench_req)
+                }
+                measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
+                    let alloc = mode == measure::MeasureMode::Alloc;
+                    let feature = harness::hotpath_feature(alloc);
+                    let mut all_features: Vec<&str> = vec![feature];
+                    all_features.extend(features.iter().map(String::as_str));
+                    let hotpath_req = request::HotpathRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: &variant,
+                        runs, all_features: &all_features,
+                        alloc, no_mem_check, force,
+                    };
+                    nidhogg::cmd::hotpath(&hotpath_req)
+                }
+                measure::MeasureMode::Profile => {
+                    let profile_req = request::ProfileRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: &variant,
+                        features, no_mem_check,
+                    };
+                    nidhogg::cmd::profile(&profile_req, profiler_tool)
+                }
+            }
+        }
+        MeasureCommand::Tiles { dataset, tiles, runs, uring } => {
+            project::require(project, Project::Nidhogg, "measure tiles")?;
+            match mode {
+                measure::MeasureMode::WallClock => {
+                    let bench_req = request::BenchRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: "raw",
+                        runs, features, force,
+                    };
+                    nidhogg::cmd::bench_tiles(&bench_req, tiles.as_deref(), uring)
+                }
+                measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
+                    let alloc = mode == measure::MeasureMode::Alloc;
+                    let feature = harness::hotpath_feature(alloc);
+                    let mut all_features: Vec<&str> = vec![feature];
+                    all_features.extend(features.iter().map(String::as_str));
+                    let hotpath_req = request::HotpathRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: "raw",
+                        runs, all_features: &all_features,
+                        alloc, no_mem_check, force,
+                    };
+                    nidhogg::cmd::hotpath(&hotpath_req)
+                }
+                measure::MeasureMode::Profile => {
+                    let profile_req = request::ProfileRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: "raw",
+                        features, no_mem_check,
+                    };
+                    nidhogg::cmd::profile(&profile_req, profiler_tool)
+                }
+            }
+        }
+
+        // ----- sluggrs commands -----
+        MeasureCommand::SluggrsHotpath { runs } => {
+            project::require(project, Project::Sluggrs, "measure sluggrs-hotpath")?;
+            match mode {
+                measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
+                    let alloc = mode == measure::MeasureMode::Alloc;
+                    let owned_features: Vec<String> = features.to_vec();
+                    sluggrs::hotpath::cmd(
+                        dev_config, project, project_root, build_root,
+                        runs, alloc, force, &owned_features,
+                    )
+                }
+                measure::MeasureMode::WallClock => {
+                    Err(DevError::Config(
+                        "sluggrs-hotpath only supports --hotpath or --alloc modes".into(),
+                    ))
+                }
+                measure::MeasureMode::Profile => {
+                    Err(DevError::Config(
+                        "sluggrs-hotpath does not support --profile mode (use --hotpath or --alloc)".into(),
+                    ))
+                }
+            }
+        }
+
+        // ----- generic commands -----
+        MeasureCommand::GenericHotpath { dataset, variant, runs } => {
+            match mode {
+                measure::MeasureMode::Hotpath | measure::MeasureMode::Alloc => {
+                    let alloc = mode == measure::MeasureMode::Alloc;
+                    let feature = harness::hotpath_feature(alloc);
+                    let mut all_features: Vec<&str> = vec![feature];
+                    all_features.extend(features.iter().map(String::as_str));
+                    let hotpath_req = request::HotpathRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: &variant,
+                        runs, all_features: &all_features,
+                        alloc, no_mem_check, force,
+                    };
+                    cmd_hotpath_generic(&hotpath_req)
+                }
+                measure::MeasureMode::WallClock => {
+                    Err(DevError::Config(
+                        "generic-hotpath only supports --hotpath or --alloc modes".into(),
+                    ))
+                }
+                measure::MeasureMode::Profile => {
+                    Err(DevError::Config(
+                        "generic-hotpath does not support --profile mode (use --hotpath or --alloc)".into(),
+                    ))
+                }
+            }
+        }
+
         // ----- suites -----
         MeasureCommand::Suite { name, dataset, variant, runs } => {
             match name.as_str() {
@@ -1500,8 +1658,23 @@ fn cmd_measure(
                     };
                     elivagar::cmd::bench_all(&bench_req)
                 }
+                "nidhogg" => {
+                    project::require(project, Project::Nidhogg, "measure suite nidhogg")?;
+                    if mode != measure::MeasureMode::WallClock {
+                        return Err(DevError::Config(
+                            "suite mode only supports wall-clock timing".into(),
+                        ));
+                    }
+                    let bench_req = request::BenchRequest {
+                        dev_config, project, project_root, build_root,
+                        dataset: &dataset, variant: &variant,
+                        runs, features, force,
+                    };
+                    nidhogg::cmd::bench_api(&bench_req, None)?;
+                    nidhogg::cmd::bench_ingest(&bench_req)
+                }
                 other => Err(DevError::Config(format!(
-                    "unknown suite: {other} (expected: pbfhogg, elivagar)"
+                    "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
                 ))),
             }
         }

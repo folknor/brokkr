@@ -1150,12 +1150,83 @@ pub(crate) enum MeasureCommand {
         runs: usize,
     },
 
+    // ----- nidhogg commands -----
+
+    /// [nidhogg] API query benchmark
+    #[command(name = "api", display_order = 15)]
+    Api {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "10")]
+        runs: usize,
+        /// Specific query name to benchmark
+        #[arg(long)]
+        query: Option<String>,
+    },
+    /// [nidhogg] Ingest benchmark
+    #[command(name = "nid-ingest", display_order = 15)]
+    NidIngest {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "3")]
+        runs: usize,
+    },
+    /// [nidhogg] Tile serving benchmark
+    #[command(name = "tiles", display_order = 15)]
+    Tiles {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PMTiles variant from config
+        #[arg(long)]
+        tiles: Option<String>,
+        /// Number of measurement runs
+        #[arg(long, default_value = "1")]
+        runs: usize,
+        /// Use io_uring for tile serving
+        #[arg(long)]
+        uring: bool,
+    },
+
+    // ----- sluggrs commands -----
+
+    /// [sluggrs] Rendering hotpath (hotpath/alloc mode only)
+    #[command(name = "sluggrs-hotpath", display_order = 16)]
+    SluggrsHotpath {
+        /// Number of measurement runs
+        #[arg(long, default_value = "1")]
+        runs: usize,
+    },
+
+    // ----- generic commands -----
+
+    /// Generic hotpath for projects without dedicated modules
+    #[command(name = "generic-hotpath", display_order = 17)]
+    GenericHotpath {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use
+        #[arg(long, default_value = "indexed")]
+        variant: String,
+        /// Number of measurement runs
+        #[arg(long, default_value = "1")]
+        runs: usize,
+    },
+
     // ----- suites -----
 
-    /// Run a full benchmark suite (pbfhogg or elivagar)
+    /// Run a full benchmark suite (pbfhogg, elivagar, or nidhogg)
     #[command(name = "suite", display_order = 20)]
     Suite {
-        /// Suite name: pbfhogg or elivagar
+        /// Suite name: pbfhogg, elivagar, or nidhogg
         name: String,
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
