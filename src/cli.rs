@@ -53,10 +53,6 @@ Examples:
         #[arg(long)]
         alloc: bool,
 
-        /// Two-pass profiling (pbfhogg: timing+alloc; elivagar: sampling profiler)
-        #[arg(long)]
-        profile: bool,
-
         /// Print full build/bench/result output
         #[arg(short, long)]
         verbose: bool,
@@ -76,10 +72,6 @@ Examples:
         /// Skip memory availability check
         #[arg(long)]
         no_mem_check: bool,
-
-        /// Profiling tool for elivagar (perf or samply)
-        #[arg(long)]
-        tool: Option<String>,
 
         #[command(subcommand)]
         command: RunCommand,
@@ -330,78 +322,6 @@ Examples:
         /// Run only this test (pbfhogg: inspect-tags, check-refs, cat, apply-changes-zlib, apply-changes-none)
         #[arg(long)]
         test: Option<String>,
-
-        /// Skip memory availability check
-        #[arg(long)]
-        no_mem_check: bool,
-    },
-    /// Run two-pass profiling (deprecated — use `brokkr run <command> --profile` instead)
-    #[command(display_order = 13)]
-    Profile {
-        /// Print full build/bench/result output
-        #[arg(long, short = 'v')]
-        verbose: bool,
-
-        /// Build and profile an old commit via git worktree
-        #[arg(long)]
-        commit: Option<String>,
-
-        /// Cargo features to enable (e.g. linux-io-uring)
-        #[arg(long, value_delimiter = ',')]
-        features: Vec<String>,
-
-        /// Dataset name from brokkr.toml (default: denmark)
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-
-        /// PBF variant to use (raw, indexed, locations)
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-
-        /// OSC sequence number(s) from brokkr.toml (comma-separated)
-        #[arg(long)]
-        osc_seq: Option<String>,
-
-        /// Profiling tool: perf or samply (elivagar only)
-        #[arg(long)]
-        tool: Option<String>,
-
-        /// Skip ocean shapefile detection (elivagar only)
-        #[arg(long)]
-        no_ocean: bool,
-
-        /// Force compact node store even without PBF sort header (elivagar only)
-        #[arg(long)]
-        force_sorted: bool,
-
-        /// Bypass elivagar flat-index safety guardrails (unsafe)
-        #[arg(long)]
-        allow_unsafe_flat_index: bool,
-
-        /// Tile output format (mvt or mlt, elivagar only)
-        #[arg(long)]
-        tile_format: Option<String>,
-        /// Tile compression (gzip or brotli, elivagar only)
-        #[arg(long)]
-        tile_compression: Option<String>,
-        /// Compress sort chunks (lz4 or snappy, elivagar only)
-        #[arg(long)]
-        compress_sort_chunks: Option<String>,
-        /// Keep tile blob in memory (elivagar only)
-        #[arg(long)]
-        in_memory: bool,
-        /// Input PBF has locations on ways (elivagar only)
-        #[arg(long)]
-        locations_on_ways: bool,
-        /// Default fanout cap for all layers (elivagar only)
-        #[arg(long)]
-        fanout_cap_default: Option<u32>,
-        /// Per-layer fanout caps (elivagar only, comma-separated layer=N pairs)
-        #[arg(long)]
-        fanout_cap: Option<String>,
-        /// Polygon simplification factor (elivagar only, default 1.0, range 0.1–10.0)
-        #[arg(long)]
-        polygon_simplify_factor: Option<f64>,
 
         /// Skip memory availability check
         #[arg(long)]

@@ -27,8 +27,6 @@ pub enum MeasureMode {
     /// Per-function allocation tracking via `--features hotpath-alloc` +
     /// `run_hotpath_capture()`.
     Alloc,
-    /// Two-pass profiling: timing then alloc.
-    Profile,
 }
 
 impl MeasureMode {
@@ -38,9 +36,6 @@ impl MeasureMode {
             Self::WallClock => None,
             Self::Hotpath => Some("hotpath"),
             Self::Alloc => Some("hotpath-alloc"),
-            // Profile does two passes internally (hotpath then hotpath-alloc),
-            // so the caller selects the feature per pass.
-            Self::Profile => None,
         }
     }
 

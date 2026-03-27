@@ -91,11 +91,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             cmd_check(project, &project_root, &features, no_default_features, package.as_deref(), &args)
         }
         Command::Env => cmd_env(&dev_config, project, &project_root),
-        Command::Run { hotpath, alloc, profile, verbose, commit, features, force, no_mem_check, tool, command: run_cmd } => {
+        Command::Run { hotpath, alloc, verbose, commit, features, force, no_mem_check, command: run_cmd } => {
             let features = resolve_features(&dev_config, &features);
             output::set_quiet(!verbose);
             context::with_worktree(&project_root, commit.as_deref(), |build_root| {
-                cmd_measure(&dev_config, project, &project_root, build_root, &features, force, no_mem_check, hotpath, alloc, profile, tool.as_deref(), run_cmd)
+                cmd_measure(&dev_config, project, &project_root, build_root, &features, force, no_mem_check, hotpath, alloc, run_cmd)
             })
         }
         Command::Passthrough { features, time, json, runs, no_build, args } => {
@@ -186,48 +186,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     polygon_simplify_factor,
                 };
                 cmd_hotpath(&req, osc_seq.as_deref(), target.as_deref(), tiles, nodes, test.as_deref(), &opts)
-            })
-        }
-        Command::Profile {
-            verbose,
-            commit,
-            features,
-            dataset,
-            variant,
-            osc_seq,
-            tool,
-            no_ocean,
-            force_sorted,
-            allow_unsafe_flat_index,
-            tile_format,
-            tile_compression,
-            compress_sort_chunks,
-            in_memory,
-            locations_on_ways,
-            fanout_cap_default,
-            fanout_cap,
-            polygon_simplify_factor,
-            no_mem_check,
-        } => {
-            eprintln!("[warn] `brokkr profile` is deprecated — use `brokkr run <command> --profile` instead");
-            let features = resolve_features(&dev_config, &features);
-            output::set_quiet(!verbose);
-            with_worktree(&project_root, commit.as_deref(), |build_root| {
-                let req = ProfileRequest {
-                    dev_config: &dev_config, project, project_root: &project_root, build_root,
-                    dataset: &dataset, variant: &variant, features: &features, no_mem_check,
-                };
-                let opts = elivagar::PipelineOpts {
-                    no_ocean, force_sorted, allow_unsafe_flat_index,
-                    tile_format: tile_format.as_deref(),
-                    tile_compression: tile_compression.as_deref(),
-                    compress_sort_chunks: compress_sort_chunks.as_deref(),
-                    in_memory, locations_on_ways,
-                    fanout_cap_default,
-                    fanout_cap: fanout_cap.as_deref(),
-                    polygon_simplify_factor,
-                };
-                cmd_profile(&req, osc_seq.as_deref(), tool.as_deref(), &opts)
             })
         }
         Command::Download { region, osc_url } => {
@@ -1210,23 +1168,18 @@ fn cmd_measure(
     no_mem_check: bool,
     hotpath: bool,
     alloc: bool,
-    profile: bool,
-    profiler_tool: Option<&str>,
     command: RunCommand,
 ) -> Result<(), DevError> {
     // Determine measurement mode from flags.
-    let mode_count = usize::from(hotpath) + usize::from(alloc) + usize::from(profile);
-    if mode_count > 1 {
+    if hotpath && alloc {
         return Err(DevError::Config(
-            "--hotpath, --alloc, and --profile are mutually exclusive".into(),
+            "--hotpath and --alloc are mutually exclusive".into(),
         ));
     }
     let mode = if hotpath {
         measure::MeasureMode::Hotpath
     } else if alloc {
         measure::MeasureMode::Alloc
-    } else if profile {
-        measure::MeasureMode::Profile
     } else {
         measure::MeasureMode::WallClock
     };
@@ -1449,27 +1402,27 @@ fn cmd_measure(
                 skip_to: skip_to.as_deref(),
                 compression_level,
             };
-            dispatch::run_elivagar_command(&req, &cmd, profiler_tool)
+            dispatch::run_elivagar_command(&req, &cmd)
         }
         RunCommand::PmtilesWriter { tiles, runs } => {
             let req = make_req!("denmark", "raw", runs);
             let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
-            dispatch::run_elivagar_command(&req, &cmd, None)
+            dispatch::run_elivagar_command(&req, &cmd)
         }
         RunCommand::NodeStore { nodes, runs } => {
             let req = make_req!("denmark", "raw", runs);
             let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
-            dispatch::run_elivagar_command(&req, &cmd, None)
+            dispatch::run_elivagar_command(&req, &cmd)
         }
         RunCommand::Planetiler { dataset, variant, runs } => {
             let req = make_req!(&dataset, &variant, runs);
             let cmd = elivagar::commands::ElivagarCommand::Planetiler;
-            dispatch::run_elivagar_command(&req, &cmd, None)
+            dispatch::run_elivagar_command(&req, &cmd)
         }
         RunCommand::Tilemaker { dataset, variant, runs } => {
             let req = make_req!(&dataset, &variant, runs);
             let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
-            dispatch::run_elivagar_command(&req, &cmd, None)
+            dispatch::run_elivagar_command(&req, &cmd)
         }
 
         // ----- nidhogg commands -----
@@ -1497,14 +1450,6 @@ fn cmd_measure(
                     };
                     nidhogg::cmd::hotpath(&hotpath_req)
                 }
-                measure::MeasureMode::Profile => {
-                    let profile_req = request::ProfileRequest {
-                        dev_config, project, project_root, build_root,
-                        dataset: &dataset, variant: "raw",
-                        features, no_mem_check,
-                    };
-                    nidhogg::cmd::profile(&profile_req, profiler_tool)
-                }
             }
         }
         RunCommand::NidIngest { dataset, variant, runs } => {
@@ -1530,14 +1475,6 @@ fn cmd_measure(
                         alloc, no_mem_check, force,
                     };
                     nidhogg::cmd::hotpath(&hotpath_req)
-                }
-                measure::MeasureMode::Profile => {
-                    let profile_req = request::ProfileRequest {
-                        dev_config, project, project_root, build_root,
-                        dataset: &dataset, variant: &variant,
-                        features, no_mem_check,
-                    };
-                    nidhogg::cmd::profile(&profile_req, profiler_tool)
                 }
             }
         }
@@ -1565,14 +1502,6 @@ fn cmd_measure(
                     };
                     nidhogg::cmd::hotpath(&hotpath_req)
                 }
-                measure::MeasureMode::Profile => {
-                    let profile_req = request::ProfileRequest {
-                        dev_config, project, project_root, build_root,
-                        dataset: &dataset, variant: "raw",
-                        features, no_mem_check,
-                    };
-                    nidhogg::cmd::profile(&profile_req, profiler_tool)
-                }
             }
         }
 
@@ -1591,11 +1520,6 @@ fn cmd_measure(
                 measure::MeasureMode::WallClock => {
                     Err(DevError::Config(
                         "sluggrs-hotpath only supports --hotpath or --alloc modes".into(),
-                    ))
-                }
-                measure::MeasureMode::Profile => {
-                    Err(DevError::Config(
-                        "sluggrs-hotpath does not support --profile mode (use --hotpath or --alloc)".into(),
                     ))
                 }
             }
@@ -1620,11 +1544,6 @@ fn cmd_measure(
                 measure::MeasureMode::WallClock => {
                     Err(DevError::Config(
                         "generic-hotpath only supports --hotpath or --alloc modes".into(),
-                    ))
-                }
-                measure::MeasureMode::Profile => {
-                    Err(DevError::Config(
-                        "generic-hotpath does not support --profile mode (use --hotpath or --alloc)".into(),
                     ))
                 }
             }

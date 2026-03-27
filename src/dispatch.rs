@@ -2,7 +2,7 @@
 //!
 //! This module replaces the scattered `cmd_bench` / `cmd_hotpath` / `cmd_profile`
 //! dispatch for pbfhogg and elivagar with a single entry point per project that
-//! handles all measurement modes (wall-clock, hotpath, alloc, profile).
+//! handles all measurement modes (wall-clock, hotpath, alloc).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -57,7 +57,6 @@ pub fn run_pbfhogg_command_with_params(
     match req.mode {
         MeasureMode::WallClock => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
         MeasureMode::Hotpath | MeasureMode::Alloc => run_pbfhogg_hotpath(req, command, osc_seq, extra_params),
-        MeasureMode::Profile => run_pbfhogg_profile(req, command, osc_seq, extra_params),
     }
 }
 
@@ -214,128 +213,6 @@ fn run_pbfhogg_hotpath(
     Ok(())
 }
 
-/// Profile mode: two-pass (timing then alloc).
-fn run_pbfhogg_profile(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    extra_params: &HashMap<String, String>,
-) -> Result<(), DevError> {
-    if !command.supports_hotpath() {
-        return Err(DevError::Config(format!(
-            "command '{}' does not support profiling",
-            command.id(),
-        )));
-    }
-
-    let hctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        &format!("profile {}", command.id()),
-        false,
-    )?;
-
-    let (_, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &hctx.paths, req.project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
-
-    let effective_root = req.build_root.unwrap_or(req.project_root);
-
-    output::hotpath_msg(&format!("=== {} profile ===", command.id()));
-
-    // --- TIMING PASS ---
-    output::hotpath_msg("=== TIMING PASS ===");
-
-    let mut timing_features: Vec<&str> = vec!["hotpath"];
-    timing_features.extend(req.features.iter().map(String::as_str));
-    let timing_binary = build::cargo_build(
-        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &timing_features),
-        effective_root,
-    )?;
-
-    run_single_hotpath_pass(
-        req, command, osc_seq, &timing_binary, &hctx.harness, &hctx.paths, false, extra_params,
-    )?;
-
-    // --- ALLOCATION PASS ---
-    output::hotpath_msg("=== ALLOCATION PASS ===");
-    output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
-
-    let mut alloc_features: Vec<&str> = vec!["hotpath-alloc"];
-    alloc_features.extend(req.features.iter().map(String::as_str));
-    let alloc_binary = build::cargo_build(
-        &build::BuildConfig::release_with_features(Some("pbfhogg-cli"), &alloc_features),
-        effective_root,
-    )?;
-
-    run_single_hotpath_pass(
-        req, command, osc_seq, &alloc_binary, &hctx.harness, &hctx.paths, true, extra_params,
-    )?;
-
-    output::hotpath_msg(&format!("=== {} profile COMPLETE ===", command.id()));
-
-    Ok(())
-}
-
-/// Run one pass of hotpath (used by profile's two-pass mode).
-fn run_single_hotpath_pass(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    binary: &Path,
-    harness: &BenchHarness,
-    paths: &config::ResolvedPaths,
-    alloc: bool,
-    extra_params: &HashMap<String, String>,
-) -> Result<(), DevError> {
-    let mut cmd_ctx = build_pbfhogg_context(req, command, osc_seq, binary, paths)?;
-    cmd_ctx.params.extend(extra_params.iter().map(|(k, v)| (k.clone(), v.clone())));
-    let hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
-    let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
-
-    let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("{}{variant_suffix}", command.id());
-    let basename = cmd_ctx.pbf_basename();
-    let (_, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, paths, req.project_root)?;
-
-    let config = BenchConfig {
-        command: "hotpath".into(),
-        variant: Some(variant),
-        input_file: Some(basename),
-        input_mb: Some(file_mb),
-        cargo_features: None,
-        cargo_profile: "release".into(),
-        runs: 1, // Single run per test for profiling.
-        cli_args: Some(harness::format_cli_args(
-            &binary.display().to_string(),
-            &subprocess_args,
-        )),
-        metadata: vec![
-            KvPair::text("meta.alloc", alloc.to_string()),
-            KvPair::text("meta.test", command.id()),
-        ],
-    };
-
-    let binary_str = binary.display().to_string();
-    let scratch_dir = paths.scratch_dir.clone();
-    let project_root = req.project_root.to_path_buf();
-
-    harness.run_internal(&config, |_i| {
-        output::hotpath_msg(command.id());
-        let (result, _stderr) = harness::run_hotpath_capture(
-            &binary_str,
-            &subprocess_args,
-            &scratch_dir,
-            &project_root,
-            &[],
-        )?;
-        Ok(result)
-    })?;
-
-    Ok(())
-}
-
 /// Build the `CommandContext` for a pbfhogg command, resolving all input paths.
 fn build_pbfhogg_context(
     req: &MeasureRequest,
@@ -465,14 +342,12 @@ fn ensure_merged_pbf(
 pub fn run_elivagar_command(
     req: &MeasureRequest,
     command: &ElivagarCommand,
-    profiler_tool: Option<&str>,
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Elivagar, &format!("run {}", command.id()))?;
 
     match req.mode {
         MeasureMode::WallClock => run_elivagar_wallclock(req, command),
         MeasureMode::Hotpath | MeasureMode::Alloc => run_elivagar_hotpath(req, command),
-        MeasureMode::Profile => run_elivagar_profile(req, command, profiler_tool),
     }
 }
 
@@ -577,41 +452,6 @@ fn run_elivagar_hotpath(
                 command.id(),
             )))
         }
-    }
-}
-
-/// Elivagar profile: sampling profiler (perf/samply).
-fn run_elivagar_profile(
-    req: &MeasureRequest,
-    command: &ElivagarCommand,
-    profiler_tool: Option<&str>,
-) -> Result<(), DevError> {
-    if !command.supports_profile() {
-        return Err(DevError::Config(format!(
-            "command '{}' does not support profiling",
-            command.id(),
-        )));
-    }
-
-    let profile_req = crate::request::ProfileRequest {
-        dev_config: req.dev_config,
-        project: req.project,
-        project_root: req.project_root,
-        build_root: req.build_root,
-        dataset: req.dataset,
-        variant: req.variant,
-        features: req.features,
-        no_mem_check: req.no_mem_check,
-    };
-
-    match command {
-        ElivagarCommand::Tilegen { opts, .. } => {
-            elivagar::cmd::profile(&profile_req, profiler_tool, opts)
-        }
-        _ => Err(DevError::Config(format!(
-            "command '{}' does not support profiling",
-            command.id(),
-        ))),
     }
 }
 
