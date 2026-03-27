@@ -6,7 +6,6 @@ pub mod client;
 pub mod geocode;
 pub mod hotpath;
 pub mod ingest;
-pub mod profile;
 pub mod query;
 pub mod server;
 pub mod update;

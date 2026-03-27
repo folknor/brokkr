@@ -12,7 +12,6 @@ pub mod compare_tiles;
 pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod hotpath;
-pub mod profile;
 pub mod verify;
 
 /// Elivagar-specific pipeline options shared across bench, hotpath, and profile.

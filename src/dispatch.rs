@@ -7,14 +7,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::build;
 use crate::config;
-use crate::context::{BenchContext, HarnessContext};
+use crate::context::BenchContext;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::elivagar;
 use crate::elivagar::commands::ElivagarCommand;
-use crate::harness::{self, BenchConfig, BenchHarness};
+use crate::harness::{self, BenchConfig};
 use crate::measure::{CommandContext, MeasureMode, MeasureRequest};
 use crate::oom;
 use crate::output;

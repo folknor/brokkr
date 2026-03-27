@@ -21,7 +21,6 @@ mod pmtiles;
 mod elivagar;
 mod nidhogg;
 mod preflight;
-mod profiler;
 mod project;
 mod request;
 mod resolve;
@@ -38,7 +37,7 @@ use cli::{Cli, Command, LitehtmlCommand, SluggrsCommand, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
-use request::{BenchRequest, HotpathRequest, ResultsQuery};
+use request::{HotpathRequest, ResultsQuery};
 use resolve::results_db_path;
 
 macro_rules! pbfhogg_cmd {

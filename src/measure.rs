@@ -31,25 +31,6 @@ pub enum MeasureMode {
 }
 
 impl MeasureMode {
-    /// The cargo feature name required for this mode, if any.
-    pub fn cargo_feature(self) -> Option<&'static str> {
-        match self {
-            Self::Run | Self::Bench { .. } => None,
-            Self::Hotpath { .. } => Some("hotpath"),
-            Self::Alloc { .. } => Some("hotpath-alloc"),
-        }
-    }
-
-    /// Whether this mode uses hotpath-style capture (JSON report file).
-    pub fn is_hotpath_capture(self) -> bool {
-        matches!(self, Self::Hotpath { .. } | Self::Alloc { .. })
-    }
-
-    /// Whether this mode tracks allocations (affects OOM risk assessment).
-    pub fn is_alloc(self) -> bool {
-        matches!(self, Self::Alloc { .. })
-    }
-
     /// Number of runs for this mode.
     pub fn runs(self) -> usize {
         match self {
@@ -58,13 +39,6 @@ impl MeasureMode {
         }
     }
 
-    /// The variant suffix appended to result variant names.
-    pub fn variant_suffix(self) -> &'static str {
-        match self {
-            Self::Alloc { .. } => "/alloc",
-            _ => "",
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,18 +73,6 @@ pub struct MeasureRequest<'a> {
     pub mode: MeasureMode,
     /// Skip the OOM memory check.
     pub no_mem_check: bool,
-}
-
-impl<'a> MeasureRequest<'a> {
-    /// Whether allocation tracking is active (derived from mode).
-    pub fn is_alloc(&self) -> bool {
-        self.mode.is_alloc()
-    }
-
-    /// The effective build root: worktree path if set, otherwise project root.
-    pub fn effective_build_root(&self) -> &'a Path {
-        self.build_root.unwrap_or(self.project_root)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -165,13 +127,6 @@ impl CommandContext {
             .ok_or_else(|| DevError::Config("merged PBF path is required but not set".into()))?
             .to_str()
             .ok_or_else(|| DevError::Config("merged PBF path is not valid UTF-8".into()))
-    }
-
-    /// Get the scratch directory as a UTF-8 string, or error.
-    pub fn scratch_str(&self) -> Result<&str, DevError> {
-        self.scratch_dir
-            .to_str()
-            .ok_or_else(|| DevError::Config("scratch dir path is not valid UTF-8".into()))
     }
 
     /// Get the binary path as a UTF-8 string, or error.

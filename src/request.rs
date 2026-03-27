@@ -31,18 +31,6 @@ pub(crate) struct HotpathRequest<'a> {
     pub(crate) force: bool,
 }
 
-/// Common parameters for profile command handlers.
-pub(crate) struct ProfileRequest<'a> {
-    pub(crate) dev_config: &'a config::DevConfig,
-    pub(crate) project: Project,
-    pub(crate) project_root: &'a Path,
-    pub(crate) build_root: Option<&'a Path>,
-    pub(crate) dataset: &'a str,
-    pub(crate) variant: &'a str,
-    pub(crate) features: &'a [String],
-    pub(crate) no_mem_check: bool,
-}
-
 /// Query parameters for the results command.
 pub(crate) struct ResultsQuery {
     pub(crate) query: Option<String>,

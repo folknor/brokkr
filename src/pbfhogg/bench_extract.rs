@@ -9,19 +9,6 @@ use crate::output;
 
 pub const ALL_STRATEGIES: &[&str] = &["simple", "complete", "smart"];
 
-pub fn parse_strategies(input: &str) -> Result<Vec<&'static str>, DevError> {
-    let mut out = Vec::new();
-    for part in input.split(',') {
-        let part = part.trim();
-        let found = ALL_STRATEGIES.iter().find(|&&s| s == part);
-        match found {
-            Some(&s) => out.push(s),
-            None => return Err(DevError::Config(format!("unknown strategy: {part}"))),
-        }
-    }
-    Ok(out)
-}
-
 fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Vec<String> {
     match name {
         "simple" => vec!["extract".into(), pbf.into(), "--simple".into(), "-b".into(), bbox.into(), "-o".into(), output.into()],

@@ -4,9 +4,8 @@ use crate::config;
 use crate::context::{bootstrap, bootstrap_config, BenchContext, HarnessContext};
 use crate::error::DevError;
 use crate::oom;
-use crate::preflight;
 use crate::project::{self, Project};
-use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
+use crate::request::{BenchRequest, HotpathRequest};
 use crate::resolve::{resolve_pbf_with_size, resolve_default_pmtiles_path, resolve_pmtiles_path};
 
 pub(crate) fn bench_node_store(
@@ -189,19 +188,3 @@ pub(crate) fn hotpath(
     )
 }
 
-pub(crate) fn profile(
-    req: &ProfileRequest,
-    tool: Option<&str>,
-    opts: &super::PipelineOpts,
-) -> Result<(), DevError> {
-    let tool_name = tool.unwrap_or("perf");
-    preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile", false)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
-    let effective = req.build_root.unwrap_or(req.project_root);
-    super::profile::run(
-        &ctx.harness, &pbf_path, file_mb, &ctx.paths.data_dir, &ctx.paths.scratch_dir,
-        tool_name, opts, req.features, effective,
-    )
-}

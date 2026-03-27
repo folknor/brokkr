@@ -197,30 +197,6 @@ fn check_rlimit(resource: libc::__rlimit_resource_t, min_bytes: u64, description
 // Convenience check sets
 // ---------------------------------------------------------------------------
 
-/// Preflight checks for sampling profilers (perf, samply).
-///
-/// Checks that `perf_event_paranoid` is permissive enough and that the tool
-/// binary is installed.
-pub fn profile_checks(tool: &str) -> Vec<Check> {
-    let help = match tool {
-        "perf" => "sudo apt install linux-tools-common linux-tools-$(uname -r)",
-        "samply" => "cargo install samply",
-        _ => "",
-    };
-    vec![
-        Check::KernelParamAtMost {
-            path: "/proc/sys/kernel/perf_event_paranoid",
-            max_value: 1,
-            description: "perf_event_paranoid must be <= 1 for profiling\n\
-                          Fix: sudo sysctl -w kernel.perf_event_paranoid=1",
-        },
-        Check::Binary {
-            name: tool.into(),
-            help: help.into(),
-        },
-    ]
-}
-
 /// Preflight checks for io_uring.
 ///
 /// Four tunables can block io_uring:

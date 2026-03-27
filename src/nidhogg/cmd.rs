@@ -8,7 +8,7 @@ use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::request::{BenchRequest, HotpathRequest, ProfileRequest};
+use crate::request::{BenchRequest, HotpathRequest};
 use crate::resolve::{self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path, resolve_pbf_with_size};
 
 fn resolve_port(dev_config: &config::DevConfig) -> u16 {
@@ -249,31 +249,3 @@ pub(crate) fn hotpath(
     )
 }
 
-pub(crate) fn profile(
-    req: &ProfileRequest,
-    tool: Option<&str>,
-) -> Result<(), DevError> {
-    let tool_name = tool.unwrap_or("perf");
-    preflight::run_preflight(&preflight::profile_checks(tool_name))?;
-    let ctx = HarnessContext::new(req.dev_config, req.project, req.project_root, req.build_root, "profile", false)?;
-    let (pbf_path, file_mb) = resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    oom::check_memory(file_mb, &oom::MemoryRisk::AllocTracking, req.no_mem_check)?;
-
-    let data_dir = ctx.paths
-        .datasets
-        .get(req.dataset)
-        .and_then(|ds| ds.data_dir.as_ref())
-        .map(|d| ctx.paths.data_dir.join(d))
-        .unwrap_or_else(|| ctx.paths.data_dir.clone());
-
-    super::profile::run(
-        &ctx.harness,
-        &pbf_path,
-        file_mb,
-        &data_dir,
-        &ctx.paths.scratch_dir,
-        tool_name,
-        req.features,
-        req.build_root.unwrap_or(req.project_root),
-    )
-}
