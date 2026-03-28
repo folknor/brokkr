@@ -82,8 +82,8 @@ Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`
 | `tilegen` | Full tile generation pipeline (with all pipeline flags) |
 | `pmtiles-writer` | PMTiles writer micro-benchmark (`--tiles N`) |
 | `node-store` | SortedNodeStore micro-benchmark (`--nodes N`) |
-| `eliv-planetiler` | Planetiler comparison |
-| `eliv-tilemaker` | Tilemaker comparison |
+| `planetiler` | Planetiler comparison |
+| `tilemaker` | Tilemaker comparison |
 
 `suite elivagar` runs the full benchmark suite.
 
