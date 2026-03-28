@@ -28,13 +28,19 @@ use crate::resolve::{
 // pbfhogg dispatch
 // ---------------------------------------------------------------------------
 
-/// Extract I/O mode flags from extra_params and return:
+/// Extract I/O mode flags from extra_params, run preflight checks, and return:
 /// - extra cargo features to add to the build
 /// - extra CLI args to append to the binary invocation
 /// - variant suffix for the result DB
-fn resolve_io_flags(extra_params: &HashMap<String, String>) -> (Vec<&'static str>, Vec<&'static str>, String) {
+fn resolve_io_flags(
+    extra_params: &HashMap<String, String>,
+) -> Result<(Vec<&'static str>, Vec<&'static str>, String), DevError> {
     let direct_io = extra_params.get("direct_io").is_some();
     let io_uring = extra_params.get("io_uring").is_some();
+
+    if io_uring {
+        crate::preflight::run_preflight(&crate::preflight::uring_checks())?;
+    }
 
     let mut features = Vec::new();
     let mut args = Vec::new();
@@ -57,7 +63,7 @@ fn resolve_io_flags(extra_params: &HashMap<String, String>) -> (Vec<&'static str
         format!("+{}", suffix_parts.join("+"))
     };
 
-    (features, args, suffix)
+    Ok((features, args, suffix))
 }
 
 /// Run a single pbfhogg command with the specified measurement mode.
@@ -89,7 +95,7 @@ fn run_pbfhogg_run(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    let (io_features, io_args, _) = resolve_io_flags(extra_params);
+    let (io_features, io_args, _) = resolve_io_flags(extra_params)?;
 
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
@@ -140,7 +146,7 @@ fn run_pbfhogg_wallclock(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    let (io_features, io_args, io_suffix) = resolve_io_flags(extra_params);
+    let (io_features, io_args, io_suffix) = resolve_io_flags(extra_params)?;
 
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
@@ -222,7 +228,7 @@ fn run_pbfhogg_hotpath(
 
     let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
     let feature = harness::hotpath_feature(alloc);
-    let (io_features, io_args, io_suffix) = resolve_io_flags(extra_params);
+    let (io_features, io_args, io_suffix) = resolve_io_flags(extra_params)?;
 
     // Build features: hotpath + user features + I/O features.
     let mut all_features: Vec<&str> = vec![feature];
