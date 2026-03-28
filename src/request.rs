@@ -23,4 +23,5 @@ pub(crate) struct ResultsQuery {
     pub(crate) run: Option<String>,
     pub(crate) compare_timeline: Option<Vec<String>>,
     pub(crate) phases: bool,
+    pub(crate) counters: bool,
 }

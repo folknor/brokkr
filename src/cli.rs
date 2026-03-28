@@ -600,6 +600,10 @@ Examples:
         #[arg(long, requires = "markers")]
         phases: bool,
 
+        /// Show application-level counters (use with --markers)
+        #[arg(long, requires = "markers")]
+        counters: bool,
+
         /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt")
         #[arg(long, requires = "timeline", value_delimiter = ',')]
         fields: Vec<String>,

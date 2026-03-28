@@ -530,6 +530,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             range,
             compare_timeline,
             phases,
+            counters,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -555,6 +556,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 range,
                 compare_timeline,
                 phases,
+                counters,
             };
             cmd_results(&project_root, &rq)
         }
@@ -1231,11 +1233,21 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 output::sidecar_msg(&format!("showing {showing} (use --run to override)"));
             }
             let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+            if q.counters {
+                let counters = sdb.query_counters(uuid_prefix, run_filter)?;
+                if counters.is_empty() {
+                    output::result_msg("no counters for this result");
+                } else {
+                    print_counters(&counters);
+                }
+                return Ok(());
+            }
             if markers.is_empty() {
                 output::result_msg("no sidecar markers for this result");
             } else if q.phases {
                 let samples = sdb.query_samples(uuid_prefix, run_filter)?;
-                print_marker_phases(&markers, &samples);
+                let counters = sdb.query_counters(uuid_prefix, run_filter)?;
+                print_marker_phases_with_counters(&markers, &samples, &counters);
             } else if q.durations {
                 print_marker_durations(&markers);
             } else {
@@ -1996,6 +2008,109 @@ fn print_marker_phases(markers: &[sidecar::Marker], samples: &[sidecar::Sample])
             format!("{name}{end_marker}"),
             dur_ms,
             peak_rss,
+            peak_anon,
+            peak_majflt,
+        );
+    }
+}
+
+/// Print counters as a simple list.
+fn print_counters(counters: &[sidecar::Counter]) {
+    for c in counters {
+        #[allow(clippy::cast_precision_loss)]
+        let t_sec = c.timestamp_us as f64 / 1_000_000.0;
+        println!("t={t_sec:<10.3} {}={}", c.name, c.value);
+    }
+}
+
+/// Print START/END marker pairs with duration, peak RSS/majflt, and counters.
+fn print_marker_phases_with_counters(
+    markers: &[sidecar::Marker],
+    samples: &[sidecar::Sample],
+    counters: &[sidecar::Counter],
+) {
+    // Pair START/END markers.
+    let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
+    let mut consumed = vec![false; markers.len()];
+
+    for (i, m) in markers.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        if let Some(base) = m.name.strip_suffix("_START") {
+            consumed[i] = true;
+            let end_name = format!("{base}_END");
+            let end_us = markers[i + 1..]
+                .iter()
+                .enumerate()
+                .find(|(_, m2)| m2.name == end_name)
+                .map(|(j, m2)| {
+                    consumed[i + 1 + j] = true;
+                    m2.timestamp_us
+                });
+            pairs.push((base.to_owned(), m.timestamp_us, end_us));
+        }
+    }
+
+    if pairs.is_empty() {
+        output::result_msg("no _START/_END marker pairs found");
+        return;
+    }
+
+    println!(
+        "{:<24} {:>10} {:>10} {:>10}  {}",
+        "Phase", "Duration", "Peak Anon", "Peak Mflt", "Counters",
+    );
+    println!("{}", "-".repeat(80));
+
+    for (name, start_us, end_us) in &pairs {
+        let end = end_us.unwrap_or_else(|| {
+            samples.last().map_or(*start_us, |s| s.timestamp_us + 1)
+        });
+        let dur_ms = (end - start_us) / 1_000;
+
+        let mut peak_anon: i64 = 0;
+        let mut peak_majflt: i64 = 0;
+        let mut prev_majflt: Option<i64> = None;
+
+        for s in samples
+            .iter()
+            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < end)
+        {
+            if s.anon_kb > peak_anon {
+                peak_anon = s.anon_kb;
+            }
+            if let Some(prev) = prev_majflt {
+                let delta = s.majflt - prev;
+                if delta > peak_majflt {
+                    peak_majflt = delta;
+                }
+            }
+            prev_majflt = Some(s.majflt);
+        }
+
+        // Counters emitted within this phase (between start and end).
+        let phase_counters: Vec<&sidecar::Counter> = counters
+            .iter()
+            .filter(|c| c.timestamp_us >= *start_us && c.timestamp_us <= end)
+            .collect();
+
+        let counter_str = if phase_counters.is_empty() {
+            String::new()
+        } else {
+            phase_counters
+                .iter()
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let end_marker = if end_us.is_some() { "" } else { " (no end)" };
+
+        println!(
+            "{:<24} {:>7}ms {:>7}kB {:>10}  {counter_str}",
+            format!("{name}{end_marker}"),
+            dur_ms,
             peak_anon,
             peak_majflt,
         );

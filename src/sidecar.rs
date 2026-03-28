@@ -88,6 +88,14 @@ pub struct Marker {
     pub name: String,
 }
 
+/// An application-level counter emitted by the target process.
+#[derive(Debug, Clone)]
+pub struct Counter {
+    pub timestamp_us: i64,
+    pub name: String,
+    pub value: i64,
+}
+
 /// Summary of a sidecar run.
 #[derive(Debug, Clone)]
 pub struct SidecarSummary {
@@ -101,6 +109,7 @@ pub struct SidecarSummary {
 pub struct SidecarData {
     pub samples: Vec<Sample>,
     pub markers: Vec<Marker>,
+    pub counters: Vec<Counter>,
     pub summary: SidecarSummary,
 }
 
@@ -413,11 +422,19 @@ impl SidecarFifo {
         let _ = fs::remove_file(self.status_path());
     }
 
-    /// Drain all pending marker lines from the FIFO.
+    /// Drain all pending lines from the FIFO, parsing markers and counters.
     ///
     /// Non-blocking: returns immediately if no data is available.
-    /// Each line is expected to be: `<timestamp_us> <marker_name>\n`
-    fn drain_markers(&mut self, markers: &mut Vec<Marker>, next_idx: &mut i32) {
+    ///
+    /// Protocol:
+    /// - `<timestamp_us> <name>\n` — phase marker
+    /// - `<timestamp_us> @<name>=<value>\n` — counter
+    fn drain(
+        &mut self,
+        markers: &mut Vec<Marker>,
+        next_marker_idx: &mut i32,
+        counters: &mut Vec<Counter>,
+    ) {
         let mut last_name: Option<String> = None;
         let mut line = String::new();
         loop {
@@ -426,15 +443,30 @@ impl SidecarFifo {
                 Ok(0) => break, // EOF
                 Ok(_) => {
                     let trimmed = line.trim();
-                    if let Some((ts_str, name)) = trimmed.split_once(' ') {
-                        if let Ok(ts) = ts_str.parse::<i64>() {
-                            last_name = Some(name.to_owned());
+                    if let Some((ts_str, payload)) = trimmed.split_once(' ') {
+                        let Ok(ts) = ts_str.parse::<i64>() else {
+                            continue;
+                        };
+                        if let Some(counter_body) = payload.strip_prefix('@') {
+                            // Counter: @name=value
+                            if let Some((name, val_str)) = counter_body.split_once('=') {
+                                if let Ok(val) = val_str.parse::<i64>() {
+                                    counters.push(Counter {
+                                        timestamp_us: ts,
+                                        name: name.to_owned(),
+                                        value: val,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Phase marker
+                            last_name = Some(payload.to_owned());
                             markers.push(Marker {
-                                marker_idx: *next_idx,
+                                marker_idx: *next_marker_idx,
                                 timestamp_us: ts,
-                                name: name.to_owned(),
+                                name: payload.to_owned(),
                             });
-                            *next_idx += 1;
+                            *next_marker_idx += 1;
                         }
                     }
                 }
@@ -542,6 +574,7 @@ pub(crate) fn run_sidecar(
     let start_ns = monotonic_ns();
     let mut samples: Vec<Sample> = Vec::new();
     let mut markers: Vec<Marker> = Vec::new();
+    let mut counters: Vec<Counter> = Vec::new();
     let mut last_hwm: i64 = 0;
     let mut sample_idx: i32 = 0;
     let mut marker_idx: i32 = 0;
@@ -573,7 +606,7 @@ pub(crate) fn run_sidecar(
         }
 
         // Drain any pending markers from FIFO.
-        fifo.drain_markers(&mut markers, &mut marker_idx);
+        fifo.drain(&mut markers, &mut marker_idx, &mut counters);
 
         // Check child exit via handle (not bare PID — PIDs can be reused).
         match child.try_wait() {
@@ -594,8 +627,8 @@ pub(crate) fn run_sidecar(
         next_tick_ns += interval_ns;
     }
 
-    // Final drain — markers may have arrived between last sample and exit.
-    fifo.drain_markers(&mut markers, &mut marker_idx);
+    // Final drain — markers/counters may have arrived between last sample and exit.
+    fifo.drain(&mut markers, &mut marker_idx, &mut counters);
 
     // Join pipe drain threads. These complete quickly once the child exits
     // since the pipe write ends are closed.
@@ -622,9 +655,10 @@ pub(crate) fn run_sidecar(
     let wall_time_ms = child_elapsed.as_millis() as i64;
 
     output::sidecar_msg(&format!(
-        "{} samples, {} markers, {wall_time_ms}ms",
+        "{} samples, {} markers, {} counters, {wall_time_ms}ms",
         samples.len(),
         markers.len(),
+        counters.len(),
     ));
 
     SidecarRunResult {
@@ -635,6 +669,7 @@ pub(crate) fn run_sidecar(
         data: SidecarData {
             samples,
             markers,
+            counters,
             summary: SidecarSummary {
                 vm_hwm_kb: last_hwm,
                 sample_count: sample_idx,

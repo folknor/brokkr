@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS sidecar_summary (
     PRIMARY KEY (result_uuid, run_idx)
 );
 
+CREATE TABLE IF NOT EXISTS sidecar_counters (
+    result_uuid  TEXT NOT NULL,
+    run_idx      INTEGER NOT NULL DEFAULT 0,
+    timestamp_us INTEGER NOT NULL,
+    name         TEXT NOT NULL,
+    value        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_counters_uuid ON sidecar_counters(result_uuid, run_idx);
+
 CREATE TABLE IF NOT EXISTS sidecar_meta (
     result_uuid   TEXT NOT NULL PRIMARY KEY,
     best_run_idx  INTEGER NOT NULL DEFAULT 0,
@@ -78,7 +87,7 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 2;
+const SIDECAR_VERSION: i64 = 3;
 
 /// Run pending migrations based on `PRAGMA user_version`.
 fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -89,6 +98,7 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
     // v0 -> v1: initial schema (handled by CREATE TABLE IF NOT EXISTS in DDL).
     // v1 -> v2: add sidecar_meta table (handled by CREATE TABLE IF NOT EXISTS in DDL).
+    // v2 -> v3: add sidecar_counters table (handled by CREATE TABLE IF NOT EXISTS in DDL).
     //           Existing UUIDs without meta rows get defaults on query (best_run_idx=0).
 
     conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
@@ -192,6 +202,25 @@ impl SidecarDb {
                     m.marker_idx,
                     m.timestamp_us,
                     m.name,
+                ])?;
+            }
+        }
+
+        // Insert counters.
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO sidecar_counters (
+                    result_uuid, run_idx, timestamp_us, name, value
+                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+
+            for c in &data.counters {
+                stmt.execute(rusqlite::params![
+                    result_uuid,
+                    run_idx as i64,
+                    c.timestamp_us,
+                    c.name,
+                    c.value,
                 ])?;
             }
         }
@@ -379,6 +408,47 @@ impl SidecarDb {
                 marker_idx: row.get(0)?,
                 timestamp_us: row.get(1)?,
                 name: row.get(2)?,
+            })
+        };
+        let rows = match run_filter {
+            Some(idx) => stmt.query_map(rusqlite::params![uuid_prefix, idx], map_row)?,
+            None => stmt.query_map(rusqlite::params![uuid_prefix], map_row)?,
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// Query sidecar counters for a result UUID prefix.
+    ///
+    /// If `run_idx` is `Some`, filters to that run only.
+    /// Resolves latest-keys (e.g. "dirty") before querying.
+    pub fn query_counters(
+        &self,
+        uuid_prefix: &str,
+        run_idx: Option<usize>,
+    ) -> Result<Vec<crate::sidecar::Counter>, DevError> {
+        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        let (sql, run_filter) = match run_idx {
+            Some(idx) => (
+                "SELECT timestamp_us, name, value
+                 FROM sidecar_counters
+                 WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
+                 ORDER BY timestamp_us, name",
+                Some(idx as i64),
+            ),
+            None => (
+                "SELECT timestamp_us, name, value
+                 FROM sidecar_counters
+                 WHERE result_uuid LIKE ?1||'%'
+                 ORDER BY run_idx, timestamp_us, name",
+                None,
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(crate::sidecar::Counter {
+                timestamp_us: row.get(0)?,
+                name: row.get(1)?,
+                value: row.get(2)?,
             })
         };
         let rows = match run_filter {
