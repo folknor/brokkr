@@ -708,27 +708,34 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Sluggrs {
             sluggrs: sluggrs_cmd,
         } => {
-            // Hotpath doesn't need sluggrs config — handle it first.
-            if let SluggrsCommand::Hotpath { mode } = &sluggrs_cmd {
-                return run_measured(
-                    mode,
-                    &dev_config,
+            if let SluggrsCommand::Hotpath {
+                alloc,
+                runs,
+                verbose,
+            } = &sluggrs_cmd
+            {
+                project::require(project, Project::Sluggrs, "sluggrs hotpath")?;
+                let mm = if *alloc {
+                    measure::MeasureMode::Alloc { runs: *runs }
+                } else {
+                    measure::MeasureMode::Hotpath { runs: *runs }
+                };
+                let features = resolve_features(&dev_config, &[]);
+                output::set_quiet(!verbose);
+                let req = measure::MeasureRequest {
+                    dev_config: &dev_config,
                     project,
-                    &project_root,
-                    "n/a",
-                    "n/a",
-                    |req| {
-                        project::require(project, Project::Sluggrs, "sluggrs hotpath")?;
-                        if !req.is_alloc()
-                            && !matches!(req.mode, measure::MeasureMode::Hotpath { .. })
-                        {
-                            return Err(DevError::Config(
-                                "sluggrs hotpath only supports --hotpath or --alloc modes".into(),
-                            ));
-                        }
-                        sluggrs::hotpath::cmd(req)
-                    },
-                );
+                    project_root: &project_root,
+                    build_root: None,
+                    dataset: "n/a",
+                    variant: "n/a",
+                    runs: mm.runs(),
+                    features: &features,
+                    force: false,
+                    mode: mm,
+                    no_mem_check: false,
+                };
+                return sluggrs::hotpath::cmd(&req);
             }
 
             let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {

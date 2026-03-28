@@ -1110,11 +1110,20 @@ pub(crate) enum LitehtmlCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum SluggrsCommand {
-    /// Rendering hotpath (hotpath/alloc mode only)
+    /// Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
     #[command(display_order = 0)]
     Hotpath {
-        #[command(flatten)]
-        mode: ModeArgs,
+        /// Per-function allocation tracking instead of timing
+        #[arg(long)]
+        alloc: bool,
+
+        /// Number of runs
+        #[arg(long, short = 'n', default_value = "1")]
+        runs: usize,
+
+        /// Print full output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Render snapshots and diff against approved baselines
     #[command(display_order = 1)]
