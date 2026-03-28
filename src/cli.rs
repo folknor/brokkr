@@ -1084,7 +1084,7 @@ pub(crate) enum VerifyCommand {
     },
 
     /// [elivagar] Verify PMTiles output integrity
-    #[command(display_order = 15)]
+    #[command(name = "pmtiles", display_order = 15)]
     ElivVerify {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
