@@ -161,6 +161,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::TagsFilterTwopass { .. }
         | Command::TagsFilterOsc { .. }
         | Command::Getid { .. }
+        | Command::GetidRefs { .. }
         | Command::Getparents { .. }
         | Command::GetidInvert { .. }
         | Command::Renumber { .. }

@@ -103,6 +103,8 @@ pub enum PbfhoggCommand {
     TagsFilterTwopass,
     TagsFilterOsc,
     Getid,
+    /// Like Getid but with `--add-referenced` (two-pass with ref collection).
+    GetidRefs,
     Getparents,
     GetidInvert,
     Renumber,
@@ -142,6 +144,7 @@ impl PbfhoggCommand {
             Self::TagsFilterTwopass => "tags-filter-twopass",
             Self::TagsFilterOsc => "tags-filter-osc",
             Self::Getid => "getid",
+            Self::GetidRefs => "getid-refs",
             Self::Getparents => "getparents",
             Self::GetidInvert => "getid-invert",
             Self::Renumber => "renumber",
@@ -235,6 +238,7 @@ impl PbfhoggCommand {
             | Self::TagsFilterTwopass
             | Self::TagsFilterOsc
             | Self::Getid
+            | Self::GetidRefs
             | Self::Getparents
             | Self::GetidInvert
             | Self::Renumber
@@ -271,6 +275,7 @@ impl PbfhoggCommand {
             | Self::TagsFilterTwopass
             | Self::TagsFilterOsc
             | Self::Getid
+            | Self::GetidRefs
             | Self::Getparents
             | Self::GetidInvert
             | Self::Renumber
@@ -446,6 +451,25 @@ impl PbfhoggCommand {
                 Ok(vec![
                     "getid".into(),
                     ctx.pbf_str()?.into(),
+                    "n115722".into(),
+                    "n115723".into(),
+                    "n115724".into(),
+                    "w2080".into(),
+                    "w2081".into(),
+                    "w2082".into(),
+                    "r174".into(),
+                    "r213".into(),
+                    "r339".into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
+                ])
+            }
+            Self::GetidRefs => {
+                let output = scratch_output_path(ctx, self);
+                Ok(vec![
+                    "getid".into(),
+                    ctx.pbf_str()?.into(),
+                    "--add-referenced".into(),
                     "n115722".into(),
                     "n115723".into(),
                     "n115724".into(),

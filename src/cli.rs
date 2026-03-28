@@ -169,6 +169,14 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
+    /// [pbfhogg] Get elements by ID with referenced element collection
+    #[command(name = "getid-refs", display_order = 2)]
+    GetidRefs {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
     /// [pbfhogg] Get parent elements
     #[command(name = "getparents", display_order = 2)]
     Getparents {
@@ -1208,6 +1216,9 @@ impl Command {
                 Some((mode, pbf, PbfhoggCommand::TagsFilterTwopass, None, empty))
             }
             Self::Getid { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Getid, None, empty)),
+            Self::GetidRefs { mode, pbf } => {
+                Some((mode, pbf, PbfhoggCommand::GetidRefs, None, empty))
+            }
             Self::Getparents { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::Getparents, None, empty))
             }
