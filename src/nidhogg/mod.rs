@@ -1,11 +1,9 @@
 pub mod bench_api;
-pub mod bench_ingest;
 pub mod bench_tiles;
 pub mod client;
 pub(crate) mod cmd;
 pub(crate) mod commands;
 pub mod geocode;
-pub mod hotpath;
 pub mod ingest;
 pub mod query;
 pub mod server;

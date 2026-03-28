@@ -8,6 +8,7 @@
 //! and metadata — dispatch handles execution.
 
 use crate::db::KvPair;
+use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
 // NidhoggCommand — the unified command enum
@@ -129,6 +130,33 @@ impl NidhoggCommand {
         match self {
             Self::Api { .. } => true,
             Self::Ingest | Self::Tiles { .. } => false,
+        }
+    }
+
+    /// Build the argument vector for commands that run an external binary.
+    ///
+    /// Only Ingest supports this — Api/Tiles have custom lifecycles.
+    /// `pbf_str` is the resolved PBF path, `output_dir` is the scratch
+    /// output directory for ingested data.
+    pub fn build_args(&self, pbf_str: &str, output_dir: &str) -> Result<Vec<String>, DevError> {
+        match self {
+            Self::Ingest => Ok(vec![
+                "ingest".into(),
+                pbf_str.into(),
+                output_dir.into(),
+            ]),
+            _ => Err(DevError::Config(format!(
+                "build_args not supported for nidhogg command '{}'",
+                self.id(),
+            ))),
+        }
+    }
+
+    /// Scratch output directory name for commands that produce output.
+    pub fn scratch_output_dir(&self) -> Option<&'static str> {
+        match self {
+            Self::Ingest => Some("bench-ingest-output"),
+            Self::Api { .. } | Self::Tiles { .. } => None,
         }
     }
 }

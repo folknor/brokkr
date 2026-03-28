@@ -5,13 +5,11 @@ use crate::config;
 use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
-use crate::oom;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
 use crate::resolve::{
     self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path,
-    resolve_pbf_with_size,
 };
 
 fn resolve_port(dev_config: &config::DevConfig) -> u16 {
@@ -189,31 +187,6 @@ pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(),
     )
 }
 
-pub(crate) fn bench_ingest(req: &MeasureRequest) -> Result<(), DevError> {
-    let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        Some("nidhogg"),
-        &feat_refs,
-        true,
-        "bench ingest",
-        req.force,
-    )?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    super::bench_ingest::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        file_mb,
-        req.runs,
-        &ctx.paths.scratch_dir,
-        req.project_root,
-    )
-}
 
 pub(crate) fn bench_tiles(
     req: &MeasureRequest,
@@ -332,35 +305,3 @@ pub(crate) fn verify_readonly(
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)
 }
 
-pub(crate) fn hotpath(req: &MeasureRequest) -> Result<(), DevError> {
-    let hotpath_features = req.hotpath_features();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        Some("nidhogg"),
-        &hotpath_features,
-        true,
-        "hotpath",
-        req.force,
-    )?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let risk = if req.is_alloc() {
-        oom::MemoryRisk::AllocTracking
-    } else {
-        oom::MemoryRisk::Normal
-    };
-    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
-    super::hotpath::run(
-        &ctx.harness,
-        &ctx.binary,
-        &pbf_path,
-        &ctx.paths.scratch_dir,
-        file_mb,
-        req.runs,
-        req.is_alloc(),
-        req.project_root,
-    )
-}

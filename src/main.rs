@@ -495,7 +495,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     "nidhogg" => {
                         project::require(project, Project::Nidhogg, "suite nidhogg")?;
                         nidhogg::cmd::bench_api(req, None)?;
-                        nidhogg::cmd::bench_ingest(req)
+                        dispatch::run_nidhogg_command(
+                            req,
+                            &nidhogg::commands::NidhoggCommand::Ingest,
+                        )
                     }
                     other => Err(DevError::Config(format!(
                         "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
