@@ -167,8 +167,8 @@ Makes performance triage easier without external tooling.
 
 ## CLI redesign remaining issues
 
-### ~~Elivagar/nidhogg default mode runs through full harness~~ PARTIALLY FIXED
-Elivagar run mode now has a lightweight `run_elivagar_run` path that skips DB for Tilegen (using `build_args` from `ElivagarCommand`). PmtilesWriter/NodeStore also skip DB via `run_elivagar_example_run`. Nidhogg run mode still goes through the full bench path (Run and Bench share the same dispatch). Nidhogg `NidhoggCommand` enum is in place but per-module functions still own lifecycle.
+### ~~Elivagar/nidhogg default mode runs through full harness~~ FIXED
+All three projects now have lightweight run paths that skip DB and dirty-tree checks. Elivagar uses `build_args` from `ElivagarCommand`; nidhogg Ingest has `run_nidhogg_ingest_run`. Api/Tiles still go through the bench path in run mode (no meaningful lightweight alternative — Api queries a server, Tiles manages a server lifecycle).
 
 ### Suite without --bench stores results in DB
 `brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
@@ -182,8 +182,8 @@ Elivagar run mode now has a lightweight `run_elivagar_run` path that skips DB fo
 ### ~~--bench 0 not validated early~~ FIXED
 `resolve_mode()` now rejects zero run counts upfront.
 
-### Nidhogg hotpath ignores command-specific context
-`RunApi --hotpath` ignores `--query`, `RunTiles --hotpath` ignores `--tiles`/`--uring`. Nidhogg hotpath is a single generic function. Pre-existing.
+### ~~Nidhogg hotpath ignores command-specific context~~ FIXED
+Hotpath dispatch now goes through the dispatch layer via `run_nidhogg_hotpath`, uses `command.id()` for variant naming, and `supports_hotpath()` correctly blocks Api/Tiles. The hotpath always runs ingest (the only nidhogg command that supports it), but it's no longer a disconnected generic function.
 
 ### ~~Remove --runs from elivagar/nidhogg CLI variants~~ FIXED
 Dead `--runs` flags were removed in an earlier commit (e71a4cc).
