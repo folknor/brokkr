@@ -2,6 +2,9 @@
 
 Command orchestrator and development utility for [pbfhogg](https://github.com/folknor/pbfhogg), [elivagar](https://github.com/folknor/elivagar), [nidhogg](https://github.com/folknor/nidhogg), [litehtml-rs](https://github.com/folknor/litehtml-rs), and [sluggrs](https://github.com/folknor/sluggrs). Single Rust binary that provides benchmarking, verification, profiling, visual reference testing, and operational commands across all projects.
 
+Built with LLMs. See [LLM.md](LLM.md).
+
+
 ## Install
 
 ```
