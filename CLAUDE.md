@@ -92,7 +92,7 @@ file = "denmark-elivagar.pmtiles"
 xxhash = "9a3b2c1d..."
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`) — NOT applied to `check`. CLI `--features` are additive on top of host features (deduped).
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses `--all-features` by default (catches feature-gated code like hotpath/alloc), overridden by explicit `--features` or `--no-default-features`.
 
 ### Dataset structure
 

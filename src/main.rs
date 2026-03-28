@@ -851,6 +851,9 @@ fn run_clippy(
     if !features.is_empty() {
         args.push("--features");
         args.push(&joined);
+    } else if !no_default_features {
+        // No explicit features and no --no-default-features: check everything.
+        args.push("--all-features");
     }
     if let Some(pkg) = package {
         args.push("--package");
@@ -886,6 +889,8 @@ fn run_tests(
     if !features.is_empty() {
         args.push("--features");
         args.push(&joined);
+    } else if !no_default_features {
+        args.push("--all-features");
     }
     if let Some(pkg) = package {
         args.push("--package");
