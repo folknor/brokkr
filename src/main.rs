@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use cli::{Cli, Command, LitehtmlCommand, SluggrsCommand, VerifyCommand};
+use cli::{Cli, Command, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
@@ -646,121 +646,105 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Geocode { term } => {
             nidhogg::cmd::geocode(&dev_config, project, &project_root, &term)
         }
-        Command::Litehtml {
-            litehtml: litehtml_cmd,
-        } => {
-            let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
-                error::DevError::Config("no [litehtml] section in brokkr.toml".into())
-            })?;
-            match litehtml_cmd {
-                LitehtmlCommand::Test {
-                    fixture,
-                    suite,
-                    all,
-                    recapture,
-                } => litehtml::cmd::test(
-                    project,
-                    &project_root,
-                    litehtml_config,
-                    fixture.as_deref(),
-                    suite.as_deref(),
-                    all,
-                    recapture,
-                ),
-                LitehtmlCommand::List => {
-                    litehtml::cmd::list(project, &project_root, litehtml_config)
+        // ----- visual testing commands (litehtml + sluggrs) -----
+        Command::Test { fixture, suite, all, recapture } => {
+            match project {
+                Project::Litehtml => {
+                    let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
+                        DevError::Config("no [litehtml] section in brokkr.toml".into())
+                    })?;
+                    litehtml::cmd::test(project, &project_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
-                LitehtmlCommand::Approve { fixture } => {
-                    litehtml::cmd::approve(project, &project_root, litehtml_config, &fixture)
+                Project::Sluggrs => {
+                    let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
+                        DevError::Config("no [sluggrs] section in brokkr.toml".into())
+                    })?;
+                    sluggrs::cmd::test(project, &project_root, sluggrs_config, fixture.as_deref(), all)
                 }
-                LitehtmlCommand::Report { run_id } => {
-                    litehtml::cmd::report(project, &project_root, &run_id)
-                }
-                LitehtmlCommand::Status => {
-                    litehtml::cmd::status(project, &project_root, litehtml_config)
-                }
-                LitehtmlCommand::Prepare { input, output } => {
-                    litehtml::cmd::prepare(project, &project_root, litehtml_config, &input, &output)
-                }
-                LitehtmlCommand::Extract {
-                    input,
-                    selector,
-                    from,
-                    to,
-                    output,
-                } => litehtml::cmd::extract(
-                    project,
-                    &project_root,
-                    &input,
-                    selector.as_deref(),
-                    from.as_deref(),
-                    to.as_deref(),
-                    &output,
-                ),
-                LitehtmlCommand::Outline {
-                    input,
-                    depth,
-                    full,
-                    selectors,
-                } => litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors),
+                _ => Err(DevError::Config("'test' is only available for litehtml and sluggrs projects".into()))
             }
         }
-        Command::Sluggrs {
-            sluggrs: sluggrs_cmd,
-        } => {
-            if let SluggrsCommand::Hotpath {
-                alloc,
-                runs,
-                verbose,
-            } = &sluggrs_cmd
-            {
-                project::require(project, Project::Sluggrs, "sluggrs hotpath")?;
-                let mm = if *alloc {
-                    measure::MeasureMode::Alloc { runs: *runs }
-                } else {
-                    measure::MeasureMode::Hotpath { runs: *runs }
-                };
-                let features = resolve_features(&dev_config, &[]);
-                output::set_quiet(!verbose);
-                let req = measure::MeasureRequest {
-                    dev_config: &dev_config,
-                    project,
-                    project_root: &project_root,
-                    build_root: None,
-                    dataset: "n/a",
-                    variant: "n/a",
-                    runs: mm.runs(),
-                    features: &features,
-                    force: false,
-                    mode: mm,
-                    no_mem_check: false,
-                };
-                return sluggrs::hotpath::cmd(&req);
+        Command::List => {
+            match project {
+                Project::Litehtml => {
+                    let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
+                    litehtml::cmd::list(project, &project_root, cfg)
+                }
+                Project::Sluggrs => {
+                    let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
+                    sluggrs::cmd::list(project, &project_root, cfg)
+                }
+                _ => Err(DevError::Config("'list' is only available for litehtml and sluggrs projects".into()))
             }
-
-            let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
-                error::DevError::Config("no [sluggrs] section in brokkr.toml".into())
-            })?;
-            match sluggrs_cmd {
-                SluggrsCommand::Hotpath { .. } => unreachable!(),
-                SluggrsCommand::Test { snapshot, all } => sluggrs::cmd::test(
-                    project,
-                    &project_root,
-                    sluggrs_config,
-                    snapshot.as_deref(),
-                    all,
-                ),
-                SluggrsCommand::List => sluggrs::cmd::list(project, &project_root, sluggrs_config),
-                SluggrsCommand::Approve { snapshot } => {
-                    sluggrs::cmd::approve(project, &project_root, sluggrs_config, &snapshot)
+        }
+        Command::Approve { fixture } => {
+            match project {
+                Project::Litehtml => {
+                    let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
+                    litehtml::cmd::approve(project, &project_root, cfg, &fixture)
                 }
-                SluggrsCommand::Status => {
-                    sluggrs::cmd::status(project, &project_root, sluggrs_config)
+                Project::Sluggrs => {
+                    let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
+                    sluggrs::cmd::approve(project, &project_root, cfg, &fixture)
                 }
-                SluggrsCommand::Report { run_id } => {
-                    sluggrs::cmd::report(project, &project_root, &run_id)
-                }
+                _ => Err(DevError::Config("'approve' is only available for litehtml and sluggrs projects".into()))
             }
+        }
+        Command::Report { run_id } => {
+            match project {
+                Project::Litehtml => litehtml::cmd::report(project, &project_root, &run_id),
+                Project::Sluggrs => sluggrs::cmd::report(project, &project_root, &run_id),
+                _ => Err(DevError::Config("'report' is only available for litehtml and sluggrs projects".into()))
+            }
+        }
+        Command::VisualStatus => {
+            match project {
+                Project::Litehtml => {
+                    let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
+                    litehtml::cmd::status(project, &project_root, cfg)
+                }
+                Project::Sluggrs => {
+                    let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
+                    sluggrs::cmd::status(project, &project_root, cfg)
+                }
+                _ => Err(DevError::Config("'visual-status' is only available for litehtml and sluggrs projects".into()))
+            }
+        }
+        // ----- litehtml-only commands -----
+        Command::Prepare { input, output } => {
+            let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
+            litehtml::cmd::prepare(project, &project_root, cfg, &input, &output)
+        }
+        Command::HtmlExtract { input, selector, from, to, output } => {
+            litehtml::cmd::extract(project, &project_root, &input, selector.as_deref(), from.as_deref(), to.as_deref(), &output)
+        }
+        Command::Outline { input, depth, full, selectors } => {
+            litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
+        }
+        // ----- sluggrs-only commands -----
+        Command::Hotpath { alloc, runs, verbose } => {
+            project::require(project, Project::Sluggrs, "hotpath")?;
+            let mm = if alloc {
+                measure::MeasureMode::Alloc { runs }
+            } else {
+                measure::MeasureMode::Hotpath { runs }
+            };
+            let features = resolve_features(&dev_config, &[]);
+            output::set_quiet(!verbose);
+            let req = measure::MeasureRequest {
+                dev_config: &dev_config,
+                project,
+                project_root: &project_root,
+                build_root: None,
+                dataset: "n/a",
+                variant: "n/a",
+                runs: mm.runs(),
+                features: &features,
+                force: false,
+                mode: mm,
+                no_mem_check: false,
+            };
+            sluggrs::hotpath::cmd(&req)
         }
     }
 }

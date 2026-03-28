@@ -794,17 +794,101 @@ Examples:
         #[arg(default_value = "København")]
         term: String,
     },
-    /// [litehtml] Visual reference testing
+    // ----- visual testing commands (litehtml + sluggrs, display_order = 50) -----
+    /// [litehtml/sluggrs] Run visual tests against reference artifacts
     #[command(display_order = 50)]
-    Litehtml {
-        #[command(subcommand)]
-        litehtml: LitehtmlCommand,
+    Test {
+        /// Fixture/snapshot ID (or unique prefix)
+        fixture: Option<String>,
+
+        /// Run all fixtures tagged with this suite name (litehtml only)
+        #[arg(long, conflicts_with = "all")]
+        suite: Option<String>,
+
+        /// Run all fixtures/snapshots
+        #[arg(long)]
+        all: bool,
+
+        /// Force-regenerate Chrome reference artifacts before comparing (litehtml only)
+        #[arg(long)]
+        recapture: bool,
     },
-    /// [sluggrs] Visual snapshot testing
-    #[command(display_order = 55)]
-    Sluggrs {
-        #[command(subcommand)]
-        sluggrs: SluggrsCommand,
+    /// [litehtml/sluggrs] List fixtures/snapshots and approval state
+    #[command(display_order = 50)]
+    List,
+    /// [litehtml/sluggrs] Record current output as accepted baseline (requires clean git tree)
+    #[command(display_order = 50)]
+    Approve {
+        /// Fixture/snapshot ID (or unique prefix)
+        fixture: String,
+    },
+    /// [litehtml/sluggrs] Show detailed results for a past run
+    #[command(display_order = 50)]
+    Report {
+        /// Run ID (or prefix)
+        run_id: String,
+    },
+    /// [litehtml/sluggrs] Show current state of all fixtures/snapshots
+    #[command(name = "visual-status", display_order = 50)]
+    VisualStatus,
+
+    // ----- litehtml-only commands (display_order = 51) -----
+    /// [litehtml] Normalize raw email HTML into a self-contained fixture
+    #[command(display_order = 51)]
+    Prepare {
+        /// Input HTML file (raw email)
+        input: String,
+        /// Output HTML file (self-contained fixture)
+        output: String,
+    },
+    /// [litehtml] Extract a sub-fixture from a prepared HTML file
+    #[command(name = "html-extract", display_order = 51)]
+    HtmlExtract {
+        /// Input HTML file (already prepared)
+        input: String,
+        /// CSS selector to extract (single element)
+        #[arg(long, conflicts_with_all = ["from", "to"])]
+        selector: Option<String>,
+        /// Start of sibling range to extract (inclusive)
+        #[arg(long, requires = "to", conflicts_with = "selector")]
+        from: Option<String>,
+        /// End of sibling range to extract (inclusive)
+        #[arg(long, requires = "from", conflicts_with = "selector")]
+        to: Option<String>,
+        /// Output HTML file (extracted sub-fixture)
+        output: String,
+    },
+    /// [litehtml] Print structural outline of a prepared HTML file
+    #[command(display_order = 51)]
+    Outline {
+        /// Input HTML file (prepared)
+        input: String,
+        /// Maximum nesting depth before collapsing (default: 4)
+        #[arg(long, default_value = "4")]
+        depth: usize,
+        /// Show full tree with no depth limit
+        #[arg(long)]
+        full: bool,
+        /// Print suggested CSS selectors for top-level sections
+        #[arg(long)]
+        selectors: bool,
+    },
+
+    // ----- sluggrs-only commands (display_order = 55) -----
+    /// [sluggrs] Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
+    #[command(name = "hotpath", display_order = 55)]
+    Hotpath {
+        /// Per-function allocation tracking instead of timing
+        #[arg(long)]
+        alloc: bool,
+
+        /// Number of runs
+        #[arg(long, short = 'n', default_value = "1")]
+        runs: usize,
+
+        /// Print full output
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -1028,132 +1112,6 @@ pub(crate) enum VerifyCommand {
     },
 }
 
-#[derive(Subcommand)]
-pub(crate) enum LitehtmlCommand {
-    /// Test fixtures against Chrome reference artifacts
-    #[command(display_order = 0)]
-    Test {
-        /// Fixture ID from brokkr.toml (or unique prefix)
-        fixture: Option<String>,
-
-        /// Run all fixtures tagged with this suite name
-        #[arg(long, conflicts_with = "all")]
-        suite: Option<String>,
-
-        /// Run all fixtures
-        #[arg(long)]
-        all: bool,
-
-        /// Force-regenerate Chrome reference artifacts before comparing
-        #[arg(long)]
-        recapture: bool,
-    },
-    /// List fixtures, tags, and approval state
-    #[command(display_order = 1)]
-    List,
-    /// Record current divergence as accepted baseline (requires clean git tree)
-    #[command(display_order = 2)]
-    Approve {
-        /// Fixture ID from brokkr.toml (or unique prefix)
-        fixture: String,
-    },
-    /// Show detailed results for a past run
-    #[command(display_order = 4)]
-    Report {
-        /// Run ID (or prefix)
-        run_id: String,
-    },
-    /// Show current state of all fixtures (last run vs approved baseline)
-    #[command(display_order = 5)]
-    Status,
-    /// Normalize raw email HTML into a self-contained fixture
-    #[command(display_order = 6)]
-    Prepare {
-        /// Input HTML file (raw email)
-        input: String,
-        /// Output HTML file (self-contained fixture)
-        output: String,
-    },
-    /// Extract a sub-fixture from a prepared HTML file
-    #[command(display_order = 7)]
-    Extract {
-        /// Input HTML file (already prepared)
-        input: String,
-        /// CSS selector to extract (single element)
-        #[arg(long, conflicts_with_all = ["from", "to"])]
-        selector: Option<String>,
-        /// Start of sibling range to extract (inclusive)
-        #[arg(long, requires = "to", conflicts_with = "selector")]
-        from: Option<String>,
-        /// End of sibling range to extract (inclusive)
-        #[arg(long, requires = "from", conflicts_with = "selector")]
-        to: Option<String>,
-        /// Output HTML file (extracted sub-fixture)
-        output: String,
-    },
-    /// Print structural outline of a prepared HTML file
-    #[command(display_order = 8)]
-    Outline {
-        /// Input HTML file (prepared)
-        input: String,
-        /// Maximum nesting depth before collapsing (default: 4)
-        #[arg(long, default_value = "4")]
-        depth: usize,
-        /// Show full tree with no depth limit
-        #[arg(long)]
-        full: bool,
-        /// Print suggested CSS selectors for top-level sections
-        #[arg(long)]
-        selectors: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum SluggrsCommand {
-    /// Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
-    #[command(display_order = 0)]
-    Hotpath {
-        /// Per-function allocation tracking instead of timing
-        #[arg(long)]
-        alloc: bool,
-
-        /// Number of runs
-        #[arg(long, short = 'n', default_value = "1")]
-        runs: usize,
-
-        /// Print full output
-        #[arg(short, long)]
-        verbose: bool,
-    },
-    /// Render snapshots and diff against approved baselines
-    #[command(display_order = 1)]
-    Test {
-        /// Snapshot ID (or unique prefix)
-        snapshot: Option<String>,
-
-        /// Run all snapshots
-        #[arg(long)]
-        all: bool,
-    },
-    /// List snapshots and approval state
-    #[command(display_order = 2)]
-    List,
-    /// Record current output as accepted baseline (requires clean git tree)
-    #[command(display_order = 3)]
-    Approve {
-        /// Snapshot ID (or unique prefix)
-        snapshot: String,
-    },
-    /// Show current state of all snapshots (last run vs approved baseline)
-    #[command(display_order = 4)]
-    Status,
-    /// Show detailed results for a past run
-    #[command(display_order = 5)]
-    Report {
-        /// Run ID (or prefix)
-        run_id: String,
-    },
-}
 
 /// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.
 fn validate_since(s: &str) -> Result<String, String> {
