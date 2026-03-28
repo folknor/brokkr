@@ -105,14 +105,18 @@ pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
             };
             crate::output::lock_msg(&format!("waiting for {desc}"));
 
-            // Block until the lock is released.
-            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-            if ret != 0 {
+            // Block until the lock is released. Retry on EINTR.
+            loop {
+                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                if ret == 0 {
+                    break;
+                }
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
                 let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-                return Err(DevError::Lock(format!(
-                    "blocking flock failed: {}",
-                    std::io::Error::last_os_error()
-                )));
+                return Err(DevError::Lock(format!("blocking flock failed: {err}")));
             }
             crate::output::lock_msg("lock acquired");
         } else {
