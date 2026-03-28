@@ -71,7 +71,7 @@ pub fn run(
 
     let mode_names: Vec<&str> = modes.iter().map(|m| m.name()).collect();
 
-    crate::harness::run_variants(&mode_names, |mode_name| {
+    crate::harness::run_variants("mode", &mode_names, |mode_name| {
         let bench_args: Vec<&str> = vec!["bench-read", pbf_str, "--mode", mode_name];
 
         let config = BenchConfig {

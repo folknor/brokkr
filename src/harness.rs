@@ -588,19 +588,19 @@ pub fn format_cli_args(program: &str, args: &[&str]) -> String {
 ///
 /// Usage:
 /// ```ignore
-/// run_variants(&["sequential", "parallel", "pipelined"], |variant| {
+/// run_variants("mode", &["sequential", "parallel", "pipelined"], |variant| {
 ///     // set up config using variant name...
 ///     harness.run_external(&config, binary, &args, project_root)
 /// })?;
 /// ```
-pub fn run_variants<F>(variants: &[&str], mut run_one: F) -> Result<(), DevError>
+pub fn run_variants<F>(label: &str, variants: &[&str], mut run_one: F) -> Result<(), DevError>
 where
     F: FnMut(&str) -> Result<(), DevError>,
 {
     let mut failures: Vec<(&str, String)> = Vec::new();
 
     for &variant in variants {
-        output::bench_msg(&format!("variant: {variant}"));
+        output::bench_msg(&format!("{label}: {variant}"));
         if let Err(e) = run_one(variant) {
             output::error(&format!("{variant} failed: {e}"));
             failures.push((variant, e.to_string()));

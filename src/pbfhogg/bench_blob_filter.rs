@@ -77,12 +77,14 @@ pub fn run(
         .collect();
     let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-    let result = crate::harness::run_variants(&variant_refs, |variant| {
-        let (cmd, label_suffix) = variant.split_once('+').unwrap();
+    let result = crate::harness::run_variants("variant", &variant_refs, |variant| {
+        let (cmd, label_suffix) = variant
+            .split_once('+')
+            .ok_or_else(|| DevError::Config(format!("invalid variant '{variant}'")))?;
         let &(_, pbf_str, basename, force) = variants
             .iter()
             .find(|&&(l, ..)| l == label_suffix)
-            .unwrap();
+            .ok_or_else(|| DevError::Config(format!("unknown variant label '{label_suffix}'")))?;
 
         let args = command_args(cmd, pbf_str, &output_str, force);
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();

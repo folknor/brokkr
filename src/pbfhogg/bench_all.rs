@@ -302,7 +302,7 @@ fn run_osmpbf_baseline(
         .collect();
     let variant_names: Vec<&str> = variant_data.iter().map(|(v, ..)| v.as_str()).collect();
 
-    crate::harness::run_variants(&variant_names, |variant| {
+    crate::harness::run_variants("baseline", &variant_names, |variant| {
         let (_, elapsed_ms, kv) = variant_data.iter().find(|(v, ..)| v == variant).unwrap();
 
         let config = BenchConfig {

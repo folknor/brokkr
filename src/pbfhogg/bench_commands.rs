@@ -387,7 +387,7 @@ pub fn run(
             .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
     }
 
-    crate::harness::run_variants(commands, |name| {
+    crate::harness::run_variants("command", commands, |name| {
         // Commands that produce output files write to scratch; others have no -o flag.
         let scratch_output_path = if !NO_OUTPUT_FILE.contains(&name) {
             let ext = if OSC_OUTPUT.contains(&name) {

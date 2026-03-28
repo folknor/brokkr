@@ -58,7 +58,7 @@ pub fn run(
 
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
-    let result = crate::harness::run_variants(strategies, |name| {
+    let result = crate::harness::run_variants("strategy", strategies, |name| {
         let args = strategy_args(name, pbf_str, bbox, &output_str);
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 

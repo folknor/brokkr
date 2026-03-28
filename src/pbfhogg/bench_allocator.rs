@@ -17,7 +17,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
-    crate::harness::run_variants(ALL_ALLOCATORS, |name| {
+    crate::harness::run_variants("allocator", ALL_ALLOCATORS, |name| {
         let build_config = match name {
             "jemalloc" => BuildConfig::release_with_features(Some("pbfhogg-cli"), &["jemalloc"]),
             "mimalloc" => BuildConfig::release_with_features(Some("pbfhogg-cli"), &["mimalloc"]),

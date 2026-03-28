@@ -24,7 +24,7 @@ pub fn run(
         .collect();
     let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-    crate::harness::run_variants(&variant_refs, |variant| {
+    crate::harness::run_variants("variant", &variant_refs, |variant| {
         // Parse "writer_mode-compression" back out.
         let (writer_mode, compression) = variant.split_once('-').unwrap_or(("sync", variant));
 

@@ -38,7 +38,7 @@ pub fn run(
         .collect();
     let variant_names: Vec<&str> = filtered.iter().map(|(name, _)| name.as_str()).collect();
 
-    crate::harness::run_variants(&variant_names, |name| {
+    crate::harness::run_variants("query", &variant_names, |name| {
         let (_, body) = filtered.iter().find(|(n, _)| n == name).unwrap();
 
         // Warmup: one request, discard result.
