@@ -50,7 +50,7 @@ All measured modes automatically attach a sidecar that samples `/proc` metrics a
 
 All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`, `--wait`.
 
-pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and create named variants in the results DB (e.g. `add-locations-to-ways+direct-io`). io_uring preflight checks run automatically before building.
+pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and create named variants in the results DB (e.g. `add-locations-to-ways+direct-io`). `--direct-io` works with all commands. `--io-uring` is only supported by `apply-changes`, `sort`, `cat-dedupe`, and `diff-osc` — brokkr rejects it for other commands before building. io_uring preflight checks run automatically.
 
 ### Shared (all projects)
 

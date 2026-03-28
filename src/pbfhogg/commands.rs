@@ -207,6 +207,18 @@ impl PbfhoggCommand {
         true
     }
 
+    /// Whether this command accepts `--io-uring`.
+    ///
+    /// Only commands whose pbfhogg binary clap definition includes `--io-uring`
+    /// are listed here.  Passing the flag to other commands causes clap exit
+    /// code 2.
+    pub fn supports_io_uring(&self) -> bool {
+        matches!(
+            self,
+            Self::ApplyChanges | Self::Sort | Self::CatDedupe | Self::DiffOsc
+        )
+    }
+
     /// Whether this command needs an OSC file.
     pub fn needs_osc(&self) -> bool {
         matches!(
