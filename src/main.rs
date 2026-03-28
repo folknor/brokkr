@@ -2084,6 +2084,21 @@ fn cmd_lock() -> Result<(), DevError> {
                 "held by PID {}: {} {} ({})",
                 info.pid, info.project, info.command, info.project_root,
             ));
+            if info.pid > 0 {
+                if let Some(summary) = lockfile::process_summary(info.pid) {
+                    output::lock_msg(&summary);
+                }
+                // Show the last sidecar marker if available.
+                let status_path = std::path::Path::new(&info.project_root)
+                    .join(".brokkr")
+                    .join(".sidecar-status");
+                if let Ok(marker) = std::fs::read_to_string(&status_path) {
+                    let marker = marker.trim();
+                    if !marker.is_empty() {
+                        output::lock_msg(&format!("last marker: {marker}"));
+                    }
+                }
+            }
         }
         None => {
             output::lock_msg("no active lock");

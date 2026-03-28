@@ -398,11 +398,27 @@ impl SidecarFifo {
         Ok(())
     }
 
+    /// Path to the sidecar status file (for `brokkr lock` to read).
+    fn status_path(&self) -> PathBuf {
+        self.path.with_file_name(".sidecar-status")
+    }
+
+    /// Write the last marker name to the status file so `brokkr lock` can show it.
+    fn update_status(&self, marker_name: &str) {
+        let _ = fs::write(self.status_path(), marker_name);
+    }
+
+    /// Clean up the status file.
+    fn cleanup_status(&self) {
+        let _ = fs::remove_file(self.status_path());
+    }
+
     /// Drain all pending marker lines from the FIFO.
     ///
     /// Non-blocking: returns immediately if no data is available.
     /// Each line is expected to be: `<timestamp_us> <marker_name>\n`
     fn drain_markers(&mut self, markers: &mut Vec<Marker>, next_idx: &mut i32) {
+        let mut last_name: Option<String> = None;
         let mut line = String::new();
         loop {
             line.clear();
@@ -412,6 +428,7 @@ impl SidecarFifo {
                     let trimmed = line.trim();
                     if let Some((ts_str, name)) = trimmed.split_once(' ') {
                         if let Ok(ts) = ts_str.parse::<i64>() {
+                            last_name = Some(name.to_owned());
                             markers.push(Marker {
                                 marker_idx: *next_idx,
                                 timestamp_us: ts,
@@ -424,6 +441,9 @@ impl SidecarFifo {
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => break,
             }
+        }
+        if let Some(name) = last_name {
+            self.update_status(&name);
         }
     }
 
@@ -438,6 +458,7 @@ impl SidecarFifo {
 impl Drop for SidecarFifo {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+        self.cleanup_status();
     }
 }
 

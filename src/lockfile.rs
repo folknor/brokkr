@@ -104,6 +104,11 @@ pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
                 None => "unknown process".into(),
             };
             crate::output::lock_msg(&format!("waiting for {desc}"));
+            if let Some(ref i) = info {
+                if let Some(summary) = process_summary(i.pid) {
+                    crate::output::lock_msg(&summary);
+                }
+            }
 
             // Block until the lock is released. Retry on EINTR.
             loop {
@@ -220,6 +225,87 @@ fn process_uptime_str(pid: u32) -> Option<String> {
     } else {
         format!("{elapsed}s")
     })
+}
+
+/// Build a one-line summary of a running process from `/proc`.
+///
+/// Returns something like `"running 12m, RSS 4.2 GB, 847 MB read, 4 threads"`.
+/// Returns `None` if the process is gone or `/proc` is unreadable.
+pub fn process_summary(pid: u32) -> Option<String> {
+    let uptime = process_uptime_str(pid)?;
+
+    // Read /proc/{pid}/status for RSS.
+    let status_path = format!("/proc/{pid}/status");
+    let status_text = std::fs::read_to_string(&status_path).ok()?;
+    let mut rss_kb: i64 = 0;
+    let mut threads: i64 = 0;
+    for line in status_text.lines() {
+        if let Some((key, rest)) = line.split_once(':') {
+            let val_str = rest.trim().trim_end_matches(" kB");
+            match key {
+                "VmRSS" => rss_kb = val_str.parse().unwrap_or(0),
+                "Threads" => threads = val_str.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+
+    // Read /proc/{pid}/io for bytes read.
+    let io_path = format!("/proc/{pid}/io");
+    let mut read_bytes: i64 = 0;
+    let mut write_bytes: i64 = 0;
+    if let Ok(io_text) = std::fs::read_to_string(&io_path) {
+        for line in io_text.lines() {
+            if let Some((key, rest)) = line.split_once(':') {
+                let val: i64 = rest.trim().parse().unwrap_or(0);
+                match key {
+                    "read_bytes" => read_bytes = val,
+                    "write_bytes" => write_bytes = val,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut parts = Vec::with_capacity(5);
+    parts.push(format!("running {uptime}"));
+
+    if rss_kb > 0 {
+        parts.push(format_bytes_kb(rss_kb, "RSS"));
+    }
+    if read_bytes > 0 {
+        parts.push(format_bytes(read_bytes, "read"));
+    }
+    if write_bytes > 0 {
+        parts.push(format_bytes(write_bytes, "written"));
+    }
+    if threads > 1 {
+        parts.push(format!("{threads} threads"));
+    }
+
+    Some(parts.join(", "))
+}
+
+/// Format kB as human-readable (e.g. "RSS 4.2 GB").
+fn format_bytes_kb(kb: i64, label: &str) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let mb = kb as f64 / 1024.0;
+    if mb >= 1024.0 {
+        format!("{label} {:.1} GB", mb / 1024.0)
+    } else {
+        format!("{label} {mb:.0} MB")
+    }
+}
+
+/// Format bytes as human-readable (e.g. "847 MB read").
+fn format_bytes(bytes: i64, label: &str) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1024.0 {
+        format!("{:.1} GB {label}", mb / 1024.0)
+    } else {
+        format!("{mb:.0} MB {label}")
+    }
 }
 
 /// Check whether a PID is still running.
