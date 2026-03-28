@@ -478,14 +478,6 @@ Examples:
         uring: bool,
     },
 
-    // ----- sluggrs commands (display_order = 5) -----
-    /// [sluggrs] Rendering hotpath (hotpath/alloc mode only)
-    #[command(name = "sluggrs-hotpath", display_order = 5)]
-    SluggrsHotpath {
-        #[command(flatten)]
-        mode: ModeArgs,
-    },
-
     // ----- generic commands (display_order = 5) -----
     /// Generic hotpath for projects without dedicated modules
     #[command(name = "generic-hotpath", display_order = 5)]
@@ -1118,8 +1110,14 @@ pub(crate) enum LitehtmlCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum SluggrsCommand {
-    /// Render snapshots and diff against approved baselines
+    /// Rendering hotpath (hotpath/alloc mode only)
     #[command(display_order = 0)]
+    Hotpath {
+        #[command(flatten)]
+        mode: ModeArgs,
+    },
+    /// Render snapshots and diff against approved baselines
+    #[command(display_order = 1)]
     Test {
         /// Snapshot ID (or unique prefix)
         snapshot: Option<String>,
@@ -1129,19 +1127,19 @@ pub(crate) enum SluggrsCommand {
         all: bool,
     },
     /// List snapshots and approval state
-    #[command(display_order = 1)]
+    #[command(display_order = 2)]
     List,
     /// Record current output as accepted baseline (requires clean git tree)
-    #[command(display_order = 2)]
+    #[command(display_order = 3)]
     Approve {
         /// Snapshot ID (or unique prefix)
         snapshot: String,
     },
     /// Show current state of all snapshots (last run vs approved baseline)
-    #[command(display_order = 3)]
+    #[command(display_order = 4)]
     Status,
     /// Show detailed results for a past run
-    #[command(display_order = 4)]
+    #[command(display_order = 5)]
     Report {
         /// Run ID (or prefix)
         run_id: String,

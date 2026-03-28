@@ -421,24 +421,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
 
         // ----- sluggrs commands -----
-        Command::SluggrsHotpath { mode } => run_measured(
-            &mode,
-            &dev_config,
-            project,
-            &project_root,
-            "n/a",
-            "n/a",
-            |req| {
-                project::require(project, Project::Sluggrs, "sluggrs-hotpath")?;
-                if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
-                    return Err(DevError::Config(
-                        "sluggrs-hotpath only supports --hotpath or --alloc modes".into(),
-                    ));
-                }
-                sluggrs::hotpath::cmd(req)
-            },
-        ),
-
         // ----- generic commands -----
         Command::GenericHotpath {
             mode,
@@ -726,10 +708,34 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Sluggrs {
             sluggrs: sluggrs_cmd,
         } => {
+            // Hotpath doesn't need sluggrs config — handle it first.
+            if let SluggrsCommand::Hotpath { mode } = &sluggrs_cmd {
+                return run_measured(
+                    mode,
+                    &dev_config,
+                    project,
+                    &project_root,
+                    "n/a",
+                    "n/a",
+                    |req| {
+                        project::require(project, Project::Sluggrs, "sluggrs hotpath")?;
+                        if !req.is_alloc()
+                            && !matches!(req.mode, measure::MeasureMode::Hotpath { .. })
+                        {
+                            return Err(DevError::Config(
+                                "sluggrs hotpath only supports --hotpath or --alloc modes".into(),
+                            ));
+                        }
+                        sluggrs::hotpath::cmd(req)
+                    },
+                );
+            }
+
             let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
                 error::DevError::Config("no [sluggrs] section in brokkr.toml".into())
             })?;
             match sluggrs_cmd {
+                SluggrsCommand::Hotpath { .. } => unreachable!(),
                 SluggrsCommand::Test { snapshot, all } => sluggrs::cmd::test(
                     project,
                     &project_root,
