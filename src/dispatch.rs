@@ -1023,7 +1023,6 @@ fn run_nidhogg_ingest_bench(
     ctx.harness.run_internal(&config, |_i| {
         clean_nidhogg_scratch(&output_dir)?;
 
-        let start = std::time::Instant::now();
         let captured =
             output::run_captured(&ctx.binary.display().to_string(), &args, req.project_root)?;
         let ms = harness::elapsed_to_ms(&captured.elapsed);
