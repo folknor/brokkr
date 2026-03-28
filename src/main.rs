@@ -130,7 +130,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
     let (project, dev_config, project_root) = project::detect()?;
 
     // Pbfhogg measured commands: 28 commands → single dispatch path.
-    if let Some((mode, pbf, pbf_cmd, osc, params)) = cli.command.as_pbfhogg() {
+    if let Some((mode, pbf, pbf_cmd, osc, mut params)) = cli.command.as_pbfhogg() {
+        if pbf.direct_io {
+            params.insert("direct_io".into(), "true".into());
+        }
+        if pbf.io_uring {
+            params.insert("io_uring".into(), "true".into());
+        }
         return run_measured(
             mode,
             &dev_config,

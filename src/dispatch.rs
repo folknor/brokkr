@@ -28,6 +28,38 @@ use crate::resolve::{
 // pbfhogg dispatch
 // ---------------------------------------------------------------------------
 
+/// Extract I/O mode flags from extra_params and return:
+/// - extra cargo features to add to the build
+/// - extra CLI args to append to the binary invocation
+/// - variant suffix for the result DB
+fn resolve_io_flags(extra_params: &HashMap<String, String>) -> (Vec<&'static str>, Vec<&'static str>, String) {
+    let direct_io = extra_params.get("direct_io").is_some();
+    let io_uring = extra_params.get("io_uring").is_some();
+
+    let mut features = Vec::new();
+    let mut args = Vec::new();
+    let mut suffix_parts = Vec::new();
+
+    if direct_io {
+        features.push("linux-direct-io");
+        args.push("--direct-io");
+        suffix_parts.push("direct-io");
+    }
+    if io_uring {
+        features.push("linux-io-uring");
+        args.push("--io-uring");
+        suffix_parts.push("uring");
+    }
+
+    let suffix = if suffix_parts.is_empty() {
+        String::new()
+    } else {
+        format!("+{}", suffix_parts.join("+"))
+    };
+
+    (features, args, suffix)
+}
+
 /// Run a single pbfhogg command with the specified measurement mode.
 ///
 /// Handles run, bench, hotpath, and alloc for any pbfhogg command.
@@ -57,7 +89,11 @@ fn run_pbfhogg_run(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let (io_features, io_args, _) = resolve_io_flags(extra_params);
+
+    let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    feat_refs.extend_from_slice(&io_features);
+
     // Run mode never stores results, so dirty tree is always fine.
     let ctx = BenchContext::new(
         req.dev_config,
@@ -74,7 +110,10 @@ fn run_pbfhogg_run(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let args = command.build_args(&cmd_ctx)?;
+    let mut args = command.build_args(&cmd_ctx)?;
+    for flag in &io_args {
+        args.push((*flag).into());
+    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let binary_str = ctx.binary.display().to_string();
@@ -101,7 +140,11 @@ fn run_pbfhogg_wallclock(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    let (io_features, io_args, io_suffix) = resolve_io_flags(extra_params);
+
+    let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
+    feat_refs.extend_from_slice(&io_features);
+
     let ctx = BenchContext::new(
         req.dev_config,
         req.project,
@@ -117,15 +160,25 @@ fn run_pbfhogg_wallclock(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let args = command.build_args(&cmd_ctx)?;
+    let mut args = command.build_args(&cmd_ctx)?;
+    for flag in &io_args {
+        args.push((*flag).into());
+    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (_, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let basename = cmd_ctx.pbf_basename();
 
+    // Append I/O mode suffix to variant (e.g. "add-locations-to-ways+direct-io").
+    let variant = match command.result_variant() {
+        Some(v) => Some(format!("{v}{io_suffix}")),
+        None if !io_suffix.is_empty() => Some(format!("{}{io_suffix}", command.id())),
+        None => None,
+    };
+
     let config = BenchConfig {
         command: command.result_command().into(),
-        variant: command.result_variant(),
+        variant,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -169,10 +222,12 @@ fn run_pbfhogg_hotpath(
 
     let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
     let feature = harness::hotpath_feature(alloc);
+    let (io_features, io_args, io_suffix) = resolve_io_flags(extra_params);
 
-    // Build features: hotpath + user features.
+    // Build features: hotpath + user features + I/O features.
     let mut all_features: Vec<&str> = vec![feature];
     all_features.extend(req.features.iter().map(String::as_str));
+    all_features.extend_from_slice(&io_features);
 
     let ctx = BenchContext::new(
         req.dev_config,
@@ -203,7 +258,10 @@ fn run_pbfhogg_hotpath(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
+    let mut hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
+    for flag in &io_args {
+        hotpath_args.push((*flag).into());
+    }
 
     let label = feature;
     output::hotpath_msg(&format!("=== {} {label} ===", command.id()));
@@ -213,7 +271,7 @@ fn run_pbfhogg_hotpath(
     }
 
     let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("{}{variant_suffix}", command.id());
+    let variant = format!("{}{variant_suffix}{io_suffix}", command.id());
 
     let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();

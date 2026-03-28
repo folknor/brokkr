@@ -960,6 +960,12 @@ pub(crate) struct PbfArgs {
     /// PBF variant to use (raw, indexed, locations)
     #[arg(long, default_value = "indexed")]
     pub(crate) variant: String,
+    /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
+    #[arg(long)]
+    pub(crate) direct_io: bool,
+    /// Use io_uring for I/O (requires linux-io-uring feature in pbfhogg)
+    #[arg(long)]
+    pub(crate) io_uring: bool,
 }
 
 #[derive(Subcommand)]
