@@ -1,6 +1,6 @@
 # brokkr
 
-Command orchestrator and development utility for [pbfhogg](https://github.com/folkol/pbfhogg), elivagar, nidhogg, and litehtml-rs. Single Rust binary that provides benchmarking, verification, profiling, visual reference testing, and operational commands across all projects.
+Command orchestrator and development utility for [pbfhogg](https://github.com/folknor/pbfhogg), [elivagar](https://github.com/folknor/elivagar), [nidhogg](https://github.com/folknor/nidhogg), [litehtml-rs](https://github.com/nickel-org/litehtml-rs), and [sluggrs](https://github.com/folknor/sluggrs). Single Rust binary that provides benchmarking, verification, profiling, visual reference testing, and operational commands across all projects.
 
 ## Install
 
@@ -45,6 +45,8 @@ Every measurable command supports these flags:
 | `--hotpath` | Function-level timing via hotpath feature (1 run) |
 | `--hotpath N` | Same but N runs |
 | `--alloc` | Per-function allocation tracking (1 run) |
+
+All measured modes automatically attach a sidecar that samples `/proc` metrics at 100ms (see [Sidecar profiler](#sidecar-profiler) below).
 
 All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`.
 
@@ -158,6 +160,33 @@ All benchmarks run through `BenchHarness`, which provides:
 - **Multiple timing modes** — in-process (N runs, best-of-N), subprocess (external binary), and distribution (min/p50/p95/max)
 - **Retroactive benchmarking** — `--commit <hash>` builds and benchmarks old commits via git worktree
 - **OOM protection** — memory availability checks before large-scale runs
+
+## Sidecar profiler
+
+Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored — local to the machine that ran it). The main results in `.brokkr/results.db` stay small and git-tracked.
+
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers.
+
+Sidecar data is stored even when the child is OOM-killed — the `/proc` trajectory up to the kill is the most valuable use case.
+
+### Querying sidecar data
+
+```
+brokkr results <uuid> --timeline                   # raw JSONL samples
+brokkr results <uuid> --timeline --summary         # per-phase table
+brokkr results <uuid> --timeline --stat anon       # min/max/avg/p50/p95 for a field
+brokkr results <uuid> --timeline --fields rss,anon --every 10  # project + downsample
+brokkr results <uuid> --timeline --where "majflt>0" --tail 20  # filter + range
+brokkr results <uuid> --timeline --phase STAGE2 --stat anon    # per-phase stats
+brokkr results <uuid> --timeline --range 10.0..82.0            # time window filter
+brokkr results <uuid> --markers                    # raw JSONL markers
+brokkr results <uuid> --markers --durations        # START/END pair timings
+brokkr results <uuid> --markers --phases           # durations + peak RSS/majflt
+brokkr results --compare-timeline <uuid_a> <uuid_b>  # phase-aligned comparison
+brokkr results dirty --timeline --stat anon        # inspect last failed/dirty run
+```
+
+All timeline flags compose: `--phase STAGE2 --where "anon>100000" --stat majflt` works.
 
 ## Results database
 

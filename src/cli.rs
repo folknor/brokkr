@@ -640,6 +640,10 @@ Examples:
         #[arg(long, requires = "timeline")]
         range: Option<String>,
 
+        /// Show a specific run index (0-based), or "all" for all runs. Defaults to the best run.
+        #[arg(long, requires = "timeline")]
+        run: Option<String>,
+
         /// Compare sidecar timelines of two results (phase-aligned summary)
         #[arg(long, num_args = 2, value_names = ["UUID_A", "UUID_B"],
               conflicts_with_all = ["query", "commit", "compare", "compare_last", "timeline", "markers"])]

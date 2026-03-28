@@ -20,6 +20,7 @@ pub(crate) struct ResultsQuery {
     pub(crate) stat: Option<String>,
     pub(crate) phase: Option<String>,
     pub(crate) range: Option<String>,
+    pub(crate) run: Option<String>,
     pub(crate) compare_timeline: Option<Vec<String>>,
     pub(crate) phases: bool,
 }

@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS sidecar_summary (
     PRIMARY KEY (result_uuid, run_idx)
 );
 
+CREATE TABLE IF NOT EXISTS sidecar_meta (
+    result_uuid   TEXT NOT NULL PRIMARY KEY,
+    best_run_idx  INTEGER NOT NULL DEFAULT 0,
+    total_runs    INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS sidecar_latest (
     key   TEXT NOT NULL PRIMARY KEY,
     uuid  TEXT NOT NULL
@@ -72,7 +78,7 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 1;
+const SIDECAR_VERSION: i64 = 2;
 
 /// Run pending migrations based on `PRAGMA user_version`.
 fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -82,8 +88,8 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
     }
 
     // v0 -> v1: initial schema (handled by CREATE TABLE IF NOT EXISTS in DDL).
-    // Future migrations go here:
-    // if current < 2 { migrate_v1_to_v2(conn)?; }
+    // v1 -> v2: add sidecar_meta table (handled by CREATE TABLE IF NOT EXISTS in DDL).
+    //           Existing UUIDs without meta rows get defaults on query (best_run_idx=0).
 
     conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
     Ok(())
@@ -208,6 +214,39 @@ impl SidecarDb {
         Ok(())
     }
 
+    /// Store metadata about a sidecar session (best run index, total runs).
+    pub fn store_meta(
+        &self,
+        result_uuid: &str,
+        best_run_idx: usize,
+        total_runs: usize,
+    ) -> Result<(), DevError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sidecar_meta (result_uuid, best_run_idx, total_runs)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![result_uuid, best_run_idx as i64, total_runs as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Query metadata for a result UUID prefix.
+    /// Returns (best_run_idx, total_runs), defaulting to (0, 1) if not found.
+    pub fn query_meta(&self, uuid_prefix: &str) -> (usize, usize) {
+        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        self.conn
+            .query_row(
+                "SELECT best_run_idx, total_runs FROM sidecar_meta
+                 WHERE result_uuid LIKE ?1||'%'",
+                rusqlite::params![uuid_prefix],
+                |row| {
+                    let best: i64 = row.get(0)?;
+                    let total: i64 = row.get(1)?;
+                    Ok((best as usize, total as usize))
+                },
+            )
+            .unwrap_or((0, 1))
+    }
+
     /// Record a UUID as the latest for a given key (e.g. "dirty").
     ///
     /// Used so `brokkr results dirty` resolves to the most recent
@@ -241,24 +280,40 @@ impl SidecarDb {
 
     /// Query sidecar samples for a result UUID prefix.
     ///
-    /// If `uuid_prefix` is a latest-key (e.g. "dirty"), it is resolved
-    /// to the actual UUID first.
+    /// If `run_idx` is `Some`, filters to that run only. If `None`, returns
+    /// all runs. Resolves latest-keys (e.g. "dirty") before querying.
     pub fn query_samples(
         &self,
         uuid_prefix: &str,
+        run_idx: Option<usize>,
     ) -> Result<Vec<crate::sidecar::Sample>, DevError> {
         let uuid_prefix = self.resolve_latest(uuid_prefix);
-        let mut stmt = self.conn.prepare(
-            "SELECT sample_idx, timestamp_us,
-                    rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
-                    utime, stime, num_threads, minflt, majflt,
-                    rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
-                    syscr, syscw, vol_cs, nonvol_cs
-             FROM sidecar_samples
-             WHERE result_uuid LIKE ?1||'%'
-             ORDER BY run_idx, sample_idx",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| {
+        let (sql, run_filter) = match run_idx {
+            Some(idx) => (
+                "SELECT sample_idx, timestamp_us,
+                        rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
+                        utime, stime, num_threads, minflt, majflt,
+                        rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
+                        syscr, syscw, vol_cs, nonvol_cs
+                 FROM sidecar_samples
+                 WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
+                 ORDER BY sample_idx",
+                Some(idx as i64),
+            ),
+            None => (
+                "SELECT sample_idx, timestamp_us,
+                        rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
+                        utime, stime, num_threads, minflt, majflt,
+                        rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
+                        syscr, syscw, vol_cs, nonvol_cs
+                 FROM sidecar_samples
+                 WHERE result_uuid LIKE ?1||'%'
+                 ORDER BY run_idx, sample_idx",
+                None,
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(crate::sidecar::Sample {
                 sample_idx: row.get(0)?,
                 timestamp_us: row.get(1)?,
@@ -284,31 +339,52 @@ impl SidecarDb {
                 vol_cs: row.get(21)?,
                 nonvol_cs: row.get(22)?,
             })
-        })?;
+        };
+        let rows = match run_filter {
+            Some(idx) => stmt.query_map(rusqlite::params![uuid_prefix, idx], map_row)?,
+            None => stmt.query_map(rusqlite::params![uuid_prefix], map_row)?,
+        };
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
     }
 
     /// Query sidecar markers for a result UUID prefix.
     ///
+    /// If `run_idx` is `Some`, filters to that run only.
     /// Resolves latest-keys (e.g. "dirty") before querying.
     pub fn query_markers(
         &self,
         uuid_prefix: &str,
+        run_idx: Option<usize>,
     ) -> Result<Vec<crate::sidecar::Marker>, DevError> {
         let uuid_prefix = self.resolve_latest(uuid_prefix);
-        let mut stmt = self.conn.prepare(
-            "SELECT marker_idx, timestamp_us, name
-             FROM sidecar_markers
-             WHERE result_uuid LIKE ?1||'%'
-             ORDER BY run_idx, marker_idx",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| {
+        let (sql, run_filter) = match run_idx {
+            Some(idx) => (
+                "SELECT marker_idx, timestamp_us, name
+                 FROM sidecar_markers
+                 WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
+                 ORDER BY marker_idx",
+                Some(idx as i64),
+            ),
+            None => (
+                "SELECT marker_idx, timestamp_us, name
+                 FROM sidecar_markers
+                 WHERE result_uuid LIKE ?1||'%'
+                 ORDER BY run_idx, marker_idx",
+                None,
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(crate::sidecar::Marker {
                 marker_idx: row.get(0)?,
                 timestamp_us: row.get(1)?,
                 name: row.get(2)?,
             })
-        })?;
+        };
+        let rows = match run_filter {
+            Some(idx) => stmt.query_map(rusqlite::params![uuid_prefix, idx], map_row)?,
+            None => stmt.query_map(rusqlite::params![uuid_prefix], map_row)?,
+        };
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
     }
 

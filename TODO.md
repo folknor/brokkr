@@ -13,84 +13,7 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ---
 
-## Bugs
-
-### ~~`run_curl_timed` silently defaults to 0.0~~ FIXED
-`nidhogg/bench_api.rs`: now returns `DevError::Verify` if `time_total` can't be parsed.
-
-### ~~`run_passthrough_timed` loses signal-kill information~~ FIXED
-`output.rs`: now returns `DevError::Subprocess` with signal number and name (SIGKILL, SIGTERM, SIGSEGV) when a process is killed by a signal.
-
-### ~~`serde_json::Error` maps to `DevError::Config`~~ FIXED
-`error.rs`: blanket `From<serde_json::Error>` now maps to `DevError::Build`. Nidhogg API response parsing uses explicit `.map_err()` to `DevError::Verify`.
-
----
-
-## Config validation
-
-### ~~No `deny_unknown_fields` on config structs~~ FIXED
-`config.rs`: added `#[serde(deny_unknown_fields)]` to `HostConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `PmtilesEntry`.
-
-### ~~`sha256` + `xxhash` coexistence silently accepted~~ FIXED
-`config.rs`: `deny_unknown_fields` + serde alias causes duplicate field rejection. Added test.
-
-### ~~No validation of empty file names~~ FIXED
-`config.rs`: `validate_datasets()` rejects empty file names at parse time with a clear error path.
-
-### ~~No bbox format validation~~ FIXED
-`resolve.rs`: `validate_bbox()` checks for exactly 4 comma-separated floats.
-
-### ~~`resolve_nidhogg_data_dir` does not check directory existence~~ FIXED
-`resolve.rs`: now checks `path.exists()` like the other resolvers.
-
----
-
-## Code duplication
-
-### ~~resolve_pbf/osc/pmtiles share identical 5-step pattern~~ FIXED
-`resolve.rs`: `FileEntry` trait + `resolve_entry_path` / `resolve_default_entry_path` generic helpers replace 3 resolve functions and 2 default resolvers.
-
-### ~~env.rs dataset check loops are identical~~ FIXED
-`env.rs`: `check_file_entries` generic helper replaces 3 identical loops using the `FileEntry` trait.
-
-### ~~JSON element-count parsing repeated in 4 nidhogg files~~ FIXED
-`client.rs`: `element_count()` helper used by `bench_api.rs`, `verify_batch.rs`, `verify_readonly.rs`.
-
-### ~~Geocode response parsing repeated in 3 nidhogg files~~ FIXED
-`client.rs`: `geocode_top_name()` helper used by `geocode.rs`, `verify_geocode.rs`.
-
-### ~~Path-to-string conversion boilerplate in nidhogg~~ FIXED
-`client.rs`: `path_str()` helper replaces 7 instances across `ingest.rs`, `hotpath.rs`, `profile.rs`, `bench_ingest.rs`, `update.rs`.
-
----
-
-## Inconsistencies
-
-### ~~Double hashing on mismatch in env.rs~~ FIXED
-`env.rs`: `check_hash_status` now calls `cached_xxh128` once and compares directly.
-
-### ~~io_uring status in env.rs incomplete~~ FIXED
-`env.rs`: `check_uring_blocked` now checks all 3 kernel parameters (kill switch + both AppArmor restrictions), matching `preflight.rs`.
-
----
-
-## Fragility
-
-### ~~bench_tiles startup detection via string matching~~ FIXED
-`nidhogg/bench_tiles.rs`: now uses case-insensitive match on "listening" instead of exact `"Listening on"` string.
-
-### ~~`find_executable` fallback is order-dependent~~ FIXED
-`build.rs`: when `expected_name` is `None`, now requires exactly one executable — errors with a clear message if multiple are found instead of picking the last one.
-
-### ~~All nidhogg test data hardcoded to Denmark~~ FIXED
-`bench_api`, `verify_batch`, `verify_readonly`: queries are now derived from the dataset bbox in `brokkr.toml` via `client::build_api_queries()` / `build_batch_queries()`. Geocode queries remain as user-supplied with Denmark defaults (geocode terms are inherently locale-specific).
-
----
-
 ## Backlog
-
-### ~~Sidecar: extend to --hotpath/--alloc and elivagar/nidhogg~~ FIXED
-Sidecar is now always-on for all measured modes. `--sidecar` flag removed. `run_external`, `run_external_with_kv`, and `run_hotpath_capture` all run the sidecar automatically. Nidhogg bench paths (Api, Tiles) don't get sidecar since they don't run external binaries via the harness.
 
 ### Sidecar: store best_run_idx in DB
 
@@ -99,26 +22,6 @@ The benchmark result is best-of-N but all N sidecar runs are stored under the sa
 ### Sidecar: result+sidecar persistence is not atomic
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
-
-### ~~Sidecar: --timeline --phase <name> filter~~ FIXED
-Implemented with exact, base-name (STAGE2 → STAGE2_START..STAGE2_END), and substring matching.
-
-### ~~Sidecar: --timeline --range <start>..<end> filter~~ FIXED
-Implemented with seconds (e.g. `--range 10.0..82.0`). Composes with all other flags.
-
-### ~~Sidecar: --timeline --stat <field>~~ FIXED
-Computes min/max/avg/p50/p95. Composes with --phase, --range, --where.
-
-Also implemented but not in original TODO: `--fields`, `--every`, `--where`, `--head`, `--tail` for agent-friendly pipe-free querying. Time output changed from microseconds to fractional seconds.
-
-### ~~Sidecar: --markers --phases~~ FIXED
-Shows START/END pairs with duration, peak RSS, peak anon, and peak majflt delta from samples.
-
-### ~~Sidecar: --compare-timeline~~ FIXED
-Phase-aligned comparison of two runs with duration, peak anon, disk read, and delta %.
-
-### ~~Sidecar: no foreign keys on sidecar tables~~ WON'T FIX
-Sidecar data is now in a separate sidecar.db — no cross-DB foreign keys possible. Orphaned rows are harmless and sidecar.db is gitignored/local-only.
 
 ### Make default binary configurable per-project in brokkr.toml
 
@@ -167,9 +70,6 @@ Makes performance triage easier without external tooling.
 
 ## CLI redesign remaining issues
 
-### ~~Elivagar/nidhogg default mode runs through full harness~~ FIXED
-All three projects now have lightweight run paths that skip DB and dirty-tree checks. Elivagar uses `build_args` from `ElivagarCommand`; nidhogg Ingest has `run_nidhogg_ingest_run`. Api/Tiles still go through the bench path in run mode (no meaningful lightweight alternative — Api queries a server, Tiles manages a server lifecycle).
-
 ### Suite without --bench stores results in DB
 `brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
 
@@ -179,20 +79,23 @@ All three projects now have lightweight run paths that skip DB and dirty-tree ch
 ### Standalone extract commands use hardcoded Copenhagen bbox
 `ExtractSimple/Complete/Smart` (bench_commands variants) hardcode `12.4,55.6,12.7,55.8`. The `Extract { strategy }` variant uses dataset bbox. Pre-existing, intentional for consistent benchmarking.
 
-### ~~--bench 0 not validated early~~ FIXED
-`resolve_mode()` now rejects zero run counts upfront.
+### Duplicate `runs` field on MeasureRequest and MeasureMode
+`MeasureMode` has `runs` inside each variant (`Bench { runs }`, `Hotpath { runs }`, `Alloc { runs }`), AND `MeasureRequest` has a top-level `runs: usize` field, always set to the same value via `runs: mm.runs()`. One source of truth would be cleaner — either remove from request and use `req.mode.runs()`, or remove from variants and keep on request.
 
-### ~~Nidhogg hotpath ignores command-specific context~~ FIXED
-Hotpath dispatch now goes through the dispatch layer via `run_nidhogg_hotpath`, uses `command.id()` for variant naming, and `supports_hotpath()` correctly blocks Api/Tiles. The hotpath always runs ingest (the only nidhogg command that supports it), but it's no longer a disconnected generic function.
+### Bench-only commands (read/write/merge) not on unified dispatch
+`Read`, `Write`, and `MergeBench` use `BenchOnlyModeArgs` instead of `ModeArgs`, and their dispatch goes through `pbfhogg::cmd::bench_read` etc. directly, not through `run_pbfhogg_command_with_params`. They don't get the unified dispatch benefits (sidecar on run_external happens to work because the harness methods have it, but the dispatch pattern is inconsistent).
 
-### ~~Remove --runs from elivagar/nidhogg CLI variants~~ FIXED
-Dead `--runs` flags were removed in an earlier commit (e71a4cc).
+### MeasureMode::Run comment says "no lockfile" but Run acquires one
+`measure.rs:23` comment says "No lockfile, no DB" but `run_pbfhogg_run` creates a `BenchContext` which acquires the lockfile via `context.rs:109`. Doc/behavior mismatch.
 
-### ~~read/write/merge expose unsupported --hotpath/--alloc flags~~ FIXED
-Read/write/merge now use `BenchOnlyModeArgs` which only exposes `--bench`, `--verbose`, `--commit`, `--features`, `--force`.
+### Project::Other memory leak
+`config.rs:221`: `Project::Other(Box::leak(other.to_owned().into_boxed_str()))` leaks memory. Called once at startup so technically fine, but would leak in a loop (tests). A `Cow<'static, str>` or `String` in the `Other` variant would be cleaner. The `Copy` derive on `Project` forces the leak.
 
-### ~~read/write/merge expose dead --no-mem-check flag~~ FIXED
-Removed along with `--hotpath`/`--alloc` by switching to `BenchOnlyModeArgs`.
+### validate_since tautology
+`cli.rs`: `s[..10].len() == 10` is always true when `s.len() == 19`. The recursive `validate_since(&s[..10])` call works but is unnecessarily clever. Dead code in the check.
+
+### hostname() called multiple times per run
+`config::hostname()` calls `libc::gethostname()` via FFI every time. Called from `resolve_paths`, `host_features`, `record_history`, `nidhogg/cmd.rs`. Cheap but could be called once during config loading and stored on `DevConfig`.
 
 ### check does not really forward args raw to cargo test
 `brokkr check` help says extra args are forwarded raw to `cargo test`, but every invocation runs clippy first. That means `brokkr check -- --help` and single-test workflows are blocked by clippy failures and do not behave like a clean cargo-test passthrough. The help text should be tightened or the command split.

@@ -170,6 +170,7 @@ impl BenchHarness {
         let fifo_path_str = fifo.path_str()?.to_owned();
 
         let mut best_ms: Option<i64> = None;
+        let mut best_run_idx: usize = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
 
@@ -208,12 +209,13 @@ impl BenchHarness {
             if exit_err.is_some() {
                 // Store sidecar data from the failed run before propagating.
                 drop(fifo);
-                self.store_sidecar(None, &sidecar_runs).ok();
+                self.store_sidecar(None, &sidecar_runs, i).ok();
                 return Err(exit_err.unwrap());
             }
 
             if best_ms.is_none_or(|best| ms < best) {
                 best_ms = Some(ms);
+                best_run_idx = i;
             }
         }
 
@@ -230,7 +232,7 @@ impl BenchHarness {
         };
 
         let uuid = self.record_result(config, &bench_result)?;
-        self.store_sidecar(uuid.as_deref(), &sidecar_runs)?;
+        self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx)?;
 
         Ok(bench_result)
     }
@@ -308,6 +310,7 @@ impl BenchHarness {
 
         let mut best: Option<BenchResult> = None;
         let mut best_stderr: Vec<u8> = Vec::new();
+        let mut best_run_idx: usize = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
 
@@ -335,7 +338,7 @@ impl BenchHarness {
             let exit_err = captured.check_success(&prog_str).err();
             if let Some(err) = exit_err {
                 drop(fifo);
-                self.store_sidecar(None, &sidecar_runs).ok();
+                self.store_sidecar(None, &sidecar_runs, i).ok();
                 return Err(err);
             }
 
@@ -345,6 +348,7 @@ impl BenchHarness {
                 .is_none_or(|b| result.elapsed_ms < b.elapsed_ms);
             if is_new_best {
                 best_stderr = captured.stderr;
+                best_run_idx = i;
             }
             best = Some(pick_best(best, result));
         }
@@ -354,10 +358,7 @@ impl BenchHarness {
         let best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
-        // Store sidecar data (uses the result UUID once recorded, or before for raw variant).
-        // For _raw, the caller records — sidecar storage deferred to caller.
-        // For simplicity, store with a placeholder now; the UUID is set on record_result.
-        self.store_sidecar(None, &sidecar_runs)?;
+        self.store_sidecar(None, &sidecar_runs, best_run_idx)?;
 
         Ok((best, best_stderr))
     }
@@ -392,6 +393,9 @@ impl BenchHarness {
 
     /// Store sidecar data in the separate sidecar.db.
     ///
+    /// `best_run_idx` records which of the N runs produced the reported
+    /// elapsed_ms, so `--timeline` defaults to showing the right run.
+    ///
     /// When `uuid` is `None` (dirty tree or failed run), generates a fresh
     /// UUID and updates the `dirty` latest pointer so `brokkr results dirty`
     /// always finds the most recent unstored run.
@@ -399,6 +403,7 @@ impl BenchHarness {
         &self,
         uuid: Option<&str>,
         sidecar_runs: &[crate::sidecar::SidecarData],
+        best_run_idx: usize,
     ) -> Result<(), DevError> {
         let sidecar_db_path = self.db_dir.join("sidecar.db");
         let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
@@ -424,6 +429,7 @@ impl BenchHarness {
         for (i, data) in sidecar_runs.iter().enumerate() {
             sidecar_db.store_run(&store_uuid, i, data)?;
         }
+        sidecar_db.store_meta(&store_uuid, best_run_idx, sidecar_runs.len())?;
 
         if is_dirty {
             sidecar_db.set_latest("dirty", &store_uuid)?;

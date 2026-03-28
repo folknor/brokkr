@@ -1,6 +1,6 @@
 # brokkr
 
-Shared development tooling for pbfhogg, elivagar, nidhogg, and litehtml-rs. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
+Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, and sluggrs. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
 
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
@@ -33,8 +33,8 @@ Single crate, single binary. No workspace.
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
 - `src/request.rs` — `ResultsQuery` struct for the results command
-- `src/db/` — ResultsDb, schema, migrations, queries, formatting, comparison
-- `src/sidecar.rs` — Monitoring sidecar: `/proc` sampling, FIFO marker protocol, `run_sidecar()`, `SidecarFifo`, `SidecarRunResult`. Activated via `--bench --sidecar`
+- `src/db/` — ResultsDb, SidecarDb, schema, migrations, queries, formatting, comparison
+- `src/sidecar.rs` — Monitoring sidecar: `/proc` sampling, FIFO marker protocol, `run_sidecar()`, `SidecarFifo`, `SidecarRunResult`. Always-on for all measured modes
 - `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners (`run_captured`, `spawn_captured`, `run_passthrough_timed`)
 - `src/error.rs` — `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/lockfile.rs` — `LockGuard` (via `OwnedFd`) for exclusive access
@@ -112,14 +112,15 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 Every measurable command is a top-level brokkr subcommand. Measurement mode is a flag:
 
 ```
-brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [--sidecar] [command options]
+brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
 ```
 
 - No flag — build, run once, print timing. Acquires lockfile, no DB storage.
 - `--bench` — full benchmark: lockfile, 3 runs (or N), best-of-N stored in DB.
 - `--hotpath` — function-level timing via hotpath feature. 1 run (or N).
 - `--alloc` — per-function allocation tracking via hotpath-alloc feature. 1 run (or N).
-- `--sidecar` — attach monitoring sidecar that samples `/proc` metrics at 100ms. Requires `--bench`. Profile data stored in `sidecar_samples`/`sidecar_markers`/`sidecar_summary` tables alongside benchmark results. Child process receives `BROKKR_MARKER_FIFO` env var for phase markers.
+
+All measured modes automatically run a sidecar that samples `/proc` metrics at 100ms and provides `BROKKR_MARKER_FIFO` for phase markers. Sidecar data is stored in `.brokkr/sidecar.db` (gitignored). Sidecar data is preserved even when the child is OOM-killed.
 
 Dataset paths resolve from `brokkr.toml` automatically. All flags go after the command name.
 
@@ -184,13 +185,13 @@ Results in `.brokkr/results.db` per project (gitignored).
 
 ## Sidecar profiler
 
-The `--sidecar` flag attaches a monitoring sidecar to `--bench` runs. The sidecar samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and reads phase markers from a FIFO. All data is buffered in memory during the benchmark and bulk-inserted to SQLite after the child exits.
+The sidecar is always-on for all measured modes. It samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and reads phase markers from a FIFO. All data is buffered in memory during the run and bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits. Results DB (`.brokkr/results.db`) stays small and git-tracked.
 
-Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external_with_sidecar`), `src/db/write.rs` (`store_sidecar_run`), `src/db/schema.rs` + `src/db/migrate.rs` (v8 schema).
+Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`, `run_external_with_kv`, `run_hotpath_capture` — all sidecar-enabled), `src/db/sidecar.rs` (`SidecarDb`).
 
-The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement.
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement. Sidecar data is stored even when the child fails (OOM, signal, non-zero exit).
 
-Currently supports pbfhogg `--bench` via unified dispatch only. Elivagar, nidhogg, and old-style pbfhogg bench commands (read/write/merge) warn and ignore the flag.
+Query sidecar data with `brokkr results <uuid> --timeline` (JSONL), `--timeline --summary` (phase table), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
 
 ## Removed features
 

@@ -542,6 +542,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             head,
             tail,
             r#where,
+            run,
             stat,
             phase,
             range,
@@ -567,6 +568,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 tail,
                 where_cond: r#where,
                 stat,
+                run,
                 phase,
                 range,
                 compare_timeline,
@@ -1125,14 +1127,16 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         };
         let uuid_a = &uuids[0];
         let uuid_b = &uuids[1];
-        let samples_a = sdb.query_samples(uuid_a)?;
-        let samples_b = sdb.query_samples(uuid_b)?;
+        let (best_a, _) = sdb.query_meta(uuid_a);
+        let (best_b, _) = sdb.query_meta(uuid_b);
+        let samples_a = sdb.query_samples(uuid_a, Some(best_a))?;
+        let samples_b = sdb.query_samples(uuid_b, Some(best_b))?;
         if samples_a.is_empty() || samples_b.is_empty() {
             output::result_msg("one or both results have no sidecar data");
             return Ok(());
         }
-        let markers_a = sdb.query_markers(uuid_a)?;
-        let markers_b = sdb.query_markers(uuid_b)?;
+        let markers_a = sdb.query_markers(uuid_a, Some(best_a))?;
+        let markers_b = sdb.query_markers(uuid_b, Some(best_b))?;
         print_compare_timeline(
             uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b,
         );
@@ -1146,15 +1150,33 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 output::result_msg("no sidecar.db found");
                 return Ok(());
             };
-            let mut samples = sdb.query_samples(uuid_prefix)?;
+
+            // Resolve --run: "all" → None (all runs), N → Some(N), absent → best run.
+            let (best_idx, total) = sdb.query_meta(uuid_prefix);
+            let run_filter = match q.run.as_deref() {
+                Some("all") => None,
+                Some(n) => Some(n.parse::<usize>().map_err(|_| {
+                    DevError::Config(format!("--run: expected a number or 'all', got '{n}'"))
+                })?),
+                None => Some(best_idx),
+            };
+            if total > 1 {
+                let showing = match run_filter {
+                    Some(idx) => format!("run {idx}/{total}"),
+                    None => format!("all {total} runs"),
+                };
+                output::sidecar_msg(&format!("showing {showing} (use --run to override)"));
+            }
+
+            let mut samples = sdb.query_samples(uuid_prefix, run_filter)?;
             if samples.is_empty() {
                 output::result_msg("no sidecar data for this result");
             } else if q.summary {
-                let markers = sdb.query_markers(uuid_prefix)?;
+                let markers = sdb.query_markers(uuid_prefix, run_filter)?;
                 print_phase_summary(&samples, &markers);
             } else {
                 if let Some(ref phase_name) = q.phase {
-                    let markers = sdb.query_markers(uuid_prefix)?;
+                    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
                     let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
                     samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
                 }
@@ -1186,11 +1208,26 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 output::result_msg("no sidecar.db found");
                 return Ok(());
             };
-            let markers = sdb.query_markers(uuid_prefix)?;
+            let (best_idx, total) = sdb.query_meta(uuid_prefix);
+            let run_filter = match q.run.as_deref() {
+                Some("all") => None,
+                Some(n) => Some(n.parse::<usize>().map_err(|_| {
+                    DevError::Config(format!("--run: expected a number or 'all', got '{n}'"))
+                })?),
+                None => Some(best_idx),
+            };
+            if total > 1 {
+                let showing = match run_filter {
+                    Some(idx) => format!("run {idx}/{total}"),
+                    None => format!("all {total} runs"),
+                };
+                output::sidecar_msg(&format!("showing {showing} (use --run to override)"));
+            }
+            let markers = sdb.query_markers(uuid_prefix, run_filter)?;
             if markers.is_empty() {
                 output::result_msg("no sidecar markers for this result");
             } else if q.phases {
-                let samples = sdb.query_samples(uuid_prefix)?;
+                let samples = sdb.query_samples(uuid_prefix, run_filter)?;
                 print_marker_phases(&markers, &samples);
             } else if q.durations {
                 print_marker_durations(&markers);
