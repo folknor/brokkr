@@ -15,6 +15,12 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Backlog
 
+### Counter diffs in --compare-timeline
+Include counter values at matching phase boundaries in the comparison table. Currently `--compare-timeline` only shows duration, peak anon, and disk read.
+
+### --phase filter for --markers --counters
+`--phase` currently requires `--timeline` (clap constraint). Adding `--markers --counters --phase STAGE4` to show only counters within a phase would be useful for targeted analysis.
+
 ### Sidecar: result+sidecar persistence is not atomic
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
