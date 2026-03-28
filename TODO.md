@@ -15,10 +15,6 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Backlog
 
-### Sidecar: store best_run_idx in DB
-
-The benchmark result is best-of-N but all N sidecar runs are stored under the same UUID. There is no column recording which `run_idx` produced the reported elapsed_ms. Add a `best_run_idx` column to `sidecar_summary` or `runs` so analysis tools can identify the authoritative run.
-
 ### Sidecar: result+sidecar persistence is not atomic
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
@@ -34,6 +30,12 @@ If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchma
 ### `--mem` systemd-run wrapping for `brokkr run`
 
 The old `run_elivagar` had `--mem 8G` support via systemd-run. Could be promoted to a project-agnostic `brokkr run --mem 8G` flag in `src/cli.rs`.
+
+### Project::Other memory leak
+`config.rs`: `Project::Other(Box::leak(...))` leaks memory. Called once at startup so technically fine, but would leak in a loop (tests). The `Copy` derive on `Project` forces the leak.
+
+### hostname() called multiple times per run
+`config::hostname()` calls `libc::gethostname()` via FFI every time. Cheap but could be called once during config loading and stored on `DevConfig`.
 
 ---
 
@@ -68,7 +70,7 @@ Makes performance triage easier without external tooling.
 
 ---
 
-## CLI redesign remaining issues
+## CLI remaining issues
 
 ### Suite without --bench stores results in DB
 `brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
@@ -79,45 +81,25 @@ Makes performance triage easier without external tooling.
 ### Standalone extract commands use hardcoded Copenhagen bbox
 `ExtractSimple/Complete/Smart` (bench_commands variants) hardcode `12.4,55.6,12.7,55.8`. The `Extract { strategy }` variant uses dataset bbox. Pre-existing, intentional for consistent benchmarking.
 
-### Duplicate `runs` field on MeasureRequest and MeasureMode
-`MeasureMode` has `runs` inside each variant (`Bench { runs }`, `Hotpath { runs }`, `Alloc { runs }`), AND `MeasureRequest` has a top-level `runs: usize` field, always set to the same value via `runs: mm.runs()`. One source of truth would be cleaner — either remove from request and use `req.mode.runs()`, or remove from variants and keep on request.
-
-### Bench-only commands (read/write/merge) not on unified dispatch
-`Read`, `Write`, and `MergeBench` use `BenchOnlyModeArgs` instead of `ModeArgs`, and their dispatch goes through `pbfhogg::cmd::bench_read` etc. directly, not through `run_pbfhogg_command_with_params`. They don't get the unified dispatch benefits (sidecar on run_external happens to work because the harness methods have it, but the dispatch pattern is inconsistent).
-
-### MeasureMode::Run comment says "no lockfile" but Run acquires one
-`measure.rs:23` comment says "No lockfile, no DB" but `run_pbfhogg_run` creates a `BenchContext` which acquires the lockfile via `context.rs:109`. Doc/behavior mismatch.
-
-### Project::Other memory leak
-`config.rs:221`: `Project::Other(Box::leak(other.to_owned().into_boxed_str()))` leaks memory. Called once at startup so technically fine, but would leak in a loop (tests). A `Cow<'static, str>` or `String` in the `Other` variant would be cleaner. The `Copy` derive on `Project` forces the leak.
-
 ### validate_since tautology
 `cli.rs`: `s[..10].len() == 10` is always true when `s.len() == 19`. The recursive `validate_since(&s[..10])` call works but is unnecessarily clever. Dead code in the check.
-
-### hostname() called multiple times per run
-`config::hostname()` calls `libc::gethostname()` via FFI every time. Called from `resolve_paths`, `host_features`, `record_history`, `nidhogg/cmd.rs`. Cheap but could be called once during config loading and stored on `DevConfig`.
 
 ### check does not really forward args raw to cargo test
 `brokkr check` help says extra args are forwarded raw to `cargo test`, but every invocation runs clippy first. That means `brokkr check -- --help` and single-test workflows are blocked by clippy failures and do not behave like a clean cargo-test passthrough. The help text should be tightened or the command split.
 
 ---
 
+## CLI flattening follow-ups
+
+### `test` and `list` are generic top-level names
+These only work for litehtml/sluggrs but are natural names users might try in any project. `brokkr test` from pbfhogg gives a project-gating error, which could confuse users expecting it to run `cargo test` (that's `brokkr check`). No immediate fix needed — the error message now includes the current project and is clear.
+
+### Help output lacks section headers
+With 55+ top-level commands, `--help` is a wall of text. `display_order` groups by project but there are no visual separators. Clap's `next_help_heading` could inject section headers like "Visual Testing Commands:", "Litehtml Commands:", etc.
+
+---
+
 ## CLI sync backlog
-
-Last synced at brokkr commit `e9bb402` (2026-03-03). Both pbfhogg and elivagar have expanded significantly since then.
-
-### pbfhogg: new commands missing from `bench commands`
-
-6 new CLI commands have no brokkr benchmark or verify coverage:
-
-- `renumber` — reassign element IDs sequentially with ref remapping
-- `merge-pbf` — merge N sorted PBFs with blob-level passthrough and dedup
-- `merge-changes` — merge multiple OSC files into one, with simplify mode
-- `getparents` — reverse lookup for ways/relations referencing given IDs
-- `tags-filter-osc` — filter OSC changes by tag expressions (with delete passthrough)
-- `time-filter` — filter history PBF to a snapshot at a timestamp
-
-`is-indexed` is also new but too trivial to benchmark (instant check).
 
 ### pbfhogg: new flags on existing commands
 
@@ -149,22 +131,3 @@ The following elivagar flags are not forwarded through `bench self`, `hotpath`, 
 - Memory budgets (`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget`) — tuning knobs, lower priority
 
 No schema changes needed: `bench_self.rs` already stores flags as `meta.*` kv pairs in `run_kv` and the full command line in `cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>", ...)` entries in the metadata vec.
-
----
-
-## CLI flattening follow-ups
-
-### `test` and `list` are generic top-level names
-These only work for litehtml/sluggrs but are natural names users might try in any project. `brokkr test` from pbfhogg gives a project-gating error, which could confuse users expecting it to run `cargo test` (that's `brokkr check`). No immediate fix needed — the error message now includes the current project and is clear.
-
-### No migration from `brokkr litehtml <cmd>` / `brokkr sluggrs <cmd>`
-The old subcommand forms no longer parse. Scripts and shell history referencing them break with no deprecation warning. Could add hidden `Litehtml` and `Sluggrs` command variants that print a migration hint before erroring.
-
-### `html-extract` naming inconsistent
-pbfhogg has `extract-simple`, `extract-complete`, `extract-smart` (action-first). Litehtml has `html-extract` (project-first). `extract-html` would be more consistent with the pbfhogg family, but this is cosmetic.
-
-### `--suite` and `--recapture` silently accepted for sluggrs
-These flags are litehtml-only but clap accepts them on the shared `Test` variant for any project. Running `brokkr test --suite foo` from sluggrs silently ignores `--suite`. Help text says "(litehtml only)" which mitigates this. A runtime warning would be better.
-
-### Help output lacks section headers
-With 55+ top-level commands, `--help` is a wall of text. `display_order` groups by project but there are no visual separators. Clap's `next_help_heading` could inject section headers like "Visual Testing Commands:", "Litehtml Commands:", etc.

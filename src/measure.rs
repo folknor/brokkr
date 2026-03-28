@@ -62,8 +62,6 @@ pub struct MeasureRequest<'a> {
     pub dataset: &'a str,
     /// PBF variant from `--variant` (e.g. `"indexed"`, `"raw"`).
     pub variant: &'a str,
-    /// Number of measurement runs.
-    pub runs: usize,
     /// Extra cargo features from CLI `--features` and host config.
     pub features: &'a [String],
     /// Allow benchmarking on a dirty git tree.
@@ -75,6 +73,11 @@ pub struct MeasureRequest<'a> {
 }
 
 impl MeasureRequest<'_> {
+    /// Number of measurement runs for this request.
+    pub fn runs(&self) -> usize {
+        self.mode.runs()
+    }
+
     /// Whether we are in allocation profiling mode.
     pub fn is_alloc(&self) -> bool {
         matches!(self.mode, MeasureMode::Alloc { .. })

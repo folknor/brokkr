@@ -179,7 +179,7 @@ pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(),
     super::bench_api::run(
         &ctx.harness,
         port,
-        req.runs,
+        req.runs(),
         query,
         input_file,
         input_mb,
@@ -251,7 +251,7 @@ pub(crate) fn bench_tiles(
         tiles_file,
         tiles_hash.as_deref(),
         tiles_mb,
-        req.runs,
+        req.runs(),
         req.project_root,
     )
 }

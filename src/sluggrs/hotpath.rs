@@ -136,7 +136,7 @@ pub(crate) fn cmd(req: &MeasureRequest) -> Result<(), DevError> {
     run(
         &harness,
         &binary,
-        req.runs,
+        req.runs(),
         req.is_alloc(),
         effective_root,
         &paths.scratch_dir,

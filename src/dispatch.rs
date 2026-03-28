@@ -128,7 +128,7 @@ fn run_pbfhogg_wallclock(
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
-        runs: req.runs,
+        runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
             &arg_refs,
@@ -139,7 +139,7 @@ fn run_pbfhogg_wallclock(
     output::bench_msg(&format!(
         "{} ({file_mb:.0} MB), {} run(s)",
         command.id(),
-        req.runs,
+        req.runs(),
     ));
 
     ctx.harness
@@ -222,7 +222,7 @@ fn run_pbfhogg_hotpath(
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
-        runs: req.runs,
+        runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
             &subprocess_args,
@@ -559,7 +559,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
     output::bench_msg(&format!(
         "{} ({file_mb:.0} MB), {} run(s)",
         command.id(),
-        req.runs,
+        req.runs(),
     ));
 
     let mut bench_config = BenchConfig {
@@ -577,7 +577,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         },
         cargo_features: None,
         cargo_profile: "release".into(),
-        runs: req.runs,
+        runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
             &arg_refs,
@@ -648,7 +648,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
     let args = command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    output::bench_msg(&format!("{}, {} run(s)", command.id(), req.runs));
+    output::bench_msg(&format!("{}, {} run(s)", command.id(), req.runs()));
 
     let config = BenchConfig {
         command: command.result_command().into(),
@@ -757,7 +757,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 input_mb: Some(file_mb),
                 cargo_features: None,
                 cargo_profile: "release".into(),
-                runs: req.runs,
+                runs: req.runs(),
                 cli_args: Some(harness::format_cli_args(&binary_str, &arg_refs)),
                 metadata,
             };
@@ -995,7 +995,7 @@ fn run_nidhogg_ingest_bench(
 
     output::bench_msg(&format!(
         "nidhogg ingest: {basename} ({file_mb:.0} MB), {} run(s)",
-        req.runs,
+        req.runs(),
     ));
 
     let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
@@ -1007,7 +1007,7 @@ fn run_nidhogg_ingest_bench(
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
-        runs: req.runs,
+        runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
             &args,
@@ -1103,7 +1103,7 @@ fn run_nidhogg_hotpath(
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
-        runs: req.runs,
+        runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
             &args,

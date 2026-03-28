@@ -34,7 +34,7 @@ pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), De
         &ctx.binary,
         &pbf_path,
         file_mb,
-        req.runs,
+        req.runs(),
         &modes,
         req.project_root,
     )
@@ -61,7 +61,7 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         &ctx.binary,
         &pbf_path,
         file_mb,
-        req.runs,
+        req.runs(),
         &compressions,
         req.project_root,
     )
@@ -105,7 +105,7 @@ pub(crate) fn bench_merge(
         &pbf_path,
         &osc_path,
         file_mb,
-        req.runs,
+        req.runs(),
         &compressions,
         uring,
         &ctx.paths.scratch_dir,
@@ -131,7 +131,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         effective,
         &pbf_path,
         file_mb,
-        req.runs,
+        req.runs(),
         req.dataset,
     )
 }
