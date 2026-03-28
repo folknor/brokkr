@@ -21,7 +21,7 @@ Single crate, single binary. No workspace.
 ### Source layout
 
 - `src/main.rs` — `main()`, command dispatch, `run_measured()`, `resolve_mode()`
-- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `LitehtmlCommand`, `Command::as_pbfhogg()`
+- `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`. All commands are top-level — no subcommand enums for litehtml/sluggrs
 - `src/measure.rs` — `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
 - `src/dispatch.rs` — Unified dispatch for all three projects: `run_pbfhogg_command_with_params()`, `run_elivagar_command()`, `run_nidhogg_command()`. Each routes through run/bench/hotpath/alloc based on command enum + mode. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions due to divergent lifecycles
 - `src/pbfhogg/commands.rs` — `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` — single source of truth for all pbfhogg command argument construction
@@ -134,17 +134,19 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 - `passthrough` — build and run with raw passthrough args (hidden, for ad-hoc use)
 
-## Litehtml commands (`brokkr litehtml <subcommand>`)
+## Litehtml commands
 
 Gated to `project = "litehtml-rs"`. Visual reference testing — renders HTML fixtures through a pipeline binary, compares against Chrome screenshots.
 
-- `test [fixture] [--suite S] [--all] [--recapture]` — run fixtures against Chrome reference artifacts. Builds pipeline binary, produces pixel diff + element match comparison.
+All litehtml and sluggrs commands are top-level (no `brokkr litehtml` or `brokkr sluggrs` namespace). Shared visual testing commands (`test`, `list`, `approve`, `report`, `visual-status`) dispatch to litehtml or sluggrs based on the detected project.
+
+- `test [ID] [--suite S] [--all] [--recapture]` — run fixtures against Chrome reference artifacts. Builds pipeline binary, produces pixel diff + element match comparison. `--suite` and `--recapture` are litehtml-only.
 - `list` — show configured fixtures with tags, expected outcome, and approval state
-- `approve <fixture>` — record current divergence as accepted baseline (requires clean git tree)
+- `approve <ID>` — record current divergence as accepted baseline (requires clean git tree)
 - `report <run_id>` — show results table for a past test run
-- `status` — dashboard: all fixtures with approved baseline vs last run, delta, improvements
+- `visual-status` — dashboard: all fixtures with approved baseline vs last run, delta, improvements
 - `prepare <input.html> <output.html>` — normalize raw email HTML into self-contained fixture (replaces images with correctly-sized gray PNGs, strips background-image/external CSS, injects Ahem font, pretty-prints). Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`.
-- `extract <input.html> [--selector S | --from S --to S] <output.html>` — extract sub-fixture from prepared HTML. `--selector` for single element, `--from`/`--to` for sibling range. Preserves ancestor context and table cell stubs.
+- `html-extract <input.html> [--selector S | --from S --to S] <output.html>` — extract sub-fixture from prepared HTML. `--selector` for single element, `--from`/`--to` for sibling range. Preserves ancestor context and table cell stubs.
 - `outline <input.html> [--depth N] [--full] [--selectors]` — structural overview of prepared HTML showing sections, image dimensions, text previews, and suggested CSS selectors for extract.
 
 ### Litehtml config in brokkr.toml

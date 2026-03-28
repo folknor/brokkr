@@ -798,7 +798,8 @@ Examples:
     /// [litehtml/sluggrs] Run visual tests against reference artifacts
     #[command(display_order = 50)]
     Test {
-        /// Fixture/snapshot ID (or unique prefix)
+        /// Fixture or snapshot ID (or unique prefix)
+        #[arg(value_name = "ID")]
         fixture: Option<String>,
 
         /// Run all fixtures tagged with this suite name (litehtml only)

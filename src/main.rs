@@ -661,7 +661,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     })?;
                     sluggrs::cmd::test(project, &project_root, sluggrs_config, fixture.as_deref(), all)
                 }
-                _ => Err(DevError::Config("'test' is only available for litehtml and sluggrs projects".into()))
+                other => Err(DevError::Config(format!(
+                    "'test' runs visual tests and is only available for litehtml/sluggrs projects (current: {other})"
+                )))
             }
         }
         Command::List => {
@@ -674,7 +676,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
                     sluggrs::cmd::list(project, &project_root, cfg)
                 }
-                _ => Err(DevError::Config("'list' is only available for litehtml and sluggrs projects".into()))
+                other => Err(DevError::Config(format!(
+                    "'list' is only available for litehtml/sluggrs projects (current: {other})"
+                )))
             }
         }
         Command::Approve { fixture } => {
@@ -687,14 +691,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
                     sluggrs::cmd::approve(project, &project_root, cfg, &fixture)
                 }
-                _ => Err(DevError::Config("'approve' is only available for litehtml and sluggrs projects".into()))
+                other => Err(DevError::Config(format!(
+                    "'approve' is only available for litehtml/sluggrs projects (current: {other})"
+                )))
             }
         }
         Command::Report { run_id } => {
             match project {
                 Project::Litehtml => litehtml::cmd::report(project, &project_root, &run_id),
                 Project::Sluggrs => sluggrs::cmd::report(project, &project_root, &run_id),
-                _ => Err(DevError::Config("'report' is only available for litehtml and sluggrs projects".into()))
+                other => Err(DevError::Config(format!(
+                    "'report' is only available for litehtml/sluggrs projects (current: {other})"
+                )))
             }
         }
         Command::VisualStatus => {
@@ -707,7 +715,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
                     sluggrs::cmd::status(project, &project_root, cfg)
                 }
-                _ => Err(DevError::Config("'visual-status' is only available for litehtml and sluggrs projects".into()))
+                other => Err(DevError::Config(format!(
+                    "'visual-status' is only available for litehtml/sluggrs projects (current: {other})"
+                )))
             }
         }
         // ----- litehtml-only commands -----
