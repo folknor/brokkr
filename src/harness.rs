@@ -391,6 +391,10 @@ impl BenchHarness {
     }
 
     /// Store sidecar data in the separate sidecar.db.
+    ///
+    /// When `uuid` is `None` (dirty tree or failed run), generates a fresh
+    /// UUID and updates the `dirty` latest pointer so `brokkr results dirty`
+    /// always finds the most recent unstored run.
     pub fn store_sidecar(
         &self,
         uuid: Option<&str>,
@@ -398,11 +402,35 @@ impl BenchHarness {
     ) -> Result<(), DevError> {
         let sidecar_db_path = self.db_dir.join("sidecar.db");
         let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
-        let store_uuid = uuid.unwrap_or("dirty");
+
+        let (store_uuid, is_dirty) = match uuid {
+            Some(u) => (u.to_owned(), false),
+            None => {
+                // Generate a unique UUID for this dirty/failed run.
+                let mut bytes = [0u8; 16];
+                std::fs::File::open("/dev/urandom")
+                    .and_then(|mut f| {
+                        use std::io::Read;
+                        f.read_exact(&mut bytes)
+                    })
+                    .map_err(DevError::Io)?;
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                (hex, true)
+            }
+        };
+
         for (i, data) in sidecar_runs.iter().enumerate() {
-            sidecar_db.store_run(store_uuid, i, data)?;
+            sidecar_db.store_run(&store_uuid, i, data)?;
         }
-        output::sidecar_msg("profile data stored in sidecar.db");
+
+        if is_dirty {
+            sidecar_db.set_latest("dirty", &store_uuid)?;
+        }
+
+        let short = &store_uuid[..8.min(store_uuid.len())];
+        output::sidecar_msg(&format!("profile data stored in sidecar.db ({short})"));
         Ok(())
     }
 

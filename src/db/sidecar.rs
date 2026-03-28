@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS sidecar_summary (
     wall_time_ms INTEGER,
     PRIMARY KEY (result_uuid, run_idx)
 );
+
+CREATE TABLE IF NOT EXISTS sidecar_latest (
+    key   TEXT NOT NULL PRIMARY KEY,
+    uuid  TEXT NOT NULL
+);
 ";
 
 // ---------------------------------------------------------------------------
@@ -178,15 +183,46 @@ impl SidecarDb {
         Ok(())
     }
 
+    /// Record a UUID as the latest for a given key (e.g. "dirty").
+    ///
+    /// Used so `brokkr results dirty` resolves to the most recent
+    /// dirty/failed run, even though each run gets a unique UUID.
+    pub fn set_latest(&self, key: &str, uuid: &str) -> Result<(), DevError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sidecar_latest (key, uuid) VALUES (?1, ?2)",
+            rusqlite::params![key, uuid],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve a key to its latest UUID, or return the input unchanged.
+    ///
+    /// If `uuid_prefix` matches a key in `sidecar_latest`, returns the
+    /// stored UUID. Otherwise returns the input as-is (for normal UUID
+    /// prefix lookups).
+    pub fn resolve_latest(&self, uuid_prefix: &str) -> String {
+        self.conn
+            .query_row(
+                "SELECT uuid FROM sidecar_latest WHERE key = ?1",
+                rusqlite::params![uuid_prefix],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| uuid_prefix.to_owned())
+    }
+
     // -------------------------------------------------------------------
     // Read
     // -------------------------------------------------------------------
 
     /// Query sidecar samples for a result UUID prefix.
+    ///
+    /// If `uuid_prefix` is a latest-key (e.g. "dirty"), it is resolved
+    /// to the actual UUID first.
     pub fn query_samples(
         &self,
         uuid_prefix: &str,
     ) -> Result<Vec<crate::sidecar::Sample>, DevError> {
+        let uuid_prefix = self.resolve_latest(uuid_prefix);
         let mut stmt = self.conn.prepare(
             "SELECT sample_idx, timestamp_us,
                     rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
@@ -228,10 +264,13 @@ impl SidecarDb {
     }
 
     /// Query sidecar markers for a result UUID prefix.
+    ///
+    /// Resolves latest-keys (e.g. "dirty") before querying.
     pub fn query_markers(
         &self,
         uuid_prefix: &str,
     ) -> Result<Vec<crate::sidecar::Marker>, DevError> {
+        let uuid_prefix = self.resolve_latest(uuid_prefix);
         let mut stmt = self.conn.prepare(
             "SELECT marker_idx, timestamp_us, name
              FROM sidecar_markers
@@ -249,7 +288,10 @@ impl SidecarDb {
     }
 
     /// Check whether sidecar data exists for a result UUID prefix.
+    ///
+    /// Resolves latest-keys (e.g. "dirty") before querying.
     pub fn has_data(&self, uuid_prefix: &str) -> bool {
+        let uuid_prefix = self.resolve_latest(uuid_prefix);
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM sidecar_summary WHERE result_uuid LIKE ?1||'%'",
