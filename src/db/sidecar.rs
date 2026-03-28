@@ -68,6 +68,28 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
 ";
 
 // ---------------------------------------------------------------------------
+// Migrations
+// ---------------------------------------------------------------------------
+
+/// Current sidecar schema version.
+const SIDECAR_VERSION: i64 = 1;
+
+/// Run pending migrations based on `PRAGMA user_version`.
+fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current >= SIDECAR_VERSION {
+        return Ok(());
+    }
+
+    // v0 -> v1: initial schema (handled by CREATE TABLE IF NOT EXISTS in DDL).
+    // Future migrations go here:
+    // if current < 2 { migrate_v1_to_v2(conn)?; }
+
+    conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // SidecarDb
 // ---------------------------------------------------------------------------
 
@@ -77,11 +99,14 @@ pub struct SidecarDb {
 }
 
 impl SidecarDb {
-    /// Open (or create) the sidecar database at `path`.
+    /// Open (or create) the sidecar database at `path`. Creates schema,
+    /// enables WAL mode, and runs pending migrations.
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = rusqlite::Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        run_sidecar_migrations(&conn)?;
         conn.execute_batch(SIDECAR_SCHEMA)?;
+        conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
         Ok(Self { conn })
     }
 
