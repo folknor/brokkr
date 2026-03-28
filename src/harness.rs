@@ -64,12 +64,18 @@ impl BenchHarness {
         project: crate::project::Project,
         lock_command: &str,
         force: bool,
+        wait: bool,
     ) -> Result<Self, DevError> {
-        let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
+        let lock_ctx = crate::lockfile::LockContext {
             project: project.name(),
             command: lock_command,
             project_root: &project_root.display().to_string(),
-        })?;
+        };
+        let lock = if wait {
+            crate::lockfile::acquire_blocking(&lock_ctx)?
+        } else {
+            crate::lockfile::acquire(&lock_ctx)?
+        };
         Self::new_with_lock(lock, paths, project_root, db_root, project, force)
     }
 

@@ -70,6 +70,8 @@ pub struct MeasureRequest<'a> {
     pub mode: MeasureMode,
     /// Skip the OOM memory check.
     pub no_mem_check: bool,
+    /// Wait for the lock instead of failing immediately.
+    pub wait: bool,
 }
 
 impl MeasureRequest<'_> {

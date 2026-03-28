@@ -69,6 +69,7 @@ fn run_pbfhogg_run(
         true,
         &format!("run {}", command.id()),
         true,
+        req.wait,
     )?;
 
     let cmd_ctx =
@@ -111,6 +112,7 @@ fn run_pbfhogg_wallclock(
         true,
         &format!("run {}", command.id()),
         req.force,
+        req.wait,
     )?;
 
     let cmd_ctx =
@@ -186,6 +188,7 @@ fn run_pbfhogg_hotpath(
             if alloc { "alloc" } else { "hotpath" }
         ),
         req.force,
+        req.wait,
     )?;
 
     // OOM check.
@@ -431,6 +434,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 true,
                 &format!("run {}", command.id()),
                 true,
+                req.wait,
             )?;
 
             let pbf_str = if command.needs_pbf() {
@@ -536,6 +540,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         true,
         &format!("bench {}", command.id()),
         req.force,
+        req.wait,
     )?;
 
     let (pbf_path, file_mb) = if command.needs_pbf() {
@@ -623,6 +628,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         req.build_root,
         &format!("bench {}", command.id()),
         req.force,
+        req.wait,
     )?;
 
     let example = command.example().ok_or_else(|| {
@@ -721,6 +727,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 true,
                 &format!("hotpath {}", command.id()),
                 req.force,
+                req.wait,
             )?;
 
             let (pbf_path, file_mb) =
@@ -800,6 +807,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 req.build_root,
                 &format!("hotpath {}", command.id()),
                 req.force,
+                req.wait,
             )?;
 
             let binary = crate::build::cargo_build(
@@ -927,6 +935,7 @@ fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
         true,
         &format!("run {}", "nid-ingest"),
         true,
+        req.wait,
     )?;
 
     let (pbf_path, _) =
@@ -976,6 +985,7 @@ fn run_nidhogg_ingest_bench(
         true,
         &format!("bench {}", command.id()),
         req.force,
+        req.wait,
     )?;
 
     let (pbf_path, file_mb) =
@@ -1069,6 +1079,7 @@ fn run_nidhogg_hotpath(
         true,
         &format!("hotpath {}", command.id()),
         req.force,
+        req.wait,
     )?;
 
     let (pbf_path, file_mb) =

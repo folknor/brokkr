@@ -76,6 +76,56 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     }
 }
 
+/// Acquire an exclusive blocking lock on the global lock file.
+///
+/// If the lock is held, prints a waiting message and blocks until it is
+/// released. On success, writes PID + context to the lock file.
+pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+    let path = lock_path()?;
+    let c_path = path_to_cstring(&path)?;
+    let fd = open_lock_file(&c_path)?;
+
+    // Try non-blocking first to print a message if waiting.
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            let info = read_lock_contents(fd);
+            let desc = match &info {
+                Some(i) => {
+                    let uptime = process_uptime_str(i.pid)
+                        .map(|u| format!(", running {u}"))
+                        .unwrap_or_default();
+                    format!(
+                        "PID {} — {} {} ({}{})",
+                        i.pid, i.project, i.command, i.project_root, uptime
+                    )
+                }
+                None => "unknown process".into(),
+            };
+            crate::output::lock_msg(&format!("waiting for {desc}"));
+
+            // Block until the lock is released.
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if ret != 0 {
+                let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+                return Err(DevError::Lock(format!(
+                    "blocking flock failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            crate::output::lock_msg("lock acquired");
+        } else {
+            let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+            return Err(DevError::Lock(format!("flock failed: {err}")));
+        }
+    }
+
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    write_lock_contents(owned.as_raw_fd(), ctx);
+    Ok(LockGuard { fd: owned })
+}
+
 /// Check the global lock status. Returns `None` if no lock is held.
 ///
 /// If the lock file exists and a flock is held, reads the context.
@@ -127,6 +177,47 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
     Ok(Some(info))
 }
 
+/// Get how long a process has been running, as a human-readable string.
+///
+/// Reads `/proc/{pid}/stat` starttime and compares against system uptime.
+fn process_uptime_str(pid: u32) -> Option<String> {
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    if clk_tck <= 0.0 {
+        return None;
+    }
+
+    // System uptime in seconds.
+    let uptime_str = std::fs::read_to_string("/proc/uptime").ok()?;
+    let uptime_secs: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
+
+    // Process start time in clock ticks since boot.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let comm_end = stat.rfind(')')?;
+    let fields: Vec<&str> = stat[comm_end + 2..].split_whitespace().collect();
+    // Field 19 after comm (index 19 in the post-comm fields) is starttime.
+    let starttime: f64 = fields.get(19)?.parse().ok()?;
+
+    let start_secs = starttime / clk_tck;
+    let elapsed_secs = uptime_secs - start_secs;
+
+    if elapsed_secs < 0.0 {
+        return None;
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let elapsed = elapsed_secs as u64;
+    let hours = elapsed / 3600;
+    let minutes = (elapsed % 3600) / 60;
+
+    Some(if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{elapsed}s")
+    })
+}
+
 /// Check whether a PID is still running.
 fn pid_alive(pid: u32) -> bool {
     // kill(pid, 0) checks existence without sending a signal.
@@ -174,11 +265,18 @@ fn try_flock(fd: RawFd) -> Result<(), DevError> {
     if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
         let info = read_lock_contents(fd);
         match info {
-            Some(info) => Err(DevError::Lock(format!(
-                "already locked by PID {} — {} {} ({})",
-                info.pid, info.project, info.command, info.project_root
-            ))),
-            None => Err(DevError::Lock("already locked by unknown process".into())),
+            Some(info) => {
+                let uptime = process_uptime_str(info.pid)
+                    .map(|u| format!(", running {u}"))
+                    .unwrap_or_default();
+                Err(DevError::Lock(format!(
+                    "already locked by PID {} — {} {} ({}{})\nuse --wait to queue behind the lock",
+                    info.pid, info.project, info.command, info.project_root, uptime
+                )))
+            }
+            None => Err(DevError::Lock(
+                "already locked by unknown process\nuse --wait to queue behind the lock".into(),
+            )),
         }
     } else {
         Err(DevError::Lock(format!("flock failed: {err}")))

@@ -70,6 +70,7 @@ where
             force: mode.force,
             mode: mm,
             no_mem_check: mode.no_mem_check,
+            wait: mode.wait,
         };
         f(&req)
     })
@@ -751,6 +752,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 force: false,
                 mode: mm,
                 no_mem_check: false,
+                wait: false,
             };
             sluggrs::hotpath::cmd(&req)
         }
@@ -2256,6 +2258,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         true,
         "hotpath",
         req.force,
+        req.wait,
     )?;
 
     let alloc = req.is_alloc();

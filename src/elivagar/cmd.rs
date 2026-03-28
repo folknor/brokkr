@@ -15,6 +15,7 @@ pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
         req.build_root,
         "bench planetiler",
         req.force,
+        req.wait,
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -37,6 +38,7 @@ pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
         req.build_root,
         "bench tilemaker",
         req.force,
+        req.wait,
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -59,6 +61,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.build_root,
         "bench all",
         req.force,
+        req.wait,
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;

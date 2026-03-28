@@ -930,6 +930,10 @@ pub(crate) struct ModeArgs {
     /// Skip memory availability check
     #[arg(long)]
     pub(crate) no_mem_check: bool,
+
+    /// Wait for the lock instead of failing immediately
+    #[arg(long)]
+    pub(crate) wait: bool,
 }
 
 // ---------------------------------------------------------------------------
