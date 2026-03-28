@@ -149,3 +149,22 @@ The following elivagar flags are not forwarded through `bench self`, `hotpath`, 
 - Memory budgets (`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget`) — tuning knobs, lower priority
 
 No schema changes needed: `bench_self.rs` already stores flags as `meta.*` kv pairs in `run_kv` and the full command line in `cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>", ...)` entries in the metadata vec.
+
+---
+
+## CLI flattening follow-ups
+
+### `test` and `list` are generic top-level names
+These only work for litehtml/sluggrs but are natural names users might try in any project. `brokkr test` from pbfhogg gives a project-gating error, which could confuse users expecting it to run `cargo test` (that's `brokkr check`). No immediate fix needed — the error message now includes the current project and is clear.
+
+### No migration from `brokkr litehtml <cmd>` / `brokkr sluggrs <cmd>`
+The old subcommand forms no longer parse. Scripts and shell history referencing them break with no deprecation warning. Could add hidden `Litehtml` and `Sluggrs` command variants that print a migration hint before erroring.
+
+### `html-extract` naming inconsistent
+pbfhogg has `extract-simple`, `extract-complete`, `extract-smart` (action-first). Litehtml has `html-extract` (project-first). `extract-html` would be more consistent with the pbfhogg family, but this is cosmetic.
+
+### `--suite` and `--recapture` silently accepted for sluggrs
+These flags are litehtml-only but clap accepts them on the shared `Test` variant for any project. Running `brokkr test --suite foo` from sluggrs silently ignores `--suite`. Help text says "(litehtml only)" which mitigates this. A runtime warning would be better.
+
+### Help output lacks section headers
+With 55+ top-level commands, `--help` is a wall of text. `display_order` groups by project but there are no visual separators. Clap's `next_help_heading` could inject section headers like "Visual Testing Commands:", "Litehtml Commands:", etc.
