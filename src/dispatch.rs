@@ -455,13 +455,14 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
 
             let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
 
-            for path in command.output_files(&ctx.paths.scratch_dir) {
-                std::fs::remove_file(path).ok();
-            }
-
             if out.code != 0 {
+                for path in command.output_files(&ctx.paths.scratch_dir) {
+                    std::fs::remove_file(path).ok();
+                }
                 return Err(DevError::ExitCode(out.code));
             }
+
+            rename_elivagar_output(command, &ctx.paths.scratch_dir, req.dataset, req.project_root);
 
             let ms = crate::duration_ms(out.elapsed);
             output::run_msg(&format!("elapsed={ms}ms"));
@@ -605,10 +606,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
     ));
     ctx.harness.record_result(&bench_config, &result)?;
 
-    // Clean up output files.
-    for path in command.output_files(&ctx.paths.scratch_dir) {
-        std::fs::remove_file(path).ok();
-    }
+    rename_elivagar_output(command, &ctx.paths.scratch_dir, req.dataset, req.project_root);
 
     Ok(())
 }
@@ -859,6 +857,49 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             "command '{}' does not support hotpath/alloc profiling",
             command.id(),
         ))),
+    }
+}
+
+/// After a successful tilegen run, rename the output PMTiles to
+/// `<scratch>/<dataset>-<commit>.pmtiles` and print the path.
+///
+/// For non-Tilegen commands, cleans up output files as before.
+fn rename_elivagar_output(
+    command: &ElivagarCommand,
+    scratch_dir: &std::path::Path,
+    dataset: &str,
+    project_root: &std::path::Path,
+) {
+    let output_files = command.output_files(scratch_dir);
+    if output_files.is_empty() {
+        return;
+    }
+
+    // Only Tilegen produces output to rename.
+    if !matches!(command, ElivagarCommand::Tilegen { .. }) {
+        for path in &output_files {
+            std::fs::remove_file(path).ok();
+        }
+        return;
+    }
+
+    let commit = crate::git::collect(project_root)
+        .map(|g| g.commit)
+        .unwrap_or_else(|_| "unknown".into());
+
+    for path in &output_files {
+        if path.exists() {
+            let dest = scratch_dir.join(format!("{dataset}-{commit}.pmtiles"));
+            match std::fs::rename(path, &dest) {
+                Ok(()) => {
+                    output::run_msg(&format!("output: {}", dest.display()));
+                }
+                Err(e) => {
+                    output::error(&format!("failed to rename output: {e}"));
+                    // Leave the original in place.
+                }
+            }
+        }
     }
 }
 
