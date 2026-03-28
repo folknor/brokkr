@@ -1936,84 +1936,6 @@ fn build_phases<'a>(
 }
 
 /// Print START/END marker pairs with duration + peak RSS and majflt from samples.
-fn print_marker_phases(markers: &[sidecar::Marker], samples: &[sidecar::Sample]) {
-    // Pair START/END markers (same logic as print_marker_durations).
-    let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
-    let mut consumed = vec![false; markers.len()];
-
-    for (i, m) in markers.iter().enumerate() {
-        if consumed[i] {
-            continue;
-        }
-        if let Some(base) = m.name.strip_suffix("_START") {
-            consumed[i] = true;
-            let end_name = format!("{base}_END");
-            let end_us = markers[i + 1..]
-                .iter()
-                .enumerate()
-                .find(|(_, m2)| m2.name == end_name)
-                .map(|(j, m2)| {
-                    consumed[i + 1 + j] = true;
-                    m2.timestamp_us
-                });
-            pairs.push((base.to_owned(), m.timestamp_us, end_us));
-        }
-    }
-
-    if pairs.is_empty() {
-        output::result_msg("no _START/_END marker pairs found");
-        return;
-    }
-
-    println!(
-        "{:<24} {:>10} {:>10} {:>10} {:>10}",
-        "Phase", "Duration", "Peak RSS", "Peak Anon", "Peak Mflt",
-    );
-    println!("{}", "-".repeat(68));
-
-    for (name, start_us, end_us) in &pairs {
-        let end =
-            end_us.unwrap_or_else(|| samples.last().map_or(*start_us, |s| s.timestamp_us + 1));
-        let dur_ms = (end - start_us) / 1_000;
-
-        let mut peak_rss: i64 = 0;
-        let mut peak_anon: i64 = 0;
-        let mut peak_majflt: i64 = 0;
-        let mut prev_majflt: Option<i64> = None;
-
-        for s in samples
-            .iter()
-            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < end)
-        {
-            if s.rss_kb > peak_rss {
-                peak_rss = s.rss_kb;
-            }
-            if s.anon_kb > peak_anon {
-                peak_anon = s.anon_kb;
-            }
-            // majflt is cumulative — compute delta rate per sample.
-            if let Some(prev) = prev_majflt {
-                let delta = s.majflt - prev;
-                if delta > peak_majflt {
-                    peak_majflt = delta;
-                }
-            }
-            prev_majflt = Some(s.majflt);
-        }
-
-        let end_marker = if end_us.is_some() { "" } else { " (no end)" };
-
-        println!(
-            "{:<24} {:>7}ms {:>7}kB {:>7}kB {:>10}",
-            format!("{name}{end_marker}"),
-            dur_ms,
-            peak_rss,
-            peak_anon,
-            peak_majflt,
-        );
-    }
-}
-
 /// Print counters as a simple list.
 fn print_counters(counters: &[sidecar::Counter]) {
     for c in counters {
@@ -2023,12 +1945,14 @@ fn print_counters(counters: &[sidecar::Counter]) {
     }
 }
 
-/// Print START/END marker pairs with duration, peak RSS/majflt, and counters.
+/// Print START/END marker pairs with duration, peak RSS/anon/majflt, and optional counters.
 fn print_marker_phases_with_counters(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
     counters: &[sidecar::Counter],
 ) {
+    let has_counters = !counters.is_empty();
+
     // Pair START/END markers.
     let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
     let mut consumed = vec![false; markers.len()];
@@ -2057,11 +1981,19 @@ fn print_marker_phases_with_counters(
         return;
     }
 
-    println!(
-        "{:<24} {:>10} {:>10} {:>10}  {}",
-        "Phase", "Duration", "Peak Anon", "Peak Mflt", "Counters",
-    );
-    println!("{}", "-".repeat(80));
+    if has_counters {
+        println!(
+            "{:<24} {:>10} {:>10} {:>10} {:>10}  {}",
+            "Phase", "Duration", "Peak RSS", "Peak Anon", "Peak Mflt", "Counters",
+        );
+        println!("{}", "-".repeat(90));
+    } else {
+        println!(
+            "{:<24} {:>10} {:>10} {:>10} {:>10}",
+            "Phase", "Duration", "Peak RSS", "Peak Anon", "Peak Mflt",
+        );
+        println!("{}", "-".repeat(68));
+    }
 
     for (name, start_us, end_us) in &pairs {
         let end = end_us.unwrap_or_else(|| {
@@ -2069,6 +2001,7 @@ fn print_marker_phases_with_counters(
         });
         let dur_ms = (end - start_us) / 1_000;
 
+        let mut peak_rss: i64 = 0;
         let mut peak_anon: i64 = 0;
         let mut peak_majflt: i64 = 0;
         let mut prev_majflt: Option<i64> = None;
@@ -2077,6 +2010,9 @@ fn print_marker_phases_with_counters(
             .iter()
             .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < end)
         {
+            if s.rss_kb > peak_rss {
+                peak_rss = s.rss_kb;
+            }
             if s.anon_kb > peak_anon {
                 peak_anon = s.anon_kb;
             }
@@ -2089,31 +2025,38 @@ fn print_marker_phases_with_counters(
             prev_majflt = Some(s.majflt);
         }
 
-        // Counters emitted within this phase (between start and end).
-        let phase_counters: Vec<&sidecar::Counter> = counters
-            .iter()
-            .filter(|c| c.timestamp_us >= *start_us && c.timestamp_us <= end)
-            .collect();
+        let end_marker = if end_us.is_some() { "" } else { " (no end)" };
 
-        let counter_str = if phase_counters.is_empty() {
-            String::new()
-        } else {
-            phase_counters
+        if has_counters {
+            let phase_counters: Vec<&sidecar::Counter> = counters
+                .iter()
+                .filter(|c| c.timestamp_us >= *start_us && c.timestamp_us <= end)
+                .collect();
+
+            let counter_str = phase_counters
                 .iter()
                 .map(|c| format!("{}={}", c.name, c.value))
                 .collect::<Vec<_>>()
-                .join(", ")
-        };
+                .join(", ");
 
-        let end_marker = if end_us.is_some() { "" } else { " (no end)" };
-
-        println!(
-            "{:<24} {:>7}ms {:>7}kB {:>10}  {counter_str}",
-            format!("{name}{end_marker}"),
-            dur_ms,
-            peak_anon,
-            peak_majflt,
-        );
+            println!(
+                "{:<24} {:>7}ms {:>7}kB {:>7}kB {:>10}  {counter_str}",
+                format!("{name}{end_marker}"),
+                dur_ms,
+                peak_rss,
+                peak_anon,
+                peak_majflt,
+            );
+        } else {
+            println!(
+                "{:<24} {:>7}ms {:>7}kB {:>7}kB {:>10}",
+                format!("{name}{end_marker}"),
+                dur_ms,
+                peak_rss,
+                peak_anon,
+                peak_majflt,
+            );
+        }
     }
 }
 
