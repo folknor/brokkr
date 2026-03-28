@@ -48,7 +48,9 @@ Every measurable command supports these flags:
 
 All measured modes automatically attach a sidecar that samples `/proc` metrics at 100ms (see [Sidecar profiler](#sidecar-profiler) below).
 
-All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`.
+All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`, `--wait`.
+
+pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and create named variants in the results DB (e.g. `add-locations-to-ways+direct-io`). io_uring preflight checks run automatically before building.
 
 ### Shared (all projects)
 

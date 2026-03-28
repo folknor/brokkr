@@ -106,6 +106,8 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `--variant <name>` — selects from `pbf.<name>` in config. Default: `indexed` (pbfhogg), `raw` (elivagar/nidhogg).
 - `--osc-seq <seq>` — selects from `osc.<seq>` in config. Auto-selects if exactly one OSC is configured.
 - `--tiles <variant>` — selects from `pmtiles.<variant>` in config. Auto-selects if exactly one PMTiles entry is configured.
+- `--direct-io` — (pbfhogg only) enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature, `--direct-io` binary flag, `+direct-io` variant suffix.
+- `--io-uring` — (pbfhogg only) enable io_uring I/O. Adds `linux-io-uring` cargo feature, `--io-uring` binary flag, `+uring` variant suffix. Runs io_uring preflight checks before building.
 
 ## CLI model
 
