@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::output;
 
 /// Run the write benchmark for each compression mode (sync + pipelined).
 pub fn run(
@@ -19,41 +18,43 @@ pub fn run(
 ) -> Result<(), DevError> {
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
-    for compression in compressions {
-        for writer_mode in &["sync", "pipelined"] {
-            let variant = format!("{writer_mode}-{compression}");
-            output::bench_msg(&format!("variant: {variant}"));
+    let variant_names: Vec<String> = compressions
+        .iter()
+        .flat_map(|c| vec![format!("sync-{c}"), format!("pipelined-{c}")])
+        .collect();
+    let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-            let bench_args: Vec<&str> = vec![
-                "bench-write",
-                pbf_str,
-                "--compression",
-                compression,
-                "--writer",
-                writer_mode,
-            ];
+    crate::harness::run_variants(&variant_refs, |variant| {
+        // Parse "writer_mode-compression" back out.
+        let (writer_mode, compression) = variant.split_once('-').unwrap_or(("sync", variant));
 
-            let config = BenchConfig {
-                command: "bench write".into(),
-                variant: Some(variant),
-                input_file: Some(basename.clone()),
-                input_mb: Some(file_mb),
-                cargo_features: None,
-                cargo_profile: "release".into(),
-                runs,
-                cli_args: Some(crate::harness::format_cli_args(
-                    &binary.display().to_string(),
-                    &bench_args,
-                )),
-                metadata: vec![
-                    KvPair::text("meta.compression", compression.as_str()),
-                    KvPair::text("meta.writer_mode", *writer_mode),
-                ],
-            };
+        let bench_args: Vec<&str> = vec![
+            "bench-write",
+            pbf_str,
+            "--compression",
+            compression,
+            "--writer",
+            writer_mode,
+        ];
 
-            harness.run_external_with_kv(&config, binary, &bench_args, project_root)?;
-        }
-    }
+        let config = BenchConfig {
+            command: "bench write".into(),
+            variant: Some(variant.into()),
+            input_file: Some(basename.clone()),
+            input_mb: Some(file_mb),
+            cargo_features: None,
+            cargo_profile: "release".into(),
+            runs,
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &bench_args,
+            )),
+            metadata: vec![
+                KvPair::text("meta.compression", compression),
+                KvPair::text("meta.writer_mode", writer_mode),
+            ],
+        };
 
-    Ok(())
+        harness.run_external_with_kv(&config, binary, &bench_args, project_root).map(|_| ())
+    })
 }

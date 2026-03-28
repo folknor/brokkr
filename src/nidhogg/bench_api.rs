@@ -32,22 +32,21 @@ pub fn run(
     let queries = super::client::build_api_queries(bbox)?;
     let url = super::client::query_url(port);
 
-    for (name, body) in &queries {
-        if let Some(filter) = only
-            && name != filter
-        {
-            continue;
-        }
+    let filtered: Vec<&(String, String)> = queries
+        .iter()
+        .filter(|(name, _)| only.is_none_or(|f| name == f))
+        .collect();
+    let variant_names: Vec<&str> = filtered.iter().map(|(name, _)| name.as_str()).collect();
 
-        output::bench_msg(&format!("=== {name} ==="));
+    crate::harness::run_variants(&variant_names, |name| {
+        let (_, body) = filtered.iter().find(|(n, _)| n == name).unwrap();
 
         // Warmup: one request, discard result.
         run_curl_timed(&url, body)?;
 
-        // Timed runs via distribution harness.
         let config = BenchConfig {
             command: "bench api".into(),
-            variant: Some(name.clone()),
+            variant: Some(name.into()),
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,
@@ -68,11 +67,9 @@ pub fn run(
             Ok(ms)
         })?;
 
-        // Extra request to get element count and response size.
         report_response_stats(&url, body, name)?;
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------

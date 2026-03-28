@@ -387,9 +387,7 @@ pub fn run(
             .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
     }
 
-    for &name in commands {
-        output::bench_msg(&format!("command: {name}"));
-
+    crate::harness::run_variants(commands, |name| {
         // Commands that produce output files write to scratch; others have no -o flag.
         let scratch_output_path = if !NO_OUTPUT_FILE.contains(&name) {
             let ext = if OSC_OUTPUT.contains(&name) {
@@ -403,7 +401,7 @@ pub fn run(
         };
         let output_str = match scratch_output_path.as_ref().and_then(|p| p.to_str()) {
             Some(s) => s.to_owned(),
-            None if NO_OUTPUT_FILE.contains(&name) => String::new(), // unused
+            None if NO_OUTPUT_FILE.contains(&name) => String::new(),
             None => {
                 return Err(DevError::Config(format!(
                     "command '{name}' produces output but no scratch directory is configured"
@@ -445,7 +443,6 @@ pub fn run(
         if let Some(ref path) = scratch_output_path {
             std::fs::remove_file(path).ok();
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }

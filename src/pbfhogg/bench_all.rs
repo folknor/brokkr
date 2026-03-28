@@ -290,23 +290,24 @@ fn run_osmpbf_baseline(
         .unwrap_or_default()
         .to_owned();
 
-    for block in &blocks {
-        let mode = match block.get("mode") {
-            Some(m) => m.clone(),
-            None => continue,
-        };
+    // Build variant list from parsed blocks.
+    let variant_data: Vec<(String, i64, Vec<KvPair>)> = blocks
+        .iter()
+        .filter_map(|block| {
+            let mode = block.get("mode")?.clone();
+            let elapsed_ms: i64 = block.get("elapsed_ms")?.parse().ok()?;
+            let kv = build_kv_from_block(block);
+            Some((format!("osmpbf/{mode}"), elapsed_ms, kv))
+        })
+        .collect();
+    let variant_names: Vec<&str> = variant_data.iter().map(|(v, ..)| v.as_str()).collect();
 
-        let elapsed_ms: i64 = match block.get("elapsed_ms").and_then(|v| v.parse().ok()) {
-            Some(ms) => ms,
-            None => continue,
-        };
-
-        let variant = format!("osmpbf/{mode}");
-        let kv = build_kv_from_block(block);
+    crate::harness::run_variants(&variant_names, |variant| {
+        let (_, elapsed_ms, kv) = variant_data.iter().find(|(v, ..)| v == variant).unwrap();
 
         let config = BenchConfig {
             command: "bench baseline".into(),
-            variant: Some(variant),
+            variant: Some(variant.into()),
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -318,15 +319,13 @@ fn run_osmpbf_baseline(
 
         harness.run_internal(&config, |_i| {
             Ok(BenchResult {
-                elapsed_ms,
+                elapsed_ms: *elapsed_ms,
                 kv: kv.clone(),
                 distribution: None,
                 hotpath: None,
             })
-        })?;
-    }
-
-    Ok(())
+        }).map(|_| ())
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -580,6 +580,49 @@ pub fn format_cli_args(program: &str, args: &[&str]) -> String {
     parts.join(" ")
 }
 
+/// Run a closure for each variant, collecting failures instead of aborting.
+///
+/// Each variant runs independently — failure of one does not skip the rest.
+/// On completion, returns `Ok(())` if all succeeded, or a summary error
+/// listing which variants failed and why.
+///
+/// Usage:
+/// ```ignore
+/// run_variants(&["sequential", "parallel", "pipelined"], |variant| {
+///     // set up config using variant name...
+///     harness.run_external(&config, binary, &args, project_root)
+/// })?;
+/// ```
+pub fn run_variants<F>(variants: &[&str], mut run_one: F) -> Result<(), DevError>
+where
+    F: FnMut(&str) -> Result<(), DevError>,
+{
+    let mut failures: Vec<(&str, String)> = Vec::new();
+
+    for &variant in variants {
+        output::bench_msg(&format!("variant: {variant}"));
+        if let Err(e) = run_one(variant) {
+            output::error(&format!("{variant} failed: {e}"));
+            failures.push((variant, e.to_string()));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        let summary: Vec<String> = failures
+            .iter()
+            .map(|(v, e)| format!("{v}: {e}"))
+            .collect();
+        Err(DevError::Verify(format!(
+            "{} of {} variants failed:\n  {}",
+            failures.len(),
+            variants.len(),
+            summary.join("\n  "),
+        )))
+    }
+}
+
 fn maybe_quote(s: &str) -> String {
     if s.contains(' ') {
         format!("\"{s}\"")

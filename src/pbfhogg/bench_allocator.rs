@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::build::{self, BuildConfig};
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::output;
 
 pub const ALL_ALLOCATORS: &[&str] = &["default", "jemalloc", "mimalloc"];
 
@@ -18,9 +17,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
-    for &name in ALL_ALLOCATORS {
-        output::bench_msg(&format!("allocator: {name}"));
-
+    crate::harness::run_variants(ALL_ALLOCATORS, |name| {
         let build_config = match name {
             "jemalloc" => BuildConfig::release_with_features(Some("pbfhogg-cli"), &["jemalloc"]),
             "mimalloc" => BuildConfig::release_with_features(Some("pbfhogg-cli"), &["mimalloc"]),
@@ -51,8 +48,6 @@ pub fn run(
             metadata: vec![],
         };
 
-        harness.run_external(&config, &binary, &args, project_root)?;
-    }
-
-    Ok(())
+        harness.run_external(&config, &binary, &args, project_root).map(|_| ())
+    })
 }

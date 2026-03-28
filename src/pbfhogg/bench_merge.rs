@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::output;
 
 /// Run the merge benchmark for each compression x I/O variant.
 #[allow(clippy::too_many_arguments)]
@@ -36,47 +35,50 @@ pub fn run(
         vec!["buffered"]
     };
 
-    for compression in compressions {
-        for io_mode in &io_modes {
-            let variant = format!("{io_mode}+{compression}");
-            output::bench_msg(&format!("variant: {variant}"));
+    let variant_names: Vec<String> = compressions
+        .iter()
+        .flat_map(|c| io_modes.iter().map(move |io| format!("{io}+{c}")))
+        .collect();
+    let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-            let bench_args: Vec<&str> = vec![
-                "bench-merge",
-                pbf_str,
-                osc_str,
-                "-o",
-                &output_str,
-                "--compression",
-                compression,
-                "--io-mode",
-                io_mode,
-            ];
+    let result = crate::harness::run_variants(&variant_refs, |variant| {
+        let (io_mode, compression) = variant.split_once('+').unwrap_or(("buffered", variant));
 
-            let config = BenchConfig {
-                command: "bench merge".into(),
-                variant: Some(variant),
-                input_file: Some(basename.clone()),
-                input_mb: Some(file_mb),
-                cargo_features: None,
-                cargo_profile: "release".into(),
-                runs,
-                cli_args: Some(crate::harness::format_cli_args(
-                    &binary.display().to_string(),
-                    &bench_args,
-                )),
-                metadata: vec![
-                    KvPair::text("meta.compression", compression.as_str()),
-                    KvPair::text("meta.io_mode", *io_mode),
-                ],
-            };
+        let bench_args: Vec<&str> = vec![
+            "bench-merge",
+            pbf_str,
+            osc_str,
+            "-o",
+            &output_str,
+            "--compression",
+            compression,
+            "--io-mode",
+            io_mode,
+        ];
 
-            harness.run_external_with_kv(&config, binary, &bench_args, project_root)?;
-        }
-    }
+        let config = BenchConfig {
+            command: "bench merge".into(),
+            variant: Some(variant.into()),
+            input_file: Some(basename.clone()),
+            input_mb: Some(file_mb),
+            cargo_features: None,
+            cargo_profile: "release".into(),
+            runs,
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &bench_args,
+            )),
+            metadata: vec![
+                KvPair::text("meta.compression", compression),
+                KvPair::text("meta.io_mode", io_mode),
+            ],
+        };
+
+        harness.run_external_with_kv(&config, binary, &bench_args, project_root).map(|_| ())
+    });
 
     // Clean up
     std::fs::remove_file(&output_path).ok();
 
-    Ok(())
+    result
 }

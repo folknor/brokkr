@@ -128,10 +128,14 @@ pub fn run(
         ));
     }
 
-    for result in &results {
+    let variant_names: Vec<&str> = results.iter().map(|r| r.mode.as_str()).collect();
+
+    crate::harness::run_variants(&variant_names, |mode| {
+        let result = results.iter().find(|r| r.mode == mode).unwrap();
+
         let config = BenchConfig {
             command: "bench planetiler".into(),
-            variant: Some(result.mode.clone()),
+            variant: Some(mode.into()),
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -148,8 +152,6 @@ pub fn run(
                 distribution: None,
                 hotpath: None,
             })
-        })?;
-    }
-
-    Ok(())
+        }).map(|_| ())
+    })
 }

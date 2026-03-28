@@ -4,7 +4,6 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::output;
 
 const COMMANDS: &[&str] = &[
     "cat-way",
@@ -72,37 +71,43 @@ pub fn run(
         ("raw", raw_str, &raw_basename, true),
     ];
 
-    for &cmd in COMMANDS {
-        for &(label_suffix, pbf_str, basename, force) in variants {
-            let variant = format!("{cmd}+{label_suffix}");
-            output::bench_msg(&format!("variant: {variant}"));
+    let variant_names: Vec<String> = COMMANDS
+        .iter()
+        .flat_map(|cmd| variants.iter().map(move |(label, ..)| format!("{cmd}+{label}")))
+        .collect();
+    let variant_refs: Vec<&str> = variant_names.iter().map(String::as_str).collect();
 
-            let args = command_args(cmd, pbf_str, &output_str, force);
-            let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = crate::harness::run_variants(&variant_refs, |variant| {
+        let (cmd, label_suffix) = variant.split_once('+').unwrap();
+        let &(_, pbf_str, basename, force) = variants
+            .iter()
+            .find(|&&(l, ..)| l == label_suffix)
+            .unwrap();
 
-            let config = BenchConfig {
-                command: "bench blob-filter".into(),
-                variant: Some(variant),
-                input_file: Some(basename.to_owned()),
-                input_mb: Some(file_mb),
-                cargo_features: None,
-                cargo_profile: "release".into(),
-                runs,
-                cli_args: Some(crate::harness::format_cli_args(
-                    &binary.display().to_string(),
-                    &args_refs,
-                )),
-                metadata: vec![],
-            };
+        let args = command_args(cmd, pbf_str, &output_str, force);
+        let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-            harness.run_external(&config, binary, &args_refs, project_root)?;
-        }
-    }
+        let config = BenchConfig {
+            command: "bench blob-filter".into(),
+            variant: Some(variant.into()),
+            input_file: Some(basename.to_owned()),
+            input_mb: Some(file_mb),
+            cargo_features: None,
+            cargo_profile: "release".into(),
+            runs,
+            cli_args: Some(crate::harness::format_cli_args(
+                &binary.display().to_string(),
+                &args_refs,
+            )),
+            metadata: vec![],
+        };
 
-    // Clean up
+        harness.run_external(&config, binary, &args_refs, project_root).map(|_| ())
+    });
+
     std::fs::remove_file(&output_path).ok();
 
-    Ok(())
+    result
 }
 
 #[cfg(test)]

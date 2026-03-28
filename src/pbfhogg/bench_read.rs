@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::output;
 
 /// Read modes.
 #[derive(Debug, Clone, Copy)]
@@ -70,14 +69,14 @@ pub fn run(
         .to_str()
         .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
 
-    for &mode in modes {
-        output::bench_msg(&format!("mode: {}", mode.name()));
+    let mode_names: Vec<&str> = modes.iter().map(|m| m.name()).collect();
 
-        let bench_args: Vec<&str> = vec!["bench-read", pbf_str, "--mode", mode.name()];
+    crate::harness::run_variants(&mode_names, |mode_name| {
+        let bench_args: Vec<&str> = vec!["bench-read", pbf_str, "--mode", mode_name];
 
         let config = BenchConfig {
             command: "bench read".into(),
-            variant: Some(mode.name().into()),
+            variant: Some(mode_name.into()),
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -87,11 +86,9 @@ pub fn run(
                 &binary.display().to_string(),
                 &bench_args,
             )),
-            metadata: vec![KvPair::text("meta.mode", mode.name())],
+            metadata: vec![KvPair::text("meta.mode", mode_name)],
         };
 
-        harness.run_external_with_kv(&config, binary, &bench_args, project_root)?;
-    }
-
-    Ok(())
+        harness.run_external_with_kv(&config, binary, &bench_args, project_root).map(|_| ())
+    })
 }

@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::output;
 
 pub const ALL_STRATEGIES: &[&str] = &["simple", "complete", "smart"];
 
@@ -59,8 +58,7 @@ pub fn run(
 
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
-    for &name in strategies {
-        output::bench_msg(&format!("strategy: {name}"));
+    let result = crate::harness::run_variants(strategies, |name| {
         let args = strategy_args(name, pbf_str, bbox, &output_str);
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -82,11 +80,10 @@ pub fn run(
             ],
         };
 
-        harness.run_external(&config, binary, &args_refs, project_root)?;
-    }
+        harness.run_external(&config, binary, &args_refs, project_root).map(|_| ())
+    });
 
-    // Clean up
     std::fs::remove_file(&output_path).ok();
 
-    Ok(())
+    result
 }
