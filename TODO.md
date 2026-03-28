@@ -89,9 +89,8 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Backlog
 
-### Sidecar: extend to --hotpath/--alloc and nidhogg
-
-`--sidecar` works with `--bench` on pbfhogg (all commands) and elivagar Tilegen. Remaining: `--hotpath`/`--alloc` modes (requires threading the FIFO env var through `run_hotpath_capture` and using `spawn_captured` + sidecar loop instead of `run_captured_with_env`). Nidhogg bench paths have divergent lifecycles (server management, curl requests) that make sidecar integration non-trivial.
+### ~~Sidecar: extend to --hotpath/--alloc and elivagar/nidhogg~~ FIXED
+Sidecar is now always-on for all measured modes. `--sidecar` flag removed. `run_external`, `run_external_with_kv`, and `run_hotpath_capture` all run the sidecar automatically. Nidhogg bench paths (Api, Tiles) don't get sidecar since they don't run external binaries via the harness.
 
 ### Sidecar: store best_run_idx in DB
 
@@ -118,9 +117,8 @@ Shows START/END pairs with duration, peak RSS, peak anon, and peak majflt delta 
 ### ~~Sidecar: --compare-timeline~~ FIXED
 Phase-aligned comparison of two runs with duration, peak anon, disk read, and delta %.
 
-### Sidecar: no foreign keys on sidecar tables
-
-`sidecar_samples`, `sidecar_markers`, `sidecar_summary` use `result_uuid TEXT` without a foreign key to the `runs` table. Orphaned rows can accumulate if results are ever deleted. Minor — brokkr never deletes results today.
+### ~~Sidecar: no foreign keys on sidecar tables~~ WON'T FIX
+Sidecar data is now in a separate sidecar.db — no cross-DB foreign keys possible. Orphaned rows are harmless and sidecar.db is gitignored/local-only.
 
 ### Make default binary configurable per-project in brokkr.toml
 
