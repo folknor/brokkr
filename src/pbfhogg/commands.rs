@@ -571,36 +571,45 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::ExtractSimple => {
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
                     "extract".into(),
                     ctx.pbf_str()?.into(),
                     "--simple".into(),
-                    "-b".into(),
-                    "12.4,55.6,12.7,55.8".into(),
+                    format!("-b={bbox}"),
                     "-o".into(),
                     path_to_string(&output)?,
                 ])
             }
             Self::ExtractComplete => {
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
                     "extract".into(),
                     ctx.pbf_str()?.into(),
-                    "-b".into(),
-                    "12.4,55.6,12.7,55.8".into(),
+                    format!("-b={bbox}"),
                     "-o".into(),
                     path_to_string(&output)?,
                 ])
             }
             Self::ExtractSmart => {
+                let bbox = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
                     "extract".into(),
                     ctx.pbf_str()?.into(),
                     "--smart".into(),
-                    "-b".into(),
-                    "12.4,55.6,12.7,55.8".into(),
+                    format!("-b={bbox}"),
                     "-o".into(),
                     path_to_string(&output)?,
                 ])

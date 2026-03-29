@@ -84,8 +84,8 @@ Makes performance triage easier without external tooling.
 ### Suite builds without host features
 `bench_all.rs` calls `cargo_build` without host features from `brokkr.toml`. Individual commands correctly include them via `BenchContext::new`. Pre-existing.
 
-### Standalone extract commands use hardcoded Copenhagen bbox
-`ExtractSimple/Complete/Smart` (bench_commands variants) hardcode `12.4,55.6,12.7,55.8`. The `Extract { strategy }` variant uses dataset bbox. Pre-existing, intentional for consistent benchmarking.
+### ~~Standalone extract commands use hardcoded Copenhagen bbox~~ DONE
+Standalone extract variants now use dataset bbox via `ctx.bbox`, same as `Extract { strategy }`.
 
 ### validate_since tautology
 `cli.rs`: `s[..10].len() == 10` is always true when `s.len() == 19`. The recursive `validate_since(&s[..10])` call works but is unnecessarily clever. Dead code in the check.
