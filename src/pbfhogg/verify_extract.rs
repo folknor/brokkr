@@ -25,7 +25,8 @@ pub fn run(
         let pbfhogg_out = outdir.join(format!("pbfhogg-{strategy}.osm.pbf"));
         let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
-        let mut pbfhogg_args = vec!["extract", &pbf_str, "-b", bbox, "-o", &pbfhogg_out_str];
+        let bbox_flag = format!("-b={bbox}");
+        let mut pbfhogg_args = vec!["extract", &pbf_str, &bbox_flag, "-o", &pbfhogg_out_str];
         match *strategy {
             "simple" => pbfhogg_args.push("--simple"),
             "smart" => pbfhogg_args.push("--smart"),
