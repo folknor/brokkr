@@ -1,11 +1,15 @@
-//! Download region datasets from Geofabrik.
+//! Download region datasets and OSC diffs.
 //!
-//! Replaces `download-regions.sh`. Downloads the latest PBF, optionally an
-//! OSC diff, and generates an indexed PBF variant via `pbfhogg cat`.
+//! Supports two sources:
+//! - **Geofabrik**: regional extracts and diffs. Accepts short aliases
+//!   (`denmark`, `europe`) or full paths (`europe/france`, `asia/japan/kanto`).
+//! - **Planet**: full planet PBF and daily replication diffs from
+//!   planet.openstreetmap.org.
 //!
-//! Accepts either a short alias (`denmark`) or a full Geofabrik path
-//! (`europe/denmark`, `asia/japan/kanto`). The dataset key in `brokkr.toml`
-//! is always the last path component.
+//! The source is determined automatically: `planet` maps to the planet
+//! endpoint, everything else is Geofabrik. If a dataset already exists in
+//! `brokkr.toml` with `origin = "planet.openstreetmap.org"`, the planet
+//! source is used regardless of the region argument.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -23,7 +27,6 @@ fn today() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // Days since epoch → year/month/day via civil calendar arithmetic.
     let days = (secs / 86400) as i64;
     let (y, m, d) = days_to_civil(days);
     format!("{y:04}{m:02}{d:02}")
@@ -45,11 +48,74 @@ fn days_to_civil(days: i64) -> (i32, u32, u32) {
     (y as i32, m, d)
 }
 
+/// Format a 9-digit zero-padded sequence number as a 3-level path: `000/004/715`.
+fn seq_path(seq: u64) -> String {
+    let padded = format!("{seq:09}");
+    let (a, rest) = padded.split_at(3);
+    let (b, c) = rest.split_at(3);
+    format!("{a}/{b}/{c}")
+}
+
+// ---------------------------------------------------------------------------
+// Download source
+// ---------------------------------------------------------------------------
+
+/// Where to download PBF and OSC files from.
+enum DownloadSource {
+    /// Geofabrik regional extract. Path is e.g. `europe/denmark`.
+    Geofabrik { path: String },
+    /// Full planet from planet.openstreetmap.org.
+    Planet,
+}
+
+impl DownloadSource {
+    /// URL for the latest PBF.
+    fn pbf_url(&self) -> String {
+        match self {
+            Self::Geofabrik { path } => {
+                format!("https://download.geofabrik.de/{path}-latest.osm.pbf")
+            }
+            Self::Planet => {
+                "https://planet.openstreetmap.org/pbf/planet-latest.osm.pbf".into()
+            }
+        }
+    }
+
+    /// URL for an OSC diff at the given sequence number.
+    fn osc_url(&self, seq: u64) -> String {
+        let sp = seq_path(seq);
+        match self {
+            Self::Geofabrik { path } => {
+                format!("https://download.geofabrik.de/{path}-updates/{sp}.osc.gz")
+            }
+            Self::Planet => {
+                format!("https://planet.openstreetmap.org/replication/day/{sp}.osc.gz")
+            }
+        }
+    }
+
+    /// Origin string for `brokkr.toml`.
+    fn origin(&self) -> &'static str {
+        match self {
+            Self::Geofabrik { .. } => "Geofabrik",
+            Self::Planet => "planet.openstreetmap.org",
+        }
+    }
+
+    /// Display name for log messages.
+    fn display_name(&self) -> String {
+        match self {
+            Self::Geofabrik { path } => format!("Geofabrik: {path}"),
+            Self::Planet => "planet.openstreetmap.org".into(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Region resolution
 // ---------------------------------------------------------------------------
 
-/// Short aliases for commonly used regions, mapping to their Geofabrik path.
+/// Short aliases for commonly used regions.
 const ALIASES: &[(&str, &str)] = &[
     ("malta", "europe/malta"),
     ("greater-london", "europe/united-kingdom/england/greater-london"),
@@ -62,31 +128,51 @@ const ALIASES: &[(&str, &str)] = &[
     ("europe", "europe"),
 ];
 
-/// Resolved region: the Geofabrik path and the dataset key for `brokkr.toml`.
-struct ResolvedRegion {
-    /// Full Geofabrik path (e.g. `europe/denmark`).
-    geofabrik_path: String,
-    /// Dataset key for `brokkr.toml` — last path component (e.g. `denmark`).
+/// Resolved download target.
+struct ResolvedDownload {
+    source: DownloadSource,
+    /// Dataset key for `brokkr.toml` (e.g. `denmark`, `planet`).
     dataset_key: String,
 }
 
-/// Resolve a region argument into a Geofabrik path and dataset key.
+/// Resolve a region argument into a download source and dataset key.
 ///
-/// - If `name` matches a short alias, use the alias mapping.
-/// - If `name` contains `/`, treat it as a direct Geofabrik path.
-/// - Otherwise, suggest using a full path.
-fn resolve_region(name: &str) -> Result<ResolvedRegion, DevError> {
-    // Check aliases first.
-    for &(alias, path) in ALIASES {
-        if alias == name {
-            return Ok(ResolvedRegion {
-                geofabrik_path: path.to_string(),
+/// Resolution order:
+/// 1. If an existing dataset has `origin = "planet.openstreetmap.org"`, use planet source.
+/// 2. `"planet"` → planet source.
+/// 3. Short alias → Geofabrik source.
+/// 4. Path containing `/` → direct Geofabrik path.
+/// 5. Error with suggestions.
+fn resolve(name: &str, dataset: Option<&Dataset>) -> Result<ResolvedDownload, DevError> {
+    // If the dataset already exists, let its origin override.
+    if let Some(ds) = dataset {
+        if ds.origin.as_deref() == Some("planet.openstreetmap.org") {
+            return Ok(ResolvedDownload {
+                source: DownloadSource::Planet,
                 dataset_key: name.to_string(),
             });
         }
     }
 
-    // Accept direct Geofabrik paths (anything with `/`).
+    // "planet" keyword.
+    if name == "planet" {
+        return Ok(ResolvedDownload {
+            source: DownloadSource::Planet,
+            dataset_key: "planet".into(),
+        });
+    }
+
+    // Short aliases.
+    for &(alias, path) in ALIASES {
+        if alias == name {
+            return Ok(ResolvedDownload {
+                source: DownloadSource::Geofabrik { path: path.into() },
+                dataset_key: name.to_string(),
+            });
+        }
+    }
+
+    // Direct Geofabrik path.
     if name.contains('/') {
         let trimmed = name.trim_end_matches('/');
         let dataset_key = trimmed
@@ -99,31 +185,18 @@ fn resolve_region(name: &str) -> Result<ResolvedRegion, DevError> {
                 "cannot derive dataset key from path '{name}'"
             )));
         }
-        return Ok(ResolvedRegion {
-            geofabrik_path: trimmed.to_string(),
+        return Ok(ResolvedDownload {
+            source: DownloadSource::Geofabrik { path: trimmed.into() },
             dataset_key,
         });
     }
 
     let alias_list: Vec<&str> = ALIASES.iter().map(|&(n, _)| n).collect();
     Err(DevError::Config(format!(
-        "unknown region '{name}'. use a Geofabrik path (e.g. europe/france) \
+        "unknown region '{name}'. use 'planet', a Geofabrik path (e.g. europe/france), \
          or one of: {}",
         alias_list.join(", ")
     )))
-}
-
-/// Format a Geofabrik updates URL from a region path and sequence number.
-///
-/// Geofabrik encodes sequence numbers as 9-digit zero-padded paths split into
-/// groups of 3: `000/004/715` for sequence 4715.
-fn geofabrik_osc_url(geofabrik_path: &str, seq: u64) -> String {
-    let padded = format!("{seq:09}");
-    let (a, rest) = padded.split_at(3);
-    let (b, c) = rest.split_at(3);
-    format!(
-        "https://download.geofabrik.de/{geofabrik_path}-updates/{a}/{b}/{c}.osc.gz"
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -250,11 +323,12 @@ fn append_dataset_header(
     project_root: &Path,
     hostname: &str,
     dataset_key: &str,
+    origin: &str,
 ) -> Result<(), DevError> {
     let toml_path = project_root.join("brokkr.toml");
     let block = format!(
         "\n[{hostname}.datasets.{dataset_key}]\n\
-         origin = \"Geofabrik\"\n"
+         origin = \"{origin}\"\n"
     );
     let mut contents = std::fs::read_to_string(&toml_path)?;
     contents.push_str(&block);
@@ -277,24 +351,26 @@ pub fn run(
     data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let resolved = resolve_region(region)?;
+    // Resolve region first to get dataset_key, then look up existing dataset,
+    // then re-resolve with dataset context (so origin field can override source).
+    let preliminary = resolve(region, None)?;
+    let dataset = datasets.get(&preliminary.dataset_key);
+    let resolved = resolve(region, dataset)?;
+
+    let source = &resolved.source;
     let dataset_key = &resolved.dataset_key;
-    let dataset = datasets.get(dataset_key);
     let date = today();
 
     tools::check_curl()?;
 
     std::fs::create_dir_all(data_dir)?;
 
-    output::download_msg(&format!("=== {dataset_key} (Geofabrik: {}) ===", resolved.geofabrik_path));
+    output::download_msg(&format!("=== {dataset_key} ({}) ===", source.display_name()));
 
     let is_new_dataset = dataset.is_none();
 
     // -- Download PBF --
-    let pbf_url = format!(
-        "https://download.geofabrik.de/{}-latest.osm.pbf",
-        resolved.geofabrik_path
-    );
+    let pbf_url = source.pbf_url();
     let pbf_dest = raw_pbf_path(dataset, data_dir, dataset_key, &date);
     let mut downloaded_pbf = false;
 
@@ -333,7 +409,7 @@ pub fn run(
                     continue;
                 }
 
-                let url = geofabrik_osc_url(&resolved.geofabrik_path, seq);
+                let url = source.osc_url(seq);
                 let dest = data_dir.join(osc_filename(dataset_key, &date, seq));
 
                 if dest.exists() && is_nonempty(&dest) {
@@ -357,7 +433,6 @@ pub fn run(
     } else {
         output::download_msg("  generating indexed PBF via cat");
 
-        // Use whichever raw PBF actually exists on disk for cat input.
         let cat_input = has_existing_pbf(dataset, data_dir)
             .unwrap_or_else(|| pbf_dest.clone());
 
@@ -389,10 +464,9 @@ pub fn run(
     // -- Update brokkr.toml with new entries --
     let has_new_osc = !osc_downloaded.is_empty();
     if is_new_dataset && (downloaded_pbf || has_new_osc || generated_indexed) {
-        append_dataset_header(project_root, hostname, dataset_key)?;
+        append_dataset_header(project_root, hostname, dataset_key, source.origin())?;
     }
 
-    // Only append entries that don't already exist in the config.
     let has_raw = dataset.is_some_and(|ds| ds.pbf.contains_key("raw"));
     let has_indexed = dataset.is_some_and(|ds| ds.pbf.contains_key("indexed"));
 
@@ -417,8 +491,6 @@ pub fn run(
     }
 
     for (seq, osc_path) in &osc_downloaded {
-        // OSC entries are already guarded by has_existing_osc in the download
-        // loop, so reaching here means the seq is not yet in the config.
         let filename = osc_path
             .file_name()
             .unwrap_or_default()
