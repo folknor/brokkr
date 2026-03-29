@@ -589,13 +589,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )
             })
         }
-        Command::Download { region, osc_url } => {
+        Command::Download {
+            region,
+            osc_seq,
+            osc_url,
+        } => {
             let _lock = acquire_cmd_lock(project, &project_root, "download")?;
             pbfhogg::cmd::download(
                 &dev_config,
                 project,
                 &project_root,
                 &region,
+                osc_seq,
                 osc_url.as_deref(),
             )
         }

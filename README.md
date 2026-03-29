@@ -78,7 +78,7 @@ Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`
 
 **Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert.
 
-**Other**: `download <region>` fetches datasets from Geofabrik.
+**Other**: `download <region> [--osc-seq N]` fetches datasets from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Skips files that already exist (checked against `brokkr.toml` filenames). `--osc-seq N` downloads all missing OSC diffs from the last configured seq through N, hashes them, and appends entries to `brokkr.toml`. New downloads use dated filenames matching the project convention (e.g. `europe-20260329-seq4716.osc.gz`).
 
 ### elivagar
 

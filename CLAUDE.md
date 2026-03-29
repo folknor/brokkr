@@ -46,7 +46,7 @@ Single crate, single binary. No workspace.
 
 ### Project-specific modules
 
-- `src/pbfhogg/` — `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), download
+- `src/pbfhogg/` — `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), download (Geofabrik region/OSC fetcher with auto-registration in `brokkr.toml`)
 - `src/elivagar/` — `commands.rs` (`ElivagarCommand` enum with `build_args()`, `build_config()`, `needs_pbf()`, `output_files()`, `metadata()`), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
 - `src/nidhogg/` — `commands.rs` (`NidhoggCommand` enum: Api/Ingest/Tiles with `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`, `metadata()`), server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode, readonly), hotpath. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
 - `src/litehtml/` — 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.
@@ -135,6 +135,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 - `passthrough` — build and run with raw passthrough args (hidden, for ad-hoc use)
+- `download <region> [--osc-seq N] [--osc-url URL]` — (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
 
 ## Litehtml commands
 

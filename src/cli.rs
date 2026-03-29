@@ -723,10 +723,14 @@ Examples:
     /// [pbfhogg] Download a region dataset from Geofabrik
     #[command(display_order = 20)]
     Download {
-        /// Region name (malta, greater-london, switzerland, norway, japan, denmark, germany, north-america)
+        /// Region name or Geofabrik path (e.g. denmark, europe/france, asia/japan/kanto)
         region: String,
 
-        /// URL for the OSC diff file
+        /// Download OSC diff for this sequence number (constructs Geofabrik URL automatically)
+        #[arg(long)]
+        osc_seq: Option<u64>,
+
+        /// URL for the OSC diff file (overrides --osc-seq)
         #[arg(long)]
         osc_url: Option<String>,
     },
