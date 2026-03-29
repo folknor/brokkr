@@ -204,8 +204,17 @@ fn resolve(name: &str, dataset: Option<&Dataset>) -> Result<ResolvedDownload, De
 // ---------------------------------------------------------------------------
 
 /// Check whether any configured PBF variant file already exists in the data dir.
+/// Prefers `raw` variant since that's the best input for indexing.
 fn has_existing_pbf(dataset: Option<&Dataset>, data_dir: &Path) -> Option<PathBuf> {
     let ds = dataset?;
+    // Check raw first.
+    if let Some(entry) = ds.pbf.get("raw") {
+        let path = data_dir.join(&entry.file);
+        if is_nonempty(&path) {
+            return Some(path);
+        }
+    }
+    // Fall back to any variant.
     for entry in ds.pbf.values() {
         let path = data_dir.join(&entry.file);
         if is_nonempty(&path) {
@@ -442,7 +451,8 @@ pub fn run(
         )?;
         let binary_str = binary.display().to_string();
         let cat_input_str = cat_input.display().to_string();
-        let indexed_str = indexed_dest.display().to_string();
+        let indexed_tmp = indexed_dest.with_extension("tmp");
+        let indexed_tmp_str = indexed_tmp.display().to_string();
 
         let captured = output::run_captured(
             &binary_str,
@@ -452,12 +462,16 @@ pub fn run(
                 "--type",
                 "node,way,relation",
                 "-o",
-                &indexed_str,
+                &indexed_tmp_str,
             ],
             project_root,
         )?;
 
-        captured.check_success(&binary_str)?;
+        if let Err(e) = captured.check_success(&binary_str) {
+            let _ = std::fs::remove_file(&indexed_tmp);
+            return Err(e);
+        }
+        std::fs::rename(&indexed_tmp, &indexed_dest)?;
         generated_indexed = true;
     }
 
@@ -478,6 +492,13 @@ pub fn run(
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(&pbf_dest, project_root)?;
         append_pbf_entry(project_root, hostname, dataset_key, "raw", &filename, &hash)?;
+    }
+
+    if downloaded_pbf {
+        output::download_msg(
+            "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
+             then add seq = <N> to the brokkr.toml entry"
+        );
     }
 
     if generated_indexed && !has_indexed {

@@ -377,10 +377,13 @@ pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
 /// Uses curl with `--progress-bar` and inherited stderr so the user can see
 /// download progress for large files.
 pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
-    let dest_str = dest.display().to_string();
+    // Download to a temp file and rename on success to avoid leaving partial
+    // files that block future retries.
+    let tmp = dest.with_extension("tmp");
+    let tmp_str = tmp.display().to_string();
 
     let status = std::process::Command::new("curl")
-        .args(["-fL", "--progress-bar", "-o", &dest_str, url])
+        .args(["-fL", "--progress-bar", "-o", &tmp_str, url])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .status()
@@ -391,12 +394,16 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
         })?;
 
     if !status.success() {
+        // Clean up partial download.
+        let _ = std::fs::remove_file(&tmp);
         return Err(DevError::Subprocess {
             program: "curl".into(),
             code: status.code(),
             stderr: format!("download failed: {url}"),
         });
     }
+
+    std::fs::rename(&tmp, dest)?;
 
     Ok(())
 }

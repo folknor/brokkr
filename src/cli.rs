@@ -720,7 +720,7 @@ Examples:
         #[command(subcommand)]
         verify: VerifyCommand,
     },
-    /// [pbfhogg] Download a region dataset from Geofabrik
+    /// [pbfhogg] Download a dataset from Geofabrik or planet.openstreetmap.org
     #[command(display_order = 20)]
     Download {
         /// Region name or Geofabrik path (e.g. denmark, europe/france, asia/japan/kanto)
