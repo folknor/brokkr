@@ -302,12 +302,11 @@ pub(crate) fn download(
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let dataset = paths.datasets.get(region);
     super::download::run(
         region,
         osc_seq,
         osc_url,
-        dataset,
+        &paths.datasets,
         &paths.hostname,
         &paths.data_dir,
         project_root,

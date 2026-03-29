@@ -88,13 +88,19 @@ fn resolve_region(name: &str) -> Result<ResolvedRegion, DevError> {
 
     // Accept direct Geofabrik paths (anything with `/`).
     if name.contains('/') {
-        let dataset_key = name
+        let trimmed = name.trim_end_matches('/');
+        let dataset_key = trimmed
             .rsplit('/')
             .next()
-            .unwrap_or(name)
+            .unwrap_or(trimmed)
             .to_string();
+        if dataset_key.is_empty() {
+            return Err(DevError::Config(format!(
+                "cannot derive dataset key from path '{name}'"
+            )));
+        }
         return Ok(ResolvedRegion {
-            geofabrik_path: name.to_string(),
+            geofabrik_path: trimmed.to_string(),
             dataset_key,
         });
     }
@@ -267,13 +273,14 @@ pub fn run(
     region: &str,
     osc_seq: Option<u64>,
     osc_url: Option<&str>,
-    dataset: Option<&Dataset>,
+    datasets: &std::collections::HashMap<String, Dataset>,
     hostname: &str,
     data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
     let resolved = resolve_region(region)?;
     let dataset_key = &resolved.dataset_key;
+    let dataset = datasets.get(dataset_key);
     let date = today();
 
     tools::check_curl()?;
@@ -282,9 +289,7 @@ pub fn run(
 
     output::download_msg(&format!("=== {dataset_key} (Geofabrik: {}) ===", resolved.geofabrik_path));
 
-    // Track whether we created new entries that need a dataset header first.
     let is_new_dataset = dataset.is_none();
-    let mut created_header = false;
 
     // -- Download PBF --
     let pbf_url = format!(
@@ -373,7 +378,6 @@ pub fn run(
 
         // Use whichever raw PBF actually exists on disk for cat input.
         let cat_input = has_existing_pbf(dataset, data_dir)
-            .filter(|p| is_nonempty(p))
             .unwrap_or_else(|| pbf_dest.clone());
 
         let binary = build::cargo_build(
@@ -405,10 +409,13 @@ pub fn run(
     let has_new_osc = !osc_downloaded.is_empty();
     if is_new_dataset && (downloaded_pbf || has_new_osc || generated_indexed) {
         append_dataset_header(project_root, hostname, dataset_key)?;
-        created_header = true;
     }
 
-    if downloaded_pbf {
+    // Only append entries that don't already exist in the config.
+    let has_raw = dataset.is_some_and(|ds| ds.pbf.contains_key("raw"));
+    let has_indexed = dataset.is_some_and(|ds| ds.pbf.contains_key("indexed"));
+
+    if downloaded_pbf && !has_raw {
         let filename = pbf_dest
             .file_name()
             .unwrap_or_default()
@@ -418,7 +425,7 @@ pub fn run(
         append_pbf_entry(project_root, hostname, dataset_key, "raw", &filename, &hash)?;
     }
 
-    if generated_indexed {
+    if generated_indexed && !has_indexed {
         let filename = indexed_dest
             .file_name()
             .unwrap_or_default()
@@ -429,17 +436,14 @@ pub fn run(
     }
 
     for (seq, osc_path) in &osc_downloaded {
+        // OSC entries are already guarded by has_existing_osc in the download
+        // loop, so reaching here means the seq is not yet in the config.
         let filename = osc_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(osc_path, project_root)?;
-
-        if is_new_dataset && !created_header {
-            append_dataset_header(project_root, hostname, dataset_key)?;
-            created_header = true;
-        }
         append_osc_entry(project_root, hostname, dataset_key, *seq, &filename, &hash)?;
     }
 
