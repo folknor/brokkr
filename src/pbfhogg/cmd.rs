@@ -295,7 +295,6 @@ pub(crate) fn download(
     project_root: &Path,
     region: &str,
     osc_seq: Option<u64>,
-    osc_url: Option<&str>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Pbfhogg, "download")?;
 
@@ -305,7 +304,6 @@ pub(crate) fn download(
     super::download::run(
         region,
         osc_seq,
-        osc_url,
         &paths.datasets,
         &paths.hostname,
         &paths.data_dir,

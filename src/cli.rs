@@ -726,13 +726,9 @@ Examples:
         /// Region name or Geofabrik path (e.g. denmark, europe/france, asia/japan/kanto)
         region: String,
 
-        /// Download OSC diff for this sequence number (constructs Geofabrik URL automatically)
+        /// Download OSC diffs up to this sequence number
         #[arg(long)]
         osc_seq: Option<u64>,
-
-        /// URL for the OSC diff file (overrides --osc-seq)
-        #[arg(long)]
-        osc_url: Option<String>,
     },
     /// [elivagar] Compare feature counts between two PMTiles archives
     #[command(display_order = 30)]

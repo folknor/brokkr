@@ -135,7 +135,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 - `passthrough` — build and run with raw passthrough args (hidden, for ad-hoc use)
-- `download <region> [--osc-seq N] [--osc-url URL]` — (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
+- `download <region> [--osc-seq N]` — (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
 
 ## Litehtml commands
 

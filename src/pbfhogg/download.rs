@@ -272,7 +272,6 @@ fn append_dataset_header(
 pub fn run(
     region: &str,
     osc_seq: Option<u64>,
-    osc_url: Option<&str>,
     datasets: &std::collections::HashMap<String, Dataset>,
     hostname: &str,
     data_dir: &Path,
@@ -310,9 +309,7 @@ pub fn run(
     }
 
     // -- Download OSC diffs --
-    // When --osc-seq is given, download all missing diffs from (last_configured + 1)
-    // through the requested seq. When --osc-url is given without --osc-seq, download
-    // that single URL.
+    // Downloads all missing diffs from (last_configured + 1) through the requested seq.
     let mut osc_downloaded: Vec<(u64, PathBuf)> = Vec::new();
     let mut osc_last_dest: Option<PathBuf> = None;
 
@@ -320,7 +317,6 @@ pub fn run(
         let start_seq = max_osc_seq(dataset).map_or(target_seq, |max| max + 1);
 
         if start_seq > target_seq {
-            // All requested seqs already exist.
             output::download_msg(&format!(
                 "  SKIP: OSC seqs up to {target_seq} already configured"
             ));
@@ -350,22 +346,7 @@ pub fn run(
                 osc_last_dest = Some(dest);
             }
         }
-    } else if let Some(url) = osc_url {
-        // Explicit URL without seq — single download, no auto-registration.
-        let filename = url
-            .rsplit('/')
-            .next()
-            .ok_or_else(|| DevError::Config(format!("cannot extract filename from URL: {url}")))?;
-        let dest = data_dir.join(filename);
-
-        if dest.exists() && is_nonempty(&dest) {
-            output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
-        } else {
-            output::download_msg(&format!("  GET: {url}"));
-            tools::download_file(url, &dest)?;
-        }
-        osc_last_dest = Some(dest);
-    };
+    }
 
     // -- Generate indexed PBF --
     let indexed_dest = indexed_pbf_path(dataset, data_dir, dataset_key, &date);
