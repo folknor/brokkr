@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config::DriveConfig;
@@ -443,6 +443,12 @@ impl BenchHarness {
 
         let short = &store_uuid[..8.min(store_uuid.len())];
         output::sidecar_msg(&format!("profile data stored in sidecar.db ({short})"));
+
+        // Back up sidecar DB while the lock is still held.
+        if let Err(e) = backup_sidecar(&sidecar_db_path, self.project) {
+            output::sidecar_msg(&format!("sidecar backup failed (non-fatal): {e}"));
+        }
+
         Ok(())
     }
 
@@ -836,6 +842,80 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
         distribution: None,
         hotpath: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar backup
+// ---------------------------------------------------------------------------
+
+/// Number of rotating backup copies to keep.
+const SIDECAR_BACKUP_COPIES: usize = 3;
+
+/// Resolve the sidecar backup directory.
+///
+/// Uses `$XDG_DATA_HOME/brokkr/sidecar-backups/`, falling back to
+/// `$HOME/.local/share/brokkr/sidecar-backups/`.
+fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
+    let data_dir = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local").join("share")
+    } else {
+        return Err(DevError::Config(
+            "cannot determine data directory for sidecar backup".into(),
+        ));
+    };
+    Ok(data_dir.join("brokkr").join("sidecar-backups"))
+}
+
+/// Back up the sidecar DB with rotation and fsync.
+///
+/// Keeps `SIDECAR_BACKUP_COPIES` versions:
+///   {project}-sidecar.db      (newest)
+///   {project}-sidecar.db.1    (previous)
+///   {project}-sidecar.db.2    (oldest)
+///
+/// Called while the benchmark lock is still held.
+fn backup_sidecar(
+    sidecar_path: &Path,
+    project: crate::project::Project,
+) -> Result<(), DevError> {
+    if !sidecar_path.exists() {
+        return Ok(());
+    }
+
+    let backup_dir = sidecar_backup_dir()?;
+    std::fs::create_dir_all(&backup_dir)?;
+
+    let base = backup_dir.join(format!("{}-sidecar.db", project.name()));
+
+    // Rotate: .2 is deleted, .1 → .2, current → .1
+    for i in (1..SIDECAR_BACKUP_COPIES).rev() {
+        let from = if i == 1 {
+            base.clone()
+        } else {
+            base.with_extension(format!("db.{}", i - 1))
+        };
+        let to = base.with_extension(format!("db.{i}"));
+        if from.exists() {
+            std::fs::rename(&from, &to)?;
+        }
+    }
+
+    // Copy current sidecar DB to the newest backup slot.
+    std::fs::copy(sidecar_path, &base)?;
+
+    // fsync the backup file.
+    let file = std::fs::File::open(&base)?;
+    file.sync_all()?;
+
+    // fsync the directory to ensure the rename/copy metadata is durable.
+    if let Ok(dir) = std::fs::File::open(&backup_dir) {
+        dir.sync_all().ok();
+    }
+
+    output::sidecar_msg(&format!("backup: {}", base.display()));
+    Ok(())
 }
 
 #[cfg(test)]
