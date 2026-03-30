@@ -960,8 +960,10 @@ fn backup_sidecar_to(
     }
 
     // Preserve the current primary as .1 via hard-link.
+    // Remove any stale .1 first (hard_link does not overwrite).
     if base.exists() {
         let slot1 = base.with_extension("db.1");
+        std::fs::remove_file(&slot1).ok();
         std::fs::hard_link(&base, &slot1).ok();
     }
 
@@ -970,10 +972,8 @@ fn backup_sidecar_to(
     std::fs::rename(&tmp, &base)?;
 
     // fsync the directory to make all renames durable.
-    let dir = std::fs::File::open(&backup_dir)
-        .map_err(|e| DevError::Io(e))?;
-    dir.sync_all()
-        .map_err(|e| DevError::Io(e))?;
+    let dir = std::fs::File::open(&backup_dir)?;
+    dir.sync_all()?;
 
     output::sidecar_msg(&format!("backup: {}", base.display()));
     Ok(())
