@@ -941,34 +941,36 @@ fn backup_sidecar_to(
     // current primary until the new one is in place.
     //
     // Sequence:
-    //   1. Shift older copies up: .1 → .2 (drop oldest)
+    //   1. Shift older copies: .1 → .2 (clears .1 slot, drops oldest)
     //   2. Preserve current primary: hard-link base → .1
     //   3. Atomic promote: rename tmp → base (overwrites old base)
     //
-    // If step 3 fails, the old base is still intact (the hard-link in
-    // step 2 created .1 as a second link to the same inode, so base is
-    // still the original file). If step 2 fails, we still promote — we
-    // just lose one generation of history.
+    // Every step propagates errors. If any rotation or preservation step
+    // fails, the backup is considered failed rather than silently losing
+    // retention history.
 
     // Shift older copies: .1 → .2, .2 → .3, etc.
+    // This clears the .1 slot so the hard-link in the next step can
+    // succeed without a prior remove.
     for i in (2..SIDECAR_BACKUP_COPIES).rev() {
         let from = base.with_extension(format!("db.{}", i - 1));
         let to = base.with_extension(format!("db.{i}"));
         if from.exists() {
-            std::fs::rename(&from, &to).ok();
+            std::fs::rename(&from, &to)?;
         }
     }
 
     // Preserve the current primary as .1 via hard-link.
-    // Remove any stale .1 first (hard_link does not overwrite).
+    // The .1 slot was cleared by the rename above (or never existed).
     if base.exists() {
         let slot1 = base.with_extension("db.1");
-        std::fs::remove_file(&slot1).ok();
-        std::fs::hard_link(&base, &slot1).ok();
+        std::fs::hard_link(&base, &slot1)?;
     }
 
     // Atomic promotion: rename tmp → base. On Linux this atomically
-    // replaces the old base. If this fails, base is still the old copy.
+    // replaces the old base. If this fails, base is still the old copy
+    // (the hard-link in step 2 created .1 as a second link to the same
+    // inode, so the data is preserved regardless).
     std::fs::rename(&tmp, &base)?;
 
     // fsync the directory to make all renames durable.
