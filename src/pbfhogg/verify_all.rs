@@ -5,7 +5,8 @@ use std::path::Path;
 use super::verify::VerifyHarness;
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
-    verify_extract, verify_getid_removeid, verify_merge, verify_sort, verify_tags_filter,
+    verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_sort,
+    verify_tags_filter,
 };
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -60,6 +61,17 @@ pub fn run(
         run_one("extract", verify_extract::run(harness, pbf, b, direct_io));
     } else {
         skip("extract", "no --bbox provided");
+    }
+
+    // 3b. multi-extract
+    verify_msg("========== multi-extract ==========");
+    if let Some(b) = bbox {
+        run_one(
+            "multi-extract",
+            verify_multi_extract::run(harness, pbf, b, 5, direct_io),
+        );
+    } else {
+        skip("multi-extract", "no --bbox provided");
     }
 
     // 4. tags-filter

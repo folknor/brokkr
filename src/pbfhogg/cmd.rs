@@ -181,6 +181,17 @@ pub(crate) fn verify(
             let bbox = resolve_bbox(bbox.as_deref(), &dataset, &paths)?;
             super::verify_extract::run(&harness, &pbf_path, &bbox, direct_io)
         }
+        VerifyCommand::MultiExtract {
+            dataset,
+            variant,
+            bbox,
+            regions,
+            direct_io,
+        } => {
+            let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
+            let bbox = resolve_bbox(bbox.as_deref(), &dataset, &paths)?;
+            super::verify_multi_extract::run(&harness, &pbf_path, &bbox, regions, direct_io)
+        }
         VerifyCommand::TagsFilter {
             dataset,
             variant,

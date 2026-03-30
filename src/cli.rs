@@ -1016,6 +1016,22 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         direct_io: bool,
     },
+    /// [pbfhogg] Cross-validate multi-extract (single-pass vs sequential)
+    #[command(name = "multi-extract", display_order = 2)]
+    MultiExtract {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
+        #[arg(long)]
+        bbox: Option<String>,
+        /// Number of non-overlapping bbox regions
+        #[arg(long, default_value = "5")]
+        regions: usize,
+        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
+    },
     /// [pbfhogg] Cross-validate tags-filter against osmium tags-filter
     #[command(display_order = 3)]
     TagsFilter {
