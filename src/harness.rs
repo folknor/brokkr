@@ -884,20 +884,34 @@ fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
 /// logical database state regardless of WAL or concurrent readers.
 ///
 /// The sequence is: create temp backup via SQLite → quick_check the
-/// temp → fsync → rotate older backups → rename temp into newest slot
-/// → fsync directory. If any step fails, existing backups are not
-/// displaced.
+/// temp → fsync → shift older copies → hard-link primary to .1 →
+/// atomic rename temp into primary slot → fsync directory. The primary
+/// slot is only overwritten by the atomic rename, so a failure before
+/// that point leaves the current primary intact.
 ///
 /// Called while the benchmark lock is still held.
 fn backup_sidecar(
     sidecar_path: &Path,
     project: crate::project::Project,
 ) -> Result<(), DevError> {
+    backup_sidecar_to(sidecar_path, project, None)
+}
+
+/// Inner implementation that accepts an optional backup directory override
+/// (used by tests to avoid mutating global XDG_DATA_HOME).
+fn backup_sidecar_to(
+    sidecar_path: &Path,
+    project: crate::project::Project,
+    backup_dir_override: Option<&Path>,
+) -> Result<(), DevError> {
     if !sidecar_path.exists() {
         return Ok(());
     }
 
-    let backup_dir = sidecar_backup_dir()?;
+    let backup_dir = match backup_dir_override {
+        Some(d) => d.to_path_buf(),
+        None => sidecar_backup_dir()?,
+    };
     std::fs::create_dir_all(&backup_dir)?;
 
     let base = backup_dir.join(format!("{}-sidecar.db", project.name()));
@@ -923,21 +937,36 @@ fn backup_sidecar(
     file.sync_all()?;
     drop(file);
 
-    // Rotate only after the new backup is confirmed on disk.
-    // .2 is deleted (implicitly by rename overwrite), .1 → .2, current → .1
-    for i in (1..SIDECAR_BACKUP_COPIES).rev() {
-        let from = if i == 1 {
-            base.clone()
-        } else {
-            base.with_extension(format!("db.{}", i - 1))
-        };
+    // Promote the new backup into the primary slot without displacing the
+    // current primary until the new one is in place.
+    //
+    // Sequence:
+    //   1. Shift older copies up: .1 → .2 (drop oldest)
+    //   2. Preserve current primary: hard-link base → .1
+    //   3. Atomic promote: rename tmp → base (overwrites old base)
+    //
+    // If step 3 fails, the old base is still intact (the hard-link in
+    // step 2 created .1 as a second link to the same inode, so base is
+    // still the original file). If step 2 fails, we still promote — we
+    // just lose one generation of history.
+
+    // Shift older copies: .1 → .2, .2 → .3, etc.
+    for i in (2..SIDECAR_BACKUP_COPIES).rev() {
+        let from = base.with_extension(format!("db.{}", i - 1));
         let to = base.with_extension(format!("db.{i}"));
         if from.exists() {
-            std::fs::rename(&from, &to)?;
+            std::fs::rename(&from, &to).ok();
         }
     }
 
-    // Promote the verified backup into the newest slot.
+    // Preserve the current primary as .1 via hard-link.
+    if base.exists() {
+        let slot1 = base.with_extension("db.1");
+        std::fs::hard_link(&base, &slot1).ok();
+    }
+
+    // Atomic promotion: rename tmp → base. On Linux this atomically
+    // replaces the old base. If this fails, base is still the old copy.
     std::fs::rename(&tmp, &base)?;
 
     // fsync the directory to make all renames durable.
@@ -1378,19 +1407,19 @@ mod tests {
         let sidecar_path = dir.join("sidecar.db");
         create_sidecar(&sidecar_path);
 
-        // Override XDG to put backups in our temp dir.
-        let _backup_dir = dir.join("backups");
-        let old_xdg = std::env::var("XDG_DATA_HOME").ok();
-        unsafe { std::env::set_var("XDG_DATA_HOME", &dir.join("xdg")) };
-
-        let xdg_backup_dir = dir.join("xdg").join("brokkr").join("sidecar-backups");
+        let backup_dir = dir.join("backups");
 
         // Run backup 4 times to exercise rotation.
         for _ in 0..4 {
-            backup_sidecar(&sidecar_path, crate::project::Project::Pbfhogg).unwrap();
+            backup_sidecar_to(
+                &sidecar_path,
+                crate::project::Project::Pbfhogg,
+                Some(&backup_dir),
+            )
+            .unwrap();
         }
 
-        let base = xdg_backup_dir.join("pbfhogg-sidecar.db");
+        let base = backup_dir.join("pbfhogg-sidecar.db");
         assert!(base.exists(), "newest backup should exist");
         assert!(
             base.with_extension("db.1").exists(),
@@ -1399,6 +1428,11 @@ mod tests {
         assert!(
             base.with_extension("db.2").exists(),
             "third backup should exist"
+        );
+        // Only 3 copies kept.
+        assert!(
+            !base.with_extension("db.3").exists(),
+            "fourth backup should not exist"
         );
 
         // Verify the backup is a valid SQLite DB.
@@ -1412,11 +1446,45 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
 
-        // Restore env.
-        match old_xdg {
-            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
-            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
-        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_failure_does_not_displace_good_backup() {
+        let dir = temp_dir("nodisplace");
+        let sidecar_path = dir.join("sidecar.db");
+        create_sidecar(&sidecar_path);
+
+        let backup_dir = dir.join("backups");
+
+        // Create a good initial backup.
+        backup_sidecar_to(
+            &sidecar_path,
+            crate::project::Project::Pbfhogg,
+            Some(&backup_dir),
+        )
+        .unwrap();
+
+        let base = backup_dir.join("pbfhogg-sidecar.db");
+        assert!(base.exists());
+        let good_size = std::fs::metadata(&base).unwrap().len();
+
+        // Attempt backup from a non-SQLite source — should fail.
+        let bad_source = dir.join("not-a-database.db");
+        std::fs::write(&bad_source, b"this is not sqlite").unwrap();
+
+        let result = backup_sidecar_to(
+            &bad_source,
+            crate::project::Project::Pbfhogg,
+            Some(&backup_dir),
+        );
+        assert!(result.is_err());
+
+        // The good backup should still be intact.
+        assert!(base.exists(), "good backup should still exist");
+        let after_size = std::fs::metadata(&base).unwrap().len();
+        assert_eq!(good_size, after_size, "good backup should be unchanged");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1425,7 +1493,11 @@ mod tests {
         let dir = temp_dir("noop");
         let sidecar_path = dir.join("does-not-exist.db");
 
-        let result = backup_sidecar(&sidecar_path, crate::project::Project::Pbfhogg);
+        let result = backup_sidecar_to(
+            &sidecar_path,
+            crate::project::Project::Pbfhogg,
+            Some(&dir),
+        );
         assert!(result.is_ok());
 
         std::fs::remove_dir_all(&dir).ok();
