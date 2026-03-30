@@ -444,7 +444,8 @@ impl BenchHarness {
         let short = &store_uuid[..8.min(store_uuid.len())];
         output::sidecar_msg(&format!("profile data stored in sidecar.db ({short})"));
 
-        // Close the connection so the WAL is checkpointed before we copy.
+        // Close the writer before backup. The backup API reads the logical
+        // DB state regardless, but closing avoids holding two connections.
         drop(sidecar_db);
 
         // Back up sidecar DB while the lock is still held.
@@ -878,14 +879,16 @@ fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
 ///   {project}-sidecar.db.1    (previous)
 ///   {project}-sidecar.db.2    (oldest)
 ///
-/// Safety:
-/// - Runs `PRAGMA quick_check` before copying — skips backup if the source
-///   is corrupt, rather than overwriting known-good backups.
-/// - Copies to a `.tmp` file and fsyncs it before rotating, so an
-///   interrupted backup never displaces good backups.
+/// Uses SQLite's online backup API to produce a self-contained backup
+/// (DELETE journal mode, no WAL side files). The backup captures the
+/// logical database state regardless of WAL or concurrent readers.
 ///
-/// Called while the benchmark lock is still held, after the sidecar DB
-/// connection has been dropped (WAL checkpointed).
+/// The sequence is: create temp backup via SQLite → quick_check the
+/// temp → fsync → rotate older backups → rename temp into newest slot
+/// → fsync directory. If any step fails, existing backups are not
+/// displaced.
+///
+/// Called while the benchmark lock is still held.
 fn backup_sidecar(
     sidecar_path: &Path,
     project: crate::project::Project,
@@ -894,38 +897,34 @@ fn backup_sidecar(
         return Ok(());
     }
 
-    // Quick integrity check before we trust the source.
-    {
-        let conn = rusqlite::Connection::open_with_flags(
-            sidecar_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|e| DevError::Database(e.to_string()))?;
-        let result: String = conn
-            .query_row("PRAGMA quick_check", [], |row| row.get(0))
-            .map_err(|e| DevError::Database(e.to_string()))?;
-        if result != "ok" {
-            output::sidecar_msg(&format!(
-                "sidecar backup skipped: integrity check failed ({result})"
-            ));
-            return Ok(());
-        }
-    }
-
     let backup_dir = sidecar_backup_dir()?;
     std::fs::create_dir_all(&backup_dir)?;
 
     let base = backup_dir.join(format!("{}-sidecar.db", project.name()));
     let tmp = base.with_extension("db.tmp");
 
-    // Copy to temp file first, fsync it.
-    std::fs::copy(sidecar_path, &tmp)?;
+    // Clean up any stale tmp from a previous interrupted run.
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    // Create backup via SQLite backup API. This reads the logical DB state
+    // (including uncommitted WAL pages from other connections) and writes a
+    // self-contained DELETE-journal-mode database at the temp path. The
+    // backup API also runs quick_check on the result.
+    if let Err(e) = crate::db::sidecar::backup_to_path(sidecar_path, &tmp) {
+        // Clean up failed temp on best effort.
+        std::fs::remove_file(&tmp).ok();
+        return Err(e);
+    }
+
+    // fsync the temp backup before rotating.
     let file = std::fs::File::open(&tmp)?;
     file.sync_all()?;
     drop(file);
 
     // Rotate only after the new backup is confirmed on disk.
-    // .2 is deleted (implicitly), .1 → .2, current → .1
+    // .2 is deleted (implicitly by rename overwrite), .1 → .2, current → .1
     for i in (1..SIDECAR_BACKUP_COPIES).rev() {
         let from = if i == 1 {
             base.clone()
@@ -938,13 +937,14 @@ fn backup_sidecar(
         }
     }
 
-    // Move the verified temp copy into the newest slot.
+    // Promote the verified backup into the newest slot.
     std::fs::rename(&tmp, &base)?;
 
-    // fsync the directory to ensure all renames are durable.
-    if let Ok(dir) = std::fs::File::open(&backup_dir) {
-        dir.sync_all().ok();
-    }
+    // fsync the directory to make all renames durable.
+    let dir = std::fs::File::open(&backup_dir)
+        .map_err(|e| DevError::Io(e))?;
+    dir.sync_all()
+        .map_err(|e| DevError::Io(e))?;
 
     output::sidecar_msg(&format!("backup: {}", base.display()));
     Ok(())
@@ -1346,5 +1346,88 @@ mod tests {
                 "feature={feature} and suffix={suffix} should agree on alloc presence"
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // backup_sidecar rotation
+    // -------------------------------------------------------------------
+
+    fn temp_dir(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "brokkr-harness-test-{}-{}",
+            std::process::id(),
+            suffix,
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Create a minimal sidecar DB at the given path.
+    fn create_sidecar(path: &Path) {
+        let db = crate::db::sidecar::SidecarDb::open(path).unwrap();
+        db.conn().execute(
+            "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+             timestamp_us, name) VALUES ('test', 0, 0, 1000, 'marker')",
+            [],
+        ).unwrap();
+    }
+
+    #[test]
+    fn backup_sidecar_creates_and_rotates() {
+        let dir = temp_dir("rotate");
+        let sidecar_path = dir.join("sidecar.db");
+        create_sidecar(&sidecar_path);
+
+        // Override XDG to put backups in our temp dir.
+        let _backup_dir = dir.join("backups");
+        let old_xdg = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &dir.join("xdg")) };
+
+        let xdg_backup_dir = dir.join("xdg").join("brokkr").join("sidecar-backups");
+
+        // Run backup 4 times to exercise rotation.
+        for _ in 0..4 {
+            backup_sidecar(&sidecar_path, crate::project::Project::Pbfhogg).unwrap();
+        }
+
+        let base = xdg_backup_dir.join("pbfhogg-sidecar.db");
+        assert!(base.exists(), "newest backup should exist");
+        assert!(
+            base.with_extension("db.1").exists(),
+            "second backup should exist"
+        );
+        assert!(
+            base.with_extension("db.2").exists(),
+            "third backup should exist"
+        );
+
+        // Verify the backup is a valid SQLite DB.
+        let conn = rusqlite::Connection::open_with_flags(
+            &base,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Restore env.
+        match old_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_sidecar_nonexistent_source_is_noop() {
+        let dir = temp_dir("noop");
+        let sidecar_path = dir.join("does-not-exist.db");
+
+        let result = backup_sidecar(&sidecar_path, crate::project::Project::Pbfhogg);
+        assert!(result.is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

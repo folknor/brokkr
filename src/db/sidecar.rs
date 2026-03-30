@@ -115,6 +115,12 @@ pub struct SidecarDb {
 }
 
 impl SidecarDb {
+    /// Access the underlying connection (for tests and backup).
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
     /// Open (or create) the sidecar database at `path`. Creates schema,
     /// enables WAL mode, and runs pending migrations.
     pub fn open(path: &Path) -> Result<Self, DevError> {
@@ -471,5 +477,201 @@ impl SidecarDb {
             )
             .map(|count| count > 0)
             .unwrap_or(false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backup
+// ---------------------------------------------------------------------------
+
+/// Create a self-contained backup of a sidecar database using SQLite's
+/// online backup API.
+///
+/// The destination is opened in DELETE journal mode (no WAL side files),
+/// so the backup is a single restorable file. Returns `Ok(())` on success.
+pub fn backup_to_path(src: &Path, dst: &Path) -> Result<(), DevError> {
+    let src_conn = rusqlite::Connection::open_with_flags(
+        src,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| DevError::Database(format!("backup: open source: {e}")))?;
+
+    let mut dst_conn = rusqlite::Connection::open(dst)
+        .map_err(|e| DevError::Database(format!("backup: open dest: {e}")))?;
+    dst_conn
+        .pragma_update(None, "journal_mode", "DELETE")
+        .map_err(|e| DevError::Database(format!("backup: set journal mode: {e}")))?;
+
+    let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst_conn)
+        .map_err(|e| DevError::Database(format!("backup: init: {e}")))?;
+
+    // Copy all pages in one step (-1 = all remaining pages).
+    backup
+        .step(-1)
+        .map_err(|e| DevError::Database(format!("backup: step: {e}")))?;
+
+    // Drop the backup handle to release the mutable borrow on dst_conn.
+    drop(backup);
+
+    // Verify the backup is consistent.
+    let result: String = dst_conn
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|e| DevError::Database(format!("backup: quick_check: {e}")))?;
+    if result != "ok" {
+        return Err(DevError::Database(format!(
+            "backup: integrity check failed on destination ({result})"
+        )));
+    }
+
+    // Close connections explicitly before caller fsyncs.
+    drop(dst_conn);
+    drop(src_conn);
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "brokkr-sidecar-test-{}-{}",
+            std::process::id(),
+            suffix,
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Create a sidecar DB and insert a minimal marker row, returning the path.
+    fn create_test_sidecar(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let db = SidecarDb::open(&path).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+                 timestamp_us, name) VALUES ('test-uuid', 0, 0, 1000, 'test')",
+                [],
+            )
+            .unwrap();
+        drop(db);
+        path
+    }
+
+    #[test]
+    fn creates_restorable_backup() {
+        let dir = temp_dir("restorable");
+        let src = create_test_sidecar(&dir, "src.db");
+        let dst = dir.join("backup.db");
+
+        backup_to_path(&src, &dst).unwrap();
+
+        // Verify the backup is a single file (no WAL).
+        assert!(dst.exists());
+        assert!(!dir.join("backup.db-wal").exists());
+
+        // Verify expected data.
+        let conn = rusqlite::Connection::open_with_flags(
+            &dst,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sidecar_markers WHERE result_uuid = 'test-uuid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_contains_latest_data_even_with_reader_open() {
+        let dir = temp_dir("reader");
+        let src = create_test_sidecar(&dir, "src-reader.db");
+        let dst = dir.join("backup-reader.db");
+
+        // Open a reader connection that stays alive during backup.
+        let _reader = rusqlite::Connection::open_with_flags(
+            &src,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+
+        // Write more data while the reader is open.
+        {
+            let db = SidecarDb::open(&src).unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+                     timestamp_us, name) VALUES ('second-uuid', 0, 0, 2000, 'second')",
+                    [],
+                )
+                .unwrap();
+            // Don't drop db yet — keep writer alive too.
+
+            backup_to_path(&src, &dst).unwrap();
+        }
+
+        // Verify backup has both rows.
+        let conn = rusqlite::Connection::open_with_flags(
+            &dst,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_overwrites_existing_destination() {
+        let dir = temp_dir("overwrite");
+        let src = create_test_sidecar(&dir, "src-overwrite.db");
+        let dst = dir.join("backup-overwrite.db");
+
+        // Create an initial backup.
+        backup_to_path(&src, &dst).unwrap();
+
+        // Add more data to source.
+        {
+            let db = SidecarDb::open(&src).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+                     timestamp_us, name) VALUES ('second', 0, 0, 2000, 'second')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        // Backup again over the existing destination.
+        backup_to_path(&src, &dst).unwrap();
+
+        // Verify the backup has both rows.
+        let conn = rusqlite::Connection::open_with_flags(
+            &dst,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
