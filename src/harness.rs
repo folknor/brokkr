@@ -444,6 +444,9 @@ impl BenchHarness {
         let short = &store_uuid[..8.min(store_uuid.len())];
         output::sidecar_msg(&format!("profile data stored in sidecar.db ({short})"));
 
+        // Close the connection so the WAL is checkpointed before we copy.
+        drop(sidecar_db);
+
         // Back up sidecar DB while the lock is still held.
         if let Err(e) = backup_sidecar(&sidecar_db_path, self.project) {
             output::sidecar_msg(&format!("sidecar backup failed (non-fatal): {e}"));
@@ -875,7 +878,14 @@ fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
 ///   {project}-sidecar.db.1    (previous)
 ///   {project}-sidecar.db.2    (oldest)
 ///
-/// Called while the benchmark lock is still held.
+/// Safety:
+/// - Runs `PRAGMA quick_check` before copying — skips backup if the source
+///   is corrupt, rather than overwriting known-good backups.
+/// - Copies to a `.tmp` file and fsyncs it before rotating, so an
+///   interrupted backup never displaces good backups.
+///
+/// Called while the benchmark lock is still held, after the sidecar DB
+/// connection has been dropped (WAL checkpointed).
 fn backup_sidecar(
     sidecar_path: &Path,
     project: crate::project::Project,
@@ -884,12 +894,38 @@ fn backup_sidecar(
         return Ok(());
     }
 
+    // Quick integrity check before we trust the source.
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            sidecar_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| DevError::Database(e.to_string()))?;
+        let result: String = conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|e| DevError::Database(e.to_string()))?;
+        if result != "ok" {
+            output::sidecar_msg(&format!(
+                "sidecar backup skipped: integrity check failed ({result})"
+            ));
+            return Ok(());
+        }
+    }
+
     let backup_dir = sidecar_backup_dir()?;
     std::fs::create_dir_all(&backup_dir)?;
 
     let base = backup_dir.join(format!("{}-sidecar.db", project.name()));
+    let tmp = base.with_extension("db.tmp");
 
-    // Rotate: .2 is deleted, .1 → .2, current → .1
+    // Copy to temp file first, fsync it.
+    std::fs::copy(sidecar_path, &tmp)?;
+    let file = std::fs::File::open(&tmp)?;
+    file.sync_all()?;
+    drop(file);
+
+    // Rotate only after the new backup is confirmed on disk.
+    // .2 is deleted (implicitly), .1 → .2, current → .1
     for i in (1..SIDECAR_BACKUP_COPIES).rev() {
         let from = if i == 1 {
             base.clone()
@@ -902,14 +938,10 @@ fn backup_sidecar(
         }
     }
 
-    // Copy current sidecar DB to the newest backup slot.
-    std::fs::copy(sidecar_path, &base)?;
+    // Move the verified temp copy into the newest slot.
+    std::fs::rename(&tmp, &base)?;
 
-    // fsync the backup file.
-    let file = std::fs::File::open(&base)?;
-    file.sync_all()?;
-
-    // fsync the directory to ensure the rename/copy metadata is durable.
+    // fsync the directory to ensure all renames are durable.
     if let Ok(dir) = std::fs::File::open(&backup_dir) {
         dir.sync_all().ok();
     }
