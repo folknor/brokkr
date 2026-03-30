@@ -177,6 +177,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::ExtractSimple { .. }
         | Command::ExtractComplete { .. }
         | Command::ExtractSmart { .. }
+        | Command::MultiExtract { .. }
         | Command::TimeFilter { .. }
         | Command::Diff { .. }
         | Command::DiffOsc { .. }

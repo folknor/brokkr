@@ -123,6 +123,9 @@ pub enum PbfhoggCommand {
 
     // -- Multi-variant benchmarks --
     Extract { strategy: ExtractStrategy },
+
+    /// Multi-extract: single-pass N-region extract benchmark.
+    MultiExtract { regions: usize },
 }
 
 impl PbfhoggCommand {
@@ -159,6 +162,7 @@ impl PbfhoggCommand {
             Self::DiffOsc => "diff-osc",
             Self::BuildGeocodeIndex => "build-geocode-index",
             Self::Extract { .. } => "extract",
+            Self::MultiExtract { .. } => "multi-extract",
         }
     }
 
@@ -172,7 +176,7 @@ impl PbfhoggCommand {
             Self::ExtractSimple | Self::ExtractComplete | Self::ExtractSmart => {
                 InputKind::PbfAndBbox
             }
-            Self::Extract { .. } => InputKind::PbfAndBbox,
+            Self::Extract { .. } | Self::MultiExtract { .. } => InputKind::PbfAndBbox,
             _ => InputKind::Pbf,
         }
     }
@@ -196,6 +200,7 @@ impl PbfhoggCommand {
 
             // Directory output.
             Self::BuildGeocodeIndex => OutputKind::ScratchDir("geocode"),
+            Self::MultiExtract { .. } => OutputKind::ScratchDir("multi-extract"),
 
             // Everything else writes a scratch PBF.
             _ => OutputKind::ScratchPbf("bench-output"),
@@ -265,6 +270,7 @@ impl PbfhoggCommand {
             | Self::DiffOsc => "bench commands",
             Self::BuildGeocodeIndex => "bench build-geocode-index",
             Self::Extract { .. } => "bench extract",
+            Self::MultiExtract { .. } => "bench multi-extract",
         }
     }
 
@@ -304,6 +310,7 @@ impl PbfhoggCommand {
             Self::BuildGeocodeIndex => None,
 
             Self::Extract { strategy } => Some(strategy.name().to_owned()),
+            Self::MultiExtract { regions } => Some(format!("multi-extract-{regions}")),
         }
     }
 
@@ -321,6 +328,13 @@ impl PbfhoggCommand {
             }
             Self::Extract { strategy } => {
                 let mut meta = vec![KvPair::text("meta.strategy", strategy.name())];
+                if let Some(ref bbox) = ctx.bbox {
+                    meta.push(KvPair::text("meta.bbox", bbox.as_str()));
+                }
+                meta
+            }
+            Self::MultiExtract { regions } => {
+                let mut meta = vec![KvPair::text("meta.regions", &regions.to_string())];
                 if let Some(ref bbox) = ctx.bbox {
                     meta.push(KvPair::text("meta.bbox", bbox.as_str()));
                 }
@@ -661,6 +675,68 @@ impl PbfhoggCommand {
                     "--output-dir".into(),
                     output_dir_str.into(),
                     "--force".into(),
+                ])
+            }
+
+            // -----------------------------------------------------------------
+            // Multi-extract: single-pass N-region extract benchmark
+            // -----------------------------------------------------------------
+            Self::MultiExtract { regions } => {
+                if *regions == 0 {
+                    return Err(DevError::Config(
+                        "multi-extract requires at least 1 region".into(),
+                    ));
+                }
+                let bbox_str = ctx
+                    .bbox
+                    .as_deref()
+                    .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
+                let parts: Vec<f64> = bbox_str
+                    .split(',')
+                    .map(|s| s.trim().parse::<f64>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| DevError::Config(format!("invalid bbox: {e}")))?;
+                if parts.len() != 4 {
+                    return Err(DevError::Config(format!(
+                        "bbox must have 4 values, got {}",
+                        parts.len()
+                    )));
+                }
+                let (min_lon, min_lat, max_lon, max_lat) =
+                    (parts[0], parts[1], parts[2], parts[3]);
+
+                let output_dir = ctx.scratch_dir.join("multi-extract");
+                std::fs::create_dir_all(&output_dir)?;
+
+                let strip_width = (max_lon - min_lon) / *regions as f64;
+                let mut extracts = Vec::new();
+                for i in 0..*regions {
+                    let strip_min = min_lon + strip_width * i as f64;
+                    let strip_max = if i + 1 == *regions {
+                        max_lon
+                    } else {
+                        min_lon + strip_width * (i + 1) as f64
+                    };
+                    extracts.push(format!(
+                        r#"    {{ "output": "strip-{i}.osm.pbf", "bbox": [{strip_min}, {min_lat}, {strip_max}, {max_lat}] }}"#
+                    ));
+                }
+
+                let config_json = format!(
+                    "{{\n  \"directory\": \"{}\",\n  \"extracts\": [\n{}\n  ]\n}}",
+                    output_dir.display(),
+                    extracts.join(",\n"),
+                );
+
+                let config_path = ctx.scratch_dir.join("multi-extract-config.json");
+                std::fs::write(&config_path, &config_json)?;
+
+                Ok(vec![
+                    "extract".into(),
+                    ctx.pbf_str()?.into(),
+                    "--config".into(),
+                    path_to_string(&config_path)?,
+                    "--simple".into(),
                 ])
             }
 

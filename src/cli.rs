@@ -258,6 +258,17 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
+    /// [pbfhogg] Multi-extract benchmark (single-pass N regions)
+    #[command(name = "multi-extract", display_order = 2)]
+    MultiExtract {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Number of non-overlapping bbox regions to extract
+        #[arg(long, default_value = "5")]
+        regions: usize,
+    },
     /// [pbfhogg] Filter by timestamp
     #[command(name = "time-filter", display_order = 2)]
     TimeFilter {
@@ -1242,6 +1253,21 @@ impl Command {
             }
             Self::ExtractSmart { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::ExtractSmart, None, empty))
+            }
+            Self::MultiExtract {
+                mode,
+                pbf,
+                regions,
+            } => {
+                let mut params = HashMap::new();
+                params.insert("regions".into(), regions.to_string());
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::MultiExtract { regions: *regions },
+                    None,
+                    params,
+                ))
             }
             Self::TimeFilter { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::TimeFilter, None, empty))
