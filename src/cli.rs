@@ -913,6 +913,18 @@ Examples:
         /// Print full output
         #[arg(short, long)]
         verbose: bool,
+
+        /// Run even if the git tree is dirty (results will not be stored)
+        #[arg(long)]
+        force: bool,
+
+        /// Skip memory availability check
+        #[arg(long)]
+        no_mem_check: bool,
+
+        /// Wait for the lock instead of failing immediately
+        #[arg(long)]
+        wait: bool,
     },
 }
 

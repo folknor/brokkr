@@ -742,7 +742,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
         }
         // ----- sluggrs-only commands -----
-        Command::Hotpath { alloc, runs, verbose } => {
+        Command::Hotpath { alloc, runs, verbose, force, no_mem_check, wait } => {
             project::require(project, Project::Sluggrs, "hotpath")?;
             let mm = if alloc {
                 measure::MeasureMode::Alloc { runs }
@@ -759,10 +759,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 dataset: "n/a",
                 variant: "n/a",
                 features: &features,
-                force: false,
+                force,
                 mode: mm,
-                no_mem_check: false,
-                wait: false,
+                no_mem_check,
+                wait,
             };
             sluggrs::hotpath::cmd(&req)
         }
