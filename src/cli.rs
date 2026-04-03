@@ -910,6 +910,10 @@ Examples:
         #[arg(long, short = 'n', default_value = "1")]
         runs: usize,
 
+        /// Example binary to build and run (default: hotpath)
+        #[arg(long, default_value = "hotpath")]
+        target: String,
+
         /// Print full output
         #[arg(short, long)]
         verbose: bool,

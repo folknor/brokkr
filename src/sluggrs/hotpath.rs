@@ -21,9 +21,10 @@ use crate::output;
 // Build helper
 // ---------------------------------------------------------------------------
 
-/// Build the `hotpath` example with the appropriate hotpath feature.
+/// Build an example binary with the appropriate hotpath feature.
 fn build_hotpath_example(
     project_root: &Path,
+    target: &str,
     alloc: bool,
     extra_features: &[String],
 ) -> Result<std::path::PathBuf, DevError> {
@@ -35,10 +36,18 @@ fn build_hotpath_example(
         }
     }
 
+    // The default "hotpath" target maps to the "hotpath" example directly;
+    // other targets map to "{target}_bench" examples (e.g. "email" → "email_bench").
+    let example_name = if target == "hotpath" {
+        target.to_owned()
+    } else {
+        format!("{target}_bench")
+    };
+
     let config = build::BuildConfig {
         package: None,
         bin: None,
-        example: Some("hotpath".into()),
+        example: Some(example_name),
         features,
         default_features: true,
         profile: "release",
@@ -64,6 +73,7 @@ pub fn run(
     alloc: bool,
     project_root: &Path,
     scratch_dir: &Path,
+    variant_base: &str,
 ) -> Result<(), DevError> {
     let binary_str = binary
         .to_str()
@@ -79,7 +89,7 @@ pub fn run(
     }
 
     let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("render{variant_suffix}");
+    let variant = format!("{variant_base}{variant_suffix}");
 
     let config = BenchConfig {
         command: "hotpath".into(),
@@ -110,7 +120,7 @@ pub fn run(
 ///
 /// Handles lock acquisition, building the example binary with the correct
 /// features, and delegating to [`run`].
-pub(crate) fn cmd(req: &MeasureRequest) -> Result<(), DevError> {
+pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     let effective_root = req.effective_build_root();
     let pi = crate::context::bootstrap(req.build_root)?;
     let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
@@ -121,7 +131,7 @@ pub(crate) fn cmd(req: &MeasureRequest) -> Result<(), DevError> {
         project_root: &req.project_root.display().to_string(),
     })?;
 
-    let binary = build_hotpath_example(effective_root, req.is_alloc(), req.features)?;
+    let binary = build_hotpath_example(effective_root, target, req.is_alloc(), req.features)?;
 
     let db_root = req.build_root.map(|_| req.project_root);
     let harness = harness::BenchHarness::new_with_lock(
@@ -133,6 +143,15 @@ pub(crate) fn cmd(req: &MeasureRequest) -> Result<(), DevError> {
         req.force,
     )?;
 
+    // The target name is the variant label (and also the cargo example name,
+    // with "_bench" appended). The default "hotpath" example maps to "render"
+    // for backwards compatibility.
+    let variant_base = if target == "hotpath" {
+        "render".to_owned()
+    } else {
+        target.to_owned()
+    };
+
     run(
         &harness,
         &binary,
@@ -140,5 +159,6 @@ pub(crate) fn cmd(req: &MeasureRequest) -> Result<(), DevError> {
         req.is_alloc(),
         effective_root,
         &paths.scratch_dir,
+        &variant_base,
     )
 }
