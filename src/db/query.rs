@@ -137,7 +137,12 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     }
     if let Some(ref cmd) = filter.command {
         params.push(cmd.clone());
-        clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
+        let i = params.len();
+        params.push(cmd.clone());
+        let j = params.len();
+        clauses.push(format!(
+            "(command LIKE '%'||?{i}||'%' OR variant LIKE '%'||?{j}||'%')"
+        ));
     }
     if let Some(ref v) = filter.variant {
         params.push(v.clone());
@@ -349,14 +354,19 @@ mod tests {
         );
         assert!(
             sql.contains("variant LIKE '%'||?3||'%'"),
-            "variant should be ?3 contains"
+            "command should also check variant as ?3"
         );
-        assert!(sql.contains("LIMIT ?4"), "limit should be ?4");
-        assert_eq!(params.len(), 4);
+        assert!(
+            sql.contains("variant LIKE '%'||?4||'%'"),
+            "variant filter should be ?4 contains"
+        );
+        assert!(sql.contains("LIMIT ?5"), "limit should be ?5");
+        assert_eq!(params.len(), 5);
         assert_eq!(params[0], "abc123");
         assert_eq!(params[1], "read");
-        assert_eq!(params[2], "mmap");
-        assert_eq!(params[3], "10");
+        assert_eq!(params[2], "read");
+        assert_eq!(params[3], "mmap");
+        assert_eq!(params[4], "10");
     }
 
     #[test]
@@ -386,14 +396,17 @@ mod tests {
         };
         let (sql, params) = build_query_sql(&filter);
 
-        // Without commit, command becomes ?1, variant ?2, limit ?3
+        // Without commit, command becomes ?1 (+ variant fallback ?2),
+        // variant filter ?3, limit ?4
         assert!(sql.contains("command LIKE '%'||?1||'%'"));
         assert!(sql.contains("variant LIKE '%'||?2||'%'"));
-        assert!(sql.contains("LIMIT ?3"));
-        assert_eq!(params.len(), 3);
+        assert!(sql.contains("variant LIKE '%'||?3||'%'"));
+        assert!(sql.contains("LIMIT ?4"));
+        assert_eq!(params.len(), 4);
         assert_eq!(params[0], "write");
-        assert_eq!(params[1], "direct");
-        assert_eq!(params[2], "5");
+        assert_eq!(params[1], "write");
+        assert_eq!(params[2], "direct");
+        assert_eq!(params[3], "5");
     }
 
     #[test]
@@ -491,6 +504,22 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows.len(), 2);
+
+        // --command also matches against the variant column, so
+        // `--command renumber` finds rows where variant contains "renumber"
+        // even if the command column is "bench commands".
+        db.insert(&make_row("bench commands", "renumber")).unwrap();
+        db.insert(&make_row("bench commands", "sort")).unwrap();
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: Some(String::from("renumber")),
+                variant: None,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].variant, "renumber");
 
         drop(db);
         cleanup(&dir, &db_path);
