@@ -770,35 +770,38 @@ Examples:
         display_order = 40,
         long_about = "\
 Start the nidhogg server. Builds the binary, kills any existing instance, \
-spawns a background process, and waits for the health endpoint.
+spawns a background process, and waits for the health endpoint. \
+Stop it with `brokkr stop`.
 
-The server can run with any combination of features depending on what the \
-dataset provides:
-  - Query + geocode + tiles  (dataset has data_dir and pmtiles)
-  - Tiles only               (dataset has pmtiles but no data_dir)
-  - Query + geocode only     (dataset has data_dir, tiles disabled)
+Use --dataset to select which dataset from brokkr.toml to serve. The \
+dataset determines what features are available:
 
-At least one of data_dir or tiles must be available — the server needs \
-something to serve.
+  brokkr serve --dataset denmark    query + geocode + tiles (has both)
+  brokkr serve --dataset norway     tiles only (has pmtiles, no data_dir)
 
-Tiles resolution (--tiles):
-  Omitted        Auto-selects if the dataset has exactly one pmtiles entry, \
-skipped if none
-  <variant>      Looks up pmtiles.<variant> in the dataset config
+The other flags (--data-dir, --tiles) override or supplement what the \
+dataset provides. You almost always just need --dataset.
+
+Tiles (--tiles):
+  Omitted        Auto-selects if the dataset has exactly one pmtiles \
+entry, skipped if none configured
+  <variant>      Looks up pmtiles.<variant> in the dataset's config \
+(e.g. \"elivagar\")
   <path>         Direct file path (detected by / or .pmtiles extension)
-  none           Explicitly disables tile serving
+  none           Explicitly disables tile serving even if dataset has pmtiles
 
-Data directory resolution (--data-dir):
+Data directory (--data-dir):
   Omitted        Resolved from the dataset's data_dir field in brokkr.toml
   <dir>          Override with an explicit directory path
-  (If the dataset has no data_dir and no override is given, the server \
-starts without a disk store)
+
+If neither data_dir nor tiles are available (from the dataset or overrides), \
+the server has nothing to serve and will error.
 
 Examples:
-  brokkr serve                                  # denmark (default), auto-detect features
-  brokkr serve --dataset norway                 # tiles only (norway has no data_dir)
+  brokkr serve                                  # denmark (default), auto-detect
+  brokkr serve --dataset norway                 # tiles only (no data_dir)
   brokkr serve --dataset denmark --tiles none   # query + geocode, no tiles
-  brokkr serve --tiles elivagar                 # explicit variant from config
+  brokkr serve --tiles elivagar                 # explicit pmtiles variant
   brokkr serve --tiles ./data/custom.pmtiles    # direct file path
   brokkr serve --data-dir /mnt/fast/nidhogg     # override data directory"
     )]
