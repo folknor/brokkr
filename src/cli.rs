@@ -766,18 +766,58 @@ Examples:
         files: Vec<String>,
     },
     /// [nidhogg] Start the server
-    #[command(display_order = 40)]
+    #[command(
+        display_order = 40,
+        long_about = "\
+Start the nidhogg server. Builds the binary, kills any existing instance, \
+spawns a background process, and waits for the health endpoint.
+
+The server can run with any combination of features depending on what the \
+dataset provides:
+  - Query + geocode + tiles  (dataset has data_dir and pmtiles)
+  - Tiles only               (dataset has pmtiles but no data_dir)
+  - Query + geocode only     (dataset has data_dir, tiles disabled)
+
+At least one of data_dir or tiles must be available — the server needs \
+something to serve.
+
+Tiles resolution (--tiles):
+  Omitted        Auto-selects if the dataset has exactly one pmtiles entry, \
+skipped if none
+  <variant>      Looks up pmtiles.<variant> in the dataset config
+  <path>         Direct file path (detected by / or .pmtiles extension)
+  none           Explicitly disables tile serving
+
+Data directory resolution (--data-dir):
+  Omitted        Resolved from the dataset's data_dir field in brokkr.toml
+  <dir>          Override with an explicit directory path
+  (If the dataset has no data_dir and no override is given, the server \
+starts without a disk store)
+
+Examples:
+  brokkr serve                                  # denmark (default), auto-detect features
+  brokkr serve --dataset norway                 # tiles only (norway has no data_dir)
+  brokkr serve --dataset denmark --tiles none   # query + geocode, no tiles
+  brokkr serve --tiles elivagar                 # explicit variant from config
+  brokkr serve --tiles ./data/custom.pmtiles    # direct file path
+  brokkr serve --data-dir /mnt/fast/nidhogg     # override data directory"
+    )]
     Serve {
-        /// Data directory (ingested disk format)
-        #[arg(long)]
+        /// Override data directory path (ingested disk format).
+        /// If omitted, resolved from the dataset's data_dir in brokkr.toml.
+        /// When the dataset has no data_dir, the server starts without a
+        /// disk store (tiles-only mode).
+        #[arg(long, value_name = "DIR")]
         data_dir: Option<String>,
 
-        /// Dataset name from brokkr.toml (default: denmark)
-        #[arg(long, default_value = "denmark")]
+        /// Dataset name from brokkr.toml
+        #[arg(long, value_name = "NAME", default_value = "denmark")]
         dataset: String,
 
-        /// PMTiles variant from config (auto-selects if only one configured)
-        #[arg(long)]
+        /// PMTiles to serve: a variant name from config, a file path, or
+        /// "none" to disable. Auto-selects if the dataset has exactly one
+        /// pmtiles entry; skipped if none are configured.
+        #[arg(long, value_name = "VARIANT|PATH|none")]
         tiles: Option<String>,
     },
     /// [nidhogg] Stop the server
