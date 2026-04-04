@@ -23,7 +23,7 @@ pub const DEFAULT_PORT: u16 = 3033;
 /// and polls the HTTP health endpoint until ready (6s timeout).
 pub fn serve(
     binary: &Path,
-    data_dir: &str,
+    data_dir: Option<&str>,
     tiles: Option<&str>,
     port: u16,
     project_root: &Path,
@@ -45,7 +45,11 @@ pub fn serve(
     let log_file_err = log_file.try_clone()?;
 
     // Build argument list.
-    let mut args = vec!["serve", data_dir];
+    let mut args = vec!["serve"];
+    if let Some(d) = data_dir {
+        args.push("--data-dir");
+        args.push(d);
+    }
     if let Some(t) = tiles {
         args.push("--tiles");
         args.push(t);

@@ -50,34 +50,78 @@ pub(crate) fn serve(
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
+    // Resolve data directory: CLI override → dataset config → None (tiles-only).
     let data_dir_str = match data_dir {
-        Some(d) => d.to_owned(),
-        None => resolve_nidhogg_data_dir(dataset, &paths)?
-            .display()
-            .to_string(),
+        Some(d) => Some(d.to_owned()),
+        None => resolve_nidhogg_data_dir(dataset, &paths)
+            .ok()
+            .map(|p| p.display().to_string()),
     };
 
-    let tiles_path = match tiles_variant {
-        Some(v) => Some(resolve::resolve_pmtiles_path(
-            dataset,
-            v,
-            &paths,
-            project_root,
-        )?),
-        None => None,
-    };
-    let tiles_str = tiles_path.as_ref().map(|p| p.display().to_string());
+    // Resolve tiles: "none" explicitly disables, path with / or .pmtiles is
+    // used directly, bare name is a variant lookup, absent auto-selects from
+    // dataset if any pmtiles are configured.
+    let tiles_str = resolve_serve_tiles(tiles_variant, dataset, &paths, project_root)?;
+
+    if data_dir_str.is_none() && tiles_str.is_none() {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has neither data_dir nor pmtiles configured — \
+             nothing to serve"
+        )));
+    }
 
     let port = resolve_port(dev_config);
     let build_config = build_config_with_features(Some("nidhogg"), features);
     let binary = build::cargo_build(&build_config, project_root)?;
     super::server::serve(
         &binary,
-        &data_dir_str,
+        data_dir_str.as_deref(),
         tiles_str.as_deref(),
         port,
         project_root,
     )
+}
+
+/// Resolve the tiles path for `serve`.
+///
+/// - `Some("none")` → explicitly disabled → `Ok(None)`
+/// - `Some(v)` where `v` contains `/` or ends with `.pmtiles` → direct path
+/// - `Some(v)` → variant lookup in dataset config
+/// - `None` → auto-select if exactly one pmtiles entry, `Ok(None)` if zero
+fn resolve_serve_tiles(
+    tiles_variant: Option<&str>,
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<Option<String>, DevError> {
+    match tiles_variant {
+        Some("none") => Ok(None),
+        Some(v) if v.contains('/') || v.ends_with(".pmtiles") => {
+            let p = std::path::Path::new(v);
+            if !p.exists() {
+                return Err(DevError::Config(format!(
+                    "tiles file not found: {v}"
+                )));
+            }
+            Ok(Some(v.to_owned()))
+        }
+        Some(v) => {
+            let path = resolve::resolve_pmtiles_path(dataset, v, paths, project_root)?;
+            Ok(Some(path.display().to_string()))
+        }
+        None => {
+            // Auto-select: try default (works with exactly one entry), treat
+            // "no pmtiles configured" as None rather than error.
+            let ds = paths.datasets.get(dataset);
+            let has_pmtiles = ds.is_some_and(|d| !d.pmtiles.is_empty());
+            if !has_pmtiles {
+                return Ok(None);
+            }
+            let path =
+                resolve::resolve_default_pmtiles_path(dataset, paths, project_root)?;
+            Ok(Some(path.display().to_string()))
+        }
+    }
 }
 
 pub(crate) fn stop(project: Project, project_root: &Path) -> Result<(), DevError> {

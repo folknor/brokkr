@@ -78,7 +78,7 @@ fn run_tests(
     bbox: &str,
 ) -> Result<(), DevError> {
     // Start server.
-    super::server::serve(binary, data_dir, None, port, project_root)?;
+    super::server::serve(binary, Some(data_dir), None, port, project_root)?;
 
     let mut passed = 0u32;
     let mut failed = 0u32;

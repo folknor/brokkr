@@ -302,7 +302,7 @@ fn spawn_server(
     let port_str = port.to_string();
 
     Command::new(binary)
-        .args(["serve", data_dir, "--tiles", tiles])
+        .args(["serve", "--data-dir", data_dir, "--tiles", tiles])
         .env("PORT", &port_str)
         .current_dir(project_root)
         .stdout(Stdio::null())
