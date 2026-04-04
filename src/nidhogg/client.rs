@@ -243,11 +243,10 @@ pub fn curl_post(url: &str, body: &str) -> Result<String, DevError> {
 
 /// Check if the server is responding on the given port.
 ///
-/// Sends a minimal POST to `/api/query` with a 2s connect timeout.
+/// Sends a GET to `/api/health` with a 2s connect timeout.
 /// Returns `true` if the server responds with HTTP 200.
 pub fn health_check(port: u16) -> Result<bool, DevError> {
-    let url = query_url(port);
-    let body = r#"{"bbox":[0,0,0,0],"query":[]}"#;
+    let url = format!("http://localhost:{port}/api/health");
 
     let result = Command::new("curl")
         .args([
@@ -256,13 +255,7 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
             "/dev/null",
             "-w",
             "%{http_code}",
-            "-X",
-            "POST",
             &url,
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            body,
             "--connect-timeout",
             "2",
         ])
