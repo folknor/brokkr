@@ -134,6 +134,7 @@ struct SnapshotMeta {
 // Per-snapshot test
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 fn run_snapshot(
     binary: &Path,
     snapshot: &SluggrsSnapshot,

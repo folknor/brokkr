@@ -104,10 +104,10 @@ pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
                 None => "unknown process".into(),
             };
             crate::output::lock_msg(&format!("waiting for {desc}"));
-            if let Some(ref i) = info {
-                if let Some(summary) = process_summary(i.pid) {
-                    crate::output::lock_msg(&summary);
-                }
+            if let Some(ref i) = info
+                && let Some(summary) = process_summary(i.pid)
+            {
+                crate::output::lock_msg(&summary);
             }
 
             // Block until the lock is released. Retry on EINTR.

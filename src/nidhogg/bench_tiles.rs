@@ -140,6 +140,7 @@ pub fn run(
 // ---------------------------------------------------------------------------
 
 /// Single lifecycle: start → requests → stop → capture.
+#[allow(clippy::too_many_lines)]
 fn run_lifecycle(
     binary: &Path,
     data_dir: &str,

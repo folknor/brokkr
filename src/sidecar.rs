@@ -366,7 +366,7 @@ impl SidecarFifo {
         let path = scratch_dir.join(format!(".sidecar-{pid}.fifo"));
 
         // Remove stale FIFO if it exists.
-        let _ = fs::remove_file(&path);
+        drop(fs::remove_file(&path));
 
         let c_path = std::ffi::CString::new(
             path.to_str()
@@ -414,12 +414,12 @@ impl SidecarFifo {
 
     /// Write the last marker name to the status file so `brokkr lock` can show it.
     fn update_status(&self, marker_name: &str) {
-        let _ = fs::write(self.status_path(), marker_name);
+        drop(fs::write(self.status_path(), marker_name));
     }
 
     /// Clean up the status file.
     fn cleanup_status(&self) {
-        let _ = fs::remove_file(self.status_path());
+        drop(fs::remove_file(self.status_path()));
     }
 
     /// Drain all pending lines from the FIFO, parsing markers and counters.
@@ -449,14 +449,14 @@ impl SidecarFifo {
                         };
                         if let Some(counter_body) = payload.strip_prefix('@') {
                             // Counter: @name=value
-                            if let Some((name, val_str)) = counter_body.split_once('=') {
-                                if let Ok(val) = val_str.parse::<i64>() {
-                                    counters.push(Counter {
-                                        timestamp_us: ts,
-                                        name: name.to_owned(),
-                                        value: val,
-                                    });
-                                }
+                            if let Some((name, val_str)) = counter_body.split_once('=')
+                                && let Ok(val) = val_str.parse::<i64>()
+                            {
+                                counters.push(Counter {
+                                    timestamp_us: ts,
+                                    name: name.to_owned(),
+                                    value: val,
+                                });
                             }
                         } else {
                             // Phase marker
@@ -489,7 +489,7 @@ impl SidecarFifo {
 
 impl Drop for SidecarFifo {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        drop(fs::remove_file(&self.path));
         self.cleanup_status();
     }
 }
@@ -526,7 +526,7 @@ fn monotonic_ns() -> i64 {
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
-    ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
+    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +542,7 @@ fn drain_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut reader = pipe;
-        let _ = reader.read_to_end(&mut buf);
+        drop(reader.read_to_end(&mut buf));
         buf
     })
 }

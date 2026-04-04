@@ -10,6 +10,7 @@ use crate::output::verify_msg;
 ///
 /// Creates a "new" PBF by applying changes, derives changes from old->new with
 /// both tools, then roundtrips each derived OSC back through apply-changes and compares.
+#[allow(clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,

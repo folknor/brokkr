@@ -41,13 +41,13 @@ fn parse_inspect_counts(stdout: &str) -> Option<Counts> {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Nodes:") {
             // "771,666  (25,597 tagged)" or just "771,666"
-            let num_str = rest.trim().split_whitespace().next()?;
+            let num_str = rest.split_whitespace().next()?;
             nodes = Some(strip_commas(num_str).parse().ok()?);
         } else if let Some(rest) = line.strip_prefix("Ways:") {
-            let num_str = rest.trim().split_whitespace().next()?;
+            let num_str = rest.split_whitespace().next()?;
             ways = Some(strip_commas(num_str).parse().ok()?);
         } else if let Some(rest) = line.strip_prefix("Relations:") {
-            let num_str = rest.trim().split_whitespace().next()?;
+            let num_str = rest.split_whitespace().next()?;
             relations = Some(strip_commas(num_str).parse().ok()?);
         }
     }
@@ -75,6 +75,7 @@ fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevErro
 }
 
 /// Cross-validate single-pass multi-extract against sequential extracts.
+#[allow(clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,

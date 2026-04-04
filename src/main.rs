@@ -1129,7 +1129,7 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
 
@@ -1996,8 +1996,8 @@ fn print_marker_phases_with_counters(
 
     if has_counters {
         println!(
-            "{:<24} {:>10} {:>10} {:>10} {:>10}  {}",
-            "Phase", "Duration", "Peak RSS", "Peak Anon", "Peak Mflt", "Counters",
+            "{:<24} {:>10} {:>10} {:>10} {:>10}  Counters",
+            "Phase", "Duration", "Peak RSS", "Peak Anon", "Peak Mflt",
         );
         println!("{}", "-".repeat(90));
     } else {

@@ -259,7 +259,7 @@ impl SidecarDb {
         self.conn.execute(
             "INSERT OR REPLACE INTO sidecar_meta (result_uuid, best_run_idx, total_runs)
              VALUES (?1, ?2, ?3)",
-            rusqlite::params![result_uuid, best_run_idx as i64, total_runs as i64],
+            rusqlite::params![result_uuid, i64::try_from(best_run_idx).unwrap_or(0), i64::try_from(total_runs).unwrap_or(1)],
         )?;
         Ok(())
     }
@@ -276,7 +276,8 @@ impl SidecarDb {
                 |row| {
                     let best: i64 = row.get(0)?;
                     let total: i64 = row.get(1)?;
-                    Ok((best as usize, total as usize))
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    Ok((best.max(0) as usize, total.max(0) as usize))
                 },
             )
             .unwrap_or((0, 1))
@@ -333,7 +334,7 @@ impl SidecarDb {
                  FROM sidecar_samples
                  WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
                  ORDER BY sample_idx",
-                Some(idx as i64),
+                Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
                 "SELECT sample_idx, timestamp_us,
@@ -398,7 +399,7 @@ impl SidecarDb {
                  FROM sidecar_markers
                  WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
                  ORDER BY marker_idx",
-                Some(idx as i64),
+                Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
                 "SELECT marker_idx, timestamp_us, name
@@ -439,7 +440,7 @@ impl SidecarDb {
                  FROM sidecar_counters
                  WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
                  ORDER BY timestamp_us, name",
-                Some(idx as i64),
+                Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
                 "SELECT timestamp_us, name, value

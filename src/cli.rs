@@ -1259,6 +1259,7 @@ impl Command {
     ///
     /// Returns `None` for non-pbfhogg commands (elivagar, nidhogg, shared, etc.).
     /// The returned tuple is `(mode, pbf, command, osc_seq, extra_params)`.
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub(crate) fn as_pbfhogg(
         &self,
     ) -> Option<(

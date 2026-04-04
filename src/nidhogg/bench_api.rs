@@ -39,7 +39,7 @@ pub fn run(
     let variant_names: Vec<&str> = filtered.iter().map(|(name, _)| name.as_str()).collect();
 
     crate::harness::run_variants("query", &variant_names, |name| {
-        let (_, body) = filtered.iter().find(|(n, _)| n == name).unwrap();
+        let (_, body) = filtered.iter().find(|(n, _)| n == name).expect("variant exists in filtered list");
 
         // Warmup: one request, discard result.
         run_curl_timed(&url, body)?;

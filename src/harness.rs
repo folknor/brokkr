@@ -212,11 +212,11 @@ impl BenchHarness {
 
             let exit_err = captured.check_success(&prog_str).err();
 
-            if exit_err.is_some() {
+            if let Some(e) = exit_err {
                 // Store sidecar data from the failed run before propagating.
                 drop(fifo);
                 self.store_sidecar(None, &sidecar_runs, i).ok();
-                return Err(exit_err.unwrap());
+                return Err(e);
             }
 
             if best_ms.is_none_or(|best| ms < best) {

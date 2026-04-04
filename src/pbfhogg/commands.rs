@@ -334,7 +334,7 @@ impl PbfhoggCommand {
                 meta
             }
             Self::MultiExtract { regions } => {
-                let mut meta = vec![KvPair::text("meta.regions", &regions.to_string())];
+                let mut meta = vec![KvPair::text("meta.regions", regions.to_string())];
                 if let Some(ref bbox) = ctx.bbox {
                     meta.push(KvPair::text("meta.bbox", bbox.as_str()));
                 }
@@ -785,6 +785,7 @@ impl PbfhoggCommand {
     /// first element, matching the format expected by `run_hotpath_capture`.
     ///
     /// Only commands where `supports_hotpath()` returns true should call this.
+    #[allow(clippy::too_many_lines)]
     pub fn build_hotpath_args(&self, ctx: &CommandContext) -> Result<Vec<String>, DevError> {
         let binary = ctx.binary_str()?;
         let mut args = vec![binary.to_owned()];

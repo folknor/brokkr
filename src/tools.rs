@@ -395,7 +395,7 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
 
     if !status.success() {
         // Clean up partial download.
-        let _ = std::fs::remove_file(&tmp);
+        drop(std::fs::remove_file(&tmp));
         return Err(DevError::Subprocess {
             program: "curl".into(),
             code: status.code(),

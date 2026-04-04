@@ -27,7 +27,8 @@ fn today() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let days = (secs / 86400) as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let days = (secs / 86400) as i64; // safe: won't wrap until year 292 billion
     let (y, m, d) = days_to_civil(days);
     format!("{y:04}{m:02}{d:02}")
 }
@@ -37,7 +38,8 @@ fn today() -> String {
 fn days_to_civil(days: i64) -> (i32, u32, u32) {
     let z = days + 719468;
     let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = (z - era * 146097) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let doe = (z - era * 146097) as u32; // always 0..146096 by construction
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe as i64 + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
@@ -45,7 +47,9 @@ fn days_to_civil(days: i64) -> (i32, u32, u32) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m, d)
+    #[allow(clippy::cast_possible_truncation)]
+    let y_i32 = y as i32; // safe for dates anywhere near the present
+    (y_i32, m, d)
 }
 
 /// Format a 9-digit zero-padded sequence number as a 3-level path: `000/004/715`.
@@ -145,13 +149,13 @@ struct ResolvedDownload {
 /// 5. Error with suggestions.
 fn resolve(name: &str, dataset: Option<&Dataset>) -> Result<ResolvedDownload, DevError> {
     // If the dataset already exists, let its origin override.
-    if let Some(ds) = dataset {
-        if ds.origin.as_deref() == Some("planet.openstreetmap.org") {
-            return Ok(ResolvedDownload {
-                source: DownloadSource::Planet,
-                dataset_key: name.to_string(),
-            });
-        }
+    if let Some(ds) = dataset
+        && ds.origin.as_deref() == Some("planet.openstreetmap.org")
+    {
+        return Ok(ResolvedDownload {
+            source: DownloadSource::Planet,
+            dataset_key: name.to_string(),
+        });
     }
 
     // "planet" keyword.
@@ -246,10 +250,10 @@ fn has_existing_osc(dataset: Option<&Dataset>, data_dir: &Path, seq: u64) -> Opt
 /// Find the "raw" PBF path — either the configured `raw` variant, or a
 /// dated filename as fallback.
 fn raw_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, date: &str) -> PathBuf {
-    if let Some(ds) = dataset {
-        if let Some(entry) = ds.pbf.get("raw") {
-            return data_dir.join(&entry.file);
-        }
+    if let Some(ds) = dataset
+        && let Some(entry) = ds.pbf.get("raw")
+    {
+        return data_dir.join(&entry.file);
     }
     data_dir.join(format!("{dataset_key}-{date}.osm.pbf"))
 }
@@ -257,10 +261,10 @@ fn raw_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, d
 /// Find the "indexed" PBF path — either the configured `indexed` variant, or
 /// a dated filename as fallback.
 fn indexed_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, date: &str) -> PathBuf {
-    if let Some(ds) = dataset {
-        if let Some(entry) = ds.pbf.get("indexed") {
-            return data_dir.join(&entry.file);
-        }
+    if let Some(ds) = dataset
+        && let Some(entry) = ds.pbf.get("indexed")
+    {
+        return data_dir.join(&entry.file);
     }
     data_dir.join(format!("{dataset_key}-{date}-with-indexdata.osm.pbf"))
 }
@@ -352,6 +356,7 @@ fn append_dataset_header(
 // Entry point
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 pub fn run(
     region: &str,
     osc_seq: Option<u64>,
@@ -468,7 +473,7 @@ pub fn run(
         )?;
 
         if let Err(e) = captured.check_success(&binary_str) {
-            let _ = std::fs::remove_file(&indexed_tmp);
+            drop(std::fs::remove_file(&indexed_tmp));
             return Err(e);
         }
         std::fs::rename(&indexed_tmp, &indexed_dest)?;

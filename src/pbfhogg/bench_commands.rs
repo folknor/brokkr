@@ -57,6 +57,7 @@ const NO_OUTPUT_FILE: &[&str] = &[
     "diff",
 ];
 
+#[allow(clippy::too_many_lines)]
 fn command_args(
     name: &str,
     pbf: &str,

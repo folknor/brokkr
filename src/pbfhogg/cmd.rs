@@ -140,6 +140,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
     _project: Project,
