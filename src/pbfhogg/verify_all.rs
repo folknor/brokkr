@@ -1,6 +1,7 @@
 //! Verify: all — run all verify commands sequentially.
 
 use std::path::Path;
+use std::time::Instant;
 
 use super::verify::VerifyHarness;
 use super::{
@@ -28,16 +29,20 @@ pub fn run(
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
     let mut skipped: u32 = 0;
+    let mut timings: Vec<(String, u64)> = Vec::new();
 
-    // Helper: run one verify command, track pass/fail.
-    let mut run_one = |name: &str, result: Result<(), DevError>| match result {
-        Ok(()) => {
-            verify_msg(&format!("{name}: PASS"));
-            passed += 1;
-        }
-        Err(e) => {
-            verify_msg(&format!("{name} failed: {e}"));
-            failed += 1;
+    // Helper: run one verify command, track pass/fail and elapsed time.
+    let mut run_one = |name: &str, result: Result<(), DevError>, elapsed_ms: u64| {
+        timings.push((name.to_owned(), elapsed_ms));
+        match result {
+            Ok(()) => {
+                verify_msg(&format!("{name}: PASS ({elapsed_ms}ms)"));
+                passed += 1;
+            }
+            Err(e) => {
+                verify_msg(&format!("{name} failed ({elapsed_ms}ms): {e}"));
+                failed += 1;
+            }
         }
     };
 
@@ -49,16 +54,19 @@ pub fn run(
 
     // 1. sort
     verify_msg("========== sort ==========");
-    run_one("sort", verify_sort::run(harness, pbf, direct_io));
+    let t = Instant::now();
+    run_one("sort", verify_sort::run(harness, pbf, direct_io), t.elapsed().as_millis() as u64);
 
     // 2. cat
     verify_msg("========== cat ==========");
-    run_one("cat", verify_cat::run(harness, pbf, direct_io));
+    let t = Instant::now();
+    run_one("cat", verify_cat::run(harness, pbf, direct_io), t.elapsed().as_millis() as u64);
 
     // 3. extract
     verify_msg("========== extract ==========");
     if let Some(b) = bbox {
-        run_one("extract", verify_extract::run(harness, pbf, b, direct_io));
+        let t = Instant::now();
+        run_one("extract", verify_extract::run(harness, pbf, b, direct_io), t.elapsed().as_millis() as u64);
     } else {
         skip("extract", "no --bbox provided");
     }
@@ -66,9 +74,11 @@ pub fn run(
     // 3b. multi-extract
     verify_msg("========== multi-extract ==========");
     if let Some(b) = bbox {
+        let t = Instant::now();
         run_one(
             "multi-extract",
             verify_multi_extract::run(harness, pbf, b, 5, direct_io),
+            t.elapsed().as_millis() as u64,
         );
     } else {
         skip("multi-extract", "no --bbox provided");
@@ -76,30 +86,38 @@ pub fn run(
 
     // 4. tags-filter
     verify_msg("========== tags-filter ==========");
+    let t = Instant::now();
     run_one(
         "tags-filter",
         verify_tags_filter::run(harness, pbf, direct_io),
+        t.elapsed().as_millis() as u64,
     );
 
     // 5. getid-removeid
     verify_msg("========== getid-removeid ==========");
+    let t = Instant::now();
     run_one(
         "getid-removeid",
         verify_getid_removeid::run(harness, pbf, direct_io),
+        t.elapsed().as_millis() as u64,
     );
 
     // 6. add-locations-to-ways
     verify_msg("========== add-locations-to-ways ==========");
+    let t = Instant::now();
     run_one(
         "add-locations-to-ways",
         verify_add_locations::run(harness, pbf, direct_io),
+        t.elapsed().as_millis() as u64,
     );
 
     // 7. check-refs
     verify_msg("========== check-refs ==========");
+    let t = Instant::now();
     run_one(
         "check-refs",
         verify_check_refs::run(harness, pbf, direct_io),
+        t.elapsed().as_millis() as u64,
     );
 
     // 8. apply-changes
@@ -113,9 +131,11 @@ pub fn run(
                 None
             }
         };
+        let t = Instant::now();
         run_one(
             "apply-changes",
             verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io),
+            t.elapsed().as_millis() as u64,
         );
     } else {
         skip("apply-changes", "no --osc provided");
@@ -124,9 +144,11 @@ pub fn run(
     // 9. diff --format osc
     verify_msg("========== diff --format osc ==========");
     if let Some(osc_path) = osc {
+        let t = Instant::now();
         run_one(
             "diff --format osc",
             verify_derive_changes::run(harness, pbf, osc_path, direct_io),
+            t.elapsed().as_millis() as u64,
         );
     } else {
         skip("diff --format osc", "no --osc provided");
@@ -135,16 +157,21 @@ pub fn run(
     // 10. diff
     verify_msg("========== diff ==========");
     if let Some(osc_path) = osc {
-        run_one("diff", verify_diff::run(harness, pbf, osc_path));
+        let t = Instant::now();
+        run_one("diff", verify_diff::run(harness, pbf, osc_path), t.elapsed().as_millis() as u64);
     } else {
         skip("diff", "no --osc provided");
     }
 
     // Summary
     let total = passed + failed + skipped;
+    let total_ms: u64 = timings.iter().map(|(_, ms)| ms).sum();
     verify_msg(&format!(
-        "===== all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ====="
+        "===== all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ({total_ms}ms) ====="
     ));
+    for (name, ms) in &timings {
+        verify_msg(&format!("  {name}: {ms}ms"));
+    }
 
     if failed > 0 {
         return Err(DevError::Verify(format!(
