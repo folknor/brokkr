@@ -137,7 +137,7 @@ fn run_pbfhogg_run(
 
     cleanup_pbfhogg_output(command, &cmd_ctx);
 
-    if out.code != 0 {
+    if out.code != 0 && !command.ok_exit_codes().contains(&out.code) {
         return Err(DevError::ExitCode(out.code));
     }
 
@@ -211,8 +211,13 @@ fn run_pbfhogg_wallclock(
         req.runs(),
     ));
 
-    ctx.harness
-        .run_external(&config, &ctx.binary, &arg_refs, req.project_root)?;
+    ctx.harness.run_external_ok(
+        &config,
+        &ctx.binary,
+        &arg_refs,
+        req.project_root,
+        command.ok_exit_codes(),
+    )?;
 
     // Clean up scratch output files.
     cleanup_pbfhogg_output(command, &cmd_ctx);
@@ -312,6 +317,7 @@ fn run_pbfhogg_hotpath(
     let scratch_dir = ctx.paths.scratch_dir.clone();
     let project_root = req.project_root.to_path_buf();
 
+    let ok_codes = command.ok_exit_codes();
     ctx.harness.run_internal(&config, |_i| {
         output::hotpath_msg(command.id());
         let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
@@ -320,6 +326,7 @@ fn run_pbfhogg_hotpath(
             &scratch_dir,
             &project_root,
             &[],
+            ok_codes,
         )?;
         Ok(result)
     })?;
@@ -853,6 +860,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     &ctx.paths.scratch_dir,
                     req.project_root,
                     &[("ELIVAGAR_NODE_STATS", "1")],
+                    &[],
                 )?;
                 result.kv.push(KvPair::text(
                     "meta.locations_on_ways_detected",
@@ -925,6 +933,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     &arg_refs,
                     &ctx.paths.scratch_dir,
                     req.project_root,
+                    &[],
                     &[],
                 )?;
                 Ok(result)
@@ -1246,7 +1255,7 @@ fn run_nidhogg_hotpath(
 
     ctx.harness.run_internal(&config, |_i| {
         let (result, _stderr, _sidecar) =
-            harness::run_hotpath_capture(&binary_str, &args, &ctx.paths.scratch_dir, req.project_root, &[])?;
+            harness::run_hotpath_capture(&binary_str, &args, &ctx.paths.scratch_dir, req.project_root, &[], &[])?;
         Ok(result)
     })?;
 

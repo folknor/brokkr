@@ -169,6 +169,19 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
+        self.run_external_ok(config, program, args, cwd, &[])
+    }
+
+    /// Like `run_external`, but treats the given exit codes as success.
+    /// For example, `diff` exits 1 when differences are found (not an error).
+    pub fn run_external_ok(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        ok_codes: &[i32],
+    ) -> Result<BenchResult, DevError> {
         let scratch_dir = &self.db_dir;
         use crate::sidecar;
 
@@ -210,7 +223,7 @@ impl BenchHarness {
             // happened before the kill.
             sidecar_runs.push(result.data);
 
-            let exit_err = captured.check_success(&prog_str).err();
+            let exit_err = captured.check_success_or(&prog_str, ok_codes).err();
 
             if let Some(e) = exit_err {
                 // Store sidecar data from the failed run before propagating.
@@ -670,6 +683,7 @@ pub fn run_hotpath_capture(
     scratch_dir: &std::path::Path,
     project_root: &std::path::Path,
     extra_env: &[(&str, &str)],
+    ok_codes: &[i32],
 ) -> Result<(BenchResult, Vec<u8>, crate::sidecar::SidecarData), crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
@@ -697,7 +711,7 @@ pub fn run_hotpath_capture(
         stderr: sidecar_result.stderr,
         elapsed: sidecar_result.elapsed,
     };
-    captured.check_success(binary)?;
+    captured.check_success_or(binary, ok_codes)?;
 
     let ms = elapsed_to_ms(&captured.elapsed);
     let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);

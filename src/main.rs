@@ -2379,6 +2379,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
             &ctx.paths.scratch_dir,
             req.project_root,
             &[],
+            &[],
         )?;
         Ok(result)
     })?;

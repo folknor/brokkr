@@ -237,6 +237,15 @@ impl PbfhoggCommand {
         matches!(self.input_kind(), InputKind::PbfAndBbox)
     }
 
+    /// Non-zero exit codes that should be treated as success for this command.
+    /// `diff` follows standard diff convention: exit 1 = differences found (not an error).
+    pub fn ok_exit_codes(&self) -> &'static [i32] {
+        match self {
+            Self::Diff | Self::DiffOsc => &[1],
+            _ => &[],
+        }
+    }
+
     /// The result command label for the DB.
     pub fn result_command(&self) -> &'static str {
         match self {

@@ -117,8 +117,19 @@ impl CapturedOutput {
     /// Return `Ok(())` if the process exited successfully, or a `DevError::Subprocess`
     /// with the captured stderr if it failed.
     pub fn check_success(&self, program: &str) -> Result<(), DevError> {
+        self.check_success_or(program, &[])
+    }
+
+    /// Like `check_success`, but also treats the given exit codes as success.
+    /// For example, `diff` uses exit 1 to mean "differences found" (not an error).
+    pub fn check_success_or(&self, program: &str, ok_codes: &[i32]) -> Result<(), DevError> {
         if self.status.success() {
             return Ok(());
+        }
+        if let Some(code) = self.status.code() {
+            if ok_codes.contains(&code) {
+                return Ok(());
+            }
         }
         Err(DevError::Subprocess {
             program: program.to_owned(),
