@@ -12,7 +12,8 @@ use crate::error::DevError;
 
 impl ResultsDb {
     /// Query two commits for side-by-side comparison. Each commit is matched
-    /// by prefix. Optional command/variant filters narrow the results.
+    /// by prefix. Optional command/variant/dataset filters narrow the results.
+    /// `dataset` is a substring match against the `input_file` column.
     /// Loads kv + hotpath children for each row (needed for output_bytes and diffs).
     pub fn query_compare(
         &self,
@@ -20,6 +21,7 @@ impl ResultsDb {
         b: &str,
         command: Option<&str>,
         variant: Option<&str>,
+        dataset: Option<&str>,
     ) -> Result<(Vec<super::StoredRow>, Vec<super::StoredRow>), DevError> {
         let mut clauses = vec!["[commit] LIKE ?1||'%'".to_owned()];
         let mut params: Vec<String> = Vec::new();
@@ -32,6 +34,10 @@ impl ResultsDb {
         if let Some(v) = variant {
             params.push(v.to_owned());
             clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
+        }
+        if let Some(d) = dataset {
+            params.push(d.to_owned());
+            clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
         }
         let sql = format!(
             "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, variant, id DESC",
@@ -46,11 +52,12 @@ impl ResultsDb {
     }
 
     /// Find the two most recent distinct commits and compare them.
-    /// Optional command/variant filters narrow the search.
+    /// Optional command/variant/dataset filters narrow the search.
     pub fn query_compare_last(
         &self,
         command: Option<&str>,
         variant: Option<&str>,
+        dataset: Option<&str>,
     ) -> Result<Option<CompareResult>, DevError> {
         // Find two most recent distinct commits matching the filters.
         let mut clauses = Vec::new();
@@ -62,6 +69,10 @@ impl ResultsDb {
         if let Some(v) = variant {
             params.push(v.to_owned());
             clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
+        }
+        if let Some(d) = dataset {
+            params.push(d.to_owned());
+            clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
         }
         let mut sql = "SELECT [commit] FROM runs".to_owned();
         if !clauses.is_empty() {
@@ -84,7 +95,8 @@ impl ResultsDb {
             return Ok(None);
         }
 
-        let (rows_a, rows_b) = self.query_compare(&commits[1], &commits[0], command, variant)?;
+        let (rows_a, rows_b) =
+            self.query_compare(&commits[1], &commits[0], command, variant, dataset)?;
         Ok(Some((
             commits[1].clone(),
             rows_a,
@@ -147,7 +159,7 @@ mod tests {
         db.insert(&make_row("aaaa1111", "bench read", "sequential"))
             .expect("insert");
 
-        let result = db.query_compare_last(None, None).expect("query");
+        let result = db.query_compare_last(None, None, None).expect("query");
         assert!(result.is_none());
 
         drop(db);
@@ -170,7 +182,7 @@ mod tests {
             .expect("insert");
 
         let compared = db
-            .query_compare_last(Some("bench read"), None)
+            .query_compare_last(Some("bench read"), None, None)
             .expect("compare")
             .expect("two commits");
         assert_eq!(compared.0, "aaaa1111");
@@ -185,6 +197,7 @@ mod tests {
                 commit: None,
                 command: Some(String::from("bench write")),
                 variant: None,
+                dataset: None,
                 limit: 10,
             })
             .expect("query");

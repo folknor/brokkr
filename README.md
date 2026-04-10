@@ -204,10 +204,14 @@ brokkr results 0b74fb6f                             # look up by UUID prefix
 brokkr results --commit a65a                        # filter by commit
 brokkr results --command 'bench read'               # filter by command
 brokkr results --variant pipelined                  # filter by variant
+brokkr results --dataset europe                     # filter by dataset (substring on input file)
+brokkr results --command tags-filter --dataset eu   # combine filters
 brokkr results --compare a65a 911c                  # compare two commits side-by-side
 brokkr results --compare-last                       # compare two most recent commits
 brokkr results --compare-last --command hotpath      # compare with hotpath function diff
 ```
+
+The `dataset` column in the output table is the first dash-separated component of the input filename — `europe-20260301-seq4714-with-indexdata.osm (35262 MB)` renders as `europe (35262 MB)`. This is a display heuristic: filtering via `--dataset` always substring-matches the full `input_file` column, so filters still work even when the short name collapses distinct datasets (e.g. a hypothetical `europe-west` would display as `europe`). See TODO.md for the proper fix.
 
 The compare view shows timing, output size, peak RSS, rewrite ratio, and blob distribution columns as applicable. Hotpath comparisons include function-level timing diffs.
 

@@ -174,6 +174,10 @@ pub struct QueryFilter {
     pub commit: Option<String>,
     pub command: Option<String>,
     pub variant: Option<String>,
+    /// Substring match against the `input_file` column. Useful for filtering
+    /// by the dataset name embedded in benchmark input filenames (e.g.
+    /// `europe-20260301-seq4714-with-indexdata.osm` matches `europe`).
+    pub dataset: Option<String>,
     pub limit: usize,
 }
 

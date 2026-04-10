@@ -21,6 +21,26 @@ Include counter values at matching phase boundaries in the comparison table. Cur
 ### --phase filter for --markers --counters
 `--phase` currently requires `--timeline` (clap constraint). Adding `--markers --counters --phase STAGE4` to show only counters within a phase would be useful for targeted analysis.
 
+### `brokkr results` dataset short-name is heuristic
+
+The `dataset` column in `brokkr results` output collapses `input_file` to the
+first dash-separated component of the basename (e.g.
+`europe-20260301-seq4714-with-indexdata.osm` → `europe`,
+`denmark-elivagar.pmtiles` → `denmark`). This is a pure string heuristic — it
+does not consult `brokkr.toml` to learn which dataset names are actually
+configured.
+
+Breaks if a dataset name itself contains a dash (e.g. `europe-west`, `asia-japan`)
+— display would show `europe` / `asia`, losing the distinction. Filtering is
+unaffected: `--dataset` is a substring match on the full `input_file` column, so
+`--dataset europe-west` still works even when the displayed name is truncated.
+
+Proper fix: load the dataset keys from the active `brokkr.toml` on `results`
+invocation and match the `input_file` basename against the longest known prefix.
+Requires plumbing `DevConfig` (or at least the dataset key list) into
+`src/db/format.rs::format_input`. Not worth the coupling until we actually hit
+a hyphenated dataset name in practice.
+
 ### Sidecar: result+sidecar persistence is not atomic
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.

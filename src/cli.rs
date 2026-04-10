@@ -561,6 +561,8 @@ Examples:
   brokkr results --commit a65a                      # filter by commit prefix
   brokkr results --command 'bench read'             # filter by command
   brokkr results --variant pipelined                # filter by variant (substring match)
+  brokkr results --dataset europe                   # filter by dataset (substring match on input file)
+  brokkr results --command tags-filter --dataset eu # combine filters
   brokkr results --compare a65a 911c                # compare two commits
   brokkr results --compare a65a 911c --variant sync # compare, filtered
   brokkr results --compare-last                     # compare two most recent commits
@@ -590,6 +592,11 @@ Examples:
         /// Filter by variant (substring match, e.g. "zlib" matches "buffered+zlib")
         #[arg(long)]
         variant: Option<String>,
+
+        /// Filter by dataset (substring match on input filename, e.g. "europe"
+        /// or "eu" matches "europe-20260301-seq4714-with-indexdata.osm")
+        #[arg(long)]
+        dataset: Option<String>,
 
         /// Maximum number of results to show
         #[arg(long, short = 'n', default_value = "20")]

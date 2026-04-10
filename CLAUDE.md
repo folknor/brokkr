@@ -188,6 +188,12 @@ Results in `.brokkr/results.db` per project (gitignored).
 - Project gating via `project::require()` — wrong-project commands fail with helpful message
 - Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries). When no expected name is provided, requires exactly one executable — errors if multiple are found.
 
+## Hotpath JSON contract
+
+Brokkr does not depend on the `hotpath` crate directly — it parses the JSON report that hotpath-instrumented binaries write to `HOTPATH_OUTPUT_PATH`. The parser (`src/db/hotpath.rs`), DB schema (`hotpath_functions` table), and formatter (`src/hotpath_fmt.rs`) all hardcode three percentile columns: `p50`, `p95`, `p99`. Projects using hotpath must keep their percentile config at `[50.0, 95.0, 99.0]` (the default). Custom float percentiles like `p99.9` (added in hotpath 0.15) will be silently dropped by brokkr's parser. Generalizing to dynamic percentile columns requires a DB migration and parser/formatter changes in brokkr first.
+
+Env vars brokkr sets on hotpath child processes: `HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json`, `HOTPATH_OUTPUT_PATH=<scratch>/hotpath-report.json`.
+
 ## Sidecar profiler
 
 The sidecar is always-on for all measured modes. It samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and reads phase markers from a FIFO. All data is buffered in memory during the run and bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits. Results DB (`.brokkr/results.db`) stays small and git-tracked.

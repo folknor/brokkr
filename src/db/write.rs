@@ -188,6 +188,7 @@ mod tests {
                 commit: Some(String::from("aabbccdd")),
                 command: None,
                 variant: None,
+                dataset: None,
                 limit: 10,
             })
             .expect("query");

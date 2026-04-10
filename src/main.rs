@@ -521,6 +521,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             compare_last,
             command,
             variant,
+            dataset,
             limit,
             top,
             timeline,
@@ -547,6 +548,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 compare_last,
                 command,
                 variant,
+                dataset,
                 limit,
                 top,
                 timeline,
@@ -1305,11 +1307,16 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             commit_b,
             q.command.as_deref(),
             q.variant.as_deref(),
+            q.dataset.as_deref(),
         )?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top);
         println!("{table}");
     } else if q.compare_last {
-        match results_db.query_compare_last(q.command.as_deref(), q.variant.as_deref())? {
+        match results_db.query_compare_last(
+            q.command.as_deref(),
+            q.variant.as_deref(),
+            q.dataset.as_deref(),
+        )? {
             Some((commit_a, rows_a, commit_b, rows_b)) => {
                 let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b, q.top);
                 println!("{table}");
@@ -1323,6 +1330,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             commit: q.commit.clone(),
             command: q.command.clone(),
             variant: q.variant.clone(),
+            dataset: q.dataset.clone(),
             limit: q.limit,
         };
         let rows = results_db.query(&filter)?;

@@ -148,6 +148,10 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(v.clone());
         clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
     }
+    if let Some(ref d) = filter.dataset {
+        params.push(d.clone());
+        clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
+    }
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
     if !clauses.is_empty() {
@@ -325,6 +329,7 @@ mod tests {
             commit: None,
             command: None,
             variant: None,
+            dataset: None,
             limit: 50,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -342,6 +347,7 @@ mod tests {
             commit: Some(String::from("abc123")),
             command: Some(String::from("read")),
             variant: Some(String::from("mmap")),
+            dataset: None,
             limit: 10,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -375,6 +381,7 @@ mod tests {
             commit: Some(String::from("deadbeef")),
             command: None,
             variant: None,
+            dataset: None,
             limit: 25,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -392,6 +399,7 @@ mod tests {
             commit: None,
             command: Some(String::from("write")),
             variant: Some(String::from("direct")),
+            dataset: None,
             limit: 5,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -410,11 +418,56 @@ mod tests {
     }
 
     #[test]
+    fn build_query_sql_dataset_only() {
+        let filter = QueryFilter {
+            commit: None,
+            command: None,
+            variant: None,
+            dataset: Some(String::from("europe")),
+            limit: 20,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        assert!(
+            sql.contains("input_file LIKE '%'||?1||'%'"),
+            "dataset should filter on input_file as ?1"
+        );
+        assert!(sql.contains("LIMIT ?2"));
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], "europe");
+        assert_eq!(params[1], "20");
+    }
+
+    #[test]
+    fn build_query_sql_command_and_dataset() {
+        let filter = QueryFilter {
+            commit: None,
+            command: Some(String::from("tags-filter")),
+            variant: None,
+            dataset: Some(String::from("eu")),
+            limit: 10,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        // command becomes ?1 + variant fallback ?2, dataset filter ?3, limit ?4
+        assert!(sql.contains("command LIKE '%'||?1||'%'"));
+        assert!(sql.contains("variant LIKE '%'||?2||'%'"));
+        assert!(sql.contains("input_file LIKE '%'||?3||'%'"));
+        assert!(sql.contains("LIMIT ?4"));
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[0], "tags-filter");
+        assert_eq!(params[1], "tags-filter");
+        assert_eq!(params[2], "eu");
+        assert_eq!(params[3], "10");
+    }
+
+    #[test]
     fn build_query_sql_selects_correct_columns() {
         let filter = QueryFilter {
             commit: None,
             command: None,
             variant: None,
+            dataset: None,
             limit: 1,
         };
         let (sql, _) = build_query_sql(&filter);
@@ -466,6 +519,7 @@ mod tests {
                 commit: None,
                 command: Some(String::from("merge")),
                 variant: None,
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -477,6 +531,7 @@ mod tests {
                 commit: None,
                 command: Some(String::from("bench")),
                 variant: None,
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -488,6 +543,7 @@ mod tests {
                 commit: None,
                 command: Some(String::from("read")),
                 variant: None,
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -500,6 +556,7 @@ mod tests {
                 commit: None,
                 command: Some(String::from("bench merge")),
                 variant: None,
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -515,6 +572,7 @@ mod tests {
                 commit: None,
                 command: Some(String::from("renumber")),
                 variant: None,
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -564,6 +622,7 @@ mod tests {
                 commit: None,
                 command: None,
                 variant: Some(String::from("zlib")),
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -575,6 +634,7 @@ mod tests {
                 commit: None,
                 command: None,
                 variant: Some(String::from("buffered")),
+                dataset: None,
                 limit: 50,
             })
             .unwrap();
@@ -586,6 +646,7 @@ mod tests {
                 commit: None,
                 command: None,
                 variant: Some(String::from("none")),
+                dataset: None,
                 limit: 50,
             })
             .unwrap();

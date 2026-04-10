@@ -6,6 +6,7 @@ pub(crate) struct ResultsQuery {
     pub(crate) compare_last: bool,
     pub(crate) command: Option<String>,
     pub(crate) variant: Option<String>,
+    pub(crate) dataset: Option<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
     pub(crate) timeline: bool,

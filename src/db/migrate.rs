@@ -602,6 +602,7 @@ mod tests {
                 commit: Some(String::from("aabb")),
                 command: None,
                 variant: None,
+                dataset: None,
                 limit: 10,
             })
             .expect("query");
@@ -672,6 +673,7 @@ mod tests {
                 commit: Some(String::from("aabb")),
                 command: None,
                 variant: None,
+                dataset: None,
                 limit: 10,
             })
             .expect("query");

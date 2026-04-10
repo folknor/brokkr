@@ -206,7 +206,7 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         command: 7,
         variant: 7,
         elapsed: 7,
-        input: 5,
+        input: "dataset".len(),
     };
     for row in rows {
         let uuid_short = short_uuid(&row.uuid);
@@ -248,7 +248,7 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         "command",
         "variant",
         "elapsed",
-        "input",
+        "dataset",
         uuid_w = w.uuid,
         ts_w = w.timestamp,
         cm_w = w.commit,
@@ -290,6 +290,12 @@ fn format_elapsed(ms: i64) -> String {
     format!("{ms} ms")
 }
 
+/// Format an input filename as a short, scannable dataset label for the
+/// results table. Extracts the first dash-separated component of the
+/// basename (e.g. `europe-20260301-seq4714-with-indexdata.osm` → `europe`,
+/// `denmark-raw.osm.pbf` → `denmark`). The full basename (minus extension)
+/// is used as a fallback when no dash is present, so non-conforming
+/// filenames remain visible.
 fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
     if input_file.is_empty() {
         return String::new();
@@ -297,9 +303,10 @@ fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
     let basename = Path::new(input_file)
         .file_stem()
         .map_or(input_file, |s| s.to_str().unwrap_or(input_file));
+    let short = basename.split_once('-').map_or(basename, |(head, _)| head);
     match input_mb {
-        Some(mb) => format!("{basename} ({mb:.0} MB)"),
-        None => basename.to_owned(),
+        Some(mb) => format!("{short} ({mb:.0} MB)"),
+        None => short.to_owned(),
     }
 }
 
@@ -501,7 +508,7 @@ fn compute_compare_widths(
     let mut w = CompareWidths {
         command: 7,
         variant: 7,
-        input: 5,
+        input: "dataset".len(),
         col_a: commit_a.len().max(2),
         col_b: commit_b.len().max(2),
         change: 6,
@@ -569,7 +576,7 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
         "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         "command",
         "variant",
-        "input",
+        "dataset",
         commit_a,
         commit_b,
         "change",
@@ -1084,8 +1091,8 @@ mod tests {
 
     #[test]
     fn format_input_with_extension_no_mb() {
+        // No dash in basename: show the stem unchanged.
         let result = format_input("denmark.osm.pbf", None);
-        // file_stem strips only the last extension: "denmark.osm"
         assert_eq!(result, "denmark.osm");
     }
 
@@ -1118,6 +1125,26 @@ mod tests {
     fn format_input_single_extension() {
         let result = format_input("test.csv", Some(10.0));
         assert_eq!(result, "test (10 MB)");
+    }
+
+    #[test]
+    fn format_input_dataset_prefix_dated() {
+        // Convention filename: <dataset>-<date>-<seq>-<variant>.osm
+        let result = format_input("europe-20260301-seq4714-with-indexdata.osm", Some(35262.0));
+        assert_eq!(result, "europe (35262 MB)");
+    }
+
+    #[test]
+    fn format_input_dataset_prefix_raw() {
+        let result = format_input("denmark-raw.osm.pbf", None);
+        assert_eq!(result, "denmark");
+    }
+
+    #[test]
+    fn format_input_pmtiles_variant() {
+        // PMTiles files like `denmark-elivagar.pmtiles` collapse to the dataset.
+        let result = format_input("denmark-elivagar.pmtiles", Some(250.0));
+        assert_eq!(result, "denmark (250 MB)");
     }
 
     // -----------------------------------------------------------------------
