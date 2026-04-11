@@ -301,6 +301,10 @@ Examples:
         /// Number of non-overlapping bbox regions to extract
         #[arg(long, default_value = "5")]
         regions: usize,
+        /// Source bounding box to carve regions from (lon_min,lat_min,lon_max,lat_max).
+        /// Falls back to the dataset's configured bbox if omitted.
+        #[arg(long)]
+        bbox: Option<String>,
     },
     /// [pbfhogg] Filter by timestamp
     #[command(name = "time-filter", display_order = 2)]
@@ -1522,9 +1526,13 @@ impl Command {
                 mode,
                 pbf,
                 regions,
+                bbox,
             } => {
                 let mut params = HashMap::new();
                 params.insert("regions".into(), regions.to_string());
+                if let Some(b) = bbox {
+                    params.insert("bbox".into(), b.clone());
+                }
                 Some((
                     mode,
                     pbf,
