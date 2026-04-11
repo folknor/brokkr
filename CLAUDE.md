@@ -46,7 +46,7 @@ Single crate, single binary. No workspace.
 
 ### Project-specific modules
 
-- `src/pbfhogg/` — `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (10 commands + all), download (Geofabrik region/OSC fetcher with auto-registration in `brokkr.toml`)
+- `src/pbfhogg/` — `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (11 commands + all), download (Geofabrik region/OSC fetcher with auto-registration in `brokkr.toml`)
 - `src/elivagar/` — `commands.rs` (`ElivagarCommand` enum with `build_args()`, `build_config()`, `needs_pbf()`, `output_files()`, `metadata()`), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
 - `src/nidhogg/` — `commands.rs` (`NidhoggCommand` enum: Api/Ingest/Tiles with `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`, `metadata()`), server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode, readonly), hotpath. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
 - `src/litehtml/` — 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.

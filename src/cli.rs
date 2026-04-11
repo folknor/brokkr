@@ -1321,8 +1321,26 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         direct_io: bool,
     },
-    /// [pbfhogg] Cross-validate diff summary against osmium diff
+    /// [pbfhogg] Cross-validate renumber against osmium renumber
     #[command(display_order = 9)]
+    Renumber {
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        #[arg(long, default_value = "indexed")]
+        variant: String,
+        /// pbfhogg renumber mode to verify: `inmem` or `external`
+        #[arg(long = "mode", value_name = "MODE", default_value = "external",
+              value_parser = validate_renumber_mode)]
+        renumber_mode: String,
+        /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
+        #[arg(long = "start-id", value_name = "IDS")]
+        start_id: Option<String>,
+        /// Print detail from the diff log when mismatches are found
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// [pbfhogg] Cross-validate diff summary against osmium diff
+    #[command(display_order = 10)]
     Diff {
         #[arg(long, default_value = "denmark")]
         dataset: String,
@@ -1332,7 +1350,7 @@ pub(crate) enum VerifyCommand {
         osc_seq: Option<String>,
     },
     /// [pbfhogg] Run all verify commands sequentially
-    #[command(display_order = 10)]
+    #[command(display_order = 11)]
     All {
         #[arg(long, default_value = "denmark")]
         dataset: String,

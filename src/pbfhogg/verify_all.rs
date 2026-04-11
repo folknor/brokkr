@@ -6,8 +6,8 @@ use std::time::Instant;
 use super::verify::VerifyHarness;
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
-    verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_sort,
-    verify_tags_filter,
+    verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
+    verify_sort, verify_tags_filter,
 };
 use crate::error::DevError;
 use crate::output::verify_msg;
@@ -17,6 +17,7 @@ use crate::output::verify_msg;
 /// Each command is wrapped so that a failure is logged but does not prevent
 /// the remaining commands from running. Returns `Err` when one or more
 /// commands failed; individual failures are reported inline via `verify_msg`.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
@@ -25,6 +26,7 @@ pub fn run(
     data_dir: &Path,
     project_root: &Path,
     direct_io: bool,
+    dataset: &str,
 ) -> Result<(), DevError> {
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
@@ -154,7 +156,16 @@ pub fn run(
         skip("diff --format osc", "no --osc provided");
     }
 
-    // 10. diff
+    // 10. renumber (external mode — the planet-safe path)
+    verify_msg("========== renumber ==========");
+    let t = Instant::now();
+    run_one(
+        "renumber",
+        verify_renumber::run(harness, pbf, dataset, "external", None, false),
+        t.elapsed().as_millis() as u64,
+    );
+
+    // 11. diff
     verify_msg("========== diff ==========");
     if let Some(osc_path) = osc {
         let t = Instant::now();

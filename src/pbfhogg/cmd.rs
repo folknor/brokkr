@@ -305,6 +305,23 @@ pub(crate) fn verify(
             };
             super::verify_derive_changes::run(&harness, &pbf_path, &osc_path, direct_io)
         }
+        VerifyCommand::Renumber {
+            dataset,
+            variant,
+            renumber_mode,
+            start_id,
+            verbose,
+        } => {
+            let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
+            super::verify_renumber::run(
+                &harness,
+                &pbf_path,
+                &dataset,
+                &renumber_mode,
+                start_id.as_deref(),
+                verbose,
+            )
+        }
         VerifyCommand::Diff {
             dataset,
             variant,
@@ -338,6 +355,7 @@ pub(crate) fn verify(
                 &paths.data_dir,
                 project_root,
                 direct_io,
+                &dataset,
             )
         }
         // Elivagar and nidhogg variants are handled above in cmd_verify().
