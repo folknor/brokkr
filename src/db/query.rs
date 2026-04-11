@@ -152,6 +152,20 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(d.clone());
         clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
     }
+    // Metadata filters: each becomes an EXISTS subquery against run_kv. The
+    // user passes key without the `meta.` prefix (e.g. `--meta format=osc`),
+    // and we look up `key = 'meta.<key>'` in run_kv. Rows missing the key are
+    // excluded (no row matches => EXISTS is false). Multiple filters AND.
+    for (key, value) in &filter.meta {
+        params.push(format!("meta.{key}"));
+        let key_idx = params.len();
+        params.push(value.clone());
+        let val_idx = params.len();
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM run_kv WHERE run_kv.run_id = runs.id \
+             AND run_kv.key = ?{key_idx} AND run_kv.value_text = ?{val_idx})"
+        ));
+    }
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
     if !clauses.is_empty() {
@@ -330,6 +344,7 @@ mod tests {
             command: None,
             variant: None,
             dataset: None,
+            meta: vec![],
             limit: 50,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -348,6 +363,7 @@ mod tests {
             command: Some(String::from("read")),
             variant: Some(String::from("mmap")),
             dataset: None,
+            meta: vec![],
             limit: 10,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -382,6 +398,7 @@ mod tests {
             command: None,
             variant: None,
             dataset: None,
+            meta: vec![],
             limit: 25,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -400,6 +417,7 @@ mod tests {
             command: Some(String::from("write")),
             variant: Some(String::from("direct")),
             dataset: None,
+            meta: vec![],
             limit: 5,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -424,6 +442,7 @@ mod tests {
             command: None,
             variant: None,
             dataset: Some(String::from("europe")),
+            meta: vec![],
             limit: 20,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -445,6 +464,7 @@ mod tests {
             command: Some(String::from("tags-filter")),
             variant: None,
             dataset: Some(String::from("eu")),
+            meta: vec![],
             limit: 10,
         };
         let (sql, params) = build_query_sql(&filter);
@@ -468,10 +488,145 @@ mod tests {
             command: None,
             variant: None,
             dataset: None,
+            meta: vec![],
             limit: 1,
         };
         let (sql, _) = build_query_sql(&filter);
         assert!(sql.starts_with(&format!("SELECT {SELECT_COLS} FROM runs")));
+    }
+
+    #[test]
+    fn build_query_sql_single_meta_filter() {
+        let filter = QueryFilter {
+            commit: None,
+            command: None,
+            variant: None,
+            dataset: None,
+            meta: vec![("format".into(), "osc".into())],
+            limit: 20,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        assert!(sql.contains("EXISTS (SELECT 1 FROM run_kv"));
+        assert!(sql.contains("run_kv.run_id = runs.id"));
+        assert!(sql.contains("run_kv.key = ?1"));
+        assert!(sql.contains("run_kv.value_text = ?2"));
+        // The user passes "format" but the kv key is stored as "meta.format".
+        assert_eq!(params[0], "meta.format");
+        assert_eq!(params[1], "osc");
+        assert_eq!(params[2], "20"); // limit
+    }
+
+    #[test]
+    fn build_query_sql_multi_meta_filters_are_anded() {
+        let filter = QueryFilter {
+            commit: None,
+            command: None,
+            variant: None,
+            dataset: None,
+            meta: vec![
+                ("format".into(), "osc".into()),
+                ("from_snapshot".into(), "base".into()),
+            ],
+            limit: 20,
+        };
+        let (sql, params) = build_query_sql(&filter);
+
+        // Two EXISTS subqueries joined by AND.
+        let exists_count = sql.matches("EXISTS (SELECT 1 FROM run_kv").count();
+        assert_eq!(exists_count, 2);
+        assert!(sql.contains(" AND "));
+        // 4 meta params (two key/value pairs) + 1 limit = 5 total.
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[0], "meta.format");
+        assert_eq!(params[1], "osc");
+        assert_eq!(params[2], "meta.from_snapshot");
+        assert_eq!(params[3], "base");
+    }
+
+    #[test]
+    fn meta_filter_excludes_rows_without_key() {
+        let (dir, db_path) = test_db("meta_filter_missing");
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        let make_row = |variant: &str, kv: Vec<KvPair>| RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("bench commands"),
+            variant: Some(String::from(variant)),
+            input_file: None,
+            input_mb: None,
+            elapsed_ms: 100,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: String::from("release"),
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
+            project: String::from("test"),
+            kv,
+            distribution: None,
+            hotpath: None,
+        };
+
+        // Row 1: has meta.format = osc
+        db.insert(&make_row(
+            "diff-snapshots-base-to-20260411",
+            vec![KvPair::text("meta.format", "osc")],
+        ))
+        .unwrap();
+        // Row 2: has meta.format = default
+        db.insert(&make_row(
+            "diff-snapshots-base-to-20260411",
+            vec![KvPair::text("meta.format", "default")],
+        ))
+        .unwrap();
+        // Row 3: no meta.format at all
+        db.insert(&make_row("diff-snapshots-base-to-20260411", vec![]))
+            .unwrap();
+
+        let osc_only = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                variant: None,
+                dataset: None,
+                meta: vec![("format".into(), "osc".into())],
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(osc_only.len(), 1, "only the osc row should match");
+
+        let default_only = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                variant: None,
+                dataset: None,
+                meta: vec![("format".into(), "default".into())],
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(default_only.len(), 1, "only the default row should match");
+
+        // No filter — all 3 rows.
+        let all = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                variant: None,
+                dataset: None,
+                meta: vec![],
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(all.len(), 3);
+
+        drop(db);
+        cleanup(&dir, &db_path);
     }
 
     // -----------------------------------------------------------------------
@@ -520,6 +675,7 @@ mod tests {
                 command: Some(String::from("merge")),
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -532,6 +688,7 @@ mod tests {
                 command: Some(String::from("bench")),
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -544,6 +701,7 @@ mod tests {
                 command: Some(String::from("read")),
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -557,6 +715,7 @@ mod tests {
                 command: Some(String::from("bench merge")),
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -573,6 +732,7 @@ mod tests {
                 command: Some(String::from("renumber")),
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -623,6 +783,7 @@ mod tests {
                 command: None,
                 variant: Some(String::from("zlib")),
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -635,6 +796,7 @@ mod tests {
                 command: None,
                 variant: Some(String::from("buffered")),
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();
@@ -647,6 +809,7 @@ mod tests {
                 command: None,
                 variant: Some(String::from("none")),
                 dataset: None,
+                meta: vec![],
                 limit: 50,
             })
             .unwrap();

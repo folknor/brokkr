@@ -189,6 +189,7 @@ mod tests {
                 command: None,
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 10,
             })
             .expect("query");

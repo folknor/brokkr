@@ -331,6 +331,78 @@ fn append_pbf_entry(
     Ok(())
 }
 
+/// Append a new snapshot header `[host.datasets.<dataset>.snapshot.<key>]` to `brokkr.toml`.
+fn append_snapshot_header(
+    project_root: &Path,
+    hostname: &str,
+    dataset_key: &str,
+    snapshot_key: &str,
+    date: &str,
+) -> Result<(), DevError> {
+    let toml_path = project_root.join("brokkr.toml");
+    let block = format!(
+        "\n[{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}]\n\
+         download_date = \"{date}\"\n"
+    );
+    let mut contents = std::fs::read_to_string(&toml_path)?;
+    contents.push_str(&block);
+    std::fs::write(&toml_path, contents)?;
+    output::download_msg(&format!(
+        "  added [{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}] to brokkr.toml"
+    ));
+    Ok(())
+}
+
+/// Append a snapshot PBF entry `[...snapshot.<key>.pbf.<variant>]` to `brokkr.toml`.
+fn append_snapshot_pbf_entry(
+    project_root: &Path,
+    hostname: &str,
+    dataset_key: &str,
+    snapshot_key: &str,
+    variant: &str,
+    filename: &str,
+    xxhash: &str,
+) -> Result<(), DevError> {
+    let toml_path = project_root.join("brokkr.toml");
+    let block = format!(
+        "\n[{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.pbf.{variant}]\n\
+         file = \"{filename}\"\n\
+         xxhash = \"{xxhash}\"\n"
+    );
+    let mut contents = std::fs::read_to_string(&toml_path)?;
+    contents.push_str(&block);
+    std::fs::write(&toml_path, contents)?;
+    output::download_msg(&format!(
+        "  added [{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.pbf.{variant}] to brokkr.toml"
+    ));
+    Ok(())
+}
+
+/// Append a snapshot OSC entry `[...snapshot.<key>.osc.<seq>]` to `brokkr.toml`.
+fn append_snapshot_osc_entry(
+    project_root: &Path,
+    hostname: &str,
+    dataset_key: &str,
+    snapshot_key: &str,
+    seq: u64,
+    filename: &str,
+    xxhash: &str,
+) -> Result<(), DevError> {
+    let toml_path = project_root.join("brokkr.toml");
+    let block = format!(
+        "\n[{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.osc.{seq}]\n\
+         file = \"{filename}\"\n\
+         xxhash = \"{xxhash}\"\n"
+    );
+    let mut contents = std::fs::read_to_string(&toml_path)?;
+    contents.push_str(&block);
+    std::fs::write(&toml_path, contents)?;
+    output::download_msg(&format!(
+        "  added [{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.osc.{seq}] to brokkr.toml"
+    ));
+    Ok(())
+}
+
 /// Append a new dataset header to `brokkr.toml` if the dataset doesn't exist yet.
 fn append_dataset_header(
     project_root: &Path,
@@ -360,6 +432,7 @@ fn append_dataset_header(
 pub fn run(
     region: &str,
     osc_seq: Option<u64>,
+    as_snapshot: Option<&str>,
     datasets: &std::collections::HashMap<String, Dataset>,
     hostname: &str,
     data_dir: &Path,
@@ -370,6 +443,21 @@ pub fn run(
     let preliminary = resolve(region, None)?;
     let dataset = datasets.get(&preliminary.dataset_key);
     let resolved = resolve(region, dataset)?;
+
+    // Snapshot mode short-circuits to a separate flow that registers the
+    // download under [<host>.datasets.<key>.snapshot.<snap_key>] instead of
+    // touching the dataset's primary pbf/osc tables.
+    if let Some(snap_key) = as_snapshot {
+        return run_as_snapshot(
+            &resolved,
+            snap_key,
+            osc_seq,
+            dataset,
+            hostname,
+            data_dir,
+            project_root,
+        );
+    }
 
     let source = &resolved.source;
     let dataset_key = &resolved.dataset_key;
@@ -541,6 +629,211 @@ pub fn run(
         }
     }
     output::download_msg(&format!("  Indexed: {}", indexed_dest.display()));
+
+    Ok(())
+}
+
+/// Snapshot-mode download. Registers a new historical snapshot of an existing
+/// dataset under `[<host>.datasets.<dataset>.snapshot.<key>]` instead of
+/// touching the dataset's primary pbf/osc tables.
+///
+/// Errors if the dataset doesn't exist (with a suggested next command) or if
+/// the snapshot key is already registered. Files use snapshot-specific names
+/// (`{dataset}-{snapshot_key}.osm.pbf` etc.) so they don't collide with the
+/// dataset's primary files on disk.
+#[allow(clippy::too_many_lines)]
+fn run_as_snapshot(
+    resolved: &ResolvedDownload,
+    snap_key: &str,
+    osc_seq: Option<u64>,
+    dataset: Option<&Dataset>,
+    hostname: &str,
+    data_dir: &Path,
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let source = &resolved.source;
+    let dataset_key = &resolved.dataset_key;
+    let date = today();
+
+    // Q5: error if the dataset doesn't exist yet, with the next command to run.
+    let ds = dataset.ok_or_else(|| {
+        DevError::Config(format!(
+            "Dataset '{dataset_key}' not found. Run `brokkr download {dataset_key}` to create the primary entry, \
+             then `brokkr download {dataset_key} --as-snapshot {snap_key}` to add a snapshot."
+        ))
+    })?;
+
+    // Reject if a snapshot with this key is already registered.
+    if ds.snapshot.contains_key(snap_key) {
+        return Err(DevError::Config(format!(
+            "snapshot '{snap_key}' is already registered for dataset '{dataset_key}'. \
+             Remove the [{hostname}.datasets.{dataset_key}.snapshot.{snap_key}] block from brokkr.toml first \
+             if you want to re-download it."
+        )));
+    }
+
+    tools::check_curl()?;
+    std::fs::create_dir_all(data_dir)?;
+
+    output::download_msg(&format!(
+        "=== {dataset_key} snapshot '{snap_key}' ({}) ===",
+        source.display_name()
+    ));
+
+    // Snapshot-specific filenames. The snapshot key is typically a date like
+    // "20260411" but can be any [a-zA-Z0-9_-]+ string. Filenames bake the key
+    // in directly so they don't collide with the dataset's primary files.
+    let pbf_filename = format!("{dataset_key}-{snap_key}.osm.pbf");
+    let pbf_dest = data_dir.join(&pbf_filename);
+    let indexed_filename = format!("{dataset_key}-{snap_key}-with-indexdata.osm.pbf");
+    let indexed_dest = data_dir.join(&indexed_filename);
+
+    // -- Download PBF --
+    let mut downloaded_pbf = false;
+    if is_nonempty(&pbf_dest) {
+        output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
+    } else {
+        let url = source.pbf_url();
+        output::download_msg(&format!("  GET: {url}"));
+        tools::download_file(&url, &pbf_dest)?;
+        downloaded_pbf = true;
+    }
+
+    // -- Download OSC diffs (snapshot-scoped, not anchored to legacy chain) --
+    let mut osc_downloaded: Vec<(u64, PathBuf)> = Vec::new();
+    if let Some(target_seq) = osc_seq {
+        // Snapshot OSC chains start fresh — they're not extending the legacy chain.
+        // Download every seq from min to target. Without a min lower bound we'd
+        // download forever, so for now we require the user to invoke later with
+        // a tighter range. Simplest: download just `target_seq` itself.
+        // (Future enhancement: --osc-from N --osc-to M for snapshot-scoped ranges.)
+        let url = source.osc_url(target_seq);
+        let dest = data_dir.join(format!("{dataset_key}-{snap_key}-seq{target_seq}.osc.gz"));
+        if is_nonempty(&dest) {
+            output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
+        } else {
+            output::download_msg(&format!("  GET: {url}"));
+            tools::download_file(&url, &dest)?;
+        }
+        osc_downloaded.push((target_seq, dest));
+    }
+
+    // -- Generate indexed PBF --
+    let mut generated_indexed = false;
+    if is_nonempty(&indexed_dest) {
+        output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
+    } else {
+        output::download_msg("  generating indexed PBF via cat");
+        let binary = build::cargo_build(
+            &build::BuildConfig::release(Some("pbfhogg-cli")),
+            project_root,
+        )?;
+        let binary_str = binary.display().to_string();
+        let cat_input_str = pbf_dest.display().to_string();
+        let indexed_tmp = indexed_dest.with_extension("tmp");
+        let indexed_tmp_str = indexed_tmp.display().to_string();
+
+        let captured = output::run_captured(
+            &binary_str,
+            &[
+                "cat",
+                &cat_input_str,
+                "--type",
+                "node,way,relation",
+                "-o",
+                &indexed_tmp_str,
+            ],
+            project_root,
+        )?;
+        if let Err(e) = captured.check_success(&binary_str) {
+            drop(std::fs::remove_file(&indexed_tmp));
+            return Err(e);
+        }
+        std::fs::rename(&indexed_tmp, &indexed_dest)?;
+        generated_indexed = true;
+    }
+
+    // -- Update brokkr.toml --
+    // Always write the snapshot header (the snapshot is new — we errored
+    // earlier if it already existed).
+    append_snapshot_header(project_root, hostname, dataset_key, snap_key, &date)?;
+
+    if downloaded_pbf || pbf_dest.exists() {
+        let filename = pbf_dest.file_name().unwrap_or_default().to_string_lossy();
+        output::download_msg(&format!("  hashing {filename}..."));
+        let hash = preflight::cached_xxh128(&pbf_dest, project_root)?;
+        append_snapshot_pbf_entry(
+            project_root,
+            hostname,
+            dataset_key,
+            snap_key,
+            "raw",
+            &filename,
+            &hash,
+        )?;
+    }
+
+    if downloaded_pbf {
+        output::download_msg(
+            "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
+             then add seq = <N> to the snapshot's pbf.raw entry"
+        );
+    }
+
+    if generated_indexed || indexed_dest.exists() {
+        let filename = indexed_dest
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        output::download_msg(&format!("  hashing {filename}..."));
+        let hash = preflight::cached_xxh128(&indexed_dest, project_root)?;
+        append_snapshot_pbf_entry(
+            project_root,
+            hostname,
+            dataset_key,
+            snap_key,
+            "indexed",
+            &filename,
+            &hash,
+        )?;
+    }
+
+    for (seq, osc_path) in &osc_downloaded {
+        let filename = osc_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        output::download_msg(&format!("  hashing {filename}..."));
+        let hash = preflight::cached_xxh128(osc_path, project_root)?;
+        append_snapshot_osc_entry(
+            project_root,
+            hostname,
+            dataset_key,
+            snap_key,
+            *seq,
+            &filename,
+            &hash,
+        )?;
+    }
+
+    if !osc_downloaded.is_empty() {
+        // Q6: warn that snapshot OSCs are stored but no current command consumes them.
+        output::download_msg(
+            "  note: snapshot OSCs are stored but no current command consumes them \
+             (apply-changes/merge-changes still operate on the dataset's primary OSC chain)"
+        );
+    }
+
+    // -- Summary --
+    output::download_msg("=== Summary ===");
+    output::download_msg(&format!("  PBF: {}", pbf_dest.display()));
+    if let Some((_, last)) = osc_downloaded.last() {
+        output::download_msg(&format!("  OSC: {}", last.display()));
+    }
+    output::download_msg(&format!("  Indexed: {}", indexed_dest.display()));
+    output::download_msg(&format!(
+        "  Use: brokkr diff-snapshots --dataset {dataset_key} --from base --to {snap_key}"
+    ));
 
     Ok(())
 }

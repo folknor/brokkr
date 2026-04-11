@@ -123,6 +123,74 @@ fn get_dataset<'a>(
         .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot resolution
+// ---------------------------------------------------------------------------
+
+/// A reference to a dataset snapshot used by `diff-snapshots` and any future
+/// command that takes snapshot pairs as input.
+///
+/// `Base` refers to the dataset's legacy top-level `pbf`/`osc` data — the
+/// "primary" snapshot. `Named(key)` refers to a snapshot registered under
+/// `[dataset.snapshot.<key>]` in `brokkr.toml`. The CLI string `"base"` parses
+/// to `Base`; any other string parses to `Named` (after key validation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotRef {
+    Base,
+    Named(String),
+}
+
+impl SnapshotRef {
+    /// Parse a `--from` / `--to` CLI argument into a `SnapshotRef`.
+    /// `"base"` (case-sensitive) → `Base`. Anything else is validated as a
+    /// snapshot key (`[a-zA-Z0-9_-]+`) and wrapped in `Named`.
+    pub(crate) fn parse(s: &str) -> Result<Self, DevError> {
+        if s == "base" {
+            return Ok(Self::Base);
+        }
+        crate::config::validate_snapshot_key(s).map_err(DevError::Config)?;
+        Ok(Self::Named(s.to_owned()))
+    }
+}
+
+/// Resolve a snapshot's PBF path for the given variant.
+///
+/// `Base` dispatches to the legacy `resolve_pbf_path` (top-level `pbf.<variant>`).
+/// `Named(key)` looks up `dataset.snapshot.<key>.pbf.<variant>`.
+pub(crate) fn resolve_snapshot_pbf_path(
+    dataset: &str,
+    snapshot: &SnapshotRef,
+    variant: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    match snapshot {
+        SnapshotRef::Base => resolve_pbf_path(dataset, variant, paths, project_root),
+        SnapshotRef::Named(key) => {
+            let ds = get_dataset(dataset, paths)?;
+            let snap = ds.snapshot.get(key).ok_or_else(|| {
+                let mut available: Vec<&str> = std::iter::once("base")
+                    .chain(ds.snapshot.keys().map(String::as_str))
+                    .collect();
+                available.sort();
+                DevError::Config(format!(
+                    "dataset '{dataset}' has no snapshot '{key}' (available: {})",
+                    available.join(", ")
+                ))
+            })?;
+            resolve_entry_path(
+                &snap.pbf,
+                variant,
+                dataset,
+                &format!("snapshot.{key}.pbf variant"),
+                &paths.data_dir,
+                ds.origin.as_deref(),
+                project_root,
+            )
+        }
+    }
+}
+
 /// Resolve the PBF path from --dataset + --variant.
 pub(crate) fn resolve_pbf_path(
     dataset: &str,
@@ -493,6 +561,7 @@ mod tests {
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
+            snapshot: HashMap::new(),
         }
     }
 
@@ -591,6 +660,130 @@ mod tests {
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
         assert_eq!(from_dataset, "1,2,3,4");
+    }
+
+    #[test]
+    fn snapshot_ref_parses_base_sentinel() {
+        assert!(matches!(SnapshotRef::parse("base").unwrap(), SnapshotRef::Base));
+    }
+
+    #[test]
+    fn snapshot_ref_parses_named_keys() {
+        let parsed = SnapshotRef::parse("20260411").unwrap();
+        assert!(matches!(parsed, SnapshotRef::Named(ref s) if s == "20260411"));
+    }
+
+    #[test]
+    fn snapshot_ref_rejects_invalid_chars() {
+        let err = SnapshotRef::parse("not a key").unwrap_err().to_string();
+        assert!(err.contains("[a-zA-Z0-9_-]+"), "got: {err}");
+    }
+
+    #[test]
+    fn snapshot_ref_rejects_empty() {
+        let err = SnapshotRef::parse("").unwrap_err().to_string();
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_snapshot_pbf_path_base_uses_legacy_table() {
+        let dir = unique_test_dir("snap-base");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("planet-base.osm.pbf"), "x").expect("write");
+
+        let mut ds = empty_dataset();
+        ds.pbf.insert(
+            "indexed".into(),
+            PbfEntry {
+                file: "planet-base.osm.pbf".into(),
+                xxhash: None,
+                seq: None,
+            },
+        );
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let resolved = resolve_snapshot_pbf_path(
+            "planet",
+            &SnapshotRef::Base,
+            "indexed",
+            &paths,
+            Path::new("."),
+        )
+        .expect("resolve");
+        assert!(resolved.ends_with("planet-base.osm.pbf"));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_snapshot_pbf_path_named_uses_snapshot_table() {
+        use crate::config::Snapshot;
+
+        let dir = unique_test_dir("snap-named");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("planet-20260411.osm.pbf"), "x").expect("write");
+
+        let mut snap = Snapshot {
+            download_date: Some("2026-04-11".into()),
+            seq: None,
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+        };
+        snap.pbf.insert(
+            "raw".into(),
+            PbfEntry {
+                file: "planet-20260411.osm.pbf".into(),
+                xxhash: None,
+                seq: None,
+            },
+        );
+        let mut ds = empty_dataset();
+        ds.snapshot.insert("20260411".into(), snap);
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let resolved = resolve_snapshot_pbf_path(
+            "planet",
+            &SnapshotRef::Named("20260411".into()),
+            "raw",
+            &paths,
+            Path::new("."),
+        )
+        .expect("resolve");
+        assert!(resolved.ends_with("planet-20260411.osm.pbf"));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_snapshot_pbf_path_errors_on_unknown_named_key() {
+        let mut ds = empty_dataset();
+        ds.pbf.insert(
+            "indexed".into(),
+            PbfEntry {
+                file: "planet-base.osm.pbf".into(),
+                xxhash: None,
+                seq: None,
+            },
+        );
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(Path::new("/irrelevant"), datasets);
+
+        let err = resolve_snapshot_pbf_path(
+            "planet",
+            &SnapshotRef::Named("missing-snap".into()),
+            "indexed",
+            &paths,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no snapshot 'missing-snap'"), "got: {err}");
+        assert!(err.contains("base"), "available list should mention base: {err}");
     }
 
     #[test]

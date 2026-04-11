@@ -46,7 +46,36 @@ pub struct PmtilesEntry {
     pub xxhash: Option<String>,
 }
 
-/// A dataset with structured PBF variants and multiple OSC entries.
+/// A historical snapshot of a dataset — a different point-in-time capture
+/// of the same region. Snapshots are first-class for the `diff-snapshots`
+/// command and any future operation that takes a pair of snapshot refs.
+///
+/// Snapshots are NOT variants in the `pbf.raw` / `pbf.indexed` sense — those
+/// are transforms of one PBF. A snapshot is a different PBF (e.g. a different
+/// weekly planet dump). Each snapshot can carry its own pbf variants and its
+/// own OSC chain anchored at its own replication seq.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct Snapshot {
+    pub download_date: Option<String>,
+    pub seq: Option<u64>,
+    /// PBF variants keyed by name (e.g. "raw", "indexed").
+    #[serde(default)]
+    pub pbf: HashMap<String, PbfEntry>,
+    /// OSC files keyed by sequence number. Stored but not consumed by any
+    /// current command — pre-positioned for future `apply-changes --snapshot`
+    /// / `merge-changes --snapshot` style commands.
+    #[serde(default)]
+    pub osc: HashMap<String, OscEntry>,
+}
+
+/// A dataset with structured PBF variants, multiple OSC entries, and zero
+/// or more historical snapshots.
+///
+/// The top-level `pbf` and `osc` tables are the dataset's "primary" snapshot
+/// (referenced as `base` by the `diff-snapshots` command). Additional
+/// snapshots live under `snapshot.<key>` with their own pbf/osc tables.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
@@ -56,14 +85,20 @@ pub struct Dataset {
     pub bbox: Option<String>,
     pub data_dir: Option<String>,
     /// PBF variants keyed by name (e.g. "raw", "indexed", "locations").
+    /// These are the variants of the dataset's primary (legacy / `base`) snapshot.
     #[serde(default)]
     pub pbf: HashMap<String, PbfEntry>,
-    /// OSC files keyed by sequence number.
+    /// OSC files keyed by sequence number, anchored to the primary PBF.
     #[serde(default)]
     pub osc: HashMap<String, OscEntry>,
     /// PMTiles archives keyed by variant name (e.g. "elivagar").
     #[serde(default)]
     pub pmtiles: HashMap<String, PmtilesEntry>,
+    /// Additional historical snapshots keyed by snapshot name (e.g. a date
+    /// like "20260411"). The reserved name "base" is rejected at parse time
+    /// because it's the CLI sentinel for the legacy top-level data.
+    #[serde(default)]
+    pub snapshot: HashMap<String, Snapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,7 +323,8 @@ fn parse_sluggrs(
     Ok(Some(config))
 }
 
-/// Validate all datasets across all hosts for empty file names.
+/// Validate all datasets across all hosts for empty file names and snapshot
+/// key constraints.
 fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError> {
     for (host, hc) in hosts {
         for (ds_name, ds) in &hc.datasets {
@@ -313,7 +349,52 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
                     )));
                 }
             }
+            for (snap_key, snap) in &ds.snapshot {
+                validate_snapshot_key(snap_key).map_err(|e| {
+                    DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.snapshot.{snap_key}: {e}"
+                    ))
+                })?;
+                for (variant, entry) in &snap.pbf {
+                    if entry.file.is_empty() {
+                        return Err(DevError::Config(format!(
+                            "{host}.datasets.{ds_name}.snapshot.{snap_key}.pbf.{variant}: file name is empty"
+                        )));
+                    }
+                }
+                for (seq, entry) in &snap.osc {
+                    if entry.file.is_empty() {
+                        return Err(DevError::Config(format!(
+                            "{host}.datasets.{ds_name}.snapshot.{snap_key}.osc.{seq}: file name is empty"
+                        )));
+                    }
+                }
+            }
         }
+    }
+    Ok(())
+}
+
+/// Validate a snapshot key matches `[a-zA-Z0-9_-]+` and is not the reserved
+/// sentinel `base` (which the CLI uses to refer to the dataset's legacy
+/// top-level pbf/osc data).
+pub(crate) fn validate_snapshot_key(key: &str) -> Result<(), String> {
+    if key == "base" {
+        return Err(
+            "'base' is a reserved snapshot name (CLI sentinel for the dataset's primary data)"
+                .into(),
+        );
+    }
+    if key.is_empty() {
+        return Err("snapshot key must not be empty".into());
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "snapshot key '{key}' must match [a-zA-Z0-9_-]+ (no spaces, dots, or other special characters)"
+        ));
     }
     Ok(())
 }
@@ -434,6 +515,7 @@ mod tests {
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
+            snapshot: HashMap::new(),
         }
     }
 
@@ -634,6 +716,122 @@ sha256 = "ccc"
             Some("bbb")
         );
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
+    }
+
+    #[test]
+    fn parse_dataset_with_snapshot_table() {
+        let toml_str = r#"
+project = "pbfhogg"
+
+[myhost.datasets.planet]
+origin = "planet.openstreetmap.org"
+
+[myhost.datasets.planet.pbf.raw]
+file = "planet-base.osm.pbf"
+
+[myhost.datasets.planet.snapshot.20260411]
+download_date = "2026-04-11"
+seq = 4969
+
+[myhost.datasets.planet.snapshot.20260411.pbf.raw]
+file = "planet-20260411.osm.pbf"
+xxhash = "deadbeef"
+
+[myhost.datasets.planet.snapshot.20260411.pbf.indexed]
+file = "planet-20260411-with-indexdata.osm.pbf"
+xxhash = "feedface"
+"#;
+        let root: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = root.as_table().unwrap();
+        let hosts = parse_hosts(table).unwrap();
+        let host = hosts.get("myhost").unwrap();
+        let planet = host.datasets.get("planet").unwrap();
+        assert_eq!(planet.pbf.get("raw").unwrap().file, "planet-base.osm.pbf");
+        let snap = planet.snapshot.get("20260411").unwrap();
+        assert_eq!(snap.download_date.as_deref(), Some("2026-04-11"));
+        assert_eq!(snap.seq, Some(4969));
+        assert_eq!(snap.pbf.get("raw").unwrap().file, "planet-20260411.osm.pbf");
+        assert_eq!(snap.pbf.get("raw").unwrap().xxhash.as_deref(), Some("deadbeef"));
+        assert_eq!(
+            snap.pbf.get("indexed").unwrap().file,
+            "planet-20260411-with-indexdata.osm.pbf"
+        );
+    }
+
+    #[test]
+    fn snapshot_named_base_is_rejected() {
+        let mut hc = HostConfig {
+            data: None,
+            scratch: None,
+            target: None,
+            port: None,
+            drives: None,
+            features: Vec::new(),
+            datasets: HashMap::new(),
+        };
+        let mut ds = Dataset {
+            origin: None,
+            download_date: None,
+            bbox: None,
+            data_dir: None,
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+            pmtiles: HashMap::new(),
+            snapshot: HashMap::new(),
+        };
+        ds.snapshot.insert(
+            "base".into(),
+            Snapshot {
+                download_date: None,
+                seq: None,
+                pbf: HashMap::new(),
+                osc: HashMap::new(),
+            },
+        );
+        hc.datasets.insert("planet".into(), ds);
+        let mut hosts = HashMap::new();
+        hosts.insert("myhost".into(), hc);
+
+        let err = validate_datasets(&hosts).unwrap_err().to_string();
+        assert!(err.contains("'base' is a reserved snapshot name"), "got: {err}");
+    }
+
+    #[test]
+    fn snapshot_key_with_invalid_chars_rejected() {
+        let mut hc = HostConfig {
+            data: None,
+            scratch: None,
+            target: None,
+            port: None,
+            drives: None,
+            features: Vec::new(),
+            datasets: HashMap::new(),
+        };
+        let mut ds = Dataset {
+            origin: None,
+            download_date: None,
+            bbox: None,
+            data_dir: None,
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+            pmtiles: HashMap::new(),
+            snapshot: HashMap::new(),
+        };
+        ds.snapshot.insert(
+            "bad key".into(),
+            Snapshot {
+                download_date: None,
+                seq: None,
+                pbf: HashMap::new(),
+                osc: HashMap::new(),
+            },
+        );
+        hc.datasets.insert("planet".into(), ds);
+        let mut hosts = HashMap::new();
+        hosts.insert("myhost".into(), hc);
+
+        let err = validate_datasets(&hosts).unwrap_err().to_string();
+        assert!(err.contains("[a-zA-Z0-9_-]+"), "got: {err}");
     }
 
     #[test]

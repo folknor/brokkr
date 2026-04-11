@@ -603,6 +603,7 @@ mod tests {
                 command: None,
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 10,
             })
             .expect("query");
@@ -674,6 +675,7 @@ mod tests {
                 command: None,
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 10,
             })
             .expect("query");

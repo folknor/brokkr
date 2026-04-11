@@ -78,11 +78,20 @@ Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`
 
 `diff` and `diff-osc` derive their second input by running `apply-changes` on the dataset's PBF + OSC and caching the result at `<scratch>/<pbf-stem>-osc<seq>-bench-merged.osm.pbf`. The cache key includes the OSC seq so different `--osc-seq` invocations don't silently reuse each other's merged files. In any measured mode (`--bench`/`--hotpath`/`--alloc`) the cache is rebuilt before the run so total invocation wall time is reproducible; pass `--keep-cache` to opt back into reuse. Run mode (no measurement flag) always reuses the cache for dev-loop speed. Cache hit/miss + age land in the result row's metadata as `meta.merged_cache` and `meta.merged_cache_age_s`.
 
+`diff-snapshots` benchmarks pbfhogg's `diff` against two independent point-in-time snapshots of the same dataset (e.g. `planet-20260223` vs `planet-20260411`). Unlike `diff`/`diff-osc` — which derive their B side from `apply-changes` and therefore preserve blob-level byte equality with the A side — `diff-snapshots` forces every blob through full decode on both sides. Different working set, different peak memory, different wall time. The dataset's primary (legacy top-level) PBF is referenced as `base`; additional snapshots registered via `brokkr download <region> --as-snapshot <key>` are referenced by their snapshot key. The `--format` flag selects between summary diff (default) and OSC-format output. Result rows are recorded with `variant = "diff-snapshots-<from>-to-<to>"` (format-agnostic) and `meta.format` / `meta.from_snapshot` / `meta.to_snapshot` in metadata — query osc-only runs via `brokkr results --variant diff-snapshots --meta format=osc`.
+
+```
+brokkr diff-snapshots --dataset planet --from base --to 20260411 --bench 1
+brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format osc
+```
+
 `suite pbfhogg` runs the full benchmark suite.
 
 **Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert.
 
 **Other**: `download <region> [--osc-seq N]` fetches datasets from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Skips files that already exist (checked against `brokkr.toml` filenames). `--osc-seq N` downloads all missing OSC diffs from the last configured seq through N, hashes them, and appends entries to `brokkr.toml`. New downloads use dated filenames matching the project convention (e.g. `europe-20260329-seq4716.osc.gz`).
+
+`download <region> --as-snapshot <key>` registers a new historical snapshot of an existing dataset under `[host.datasets.<region>.snapshot.<key>]` instead of touching the dataset's primary pbf/osc tables. Requires the dataset to already exist (run `brokkr download <region>` first). The snapshot key must match `[a-zA-Z0-9_-]+`; `base` is reserved as the CLI sentinel for the dataset's legacy/primary data. Files are written with snapshot-specific names (`<region>-<key>.osm.pbf`, etc.) and the indexed PBF is generated automatically. Snapshot OSCs are stored but not consumed by any current command — pre-positioned for future `apply-changes --snapshot` / `merge-changes --snapshot` style operations.
 
 ### elivagar
 
@@ -210,10 +219,15 @@ brokkr results --command 'bench read'               # filter by command
 brokkr results --variant pipelined                  # filter by variant
 brokkr results --dataset europe                     # filter by dataset (substring on input file)
 brokkr results --command tags-filter --dataset eu   # combine filters
+brokkr results --meta format=osc                    # filter by metadata key
+brokkr results --variant diff-snapshots --meta format=osc       # AND with variant
+brokkr results --meta merged_cache=miss --command diff           # cold-cache diff runs only
 brokkr results --compare a65a 911c                  # compare two commits side-by-side
 brokkr results --compare-last                       # compare two most recent commits
 brokkr results --compare-last --command hotpath      # compare with hotpath function diff
 ```
+
+`--meta KEY=VALUE` filters by metadata kvs (the `meta.` prefix is implicit — pass the bare name). Multiple `--meta` flags AND together. Rows missing the requested key are silently excluded, which means historical runs from before a metadata field was introduced just don't appear — they don't error. The available metadata keys depend on the command (e.g. `diff`/`diff-osc` emit `meta.merged_cache` + `meta.merged_cache_age_s`; `diff-snapshots` emits `meta.format` + `meta.from_snapshot` + `meta.to_snapshot`; `add-locations-to-ways` emits `meta.index_type`; `merge-changes --osc-range` emits via the variant suffix instead).
 
 The `dataset` column in the output table is the first dash-separated component of the input filename — `europe-20260301-seq4714-with-indexdata.osm (35262 MB)` renders as `europe (35262 MB)`. This is a display heuristic: filtering via `--dataset` always substring-matches the full `input_file` column, so filters still work even when the short name collapses distinct datasets (e.g. a hypothetical `europe-west` would display as `europe`). See TODO.md for the proper fix.
 
@@ -274,6 +288,22 @@ seq = 4704
 file = "denmark-4705.osc.gz"
 xxhash = "f1e2d3c4b5a6..."
 
+# Optional historical snapshots — additional point-in-time captures of the
+# same dataset, registered via `brokkr download denmark --as-snapshot <key>`.
+# The legacy top-level pbf/osc data above is implicitly snapshot `base`.
+# `diff-snapshots --from base --to 20260411` diffs the two.
+[plantasjen.datasets.denmark.snapshot.20260411]
+download_date = "2026-04-11"
+seq = 4969
+
+[plantasjen.datasets.denmark.snapshot.20260411.pbf.raw]
+file = "denmark-20260411.osm.pbf"
+xxhash = "..."
+
+[plantasjen.datasets.denmark.snapshot.20260411.pbf.indexed]
+file = "denmark-20260411-with-indexdata.osm.pbf"
+xxhash = "..."
+
 # Cross-project source trees for preview pipeline
 [plantasjen.preview]
 pbfhogg = "/home/folk/Programs/pbfhogg"
@@ -283,6 +313,7 @@ nidhogg = "/home/folk/Programs/nidhogg"
 
 - `project` — which project this is (`pbfhogg`, `elivagar`, `nidhogg`, or `litehtml-rs`)
 - `[hostname.datasets.*]` — named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
+- `[hostname.datasets.*.snapshot.<key>]` — additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots`; the existing rolling-OSC-chain commands (`apply-changes`, `merge-changes`) continue to operate on the dataset's primary pbf/osc tables only
 - `xxhash` — optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` — per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
 - `features` — cargo features appended to every build (all measurable commands, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top

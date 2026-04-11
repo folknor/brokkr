@@ -227,6 +227,33 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 },
             )
         }
+        Command::DiffSnapshots {
+            mode,
+            dataset,
+            from,
+            to,
+            variant,
+            format,
+        } => {
+            let mut params = std::collections::HashMap::new();
+            params.insert("from_snapshot".into(), from.clone());
+            params.insert("to_snapshot".into(), to.clone());
+            let format_enum = pbfhogg::commands::DiffFormat::parse(&format)?;
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                &variant,
+                |req| {
+                    let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots {
+                        format: format_enum,
+                    };
+                    dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)
+                },
+            )
+        }
         Command::Extract {
             mode,
             pbf,
@@ -553,6 +580,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             command,
             variant,
             dataset,
+            meta,
             limit,
             top,
             timeline,
@@ -580,6 +608,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 command,
                 variant,
                 dataset,
+                meta,
                 limit,
                 top,
                 timeline,
@@ -623,7 +652,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )
             })
         }
-        Command::Download { region, osc_seq } => {
+        Command::Download {
+            region,
+            osc_seq,
+            as_snapshot,
+        } => {
             let _lock = acquire_cmd_lock(project, &project_root, "download")?;
             pbfhogg::cmd::download(
                 &dev_config,
@@ -631,6 +664,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &region,
                 osc_seq,
+                as_snapshot.as_deref(),
             )
         }
         Command::CompareTiles {
@@ -1357,11 +1391,20 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             }
         }
     } else {
+        // Parse --meta KEY=VALUE strings into (key, value) pairs. The CLI
+        // validator already guarantees each entry contains '=', so split_once
+        // can't fail here, but we still defensively pattern-match.
+        let meta_pairs: Vec<(String, String)> = q
+            .meta
+            .iter()
+            .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
+            .collect();
         let filter = db::QueryFilter {
             commit: q.commit.clone(),
             command: q.command.clone(),
             variant: q.variant.clone(),
             dataset: q.dataset.clone(),
+            meta: meta_pairs,
             limit: q.limit,
         };
         let rows = results_db.query(&filter)?;

@@ -130,8 +130,10 @@ pub struct CommandContext {
     /// Single-OSC commands populate this with a one-element vec; multi-OSC commands
     /// (merge-changes with a range) populate it with the full expanded range.
     pub osc_paths: Vec<PathBuf>,
-    /// Resolved merged PBF path (for diff/diff-osc commands).
-    pub merged_pbf_path: Option<PathBuf>,
+    /// Resolved B-side PBF path for any diff-style operation. Populated by:
+    /// - `Diff` / `DiffOsc` from `ensure_merged_pbf` (apply-changes output).
+    /// - `DiffSnapshots` from `resolve_snapshot_pbf_path` for the `--to` side.
+    pub pbf_b_path: Option<PathBuf>,
     /// Scratch directory for output files.
     pub scratch_dir: PathBuf,
     /// Dataset name (e.g. `"denmark"`).
@@ -173,13 +175,13 @@ impl CommandContext {
             .collect()
     }
 
-    /// Get the merged PBF path as a UTF-8 string, or error if not set.
-    pub fn merged_pbf_str(&self) -> Result<&str, DevError> {
-        self.merged_pbf_path
+    /// Get the B-side PBF path as a UTF-8 string, or error if not set.
+    pub fn pbf_b_str(&self) -> Result<&str, DevError> {
+        self.pbf_b_path
             .as_ref()
-            .ok_or_else(|| DevError::Config("merged PBF path is required but not set".into()))?
+            .ok_or_else(|| DevError::Config("B-side PBF path is required but not set".into()))?
             .to_str()
-            .ok_or_else(|| DevError::Config("merged PBF path is not valid UTF-8".into()))
+            .ok_or_else(|| DevError::Config("B-side PBF path is not valid UTF-8".into()))
     }
 
     /// Get the binary path as a UTF-8 string, or error.

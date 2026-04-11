@@ -178,6 +178,11 @@ pub struct QueryFilter {
     /// by the dataset name embedded in benchmark input filenames (e.g.
     /// `europe-20260301-seq4714-with-indexdata.osm` matches `europe`).
     pub dataset: Option<String>,
+    /// Metadata filters as `(key, value)` pairs. The key is the user-facing
+    /// name without the `meta.` prefix (e.g. `("format", "osc")` matches rows
+    /// with `meta.format = "osc"` in the run_kv table). Multiple filters AND
+    /// together. Rows missing the key are silently excluded.
+    pub meta: Vec<(String, String)>,
     pub limit: usize,
 }
 

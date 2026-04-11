@@ -314,6 +314,48 @@ Examples:
         #[arg(long)]
         keep_cache: bool,
     },
+    /// [pbfhogg] Diff two snapshots of the same dataset
+    #[command(
+        name = "diff-snapshots",
+        display_order = 2,
+        long_about = "\
+Diff two point-in-time snapshots of the same dataset.
+
+Unlike `brokkr diff`, neither side is derived from apply-changes — both PBFs
+come from independent snapshot resolution. Use this to measure the cost of
+diffing two real weekly dumps where no blob-level byte equality is possible.
+
+The dataset's primary (legacy top-level) pbf data is referenced as `base`.
+Additional snapshots registered via `brokkr download <region> --as-snapshot <key>`
+are referenced by their snapshot key.
+
+Examples:
+  brokkr diff-snapshots --dataset planet --from base --to 20260411 --bench 1
+  brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format osc"
+    )]
+    DiffSnapshots {
+        #[command(flatten)]
+        mode: ModeArgs,
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// "From" snapshot reference. Use `base` for the dataset's
+        /// legacy/primary PBF, or a snapshot key registered under
+        /// `[dataset.snapshot.<key>]`.
+        #[arg(long)]
+        from: String,
+        /// "To" snapshot reference (same naming as `--from`).
+        #[arg(long)]
+        to: String,
+        /// PBF variant to use on both sides (raw, indexed, locations).
+        /// Errors if the requested variant doesn't exist on either snapshot.
+        #[arg(long, default_value = "indexed")]
+        variant: String,
+        /// Output format: `default` (summary diff) or `osc` (OSC-format diff
+        /// written to scratch).
+        #[arg(long, default_value = "default")]
+        format: String,
+    },
     /// [pbfhogg] Diff two PBFs (OSC output)
     #[command(name = "diff-osc", display_order = 2)]
     DiffOsc {
@@ -629,6 +671,13 @@ Examples:
         #[arg(long)]
         dataset: Option<String>,
 
+        /// Filter by metadata key=value (multiple allowed, AND semantics).
+        /// The key is the user-facing name without the `meta.` prefix
+        /// (e.g. `--meta format=osc` matches rows with `meta.format = "osc"`).
+        /// Rows missing the key are silently excluded.
+        #[arg(long, value_parser = validate_meta_filter)]
+        meta: Vec<String>,
+
         /// Maximum number of results to show
         #[arg(long, short = 'n', default_value = "20")]
         limit: usize,
@@ -778,6 +827,19 @@ Examples:
         /// Download OSC diffs up to this sequence number
         #[arg(long)]
         osc_seq: Option<u64>,
+
+        /// Register the download as an additional snapshot of an existing
+        /// dataset rather than (re-)populating the dataset's primary entry.
+        ///
+        /// Requires the dataset to already exist (run `brokkr download <region>`
+        /// first to create the primary entry). The snapshot key must match
+        /// `[a-zA-Z0-9_-]+` and cannot be `base` (reserved for the dataset's
+        /// legacy/primary data).
+        ///
+        /// Files are written with snapshot-specific names and registered under
+        /// `[<host>.datasets.<region>.snapshot.<key>]` in `brokkr.toml`.
+        #[arg(long, value_parser = validate_snapshot_key_arg)]
+        as_snapshot: Option<String>,
     },
     /// [elivagar] Compare feature counts between two PMTiles archives
     #[command(display_order = 30)]
@@ -1259,6 +1321,26 @@ pub(crate) enum VerifyCommand {
     },
 }
 
+
+/// Validate `--as-snapshot` key: matches `[a-zA-Z0-9_-]+` and is not the
+/// reserved sentinel `base`. Delegates to `config::validate_snapshot_key`
+/// so the parse-time and CLI-time rules stay in sync.
+fn validate_snapshot_key_arg(s: &str) -> Result<String, String> {
+    crate::config::validate_snapshot_key(s)?;
+    Ok(s.to_owned())
+}
+
+/// Validate `--meta key=value`: must contain exactly one `=`. Both sides may
+/// be empty (the empty-value case is legitimate for filtering rows where the
+/// stored value is the empty string).
+fn validate_meta_filter(s: &str) -> Result<String, String> {
+    if !s.contains('=') {
+        return Err(format!(
+            "expected key=value, got '{s}' (use --meta KEY=VALUE)"
+        ));
+    }
+    Ok(s.to_owned())
+}
 
 /// Validate `--osc-range` format: `LO..HI` where both are non-negative integers and LO <= HI.
 fn validate_osc_range(s: &str) -> Result<String, String> {

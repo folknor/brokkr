@@ -41,6 +41,16 @@ fn extra_variant_suffix(
     {
         return format!("+range-{lo}-{hi}");
     }
+    if matches!(command, PbfhoggCommand::DiffSnapshots { .. })
+        && let Some(from) = extra_params.get("from_snapshot")
+        && let Some(to) = extra_params.get("to_snapshot")
+    {
+        // diff-snapshots variant column is always
+        // "diff-snapshots-{from}-to-{to}", regardless of format. Format
+        // lives in metadata so substring queries on `--variant diff-snapshots`
+        // catch all snapshot diffs across both formats.
+        return format!("-{from}-to-{to}");
+    }
     String::new()
 }
 
@@ -195,8 +205,10 @@ fn run_pbfhogg_wallclock(
         args.push((*flag).into());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (_, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    // Read the input file size from the resolved PBF in cmd_ctx — correct for
+    // both legacy commands (where pbf_path = resolve_pbf_path(dataset, variant))
+    // and DiffSnapshots (where pbf_path is the --from snapshot's PBF).
+    let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
     let basename = cmd_ctx.pbf_basename();
 
     // Append I/O mode suffix and any extra suffix (e.g. merge-changes range)
@@ -286,9 +298,12 @@ fn run_pbfhogg_hotpath(
         req.wait,
     )?;
 
-    // OOM check.
-    let (_, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let cmd_ctx =
+        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
+
+    // Read input file size from the resolved PBF in cmd_ctx — correct for both
+    // legacy commands and DiffSnapshots (which resolves a snapshot's PBF).
+    let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
     let risk = if alloc {
         oom::MemoryRisk::AllocTracking
     } else {
@@ -296,8 +311,6 @@ fn run_pbfhogg_hotpath(
     };
     oom::check_memory(file_mb, &risk, req.no_mem_check)?;
 
-    let cmd_ctx =
-        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
     let mut hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
     for flag in &io_args {
         hotpath_args.push((*flag).into());
@@ -367,6 +380,12 @@ fn build_pbfhogg_context(
     paths: &config::ResolvedPaths,
     extra_params: &HashMap<String, String>,
 ) -> Result<CommandContext, DevError> {
+    // DiffSnapshots resolves both PBFs via the snapshot resolver instead of
+    // the standard pbf_path/osc/merged flow. Short-circuit here.
+    if matches!(command, PbfhoggCommand::DiffSnapshots { .. }) {
+        return build_diff_snapshots_context(req, binary, paths, extra_params);
+    }
+
     let pbf_path = resolve_pbf_path(req.dataset, req.variant, paths, req.project_root)?;
 
     // Resolve OSC path(s) if needed.
@@ -395,7 +414,7 @@ fn build_pbfhogg_context(
     // default so total brokkr-invocation wall time is deterministic regardless
     // of prior session state. `--keep-cache` opts back into reuse.
     let mut params = extra_params.clone();
-    let merged_pbf_path = if command.input_kind() == InputKind::PbfAndMerged {
+    let pbf_b_path = if command.input_kind() == InputKind::PbfAndMerged {
         let osc = osc_path
             .as_ref()
             .ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
@@ -442,11 +461,58 @@ fn build_pbfhogg_context(
         pbf_path,
         osc_path,
         osc_paths,
-        merged_pbf_path,
+        pbf_b_path,
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
         bbox,
         params,
+    })
+}
+
+/// Build the `CommandContext` for `DiffSnapshots`. Resolves both PBF paths
+/// via the snapshot resolver — `pbf_path` is the `--from` side, `pbf_b_path`
+/// is the `--to` side. The `--variant` is applied symmetrically to both.
+fn build_diff_snapshots_context(
+    req: &MeasureRequest,
+    binary: &Path,
+    paths: &config::ResolvedPaths,
+    extra_params: &HashMap<String, String>,
+) -> Result<CommandContext, DevError> {
+    let from_str = extra_params.get("from_snapshot").ok_or_else(|| {
+        DevError::Config("diff-snapshots requires --from".into())
+    })?;
+    let to_str = extra_params.get("to_snapshot").ok_or_else(|| {
+        DevError::Config("diff-snapshots requires --to".into())
+    })?;
+
+    let from_ref = resolve::SnapshotRef::parse(from_str)?;
+    let to_ref = resolve::SnapshotRef::parse(to_str)?;
+
+    let from_path = resolve::resolve_snapshot_pbf_path(
+        req.dataset,
+        &from_ref,
+        req.variant,
+        paths,
+        req.project_root,
+    )?;
+    let to_path = resolve::resolve_snapshot_pbf_path(
+        req.dataset,
+        &to_ref,
+        req.variant,
+        paths,
+        req.project_root,
+    )?;
+
+    Ok(CommandContext {
+        binary: binary.to_path_buf(),
+        pbf_path: from_path,
+        osc_path: None,
+        osc_paths: Vec::new(),
+        pbf_b_path: Some(to_path),
+        scratch_dir: paths.scratch_dir.clone(),
+        dataset: req.dataset.to_owned(),
+        bbox: None,
+        params: extra_params.clone(),
     })
 }
 

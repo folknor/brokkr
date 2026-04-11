@@ -198,6 +198,7 @@ mod tests {
                 command: Some(String::from("bench write")),
                 variant: None,
                 dataset: None,
+                meta: vec![],
                 limit: 10,
             })
             .expect("query");

@@ -54,6 +54,35 @@ pub enum ExtractStrategy {
     Smart,
 }
 
+/// Output format for `diff` / `diff-snapshots` (`pbfhogg diff` accepts both
+/// a default summary format and `--format osc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffFormat {
+    /// Default summary diff (`pbfhogg diff <a> <b> -c`).
+    Default,
+    /// OSC-format diff (`pbfhogg diff --format osc <a> <b> -o <out>`).
+    Osc,
+}
+
+impl DiffFormat {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Osc => "osc",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, DevError> {
+        match s {
+            "default" => Ok(Self::Default),
+            "osc" => Ok(Self::Osc),
+            _ => Err(DevError::Config(format!(
+                "unknown diff format '{s}' (expected: default, osc)"
+            ))),
+        }
+    }
+}
+
 impl ExtractStrategy {
     pub fn name(self) -> &'static str {
         match self {
@@ -119,6 +148,13 @@ pub enum PbfhoggCommand {
     Diff,
     DiffOsc,
 
+    /// Two-snapshot diff: compares two PBFs from different point-in-time
+    /// snapshots of the same dataset (e.g. `planet-20260223` vs
+    /// `planet-20260411`). Unlike `Diff`, neither side is derived from
+    /// `apply-changes` — both come from independent snapshot resolution.
+    /// The format flag selects between summary diff and OSC-format diff.
+    DiffSnapshots { format: DiffFormat },
+
     // -- Standalone commands --
     BuildGeocodeIndex,
 
@@ -165,6 +201,7 @@ impl PbfhoggCommand {
             Self::BuildGeocodeIndex => "build-geocode-index",
             Self::Extract { .. } => "extract",
             Self::MultiExtract { .. } => "multi-extract",
+            Self::DiffSnapshots { .. } => "diff-snapshots",
         }
     }
 
@@ -179,6 +216,10 @@ impl PbfhoggCommand {
                 InputKind::PbfAndBbox
             }
             Self::Extract { .. } | Self::MultiExtract { .. } => InputKind::PbfAndBbox,
+            // DiffSnapshots resolves both PBFs via the snapshot path resolver.
+            // Doesn't need OSC or merged-PBF setup; the dispatch layer handles
+            // the snapshot resolution outside the InputKind dispatch.
+            Self::DiffSnapshots { .. } => InputKind::Pbf,
             _ => InputKind::Pbf,
         }
     }
@@ -194,6 +235,13 @@ impl PbfhoggCommand {
             | Self::CheckRefs
             | Self::CheckIds
             | Self::Diff => OutputKind::None,
+
+            // DiffSnapshots: same as Diff/DiffOsc — None for default format
+            // (stdout summary), ScratchOsc for osc format.
+            Self::DiffSnapshots { format: DiffFormat::Default } => OutputKind::None,
+            Self::DiffSnapshots { format: DiffFormat::Osc } => {
+                OutputKind::ScratchOsc("bench-output")
+            }
 
             // OSC output.
             Self::TagsFilterOsc | Self::MergeChanges | Self::DiffOsc => {
@@ -243,7 +291,7 @@ impl PbfhoggCommand {
     /// `diff` follows standard diff convention: exit 1 = differences found (not an error).
     pub fn ok_exit_codes(&self) -> &'static [i32] {
         match self {
-            Self::Diff | Self::DiffOsc => &[1],
+            Self::Diff | Self::DiffOsc | Self::DiffSnapshots { .. } => &[1],
             _ => &[],
         }
     }
@@ -279,7 +327,8 @@ impl PbfhoggCommand {
             | Self::ExtractSmart
             | Self::TimeFilter
             | Self::Diff
-            | Self::DiffOsc => "bench commands",
+            | Self::DiffOsc
+            | Self::DiffSnapshots { .. } => "bench commands",
             Self::BuildGeocodeIndex => "bench build-geocode-index",
             Self::Extract { .. } => "bench extract",
             Self::MultiExtract { .. } => "bench multi-extract",
@@ -324,6 +373,13 @@ impl PbfhoggCommand {
 
             Self::Extract { strategy } => Some(strategy.name().to_owned()),
             Self::MultiExtract { regions } => Some(format!("multi-extract-{regions}")),
+
+            // DiffSnapshots returns None — the full variant string
+            // ("diff-snapshots-{from}-to-{to}") is composed in the dispatch
+            // layer via `extra_variant_suffix` since it needs from/to from
+            // the cmd_ctx params. Format is recorded in metadata, not in
+            // the variant column (per the schema design — see Q7).
+            Self::DiffSnapshots { .. } => None,
         }
     }
 
@@ -368,6 +424,19 @@ impl PbfhoggCommand {
                 }
                 if let Some(age) = ctx.param("merged_cache_age_s") {
                     meta.push(KvPair::text("meta.merged_cache_age_s", age));
+                }
+                meta
+            }
+            Self::DiffSnapshots { format } => {
+                // Format and snapshot identities live in metadata so the
+                // variant column stays format-agnostic. Query osc-only runs
+                // via `brokkr results --variant diff-snapshots --meta format=osc`.
+                let mut meta = vec![KvPair::text("meta.format", format.name())];
+                if let Some(from) = ctx.param("from_snapshot") {
+                    meta.push(KvPair::text("meta.from_snapshot", from));
+                }
+                if let Some(to) = ctx.param("to_snapshot") {
+                    meta.push(KvPair::text("meta.to_snapshot", to));
                 }
                 meta
             }
@@ -675,7 +744,7 @@ impl PbfhoggCommand {
                 ])
             }
             Self::Diff => {
-                let merged = ctx.merged_pbf_str()?;
+                let merged = ctx.pbf_b_str()?;
                 Ok(vec![
                     "diff".into(),
                     ctx.pbf_str()?.into(),
@@ -685,7 +754,7 @@ impl PbfhoggCommand {
             }
             Self::DiffOsc => {
                 let output = scratch_output_path(ctx, self);
-                let merged = ctx.merged_pbf_str()?;
+                let merged = ctx.pbf_b_str()?;
                 Ok(vec![
                     "diff".into(),
                     "--format".into(),
@@ -695,6 +764,32 @@ impl PbfhoggCommand {
                     "-o".into(),
                     path_to_string(&output)?,
                 ])
+            }
+            Self::DiffSnapshots { format } => {
+                // Both PBFs come from snapshot resolution; pbf_path is the
+                // --from side, pbf_b_path is the --to side.
+                let from = ctx.pbf_str()?;
+                let to = ctx.pbf_b_str()?;
+                match format {
+                    DiffFormat::Default => Ok(vec![
+                        "diff".into(),
+                        from.into(),
+                        to.into(),
+                        "-c".into(),
+                    ]),
+                    DiffFormat::Osc => {
+                        let output = scratch_output_path(ctx, self);
+                        Ok(vec![
+                            "diff".into(),
+                            "--format".into(),
+                            "osc".into(),
+                            from.into(),
+                            to.into(),
+                            "-o".into(),
+                            path_to_string(&output)?,
+                        ])
+                    }
+                }
             }
 
             // -----------------------------------------------------------------
@@ -979,7 +1074,7 @@ mod tests {
             pbf_path: PathBuf::from("/data/denmark.osm.pbf"),
             osc_path: Some(PathBuf::from("/data/denmark-4705.osc.gz")),
             osc_paths: vec![PathBuf::from("/data/denmark-4705.osc.gz")],
-            merged_pbf_path: Some(PathBuf::from("/data/scratch/merged.osm.pbf")),
+            pbf_b_path: Some(PathBuf::from("/data/scratch/merged.osm.pbf")),
             scratch_dir: PathBuf::from("/data/scratch"),
             dataset: "denmark".into(),
             bbox: Some("12.4,55.6,12.7,55.8".into()),
