@@ -14,6 +14,14 @@ use crate::resolve::{
 use crate::tools;
 
 pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), DevError> {
+    if req.dry_run {
+        let paths = dry_run_paths(req)?;
+        let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        let _ = super::bench_read::parse_modes(modes_str)?;
+        output::run_msg("[dry-run] ok (bench read)");
+        return Ok(());
+    }
+
     let feat_refs = req.feat_refs();
     let ctx = BenchContext::new(
         req.dev_config,
@@ -42,6 +50,14 @@ pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), De
 }
 
 pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result<(), DevError> {
+    if req.dry_run {
+        let paths = dry_run_paths(req)?;
+        let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        let _ = super::parse_compressions(compression_str, true)?;
+        output::run_msg("[dry-run] ok (bench write)");
+        return Ok(());
+    }
+
     let feat_refs = req.feat_refs();
     let ctx = BenchContext::new(
         req.dev_config,
@@ -75,6 +91,24 @@ pub(crate) fn bench_merge(
     uring: bool,
     compression_str: &str,
 ) -> Result<(), DevError> {
+    if req.dry_run {
+        if uring {
+            preflight::run_preflight(&preflight::uring_checks())?;
+        }
+        let paths = dry_run_paths(req)?;
+        let (pbf_path, _file_mb) =
+            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        let osc_path = match osc_seq {
+            Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &paths, req.project_root)?,
+            None => resolve_default_osc_path(req.dataset, &paths, req.project_root)?,
+        };
+        let _ = super::parse_compressions(compression_str, false)?;
+        output::run_msg(&format!("[dry-run] pbf: {}", pbf_path.display()));
+        output::run_msg(&format!("[dry-run] osc: {}", osc_path.display()));
+        output::run_msg("[dry-run] ok (bench merge)");
+        return Ok(());
+    }
+
     if uring {
         preflight::run_preflight(&preflight::uring_checks())?;
     }
@@ -117,6 +151,13 @@ pub(crate) fn bench_merge(
 }
 
 pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
+    if req.dry_run {
+        let paths = dry_run_paths(req)?;
+        let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        output::run_msg("[dry-run] ok (bench all)");
+        return Ok(());
+    }
+
     let ctx = HarnessContext::new(
         req.dev_config,
         req.project,
@@ -138,6 +179,12 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.runs(),
         req.dataset,
     )
+}
+
+/// Resolve host paths without building the binary, for dry-run validation.
+fn dry_run_paths(req: &MeasureRequest) -> Result<config::ResolvedPaths, DevError> {
+    let pi = bootstrap(req.build_root)?;
+    bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)
 }
 
 #[allow(clippy::too_many_lines)]

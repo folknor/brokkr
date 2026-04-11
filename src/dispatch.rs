@@ -126,6 +126,10 @@ pub fn run_pbfhogg_command_with_params(
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Pbfhogg, command.id())?;
 
+    if req.dry_run {
+        return run_pbfhogg_dry_run(req, command, osc_seq, extra_params);
+    }
+
     match req.mode {
         MeasureMode::Run => run_pbfhogg_run(req, command, osc_seq, extra_params),
         MeasureMode::Bench { .. } => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
@@ -133,6 +137,81 @@ pub fn run_pbfhogg_command_with_params(
             run_pbfhogg_hotpath(req, command, osc_seq, extra_params)
         }
     }
+}
+
+/// Dry-run mode: validate argv, config, and path resolution without building
+/// or running. Short-circuits after `command.build_args` succeeds.
+///
+/// Does: io-flag validation, project bootstrap, path resolution
+/// (pbf/osc/bbox/snapshot/merged-cache-key), arg-vector construction, and
+/// hotpath-arg-vector construction for commands that support it.
+/// Does NOT: cargo build, lock acquisition, ensure_merged_pbf apply-changes,
+/// preflight memory check, or process execution. Hash verification of the
+/// input PBF/OSC IS performed (cached in `.brokkr/hash_cache`), because it's
+/// part of "would this start up cleanly" and cache hits are fast.
+fn run_pbfhogg_dry_run(
+    req: &MeasureRequest,
+    command: &PbfhoggCommand,
+    osc_seq: Option<&str>,
+    extra_params: &HashMap<String, String>,
+) -> Result<(), DevError> {
+    // Validate I/O flag compatibility (e.g. --io-uring on a command that
+    // doesn't support it) and run io_uring preflight if requested.
+    let (_io_features, io_args, _io_suffix) = resolve_io_flags(command, extra_params)?;
+
+    // Resolve paths without building. bootstrap() reads cargo metadata for
+    // target_dir — cheap, doesn't trigger a compile.
+    let pi = crate::context::bootstrap(req.build_root)?;
+    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+
+    // Fake binary path for the CommandContext. `build_args` for wall-clock
+    // mode doesn't touch it; `build_hotpath_args` uses it only as a leading
+    // argv[0] string. Use the brokkr binary's own path so any accidental
+    // stat still succeeds.
+    let fake_binary = std::env::current_exe()
+        .unwrap_or_else(|_| req.project_root.join("brokkr.toml"));
+
+    let cmd_ctx =
+        build_pbfhogg_context(req, command, osc_seq, &fake_binary, &paths, extra_params)?;
+
+    // Construct the wall-clock arg vector (catches any build_args failures,
+    // e.g. missing bbox for extract, missing osc for merge).
+    let mut args = command.build_args(&cmd_ctx)?;
+    for flag in &io_args {
+        args.push((*flag).into());
+    }
+
+    // Also validate the hotpath arg construction path when supported, so
+    // `--dry-run --hotpath` is meaningful.
+    if command.supports_hotpath() {
+        let _ = command.build_hotpath_args(&cmd_ctx)?;
+    }
+
+    output::run_msg(&format!(
+        "[dry-run] {} args: {}",
+        command.id(),
+        args.join(" ")
+    ));
+    output::run_msg(&format!("[dry-run] pbf: {}", cmd_ctx.pbf_path.display()));
+    if let Some(ref p) = cmd_ctx.osc_path {
+        output::run_msg(&format!("[dry-run] osc: {}", p.display()));
+    }
+    if cmd_ctx.osc_paths.len() > 1 {
+        output::run_msg(&format!(
+            "[dry-run] osc range: {} files ({} .. {})",
+            cmd_ctx.osc_paths.len(),
+            cmd_ctx.osc_paths.first().map_or(String::new(), |p| p.display().to_string()),
+            cmd_ctx.osc_paths.last().map_or(String::new(), |p| p.display().to_string()),
+        ));
+    }
+    if let Some(ref p) = cmd_ctx.pbf_b_path {
+        output::run_msg(&format!("[dry-run] pbf_b: {}", p.display()));
+    }
+    if let Some(ref b) = cmd_ctx.bbox {
+        output::run_msg(&format!("[dry-run] bbox: {b}"));
+    }
+    output::run_msg("[dry-run] ok");
+    Ok(())
 }
 
 /// Default run mode: build, run once, print timing. Acquires lockfile, no DB storage.
@@ -456,51 +535,19 @@ fn build_pbfhogg_context(
     };
 
     // Resolve merged PBF if needed (diff/diff-osc commands).
-    //
-    // In any measured mode (bench/hotpath/alloc) we force a cache rebuild by
-    // default so total brokkr-invocation wall time is deterministic regardless
-    // of prior session state. `--keep-cache` opts back into reuse.
     let mut params = extra_params.clone();
-    let pbf_b_path = if command.input_kind() == InputKind::PbfAndMerged {
-        let osc = osc_path
-            .as_ref()
-            .ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
-        let osc_seq_str = single_osc_seq
-            .as_deref()
-            .ok_or_else(|| DevError::Config("merged PBF requires a single OSC seq".into()))?;
-        // Snapshot key for the cache key. Different snapshots produce different
-        // merged PBFs from the same OSC seq, so the cache must disambiguate.
-        let snapshot_key = match &snapshot_ref {
-            resolve::SnapshotRef::Base => "base",
-            resolve::SnapshotRef::Named(k) => k.as_str(),
-        };
-        let force_rebuild = !matches!(req.mode, MeasureMode::Run)
-            && !extra_params.contains_key("keep_cache");
-        let (merged, state) = ensure_merged_pbf(
-            binary,
-            &pbf_path,
-            osc,
-            snapshot_key,
-            osc_seq_str,
-            &paths.scratch_dir,
-            req.project_root,
-            force_rebuild,
-        )?;
-        // Stash cache state in params so the command's metadata builder can
-        // emit it as KvPairs on the result row.
-        match state {
-            MergedCacheState::Hit { age_secs } => {
-                params.insert("merged_cache_state".into(), "hit".into());
-                params.insert("merged_cache_age_s".into(), age_secs.to_string());
-            }
-            MergedCacheState::Miss => {
-                params.insert("merged_cache_state".into(), "miss".into());
-            }
-        }
-        Some(merged)
-    } else {
-        None
-    };
+    let pbf_b_path = resolve_merged_pbf(
+        req,
+        command,
+        binary,
+        &pbf_path,
+        osc_path.as_deref(),
+        single_osc_seq.as_deref(),
+        &snapshot_ref,
+        paths,
+        extra_params,
+        &mut params,
+    )?;
 
     // Resolve bbox if needed. Check extra_params for a CLI override first.
     let bbox = if command.needs_bbox() {
@@ -521,6 +568,79 @@ fn build_pbfhogg_context(
         bbox,
         params,
     })
+}
+
+/// Resolve the B-side (merged) PBF path for diff/diff-osc commands.
+///
+/// In any measured mode (bench/hotpath/alloc) we force a cache rebuild by
+/// default so total brokkr-invocation wall time is deterministic regardless
+/// of prior session state. `--keep-cache` opts back into reuse. In dry-run
+/// mode, synthesizes the would-be cache path without running apply-changes.
+#[allow(clippy::too_many_arguments)]
+fn resolve_merged_pbf(
+    req: &MeasureRequest,
+    command: &PbfhoggCommand,
+    binary: &Path,
+    pbf_path: &Path,
+    osc_path: Option<&Path>,
+    single_osc_seq: Option<&str>,
+    snapshot_ref: &resolve::SnapshotRef,
+    paths: &config::ResolvedPaths,
+    extra_params: &HashMap<String, String>,
+    params: &mut HashMap<String, String>,
+) -> Result<Option<std::path::PathBuf>, DevError> {
+    if command.input_kind() != InputKind::PbfAndMerged {
+        return Ok(None);
+    }
+    let osc = osc_path
+        .ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
+    let osc_seq_str = single_osc_seq
+        .ok_or_else(|| DevError::Config("merged PBF requires a single OSC seq".into()))?;
+    // Snapshot key for the cache key. Different snapshots produce different
+    // merged PBFs from the same OSC seq, so the cache must disambiguate.
+    let snapshot_key = match snapshot_ref {
+        resolve::SnapshotRef::Base => "base",
+        resolve::SnapshotRef::Named(k) => k.as_str(),
+    };
+
+    if req.dry_run {
+        // Synthesize the would-be merged path from the same key format
+        // `ensure_merged_pbf` uses, without running apply-changes. The
+        // existence of the cache file is irrelevant to dry-run — we just
+        // need a populated `pbf_b_path` so `build_args` can reference it.
+        let stem = pbf_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input");
+        let merged_name =
+            format!("{stem}-snap{snapshot_key}-osc{osc_seq_str}-bench-merged.osm.pbf");
+        return Ok(Some(paths.scratch_dir.join(merged_name)));
+    }
+
+    let force_rebuild =
+        !matches!(req.mode, MeasureMode::Run) && !extra_params.contains_key("keep_cache");
+    let (merged, state) = ensure_merged_pbf(
+        binary,
+        pbf_path,
+        osc,
+        snapshot_key,
+        osc_seq_str,
+        &paths.scratch_dir,
+        req.project_root,
+        force_rebuild,
+    )?;
+    // Stash cache state in params so the command's metadata builder can
+    // emit it as KvPairs on the result row.
+    match state {
+        MergedCacheState::Hit { age_secs } => {
+            params.insert("merged_cache_state".into(), "hit".into());
+            params.insert("merged_cache_age_s".into(), age_secs.to_string());
+        }
+        MergedCacheState::Miss => {
+            params.insert("merged_cache_state".into(), "miss".into());
+        }
+    }
+    Ok(Some(merged))
 }
 
 /// Build the `CommandContext` for `DiffSnapshots`. Resolves both PBF paths
@@ -718,6 +838,12 @@ pub fn run_elivagar_command(
     command: &ElivagarCommand,
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Elivagar, command.id())?;
+
+    if req.dry_run {
+        return Err(DevError::Config(
+            "--dry-run is not yet supported for elivagar commands".into(),
+        ));
+    }
 
     // External tools (Planetiler, Tilemaker) keep their old dispatch path.
     if command.is_external() {
@@ -1255,6 +1381,12 @@ pub fn run_nidhogg_command(
     use crate::nidhogg::commands::NidhoggCommand;
 
     project::require(req.project, Project::Nidhogg, command.id())?;
+
+    if req.dry_run {
+        return Err(DevError::Config(
+            "--dry-run is not yet supported for nidhogg commands".into(),
+        ));
+    }
 
     match req.mode {
         MeasureMode::Run => match command {

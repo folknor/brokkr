@@ -71,6 +71,7 @@ where
             mode: mm,
             no_mem_check: mode.no_mem_check,
             wait: mode.wait,
+            dry_run: mode.dry_run,
         };
         f(&req)
     })
@@ -496,6 +497,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &dataset,
             &variant,
             |req| {
+                if req.dry_run {
+                    return Err(DevError::Config(
+                        "--dry-run is not yet supported for generic-hotpath".into(),
+                    ));
+                }
                 if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
                     return Err(DevError::Config(
                         "generic-hotpath only supports --hotpath or --alloc modes".into(),
@@ -519,6 +525,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &dataset,
             &variant,
             |req| {
+                if req.dry_run {
+                    return Err(DevError::Config(
+                        "--dry-run is not yet supported for suites".into(),
+                    ));
+                }
                 if !matches!(
                     req.mode,
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
@@ -830,6 +841,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 mode: mm,
                 no_mem_check,
                 wait,
+                // Sluggrs hotpath uses Command::Hotpath, not ModeArgs — no
+                // dry-run surface to plumb from.
+                dry_run: false,
             };
             sluggrs::hotpath::cmd(&req, &target)
         }

@@ -1160,6 +1160,13 @@ pub(crate) struct ModeArgs {
     /// Wait for the lock instead of failing immediately
     #[arg(long)]
     pub(crate) wait: bool,
+
+    /// Validate argv, config, and path resolution without building or running.
+    /// Short-circuits after path/arg-vector construction. Skips cargo build,
+    /// lock acquisition, and process execution. Useful for sanity-checking a
+    /// script of queued benches before leaving it overnight.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------

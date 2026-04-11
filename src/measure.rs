@@ -72,6 +72,9 @@ pub struct MeasureRequest<'a> {
     pub no_mem_check: bool,
     /// Wait for the lock instead of failing immediately.
     pub wait: bool,
+    /// Dry-run: resolve paths and build the arg vector without building the
+    /// binary or running it. See `ModeArgs::dry_run`.
+    pub dry_run: bool,
 }
 
 impl MeasureRequest<'_> {
