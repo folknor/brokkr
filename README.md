@@ -76,6 +76,8 @@ Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`
 
 `merge-changes` accepts `--osc-seq <N>` for a single OSC file (back-compat) or `--osc-range LO..HI` to merge a contiguous range of configured OSC entries in one invocation. The range form is recorded in the results DB as a `+range-LO-HI` variant suffix so single-seq runs and range runs stay distinguishable.
 
+`diff` and `diff-osc` derive their second input by running `apply-changes` on the dataset's PBF + OSC and caching the result at `<scratch>/<pbf-stem>-osc<seq>-bench-merged.osm.pbf`. The cache key includes the OSC seq so different `--osc-seq` invocations don't silently reuse each other's merged files. In any measured mode (`--bench`/`--hotpath`/`--alloc`) the cache is rebuilt before the run so total invocation wall time is reproducible; pass `--keep-cache` to opt back into reuse. Run mode (no measurement flag) always reuses the cache for dev-loop speed. Cache hit/miss + age land in the result row's metadata as `meta.merged_cache` and `meta.merged_cache_age_s`.
+
 `suite pbfhogg` runs the full benchmark suite.
 
 **Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert.

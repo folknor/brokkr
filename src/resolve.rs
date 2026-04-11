@@ -161,6 +161,44 @@ pub(crate) fn resolve_osc_path(
     )
 }
 
+/// Resolve a single OSC path along with the seq key it came from.
+///
+/// If `osc_seq` is `Some(seq)`, returns the path for that seq plus the seq
+/// itself. If `None`, auto-selects the only configured OSC entry (errors if
+/// zero or multiple), returning both its path and its key. The seq key is
+/// useful when constructing cache keys that need to disambiguate by OSC
+/// (e.g. the diff/diff-osc merged-PBF cache).
+pub(crate) fn resolve_single_osc(
+    dataset: &str,
+    osc_seq: Option<&str>,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<(PathBuf, String), DevError> {
+    if let Some(seq) = osc_seq {
+        let path = resolve_osc_path(dataset, seq, paths, project_root)?;
+        return Ok((path, seq.to_string()));
+    }
+
+    // Auto-select: requires exactly one configured OSC.
+    let ds = get_dataset(dataset, paths)?;
+    if ds.osc.is_empty() {
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has no osc configured"
+        )));
+    }
+    if ds.osc.len() > 1 {
+        let mut keys: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
+        keys.sort();
+        return Err(DevError::Config(format!(
+            "dataset '{dataset}' has multiple osc entries — use --osc-seq to select (available: {})",
+            keys.join(", ")
+        )));
+    }
+    let key = ds.osc.keys().next().expect("len == 1").clone();
+    let path = resolve_osc_path(dataset, &key, paths, project_root)?;
+    Ok((path, key))
+}
+
 /// Resolve a range of OSC paths from `--osc-range LO..HI`.
 ///
 /// Every integer seq in `[LO, HI]` must be present in the dataset's osc map;
@@ -553,6 +591,81 @@ mod tests {
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
         assert_eq!(from_dataset, "1,2,3,4");
+    }
+
+    #[test]
+    fn resolve_single_osc_returns_explicit_seq() {
+        let dir = unique_test_dir("single-osc-explicit");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("planet-4914.osc.gz"), "x").expect("write");
+
+        let mut ds = empty_dataset();
+        ds.osc.insert(
+            String::from("4914"),
+            OscEntry {
+                file: String::from("planet-4914.osc.gz"),
+                xxhash: None,
+            },
+        );
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("planet"), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let (path, seq) =
+            resolve_single_osc("planet", Some("4914"), &paths, Path::new(".")).expect("resolve");
+        assert!(path.ends_with("planet-4914.osc.gz"));
+        assert_eq!(seq, "4914");
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_single_osc_auto_selects_when_one_configured() {
+        let dir = unique_test_dir("single-osc-auto");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("denmark-4705.osc.gz"), "x").expect("write");
+
+        let mut ds = empty_dataset();
+        ds.osc.insert(
+            String::from("4705"),
+            OscEntry {
+                file: String::from("denmark-4705.osc.gz"),
+                xxhash: None,
+            },
+        );
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("denmark"), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let (path, seq) =
+            resolve_single_osc("denmark", None, &paths, Path::new(".")).expect("resolve");
+        assert!(path.ends_with("denmark-4705.osc.gz"));
+        assert_eq!(seq, "4705");
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_single_osc_errors_when_multiple_and_no_seq() {
+        let mut ds = empty_dataset();
+        for n in [4913u64, 4914, 4915] {
+            ds.osc.insert(
+                n.to_string(),
+                OscEntry {
+                    file: format!("planet-{n}.osc.gz"),
+                    xxhash: None,
+                },
+            );
+        }
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("planet"), ds);
+        let paths = mk_paths(Path::new("/irrelevant"), datasets);
+
+        let err = resolve_single_osc("planet", None, &paths, Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("multiple osc entries"), "got: {err}");
+        assert!(err.contains("4913, 4914, 4915"), "got: {err}");
     }
 
     #[test]

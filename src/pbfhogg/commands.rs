@@ -358,6 +358,19 @@ impl PbfhoggCommand {
                 // when used through the extract benchmark path.
                 vec![]
             }
+            Self::Diff | Self::DiffOsc => {
+                // Record merged-PBF cache state so `brokkr results <uuid>`
+                // can distinguish runs that paid the apply-changes setup cost
+                // from runs that reused a cached file.
+                let mut meta = Vec::new();
+                if let Some(state) = ctx.param("merged_cache_state") {
+                    meta.push(KvPair::text("meta.merged_cache", state));
+                }
+                if let Some(age) = ctx.param("merged_cache_age_s") {
+                    meta.push(KvPair::text("meta.merged_cache_age_s", age));
+                }
+                meta
+            }
             _ => vec![],
         }
     }

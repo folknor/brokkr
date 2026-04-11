@@ -308,6 +308,11 @@ Examples:
         /// OSC sequence number from brokkr.toml
         #[arg(long)]
         osc_seq: Option<String>,
+        /// Reuse the cached merged PBF in measured modes (default: rebuild
+        /// before bench/hotpath/alloc so total invocation wall time is
+        /// reproducible). No-op in run mode (cache is always reused there).
+        #[arg(long)]
+        keep_cache: bool,
     },
     /// [pbfhogg] Diff two PBFs (OSC output)
     #[command(name = "diff-osc", display_order = 2)]
@@ -319,6 +324,11 @@ Examples:
         /// OSC sequence number from brokkr.toml
         #[arg(long)]
         osc_seq: Option<String>,
+        /// Reuse the cached merged PBF in measured modes (default: rebuild
+        /// before bench/hotpath/alloc so total invocation wall time is
+        /// reproducible). No-op in run mode (cache is always reused there).
+        #[arg(long)]
+        keep_cache: bool,
     },
     /// [pbfhogg] Build geocode index
     #[command(name = "build-geocode-index", display_order = 2)]
@@ -1430,16 +1440,36 @@ impl Command {
                 osc_seq.as_deref(),
                 empty,
             )),
-            Self::Diff { mode, pbf, osc_seq } => {
-                Some((mode, pbf, PbfhoggCommand::Diff, osc_seq.as_deref(), empty))
-            }
-            Self::DiffOsc { mode, pbf, osc_seq } => Some((
+            Self::Diff {
                 mode,
                 pbf,
-                PbfhoggCommand::DiffOsc,
-                osc_seq.as_deref(),
-                empty,
-            )),
+                osc_seq,
+                keep_cache,
+            } => {
+                let mut params = HashMap::new();
+                if *keep_cache {
+                    params.insert("keep_cache".into(), "true".into());
+                }
+                Some((mode, pbf, PbfhoggCommand::Diff, osc_seq.as_deref(), params))
+            }
+            Self::DiffOsc {
+                mode,
+                pbf,
+                osc_seq,
+                keep_cache,
+            } => {
+                let mut params = HashMap::new();
+                if *keep_cache {
+                    params.insert("keep_cache".into(), "true".into());
+                }
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::DiffOsc,
+                    osc_seq.as_deref(),
+                    params,
+                ))
+            }
 
             // Command with extra params
             Self::AddLocationsToWays {
