@@ -687,8 +687,6 @@ pub fn run(
             &[
                 "cat",
                 &cat_input_str,
-                "--type",
-                "node,way,relation",
                 "-o",
                 &indexed_tmp_str,
             ],
@@ -873,8 +871,6 @@ fn run_as_snapshot(
             &[
                 "cat",
                 &cat_input_str,
-                "--type",
-                "node,way,relation",
                 "-o",
                 &indexed_tmp_str,
             ],
