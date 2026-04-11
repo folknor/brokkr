@@ -45,6 +45,16 @@ fn extra_variant_suffix(
         suffix.push_str(&format!("+range-{lo}-{hi}"));
     }
 
+    // Renumber mode suffix: `--mode external` → `+external`. `inmem` (and the
+    // default, unset) stays unsuffixed so historical baselines stored as plain
+    // `renumber` remain comparable via `brokkr results --command renumber`.
+    if matches!(command, PbfhoggCommand::Renumber)
+        && let Some(m) = extra_params.get("renumber_mode")
+        && m == "external"
+    {
+        suffix.push_str("+external");
+    }
+
     // Snapshot suffix: appended to OSC-consuming commands when --snapshot is
     // set to a non-Base value. Lets `brokkr results --variant snap-20260411`
     // surface every command run against that snapshot.
@@ -401,7 +411,15 @@ fn run_pbfhogg_hotpath(
     } else {
         oom::MemoryRisk::Normal
     };
-    oom::check_memory(file_mb, &risk, req.no_mem_check)?;
+    // `renumber --mode external` has a flat ~3-4 GB RAM footprint independent
+    // of input size (radix-partitioned tuple files live on disk), so the
+    // input×multiplier heuristic over-rejects it on planet. Skip the check.
+    let skip_mem_check = req.no_mem_check
+        || (matches!(command, PbfhoggCommand::Renumber)
+            && extra_params
+                .get("renumber_mode")
+                .is_some_and(|m| m == "external"));
+    oom::check_memory(file_mb, &risk, skip_mem_check)?;
 
     let mut hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
     for flag in &io_args {

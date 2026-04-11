@@ -220,6 +220,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Implementation: `inmem` (in-memory FxHashMap, default) or
+        /// `external` (radix-partitioned tuple files on disk).
+        /// Only `external` scales to planet; `inmem` OOMs above Europe.
+        #[arg(long = "mode", value_name = "MODE", value_parser = validate_renumber_mode)]
+        renumber_mode: Option<String>,
     },
     /// [pbfhogg] Merge OSC changes
     #[command(name = "merge-changes", display_order = 2)]
@@ -1397,6 +1402,16 @@ fn validate_meta_filter(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
+/// Validate `--mode` for `renumber`: must be `inmem` or `external`.
+fn validate_renumber_mode(s: &str) -> Result<String, String> {
+    match s {
+        "inmem" | "external" => Ok(s.to_owned()),
+        _ => Err(format!(
+            "invalid renumber mode '{s}', expected 'inmem' or 'external'"
+        )),
+    }
+}
+
 /// Validate `--osc-range` format: `LO..HI` where both are non-negative integers and LO <= HI.
 fn validate_osc_range(s: &str) -> Result<String, String> {
     let (lo_s, hi_s) = s
@@ -1510,8 +1525,16 @@ impl Command {
             Self::GetidInvert { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::GetidInvert, None, empty))
             }
-            Self::Renumber { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::Renumber, None, empty))
+            Self::Renumber {
+                mode,
+                pbf,
+                renumber_mode,
+            } => {
+                let mut params = HashMap::new();
+                if let Some(m) = renumber_mode {
+                    params.insert("renumber_mode".into(), m.clone());
+                }
+                Some((mode, pbf, PbfhoggCommand::Renumber, None, params))
             }
             Self::ExtractSimple { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::ExtractSimple, None, empty))

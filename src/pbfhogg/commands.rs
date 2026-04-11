@@ -672,12 +672,17 @@ impl PbfhoggCommand {
             }
             Self::Renumber => {
                 let output = scratch_output_path(ctx, self);
-                Ok(vec![
+                let mut args = vec![
                     "renumber".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
                     path_to_string(&output)?,
-                ])
+                ];
+                if let Some(m) = ctx.param("renumber_mode") {
+                    args.push("--mode".into());
+                    args.push(m.into());
+                }
+                Ok(args)
             }
             Self::MergeChanges => {
                 let output = scratch_output_path(ctx, self);
