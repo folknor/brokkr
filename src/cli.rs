@@ -116,9 +116,6 @@ Examples:
         /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
         #[arg(long)]
         direct_io: bool,
-        /// Use io_uring for I/O (requires linux-io-uring feature in pbfhogg)
-        #[arg(long)]
-        io_uring: bool,
     },
     /// [pbfhogg] Cat way elements
     #[command(name = "cat-way", display_order = 2)]
@@ -881,7 +878,11 @@ Examples:
         /// header is not newer than the existing pbf.raw's mtime. Use when
         /// the heuristic gets it wrong (e.g. file mtime was touched by an
         /// rsync, or you want to re-download for some other reason).
-        #[arg(long)]
+        ///
+        /// Only meaningful with `--refresh`. Clap rejects it on plain
+        /// `download` and `download --as-snapshot` to avoid silently
+        /// ignoring a flag the user explicitly typed.
+        #[arg(long, requires = "refresh")]
         force: bool,
     },
     /// [elivagar] Compare feature counts between two PMTiles archives

@@ -201,14 +201,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             dataset,
             variant,
             direct_io,
-            io_uring,
         } => {
             let mut params = std::collections::HashMap::new();
             if direct_io {
                 params.insert("direct_io".into(), "true".into());
-            }
-            if io_uring {
-                params.insert("io_uring".into(), "true".into());
             }
             run_measured(
                 &mode,
