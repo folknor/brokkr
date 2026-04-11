@@ -63,6 +63,19 @@ fn resolve_entry_path<E: FileEntry>(
             }
         ))
     })?;
+    finalize_entry_path(entry, data_dir, kind, origin, project_root)
+}
+
+/// Tail of `resolve_entry_path`: build the on-disk path, check existence,
+/// verify hash. Extracted so callers that want a custom "missing key" error
+/// (e.g. the snapshot pbf path) can reuse the file-checking logic.
+fn finalize_entry_path<E: FileEntry>(
+    entry: &E,
+    data_dir: &Path,
+    kind: &str,
+    origin: Option<&str>,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
     let path = data_dir.join(entry.file());
 
     if !path.exists() {
@@ -211,12 +224,33 @@ pub(crate) fn resolve_snapshot_pbf_path(
                     available.join(", ")
                 ))
             })?;
-            resolve_entry_path(
-                &snap.pbf,
-                variant,
-                dataset,
-                &format!("snapshot.{key}.pbf variant"),
+            // Custom missing-variant error: name the available variants and
+            // suggest both a one-shot workaround (--variant <X>) and the
+            // proper fix (re-download to auto-generate). This is the
+            // first-time-user papercut from TODO #5 — closing it inline
+            // instead of adding the per-side --variant-from / --variant-to
+            // flags, since no concrete asymmetric use case has surfaced yet.
+            let entry = snap.pbf.get(variant).ok_or_else(|| {
+                let mut available: Vec<&str> = snap.pbf.keys().map(String::as_str).collect();
+                available.sort();
+                let available_str = if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                };
+                let suggestion_variant = available.first().copied().unwrap_or("raw");
+                DevError::Config(format!(
+                    "dataset '{dataset}' has no snapshot.{key}.pbf variant '{variant}'\n  \
+                     └─ available variants on this snapshot: {available_str}\n  \
+                     └─ pass `--variant {suggestion_variant}` to resolve both sides with the available variant,\n     \
+                     or register the {variant} variant via `brokkr download {dataset} --as-snapshot {key}`\n     \
+                     (which auto-generates pbf.indexed from pbf.raw)."
+                ))
+            })?;
+            finalize_entry_path(
+                entry,
                 &paths.data_dir,
+                &format!("snapshot.{key}.pbf variant"),
                 ds.origin.as_deref(),
                 project_root,
             )
@@ -832,6 +866,67 @@ mod tests {
         )
         .expect("resolve");
         assert!(resolved.ends_with("planet-20260411.osm.pbf"));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_snapshot_pbf_path_missing_variant_emits_friendly_error() {
+        use crate::config::Snapshot;
+
+        let dir = unique_test_dir("snap-missing-variant");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("planet-20260411.osm.pbf"), "x").expect("write");
+
+        // Snapshot has only `raw` — user asks for `indexed`. The error should
+        // name `raw` as available and suggest both --variant raw and the
+        // re-download path.
+        let mut snap = Snapshot {
+            download_date: Some("2026-04-11".into()),
+            seq: None,
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+        };
+        snap.pbf.insert(
+            "raw".into(),
+            PbfEntry {
+                file: "planet-20260411.osm.pbf".into(),
+                xxhash: None,
+                seq: None,
+            },
+        );
+        let mut ds = empty_dataset();
+        ds.snapshot.insert("20260411".into(), snap);
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let err = resolve_snapshot_pbf_path(
+            "planet",
+            &SnapshotRef::Named("20260411".into()),
+            "indexed",
+            &paths,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+
+        // Names the missing variant and the available one.
+        assert!(
+            err.contains("snapshot.20260411.pbf variant 'indexed'"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("available variants on this snapshot: raw"),
+            "got: {err}"
+        );
+        // Names the workaround flag with the actual available variant.
+        assert!(err.contains("--variant raw"), "got: {err}");
+        // Names the re-download path as the proper fix.
+        assert!(
+            err.contains("brokkr download planet --as-snapshot 20260411"),
+            "got: {err}"
+        );
 
         drop(std::fs::remove_dir_all(&dir));
     }
