@@ -573,13 +573,14 @@ impl PbfhoggCommand {
             }
             Self::MergeChanges => {
                 let output = scratch_output_path(ctx, self);
-                let osc = ctx.osc_str()?;
-                Ok(vec![
-                    "merge-changes".into(),
-                    osc.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
+                let oscs = ctx.osc_strs()?;
+                let mut args = vec!["merge-changes".into()];
+                for o in oscs {
+                    args.push(o.into());
+                }
+                args.push("-o".into());
+                args.push(path_to_string(&output)?);
+                Ok(args)
             }
             Self::ApplyChanges => {
                 let output = scratch_output_path(ctx, self);
@@ -964,6 +965,7 @@ mod tests {
             binary: PathBuf::from("/usr/bin/pbfhogg"),
             pbf_path: PathBuf::from("/data/denmark.osm.pbf"),
             osc_path: Some(PathBuf::from("/data/denmark-4705.osc.gz")),
+            osc_paths: vec![PathBuf::from("/data/denmark-4705.osc.gz")],
             merged_pbf_path: Some(PathBuf::from("/data/scratch/merged.osm.pbf")),
             scratch_dir: PathBuf::from("/data/scratch"),
             dataset: "denmark".into(),

@@ -28,6 +28,22 @@ use crate::resolve::{
 // pbfhogg dispatch
 // ---------------------------------------------------------------------------
 
+/// Compute a per-command result variant suffix from extra_params (e.g.
+/// `+range-4914-4920` for `merge-changes --osc-range`). Returns an empty
+/// string for commands without such a suffix.
+fn extra_variant_suffix(
+    command: &PbfhoggCommand,
+    extra_params: &HashMap<String, String>,
+) -> String {
+    if matches!(command, PbfhoggCommand::MergeChanges)
+        && let Some(range) = extra_params.get("osc_range")
+        && let Some((lo, hi)) = range.split_once("..")
+    {
+        return format!("+range-{lo}-{hi}");
+    }
+    String::new()
+}
+
 /// Extract I/O mode flags from extra_params, run preflight checks, and return:
 /// - extra cargo features to add to the build
 /// - extra CLI args to append to the binary invocation
@@ -183,10 +199,15 @@ fn run_pbfhogg_wallclock(
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let basename = cmd_ctx.pbf_basename();
 
-    // Append I/O mode suffix to variant (e.g. "add-locations-to-ways+direct-io").
+    // Append I/O mode suffix and any extra suffix (e.g. merge-changes range)
+    // to variant (e.g. "add-locations-to-ways+direct-io" or
+    // "merge-changes+range-4914-4920").
+    let extra_suffix = extra_variant_suffix(command, extra_params);
     let variant = match command.result_variant() {
-        Some(v) => Some(format!("{v}{io_suffix}")),
-        None if !io_suffix.is_empty() => Some(format!("{}{io_suffix}", command.id())),
+        Some(v) => Some(format!("{v}{io_suffix}{extra_suffix}")),
+        None if !io_suffix.is_empty() || !extra_suffix.is_empty() => {
+            Some(format!("{}{io_suffix}{extra_suffix}", command.id()))
+        }
         None => None,
     };
 
@@ -290,7 +311,8 @@ fn run_pbfhogg_hotpath(
     }
 
     let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("{}{variant_suffix}{io_suffix}", command.id());
+    let extra_suffix = extra_variant_suffix(command, extra_params);
+    let variant = format!("{}{variant_suffix}{io_suffix}{extra_suffix}", command.id());
 
     let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
@@ -347,15 +369,25 @@ fn build_pbfhogg_context(
 ) -> Result<CommandContext, DevError> {
     let pbf_path = resolve_pbf_path(req.dataset, req.variant, paths, req.project_root)?;
 
-    // Resolve OSC path if needed.
-    let osc_path = if command.needs_osc() {
-        let osc = match osc_seq {
-            Some(seq) => resolve::resolve_osc_path(req.dataset, seq, paths, req.project_root)?,
-            None => resolve_default_osc_path(req.dataset, paths, req.project_root)?,
-        };
-        Some(osc)
+    // Resolve OSC path(s) if needed.
+    //
+    // If `osc_range` is set in extra_params, expand the LO..HI range into an
+    // ordered list of paths. Otherwise fall back to single-seq behavior.
+    let (osc_path, osc_paths) = if command.needs_osc() {
+        if let Some(range) = extra_params.get("osc_range") {
+            let paths_vec =
+                resolve::resolve_osc_range(req.dataset, range, paths, req.project_root)?;
+            // osc_path holds the first for any legacy code that still reads it.
+            (paths_vec.first().cloned(), paths_vec)
+        } else {
+            let single = match osc_seq {
+                Some(seq) => resolve::resolve_osc_path(req.dataset, seq, paths, req.project_root)?,
+                None => resolve_default_osc_path(req.dataset, paths, req.project_root)?,
+            };
+            (Some(single.clone()), vec![single])
+        }
     } else {
-        None
+        (None, Vec::new())
     };
 
     // Resolve merged PBF if needed (diff/diff-osc commands).
@@ -386,6 +418,7 @@ fn build_pbfhogg_context(
         binary: binary.to_path_buf(),
         pbf_path,
         osc_path,
+        osc_paths,
         merged_pbf_path,
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),

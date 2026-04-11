@@ -70,9 +70,11 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 
 ### pbfhogg
 
-Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect-tags`, `check-refs`, `sort`, `cat-way`, `add-locations-to-ways`, `build-geocode-index`, `apply-changes`, `extract`, `diff`, etc.
+Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect-tags`, `check-refs`, `sort`, `cat`, `cat-way`, `add-locations-to-ways`, `build-geocode-index`, `apply-changes`, `merge-changes`, `extract`, `diff`, etc. The base `cat` subcommand benchmarks the indexdata-generation passthrough path (no `--type` filter, no re-encoding) and defaults to `--variant raw` since that's the natural input for the bootstrap.
 
 Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`, `--modes`, `--compression` flags).
+
+`merge-changes` accepts `--osc-seq <N>` for a single OSC file (back-compat) or `--osc-range LO..HI` to merge a contiguous range of configured OSC entries in one invocation. The range form is recorded in the results DB as a `+range-LO-HI` variant suffix so single-seq runs and range runs stay distinguishable.
 
 `suite pbfhogg` runs the full benchmark suite.
 

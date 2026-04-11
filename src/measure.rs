@@ -121,7 +121,15 @@ pub struct CommandContext {
     /// Resolved PBF file path.
     pub pbf_path: PathBuf,
     /// Resolved OSC file path (when the command needs one).
+    ///
+    /// For commands that accept multiple OSCs (e.g. `merge-changes --osc-range`),
+    /// this holds the first entry for back-compat; use `osc_paths` for the full list.
     pub osc_path: Option<PathBuf>,
+    /// Resolved OSC file paths in ascending seq order.
+    ///
+    /// Single-OSC commands populate this with a one-element vec; multi-OSC commands
+    /// (merge-changes with a range) populate it with the full expanded range.
+    pub osc_paths: Vec<PathBuf>,
     /// Resolved merged PBF path (for diff/diff-osc commands).
     pub merged_pbf_path: Option<PathBuf>,
     /// Scratch directory for output files.
@@ -149,6 +157,20 @@ impl CommandContext {
             .ok_or_else(|| DevError::Config("OSC path is required but not set".into()))?
             .to_str()
             .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))
+    }
+
+    /// Get all OSC paths as UTF-8 strings, or error if none set.
+    pub fn osc_strs(&self) -> Result<Vec<&str>, DevError> {
+        if self.osc_paths.is_empty() {
+            return Err(DevError::Config("OSC paths are required but not set".into()));
+        }
+        self.osc_paths
+            .iter()
+            .map(|p| {
+                p.to_str()
+                    .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))
+            })
+            .collect()
     }
 
     /// Get the merged PBF path as a UTF-8 string, or error if not set.

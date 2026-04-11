@@ -227,8 +227,11 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
         /// OSC sequence number from brokkr.toml
-        #[arg(long)]
+        #[arg(long, conflicts_with = "osc_range")]
         osc_seq: Option<String>,
+        /// OSC sequence range LO..HI (inclusive) to merge in a single invocation
+        #[arg(long, value_parser = validate_osc_range)]
+        osc_range: Option<String>,
     },
     /// [pbfhogg] Apply OSC changes to PBF
     #[command(name = "apply-changes", display_order = 2)]
@@ -1247,6 +1250,23 @@ pub(crate) enum VerifyCommand {
 }
 
 
+/// Validate `--osc-range` format: `LO..HI` where both are non-negative integers and LO <= HI.
+fn validate_osc_range(s: &str) -> Result<String, String> {
+    let (lo_s, hi_s) = s
+        .split_once("..")
+        .ok_or_else(|| format!("expected LO..HI, got '{s}'"))?;
+    let lo: u64 = lo_s
+        .parse()
+        .map_err(|e| format!("invalid LO '{lo_s}': {e}"))?;
+    let hi: u64 = hi_s
+        .parse()
+        .map_err(|e| format!("invalid HI '{hi_s}': {e}"))?;
+    if lo > hi {
+        return Err(format!("LO ({lo}) must be <= HI ({hi})"));
+    }
+    Ok(s.to_owned())
+}
+
 /// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.
 fn validate_since(s: &str) -> Result<String, String> {
     let date_ok = s.len() == 10
@@ -1385,13 +1405,24 @@ impl Command {
                 osc_seq.as_deref(),
                 empty,
             )),
-            Self::MergeChanges { mode, pbf, osc_seq } => Some((
+            Self::MergeChanges {
                 mode,
                 pbf,
-                PbfhoggCommand::MergeChanges,
-                osc_seq.as_deref(),
-                empty,
-            )),
+                osc_seq,
+                osc_range,
+            } => {
+                let mut params = HashMap::new();
+                if let Some(r) = osc_range {
+                    params.insert("osc_range".into(), r.clone());
+                }
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::MergeChanges,
+                    osc_seq.as_deref(),
+                    params,
+                ))
+            }
             Self::ApplyChanges { mode, pbf, osc_seq } => Some((
                 mode,
                 pbf,

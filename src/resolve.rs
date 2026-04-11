@@ -161,6 +161,56 @@ pub(crate) fn resolve_osc_path(
     )
 }
 
+/// Resolve a range of OSC paths from `--osc-range LO..HI`.
+///
+/// Every integer seq in `[LO, HI]` must be present in the dataset's osc map;
+/// a missing seq fails fast with `missing osc.X`. Returns paths in ascending
+/// seq order. The range string must be pre-validated in `LO..HI` form.
+pub(crate) fn resolve_osc_range(
+    dataset: &str,
+    range: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<Vec<PathBuf>, DevError> {
+    let (lo_s, hi_s) = range
+        .split_once("..")
+        .ok_or_else(|| DevError::Config(format!("invalid osc range '{range}': expected LO..HI")))?;
+    let lo: u64 = lo_s
+        .parse()
+        .map_err(|e| DevError::Config(format!("invalid osc range LO '{lo_s}': {e}")))?;
+    let hi: u64 = hi_s
+        .parse()
+        .map_err(|e| DevError::Config(format!("invalid osc range HI '{hi_s}': {e}")))?;
+    if lo > hi {
+        return Err(DevError::Config(format!(
+            "osc range LO ({lo}) must be <= HI ({hi})"
+        )));
+    }
+
+    let ds = get_dataset(dataset, paths)?;
+
+    let mut resolved = Vec::with_capacity((hi - lo + 1) as usize);
+    for seq in lo..=hi {
+        let key = seq.to_string();
+        if !ds.osc.contains_key(&key) {
+            return Err(DevError::Config(format!(
+                "dataset '{dataset}' missing osc.{seq} (required by --osc-range {range})"
+            )));
+        }
+        let path = resolve_entry_path(
+            &ds.osc,
+            &key,
+            dataset,
+            "osc seq",
+            &paths.data_dir,
+            ds.origin.as_deref(),
+            project_root,
+        )?;
+        resolved.push(path);
+    }
+    Ok(resolved)
+}
+
 /// Resolve the default OSC path when no --osc-seq is specified.
 ///
 /// If exactly one OSC is configured, returns it. If multiple exist, errors
@@ -503,6 +553,67 @@ mod tests {
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
         assert_eq!(from_dataset, "1,2,3,4");
+    }
+
+    #[test]
+    fn resolve_osc_range_returns_paths_in_seq_order() {
+        let dir = unique_test_dir("osc-range-ok");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for n in 4914..=4916 {
+            std::fs::write(dir.join(format!("planet-{n}.osc.gz")), "x").expect("write");
+        }
+
+        let mut ds = empty_dataset();
+        for n in 4914..=4916u64 {
+            ds.osc.insert(
+                n.to_string(),
+                OscEntry {
+                    file: format!("planet-{n}.osc.gz"),
+                    xxhash: None,
+                },
+            );
+        }
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("planet"), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let resolved =
+            resolve_osc_range("planet", "4914..4916", &paths, Path::new(".")).expect("range");
+        assert_eq!(resolved.len(), 3);
+        assert!(resolved[0].ends_with("planet-4914.osc.gz"));
+        assert!(resolved[1].ends_with("planet-4915.osc.gz"));
+        assert!(resolved[2].ends_with("planet-4916.osc.gz"));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_osc_range_fails_fast_on_missing_seq() {
+        let dir = unique_test_dir("osc-range-missing");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("planet-4914.osc.gz"), "x").expect("write");
+        std::fs::write(dir.join("planet-4916.osc.gz"), "x").expect("write");
+
+        let mut ds = empty_dataset();
+        for n in [4914u64, 4916] {
+            ds.osc.insert(
+                n.to_string(),
+                OscEntry {
+                    file: format!("planet-{n}.osc.gz"),
+                    xxhash: None,
+                },
+            );
+        }
+        let mut datasets = HashMap::new();
+        datasets.insert(String::from("planet"), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let err = resolve_osc_range("planet", "4914..4916", &paths, Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing osc.4915"), "got: {err}");
+
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]
