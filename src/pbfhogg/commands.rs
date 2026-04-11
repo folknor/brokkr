@@ -387,6 +387,16 @@ impl PbfhoggCommand {
     pub fn metadata(&self, ctx: &CommandContext) -> Vec<crate::db::KvPair> {
         use crate::db::KvPair;
 
+        // Snapshot metadata: emit `meta.snapshot = <key>` for any OSC-consuming
+        // command run with `--snapshot <key>` (when key != "base"). Lets
+        // `brokkr results --meta snapshot=<key>` find every command that
+        // operated on a particular snapshot.
+        let snapshot_meta: Vec<KvPair> = ctx
+            .param("snapshot")
+            .filter(|s| *s != "base")
+            .map(|s| vec![KvPair::text("meta.snapshot", s)])
+            .unwrap_or_default();
+
         match self {
             Self::AddLocationsToWays => {
                 if let Some(it) = ctx.param("index_type") {
@@ -417,8 +427,9 @@ impl PbfhoggCommand {
             Self::Diff | Self::DiffOsc => {
                 // Record merged-PBF cache state so `brokkr results <uuid>`
                 // can distinguish runs that paid the apply-changes setup cost
-                // from runs that reused a cached file.
-                let mut meta = Vec::new();
+                // from runs that reused a cached file. Also emit snapshot
+                // metadata if --snapshot was passed.
+                let mut meta = snapshot_meta;
                 if let Some(state) = ctx.param("merged_cache_state") {
                     meta.push(KvPair::text("meta.merged_cache", state));
                 }
@@ -427,6 +438,9 @@ impl PbfhoggCommand {
                 }
                 meta
             }
+            Self::TagsFilterOsc
+            | Self::MergeChanges
+            | Self::ApplyChanges => snapshot_meta,
             Self::DiffSnapshots { format } => {
                 // Format and snapshot identities live in metadata so the
                 // variant column stays format-agnostic. Query osc-only runs

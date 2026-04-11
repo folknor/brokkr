@@ -656,6 +656,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             region,
             osc_seq,
             as_snapshot,
+            refresh,
+            force,
         } => {
             let _lock = acquire_cmd_lock(project, &project_root, "download")?;
             pbfhogg::cmd::download(
@@ -665,6 +667,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &region,
                 osc_seq,
                 as_snapshot.as_deref(),
+                refresh,
+                force,
             )
         }
         Command::CompareTiles {

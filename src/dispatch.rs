@@ -21,7 +21,7 @@ use crate::output;
 use crate::pbfhogg::commands::{InputKind, OutputKind, PbfhoggCommand};
 use crate::project::{self, Project};
 use crate::resolve::{
-    self, resolve_bbox, resolve_pbf_path, resolve_pbf_with_size,
+    self, resolve_bbox, resolve_pbf_with_size,
 };
 
 // ---------------------------------------------------------------------------
@@ -30,17 +30,30 @@ use crate::resolve::{
 
 /// Compute a per-command result variant suffix from extra_params (e.g.
 /// `+range-4914-4920` for `merge-changes --osc-range`). Returns an empty
-/// string for commands without such a suffix.
+/// string for commands without such a suffix. Multiple suffixes (e.g. range
+/// + snapshot) concatenate.
 fn extra_variant_suffix(
     command: &PbfhoggCommand,
     extra_params: &HashMap<String, String>,
 ) -> String {
+    let mut suffix = String::new();
+
     if matches!(command, PbfhoggCommand::MergeChanges)
         && let Some(range) = extra_params.get("osc_range")
         && let Some((lo, hi)) = range.split_once("..")
     {
-        return format!("+range-{lo}-{hi}");
+        suffix.push_str(&format!("+range-{lo}-{hi}"));
     }
+
+    // Snapshot suffix: appended to OSC-consuming commands when --snapshot is
+    // set to a non-Base value. Lets `brokkr results --variant snap-20260411`
+    // surface every command run against that snapshot.
+    if let Some(snap) = extra_params.get("snapshot")
+        && snap != "base"
+    {
+        suffix.push_str(&format!("+snap-{snap}"));
+    }
+
     if matches!(command, PbfhoggCommand::DiffSnapshots { .. })
         && let Some(from) = extra_params.get("from_snapshot")
         && let Some(to) = extra_params.get("to_snapshot")
@@ -49,9 +62,9 @@ fn extra_variant_suffix(
         // "diff-snapshots-{from}-to-{to}", regardless of format. Format
         // lives in metadata so substring queries on `--variant diff-snapshots`
         // catch all snapshot diffs across both formats.
-        return format!("-{from}-to-{to}");
+        suffix.push_str(&format!("-{from}-to-{to}"));
     }
-    String::new()
+    suffix
 }
 
 /// Extract I/O mode flags from extra_params, run preflight checks, and return:
@@ -386,7 +399,24 @@ fn build_pbfhogg_context(
         return build_diff_snapshots_context(req, binary, paths, extra_params);
     }
 
-    let pbf_path = resolve_pbf_path(req.dataset, req.variant, paths, req.project_root)?;
+    // Parse the optional `--snapshot` flag from extra_params into a SnapshotRef.
+    // None or "base" → SnapshotRef::Base (legacy top-level data, current
+    // behavior preserved). Anything else → Named, validated.
+    let snapshot_ref = match extra_params.get("snapshot").map(String::as_str) {
+        None => resolve::SnapshotRef::Base,
+        Some(s) => resolve::SnapshotRef::parse(s)?,
+    };
+
+    // Resolve PBF via the snapshot-aware resolver. For Base this is identical
+    // to the legacy `resolve_pbf_path`; for Named it reads the snapshot's
+    // pbf table.
+    let pbf_path = resolve::resolve_snapshot_pbf_path(
+        req.dataset,
+        &snapshot_ref,
+        req.variant,
+        paths,
+        req.project_root,
+    )?;
 
     // Resolve OSC path(s) if needed.
     //
@@ -394,14 +424,27 @@ fn build_pbfhogg_context(
     // ordered list of paths. Otherwise fall back to single-seq behavior. The
     // single-seq case captures the resolved seq key so callers (e.g.
     // `ensure_merged_pbf`) can include it in cache keys.
+    //
+    // Both resolution paths are snapshot-scoped: when --snapshot is set, OSCs
+    // come from the snapshot's osc table, not the legacy top-level.
     let (osc_path, osc_paths, single_osc_seq) = if command.needs_osc() {
         if let Some(range) = extra_params.get("osc_range") {
-            let paths_vec =
-                resolve::resolve_osc_range(req.dataset, range, paths, req.project_root)?;
+            let paths_vec = resolve::resolve_osc_range(
+                req.dataset,
+                &snapshot_ref,
+                range,
+                paths,
+                req.project_root,
+            )?;
             (paths_vec.first().cloned(), paths_vec, None)
         } else {
-            let (path, seq_key) =
-                resolve::resolve_single_osc(req.dataset, osc_seq, paths, req.project_root)?;
+            let (path, seq_key) = resolve::resolve_single_osc(
+                req.dataset,
+                &snapshot_ref,
+                osc_seq,
+                paths,
+                req.project_root,
+            )?;
             (Some(path.clone()), vec![path], Some(seq_key))
         }
     } else {
@@ -421,12 +464,19 @@ fn build_pbfhogg_context(
         let osc_seq_str = single_osc_seq
             .as_deref()
             .ok_or_else(|| DevError::Config("merged PBF requires a single OSC seq".into()))?;
+        // Snapshot key for the cache key. Different snapshots produce different
+        // merged PBFs from the same OSC seq, so the cache must disambiguate.
+        let snapshot_key = match &snapshot_ref {
+            resolve::SnapshotRef::Base => "base",
+            resolve::SnapshotRef::Named(k) => k.as_str(),
+        };
         let force_rebuild = !matches!(req.mode, MeasureMode::Run)
             && !extra_params.contains_key("keep_cache");
         let (merged, state) = ensure_merged_pbf(
             binary,
             &pbf_path,
             osc,
+            snapshot_key,
             osc_seq_str,
             &paths.scratch_dir,
             req.project_root,
@@ -560,15 +610,17 @@ enum MergedCacheState {
 /// Ensure a merged PBF exists in the scratch directory. Returns the path and
 /// the cache state (hit/miss + age on hit).
 ///
-/// The cache key includes the OSC seq so different `--osc-seq` invocations
-/// don't silently reuse each other's merged files. If `force_rebuild` is set,
-/// any existing cached file is deleted before checking — used by measured
-/// modes (bench/hotpath/alloc) to make total invocation wall time
-/// deterministic regardless of prior session state.
+/// The cache key includes the snapshot key AND the OSC seq so neither
+/// `--snapshot` nor `--osc-seq` invocations can silently reuse each other's
+/// merged files. If `force_rebuild` is set, any existing cached file is
+/// deleted before checking — used by measured modes (bench/hotpath/alloc) to
+/// make total invocation wall time deterministic regardless of prior session
+/// state.
 fn ensure_merged_pbf(
     binary: &Path,
     pbf_path: &Path,
     osc_path: &Path,
+    snapshot_key: &str,
     osc_seq: &str,
     scratch_dir: &Path,
     project_root: &Path,
@@ -578,9 +630,11 @@ fn ensure_merged_pbf(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("input");
-    // Cache key: <pbf-stem>-osc<seq>-bench-merged.osm.pbf
-    // Including the seq prevents silent wrong-file reuse across --osc-seq runs.
-    let merged_name = format!("{stem}-osc{osc_seq}-bench-merged.osm.pbf");
+    // Cache key: <pbf-stem>-snap<key>-osc<seq>-bench-merged.osm.pbf
+    // Including snapshot + seq prevents silent wrong-file reuse across runs
+    // that target different snapshots or different osc seqs.
+    let merged_name =
+        format!("{stem}-snap{snapshot_key}-osc{osc_seq}-bench-merged.osm.pbf");
     let merged_path = scratch_dir.join(&merged_name);
 
     if force_rebuild && merged_path.exists() {

@@ -408,6 +408,144 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
     Ok(())
 }
 
+/// Result of an HTTP HEAD request to a URL. Used by `download::run_refresh`
+/// to detect upstream newness without fetching the full PBF.
+pub(crate) struct HeadResponse {
+    /// `Last-Modified` header parsed as Unix epoch seconds, if present and parseable.
+    /// Refresh compares this against the on-disk mtime of the existing PBF to
+    /// decide whether to rotate.
+    pub last_modified_unix: Option<i64>,
+}
+
+/// HEAD a URL via `curl -fIL` and parse the `Last-Modified` header.
+///
+/// Returns `Ok(HeadResponse { last_modified_unix: None })` when the request
+/// succeeds but no `Last-Modified` header is present (or it can't be parsed).
+/// Errors only when the HEAD request itself fails (e.g. 404, network error).
+pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
+    let output = std::process::Command::new("curl")
+        .args(["-fsIL", url])
+        .output()
+        .map_err(|e| DevError::Subprocess {
+            program: "curl".into(),
+            code: None,
+            stderr: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        return Err(DevError::Subprocess {
+            program: "curl".into(),
+            code: output.status.code(),
+            stderr: format!(
+                "HEAD request failed for {url}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+
+    // Parse the headers. With `-L`, redirects are followed and we get multiple
+    // header blocks separated by blank lines — we want the LAST one (the final
+    // resource). Look for `Last-Modified:` case-insensitively.
+    let body = String::from_utf8_lossy(&output.stdout);
+    let last_modified = body
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.splitn(2, ':');
+            let name = parts.next()?.trim();
+            let value = parts.next()?.trim();
+            name.eq_ignore_ascii_case("last-modified").then_some(value)
+        })
+        .next_back()
+        .map(parse_http_date)
+        .and_then(|r| r.ok());
+
+    Ok(HeadResponse {
+        last_modified_unix: last_modified,
+    })
+}
+
+/// Parse an HTTP-date string (RFC 7231 IMF-fixdate format) into Unix epoch
+/// seconds. Returns `Err` if the format isn't recognized.
+///
+/// Only supports the IMF-fixdate format (`"Sun, 06 Nov 1994 08:49:37 GMT"`)
+/// which is the canonical form per RFC 7231 §7.1.1.1 — what every modern
+/// origin server emits. Doesn't support the obsolete RFC 850 or asctime forms.
+fn parse_http_date(s: &str) -> Result<i64, String> {
+    // Format: "Day, DD Mon YYYY HH:MM:SS GMT"
+    // Example: "Tue, 11 Apr 2026 12:34:56 GMT"
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() < 6 {
+        return Err(format!("not enough parts: '{s}'"));
+    }
+    let day: i64 = parts[1].parse().map_err(|e| format!("day: {e}"))?;
+    let month = match parts[2] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        other => return Err(format!("unknown month: {other}")),
+    };
+    let year: i64 = parts[3].parse().map_err(|e| format!("year: {e}"))?;
+    let time_parts: Vec<&str> = parts[4].split(':').collect();
+    if time_parts.len() != 3 {
+        return Err(format!("bad time: '{}'", parts[4]));
+    }
+    let hour: i64 = time_parts[0].parse().map_err(|e| format!("hour: {e}"))?;
+    let minute: i64 = time_parts[1]
+        .parse()
+        .map_err(|e| format!("minute: {e}"))?;
+    let second: i64 = time_parts[2]
+        .parse()
+        .map_err(|e| format!("second: {e}"))?;
+
+    // Convert (Y, M, D) to days since 1970-01-01 using Howard Hinnant's
+    // algorithm — same one used by `pbfhogg::download::days_to_civil` in
+    // reverse.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = month as u64;
+    let d = day as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+    Ok(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_http_date_imf_fixdate() {
+        // Sun, 06 Nov 1994 08:49:37 GMT — the canonical example from RFC 7231.
+        let unix = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
+        assert_eq!(unix, 784111777);
+    }
+
+    #[test]
+    fn parse_http_date_modern() {
+        // Sat, 11 Apr 2026 12:34:56 GMT
+        let unix = parse_http_date("Sat, 11 Apr 2026 12:34:56 GMT").unwrap();
+        // Cross-check: 2026-04-11T12:34:56Z = 1775910896
+        assert_eq!(unix, 1775910896);
+    }
+
+    #[test]
+    fn parse_http_date_rejects_garbage() {
+        assert!(parse_http_date("not a date").is_err());
+        assert!(parse_http_date("Sun, 06 XYZ 1994 08:49:37 GMT").is_err());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tilemaker
 // ---------------------------------------------------------------------------

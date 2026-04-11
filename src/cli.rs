@@ -178,6 +178,11 @@ Examples:
         /// OSC sequence number from brokkr.toml
         #[arg(long)]
         osc_seq: Option<String>,
+        /// Snapshot key to read PBF and OSC from. Use `base` (or omit) for
+        /// the dataset's primary/legacy data; pass a snapshot key registered
+        /// under `[dataset.snapshot.<key>]` to read from a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Get elements by ID
     #[command(name = "getid", display_order = 2)]
@@ -232,6 +237,11 @@ Examples:
         /// OSC sequence range LO..HI (inclusive) to merge in a single invocation
         #[arg(long, value_parser = validate_osc_range)]
         osc_range: Option<String>,
+        /// Snapshot key to read OSCs from. Use `base` (or omit) for the
+        /// dataset's primary/legacy OSC chain; pass a snapshot key to read
+        /// from a historical snapshot's OSC table.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Apply OSC changes to PBF
     #[command(name = "apply-changes", display_order = 2)]
@@ -243,6 +253,11 @@ Examples:
         /// OSC sequence number from brokkr.toml
         #[arg(long)]
         osc_seq: Option<String>,
+        /// Snapshot key to read PBF and OSC from. Use `base` (or omit) for
+        /// the dataset's primary/legacy data; pass a snapshot key registered
+        /// under `[dataset.snapshot.<key>]` to read from a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Add location data to ways
     #[command(name = "add-locations-to-ways", display_order = 2)]
@@ -313,6 +328,11 @@ Examples:
         /// reproducible). No-op in run mode (cache is always reused there).
         #[arg(long)]
         keep_cache: bool,
+        /// Snapshot key to read PBF and OSC from. Use `base` (or omit) for
+        /// the dataset's primary/legacy data; pass a snapshot key to read
+        /// from a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Diff two snapshots of the same dataset
     #[command(
@@ -371,6 +391,11 @@ Examples:
         /// reproducible). No-op in run mode (cache is always reused there).
         #[arg(long)]
         keep_cache: bool,
+        /// Snapshot key to read PBF and OSC from. Use `base` (or omit) for
+        /// the dataset's primary/legacy data; pass a snapshot key to read
+        /// from a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Build geocode index
     #[command(name = "build-geocode-index", display_order = 2)]
@@ -838,8 +863,26 @@ Examples:
         ///
         /// Files are written with snapshot-specific names and registered under
         /// `[<host>.datasets.<region>.snapshot.<key>]` in `brokkr.toml`.
-        #[arg(long, value_parser = validate_snapshot_key_arg)]
+        #[arg(long, value_parser = validate_snapshot_key_arg, conflicts_with = "refresh")]
         as_snapshot: Option<String>,
+
+        /// Rotate the dataset to a newer upstream snapshot. Archives the
+        /// existing primary pbf/osc data into a `[snapshot.<key>]` block
+        /// (key derived from download_date or file mtime), then downloads
+        /// the new PBF and resets the OSC chain. HEAD-checks upstream
+        /// `Last-Modified` first and no-ops if the upstream isn't newer
+        /// (use `--force` to rotate anyway).
+        ///
+        /// Mutually exclusive with `--as-snapshot`.
+        #[arg(long, conflicts_with = "as_snapshot")]
+        refresh: bool,
+
+        /// Force `--refresh` to rotate even when the upstream Last-Modified
+        /// header is not newer than the existing pbf.raw's mtime. Use when
+        /// the heuristic gets it wrong (e.g. file mtime was touched by an
+        /// rsync, or you want to re-download for some other reason).
+        #[arg(long)]
+        force: bool,
     },
     /// [elivagar] Compare feature counts between two PMTiles archives
     #[command(display_order = 30)]
@@ -1490,22 +1533,37 @@ impl Command {
             }
 
             // Commands with OSC sequence
-            Self::TagsFilterOsc { mode, pbf, osc_seq } => Some((
+            Self::TagsFilterOsc {
                 mode,
                 pbf,
-                PbfhoggCommand::TagsFilterOsc,
-                osc_seq.as_deref(),
-                empty,
-            )),
+                osc_seq,
+                snapshot,
+            } => {
+                let mut params = HashMap::new();
+                if let Some(s) = snapshot {
+                    params.insert("snapshot".into(), s.clone());
+                }
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::TagsFilterOsc,
+                    osc_seq.as_deref(),
+                    params,
+                ))
+            }
             Self::MergeChanges {
                 mode,
                 pbf,
                 osc_seq,
                 osc_range,
+                snapshot,
             } => {
                 let mut params = HashMap::new();
                 if let Some(r) = osc_range {
                     params.insert("osc_range".into(), r.clone());
+                }
+                if let Some(s) = snapshot {
+                    params.insert("snapshot".into(), s.clone());
                 }
                 Some((
                     mode,
@@ -1515,22 +1573,37 @@ impl Command {
                     params,
                 ))
             }
-            Self::ApplyChanges { mode, pbf, osc_seq } => Some((
+            Self::ApplyChanges {
                 mode,
                 pbf,
-                PbfhoggCommand::ApplyChanges,
-                osc_seq.as_deref(),
-                empty,
-            )),
+                osc_seq,
+                snapshot,
+            } => {
+                let mut params = HashMap::new();
+                if let Some(s) = snapshot {
+                    params.insert("snapshot".into(), s.clone());
+                }
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::ApplyChanges,
+                    osc_seq.as_deref(),
+                    params,
+                ))
+            }
             Self::Diff {
                 mode,
                 pbf,
                 osc_seq,
                 keep_cache,
+                snapshot,
             } => {
                 let mut params = HashMap::new();
                 if *keep_cache {
                     params.insert("keep_cache".into(), "true".into());
+                }
+                if let Some(s) = snapshot {
+                    params.insert("snapshot".into(), s.clone());
                 }
                 Some((mode, pbf, PbfhoggCommand::Diff, osc_seq.as_deref(), params))
             }
@@ -1539,10 +1612,14 @@ impl Command {
                 pbf,
                 osc_seq,
                 keep_cache,
+                snapshot,
             } => {
                 let mut params = HashMap::new();
                 if *keep_cache {
                     params.insert("keep_cache".into(), "true".into());
+                }
+                if let Some(s) = snapshot {
+                    params.insert("snapshot".into(), s.clone());
                 }
                 Some((
                     mode,

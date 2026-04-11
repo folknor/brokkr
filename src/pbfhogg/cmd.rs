@@ -301,6 +301,7 @@ pub(crate) fn verify(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn download(
     dev_config: &config::DevConfig,
     project: Project,
@@ -308,6 +309,8 @@ pub(crate) fn download(
     region: &str,
     osc_seq: Option<u64>,
     as_snapshot: Option<&str>,
+    refresh: bool,
+    force: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Pbfhogg, "download")?;
 
@@ -318,6 +321,8 @@ pub(crate) fn download(
         region,
         osc_seq,
         as_snapshot,
+        refresh,
+        force,
         &paths.datasets,
         &paths.hostname,
         &paths.data_dir,

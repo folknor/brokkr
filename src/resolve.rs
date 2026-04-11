@@ -153,6 +153,39 @@ impl SnapshotRef {
     }
 }
 
+/// Get the OSC HashMap for a snapshot ref. `Base` returns the dataset's
+/// top-level `osc` table; `Named(key)` returns the snapshot's `osc` table.
+/// Errors if the snapshot key isn't registered.
+fn snapshot_osc_map<'a>(
+    dataset: &str,
+    snapshot: &SnapshotRef,
+    paths: &'a config::ResolvedPaths,
+) -> Result<&'a HashMap<String, config::OscEntry>, DevError> {
+    let ds = get_dataset(dataset, paths)?;
+    match snapshot {
+        SnapshotRef::Base => Ok(&ds.osc),
+        SnapshotRef::Named(key) => {
+            let snap = ds.snapshot.get(key).ok_or_else(|| {
+                let mut available: Vec<&str> = std::iter::once("base")
+                    .chain(ds.snapshot.keys().map(String::as_str))
+                    .collect();
+                available.sort();
+                DevError::Config(format!(
+                    "dataset '{dataset}' has no snapshot '{key}' (available: {})",
+                    available.join(", ")
+                ))
+            })?;
+            Ok(&snap.osc)
+        }
+    }
+}
+
+/// Get the dataset's `data_dir` (data files always live in the dataset's
+/// data dir; snapshots don't have their own data dir).
+fn dataset_data_dir<'a>(paths: &'a config::ResolvedPaths) -> &'a Path {
+    &paths.data_dir
+}
+
 /// Resolve a snapshot's PBF path for the given variant.
 ///
 /// `Base` dispatches to the legacy `resolve_pbf_path` (top-level `pbf.<variant>`).
@@ -238,32 +271,65 @@ pub(crate) fn resolve_osc_path(
 /// (e.g. the diff/diff-osc merged-PBF cache).
 pub(crate) fn resolve_single_osc(
     dataset: &str,
+    snapshot: &SnapshotRef,
     osc_seq: Option<&str>,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<(PathBuf, String), DevError> {
+    let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
+    let ds = get_dataset(dataset, paths)?;
+    let origin = ds.origin.as_deref();
+    let data_dir = dataset_data_dir(paths);
+    let kind_label = match snapshot {
+        SnapshotRef::Base => "osc seq".to_string(),
+        SnapshotRef::Named(k) => format!("snapshot.{k}.osc seq"),
+    };
+
     if let Some(seq) = osc_seq {
-        let path = resolve_osc_path(dataset, seq, paths, project_root)?;
+        let path = resolve_entry_path(
+            osc_map,
+            seq,
+            dataset,
+            &kind_label,
+            data_dir,
+            origin,
+            project_root,
+        )?;
         return Ok((path, seq.to_string()));
     }
 
-    // Auto-select: requires exactly one configured OSC.
-    let ds = get_dataset(dataset, paths)?;
-    if ds.osc.is_empty() {
+    // Auto-select: requires exactly one configured OSC under the snapshot.
+    if osc_map.is_empty() {
+        let where_clause = match snapshot {
+            SnapshotRef::Base => format!("dataset '{dataset}'"),
+            SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
+        };
         return Err(DevError::Config(format!(
-            "dataset '{dataset}' has no osc configured"
+            "{where_clause} has no osc configured"
         )));
     }
-    if ds.osc.len() > 1 {
-        let mut keys: Vec<&str> = ds.osc.keys().map(String::as_str).collect();
+    if osc_map.len() > 1 {
+        let mut keys: Vec<&str> = osc_map.keys().map(String::as_str).collect();
         keys.sort();
+        let where_clause = match snapshot {
+            SnapshotRef::Base => format!("dataset '{dataset}'"),
+            SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
+        };
         return Err(DevError::Config(format!(
-            "dataset '{dataset}' has multiple osc entries — use --osc-seq to select (available: {})",
+            "{where_clause} has multiple osc entries — use --osc-seq to select (available: {})",
             keys.join(", ")
         )));
     }
-    let key = ds.osc.keys().next().expect("len == 1").clone();
-    let path = resolve_osc_path(dataset, &key, paths, project_root)?;
+    let key = osc_map.keys().next().expect("len == 1").clone();
+    let path = resolve_entry_path(
+        osc_map,
+        &key,
+        dataset,
+        &kind_label,
+        data_dir,
+        origin,
+        project_root,
+    )?;
     Ok((path, key))
 }
 
@@ -274,6 +340,7 @@ pub(crate) fn resolve_single_osc(
 /// seq order. The range string must be pre-validated in `LO..HI` form.
 pub(crate) fn resolve_osc_range(
     dataset: &str,
+    snapshot: &SnapshotRef,
     range: &str,
     paths: &config::ResolvedPaths,
     project_root: &Path,
@@ -293,23 +360,34 @@ pub(crate) fn resolve_osc_range(
         )));
     }
 
+    let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
     let ds = get_dataset(dataset, paths)?;
+    let origin = ds.origin.as_deref();
+    let data_dir = dataset_data_dir(paths);
+    let kind_label = match snapshot {
+        SnapshotRef::Base => "osc seq".to_string(),
+        SnapshotRef::Named(k) => format!("snapshot.{k}.osc seq"),
+    };
+    let where_clause = match snapshot {
+        SnapshotRef::Base => format!("dataset '{dataset}'"),
+        SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
+    };
 
     let mut resolved = Vec::with_capacity((hi - lo + 1) as usize);
     for seq in lo..=hi {
         let key = seq.to_string();
-        if !ds.osc.contains_key(&key) {
+        if !osc_map.contains_key(&key) {
             return Err(DevError::Config(format!(
-                "dataset '{dataset}' missing osc.{seq} (required by --osc-range {range})"
+                "{where_clause} missing osc.{seq} (required by --osc-range {range})"
             )));
         }
         let path = resolve_entry_path(
-            &ds.osc,
+            osc_map,
             &key,
             dataset,
-            "osc seq",
-            &paths.data_dir,
-            ds.origin.as_deref(),
+            &kind_label,
+            data_dir,
+            origin,
             project_root,
         )?;
         resolved.push(path);
@@ -804,8 +882,14 @@ mod tests {
         datasets.insert(String::from("planet"), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let (path, seq) =
-            resolve_single_osc("planet", Some("4914"), &paths, Path::new(".")).expect("resolve");
+        let (path, seq) = resolve_single_osc(
+            "planet",
+            &SnapshotRef::Base,
+            Some("4914"),
+            &paths,
+            Path::new("."),
+        )
+        .expect("resolve");
         assert!(path.ends_with("planet-4914.osc.gz"));
         assert_eq!(seq, "4914");
 
@@ -830,8 +914,14 @@ mod tests {
         datasets.insert(String::from("denmark"), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let (path, seq) =
-            resolve_single_osc("denmark", None, &paths, Path::new(".")).expect("resolve");
+        let (path, seq) = resolve_single_osc(
+            "denmark",
+            &SnapshotRef::Base,
+            None,
+            &paths,
+            Path::new("."),
+        )
+        .expect("resolve");
         assert!(path.ends_with("denmark-4705.osc.gz"));
         assert_eq!(seq, "4705");
 
@@ -854,11 +944,131 @@ mod tests {
         datasets.insert(String::from("planet"), ds);
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
 
-        let err = resolve_single_osc("planet", None, &paths, Path::new("."))
-            .unwrap_err()
-            .to_string();
+        let err = resolve_single_osc(
+            "planet",
+            &SnapshotRef::Base,
+            None,
+            &paths,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("multiple osc entries"), "got: {err}");
         assert!(err.contains("4913, 4914, 4915"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_single_osc_named_snapshot_uses_snapshot_table() {
+        use crate::config::Snapshot;
+
+        let dir = unique_test_dir("snap-osc-named");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("planet-20260411-seq4969.osc.gz"), "x").expect("write");
+
+        let mut snap = Snapshot {
+            download_date: Some("2026-04-11".into()),
+            seq: Some(4969),
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+        };
+        snap.osc.insert(
+            "4969".into(),
+            OscEntry {
+                file: "planet-20260411-seq4969.osc.gz".into(),
+                xxhash: None,
+            },
+        );
+        let mut ds = empty_dataset();
+        ds.snapshot.insert("20260411".into(), snap);
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let (path, seq) = resolve_single_osc(
+            "planet",
+            &SnapshotRef::Named("20260411".into()),
+            Some("4969"),
+            &paths,
+            Path::new("."),
+        )
+        .expect("resolve");
+        assert!(path.ends_with("planet-20260411-seq4969.osc.gz"));
+        assert_eq!(seq, "4969");
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_osc_range_named_snapshot_uses_snapshot_table() {
+        use crate::config::Snapshot;
+
+        let dir = unique_test_dir("snap-osc-range");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for n in 4969..=4971 {
+            std::fs::write(dir.join(format!("planet-20260411-seq{n}.osc.gz")), "x")
+                .expect("write");
+        }
+
+        let mut snap = Snapshot {
+            download_date: Some("2026-04-11".into()),
+            seq: Some(4969),
+            pbf: HashMap::new(),
+            osc: HashMap::new(),
+        };
+        for n in 4969..=4971u64 {
+            snap.osc.insert(
+                n.to_string(),
+                OscEntry {
+                    file: format!("planet-20260411-seq{n}.osc.gz"),
+                    xxhash: None,
+                },
+            );
+        }
+        let mut ds = empty_dataset();
+        ds.snapshot.insert("20260411".into(), snap);
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(&dir, datasets);
+
+        let resolved = resolve_osc_range(
+            "planet",
+            &SnapshotRef::Named("20260411".into()),
+            "4969..4971",
+            &paths,
+            Path::new("."),
+        )
+        .expect("range");
+        assert_eq!(resolved.len(), 3);
+        assert!(resolved[0].ends_with("planet-20260411-seq4969.osc.gz"));
+        assert!(resolved[2].ends_with("planet-20260411-seq4971.osc.gz"));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn resolve_single_osc_named_snapshot_unknown_key_errors() {
+        let mut ds = empty_dataset();
+        ds.osc.insert(
+            "4913".into(),
+            OscEntry {
+                file: "planet-4913.osc.gz".into(),
+                xxhash: None,
+            },
+        );
+        let mut datasets = HashMap::new();
+        datasets.insert("planet".into(), ds);
+        let paths = mk_paths(Path::new("/irrelevant"), datasets);
+
+        let err = resolve_single_osc(
+            "planet",
+            &SnapshotRef::Named("missing".into()),
+            None,
+            &paths,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no snapshot 'missing'"), "got: {err}");
     }
 
     #[test]
@@ -883,8 +1093,14 @@ mod tests {
         datasets.insert(String::from("planet"), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let resolved =
-            resolve_osc_range("planet", "4914..4916", &paths, Path::new(".")).expect("range");
+        let resolved = resolve_osc_range(
+            "planet",
+            &SnapshotRef::Base,
+            "4914..4916",
+            &paths,
+            Path::new("."),
+        )
+        .expect("range");
         assert_eq!(resolved.len(), 3);
         assert!(resolved[0].ends_with("planet-4914.osc.gz"));
         assert!(resolved[1].ends_with("planet-4915.osc.gz"));
@@ -914,9 +1130,15 @@ mod tests {
         datasets.insert(String::from("planet"), ds);
         let paths = mk_paths(&dir, datasets);
 
-        let err = resolve_osc_range("planet", "4914..4916", &paths, Path::new("."))
-            .unwrap_err()
-            .to_string();
+        let err = resolve_osc_range(
+            "planet",
+            &SnapshotRef::Base,
+            "4914..4916",
+            &paths,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("missing osc.4915"), "got: {err}");
 
         drop(std::fs::remove_dir_all(&dir));
