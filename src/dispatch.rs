@@ -343,6 +343,13 @@ fn run_pbfhogg_hotpath(
     let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
 
+    // Compose metadata from the command's metadata builder + hotpath-specific
+    // fields. This keeps merged_cache, snapshot, and any future per-command
+    // metadata consistent across measurement modes (wall-clock vs hotpath/alloc).
+    let mut metadata = command.metadata(&cmd_ctx);
+    metadata.push(KvPair::text("meta.alloc", alloc.to_string()));
+    metadata.push(KvPair::text("meta.test", command.id()));
+
     let config = BenchConfig {
         command: "hotpath".into(),
         variant: Some(variant),
@@ -355,10 +362,7 @@ fn run_pbfhogg_hotpath(
             &ctx.binary.display().to_string(),
             &subprocess_args,
         )),
-        metadata: vec![
-            KvPair::text("meta.alloc", alloc.to_string()),
-            KvPair::text("meta.test", command.id()),
-        ],
+        metadata,
     };
 
     let binary_str = ctx.binary.display().to_string();
