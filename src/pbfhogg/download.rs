@@ -891,7 +891,22 @@ fn run_as_snapshot(
     // -- Update brokkr.toml --
     // Always write the snapshot header (the snapshot is new — we errored
     // earlier if it already existed).
-    append_snapshot_header(project_root, hostname, dataset_key, snap_key, &date)?;
+    //
+    // The snapshot's `download_date` should reflect the snapshot's
+    // point-in-time identity, NOT the date the user ran `brokkr download
+    // --as-snapshot`. If the snapshot key parses as YYYYMMDD (the common case
+    // when keys are dates like `20260411`), use that. Otherwise fall back to
+    // today's date. Either way, format as YYYY-MM-DD to match the documented
+    // schema.
+    let snapshot_download_date = snapshot_key_to_iso_date(snap_key)
+        .unwrap_or_else(|| iso_date_today(&date));
+    append_snapshot_header(
+        project_root,
+        hostname,
+        dataset_key,
+        snap_key,
+        &snapshot_download_date,
+    )?;
 
     if downloaded_pbf || pbf_dest.exists() {
         let filename = pbf_dest.file_name().unwrap_or_default().to_string_lossy();
@@ -980,6 +995,26 @@ fn unix_to_yyyymmdd(unix_secs: i64) -> String {
     let days = unix_secs.div_euclid(86400);
     let (y, m, d) = days_to_civil(days);
     format!("{y:04}{m:02}{d:02}")
+}
+
+/// If the snapshot key parses as a `YYYYMMDD` date string, convert it to
+/// `YYYY-MM-DD` for writing as the snapshot's `download_date`. Returns `None`
+/// if the key isn't an 8-digit date (e.g. `pre-refactor` or `staging-1`).
+///
+/// Used by `run_as_snapshot` to derive the snapshot's identity date from
+/// its key when the key follows the common dated convention. Snapshots with
+/// non-date keys fall back to today's date.
+fn snapshot_key_to_iso_date(key: &str) -> Option<String> {
+    if key.len() != 8 || !key.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let y: i32 = key[..4].parse().ok()?;
+    let m: u32 = key[4..6].parse().ok()?;
+    let d: u32 = key[6..8].parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
 /// Convert a `YYYY-MM-DD` `download_date` string into `YYYYMMDD`. Returns
@@ -1278,6 +1313,37 @@ fn civil_to_days(y: i32, m: u32, d: u32) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_key_to_iso_date_basic() {
+        // Date-shaped keys: convert.
+        assert_eq!(
+            snapshot_key_to_iso_date("20260411").as_deref(),
+            Some("2026-04-11")
+        );
+        assert_eq!(
+            snapshot_key_to_iso_date("19700101").as_deref(),
+            Some("1970-01-01")
+        );
+
+        // Non-date keys: None (caller falls back to today).
+        assert!(snapshot_key_to_iso_date("pre-refactor").is_none());
+        assert!(snapshot_key_to_iso_date("staging-1").is_none());
+        assert!(snapshot_key_to_iso_date("v1").is_none());
+
+        // Wrong length.
+        assert!(snapshot_key_to_iso_date("2026041").is_none());
+        assert!(snapshot_key_to_iso_date("202604111").is_none());
+
+        // Wrong characters (8 chars but not all digits).
+        assert!(snapshot_key_to_iso_date("2026-411").is_none());
+
+        // Out-of-range month/day.
+        assert!(snapshot_key_to_iso_date("20261311").is_none());
+        assert!(snapshot_key_to_iso_date("20260432").is_none());
+        assert!(snapshot_key_to_iso_date("20260400").is_none());
+        assert!(snapshot_key_to_iso_date("20260011").is_none());
+    }
 
     #[test]
     fn iso_date_to_yyyymmdd_basic() {
