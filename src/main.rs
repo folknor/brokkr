@@ -196,6 +196,37 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &args,
         ),
         Command::Env => cmd_env(&dev_config, project, &project_root),
+        Command::Cat {
+            mode,
+            dataset,
+            variant,
+            direct_io,
+            io_uring,
+        } => {
+            let mut params = std::collections::HashMap::new();
+            if direct_io {
+                params.insert("direct_io".into(), "true".into());
+            }
+            if io_uring {
+                params.insert("io_uring".into(), "true".into());
+            }
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                &variant,
+                |req| {
+                    dispatch::run_pbfhogg_command_with_params(
+                        req,
+                        &pbfhogg::commands::PbfhoggCommand::Cat,
+                        None,
+                        &params,
+                    )
+                },
+            )
+        }
         Command::Extract {
             mode,
             pbf,

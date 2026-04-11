@@ -95,6 +95,7 @@ pub enum PbfhoggCommand {
     CheckRefs,
     CheckIds,
     Sort,
+    Cat,
     CatWay,
     CatRelation,
     CatDedupe,
@@ -139,6 +140,7 @@ impl PbfhoggCommand {
             Self::CheckRefs => "check-refs",
             Self::CheckIds => "check-ids",
             Self::Sort => "sort",
+            Self::Cat => "cat",
             Self::CatWay => "cat-way",
             Self::CatRelation => "cat-relation",
             Self::CatDedupe => "cat-dedupe",
@@ -256,6 +258,7 @@ impl PbfhoggCommand {
             | Self::CheckRefs
             | Self::CheckIds
             | Self::Sort
+            | Self::Cat
             | Self::CatWay
             | Self::CatRelation
             | Self::CatDedupe
@@ -294,6 +297,7 @@ impl PbfhoggCommand {
             | Self::CheckRefs
             | Self::CheckIds
             | Self::Sort
+            | Self::Cat
             | Self::CatWay
             | Self::CatRelation
             | Self::CatDedupe
@@ -397,6 +401,15 @@ impl PbfhoggCommand {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
                     "sort".into(),
+                    ctx.pbf_str()?.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
+                ])
+            }
+            Self::Cat => {
+                let output = scratch_output_path(ctx, self);
+                Ok(vec![
+                    "cat".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
                     path_to_string(&output)?,

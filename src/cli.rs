@@ -102,6 +102,24 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
+    /// [pbfhogg] Cat passthrough (generate indexdata without re-encoding)
+    #[command(name = "cat", display_order = 2)]
+    Cat {
+        #[command(flatten)]
+        mode: ModeArgs,
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// PBF variant to use (defaults to raw — passthrough's natural input)
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
+        #[arg(long)]
+        direct_io: bool,
+        /// Use io_uring for I/O (requires linux-io-uring feature in pbfhogg)
+        #[arg(long)]
+        io_uring: bool,
+    },
     /// [pbfhogg] Cat way elements
     #[command(name = "cat-way", display_order = 2)]
     CatWay {

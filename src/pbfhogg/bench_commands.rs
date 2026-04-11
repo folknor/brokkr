@@ -15,6 +15,7 @@ pub const ALL_COMMANDS: &[&str] = &[
     "check-refs",
     "check-ids",
     "sort",
+    "cat",
     "cat-way",
     "cat-relation",
     "cat-dedupe",
@@ -88,6 +89,7 @@ fn command_args(
         "check-refs" => vec!["check".into(), "--refs".into(), pbf.into()],
         "check-ids" => vec!["check".into(), "--ids".into(), pbf.into()],
         "sort" => vec!["sort".into(), pbf.into(), "-o".into(), output.into()],
+        "cat" => vec!["cat".into(), pbf.into(), "-o".into(), output.into()],
         "cat-way" => vec![
             "cat".into(),
             pbf.into(),
