@@ -97,21 +97,46 @@ fn categorize_blocks(detail: &str) -> TypeCounts {
 
 /// Parse the total relation count from `pbfhogg inspect` output.
 ///
-/// Looks for a line like `Elements: 52489653 nodes, 6616526 ways, 46103 relations`.
+/// pbfhogg inspect prints the element breakdown across multiple lines:
+///
+/// ```text
+/// Elements: 59,152,282 total
+///   Nodes:        52,489,653  (25,411 tagged)
+///   Ways:          6,616,526
+///   Relations:       46,103
+/// ```
+///
+/// With `--extended`, a later section prints an id-range line using the
+/// same `Relations:` label (e.g. `Relations:  1 .. 46,103   (monotonic: yes)`),
+/// so we anchor on the `Elements:` line first and then take the next
+/// line whose first token is `Relations:`. The id-range line contains
+/// `..` between the two numbers, and because the elements section comes
+/// first in the output we never see it when anchoring forwards.
 fn parse_total_relations(inspect_text: &str) -> Option<u64> {
+    let mut in_elements = false;
     for line in inspect_text.lines() {
-        if !line.to_lowercase().contains("elements:") {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Elements:") {
+            in_elements = true;
             continue;
         }
-        let toks: Vec<&str> = line.split_whitespace().collect();
-        for (i, tok) in toks.iter().enumerate() {
-            if tok.starts_with("relation")
-                && i > 0
-                && let Ok(n) = toks[i - 1].trim_matches(',').parse::<u64>()
-            {
-                return Some(n);
-            }
+        if !in_elements {
+            continue;
         }
+        // A blank line terminates the elements section.
+        if trimmed.is_empty() {
+            return None;
+        }
+        let mut toks = trimmed.split_whitespace();
+        let Some(label) = toks.next() else {
+            continue;
+        };
+        if label != "Relations:" {
+            continue;
+        }
+        let num_tok = toks.next()?;
+        let cleaned: String = num_tok.chars().filter(|c| *c != ',').collect();
+        return cleaned.parse::<u64>().ok();
     }
     None
 }
@@ -246,10 +271,21 @@ pub fn run(
         })?;
 
     // --- Total relation count (for threshold) ---------------------------
+    // A parse failure here is a hard error rather than a silent fallback:
+    // if we can't recover total_relations, the sanity-threshold check is
+    // effectively disabled, which would let arbitrarily large relation-only
+    // regressions sneak through as PASS.
     let inspect = harness.run_pbfhogg(&["inspect", &osmium_out_str])?;
     harness.check_exit(&inspect, "pbfhogg inspect")?;
     let inspect_text = String::from_utf8_lossy(&inspect.stdout);
-    let total_relations = parse_total_relations(&inspect_text).unwrap_or(0);
+    let total_relations = parse_total_relations(&inspect_text).ok_or_else(|| {
+        DevError::Verify(
+            "renumber: could not parse 'Relations:' count from pbfhogg inspect output — \
+             has the inspect output format changed? Refusing to run the threshold check \
+             with total_relations=0 (would let any relation-only regression PASS)."
+                .into(),
+        )
+    })?;
 
     // --- Report ---------------------------------------------------------
     let total = summary.left.max(summary.right);
@@ -310,7 +346,7 @@ pub fn run(
             "node/way diffs detected (nodes={}, ways={})",
             counts.nodes, counts.ways,
         ))
-    } else if total_relations > 0 && summary.different > threshold {
+    } else if summary.different > threshold {
         Some(format!(
             "relation diffs {} exceed sanity threshold {} (10% of {} relations)",
             summary.different, threshold, total_relations,
@@ -419,19 +455,81 @@ mod tests {
 
     #[test]
     fn parse_total_relations_standard() {
-        let text = "File: foo.osm.pbf\nElements: 52489653 nodes, 6616526 ways, 46103 relations\n";
+        // Actual pbfhogg inspect output (see pbfhogg/src/commands/inspect.rs
+        // `print_elements`): multi-line, comma-separated, padded labels.
+        let text = "\
+File:     denmark-with-indexdata.osm.pbf (487 MB)
+Features: Sort.Type_then_ID
+Indexed:  yes
+Blocks:   1234 total
+Elements: 59,152,282 total
+  Nodes:        52,489,653  (25,411 tagged)
+  Ways:          6,616,526
+  Relations:       46,103
+Ordering: n -> w -> r (strict)
+";
         assert_eq!(parse_total_relations(text), Some(46_103));
     }
 
     #[test]
     fn parse_total_relations_zero() {
-        let text = "Elements: 52489653 nodes, 6616526 ways, 0 relations";
+        let text = "\
+Elements: 59,105,679 total
+  Nodes:        52,489,653
+  Ways:          6,616,526
+  Relations:            0
+";
         assert_eq!(parse_total_relations(text), Some(0));
+    }
+
+    #[test]
+    fn parse_total_relations_untagged_nodes_branch() {
+        // Covers the `else` branch in print_elements where Nodes: has no
+        // tagged-count suffix.
+        let text = "\
+Elements: 100 total
+  Nodes:               50
+  Ways:                30
+  Relations:           20
+";
+        assert_eq!(parse_total_relations(text), Some(20));
+    }
+
+    #[test]
+    fn parse_total_relations_ignores_id_range_section() {
+        // With --extended, a later section emits an identically-labeled
+        // "Relations:" line showing min..max. parse_total_relations must
+        // lock onto the first (count) line and not the later (range) line.
+        let text = "\
+Elements: 59,152,282 total
+  Nodes:        52,489,653
+  Ways:          6,616,526
+  Relations:       46,103
+
+ID ranges:
+  Nodes:        1 .. 11,000,000,000   (monotonic: yes)
+  Ways:         1 .. 1,200,000,000    (monotonic: yes)
+  Relations:    1 .. 17,000,000       (monotonic: yes)
+";
+        assert_eq!(parse_total_relations(text), Some(46_103));
     }
 
     #[test]
     fn parse_total_relations_missing() {
         assert_eq!(parse_total_relations("nothing relevant\n"), None);
+    }
+
+    #[test]
+    fn parse_total_relations_elements_without_relations_line() {
+        // Defensive: an "Elements:" line followed by a blank line
+        // (no Relations: label at all) should return None, not hang or
+        // mis-parse a later section's Relations: row.
+        let text = "\
+Elements: 100 total
+
+  Relations:   46,103
+";
+        assert_eq!(parse_total_relations(text), None);
     }
 
     #[test]
