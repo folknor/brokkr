@@ -445,12 +445,24 @@ impl PbfhoggCommand {
                 // Format and snapshot identities live in metadata so the
                 // variant column stays format-agnostic. Query osc-only runs
                 // via `brokkr results --variant diff-snapshots --meta format=osc`.
+                //
+                // The from-side file/size are already on the result row as
+                // input_file/input_mb (set from cmd_ctx.pbf_path). Add to-side
+                // file + size as metadata so result queries can identify or
+                // filter by the B-side input — without these, half the
+                // workload shape was invisible to `brokkr results`.
                 let mut meta = vec![KvPair::text("meta.format", format.name())];
                 if let Some(from) = ctx.param("from_snapshot") {
                     meta.push(KvPair::text("meta.from_snapshot", from));
                 }
                 if let Some(to) = ctx.param("to_snapshot") {
                     meta.push(KvPair::text("meta.to_snapshot", to));
+                }
+                if let Some(file) = ctx.param("to_snapshot_file") {
+                    meta.push(KvPair::text("meta.to_snapshot_file", file));
+                }
+                if let Some(mb) = ctx.param("to_snapshot_file_mb") {
+                    meta.push(KvPair::text("meta.to_snapshot_file_mb", mb));
                 }
                 meta
             }

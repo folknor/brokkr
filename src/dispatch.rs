@@ -557,6 +557,18 @@ fn build_diff_snapshots_context(
         req.project_root,
     )?;
 
+    // Stash the to-side file's basename and size in params so the result row
+    // metadata can describe both inputs (input_file/input_mb on the row only
+    // covers the from side). Lets `brokkr results` queries filter by the
+    // B-side via `--meta to_snapshot_file=<name>`.
+    let mut params = extra_params.clone();
+    if let Some(name) = to_path.file_name().and_then(|s| s.to_str()) {
+        params.insert("to_snapshot_file".into(), name.to_owned());
+    }
+    if let Ok(mb) = resolve::file_size_mb(&to_path) {
+        params.insert("to_snapshot_file_mb".into(), format!("{mb:.0}"));
+    }
+
     Ok(CommandContext {
         binary: binary.to_path_buf(),
         pbf_path: from_path,
@@ -566,7 +578,7 @@ fn build_diff_snapshots_context(
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
         bbox: None,
-        params: extra_params.clone(),
+        params,
     })
 }
 
