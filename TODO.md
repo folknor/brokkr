@@ -1,5 +1,53 @@
 # TODO
 
+## Punted
+
+### `diff-snapshots` per-side variant selection (punted 2026-04-11)
+`Command::DiffSnapshots` exposes a single `--variant` flag and resolves both
+`--from` and `--to` with the same variant via `build_diff_snapshots_context`.
+That rejects asymmetric snapshot pairs where one side has `pbf.indexed` but
+the other only has `pbf.raw`.
+
+**Why punted**: no concrete use case has surfaced. Both auto-population paths
+(`brokkr download <region> --as-snapshot <key>` and `brokkr download <region>
+--refresh`) generate `pbf.raw` *and* `pbf.indexed` automatically via
+`pbfhogg cat`, so brokkr-managed snapshots are always symmetric. The
+asymmetric case only arises with hand-edited brokkr.toml entries or
+third-party archives. The TODO note was a code-reviewer observation, not a
+user-need report.
+
+**Original design decision (Q3 of the snapshot feature spec)**: explicitly
+went with a single `--variant` flag (default `indexed`), with the reasoning
+"YAGNI on the split flags — no known use case for asymmetric variants, and
+the error-if-missing behavior on the receiving snapshot is the right default.
+Add `--variant-from` / `--variant-to` later only when a concrete need shows
+up." Today's review (2026-04-11) confirmed that decision still holds — the
+pbfhogg dev's roadmap doesn't include any workflow that intentionally
+produces asymmetric snapshots.
+
+**What was done instead**: improved the error message that fires when the
+asymmetric case is hit (commit 36cb9f3). The new error names the available
+variants on the snapshot, suggests `--variant <X>` as a one-shot workaround,
+and points at `brokkr download <region> --as-snapshot <key>` as the proper
+fix (which auto-generates the missing variant). Closes the
+first-time-user papercut without committing to any particular per-side flag
+shape.
+
+**Trigger condition for revisiting**: someone files a bug or feature request
+with a concrete asymmetric use case. Examples that would qualify: regular
+benchmarks against archive.org weekly dumps (raw-only) compared against
+brokkr-managed snapshots (raw + indexed); a pbfhogg testing workflow that
+deliberately wants to diff `--from raw --to indexed` for some reason; a
+third party releasing snapshots in a non-standard variant set.
+
+**If revisited**: the original feature request walkthrough lists the most
+plausible CLI shape — `--variant-from` / `--variant-to` overriding `--variant`
+on each side independently. But "wait for a real use case to inform the
+shape" was the principled call; the use case might suggest a different shape
+(e.g. `--variants from=X,to=Y`).
+
+---
+
 ## Won't fix
 
 ### Inconsistent path-to-string conversion
