@@ -63,12 +63,14 @@ pub struct TestFailureEvent {
 #[derive(Serialize)]
 pub struct DiagnosticSummaryEvent {
     pub tool: &'static str,
+    pub status: &'static str,
     pub errors: usize,
     pub warnings: usize,
 }
 
 #[derive(Serialize)]
 pub struct TestSummaryEvent {
+    pub status: &'static str,
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
@@ -303,6 +305,7 @@ mod tests {
     fn emit_produces_valid_json() {
         let event = CheckEvent::DiagnosticSummary(DiagnosticSummaryEvent {
             tool: "clippy",
+            status: "failed",
             errors: 2,
             warnings: 3,
         });
@@ -315,6 +318,7 @@ mod tests {
     #[test]
     fn test_summary_serialization() {
         let event = CheckEvent::TestSummary(TestSummaryEvent {
+            status: "failed",
             passed: 10,
             failed: 1,
             ignored: 0,
@@ -344,6 +348,7 @@ mod tests {
     #[test]
     fn test_summary_omits_none_duration() {
         let event = CheckEvent::TestSummary(TestSummaryEvent {
+            status: "ok",
             passed: 5,
             failed: 0,
             ignored: 0,

@@ -992,9 +992,11 @@ fn run_clippy(
             cargo_json::emit_parse_error("clippy", &stdout, &stderr);
             errors += 1;
         }
+        let status = if captured.status.success() { "ok" } else { "failed" };
         cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
             cargo_json::DiagnosticSummaryEvent {
                 tool: "clippy",
+                status,
                 errors,
                 warnings,
             },
@@ -1101,9 +1103,11 @@ fn run_tests(
             cargo_json::emit(event);
         }
         if errors > 0 || warnings > 0 {
+            let diag_status = if errors > 0 { "failed" } else { "ok" };
             cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
                 cargo_json::DiagnosticSummaryEvent {
                     tool: "test",
+                    status: diag_status,
                     errors,
                     warnings,
                 },
@@ -1130,8 +1134,10 @@ fn run_tests(
         // failures, suites == 0 and an all-zero summary would falsely imply
         // an executed-but-empty test phase.
         if parsed.suites > 0 {
+            let test_status = if parsed.failed > 0 { "failed" } else { "ok" };
             cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
                 cargo_json::TestSummaryEvent {
+                    status: test_status,
                     passed: parsed.passed,
                     failed: parsed.failed,
                     ignored: parsed.ignored,
