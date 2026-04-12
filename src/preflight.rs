@@ -285,7 +285,7 @@ pub fn cached_xxh128(path: &Path, project_root: &Path) -> Result<String, DevErro
 }
 
 /// Compute XXH128 of a file, reading in 64 KB chunks.
-fn compute_xxh128(path: &Path) -> Result<String, DevError> {
+pub(crate) fn compute_xxh128(path: &Path) -> Result<String, DevError> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Xxh3::new();
     let mut buf = vec![0u8; 64 * 1024];

@@ -71,9 +71,18 @@ CREATE TABLE IF NOT EXISTS sidecar_counters (
 CREATE INDEX IF NOT EXISTS idx_counters_uuid ON sidecar_counters(result_uuid, run_idx);
 
 CREATE TABLE IF NOT EXISTS sidecar_meta (
-    result_uuid   TEXT NOT NULL PRIMARY KEY,
-    best_run_idx  INTEGER NOT NULL DEFAULT 0,
-    total_runs    INTEGER NOT NULL DEFAULT 1
+    result_uuid    TEXT NOT NULL PRIMARY KEY,
+    best_run_idx   INTEGER NOT NULL DEFAULT 0,
+    total_runs     INTEGER NOT NULL DEFAULT 1,
+    run_start_epoch INTEGER,
+    pid            INTEGER,
+    command        TEXT,
+    binary_path    TEXT,
+    binary_xxh128  TEXT,
+    git_commit     TEXT,
+    variant        TEXT,
+    dataset        TEXT,
+    exit_code      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS sidecar_latest (
@@ -87,7 +96,7 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 3;
+const SIDECAR_VERSION: i64 = 4;
 
 /// Run pending migrations based on `PRAGMA user_version`.
 fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -100,6 +109,27 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // v1 -> v2: add sidecar_meta table (handled by CREATE TABLE IF NOT EXISTS in DDL).
     // v2 -> v3: add sidecar_counters table (handled by CREATE TABLE IF NOT EXISTS in DDL).
     //           Existing UUIDs without meta rows get defaults on query (best_run_idx=0).
+    // v3 -> v4: add run provenance columns to sidecar_meta.
+    if current < 4 {
+        // ALTER TABLE is idempotent-safe: if the column already exists (e.g.
+        // fresh DB created with the v4 DDL), the error is harmless.
+        for col in &[
+            "run_start_epoch INTEGER",
+            "pid INTEGER",
+            "command TEXT",
+            "binary_path TEXT",
+            "binary_xxh128 TEXT",
+            "git_commit TEXT",
+            "variant TEXT",
+            "dataset TEXT",
+            "exit_code INTEGER",
+        ] {
+            let sql = format!("ALTER TABLE sidecar_meta ADD COLUMN {col}");
+            // Ignore "duplicate column name" errors from fresh databases.
+            #[allow(clippy::let_underscore_must_use)]
+            let _ = conn.execute_batch(&sql);
+        }
+    }
 
     conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
     Ok(())
@@ -108,6 +138,20 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
 // ---------------------------------------------------------------------------
 // SidecarDb
 // ---------------------------------------------------------------------------
+
+/// Provenance metadata for a sidecar session: when it ran, what binary
+/// produced it, and whether that binary still matches the current build.
+pub struct RunInfo {
+    pub run_start_epoch: Option<i64>,
+    pub pid: Option<i64>,
+    pub command: Option<String>,
+    pub binary_path: Option<String>,
+    pub binary_xxh128: Option<String>,
+    pub git_commit: Option<String>,
+    pub variant: Option<String>,
+    pub dataset: Option<String>,
+    pub exit_code: Option<i32>,
+}
 
 /// Handle to the sidecar profile database (`.brokkr/sidecar.db`).
 pub struct SidecarDb {
@@ -249,17 +293,35 @@ impl SidecarDb {
         Ok(())
     }
 
-    /// Store metadata about a sidecar session (best run index, total runs).
+    /// Store metadata about a sidecar session (best run index, total runs,
+    /// and optional run provenance).
     pub fn store_meta(
         &self,
         result_uuid: &str,
         best_run_idx: usize,
         total_runs: usize,
+        run_info: Option<&RunInfo>,
     ) -> Result<(), DevError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO sidecar_meta (result_uuid, best_run_idx, total_runs)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![result_uuid, i64::try_from(best_run_idx).unwrap_or(0), i64::try_from(total_runs).unwrap_or(1)],
+            "INSERT OR REPLACE INTO sidecar_meta (
+                result_uuid, best_run_idx, total_runs,
+                run_start_epoch, pid, command, binary_path, binary_xxh128,
+                git_commit, variant, dataset, exit_code
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                result_uuid,
+                i64::try_from(best_run_idx).unwrap_or(0),
+                i64::try_from(total_runs).unwrap_or(1),
+                run_info.and_then(|r| r.run_start_epoch),
+                run_info.and_then(|r| r.pid),
+                run_info.as_ref().and_then(|r| r.command.as_deref()),
+                run_info.as_ref().and_then(|r| r.binary_path.as_deref()),
+                run_info.as_ref().and_then(|r| r.binary_xxh128.as_deref()),
+                run_info.as_ref().and_then(|r| r.git_commit.as_deref()),
+                run_info.as_ref().and_then(|r| r.variant.as_deref()),
+                run_info.as_ref().and_then(|r| r.dataset.as_deref()),
+                run_info.and_then(|r| r.exit_code),
+            ],
         )?;
         Ok(())
     }
@@ -281,6 +343,32 @@ impl SidecarDb {
                 },
             )
             .unwrap_or((0, 1))
+    }
+
+    /// Query run provenance for a result UUID prefix.
+    pub fn query_run_info(&self, uuid_prefix: &str) -> Option<RunInfo> {
+        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        self.conn
+            .query_row(
+                "SELECT run_start_epoch, pid, command, binary_path, binary_xxh128,
+                        git_commit, variant, dataset, exit_code
+                 FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
+                rusqlite::params![uuid_prefix],
+                |row| {
+                    Ok(RunInfo {
+                        run_start_epoch: row.get(0)?,
+                        pid: row.get(1)?,
+                        command: row.get(2)?,
+                        binary_path: row.get(3)?,
+                        binary_xxh128: row.get(4)?,
+                        git_commit: row.get(5)?,
+                        variant: row.get(6)?,
+                        dataset: row.get(7)?,
+                        exit_code: row.get(8)?,
+                    })
+                },
+            )
+            .ok()
     }
 
     /// Record a UUID as the latest for a given key (e.g. "dirty").

@@ -1210,6 +1210,100 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
     }
 }
 
+/// Print run provenance header for sidecar queries.
+fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
+    let Some(info) = sdb.query_run_info(uuid_prefix) else {
+        return;
+    };
+    // Only print if we have at least some provenance data.
+    if info.run_start_epoch.is_none() && info.binary_path.is_none() {
+        return;
+    }
+
+    // Line 1: timestamp, command, variant, dataset.
+    if let Some(epoch) = info.run_start_epoch {
+        let dt = format_epoch(epoch);
+        let mut parts = vec![format!("run {dt}")];
+        if let Some(ref cmd) = info.command {
+            parts.push(format!("command: {cmd}"));
+        }
+        if let Some(ref variant) = info.variant {
+            parts.push(format!("variant: {variant}"));
+        }
+        if let Some(ref dataset) = info.dataset {
+            parts.push(format!("dataset: {dataset}"));
+        }
+        output::sidecar_msg(&parts.join("  "));
+    }
+
+    // Line 2: git commit.
+    if let Some(ref commit) = info.git_commit {
+        output::sidecar_msg(&format!("commit: {commit}"));
+    }
+
+    // Line 3: exit code (only if non-zero / abnormal).
+    match info.exit_code {
+        Some(0) | None => {}
+        Some(code) if code > 128 => {
+            let sig = code - 128;
+            let sig_name = match sig {
+                9 => " SIGKILL (OOM?)",
+                11 => " SIGSEGV",
+                6 => " SIGABRT",
+                _ => "",
+            };
+            output::error(&format!("exit code: {code} (signal {sig}{sig_name})"));
+        }
+        Some(code) => {
+            output::error(&format!("exit code: {code}"));
+        }
+    }
+
+    // Line 4-5: binary path and hash verification.
+    if let Some(ref path) = info.binary_path {
+        if let Some(ref hash) = info.binary_xxh128 {
+            let short = &hash[..12.min(hash.len())];
+            output::sidecar_msg(&format!("binary: {path} (xxh128: {short}...)"));
+
+            // Check if current binary on disk still matches.
+            match crate::preflight::compute_xxh128(std::path::Path::new(path)) {
+                Ok(current_hash) => {
+                    if current_hash == *hash {
+                        output::sidecar_msg("current binary xxh128: match");
+                    } else {
+                        let current_short = &current_hash[..12.min(current_hash.len())];
+                        output::error(&format!(
+                            "current binary differs (xxh128: {current_short}...)"
+                        ));
+                    }
+                }
+                Err(_) => {
+                    output::sidecar_msg("current binary: not found (deleted or moved)");
+                }
+            }
+        } else {
+            output::sidecar_msg(&format!("binary: {path}"));
+        }
+    }
+}
+
+/// Format a Unix epoch as a local ISO-8601 timestamp.
+fn format_epoch(epoch: i64) -> String {
+    // Use libc localtime_r for zero-dependency local time formatting.
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    let time_t = epoch as libc::time_t;
+    unsafe { libc::localtime_r(&time_t, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+    )
+}
+
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
@@ -1253,6 +1347,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 output::result_msg("no sidecar.db found");
                 return Ok(());
             };
+            print_run_info(sdb, uuid_prefix);
 
             // Resolve --run: "all" → None (all runs), N → Some(N), absent → best run.
             let (best_idx, total) = sdb.query_meta(uuid_prefix);
@@ -1311,6 +1406,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 output::result_msg("no sidecar.db found");
                 return Ok(());
             };
+            print_run_info(sdb, uuid_prefix);
             let (best_idx, total) = sdb.query_meta(uuid_prefix);
             let run_filter = match q.run.as_deref() {
                 Some("all") => None,

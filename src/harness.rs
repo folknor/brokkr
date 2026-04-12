@@ -185,6 +185,7 @@ impl BenchHarness {
         let scratch_dir = &self.db_dir;
         use crate::sidecar;
 
+        let start_epoch = wall_clock_epoch();
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
         let fifo_path_str = fifo.path_str()?.to_owned();
 
@@ -228,7 +229,9 @@ impl BenchHarness {
             if let Some(e) = exit_err {
                 // Store sidecar data from the failed run before propagating.
                 drop(fifo);
-                self.store_sidecar(None, &sidecar_runs, i).ok();
+                let exit_code = exit_code_from_status(&captured.status);
+                let info = self.build_run_info(config, program, start_epoch, Some(exit_code));
+                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
                 return Err(e);
             }
 
@@ -251,7 +254,8 @@ impl BenchHarness {
         };
 
         let uuid = self.record_result(config, &bench_result)?;
-        self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx)?;
+        let info = self.build_run_info(config, program, start_epoch, Some(0));
+        self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
 
         Ok(bench_result)
     }
@@ -324,6 +328,7 @@ impl BenchHarness {
         let scratch_dir = &self.db_dir;
         use crate::sidecar;
 
+        let start_epoch = wall_clock_epoch();
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
         let fifo_path_str = fifo.path_str()?.to_owned();
 
@@ -357,7 +362,9 @@ impl BenchHarness {
             let exit_err = captured.check_success(&prog_str).err();
             if let Some(err) = exit_err {
                 drop(fifo);
-                self.store_sidecar(None, &sidecar_runs, i).ok();
+                let exit_code = exit_code_from_status(&captured.status);
+                let info = self.build_run_info(config, program, start_epoch, Some(exit_code));
+                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
                 return Err(err);
             }
 
@@ -377,7 +384,8 @@ impl BenchHarness {
         let best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
-        self.store_sidecar(None, &sidecar_runs, best_run_idx)?;
+        let info = self.build_run_info(config, program, start_epoch, Some(0));
+        self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info))?;
 
         Ok((best, best_stderr))
     }
@@ -410,10 +418,36 @@ impl BenchHarness {
         }
     }
 
+    /// Build a `RunInfo` from harness state for sidecar provenance.
+    fn build_run_info(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        start_epoch: i64,
+        exit_code: Option<i32>,
+    ) -> crate::db::sidecar::RunInfo {
+        let binary_xxh128 = crate::preflight::compute_xxh128(program).ok();
+        crate::db::sidecar::RunInfo {
+            run_start_epoch: Some(start_epoch),
+            pid: None,
+            command: Some(config.command.clone()),
+            binary_path: Some(program.display().to_string()),
+            binary_xxh128,
+            git_commit: Some(self.git.commit.clone()),
+            variant: config.variant.clone(),
+            dataset: config.input_file.clone(),
+            exit_code,
+        }
+    }
+
     /// Store sidecar data in the separate sidecar.db.
     ///
     /// `best_run_idx` records which of the N runs produced the reported
     /// elapsed_ms, so `--timeline` defaults to showing the right run.
+    ///
+    /// `run_info` carries provenance metadata (timestamp, binary hash, git
+    /// commit, variant, dataset, exit code) so that `brokkr results dirty`
+    /// can identify exactly which run produced the sidecar data.
     ///
     /// When `uuid` is `None` (dirty tree or failed run), generates a fresh
     /// UUID and updates the `dirty` latest pointer so `brokkr results dirty`
@@ -423,6 +457,7 @@ impl BenchHarness {
         uuid: Option<&str>,
         sidecar_runs: &[crate::sidecar::SidecarData],
         best_run_idx: usize,
+        run_info: Option<&crate::db::sidecar::RunInfo>,
     ) -> Result<(), DevError> {
         let sidecar_db_path = self.db_dir.join("sidecar.db");
         let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
@@ -448,7 +483,8 @@ impl BenchHarness {
         for (i, data) in sidecar_runs.iter().enumerate() {
             sidecar_db.store_run(&store_uuid, i, data)?;
         }
-        sidecar_db.store_meta(&store_uuid, best_run_idx, sidecar_runs.len())?;
+
+        sidecar_db.store_meta(&store_uuid, best_run_idx, sidecar_runs.len(), run_info)?;
 
         if is_dirty {
             sidecar_db.set_latest("dirty", &store_uuid)?;
@@ -589,6 +625,32 @@ fn append_kv_fields(parts: &mut Vec<String>, kv: &[KvPair]) {
     for pair in kv {
         parts.push(format!("{}={}", pair.key, pair.value));
     }
+}
+
+/// Extract an exit code from a process `ExitStatus`.
+///
+/// Returns the exit code if the process exited normally, or `128 + signal`
+/// if it was killed by a signal (matching shell convention: 137 = OOM kill).
+fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    // Killed by signal — use shell convention (128 + signum).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    -1
+}
+
+/// Current wall-clock time as seconds since the Unix epoch.
+fn wall_clock_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
 /// Format a program path and argument slice into a single command-line string.
