@@ -68,6 +68,8 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
 | `lock` | Show who holds the benchmark lock |
 
+`check` filters cargo output for readability. Instead of dumping hundreds of raw `Compiling`/`Checking` lines with errors buried in the middle, clippy output is parsed into a structured summary: errors are listed first with locations, warnings are grouped by lint rule and sorted by frequency, and noise lines are stripped. Test output is similarly compressed — passing suites are aggregated into a single line (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), while failures are shown with full detail. This matters because AI agents consuming brokkr output would otherwise re-run the command multiple times with grep to find the actual errors.
+
 ### pbfhogg
 
 Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect-tags`, `check-refs`, `sort`, `cat`, `cat-way`, `add-locations-to-ways`, `build-geocode-index`, `apply-changes`, `merge-changes`, `extract`, `diff`, etc. The base `cat` subcommand benchmarks the indexdata-generation passthrough path (no `--type` filter, no re-encoding) and defaults to `--variant raw` since that's the natural input for the bootstrap.

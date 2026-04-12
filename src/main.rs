@@ -1,4 +1,5 @@
 mod build;
+mod cargo_filter;
 mod cli;
 mod config;
 mod context;
@@ -954,7 +955,8 @@ fn run_clippy(
 
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        output::error(&stderr);
+        let filtered = cargo_filter::filter_clippy(&stderr);
+        output::error(&filtered);
         return Err(DevError::Build("clippy failed".into()));
     }
 
@@ -1006,14 +1008,8 @@ fn run_tests(
     if !captured.status.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        // Print stderr (compilation warnings) first, stdout (test results) last
-        // so the actionable failure details appear at the bottom of output.
-        if !stderr.is_empty() {
-            output::error(&stderr);
-        }
-        if !stdout.is_empty() {
-            output::error(&stdout);
-        }
+        let filtered = cargo_filter::filter_test(&stdout, &stderr);
+        output::error(&filtered);
         return Err(DevError::Build("tests failed".into()));
     }
 
