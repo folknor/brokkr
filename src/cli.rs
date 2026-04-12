@@ -1209,6 +1209,9 @@ pub(crate) struct PbfArgs {
     /// Use io_uring for I/O (requires linux-io-uring feature in pbfhogg)
     #[arg(long)]
     pub(crate) io_uring: bool,
+    /// Output compression: zlib:N (N=1-9), zstd:N, or none
+    #[arg(long, value_parser = validate_compression)]
+    pub(crate) compression: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1441,6 +1444,30 @@ fn validate_renumber_mode(s: &str) -> Result<String, String> {
             "invalid renumber mode '{s}', expected 'inmem' or 'external'"
         )),
     }
+}
+
+fn validate_compression(s: &str) -> Result<String, String> {
+    if s == "none" {
+        return Ok(s.to_owned());
+    }
+    if let Some(level) = s.strip_prefix("zlib:") {
+        let n: u8 = level
+            .parse()
+            .map_err(|_| format!("invalid zlib level '{level}', expected 1-9"))?;
+        if (1..=9).contains(&n) {
+            return Ok(s.to_owned());
+        }
+        return Err(format!("zlib level {n} out of range, expected 1-9"));
+    }
+    if let Some(level) = s.strip_prefix("zstd:") {
+        level
+            .parse::<u32>()
+            .map_err(|_| format!("invalid zstd level '{level}', expected a positive integer"))?;
+        return Ok(s.to_owned());
+    }
+    Err(format!(
+        "invalid compression '{s}', expected 'none', 'zlib:N' (N=1-9), or 'zstd:N'"
+    ))
 }
 
 /// Validate `--osc-range` format: `LO..HI` where both are non-negative integers and LO <= HI.

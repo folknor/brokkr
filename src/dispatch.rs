@@ -74,6 +74,17 @@ fn extra_variant_suffix(
         // catch all snapshot diffs across both formats.
         suffix.push_str(&format!("-{from}-to-{to}"));
     }
+
+    // Compression suffix: `--compression zstd:1` → `+zstd1`, `none` → `+nocompress`.
+    // Default (no flag) stays unsuffixed so historical baselines remain comparable.
+    if let Some(c) = extra_params.get("compression") {
+        let tag = match c.as_str() {
+            "none" => "nocompress".to_string(),
+            other => other.replace(':', ""),
+        };
+        suffix.push_str(&format!("+{tag}"));
+    }
+
     suffix
 }
 
@@ -190,6 +201,10 @@ fn run_pbfhogg_dry_run(
     for flag in &io_args {
         args.push((*flag).into());
     }
+    if let Some(c) = extra_params.get("compression") {
+        args.push("--compression".into());
+        args.push(c.clone());
+    }
 
     // Also validate the hotpath arg construction path when supported, so
     // `--dry-run --hotpath` is meaningful.
@@ -257,6 +272,10 @@ fn run_pbfhogg_run(
     for flag in &io_args {
         args.push((*flag).into());
     }
+    if let Some(c) = extra_params.get("compression") {
+        args.push("--compression".into());
+        args.push(c.clone());
+    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let binary_str = ctx.binary.display().to_string();
@@ -307,6 +326,10 @@ fn run_pbfhogg_wallclock(
     let mut args = command.build_args(&cmd_ctx)?;
     for flag in &io_args {
         args.push((*flag).into());
+    }
+    if let Some(c) = extra_params.get("compression") {
+        args.push("--compression".into());
+        args.push(c.clone());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Read the input file size from the resolved PBF in cmd_ctx — correct for
@@ -427,6 +450,10 @@ fn run_pbfhogg_hotpath(
     let mut hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
     for flag in &io_args {
         hotpath_args.push((*flag).into());
+    }
+    if let Some(c) = extra_params.get("compression") {
+        hotpath_args.push("--compression".into());
+        hotpath_args.push(c.clone());
     }
 
     let label = feature;

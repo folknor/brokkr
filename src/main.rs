@@ -141,6 +141,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
         if pbf.io_uring {
             params.insert("io_uring".into(), "true".into());
         }
+        if let Some(c) = &pbf.compression {
+            params.insert("compression".into(), c.clone());
+        }
         return run_measured(
             mode,
             &dev_config,
