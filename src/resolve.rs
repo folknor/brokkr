@@ -195,7 +195,7 @@ fn snapshot_osc_map<'a>(
 
 /// Get the dataset's `data_dir` (data files always live in the dataset's
 /// data dir; snapshots don't have their own data dir).
-fn dataset_data_dir<'a>(paths: &'a config::ResolvedPaths) -> &'a Path {
+fn dataset_data_dir(paths: &config::ResolvedPaths) -> &Path {
     &paths.data_dir
 }
 
@@ -407,6 +407,7 @@ pub(crate) fn resolve_osc_range(
         SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
     };
 
+    #[allow(clippy::cast_possible_truncation)]
     let mut resolved = Vec::with_capacity((hi - lo + 1) as usize);
     for seq in lo..=hi {
         let key = seq.to_string();

@@ -1033,6 +1033,7 @@ fn iso_date_to_yyyymmdd(s: &str) -> Option<String> {
 }
 
 /// Get the unix mtime of a file in seconds since epoch, or 0 on any error.
+#[allow(clippy::cast_possible_wrap)]
 fn file_mtime_unix(path: &Path) -> i64 {
     std::fs::metadata(path)
         .ok()
@@ -1298,12 +1299,15 @@ fn civil_to_days(y: i32, m: u32, d: u32) -> Option<i64> {
     let y = y as i64;
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
+    #[allow(clippy::cast_sign_loss)] // yoe is non-negative by construction
     let yoe = (y - era * 400) as u64;
-    let m = m as u64;
-    let d = d as u64;
+    let m = u64::from(m);
+    let d = u64::from(d);
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146097 + doe as i64 - 719468)
+    #[allow(clippy::cast_possible_wrap)]
+    let days = doe as i64;
+    Some(era * 146097 + days - 719468)
 }
 
 #[cfg(test)]

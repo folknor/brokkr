@@ -12,6 +12,12 @@ use super::{
 use crate::error::DevError;
 use crate::output::verify_msg;
 
+/// Elapsed milliseconds as u64 (truncation is safe — verify commands won't run for 584M years).
+#[allow(clippy::cast_possible_truncation)]
+fn elapsed_ms(t: &Instant) -> u64 {
+    t.elapsed().as_millis() as u64
+}
+
 /// Run all verify commands sequentially.
 ///
 /// Each command is wrapped so that a failure is logged but does not prevent
@@ -57,18 +63,18 @@ pub fn run(
     // 1. sort
     verify_msg("========== sort ==========");
     let t = Instant::now();
-    run_one("sort", verify_sort::run(harness, pbf, direct_io), t.elapsed().as_millis() as u64);
+    run_one("sort", verify_sort::run(harness, pbf, direct_io), elapsed_ms(&t));
 
     // 2. cat
     verify_msg("========== cat ==========");
     let t = Instant::now();
-    run_one("cat", verify_cat::run(harness, pbf, direct_io), t.elapsed().as_millis() as u64);
+    run_one("cat", verify_cat::run(harness, pbf, direct_io), elapsed_ms(&t));
 
     // 3. extract
     verify_msg("========== extract ==========");
     if let Some(b) = bbox {
         let t = Instant::now();
-        run_one("extract", verify_extract::run(harness, pbf, b, direct_io), t.elapsed().as_millis() as u64);
+        run_one("extract", verify_extract::run(harness, pbf, b, direct_io), elapsed_ms(&t));
     } else {
         skip("extract", "no --bbox provided");
     }
@@ -80,7 +86,7 @@ pub fn run(
         run_one(
             "multi-extract",
             verify_multi_extract::run(harness, pbf, b, 5, direct_io),
-            t.elapsed().as_millis() as u64,
+            elapsed_ms(&t),
         );
     } else {
         skip("multi-extract", "no --bbox provided");
@@ -92,7 +98,7 @@ pub fn run(
     run_one(
         "tags-filter",
         verify_tags_filter::run(harness, pbf, direct_io),
-        t.elapsed().as_millis() as u64,
+        elapsed_ms(&t),
     );
 
     // 5. getid-removeid
@@ -101,7 +107,7 @@ pub fn run(
     run_one(
         "getid-removeid",
         verify_getid_removeid::run(harness, pbf, direct_io),
-        t.elapsed().as_millis() as u64,
+        elapsed_ms(&t),
     );
 
     // 6. add-locations-to-ways
@@ -110,7 +116,7 @@ pub fn run(
     run_one(
         "add-locations-to-ways",
         verify_add_locations::run(harness, pbf, direct_io),
-        t.elapsed().as_millis() as u64,
+        elapsed_ms(&t),
     );
 
     // 7. check-refs
@@ -119,7 +125,7 @@ pub fn run(
     run_one(
         "check-refs",
         verify_check_refs::run(harness, pbf, direct_io),
-        t.elapsed().as_millis() as u64,
+        elapsed_ms(&t),
     );
 
     // 8. apply-changes
@@ -137,7 +143,7 @@ pub fn run(
         run_one(
             "apply-changes",
             verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io),
-            t.elapsed().as_millis() as u64,
+            elapsed_ms(&t),
         );
     } else {
         skip("apply-changes", "no --osc provided");
@@ -150,7 +156,7 @@ pub fn run(
         run_one(
             "diff --format osc",
             verify_derive_changes::run(harness, pbf, osc_path, direct_io),
-            t.elapsed().as_millis() as u64,
+            elapsed_ms(&t),
         );
     } else {
         skip("diff --format osc", "no --osc provided");
@@ -162,14 +168,14 @@ pub fn run(
     run_one(
         "renumber",
         verify_renumber::run(harness, pbf, dataset, "external", None, false),
-        t.elapsed().as_millis() as u64,
+        elapsed_ms(&t),
     );
 
     // 11. diff
     verify_msg("========== diff ==========");
     if let Some(osc_path) = osc {
         let t = Instant::now();
-        run_one("diff", verify_diff::run(harness, pbf, osc_path), t.elapsed().as_millis() as u64);
+        run_one("diff", verify_diff::run(harness, pbf, osc_path), elapsed_ms(&t));
     } else {
         skip("diff", "no --osc provided");
     }

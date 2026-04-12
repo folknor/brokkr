@@ -770,6 +770,7 @@ enum MergedCacheState {
 /// deleted before checking — used by measured modes (bench/hotpath/alloc) to
 /// make total invocation wall time deterministic regardless of prior session
 /// state.
+#[allow(clippy::too_many_arguments)]
 fn ensure_merged_pbf(
     binary: &Path,
     pbf_path: &Path,

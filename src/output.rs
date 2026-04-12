@@ -126,10 +126,10 @@ impl CapturedOutput {
         if self.status.success() {
             return Ok(());
         }
-        if let Some(code) = self.status.code() {
-            if ok_codes.contains(&code) {
-                return Ok(());
-            }
+        if let Some(code) = self.status.code()
+            && ok_codes.contains(&code)
+        {
+            return Ok(());
         }
         Err(DevError::Subprocess {
             program: program.to_owned(),

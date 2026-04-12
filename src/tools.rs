@@ -457,7 +457,7 @@ pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
         })
         .next_back()
         .map(parse_http_date)
-        .and_then(|r| r.ok());
+        .and_then(Result::ok);
 
     Ok(HeadResponse {
         last_modified_unix: last_modified,
@@ -478,7 +478,7 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
         return Err(format!("not enough parts: '{s}'"));
     }
     let day: i64 = parts[1].parse().map_err(|e| format!("day: {e}"))?;
-    let month = match parts[2] {
+    let month: i32 = match parts[2] {
         "Jan" => 1,
         "Feb" => 2,
         "Mar" => 3,
@@ -511,11 +511,15 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
     // reverse.
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
+    #[allow(clippy::cast_sign_loss)] // yoe, month, day are all non-negative here
     let yoe = (y - era * 400) as u64;
+    #[allow(clippy::cast_sign_loss)]
     let m = month as u64;
+    #[allow(clippy::cast_sign_loss)]
     let d = day as u64;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    #[allow(clippy::cast_possible_wrap)]
     let days = era * 146097 + doe as i64 - 719468;
     Ok(days * 86400 + hour * 3600 + minute * 60 + second)
 }
