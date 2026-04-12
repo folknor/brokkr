@@ -1211,6 +1211,9 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
 }
 
 /// Print run provenance header for sidecar queries.
+///
+/// Writes to stderr so it never contaminates the raw JSONL stream on
+/// stdout (`--timeline` / `--markers` without `--summary` etc.).
 fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
     let Some(info) = sdb.query_run_info(uuid_prefix) else {
         return;
@@ -1220,10 +1223,13 @@ fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
         return;
     }
 
-    // Line 1: timestamp, command, variant, dataset.
+    // Line 1: timestamp, PID, command, variant, dataset.
     if let Some(epoch) = info.run_start_epoch {
         let dt = format_epoch(epoch);
         let mut parts = vec![format!("run {dt}")];
+        if let Some(pid) = info.pid {
+            parts.push(format!("PID {pid}"));
+        }
         if let Some(ref cmd) = info.command {
             parts.push(format!("command: {cmd}"));
         }
@@ -1233,12 +1239,34 @@ fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
         if let Some(ref dataset) = info.dataset {
             parts.push(format!("dataset: {dataset}"));
         }
-        output::sidecar_msg(&parts.join("  "));
+        eprintln!("[sidecar] {}", parts.join("  "));
     }
 
-    // Line 2: git commit.
-    if let Some(ref commit) = info.git_commit {
-        output::sidecar_msg(&format!("commit: {commit}"));
+    // Line 2: git commit + wall time from sidecar summary.
+    let (best_idx, _) = sdb.query_meta(uuid_prefix);
+    let samples = sdb.query_samples(uuid_prefix, Some(best_idx)).ok();
+    let wall_time = samples.as_ref().and_then(|s| {
+        if s.len() < 2 {
+            return None;
+        }
+        let first = s.first()?.timestamp_us;
+        let last = s.last()?.timestamp_us;
+        let secs = (last - first) / 1_000_000;
+        if secs > 0 { Some(secs) } else { None }
+    });
+    match (&info.git_commit, wall_time) {
+        (Some(commit), Some(secs)) => {
+            let (m, s) = (secs / 60, secs % 60);
+            eprintln!("[sidecar] commit: {commit}  wall: {m}m{s:02}s");
+        }
+        (Some(commit), None) => {
+            eprintln!("[sidecar] commit: {commit}");
+        }
+        (None, Some(secs)) => {
+            let (m, s) = (secs / 60, secs % 60);
+            eprintln!("[sidecar] wall: {m}m{s:02}s");
+        }
+        (None, None) => {}
     }
 
     // Line 3: exit code (only if non-zero / abnormal).
@@ -1252,10 +1280,10 @@ fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
                 6 => " SIGABRT",
                 _ => "",
             };
-            output::error(&format!("exit code: {code} (signal {sig}{sig_name})"));
+            eprintln!("[error]   exit code: {code} (signal {sig}{sig_name})");
         }
         Some(code) => {
-            output::error(&format!("exit code: {code}"));
+            eprintln!("[error]   exit code: {code}");
         }
     }
 
@@ -1263,26 +1291,26 @@ fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
     if let Some(ref path) = info.binary_path {
         if let Some(ref hash) = info.binary_xxh128 {
             let short = &hash[..12.min(hash.len())];
-            output::sidecar_msg(&format!("binary: {path} (xxh128: {short}...)"));
+            eprintln!("[sidecar] binary: {path} (xxh128: {short}...)");
 
             // Check if current binary on disk still matches.
             match crate::preflight::compute_xxh128(std::path::Path::new(path)) {
                 Ok(current_hash) => {
                     if current_hash == *hash {
-                        output::sidecar_msg("current binary xxh128: match");
+                        eprintln!("[sidecar] current binary xxh128: match");
                     } else {
                         let current_short = &current_hash[..12.min(current_hash.len())];
-                        output::error(&format!(
-                            "current binary differs (xxh128: {current_short}...)"
-                        ));
+                        eprintln!(
+                            "[error]   current binary differs (xxh128: {current_short}...)"
+                        );
                     }
                 }
                 Err(_) => {
-                    output::sidecar_msg("current binary: not found (deleted or moved)");
+                    eprintln!("[sidecar] current binary: not found (deleted or moved)");
                 }
             }
         } else {
-            output::sidecar_msg(&format!("binary: {path}"));
+            eprintln!("[sidecar] binary: {path}");
         }
     }
 }

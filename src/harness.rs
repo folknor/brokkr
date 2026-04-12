@@ -191,6 +191,7 @@ impl BenchHarness {
 
         let mut best_ms: Option<i64> = None;
         let mut best_run_idx: usize = 0;
+        let mut last_pid: u32 = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
 
@@ -206,6 +207,7 @@ impl BenchHarness {
             let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
             let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+            last_pid = child.id();
 
             // run_sidecar takes ownership of the child, drains stdout/stderr
             // in background threads, and returns everything when the child exits.
@@ -230,7 +232,7 @@ impl BenchHarness {
                 // Store sidecar data from the failed run before propagating.
                 drop(fifo);
                 let exit_code = exit_code_from_status(&captured.status);
-                let info = self.build_run_info(config, program, start_epoch, Some(exit_code));
+                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
                 self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
                 return Err(e);
             }
@@ -254,7 +256,7 @@ impl BenchHarness {
         };
 
         let uuid = self.record_result(config, &bench_result)?;
-        let info = self.build_run_info(config, program, start_epoch, Some(0));
+        let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
         self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
 
         Ok(bench_result)
@@ -335,6 +337,7 @@ impl BenchHarness {
         let mut best: Option<BenchResult> = None;
         let mut best_stderr: Vec<u8> = Vec::new();
         let mut best_run_idx: usize = 0;
+        let mut last_pid: u32 = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
 
@@ -348,6 +351,7 @@ impl BenchHarness {
             let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
             let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+            last_pid = child.id();
             let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start);
 
             let captured = output::CapturedOutput {
@@ -363,7 +367,7 @@ impl BenchHarness {
             if let Some(err) = exit_err {
                 drop(fifo);
                 let exit_code = exit_code_from_status(&captured.status);
-                let info = self.build_run_info(config, program, start_epoch, Some(exit_code));
+                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
                 self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
                 return Err(err);
             }
@@ -384,7 +388,7 @@ impl BenchHarness {
         let best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
-        let info = self.build_run_info(config, program, start_epoch, Some(0));
+        let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
         self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info))?;
 
         Ok((best, best_stderr))
@@ -424,12 +428,13 @@ impl BenchHarness {
         config: &BenchConfig,
         program: &Path,
         start_epoch: i64,
+        pid: u32,
         exit_code: Option<i32>,
     ) -> crate::db::sidecar::RunInfo {
         let binary_xxh128 = crate::preflight::compute_xxh128(program).ok();
         crate::db::sidecar::RunInfo {
             run_start_epoch: Some(start_epoch),
-            pid: None,
+            pid: Some(i64::from(pid)),
             command: Some(config.command.clone()),
             binary_path: Some(program.display().to_string()),
             binary_xxh128,
