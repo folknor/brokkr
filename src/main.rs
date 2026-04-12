@@ -959,15 +959,19 @@ fn run_clippy(
     output::run_msg(&format!("cargo {}", args.join(" ")));
 
     let captured = output::run_captured("cargo", &args, project_root)?;
+    let stderr = String::from_utf8_lossy(&captured.stderr);
 
     if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
         if raw {
             output::error(&stderr);
         } else {
             output::error(&cargo_filter::filter_clippy(&stderr));
         }
         return Err(DevError::Build("clippy failed".into()));
+    }
+
+    if raw && !stderr.is_empty() {
+        print!("{stderr}");
     }
 
     Ok(())
@@ -1016,9 +1020,10 @@ fn run_tests(
         output::run_captured_with_env("cargo", &args, project_root, &env)?
     };
 
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+
     if !captured.status.success() {
-        let stdout = String::from_utf8_lossy(&captured.stdout);
-        let stderr = String::from_utf8_lossy(&captured.stderr);
         if raw {
             if !stderr.is_empty() {
                 output::error(&stderr);
@@ -1030,6 +1035,15 @@ fn run_tests(
             output::error(&cargo_filter::filter_test(&stdout, &stderr));
         }
         return Err(DevError::Build("tests failed".into()));
+    }
+
+    if raw {
+        if !stderr.is_empty() {
+            print!("{stderr}");
+        }
+        if !stdout.is_empty() {
+            print!("{stdout}");
+        }
     }
 
     Ok(())

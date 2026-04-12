@@ -69,7 +69,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
 | `lock` | Show who holds the benchmark lock |
 
-`check` filters cargo output for readability. Instead of dumping hundreds of raw `Compiling`/`Checking` lines with errors buried in the middle, clippy output is parsed into a structured summary: errors are listed first with locations, warnings are grouped by lint rule and sorted by frequency, and noise lines are stripped. Test output is similarly compressed — passing suites are aggregated into a single line (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), while failures are shown with full detail. This matters because AI agents consuming brokkr output would otherwise re-run the command multiple times with grep to find the actual errors.
+`check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), failures become `FAILED name location message`. Use `--raw` for unfiltered cargo output. Falls back to raw output automatically if parsing fails.
 
 ### pbfhogg
 

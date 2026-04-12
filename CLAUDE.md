@@ -22,7 +22,7 @@ Single crate, single binary. No workspace.
 
 - `src/main.rs` — `main()`, command dispatch, `run_measured()`, `resolve_mode()`
 - `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`. All commands are top-level — no subcommand enums for litehtml/sluggrs
-- `src/cargo_filter.rs` — Filters raw cargo output into structured summaries for `check` command. `filter_clippy()` groups warnings by lint rule, shows errors first. `filter_test()` aggregates passing suites, shows only failure details. Bypassed with `--raw`
+- `src/cargo_filter.rs` — Filters raw cargo output into one-line-per-diagnostic summaries for `check` command. `filter_clippy()` emits `error[CODE] file:line:col message` / `warning[rule] file:line:col message`. `filter_test()` aggregates passing suites, emits `FAILED name location message` for failures. Falls back to raw output if parsing extracts nothing. Bypassed with `--raw`
 - `src/measure.rs` — `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
 - `src/dispatch.rs` — Unified dispatch for all three projects: `run_pbfhogg_command_with_params()`, `run_elivagar_command()`, `run_nidhogg_command()`. Each routes through run/bench/hotpath/alloc based on command enum + mode. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions due to divergent lifecycles
 - `src/pbfhogg/commands.rs` — `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` — single source of truth for all pbfhogg command argument construction
@@ -130,7 +130,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 
 ### Shared commands (all projects)
 
-- `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features`, `--no-default-features`, and `--raw` (bypass output filtering). Output is filtered by default: errors shown first, warnings grouped by lint rule, compilation noise stripped. `--raw` disables filtering for unprocessed cargo output.
+- `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features`, `--no-default-features`, and `--raw` (unfiltered cargo output). Output is filtered by default: each diagnostic becomes one line (`error[CODE] file:line:col message`), compilation noise stripped, passing tests aggregated. `--raw` shows full cargo output on both success and failure.
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
 - `results` — query the results database (`.brokkr/results.db`). Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
 - `clean` — remove scratch/temp files
