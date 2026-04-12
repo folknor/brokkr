@@ -1476,9 +1476,24 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             return Ok(());
         }
 
-        let rows = results_db.query_by_uuid(uuid_prefix)?;
+        // Resolve sidecar latest-keys (e.g. "dirty") so the results DB
+        // lookup uses the actual UUID, not the alias.
+        let resolved_prefix = sidecar_db
+            .as_ref()
+            .map(|sdb| sdb.resolve_latest(uuid_prefix))
+            .unwrap_or_else(|| uuid_prefix.to_owned());
+        let rows = results_db.query_by_uuid(&resolved_prefix)?;
         if rows.is_empty() {
-            output::result_msg("no matching results");
+            // No results DB entry — check if sidecar data exists (dirty/failed run).
+            if let Some(ref sdb) = sidecar_db
+                && sdb.has_data(uuid_prefix)
+            {
+                print_run_info(sdb, uuid_prefix);
+                output::result_msg("sidecar-only run (no results DB entry — dirty tree or failed)");
+                output::result_msg("use --timeline, --markers, or --markers --phases for data");
+            } else {
+                output::result_msg("no matching results");
+            }
         } else {
             let table = db::format_table(&rows);
             println!("{table}");
