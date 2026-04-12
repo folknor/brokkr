@@ -39,8 +39,12 @@ Examples:
         package: Option<String>,
 
         /// Show unfiltered cargo output
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         raw: bool,
+
+        /// Emit NDJSON diagnostics and summaries
+        #[arg(long, conflicts_with = "raw")]
+        json: bool,
 
         /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

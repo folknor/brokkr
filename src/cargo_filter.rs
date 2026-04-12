@@ -3,6 +3,9 @@
 //! Instead of dumping hundreds of lines of cargo decoration (source excerpts,
 //! pipe characters, help suggestions, diff hunks), each diagnostic becomes a
 //! single line: `error[CODE] file:line:col message`
+//!
+//! Test output parsing is split into a shared structured layer ([`parse_test_output`])
+//! so that both text and JSON modes can consume the same parsed results.
 
 /// Filter cargo clippy output into one line per diagnostic.
 ///
@@ -105,6 +108,197 @@ pub fn filter_clippy(output: &str) -> String {
     result.trim_end().to_string()
 }
 
+// --- Shared test output parser ---
+
+/// A single parsed test failure.
+pub struct ParsedTestFailure {
+    pub name: String,
+    pub location: Option<String>,
+    pub message: Option<String>,
+}
+
+/// Aggregated test results from one or more test suites.
+pub struct ParsedTestResults {
+    pub failures: Vec<ParsedTestFailure>,
+    pub passed: usize,
+    pub failed: usize,
+    pub ignored: usize,
+    pub filtered_out: usize,
+    pub suites: usize,
+    pub duration: Option<f64>,
+}
+
+/// Parse cargo test stdout into structured results.
+///
+/// Handles the two `failures:` sections (detail then name-list), extracts
+/// panic locations and messages, and aggregates `test result:` summary lines.
+/// Works on any iterator of lines — callers can pre-filter JSON lines out
+/// before passing non-JSON lines here.
+pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
+    let mut failures: Vec<ParsedTestFailure> = Vec::new();
+    let mut summary_lines: Vec<String> = Vec::new();
+    let mut in_failure_detail = false;
+    let mut seen_failure_section = false;
+    let mut current_name = String::new();
+    let mut current_panic_loc = String::new();
+    let mut current_panic_msg = String::new();
+
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Compiling")
+            || trimmed.starts_with("Downloading")
+            || trimmed.starts_with("Finished")
+            || line.starts_with("running ")
+            || (line.starts_with("test ") && line.ends_with("... ok"))
+        {
+            continue;
+        }
+
+        if *line == "failures:" {
+            if !seen_failure_section {
+                in_failure_detail = true;
+                seen_failure_section = true;
+            } else {
+                in_failure_detail = false;
+                flush_parsed_failure(
+                    &current_name,
+                    &current_panic_loc,
+                    &current_panic_msg,
+                    &mut failures,
+                );
+                current_name.clear();
+                current_panic_loc.clear();
+                current_panic_msg.clear();
+            }
+            continue;
+        }
+
+        if in_failure_detail {
+            if line.starts_with("test result:") {
+                in_failure_detail = false;
+                flush_parsed_failure(
+                    &current_name,
+                    &current_panic_loc,
+                    &current_panic_msg,
+                    &mut failures,
+                );
+                current_name.clear();
+                current_panic_loc.clear();
+                current_panic_msg.clear();
+                summary_lines.push(line.to_string());
+            } else if line.starts_with("---- ") && line.ends_with(" stdout ----") {
+                flush_parsed_failure(
+                    &current_name,
+                    &current_panic_loc,
+                    &current_panic_msg,
+                    &mut failures,
+                );
+                current_name = line
+                    .strip_prefix("---- ")
+                    .unwrap_or("")
+                    .strip_suffix(" stdout ----")
+                    .unwrap_or("")
+                    .to_string();
+                current_panic_loc.clear();
+                current_panic_msg.clear();
+            } else if line.contains("panicked at ") {
+                if let Some(idx) = line.find("panicked at ") {
+                    let rest = &line[idx + "panicked at ".len()..];
+                    let rest = rest.trim_end_matches(':');
+                    if rest.starts_with('\'') {
+                        if let Some(end_quote) = rest[1..].find('\'') {
+                            current_panic_msg = rest[1..1 + end_quote].to_string();
+                            let after = rest[1 + end_quote + 1..].trim_start_matches(", ");
+                            current_panic_loc = after.to_string();
+                        }
+                    } else {
+                        current_panic_loc = rest.to_string();
+                    }
+                }
+            } else if current_panic_msg.is_empty()
+                && !current_panic_loc.is_empty()
+                && !line.trim().is_empty()
+            {
+                current_panic_msg = line.trim().to_string();
+            }
+        }
+
+        if !in_failure_detail && line.starts_with("test result:") {
+            summary_lines.push(line.to_string());
+        }
+    }
+
+    flush_parsed_failure(
+        &current_name,
+        &current_panic_loc,
+        &current_panic_msg,
+        &mut failures,
+    );
+
+    // Aggregate summary lines.
+    let mut passed: usize = 0;
+    let mut failed: usize = 0;
+    let mut ignored: usize = 0;
+    let mut filtered_out: usize = 0;
+    let mut duration: f64 = 0.0;
+    let mut has_duration = false;
+    let mut suites: usize = 0;
+
+    for line in &summary_lines {
+        suites += 1;
+        if let Some(n) = parse_count(line, "passed") {
+            passed += n;
+        }
+        if let Some(n) = parse_count(line, "failed") {
+            failed += n;
+        }
+        if let Some(n) = parse_count(line, "ignored") {
+            ignored += n;
+        }
+        if let Some(n) = parse_count(line, "filtered out") {
+            filtered_out += n;
+        }
+        if let Some(d) = parse_duration(line) {
+            duration += d;
+            has_duration = true;
+        }
+    }
+
+    ParsedTestResults {
+        failures,
+        passed,
+        failed,
+        ignored,
+        filtered_out,
+        suites,
+        duration: if has_duration { Some(duration) } else { None },
+    }
+}
+
+fn flush_parsed_failure(
+    name: &str,
+    panic_loc: &str,
+    panic_msg: &str,
+    failures: &mut Vec<ParsedTestFailure>,
+) {
+    if name.is_empty() {
+        return;
+    }
+    failures.push(ParsedTestFailure {
+        name: name.to_string(),
+        location: if panic_loc.is_empty() {
+            None
+        } else {
+            Some(panic_loc.to_string())
+        },
+        message: if panic_msg.is_empty() {
+            None
+        } else {
+            Some(panic_msg.to_string())
+        },
+    });
+}
+
 /// Filter cargo test output — one line per failure, compact summary on success.
 ///
 /// On success:
@@ -137,124 +331,16 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         return filtered;
     }
 
-    // Parse test failures and result summaries from stdout.
-    let mut failures: Vec<String> = Vec::new();
-    let mut summary_lines: Vec<String> = Vec::new();
-    let mut in_failure_detail = false;
-    let mut seen_failure_section = false;
-    let mut current_name = String::new();
-    let mut current_panic_loc = String::new();
-    let mut current_panic_msg = String::new();
+    let lines: Vec<&str> = stdout.lines().collect();
+    let parsed = parse_test_output(&lines);
 
-    for line in stdout.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("Compiling")
-            || trimmed.starts_with("Downloading")
-            || trimmed.starts_with("Finished")
-            || line.starts_with("running ")
-            || (line.starts_with("test ") && line.ends_with("... ok"))
-        {
-            continue;
-        }
-
-        if line == "failures:" {
-            if !seen_failure_section {
-                in_failure_detail = true;
-                seen_failure_section = true;
-            } else {
-                // Second "failures:" section — flush and stop collecting.
-                in_failure_detail = false;
-                flush_test_failure(
-                    &current_name,
-                    &current_panic_loc,
-                    &current_panic_msg,
-                    &mut failures,
-                );
-                current_name.clear();
-                current_panic_loc.clear();
-                current_panic_msg.clear();
-            }
-            continue;
-        }
-
-        if in_failure_detail {
-            if line.starts_with("test result:") {
-                in_failure_detail = false;
-                flush_test_failure(
-                    &current_name,
-                    &current_panic_loc,
-                    &current_panic_msg,
-                    &mut failures,
-                );
-                current_name.clear();
-                current_panic_loc.clear();
-                current_panic_msg.clear();
-                summary_lines.push(line.to_string());
-            } else if line.starts_with("---- ") && line.ends_with(" stdout ----") {
-                // New failure block — flush previous.
-                flush_test_failure(
-                    &current_name,
-                    &current_panic_loc,
-                    &current_panic_msg,
-                    &mut failures,
-                );
-                current_name = line
-                    .strip_prefix("---- ")
-                    .unwrap_or("")
-                    .strip_suffix(" stdout ----")
-                    .unwrap_or("")
-                    .to_string();
-                current_panic_loc.clear();
-                current_panic_msg.clear();
-            } else if line.contains("panicked at ") {
-                // "thread 'name' panicked at src/file.rs:10:5:" (Rust 2021+)
-                // "thread 'name' panicked at 'msg', src/file.rs:10:5" (older)
-                if let Some(idx) = line.find("panicked at ") {
-                    let rest = &line[idx + "panicked at ".len()..];
-                    let rest = rest.trim_end_matches(':');
-                    // If it starts with a quote, it's the old format: 'msg', location
-                    if rest.starts_with('\'') {
-                        if let Some(end_quote) = rest[1..].find('\'') {
-                            current_panic_msg = rest[1..1 + end_quote].to_string();
-                            let after = rest[1 + end_quote + 1..].trim_start_matches(", ");
-                            current_panic_loc = after.to_string();
-                        }
-                    } else {
-                        // New format: location on this line, message on next
-                        current_panic_loc = rest.to_string();
-                    }
-                }
-            } else if current_panic_msg.is_empty()
-                && !current_panic_loc.is_empty()
-                && !line.trim().is_empty()
-            {
-                // First non-empty line after "panicked at location:" is the message.
-                current_panic_msg = line.trim().to_string();
-            }
-        }
-
-        if !in_failure_detail && line.starts_with("test result:") {
-            summary_lines.push(line.to_string());
-        }
-    }
-
-    flush_test_failure(
-        &current_name,
-        &current_panic_loc,
-        &current_panic_msg,
-        &mut failures,
-    );
-
-    // All passed — aggregate into compact format.
-    if failures.is_empty() && !summary_lines.is_empty() {
-        if let Some(agg) = aggregate_test_results(&summary_lines) {
-            return agg;
-        }
-        return summary_lines.join("\n");
+    // All passed — compact summary.
+    if parsed.failures.is_empty() && parsed.suites > 0 {
+        return format_test_summary(&parsed);
     }
 
     // Parser found no failures but stdout has FAILED lines — fall back to raw.
-    if failures.is_empty() {
+    if parsed.failures.is_empty() {
         let has_failed = stdout.lines().any(|l| l.contains("FAILED"));
         if has_failed {
             let mut raw = String::new();
@@ -271,23 +357,56 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         }
     }
 
-    // Failures present.
+    // Failures present — format as one-liners.
+    format_test_failures(&parsed)
+}
+
+/// Format parsed test results as a compact summary line.
+fn format_test_summary(parsed: &ParsedTestResults) -> String {
+    let mut parts = vec![format!("{} passed", parsed.passed)];
+    if parsed.failed > 0 {
+        parts.push(format!("{} failed", parsed.failed));
+    }
+    if parsed.ignored > 0 {
+        parts.push(format!("{} ignored", parsed.ignored));
+    }
+    if parsed.filtered_out > 0 {
+        parts.push(format!("{} filtered out", parsed.filtered_out));
+    }
+
+    let counts = parts.join(", ");
+    let suite_text = if parsed.suites == 1 {
+        "1 suite".to_string()
+    } else {
+        format!("{} suites", parsed.suites)
+    };
+
+    if let Some(d) = parsed.duration {
+        format!("cargo test: {counts} ({suite_text}, {d:.2}s)")
+    } else {
+        format!("cargo test: {counts} ({suite_text})")
+    }
+}
+
+/// Format parsed test failures as one-liner text output.
+fn format_test_failures(parsed: &ParsedTestResults) -> String {
     let mut result = format!(
         "cargo test: {} failure{}\n",
-        failures.len(),
-        if failures.len() == 1 { "" } else { "s" }
+        parsed.failures.len(),
+        if parsed.failures.len() == 1 { "" } else { "s" }
     );
-    for line in &failures {
-        result.push_str("  ");
-        result.push_str(line);
-        result.push('\n');
-    }
-    if !summary_lines.is_empty() {
-        result.push('\n');
-        for line in &summary_lines {
-            result.push_str(line);
-            result.push('\n');
+    for f in &parsed.failures {
+        result.push_str("  FAILED ");
+        result.push_str(&f.name);
+        if let Some(loc) = &f.location {
+            result.push(' ');
+            result.push_str(loc);
         }
+        if let Some(msg) = &f.message {
+            result.push(' ');
+            result.push_str(msg);
+        }
+        result.push('\n');
     }
 
     result.trim_end().to_string()
@@ -391,96 +510,8 @@ fn format_diagnostic(block: &[String]) -> String {
     }
 }
 
-/// Flush a collected test failure into the failures vec as a one-liner.
-fn flush_test_failure(
-    name: &str,
-    panic_loc: &str,
-    panic_msg: &str,
-    failures: &mut Vec<String>,
-) {
-    if name.is_empty() {
-        return;
-    }
-    let mut line = format!("FAILED {name}");
-    if !panic_loc.is_empty() {
-        line.push(' ');
-        line.push_str(panic_loc);
-    }
-    if !panic_msg.is_empty() {
-        line.push(' ');
-        line.push_str(panic_msg);
-    }
-    failures.push(line);
-}
-
-/// Aggregate multiple "test result: ok." lines into a compact summary.
-fn aggregate_test_results(summary_lines: &[String]) -> Option<String> {
-    let mut total_passed: usize = 0;
-    let mut total_failed: usize = 0;
-    let mut total_ignored: usize = 0;
-    let mut total_filtered: usize = 0;
-    let mut total_duration: f64 = 0.0;
-    let mut suites: usize = 0;
-    let mut has_duration = false;
-
-    for line in summary_lines {
-        if !line.contains("test result: ok.") {
-            return None;
-        }
-
-        suites += 1;
-
-        if let Some(n) = parse_count(line, "passed") {
-            total_passed += n;
-        }
-        if let Some(n) = parse_count(line, "failed") {
-            total_failed += n;
-        }
-        if let Some(n) = parse_count(line, "ignored") {
-            total_ignored += n;
-        }
-        if let Some(n) = parse_count(line, "filtered out") {
-            total_filtered += n;
-        }
-        if let Some(d) = parse_duration(line) {
-            total_duration += d;
-            has_duration = true;
-        }
-    }
-
-    if suites == 0 {
-        return None;
-    }
-
-    let mut parts = vec![format!("{total_passed} passed")];
-    if total_failed > 0 {
-        parts.push(format!("{total_failed} failed"));
-    }
-    if total_ignored > 0 {
-        parts.push(format!("{total_ignored} ignored"));
-    }
-    if total_filtered > 0 {
-        parts.push(format!("{total_filtered} filtered out"));
-    }
-
-    let counts = parts.join(", ");
-    let suite_text = if suites == 1 {
-        "1 suite".to_string()
-    } else {
-        format!("{suites} suites")
-    };
-
-    if has_duration {
-        Some(format!(
-            "cargo test: {counts} ({suite_text}, {total_duration:.2}s)"
-        ))
-    } else {
-        Some(format!("cargo test: {counts} ({suite_text})"))
-    }
-}
-
 /// Parse "N <label>" from a test result line.
-fn parse_count(line: &str, label: &str) -> Option<usize> {
+pub fn parse_count(line: &str, label: &str) -> Option<usize> {
     let idx = line.find(label)?;
     let before = line[..idx].trim_end();
     let num_str = before.rsplit(|c: char| !c.is_ascii_digit()).next()?;
@@ -488,7 +519,7 @@ fn parse_count(line: &str, label: &str) -> Option<usize> {
 }
 
 /// Parse "finished in N.NNs" from a test result line.
-fn parse_duration(line: &str) -> Option<f64> {
+pub fn parse_duration(line: &str) -> Option<f64> {
     let marker = "finished in ";
     let idx = line.find(marker)?;
     let rest = &line[idx + marker.len()..];

@@ -69,7 +69,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
 | `lock` | Show who holds the benchmark lock |
 
-`check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), failures become `FAILED name location message`. Use `--raw` for unfiltered cargo output. Falls back to raw output automatically if parsing fails.
+`check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), failures become `FAILED name location message`. Use `--raw` for unfiltered cargo output, or `--json` for NDJSON with full-fidelity structured diagnostics (one JSON object per line). Falls back to raw output automatically if parsing fails.
 
 ### pbfhogg
 
