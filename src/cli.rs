@@ -667,8 +667,8 @@ Examples:
 Query benchmark results from .brokkr/results.db.
 
 Examples:
-  brokkr results                                    # last 20 results
-  brokkr results -n 50                              # last 50 results
+  brokkr results                                    # detail view of last result
+  brokkr results --command read                     # last 20 matching 'read'
   brokkr results 0b74fb6f                           # look up by UUID prefix
   brokkr results --commit a65a                      # filter by commit prefix
   brokkr results --command 'bench read'             # filter by command
@@ -725,12 +725,12 @@ Examples:
         #[arg(long, default_value = "10")]
         top: usize,
 
-        /// Output sidecar samples as JSONL (requires UUID argument)
-        #[arg(long, requires = "query", conflicts_with = "markers")]
+        /// Output sidecar samples as JSONL (defaults to last result if no UUID given)
+        #[arg(long, conflicts_with = "markers")]
         timeline: bool,
 
-        /// Output sidecar markers as JSONL (requires UUID argument)
-        #[arg(long, requires = "query", conflicts_with = "timeline")]
+        /// Output sidecar markers as JSONL (defaults to last result if no UUID given)
+        #[arg(long, conflicts_with = "timeline")]
         markers: bool,
 
         /// Show per-phase summary table (use with --timeline)
@@ -782,7 +782,7 @@ Examples:
         range: Option<String>,
 
         /// Show a specific run index (0-based), or "all" for all runs. Defaults to the best run.
-        #[arg(long, requires = "timeline")]
+        #[arg(long)]
         run: Option<String>,
 
         /// Compare sidecar timelines of two results (phase-aligned summary)

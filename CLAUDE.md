@@ -133,7 +133,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 
 - `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features`, `--no-default-features`, `--raw` (unfiltered cargo output), and `--json` (NDJSON diagnostics and summaries). `--raw` and `--json` are mutually exclusive (clap enforced). Default text mode: each diagnostic becomes one line, compilation noise stripped, passing tests aggregated. `--json` mode: uses cargo `--message-format=json` for full-fidelity structured diagnostics, emits one JSON object per line to stdout with no prefixed output. Always emits summary events even on success.
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
-- `results` — query the results database (`.brokkr/results.db`). Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
+- `results` — query the results database (`.brokkr/results.db`). Bare `brokkr results` shows detail view of the last result. Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
 - `clean` — remove scratch/temp files
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
@@ -205,7 +205,7 @@ Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`, `run_exter
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement. Sidecar data is stored even when the child fails (OOM, signal, non-zero exit).
 
-Query sidecar data with `brokkr results <uuid> --timeline` (JSONL), `--timeline --summary` (phase table), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
+Query sidecar data with `brokkr results --timeline` (JSONL), `--timeline --summary` (phase table), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. All sidecar flags default to the last result when no UUID is given. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
 
 ## Removed features
 

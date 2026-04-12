@@ -220,19 +220,21 @@ Sidecar data is stored even when the child is OOM-killed — the `/proc` traject
 ### Querying sidecar data
 
 ```
-brokkr results <uuid> --timeline                   # raw JSONL samples
-brokkr results <uuid> --timeline --summary         # per-phase table
+brokkr results --timeline                          # raw JSONL samples (last result)
+brokkr results --timeline --summary                # per-phase table (last result)
 brokkr results <uuid> --timeline --stat anon       # min/max/avg/p50/p95 for a field
 brokkr results <uuid> --timeline --fields rss,anon --every 10  # project + downsample
 brokkr results <uuid> --timeline --where "majflt>0" --tail 20  # filter + range
 brokkr results <uuid> --timeline --phase STAGE2 --stat anon    # per-phase stats
 brokkr results <uuid> --timeline --range 10.0..82.0            # time window filter
-brokkr results <uuid> --markers                    # raw JSONL markers
-brokkr results <uuid> --markers --durations        # START/END pair timings
-brokkr results <uuid> --markers --phases           # durations + peak RSS/majflt
+brokkr results --markers                           # raw JSONL markers (last result)
+brokkr results --markers --durations               # START/END pair timings (last result)
+brokkr results --markers --phases                  # durations + peak RSS/majflt (last result)
 brokkr results --compare-timeline <uuid_a> <uuid_b>  # phase-aligned comparison
 brokkr results dirty --timeline --stat anon        # inspect last failed/dirty run
 ```
+
+All sidecar flags (`--timeline`, `--markers`, etc.) default to the last result when no UUID is given.
 
 All timeline flags compose: `--phase STAGE2 --where "anon>100000" --stat majflt` works.
 
@@ -241,11 +243,10 @@ All timeline flags compose: `--phase STAGE2 --where "anon>100000" --stat majflt`
 Query stored benchmarks with `brokkr results`:
 
 ```
-brokkr results                                      # last 20 results
-brokkr results -n 50                                # last 50
+brokkr results                                      # detail view of last result
 brokkr results 0b74fb6f                             # look up by UUID prefix
+brokkr results --command 'bench read'               # last 20 matching 'read'
 brokkr results --commit a65a                        # filter by commit
-brokkr results --command 'bench read'               # filter by command
 brokkr results --variant pipelined                  # filter by variant
 brokkr results --dataset europe                     # filter by dataset (substring on input file)
 brokkr results --command tags-filter --dataset eu   # combine filters

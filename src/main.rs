@@ -1528,7 +1528,30 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         return Ok(());
     }
 
-    if let Some(ref uuid_prefix) = q.query {
+    // Resolve effective UUID: explicit query arg, or last result from DB.
+    let effective_uuid: Option<String> = if let Some(ref prefix) = q.query {
+        Some(prefix.clone())
+    } else if q.timeline || q.markers {
+        let filter = db::QueryFilter {
+            commit: None,
+            command: None,
+            variant: None,
+            dataset: None,
+            meta: vec![],
+            limit: 1,
+        };
+        let rows = results_db.query(&filter)?;
+        if let Some(row) = rows.first() {
+            Some(row.uuid.clone())
+        } else {
+            output::result_msg("no results yet");
+            return Ok(());
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref uuid_prefix) = effective_uuid {
         // Sidecar output modes.
         if q.timeline {
             let Some(ref sdb) = sidecar_db else {
@@ -1712,20 +1735,65 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             .iter()
             .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
             .collect();
-        let filter = db::QueryFilter {
-            commit: q.commit.clone(),
-            command: q.command.clone(),
-            variant: q.variant.clone(),
-            dataset: q.dataset.clone(),
-            meta: meta_pairs,
-            limit: q.limit,
-        };
-        let rows = results_db.query(&filter)?;
-        if rows.is_empty() {
-            output::result_msg("no matching results");
+
+        // Bare `brokkr results` with no filters: show detail view for the last result.
+        let no_filters = q.commit.is_none()
+            && q.command.is_none()
+            && q.variant.is_none()
+            && q.dataset.is_none()
+            && meta_pairs.is_empty();
+
+        if no_filters {
+            let filter = db::QueryFilter {
+                commit: None,
+                command: None,
+                variant: None,
+                dataset: None,
+                meta: vec![],
+                limit: 1,
+            };
+            let rows = results_db.query(&filter)?;
+            if rows.is_empty() {
+                output::result_msg("no results yet");
+            } else {
+                let table = db::format_table(&rows);
+                println!("{table}");
+                for row in &rows {
+                    let details = db::format_details(row);
+                    if !details.is_empty() {
+                        println!("\n{details}");
+                    }
+                    if let Some(ref hotpath) = row.hotpath
+                        && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, q.top)
+                    {
+                        println!("\n{report}");
+                    }
+                    if sidecar_db
+                        .as_ref()
+                        .is_some_and(|sdb| sdb.has_data(&row.uuid))
+                    {
+                        output::sidecar_msg(
+                            "profile data available (use --timeline or --markers)",
+                        );
+                    }
+                }
+            }
         } else {
-            let table = db::format_table(&rows);
-            println!("{table}");
+            let filter = db::QueryFilter {
+                commit: q.commit.clone(),
+                command: q.command.clone(),
+                variant: q.variant.clone(),
+                dataset: q.dataset.clone(),
+                meta: meta_pairs,
+                limit: q.limit,
+            };
+            let rows = results_db.query(&filter)?;
+            if rows.is_empty() {
+                output::result_msg("no matching results");
+            } else {
+                let table = db::format_table(&rows);
+                println!("{table}");
+            }
         }
     }
 
