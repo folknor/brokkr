@@ -75,6 +75,8 @@ pub struct MeasureRequest<'a> {
     /// Dry-run: resolve paths and build the arg vector without building the
     /// binary or running it. See `ModeArgs::dry_run`.
     pub dry_run: bool,
+    /// Kill the child when this marker is emitted via the sidecar FIFO.
+    pub stop_marker: Option<&'a str>,
 }
 
 impl MeasureRequest<'_> {

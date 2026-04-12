@@ -48,6 +48,7 @@ pub struct BenchHarness {
     storage_notes: Option<String>,
     cargo_features: Option<String>,
     project: crate::project::Project,
+    stop_marker: Option<String>,
 }
 
 impl BenchHarness {
@@ -57,6 +58,7 @@ impl BenchHarness {
     /// instead of `project_root`. This is used for worktree-based benchmarking
     /// where git info comes from the worktree but results are stored in the
     /// main tree's database.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         paths: &crate::config::ResolvedPaths,
         project_root: &Path,
@@ -65,6 +67,7 @@ impl BenchHarness {
         lock_command: &str,
         force: bool,
         wait: bool,
+        stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         let lock_ctx = crate::lockfile::LockContext {
             project: project.name(),
@@ -76,7 +79,7 @@ impl BenchHarness {
         } else {
             crate::lockfile::acquire(&lock_ctx)?
         };
-        Self::new_with_lock(lock, paths, project_root, db_root, project, force)
+        Self::new_with_lock(lock, paths, project_root, db_root, project, force, stop_marker)
     }
 
     /// Create a new harness with a pre-acquired lock.
@@ -90,6 +93,7 @@ impl BenchHarness {
         db_root: Option<&Path>,
         project: crate::project::Project,
         force: bool,
+        stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         std::fs::create_dir_all(&paths.scratch_dir)?;
         let env = crate::env::collect(paths, project, project_root);
@@ -120,6 +124,7 @@ impl BenchHarness {
             storage_notes,
             cargo_features: None,
             project,
+            stop_marker,
         })
     }
 
@@ -211,7 +216,8 @@ impl BenchHarness {
 
             // run_sidecar takes ownership of the child, drains stdout/stderr
             // in background threads, and returns everything when the child exits.
-            let result = sidecar::run_sidecar(child, &mut fifo, i, start);
+            let result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
+            let stopped = result.stopped_by_marker;
 
             let captured = output::CapturedOutput {
                 status: result.exit_status,
@@ -226,15 +232,17 @@ impl BenchHarness {
             // happened before the kill.
             sidecar_runs.push(result.data);
 
-            let exit_err = captured.check_success_or(&prog_str, ok_codes).err();
-
-            if let Some(e) = exit_err {
-                // Store sidecar data from the failed run before propagating.
-                drop(fifo);
-                let exit_code = exit_code_from_status(&captured.status);
-                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
-                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                return Err(e);
+            // When the child was killed by a --stop marker, the exit status
+            // is SIGKILL — not a real failure.
+            if !stopped {
+                let exit_err = captured.check_success_or(&prog_str, ok_codes).err();
+                if let Some(e) = exit_err {
+                    drop(fifo);
+                    let exit_code = exit_code_from_status(&captured.status);
+                    let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
+                    self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
+                    return Err(e);
+                }
             }
 
             if best_ms.is_none_or(|best| ms < best) {
@@ -352,7 +360,8 @@ impl BenchHarness {
             let start = Instant::now();
             let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
             last_pid = child.id();
-            let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start);
+            let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
+            let stopped = sidecar_result.stopped_by_marker;
 
             let captured = output::CapturedOutput {
                 status: sidecar_result.exit_status,
@@ -363,13 +372,15 @@ impl BenchHarness {
 
             sidecar_runs.push(sidecar_result.data);
 
-            let exit_err = captured.check_success(&prog_str).err();
-            if let Some(err) = exit_err {
-                drop(fifo);
-                let exit_code = exit_code_from_status(&captured.status);
-                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
-                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                return Err(err);
+            if !stopped {
+                let exit_err = captured.check_success(&prog_str).err();
+                if let Some(err) = exit_err {
+                    drop(fifo);
+                    let exit_code = exit_code_from_status(&captured.status);
+                    let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
+                    self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
+                    return Err(err);
+                }
             }
 
             let result = parse_kv_stderr(&captured.stderr)?;
@@ -751,6 +762,7 @@ pub fn run_hotpath_capture(
     project_root: &std::path::Path,
     extra_env: &[(&str, &str)],
     ok_codes: &[i32],
+    stop_marker: Option<&str>,
 ) -> Result<(BenchResult, Vec<u8>, crate::sidecar::SidecarData), crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
@@ -768,7 +780,8 @@ pub fn run_hotpath_capture(
 
     let start = std::time::Instant::now();
     let child = output::spawn_captured(binary, args, project_root, &env)?;
-    let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start);
+    let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start, stop_marker);
+    let stopped = sidecar_result.stopped_by_marker;
 
     drop(fifo);
 
@@ -778,7 +791,9 @@ pub fn run_hotpath_capture(
         stderr: sidecar_result.stderr,
         elapsed: sidecar_result.elapsed,
     };
-    captured.check_success_or(binary, ok_codes)?;
+    if !stopped {
+        captured.check_success_or(binary, ok_codes)?;
+    }
 
     let ms = elapsed_to_ms(&captured.elapsed);
     let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);

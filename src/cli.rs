@@ -1180,6 +1180,11 @@ pub(crate) struct ModeArgs {
     /// script of queued benches before leaving it overnight.
     #[arg(long)]
     pub(crate) dry_run: bool,
+
+    /// Kill the child process when this marker is emitted via the sidecar FIFO.
+    /// Useful for benchmarking only a specific phase of execution.
+    #[arg(long)]
+    pub(crate) stop: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

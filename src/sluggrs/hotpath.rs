@@ -105,7 +105,7 @@ pub fn run(
 
     harness.run_internal(&config, |_i| {
         let (result, _stderr, _sidecar) =
-            harness::run_hotpath_capture(binary_str, &[], scratch_dir, project_root, &[], &[])?;
+            harness::run_hotpath_capture(binary_str, &[], scratch_dir, project_root, &[], &[], None)?;
         Ok(result)
     })?;
 
@@ -141,6 +141,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         db_root,
         req.project,
         req.force,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     // The target name is the variant label (and also the cargo example name,

@@ -55,6 +55,7 @@ pub(crate) struct HarnessContext {
 }
 
 impl HarnessContext {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         dev_config: &config::DevConfig,
         project: Project,
@@ -63,13 +64,14 @@ impl HarnessContext {
         lock_command: &str,
         force: bool,
         wait: bool,
+        stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         let pi = bootstrap(build_root)?;
         let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
         let effective = build_root.unwrap_or(project_root);
         let db_root = build_root.map(|_| project_root);
         let harness =
-            harness::BenchHarness::new(&paths, effective, db_root, project, lock_command, force, wait)?;
+            harness::BenchHarness::new(&paths, effective, db_root, project, lock_command, force, wait, stop_marker)?;
         Ok(Self { paths, harness })
     }
 }
@@ -102,6 +104,7 @@ impl BenchContext {
         lock_command: &str,
         force: bool,
         wait: bool,
+        stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         let effective_build_root = build_root.unwrap_or(project_root);
         let pi = bootstrap(build_root)?;
@@ -139,6 +142,7 @@ impl BenchContext {
             db_root,
             project,
             force,
+            stop_marker,
         )?
         .with_cargo_features(cargo_features);
         Ok(Self {

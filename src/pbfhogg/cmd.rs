@@ -34,6 +34,7 @@ pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), De
         "bench read",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -70,6 +71,7 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         "bench write",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -128,6 +130,7 @@ pub(crate) fn bench_merge(
         "bench merge",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -166,6 +169,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         "bench all",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;

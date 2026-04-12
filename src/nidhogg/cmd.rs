@@ -209,6 +209,7 @@ pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(),
         "bench api",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
     let port = resolve_port(req.dev_config);
 
@@ -256,6 +257,7 @@ pub(crate) fn bench_tiles(
         "bench tiles",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config);

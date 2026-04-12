@@ -248,6 +248,7 @@ fn run_pbfhogg_run(
         &format!("run {}", command.id()),
         true,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let cmd_ctx =
@@ -298,6 +299,7 @@ fn run_pbfhogg_wallclock(
         &format!("run {}", command.id()),
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let cmd_ctx =
@@ -398,6 +400,7 @@ fn run_pbfhogg_hotpath(
         ),
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let cmd_ctx =
@@ -476,6 +479,7 @@ fn run_pbfhogg_hotpath(
             &project_root,
             &[],
             ok_codes,
+            req.stop_marker,
         )?;
         Ok(result)
     })?;
@@ -900,6 +904,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &format!("run {}", command.id()),
                 true,
                 req.wait,
+                req.stop_marker.map(str::to_owned),
             )?;
 
             let pbf_str = if command.needs_pbf() {
@@ -1007,6 +1012,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         &format!("bench {}", command.id()),
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let (pbf_path, file_mb) = if command.needs_pbf() {
@@ -1092,6 +1098,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         &format!("bench {}", command.id()),
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let example = command.example().ok_or_else(|| {
@@ -1191,6 +1198,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 &format!("hotpath {}", command.id()),
                 req.force,
                 req.wait,
+                req.stop_marker.map(str::to_owned),
             )?;
 
             let (pbf_path, file_mb) =
@@ -1240,6 +1248,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     req.project_root,
                     &[("ELIVAGAR_NODE_STATS", "1")],
                     &[],
+                    req.stop_marker,
                 )?;
                 result.kv.push(KvPair::text(
                     "meta.locations_on_ways_detected",
@@ -1272,6 +1281,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 &format!("hotpath {}", command.id()),
                 req.force,
                 req.wait,
+                req.stop_marker.map(str::to_owned),
             )?;
 
             let binary = crate::build::cargo_build(
@@ -1314,6 +1324,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     req.project_root,
                     &[],
                     &[],
+                    req.stop_marker,
                 )?;
                 Ok(result)
             })?;
@@ -1450,6 +1461,7 @@ fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
         &format!("run {}", "nid-ingest"),
         true,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let (pbf_path, _) =
@@ -1500,6 +1512,7 @@ fn run_nidhogg_ingest_bench(
         &format!("bench {}", command.id()),
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let (pbf_path, file_mb) =
@@ -1594,6 +1607,7 @@ fn run_nidhogg_hotpath(
         &format!("hotpath {}", command.id()),
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let (pbf_path, file_mb) =
@@ -1640,7 +1654,7 @@ fn run_nidhogg_hotpath(
 
     ctx.harness.run_internal(&config, |_i| {
         let (result, _stderr, _sidecar) =
-            harness::run_hotpath_capture(&binary_str, &args, &ctx.paths.scratch_dir, req.project_root, &[], &[])?;
+            harness::run_hotpath_capture(&binary_str, &args, &ctx.paths.scratch_dir, req.project_root, &[], &[], req.stop_marker)?;
         Ok(result)
     })?;
 

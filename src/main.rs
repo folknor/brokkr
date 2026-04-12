@@ -73,6 +73,7 @@ where
             no_mem_check: mode.no_mem_check,
             wait: mode.wait,
             dry_run: mode.dry_run,
+            stop_marker: mode.stop.as_deref(),
         };
         f(&req)
     })
@@ -845,8 +846,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 no_mem_check,
                 wait,
                 // Sluggrs hotpath uses Command::Hotpath, not ModeArgs — no
-                // dry-run surface to plumb from.
+                // dry-run or stop-marker surface to plumb from.
                 dry_run: false,
+                stop_marker: None,
             };
             sluggrs::hotpath::cmd(&req, &target)
         }
@@ -2593,6 +2595,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         "hotpath",
         req.force,
         req.wait,
+        req.stop_marker.map(str::to_owned),
     )?;
 
     let alloc = req.is_alloc();
@@ -2628,6 +2631,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
             req.project_root,
             &[],
             &[],
+            req.stop_marker,
         )?;
         Ok(result)
     })?;

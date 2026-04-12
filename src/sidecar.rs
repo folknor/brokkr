@@ -123,6 +123,10 @@ pub struct SidecarRunResult {
     pub stderr: Vec<u8>,
     pub elapsed: Duration,
     pub data: SidecarData,
+    /// True when the child was killed because a `--stop` marker was received.
+    /// Callers should treat this as a successful exit even though the exit
+    /// status reflects SIGKILL.
+    pub stopped_by_marker: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +565,7 @@ pub(crate) fn run_sidecar(
     fifo: &mut SidecarFifo,
     run_idx: usize,
     start: Instant,
+    stop_marker: Option<&str>,
 ) -> SidecarRunResult {
     let pid = child.id();
 
@@ -590,6 +595,7 @@ pub(crate) fn run_sidecar(
     let mut exit_status: Option<ExitStatus> = None;
     #[allow(unused_assignments)] // initial None is never read; every branch assigns before use
     let mut child_elapsed: Option<Duration> = None;
+    let mut stopped_by_marker = false;
 
     loop {
         #[allow(clippy::cast_possible_truncation)]
@@ -606,7 +612,25 @@ pub(crate) fn run_sidecar(
         }
 
         // Drain any pending markers from FIFO.
+        let marker_count_before = markers.len();
         fifo.drain(&mut markers, &mut marker_idx, &mut counters);
+
+        // If a stop marker was requested, check if it was just emitted.
+        if let Some(stop) = stop_marker {
+            let matched = markers[marker_count_before..]
+                .iter()
+                .any(|m| m.name == stop);
+            if matched {
+                output::sidecar_msg(&format!("stop marker \"{stop}\" received, killing child"));
+                child.kill().ok();
+                // Wait for process to actually exit so we can collect status.
+                let status = child.wait().ok();
+                child_elapsed = Some(start.elapsed());
+                exit_status = status;
+                stopped_by_marker = true;
+                break;
+            }
+        }
 
         // Check child exit via handle (not bare PID — PIDs can be reused).
         match child.try_wait() {
@@ -677,6 +701,7 @@ pub(crate) fn run_sidecar(
                 wall_time_ms,
             },
         },
+        stopped_by_marker,
     }
 }
 
