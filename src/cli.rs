@@ -38,6 +38,10 @@ Examples:
         #[arg(long, short)]
         package: Option<String>,
 
+        /// Show unfiltered cargo output
+        #[arg(long)]
+        raw: bool,
+
         /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

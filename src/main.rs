@@ -188,6 +188,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             features,
             no_default_features,
             package,
+            raw,
             args,
         } => cmd_check(
             project,
@@ -195,6 +196,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &features,
             no_default_features,
             package.as_deref(),
+            raw,
             &args,
         ),
         Command::Env => cmd_env(&dev_config, project, &project_root),
@@ -911,15 +913,17 @@ fn cmd_check(
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
+    raw: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    run_clippy(project_root, features, no_default_features, package)?;
+    run_clippy(project_root, features, no_default_features, package, raw)?;
     run_tests(
         project,
         project_root,
         features,
         no_default_features,
         package,
+        raw,
         extra_args,
     )?;
     output::result_msg("check passed");
@@ -931,6 +935,7 @@ fn run_clippy(
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
+    raw: bool,
 ) -> Result<(), DevError> {
     let mut args = vec!["clippy", "--all-targets"];
     if no_default_features {
@@ -955,8 +960,11 @@ fn run_clippy(
 
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        let filtered = cargo_filter::filter_clippy(&stderr);
-        output::error(&filtered);
+        if raw {
+            output::error(&stderr);
+        } else {
+            output::error(&cargo_filter::filter_clippy(&stderr));
+        }
         return Err(DevError::Build("clippy failed".into()));
     }
 
@@ -969,6 +977,7 @@ fn run_tests(
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
+    raw: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let mut args = vec!["test"];
@@ -1008,8 +1017,16 @@ fn run_tests(
     if !captured.status.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        let filtered = cargo_filter::filter_test(&stdout, &stderr);
-        output::error(&filtered);
+        if raw {
+            if !stderr.is_empty() {
+                output::error(&stderr);
+            }
+            if !stdout.is_empty() {
+                output::error(&stdout);
+            }
+        } else {
+            output::error(&cargo_filter::filter_test(&stdout, &stderr));
+        }
         return Err(DevError::Build("tests failed".into()));
     }
 
