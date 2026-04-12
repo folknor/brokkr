@@ -72,6 +72,7 @@ pub struct TestSummaryEvent {
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
+    pub filtered_out: usize,
     pub suites: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
@@ -317,12 +318,14 @@ mod tests {
             passed: 10,
             failed: 1,
             ignored: 0,
+            filtered_out: 5,
             suites: 2,
             duration_seconds: Some(1.45),
         });
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"test_summary""#));
         assert!(json.contains(r#""passed":10"#));
+        assert!(json.contains(r#""filtered_out":5"#));
         assert!(json.contains(r#""duration_seconds":1.45"#));
     }
 
@@ -344,6 +347,7 @@ mod tests {
             passed: 5,
             failed: 0,
             ignored: 0,
+            filtered_out: 0,
             suites: 1,
             duration_seconds: None,
         });

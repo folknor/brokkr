@@ -990,6 +990,7 @@ fn run_clippy(
         }
         if events.is_empty() && !captured.status.success() {
             cargo_json::emit_parse_error("clippy", &stdout, &stderr);
+            errors += 1;
         }
         cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
             cargo_json::DiagnosticSummaryEvent {
@@ -1125,15 +1126,21 @@ fn run_tests(
             cargo_json::emit_parse_error("test", &stdout, &stderr);
         }
 
-        cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
-            cargo_json::TestSummaryEvent {
-                passed: parsed.passed,
-                failed: parsed.failed,
-                ignored: parsed.ignored,
-                suites: parsed.suites,
-                duration_seconds: parsed.duration.map(|d| (d * 100.0).round() / 100.0),
-            },
-        ));
+        // Only emit TestSummary when tests actually ran. On pure compile
+        // failures, suites == 0 and an all-zero summary would falsely imply
+        // an executed-but-empty test phase.
+        if parsed.suites > 0 {
+            cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
+                cargo_json::TestSummaryEvent {
+                    passed: parsed.passed,
+                    failed: parsed.failed,
+                    ignored: parsed.ignored,
+                    filtered_out: parsed.filtered_out,
+                    suites: parsed.suites,
+                    duration_seconds: parsed.duration.map(|d| (d * 100.0).round() / 100.0),
+                },
+            ));
+        }
 
         if !captured.status.success() {
             return Err(DevError::Build("tests failed".into()));

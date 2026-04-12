@@ -511,7 +511,7 @@ fn format_diagnostic(block: &[String]) -> String {
 }
 
 /// Parse "N <label>" from a test result line.
-pub fn parse_count(line: &str, label: &str) -> Option<usize> {
+pub(crate) fn parse_count(line: &str, label: &str) -> Option<usize> {
     let idx = line.find(label)?;
     let before = line[..idx].trim_end();
     let num_str = before.rsplit(|c: char| !c.is_ascii_digit()).next()?;
@@ -519,7 +519,7 @@ pub fn parse_count(line: &str, label: &str) -> Option<usize> {
 }
 
 /// Parse "finished in N.NNs" from a test result line.
-pub fn parse_duration(line: &str) -> Option<f64> {
+pub(crate) fn parse_duration(line: &str) -> Option<f64> {
     let marker = "finished in ";
     let idx = line.find(marker)?;
     let rest = &line[idx + marker.len()..];
