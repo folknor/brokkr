@@ -1,113 +1,60 @@
-//! Filters raw cargo output into structured summaries.
+//! Filters raw cargo output into one-line-per-diagnostic summaries.
 //!
-//! Instead of dumping hundreds of lines of `Compiling …` / `Checking …` noise
-//! followed by buried errors, these filters extract the actionable information
-//! and present it in a compact, structured format.
+//! Instead of dumping hundreds of lines of cargo decoration (source excerpts,
+//! pipe characters, help suggestions, diff hunks), each diagnostic becomes a
+//! single line: `error[CODE] file:line:col message`
 
-use std::collections::HashMap;
-
-/// Filter cargo clippy output — group warnings by lint rule, show errors first.
+/// Filter cargo clippy output into one line per diagnostic.
 ///
 /// Output format:
 /// ```text
-/// cargo clippy: 2 errors, 11 warnings
-/// ═══════════════════════════════════════
-///
-/// Errors:
-///   1. error[E0308]: mismatched types
-///      --> src/foo.rs:10:5
-///
-///   2. error: casting `u64` to `usize` may truncate
-///      --> src/commands/renumber_external.rs:2352:61
-///
-/// Warnings by lint:
-///   clippy::same_item_push (3x)
-///     src/foo.rs:10:5
-///     src/bar.rs:20:3
-///     ... +1 more
+/// cargo clippy: 2 errors, 3 warnings
+///   error[E0308] src/foo.rs:10:5 mismatched types
+///   error[E0425] src/bar.rs:20:3 cannot find value `x` in this scope
+///   warning[unused_variables] src/a.rs:1:9 unused variable: `x`
+///   warning[clippy::needless_return] src/d.rs:4:5 this could be simplified
 /// ```
 pub fn filter_clippy(output: &str) -> String {
-    let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
-    let mut error_blocks: Vec<String> = Vec::new();
-    let mut warning_count: usize = 0;
-    let mut error_count: usize = 0;
-    let mut compiled: usize = 0;
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     let mut in_block = false;
-    let mut current_block = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
     let mut current_is_error = false;
-    let mut current_rule = String::new();
 
     for line in output.lines() {
-        let trimmed = line.trim_start();
-
-        // Skip compilation noise.
-        if trimmed.starts_with("Compiling")
-            || trimmed.starts_with("Checking")
-            || trimmed.starts_with("Downloading")
-            || trimmed.starts_with("Downloaded")
-            || trimmed.starts_with("Finished")
-            || trimmed.starts_with("Locking")
-            || trimmed.starts_with("Updating")
-        {
-            compiled += 1;
+        if is_noise(line.trim_start()) || is_meta_noise(line) {
             continue;
         }
 
-        // Skip summary lines: "warning: `crate` (lib) generated N warnings"
-        if line.starts_with("warning:")
-            && line.contains("generated")
-            && line.contains("warning")
-        {
-            continue;
-        }
-
-        // Skip "error: aborting …" / "error: could not compile …"
-        if (line.starts_with("error:") || line.starts_with("error["))
-            && (line.contains("aborting due to") || line.contains("could not compile"))
-        {
-            continue;
-        }
-
-        // Detect new error/warning block.
         let is_error_start = line.starts_with("error:") || line.starts_with("error[");
         let is_warning_start = line.starts_with("warning:") || line.starts_with("warning[");
 
         if is_error_start || is_warning_start {
             // Flush previous block.
-            flush_block(
-                &mut in_block,
-                &mut current_block,
-                current_is_error,
-                &current_rule,
-                &mut error_blocks,
-                &mut by_rule,
-            );
-
-            if is_error_start {
-                error_count += 1;
-                current_is_error = true;
-            } else {
-                warning_count += 1;
-                current_is_error = false;
+            if in_block && !current_block.is_empty() {
+                let diag = format_diagnostic(&current_block);
+                if current_is_error {
+                    errors.push(diag);
+                } else {
+                    warnings.push(diag);
+                }
+                current_block.clear();
             }
 
-            // Extract rule name from brackets: "warning: unused [unused_variables]"
-            current_rule = extract_rule(line);
-
+            current_is_error = is_error_start;
             in_block = true;
             current_block.push(line.to_string());
         } else if in_block {
-            // Blank line after enough context ends the block.
             if line.trim().is_empty() && current_block.len() > 3 {
-                flush_block(
-                    &mut in_block,
-                    &mut current_block,
-                    current_is_error,
-                    &current_rule,
-                    &mut error_blocks,
-                    &mut by_rule,
-                );
+                let diag = format_diagnostic(&current_block);
+                if current_is_error {
+                    errors.push(diag);
+                } else {
+                    warnings.push(diag);
+                }
+                current_block.clear();
+                in_block = false;
             } else {
                 current_block.push(line.to_string());
             }
@@ -115,74 +62,50 @@ pub fn filter_clippy(output: &str) -> String {
     }
 
     // Flush trailing block.
-    flush_block(
-        &mut in_block,
-        &mut current_block,
-        current_is_error,
-        &current_rule,
-        &mut error_blocks,
-        &mut by_rule,
-    );
+    if in_block && !current_block.is_empty() {
+        let diag = format_diagnostic(&current_block);
+        if current_is_error {
+            errors.push(diag);
+        } else {
+            warnings.push(diag);
+        }
+    }
 
-    format_clippy_result(error_count, warning_count, compiled, &error_blocks, &by_rule)
-}
-
-/// Format parsed clippy results into a structured summary string.
-fn format_clippy_result(
-    error_count: usize,
-    warning_count: usize,
-    compiled: usize,
-    error_blocks: &[String],
-    by_rule: &HashMap<String, Vec<String>>,
-) -> String {
-    // No issues — clean pass.
-    if error_count == 0 && warning_count == 0 {
-        if compiled > 0 {
-            return format!("cargo clippy: no issues ({compiled} crates checked)");
+    if errors.is_empty() && warnings.is_empty() {
+        // If the output had lines that look like errors/warnings but we extracted
+        // nothing, the parser failed — fall back to raw output.
+        let has_error_lines = output
+            .lines()
+            .any(|l| l.starts_with("error:") || l.starts_with("error["));
+        let has_warning_lines = output.lines().any(|l| {
+            l.starts_with("warning:") || l.starts_with("warning[")
+        });
+        if has_error_lines || has_warning_lines {
+            return output.to_string();
         }
         return "cargo clippy: no issues".into();
     }
 
-    let mut result = format!("cargo clippy: {error_count} errors, {warning_count} warnings\n");
-    result.push_str("═══════════════════════════════════════\n");
-
-    // Errors first — these are what need fixing.
-    if !error_blocks.is_empty() {
+    let mut result = format!(
+        "cargo clippy: {} errors, {} warnings\n",
+        errors.len(),
+        warnings.len()
+    );
+    for line in &errors {
+        result.push_str("  ");
+        result.push_str(line);
         result.push('\n');
-        for (i, block) in error_blocks.iter().enumerate().take(15) {
-            result.push_str(&format!("  {}. ", i + 1));
-            result.push_str(block);
-            result.push('\n');
-        }
-        if error_blocks.len() > 15 {
-            result.push_str(&format!("\n  ... +{} more errors\n", error_blocks.len() - 15));
-        }
     }
-
-    // Warnings grouped by rule, sorted by frequency.
-    if !by_rule.is_empty() {
-        result.push_str("\nWarnings by lint:\n");
-        let mut rule_counts: Vec<_> = by_rule.iter().collect();
-        rule_counts.sort_by_key(|&(_, locs)| std::cmp::Reverse(locs.len()));
-
-        for (rule, locations) in rule_counts.iter().take(15) {
-            result.push_str(&format!("  {} ({}x)\n", rule, locations.len()));
-            for loc in locations.iter().take(3) {
-                result.push_str(&format!("    {loc}\n"));
-            }
-            if locations.len() > 3 {
-                result.push_str(&format!("    ... +{} more\n", locations.len() - 3));
-            }
-        }
-        if by_rule.len() > 15 {
-            result.push_str(&format!("\n  ... +{} more lint rules\n", by_rule.len() - 15));
-        }
+    for line in &warnings {
+        result.push_str("  ");
+        result.push_str(line);
+        result.push('\n');
     }
 
     result.trim_end().to_string()
 }
 
-/// Filter cargo test output — show failures and compact summary.
+/// Filter cargo test output — one line per failure, compact summary on success.
 ///
 /// On success:
 /// ```text
@@ -191,24 +114,15 @@ fn format_clippy_result(
 ///
 /// On failure:
 /// ```text
-/// cargo test: 2 failures
-/// ═══════════════════════════════════════
-///
-///   1. tests::failing_test
-///      thread 'tests::failing_test' panicked at src/lib.rs:15:9:
-///      assertion `left == right` failed
-///
-///   2. tests::another_failing
-///      thread 'tests::another_failing' panicked at src/lib.rs:20:9:
-///      something went wrong
-///
-/// test result: FAILED. 14 passed; 2 failed; 0 ignored
+/// cargo test: 2 failures, 14 passed
+///   FAILED foo::test_b src/lib.rs:15:9 assertion `left == right` failed
+///   FAILED foo::test_c src/lib.rs:20:9 something went wrong
 /// ```
 ///
-/// On compilation error (no test results at all):
+/// On compilation error (no test results):
 /// Falls back to `filter_clippy` to show the build errors.
 pub fn filter_test(stdout: &str, stderr: &str) -> String {
-    // Check if this is actually a compilation failure (no test results in stdout).
+    // Compilation failure — no test results, just build errors.
     let has_test_result = stdout.lines().any(|l| l.starts_with("test result:"));
     let has_compile_error = stderr.lines().any(|l| {
         let t = l.trim_start();
@@ -216,8 +130,6 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
     });
 
     if !has_test_result && has_compile_error {
-        // Compilation failed before tests could run. Use clippy filter on stderr
-        // which handles build errors the same way.
         let filtered = filter_clippy(stderr);
         if filtered.starts_with("cargo clippy:") {
             return filtered.replacen("cargo clippy:", "cargo test:", 1);
@@ -225,23 +137,20 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         return filtered;
     }
 
-    // Parse test results and failures from stdout.
-    //
-    // Cargo test output has TWO "failures:" sections:
-    //   1. Detail section with "---- test_name stdout ----" blocks
-    //   2. Summary section with just indented test names
-    // We only want the first (detail) section.
+    // Parse test failures and result summaries from stdout.
     let mut failures: Vec<String> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_detail = false;
     let mut seen_failure_section = false;
-    let mut current_failure = Vec::new();
+    let mut current_name = String::new();
+    let mut current_panic_loc = String::new();
+    let mut current_panic_msg = String::new();
 
     for line in stdout.lines() {
-        // Skip compilation and running lines.
-        if line.trim_start().starts_with("Compiling")
-            || line.trim_start().starts_with("Downloading")
-            || line.trim_start().starts_with("Finished")
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Compiling")
+            || trimmed.starts_with("Downloading")
+            || trimmed.starts_with("Finished")
             || line.starts_with("running ")
             || (line.starts_with("test ") && line.ends_with("... ok"))
         {
@@ -250,16 +159,20 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
 
         if line == "failures:" {
             if !seen_failure_section {
-                // First "failures:" — detail section with stdout/stderr blocks.
                 in_failure_detail = true;
                 seen_failure_section = true;
             } else {
-                // Second "failures:" — just test name list, stop collecting.
+                // Second "failures:" section — flush and stop collecting.
                 in_failure_detail = false;
-                if !current_failure.is_empty() {
-                    failures.push(current_failure.join("\n"));
-                    current_failure.clear();
-                }
+                flush_test_failure(
+                    &current_name,
+                    &current_panic_loc,
+                    &current_panic_msg,
+                    &mut failures,
+                );
+                current_name.clear();
+                current_panic_loc.clear();
+                current_panic_msg.clear();
             }
             continue;
         }
@@ -267,67 +180,114 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         if in_failure_detail {
             if line.starts_with("test result:") {
                 in_failure_detail = false;
+                flush_test_failure(
+                    &current_name,
+                    &current_panic_loc,
+                    &current_panic_msg,
+                    &mut failures,
+                );
+                current_name.clear();
+                current_panic_loc.clear();
+                current_panic_msg.clear();
                 summary_lines.push(line.to_string());
-            } else if line.starts_with("    ") || line.starts_with("---- ") {
-                current_failure.push(line.to_string());
-            } else if line.trim().is_empty() && !current_failure.is_empty() {
-                failures.push(current_failure.join("\n"));
-                current_failure.clear();
-            } else if !line.trim().is_empty() {
-                current_failure.push(line.to_string());
+            } else if line.starts_with("---- ") && line.ends_with(" stdout ----") {
+                // New failure block — flush previous.
+                flush_test_failure(
+                    &current_name,
+                    &current_panic_loc,
+                    &current_panic_msg,
+                    &mut failures,
+                );
+                current_name = line
+                    .strip_prefix("---- ")
+                    .unwrap_or("")
+                    .strip_suffix(" stdout ----")
+                    .unwrap_or("")
+                    .to_string();
+                current_panic_loc.clear();
+                current_panic_msg.clear();
+            } else if line.contains("panicked at ") {
+                // "thread 'name' panicked at src/file.rs:10:5:" (Rust 2021+)
+                // "thread 'name' panicked at 'msg', src/file.rs:10:5" (older)
+                if let Some(idx) = line.find("panicked at ") {
+                    let rest = &line[idx + "panicked at ".len()..];
+                    let rest = rest.trim_end_matches(':');
+                    // If it starts with a quote, it's the old format: 'msg', location
+                    if rest.starts_with('\'') {
+                        if let Some(end_quote) = rest[1..].find('\'') {
+                            current_panic_msg = rest[1..1 + end_quote].to_string();
+                            let after = rest[1 + end_quote + 1..].trim_start_matches(", ");
+                            current_panic_loc = after.to_string();
+                        }
+                    } else {
+                        // New format: location on this line, message on next
+                        current_panic_loc = rest.to_string();
+                    }
+                }
+            } else if current_panic_msg.is_empty()
+                && !current_panic_loc.is_empty()
+                && !line.trim().is_empty()
+            {
+                // First non-empty line after "panicked at location:" is the message.
+                current_panic_msg = line.trim().to_string();
             }
         }
 
-        // Capture test result summaries (outside failure sections too).
         if !in_failure_detail && line.starts_with("test result:") {
             summary_lines.push(line.to_string());
         }
     }
 
-    if !current_failure.is_empty() {
-        failures.push(current_failure.join("\n"));
-    }
+    flush_test_failure(
+        &current_name,
+        &current_panic_loc,
+        &current_panic_msg,
+        &mut failures,
+    );
 
     // All passed — aggregate into compact format.
     if failures.is_empty() && !summary_lines.is_empty() {
         if let Some(agg) = aggregate_test_results(&summary_lines) {
             return agg;
         }
-        // Fallback: show raw summary lines.
         return summary_lines.join("\n");
     }
 
-    // Failures present.
-    let mut result = String::new();
-    if !failures.is_empty() {
-        result.push_str(&format!(
-            "cargo test: {} failure{}\n",
-            failures.len(),
-            if failures.len() == 1 { "" } else { "s" }
-        ));
-        result.push_str("═══════════════════════════════════════\n\n");
-
-        for (i, failure) in failures.iter().enumerate().take(10) {
-            result.push_str(&format!("  {}. ", i + 1));
-            // Indent continuation lines.
-            for (j, fline) in failure.lines().enumerate() {
-                if j == 0 {
-                    result.push_str(fline.trim());
-                    result.push('\n');
-                } else {
-                    result.push_str(&format!("     {}\n", fline.trim()));
-                }
+    // Parser found no failures but stdout has FAILED lines — fall back to raw.
+    if failures.is_empty() {
+        let has_failed = stdout.lines().any(|l| l.contains("FAILED"));
+        if has_failed {
+            let mut raw = String::new();
+            if !stderr.is_empty() {
+                raw.push_str(stderr);
             }
-            result.push('\n');
-        }
-        if failures.len() > 10 {
-            result.push_str(&format!("  ... +{} more failures\n\n", failures.len() - 10));
+            if !stdout.is_empty() {
+                if !raw.is_empty() {
+                    raw.push('\n');
+                }
+                raw.push_str(stdout);
+            }
+            return raw;
         }
     }
 
-    for line in &summary_lines {
+    // Failures present.
+    let mut result = format!(
+        "cargo test: {} failure{}\n",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" }
+    );
+    for line in &failures {
+        result.push_str("  ");
         result.push_str(line);
         result.push('\n');
+    }
+    if !summary_lines.is_empty() {
+        result.push('\n');
+        for line in &summary_lines {
+            result.push_str(line);
+            result.push('\n');
+        }
     }
 
     result.trim_end().to_string()
@@ -335,66 +295,122 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
 
 // --- helpers ---
 
-/// Extract a lint rule name from brackets in a warning/error line.
-/// "warning: unused variable [unused_variables]" → "unused_variables"
-fn extract_rule(line: &str) -> String {
-    if let Some(bracket_start) = line.rfind('[')
-        && let Some(bracket_end) = line.rfind(']')
-        && bracket_end > bracket_start
-    {
-        return line[bracket_start + 1..bracket_end].to_string();
-    }
-    // No bracket — use the message itself as the key.
-    let prefix = if line.starts_with("error") {
-        "error: "
-    } else {
-        "warning: "
-    };
-    line.strip_prefix(prefix)
-        .unwrap_or(line)
-        .to_string()
+fn is_noise(trimmed: &str) -> bool {
+    trimmed.starts_with("Compiling")
+        || trimmed.starts_with("Checking")
+        || trimmed.starts_with("Downloading")
+        || trimmed.starts_with("Downloaded")
+        || trimmed.starts_with("Finished")
+        || trimmed.starts_with("Locking")
+        || trimmed.starts_with("Updating")
 }
 
-/// Extract a `-->` location from a block of lines.
+fn is_meta_noise(line: &str) -> bool {
+    // "warning: `crate` (lib) generated N warnings"
+    if line.starts_with("warning:")
+        && line.contains("generated")
+        && line.contains("warning")
+    {
+        return true;
+    }
+    // "error: aborting …" / "error: could not compile …"
+    if (line.starts_with("error:") || line.starts_with("error["))
+        && (line.contains("aborting due to") || line.contains("could not compile"))
+    {
+        return true;
+    }
+    // "warning: build failed, waiting for other jobs to finish..."
+    if line.starts_with("warning:") && line.contains("build failed") {
+        return true;
+    }
+    false
+}
+
+/// Extract the `-->` location from a block of diagnostic lines.
 fn extract_location(block: &[String]) -> Option<String> {
     for line in block {
         let trimmed = line.trim_start();
         if trimmed.starts_with("--> ") {
-            return Some(trimmed.trim_start_matches("--> ").to_string());
+            return Some(trimmed.strip_prefix("--> ")?.to_string());
         }
     }
     None
 }
 
-/// Flush the current block into either error_blocks or by_rule.
-fn flush_block(
-    in_block: &mut bool,
-    current_block: &mut Vec<String>,
-    is_error: bool,
-    rule: &str,
-    error_blocks: &mut Vec<String>,
-    by_rule: &mut HashMap<String, Vec<String>>,
-) {
-    if !*in_block || current_block.is_empty() {
-        return;
-    }
-
-    if is_error {
-        // For errors, keep the full block (header + location + context).
-        error_blocks.push(current_block.join("\n"));
-    } else {
-        // For warnings, just track rule + location.
-        let location = extract_location(current_block).unwrap_or_default();
-        if !rule.is_empty() {
-            by_rule
-                .entry(rule.to_string())
-                .or_default()
-                .push(location);
+/// Parse a diagnostic header into (prefix, message).
+///
+/// `"error[E0308]: mismatched types"` → `("error[E0308]", "mismatched types")`
+/// `"warning: unused variable: \`x\` [unused_variables]"` → `("warning[unused_variables]", "unused variable: \`x\`")`
+fn parse_header(line: &str) -> (String, String) {
+    // error[CODE]: message
+    if line.starts_with("error[") || line.starts_with("warning[") {
+        if let Some(bracket_end) = line.find(']') {
+            let prefix = &line[..bracket_end + 1];
+            let message = line[bracket_end + 1..]
+                .trim_start_matches(':')
+                .trim();
+            return (prefix.to_string(), message.to_string());
         }
     }
 
-    current_block.clear();
-    *in_block = false;
+    // "warning: message [rule]" or "error: message"
+    let (level, rest) = if let Some(rest) = line.strip_prefix("error: ") {
+        ("error", rest)
+    } else if let Some(rest) = line.strip_prefix("warning: ") {
+        ("warning", rest)
+    } else {
+        return (line.to_string(), String::new());
+    };
+
+    // Check for trailing [rule].
+    if let Some(bracket_start) = rest.rfind('[') {
+        if let Some(bracket_end) = rest.rfind(']') {
+            if bracket_end > bracket_start {
+                let rule = &rest[bracket_start + 1..bracket_end];
+                let message = rest[..bracket_start].trim();
+                return (format!("{level}[{rule}]"), message.to_string());
+            }
+        }
+    }
+
+    (level.to_string(), rest.to_string())
+}
+
+/// Format a diagnostic block into a single line.
+///
+/// `["error[E0425]: cannot find value ...", " --> src/foo.rs:10:5", ...]`
+/// → `"error[E0425] src/foo.rs:10:5 cannot find value ..."`
+fn format_diagnostic(block: &[String]) -> String {
+    let (prefix, message) = parse_header(&block[0]);
+    let location = extract_location(block).unwrap_or_default();
+
+    if location.is_empty() {
+        format!("{prefix} {message}")
+    } else {
+        format!("{prefix} {location} {message}")
+    }
+}
+
+/// Flush a collected test failure into the failures vec as a one-liner.
+fn flush_test_failure(
+    name: &str,
+    panic_loc: &str,
+    panic_msg: &str,
+    failures: &mut Vec<String>,
+) {
+    if name.is_empty() {
+        return;
+    }
+    let mut line = format!("FAILED {name}");
+    if !panic_loc.is_empty() {
+        line.push(' ');
+        line.push_str(panic_loc);
+    }
+    if !panic_msg.is_empty() {
+        line.push(' ');
+        line.push_str(panic_msg);
+    }
+    failures.push(line);
 }
 
 /// Aggregate multiple "test result: ok." lines into a compact summary.
@@ -408,15 +424,12 @@ fn aggregate_test_results(summary_lines: &[String]) -> Option<String> {
     let mut has_duration = false;
 
     for line in summary_lines {
-        // "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
         if !line.contains("test result: ok.") {
-            // Has a non-ok result — don't aggregate, show raw.
             return None;
         }
 
         suites += 1;
 
-        // Parse counts with simple string scanning.
         if let Some(n) = parse_count(line, "passed") {
             total_passed += n;
         }
@@ -466,10 +479,9 @@ fn aggregate_test_results(summary_lines: &[String]) -> Option<String> {
     }
 }
 
-/// Parse "N <label>" from a test result line. E.g. "15 passed" → 15.
+/// Parse "N <label>" from a test result line.
 fn parse_count(line: &str, label: &str) -> Option<usize> {
     let idx = line.find(label)?;
-    // Walk backwards from idx to find the number.
     let before = line[..idx].trim_end();
     let num_str = before.rsplit(|c: char| !c.is_ascii_digit()).next()?;
     num_str.parse().ok()
@@ -492,11 +504,11 @@ mod tests {
     fn clippy_clean() {
         let output = "    Checking pbfhogg v0.1.0\n    Finished dev target(s) in 1.53s\n";
         let result = filter_clippy(output);
-        assert!(result.contains("no issues"), "got: {result}");
+        assert_eq!(result, "cargo clippy: no issues");
     }
 
     #[test]
-    fn clippy_errors_before_warnings() {
+    fn clippy_one_line_per_diagnostic() {
         let output = "\
 warning: unused variable: `x` [unused_variables]
  --> src/main.rs:10:9
@@ -514,18 +526,43 @@ warning: `pbfhogg` (lib) generated 1 warning
 error: aborting due to 1 previous error
 ";
         let result = filter_clippy(output);
-        assert!(result.contains("1 errors, 1 warnings"), "got: {result}");
-        // Errors section should appear.
-        assert!(result.contains("E0308"), "got: {result}");
-        // Warnings grouped by rule.
-        assert!(result.contains("unused_variables (1x)"), "got: {result}");
-        // Noise stripped.
+        assert!(result.starts_with("cargo clippy: 1 errors, 1 warnings"), "got: {result}");
+        // Error line: one-liner with code, location, message.
+        assert!(
+            result.contains("error[E0308] src/foo.rs:20:5 mismatched types"),
+            "got: {result}"
+        );
+        // Warning line: one-liner with rule, location, message.
+        assert!(
+            result.contains("warning[unused_variables] src/main.rs:10:9 unused variable: `x`"),
+            "got: {result}"
+        );
+        // No decoration.
         assert!(!result.contains("aborting"), "got: {result}");
         assert!(!result.contains("generated"), "got: {result}");
+        assert!(!result.contains("help:"), "got: {result}");
+        assert!(!result.contains("^^^"), "got: {result}");
     }
 
     #[test]
-    fn clippy_multiple_warnings_same_rule() {
+    fn clippy_errors_before_warnings() {
+        let output = "\
+warning: unused variable: `x` [unused_variables]
+ --> src/main.rs:10:9
+  |
+
+error[E0308]: mismatched types
+ --> src/foo.rs:20:5
+  |
+";
+        let result = filter_clippy(output);
+        let error_pos = result.find("error[E0308]").unwrap();
+        let warning_pos = result.find("warning[unused_variables]").unwrap();
+        assert!(error_pos < warning_pos, "errors should come before warnings: {result}");
+    }
+
+    #[test]
+    fn clippy_multiple_same_rule() {
         let output = "\
 warning: unused variable: `x` [unused_variables]
  --> src/a.rs:1:9
@@ -546,11 +583,23 @@ warning: this could be simplified [clippy::needless_return]
 ";
         let result = filter_clippy(output);
         assert!(result.contains("0 errors, 4 warnings"), "got: {result}");
-        assert!(result.contains("unused_variables (3x)"), "got: {result}");
-        assert!(
-            result.contains("clippy::needless_return (1x)"),
-            "got: {result}"
-        );
+        // Each warning is its own line — no grouping.
+        assert_eq!(result.matches("warning[unused_variables]").count(), 3, "got: {result}");
+        assert!(result.contains("warning[clippy::needless_return]"), "got: {result}");
+    }
+
+    #[test]
+    fn clippy_build_failed_noise_stripped() {
+        let output = "\
+error[E0425]: cannot find value `x` in this scope
+ --> src/foo.rs:10:5
+  |
+
+warning: build failed, waiting for other jobs to finish...
+";
+        let result = filter_clippy(output);
+        assert!(!result.contains("build failed"), "got: {result}");
+        assert!(result.contains("1 errors, 0 warnings"), "got: {result}");
     }
 
     #[test]
@@ -564,10 +613,7 @@ test utils::test_c ... ok
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 ";
         let result = filter_test(stdout, "");
-        assert!(
-            result.contains("cargo test: 15 passed (1 suite, 0.01s)"),
-            "got: {result}"
-        );
+        assert_eq!(result, "cargo test: 15 passed (1 suite, 0.01s)");
     }
 
     #[test]
@@ -580,14 +626,11 @@ running 30 tests
 test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
 ";
         let result = filter_test(stdout, "");
-        assert!(
-            result.contains("cargo test: 80 passed (2 suites, 0.75s)"),
-            "got: {result}"
-        );
+        assert_eq!(result, "cargo test: 80 passed (2 suites, 0.75s)");
     }
 
     #[test]
-    fn test_failures_shown() {
+    fn test_failure_one_liner() {
         let stdout = "\
 running 5 tests
 test foo::test_a ... ok
@@ -597,7 +640,7 @@ test foo::test_c ... ok
 failures:
 
 ---- foo::test_b stdout ----
-thread 'foo::test_b' panicked at 'assert_eq!(1, 2)'
+thread 'foo::test_b' panicked at 'assert_eq!(1, 2)', src/lib.rs:15:9
 
 failures:
     foo::test_b
@@ -606,8 +649,10 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 ";
         let result = filter_test(stdout, "");
         assert!(result.contains("1 failure"), "got: {result}");
-        assert!(result.contains("test_b"), "got: {result}");
-        assert!(result.contains("test result:"), "got: {result}");
+        assert!(result.contains("FAILED foo::test_b"), "got: {result}");
+        // Should be one line per failure, not multi-line.
+        let failure_lines: Vec<&str> = result.lines().filter(|l| l.starts_with("  FAILED")).collect();
+        assert_eq!(failure_lines.len(), 1, "got: {result}");
     }
 
     #[test]
@@ -624,7 +669,10 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
         let result = filter_test("", stderr);
         assert!(result.contains("cargo test:"), "got: {result}");
         assert!(result.contains("1 errors"), "got: {result}");
-        assert!(result.contains("E0425"), "got: {result}");
+        assert!(
+            result.contains("error[E0425] tests/foo.rs:3:13 cannot find value `missing_symbol` in this scope"),
+            "got: {result}"
+        );
         assert!(!result.contains("could not compile"), "got: {result}");
     }
 
