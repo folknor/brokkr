@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 9;
+pub(super) const SCHEMA_VERSION: i64 = 10;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -42,6 +42,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 9 {
         migrate_v8_to_v9(conn)?;
+    }
+    if current < 10 {
+        migrate_v9_to_v10(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -318,6 +321,14 @@ fn migrate_v8_to_v9(conn: &rusqlite::Connection) -> Result<(), DevError> {
              DROP TABLE IF EXISTS sidecar_markers;
              DROP TABLE IF EXISTS sidecar_summary;",
         )?;
+    }
+    Ok(())
+}
+
+/// v9 → v10: add stop_marker column.
+fn migrate_v9_to_v10(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if !has_column(conn, "runs", "stop_marker") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN stop_marker TEXT")?;
     }
     Ok(())
 }

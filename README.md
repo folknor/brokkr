@@ -48,6 +48,7 @@ Every measurable command supports these flags:
 | `--hotpath` | Function-level timing via hotpath feature (1 run) |
 | `--hotpath N` | Same but N runs |
 | `--alloc` | Per-function allocation tracking (1 run) |
+| `--stop <marker>` | Kill the child when this FIFO marker is emitted (bench any phase in isolation) |
 
 All measured modes automatically attach a sidecar that samples `/proc` metrics at 100ms (see [Sidecar profiler](#sidecar-profiler) below).
 
@@ -210,7 +211,9 @@ All benchmarks run through `BenchHarness`, which provides:
 
 Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored — local to the machine that ran it). The main results in `.brokkr/results.db` stay small and git-tracked.
 
-The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers.
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`.
+
+`--stop <marker>` kills the child process as soon as the named marker is emitted, allowing benchmarks of individual phases without waiting for the full run to complete. The SIGKILL exit is treated as success.
 
 Sidecar data is stored even when the child is OOM-killed — the `/proc` trajectory up to the kill is the most valuable use case.
 

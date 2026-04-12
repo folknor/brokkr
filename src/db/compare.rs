@@ -143,6 +143,7 @@ mod tests {
             storage_notes: None,
             cli_args: None,
             project: String::from("pbfhogg"),
+            stop_marker: None,
             kv: vec![],
             distribution: None,
             hotpath: None,

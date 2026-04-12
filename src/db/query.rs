@@ -121,6 +121,9 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         project: row
             .get::<_, Option<String>>("project")?
             .unwrap_or_else(|| "pbfhogg".to_owned()),
+        stop_marker: row
+            .get::<_, Option<String>>("stop_marker")?
+            .unwrap_or_default(),
         kv: Vec::new(),
         distribution: None,
         hotpath: None,
@@ -567,6 +570,7 @@ mod tests {
             storage_notes: None,
             cli_args: None,
             project: String::from("test"),
+            stop_marker: None,
             kv,
             distribution: None,
             hotpath: None,
@@ -657,6 +661,7 @@ mod tests {
             storage_notes: None,
             cli_args: None,
             project: String::from("test"),
+            stop_marker: None,
             kv: vec![],
             distribution: None,
             hotpath: None,
@@ -767,6 +772,7 @@ mod tests {
             storage_notes: None,
             cli_args: None,
             project: String::from("test"),
+            stop_marker: None,
             kv: vec![],
             distribution: None,
             hotpath: None,
@@ -849,6 +855,7 @@ mod tests {
             storage_notes: None,
             cli_args: None,
             project: String::from("test"),
+            stop_marker: None,
             kv: vec![
                 KvPair::int("elapsed_ms", 500),
                 KvPair::text("threads.rss_bytes", "1024"),

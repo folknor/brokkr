@@ -68,6 +68,12 @@ pub fn format_details(row: &StoredRow) -> String {
     if !row.storage_notes.is_empty() {
         fields.push(("storage".into(), row.storage_notes.clone()));
     }
+    if !row.stop_marker.is_empty() {
+        fields.push((
+            "stop marker".into(),
+            format!("killed at \"{}\"", row.stop_marker),
+        ));
+    }
     if !row.cli_args.is_empty() {
         fields.push(("cli args".into(), row.cli_args.clone()));
     }
@@ -835,6 +841,7 @@ mod tests {
             uuid: String::from("abcdef1234567890"),
             cli_args: String::new(),
             project: String::from("test"),
+            stop_marker: String::new(),
             kv: vec![],
             distribution: None,
             hotpath: None,

@@ -54,6 +54,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             uuid,
             row.cli_args,
             row.project,
+            row.stop_marker,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -176,6 +177,7 @@ mod tests {
             storage_notes: None,
             cli_args: Some(String::from("--fast")),
             project: String::from("test"),
+            stop_marker: None,
             kv: vec![],
             distribution: None,
             hotpath: None,

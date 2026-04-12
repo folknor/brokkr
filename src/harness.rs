@@ -559,6 +559,7 @@ impl BenchHarness {
             storage_notes: self.storage_notes.clone(),
             cli_args: config.cli_args.clone(),
             project: self.project.name().to_owned(),
+            stop_marker: self.stop_marker.clone(),
             kv,
             distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),

@@ -22,6 +22,7 @@ Single crate, single binary. No workspace.
 
 - `src/main.rs` — `main()`, command dispatch, `run_measured()`, `resolve_mode()`
 - `src/cli.rs` — CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`. All commands are top-level — no subcommand enums for litehtml/sluggrs
+- `src/cargo_filter.rs` — Filters raw cargo output into structured summaries for `check` command. `filter_clippy()` groups warnings by lint rule, shows errors first. `filter_test()` aggregates passing suites, shows only failure details. Bypassed with `--raw`
 - `src/measure.rs` — `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
 - `src/dispatch.rs` — Unified dispatch for all three projects: `run_pbfhogg_command_with_params()`, `run_elivagar_command()`, `run_nidhogg_command()`. Each routes through run/bench/hotpath/alloc based on command enum + mode. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions due to divergent lifecycles
 - `src/pbfhogg/commands.rs` — `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` — single source of truth for all pbfhogg command argument construction
@@ -121,6 +122,7 @@ brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
 - `--bench` — full benchmark: lockfile, 3 runs (or N), best-of-N stored in DB.
 - `--hotpath` — function-level timing via hotpath feature. 1 run (or N).
 - `--alloc` — per-function allocation tracking via hotpath-alloc feature. 1 run (or N).
+- `--stop <marker>` — kill the child when this FIFO marker is emitted. Allows benchmarking a specific phase in isolation. The SIGKILL exit is treated as success.
 
 All measured modes automatically run a sidecar that samples `/proc` metrics at 100ms and provides `BROKKR_MARKER_FIFO` for phase markers. Sidecar data is stored in `.brokkr/sidecar.db` (gitignored). Sidecar data is preserved even when the child is OOM-killed.
 
@@ -128,7 +130,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 
 ### Shared commands (all projects)
 
-- `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features` and `--no-default-features`
+- `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features`, `--no-default-features`, and `--raw` (bypass output filtering). Output is filtered by default: errors shown first, warnings grouped by lint rule, compilation noise stripped. `--raw` disables filtering for unprocessed cargo output.
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
 - `results` — query the results database (`.brokkr/results.db`). Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
 - `clean` — remove scratch/temp files
