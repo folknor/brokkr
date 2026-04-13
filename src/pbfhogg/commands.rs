@@ -406,6 +406,9 @@ impl PbfhoggCommand {
                 if let Some(s) = ctx.param("start_stage") {
                     meta.push(KvPair::text("meta.start_stage", s));
                 }
+                if ctx.param("keep_scratch").is_some() {
+                    meta.push(KvPair::text("meta.keep_scratch", "true"));
+                }
                 meta
             }
             Self::Extract { strategy } => {
@@ -1236,10 +1239,12 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.insert("index_type".into(), "external".into());
         ctx.params.insert("start_stage".into(), "3".into());
+        ctx.params.insert("keep_scratch".into(), "true".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let meta = cmd.metadata(&ctx);
         assert!(meta.iter().any(|kv| kv.key == "meta.index_type"));
         assert!(meta.iter().any(|kv| kv.key == "meta.start_stage"));
+        assert!(meta.iter().any(|kv| kv.key == "meta.keep_scratch"));
     }
 
     #[test]

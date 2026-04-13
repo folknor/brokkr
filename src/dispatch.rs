@@ -67,10 +67,13 @@ fn extra_variant_suffix(
 
     // Start-stage suffix: partial runs get `+from-stage4` etc. so they don't
     // mix with full-pipeline results.
-    if matches!(command, PbfhoggCommand::AddLocationsToWays)
-        && let Some(s) = extra_params.get("start_stage")
-    {
-        suffix.push_str(&format!("+from-stage{s}"));
+    if matches!(command, PbfhoggCommand::AddLocationsToWays) {
+        if let Some(s) = extra_params.get("start_stage") {
+            suffix.push_str(&format!("+from-stage{s}"));
+        }
+        if extra_params.contains_key("keep_scratch") {
+            suffix.push_str("+keep-scratch");
+        }
     }
 
     // Compression suffix: `--compression zstd:1` → `+zstd1`, `none` → `+nocompress`.
