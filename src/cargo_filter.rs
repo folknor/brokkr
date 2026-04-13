@@ -49,18 +49,7 @@ pub fn filter_clippy(output: &str) -> String {
             in_block = true;
             current_block.push(line.to_string());
         } else if in_block {
-            if line.trim().is_empty() && current_block.len() > 3 {
-                let diag = format_diagnostic(&current_block);
-                if current_is_error {
-                    errors.push(diag);
-                } else {
-                    warnings.push(diag);
-                }
-                current_block.clear();
-                in_block = false;
-            } else {
-                current_block.push(line.to_string());
-            }
+            current_block.push(line.to_string());
         }
     }
 
@@ -495,18 +484,75 @@ fn parse_header(line: &str) -> (String, String) {
     (level.to_string(), rest.to_string())
 }
 
+/// Extract key detail from a diagnostic block (e.g. "expected X, found Y").
+///
+/// Scans block lines for:
+/// 1. Lines containing both "expected" and "found" (inline type annotations)
+/// 2. `= note:` lines with type detail (multi-line expected/found)
+fn extract_detail(block: &[String]) -> Option<String> {
+    // First pass: look for a single line with both "expected" and "found".
+    for line in block.iter().skip(1) {
+        let trimmed = line
+            .trim_start()
+            .trim_start_matches('|')
+            .trim_start()
+            .trim_start_matches('^')
+            .trim_start_matches('-')
+            .trim_start();
+        if trimmed.contains("expected") && trimmed.contains("found") {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    // Second pass: look for `= note:` expected/found lines (may be split across
+    // a `= note: expected ...` line and a continuation `found ...` line).
+    let mut expected = None;
+    let mut found = None;
+    for line in block.iter().skip(1) {
+        let trimmed = line.trim_start().trim_start_matches('=').trim_start();
+        if let Some(rest) = trimmed.strip_prefix("note:") {
+            let rest = rest.trim();
+            if rest.starts_with("expected") && expected.is_none() {
+                expected = Some(rest.to_string());
+            } else if rest.starts_with("found") && found.is_none() {
+                found = Some(rest.to_string());
+            }
+        } else if expected.is_some() && found.is_none() {
+            // Continuation line under `= note:` — often the `found` part.
+            let trimmed = line.trim();
+            if trimmed.starts_with("found") {
+                found = Some(trimmed.to_string());
+            }
+        }
+    }
+    if let (Some(exp), Some(fnd)) = (expected, found) {
+        return Some(format!("{exp}, {fnd}"));
+    }
+
+    None
+}
+
 /// Format a diagnostic block into a single line.
 ///
 /// `["error[E0425]: cannot find value ...", " --> src/foo.rs:10:5", ...]`
 /// → `"error[E0425] src/foo.rs:10:5 cannot find value ..."`
+///
+/// When the block contains "expected/found" detail, it is appended:
+/// `"error[E0308] src/foo.rs:20:5 mismatched types — expected `i32`, found `&str`"`
 fn format_diagnostic(block: &[String]) -> String {
     let (prefix, message) = parse_header(&block[0]);
     let location = extract_location(block).unwrap_or_default();
+    let detail = extract_detail(block);
 
-    if location.is_empty() {
+    let base = if location.is_empty() {
         format!("{prefix} {message}")
     } else {
         format!("{prefix} {location} {message}")
+    };
+
+    match detail {
+        Some(d) => format!("{base} — {d}"),
+        None => base,
     }
 }
 
@@ -558,9 +604,9 @@ error: aborting due to 1 previous error
 ";
         let result = filter_clippy(output);
         assert!(result.starts_with("cargo clippy: 1 errors, 1 warnings"), "got: {result}");
-        // Error line: one-liner with code, location, message.
+        // Error line: one-liner with code, location, message, and type detail.
         assert!(
-            result.contains("error[E0308] src/foo.rs:20:5 mismatched types"),
+            result.contains("error[E0308] src/foo.rs:20:5 mismatched types — expected `i32`, found `&str`"),
             "got: {result}"
         );
         // Warning line: one-liner with rule, location, message.
@@ -631,6 +677,51 @@ warning: build failed, waiting for other jobs to finish...
         let result = filter_clippy(output);
         assert!(!result.contains("build failed"), "got: {result}");
         assert!(result.contains("1 errors, 0 warnings"), "got: {result}");
+    }
+
+    #[test]
+    fn clippy_note_expected_found() {
+        let output = "\
+error[E0308]: mismatched types
+ --> src/commands/getparents.rs:68:29
+  |
+68|         let stats = GetparentsStats {
+  |                     ^^^^^^^^^^^^^^^^ expected `RenumberStats`, found `GetparentsStats`
+  |
+  = note: expected struct `RenumberStats`
+             found struct `GetparentsStats`
+
+error: aborting due to 1 previous error
+";
+        let result = filter_clippy(output);
+        // The inline expected/found line should be captured.
+        assert!(
+            result.contains("— expected `RenumberStats`, found `GetparentsStats`"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn clippy_note_only_expected_found() {
+        // Some diagnostics have the expected/found only in = note: lines,
+        // not inline with the source annotation.
+        let output = "\
+error[E0308]: mismatched types
+ --> src/lib.rs:42:12
+  |
+42|     foo(bar)
+  |         ^^^ arguments to this function are incorrect
+  |
+  = note: expected reference `&Vec<u8>`
+             found reference `&Vec<i32>`
+
+error: aborting due to 1 previous error
+";
+        let result = filter_clippy(output);
+        assert!(
+            result.contains("— expected reference `&Vec<u8>`, found reference `&Vec<i32>`"),
+            "got: {result}"
+        );
     }
 
     #[test]
