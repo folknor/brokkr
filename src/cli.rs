@@ -1732,7 +1732,9 @@ impl Command {
                 if let Some(s) = start_stage {
                     params.insert("start_stage".into(), s.clone());
                 }
-                if *keep_scratch {
+                // --start-stage implies --keep-scratch: without it the first
+                // partial run would clean up the scratch dir and break the next.
+                if *keep_scratch || params.contains_key("start_stage") {
                     params.insert("keep_scratch".into(), "true".into());
                 }
                 Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))

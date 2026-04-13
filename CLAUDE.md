@@ -111,6 +111,8 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `--direct-io` — (pbfhogg only) enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature, `--direct-io` binary flag, `+direct-io` variant suffix.
 - `--io-uring` — (pbfhogg only) enable io_uring I/O. Adds `linux-io-uring` cargo feature, `--io-uring` binary flag, `+uring` variant suffix. Runs io_uring preflight checks before building. Only supported by `apply-changes`, `sort`, `cat-dedupe`, and `diff-osc`; brokkr rejects it for other commands before building.
 - `--compression <spec>` — (pbfhogg only) output compression passed through to the binary. Values: `zlib:N` (N=1-9), `zstd:N`, `none`. Adds `+zstd1`/`+zlib6`/`+nocompress` variant suffix. No cargo features required.
+- `--start-stage <N>` — (add-locations-to-ways only, requires `--index-type external`) skip stages 1..N-1 and start from stage N (2-4). Expects scratch directory from a prior `--keep-scratch` run. Implies `--keep-scratch` so subsequent partial runs don't clean up the scratch. Validated at the brokkr boundary. Adds `+from-stageN` variant suffix and `meta.start_stage`.
+- `--keep-scratch` — (add-locations-to-ways only, requires `--index-type external`) preserve the external join scratch directory after the run. Adds `+keep-scratch` variant suffix and `meta.keep_scratch`.
 
 ## CLI model
 
