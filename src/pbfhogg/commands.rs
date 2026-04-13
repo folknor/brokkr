@@ -399,11 +399,14 @@ impl PbfhoggCommand {
 
         match self {
             Self::AddLocationsToWays => {
+                let mut meta = Vec::new();
                 if let Some(it) = ctx.param("index_type") {
-                    vec![KvPair::text("meta.index_type", it)]
-                } else {
-                    vec![]
+                    meta.push(KvPair::text("meta.index_type", it));
                 }
+                if let Some(s) = ctx.param("start_stage") {
+                    meta.push(KvPair::text("meta.start_stage", s));
+                }
+                meta
             }
             Self::Extract { strategy } => {
                 let mut meta = vec![KvPair::text("meta.strategy", strategy.name())];
@@ -713,6 +716,13 @@ impl PbfhoggCommand {
                     args.push("--index-type".into());
                     args.push(it.into());
                 }
+                if let Some(s) = ctx.param("start_stage") {
+                    args.push("--start-stage".into());
+                    args.push(s.into());
+                }
+                if ctx.param("keep_scratch").is_some() {
+                    args.push("--keep-scratch".into());
+                }
                 Ok(args)
             }
             Self::ExtractSimple => {
@@ -972,16 +982,24 @@ impl PbfhoggCommand {
                 ]);
             }
             Self::AddLocationsToWays => {
-                let index_type = ctx.param("index_type").unwrap_or("external");
-                let output = ctx.scratch_output("hotpath-altw-external", "osm.pbf");
+                let output = ctx.scratch_output("hotpath-altw", "osm.pbf");
                 args.extend([
                     "add-locations-to-ways".into(),
-                    "--index-type".into(),
-                    index_type.into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
                     path_to_string(&output)?,
                 ]);
+                if let Some(it) = ctx.param("index_type") {
+                    args.push("--index-type".into());
+                    args.push(it.into());
+                }
+                if let Some(s) = ctx.param("start_stage") {
+                    args.push("--start-stage".into());
+                    args.push(s.into());
+                }
+                if ctx.param("keep_scratch").is_some() {
+                    args.push("--keep-scratch".into());
+                }
             }
             Self::BuildGeocodeIndex => {
                 let output_dir = ctx.scratch_dir.join(format!("geocode-{}", ctx.dataset));
@@ -1168,6 +1186,60 @@ mod tests {
         let args = cmd.build_args(&ctx).unwrap();
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
+    }
+
+    #[test]
+    fn altw_build_args_with_start_stage() {
+        let mut ctx = test_ctx();
+        ctx.params.insert("index_type".into(), "external".into());
+        ctx.params.insert("start_stage".into(), "3".into());
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx).unwrap();
+        assert!(args.contains(&String::from("--start-stage")));
+        assert!(args.contains(&String::from("3")));
+    }
+
+    #[test]
+    fn altw_build_args_with_keep_scratch() {
+        let mut ctx = test_ctx();
+        ctx.params.insert("index_type".into(), "external".into());
+        ctx.params.insert("keep_scratch".into(), "true".into());
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx).unwrap();
+        assert!(args.contains(&String::from("--keep-scratch")));
+    }
+
+    #[test]
+    fn altw_hotpath_no_index_type_default() {
+        // Hotpath should NOT default to --index-type external when omitted.
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_hotpath_args(&ctx).unwrap();
+        assert!(!args.contains(&String::from("--index-type")));
+    }
+
+    #[test]
+    fn altw_hotpath_with_start_stage() {
+        let mut ctx = test_ctx();
+        ctx.params.insert("index_type".into(), "external".into());
+        ctx.params.insert("start_stage".into(), "4".into());
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_hotpath_args(&ctx).unwrap();
+        assert!(args.contains(&String::from("--index-type")));
+        assert!(args.contains(&String::from("external")));
+        assert!(args.contains(&String::from("--start-stage")));
+        assert!(args.contains(&String::from("4")));
+    }
+
+    #[test]
+    fn altw_metadata_with_start_stage() {
+        let mut ctx = test_ctx();
+        ctx.params.insert("index_type".into(), "external".into());
+        ctx.params.insert("start_stage".into(), "3".into());
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let meta = cmd.metadata(&ctx);
+        assert!(meta.iter().any(|kv| kv.key == "meta.index_type"));
+        assert!(meta.iter().any(|kv| kv.key == "meta.start_stage"));
     }
 
     #[test]

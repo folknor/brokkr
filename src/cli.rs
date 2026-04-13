@@ -274,6 +274,12 @@ Examples:
         /// Index type (dense, sparse, external; default: hash)
         #[arg(long)]
         index_type: Option<String>,
+        /// Start from stage N, skipping earlier stages (2-4; requires a prior --keep-scratch run)
+        #[arg(long, value_parser = validate_start_stage, requires = "index_type")]
+        start_stage: Option<String>,
+        /// Preserve the external join scratch directory for subsequent --start-stage invocations
+        #[arg(long, requires = "index_type")]
+        keep_scratch: bool,
     },
     /// [pbfhogg] Extract by bounding box (simple strategy)
     #[command(name = "extract-simple", display_order = 2)]
@@ -1451,6 +1457,17 @@ fn validate_compression(s: &str) -> Result<String, String> {
     ))
 }
 
+/// Validate `--start-stage`: must be 2, 3, or 4.
+fn validate_start_stage(s: &str) -> Result<String, String> {
+    let n: u8 = s
+        .parse()
+        .map_err(|_| format!("expected stage number 2-4, got '{s}'"))?;
+    if !(2..=4).contains(&n) {
+        return Err(format!("stage must be 2-4, got {n}"));
+    }
+    Ok(s.to_owned())
+}
+
 /// Validate `--osc-range` format: `LO..HI` where both are non-negative integers and LO <= HI.
 fn validate_osc_range(s: &str) -> Result<String, String> {
     let (lo_s, hi_s) = s
@@ -1705,10 +1722,18 @@ impl Command {
                 mode,
                 pbf,
                 index_type,
+                start_stage,
+                keep_scratch,
             } => {
                 let mut params = HashMap::new();
                 if let Some(it) = index_type {
                     params.insert("index_type".into(), it.clone());
+                }
+                if let Some(s) = start_stage {
+                    params.insert("start_stage".into(), s.clone());
+                }
+                if *keep_scratch {
+                    params.insert("keep_scratch".into(), "true".into());
                 }
                 Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))
             }
@@ -1751,5 +1776,77 @@ mod tests {
         };
         assert!(mode.hotpath.is_some());
         assert_eq!(pbf.dataset, "japan");
+    }
+
+    #[test]
+    fn validate_start_stage_accepts_valid() {
+        assert!(validate_start_stage("2").is_ok());
+        assert!(validate_start_stage("3").is_ok());
+        assert!(validate_start_stage("4").is_ok());
+    }
+
+    #[test]
+    fn validate_start_stage_rejects_invalid() {
+        assert!(validate_start_stage("0").is_err());
+        assert!(validate_start_stage("1").is_err());
+        assert!(validate_start_stage("5").is_err());
+        assert!(validate_start_stage("255").is_err());
+        assert!(validate_start_stage("abc").is_err());
+    }
+
+    #[test]
+    fn altw_start_stage_requires_index_type() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "add-locations-to-ways",
+            "--start-stage",
+            "4",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn altw_start_stage_with_index_type_parses() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "add-locations-to-ways",
+            "--index-type",
+            "external",
+            "--start-stage",
+            "4",
+        ])
+        .expect("parse");
+
+        let Command::AddLocationsToWays { start_stage, .. } = parsed.command else {
+            panic!("expected add-locations-to-ways command");
+        };
+        assert_eq!(start_stage.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn altw_keep_scratch_requires_index_type() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "add-locations-to-ways",
+            "--keep-scratch",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn altw_keep_scratch_with_index_type_parses() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "add-locations-to-ways",
+            "--index-type",
+            "external",
+            "--keep-scratch",
+        ])
+        .expect("parse");
+
+        let Command::AddLocationsToWays { keep_scratch, .. } = parsed.command else {
+            panic!("expected add-locations-to-ways command");
+        };
+        assert!(keep_scratch);
     }
 }

@@ -65,6 +65,14 @@ fn extra_variant_suffix(
         suffix.push_str(&format!("-{from}-to-{to}"));
     }
 
+    // Start-stage suffix: partial runs get `+from-stage4` etc. so they don't
+    // mix with full-pipeline results.
+    if matches!(command, PbfhoggCommand::AddLocationsToWays)
+        && let Some(s) = extra_params.get("start_stage")
+    {
+        suffix.push_str(&format!("+from-stage{s}"));
+    }
+
     // Compression suffix: `--compression zstd:1` → `+zstd1`, `none` → `+nocompress`.
     // Default (no flag) stays unsuffixed so historical baselines remain comparable.
     if let Some(c) = extra_params.get("compression") {
@@ -136,6 +144,17 @@ pub fn run_pbfhogg_command_with_params(
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Pbfhogg, command.id())?;
+
+    // --start-stage and --keep-scratch are only meaningful for external join.
+    let has_stage_flags =
+        extra_params.contains_key("start_stage") || extra_params.contains_key("keep_scratch");
+    if has_stage_flags
+        && extra_params.get("index_type").map_or(true, |v| v != "external")
+    {
+        return Err(DevError::Config(
+            "--start-stage and --keep-scratch require --index-type external".into(),
+        ));
+    }
 
     if req.dry_run {
         return run_pbfhogg_dry_run(req, command, osc_seq, extra_params);
