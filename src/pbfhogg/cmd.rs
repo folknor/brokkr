@@ -312,7 +312,6 @@ pub(crate) fn verify(
         VerifyCommand::Renumber {
             dataset,
             variant,
-            renumber_mode,
             start_id,
             verbose,
         } => {
@@ -321,7 +320,6 @@ pub(crate) fn verify(
                 &harness,
                 &pbf_path,
                 &dataset,
-                &renumber_mode,
                 start_id.as_deref(),
                 verbose,
             )

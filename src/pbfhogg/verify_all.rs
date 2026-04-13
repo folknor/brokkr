@@ -162,12 +162,12 @@ pub fn run(
         skip("diff --format osc", "no --osc provided");
     }
 
-    // 10. renumber (external mode — the planet-safe path)
+    // 10. renumber
     verify_msg("========== renumber ==========");
     let t = Instant::now();
     run_one(
         "renumber",
-        verify_renumber::run(harness, pbf, dataset, "external", None, false),
+        verify_renumber::run(harness, pbf, dataset, None, false),
         elapsed_ms(&t),
     );
 

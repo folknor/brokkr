@@ -95,8 +95,7 @@ brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format os
 `verify renumber` is a special case. Most verify commands require pbfhogg's output to be byte-identical (or element-identical) with osmium's. `renumber` does not: pbfhogg's orphan-reference handling in relation members is a documented intentional deviation (see pbfhogg's `DEVIATIONS.md` and `notes/renumber-planet-scale.md` section 5b), so a small non-zero diff is expected and does not indicate a regression. The goal of the command is to separate "expected delta" from "actual regression" without a human having to triage every diff.
 
 ```
-brokkr verify renumber                              # default: denmark, external mode
-brokkr verify renumber --mode inmem                 # also sanity-checks the baseline
+brokkr verify renumber                              # default: denmark
 brokkr verify renumber --dataset europe --verbose   # print detail on mismatch
 brokkr verify renumber --start-id 1,1,1             # forwarded to both tools
 ```
@@ -109,7 +108,7 @@ Per run it renumbers the input PBF with both tools, runs `pbfhogg diff -s -c -v`
 
 **PASS** when element counts match, no node or way block headers appear in the diff, and the total diff count stays under `0.10 * total_relations` (sanity threshold — calibrated from measured rates like Denmark's 306 orphan-ref diffs ÷ 46,103 relations ≈ 0.66%; the threshold catches regressions that would typically be orders of magnitude higher without flagging normal transboundary delta).
 
-**FAIL** when any of those three checks fire: divergent element counts, any node/way diff, or relation diffs that blow past the sanity threshold. On failure the diff log at `target/verify/renumber/verify-renumber-<dataset>-<mode>-diff.txt` is preserved alongside both renumbered PBFs for human review. On success all three scratch files are removed. The `--verbose` flag additionally prints the first 50 lines of the diff to the terminal when any mismatch (expected or not) is found. `verify all` includes `renumber` as part of the pre-release sweep, running it with `--mode external` — the planet-safe path.
+**FAIL** when any of those three checks fire: divergent element counts, any node/way diff, or relation diffs that blow past the sanity threshold. On failure the diff log at `target/verify/renumber/verify-renumber-<dataset>-diff.txt` is preserved alongside both renumbered PBFs for human review. On success all three scratch files are removed. The `--verbose` flag additionally prints the first 50 lines of the diff to the terminal when any mismatch (expected or not) is found. `verify all` includes `renumber` as part of the pre-release sweep.
 
 **Other**: `download <region> [--osc-seq N]` fetches datasets from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Skips files that already exist (checked against `brokkr.toml` filenames). `--osc-seq N` downloads all missing OSC diffs from the last configured seq through N, hashes them, and appends entries to `brokkr.toml`. New downloads use dated filenames matching the project convention (e.g. `europe-20260329-seq4716.osc.gz`).
 

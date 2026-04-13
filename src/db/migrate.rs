@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 10;
+pub(super) const SCHEMA_VERSION: i64 = 11;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -45,6 +45,10 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 10 {
         migrate_v9_to_v10(conn)?;
+    }
+
+    if current < 11 {
+        migrate_v10_to_v11(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -330,6 +334,20 @@ fn migrate_v9_to_v10(conn: &rusqlite::Connection) -> Result<(), DevError> {
     if !has_column(conn, "runs", "stop_marker") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN stop_marker TEXT")?;
     }
+    Ok(())
+}
+
+/// v10 → v11: collapse `renumber+external` variant to `renumber`.
+///
+/// pbfhogg removed the `--mode` flag from `renumber` (external is now the only
+/// implementation), so the `+external` variant suffix is no longer produced.
+/// Merge old `+external` rows into the plain `renumber` variant for consistent
+/// `brokkr results --command renumber` queries.
+fn migrate_v10_to_v11(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    conn.execute(
+        "UPDATE runs SET variant = 'renumber' WHERE variant = 'renumber+external'",
+        [],
+    )?;
     Ok(())
 }
 

@@ -178,7 +178,6 @@ pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
     dataset: &str,
-    mode: &str,
     start_id: Option<&str>,
     verbose: bool,
 ) -> Result<(), DevError> {
@@ -187,7 +186,6 @@ pub fn run(
     verify_msg("--- renumber cross-validation ---");
     verify_msg(&format!("  dataset: {dataset}"));
     verify_msg(&format!("  input: {}", pbf.display()));
-    verify_msg(&format!("  mode: {mode}"));
     if let Some(sid) = start_id {
         verify_msg(&format!("  start-id: {sid}"));
     }
@@ -196,8 +194,8 @@ pub fn run(
 
     // --- Output paths ---------------------------------------------------
     let osmium_out = outdir.join(format!("osmium-renumber-{dataset}.osm.pbf"));
-    let pbfhogg_out = outdir.join(format!("pbfhogg-renumber-{dataset}-{mode}.osm.pbf"));
-    let diff_log = outdir.join(format!("verify-renumber-{dataset}-{mode}-diff.txt"));
+    let pbfhogg_out = outdir.join(format!("pbfhogg-renumber-{dataset}.osm.pbf"));
+    let diff_log = outdir.join(format!("verify-renumber-{dataset}-diff.txt"));
     let osmium_out_str = osmium_out.display().to_string();
     let pbfhogg_out_str = pbfhogg_out.display().to_string();
 
@@ -229,8 +227,6 @@ pub fn run(
         &pbf_str,
         "-o",
         &pbfhogg_out_str,
-        "--mode",
-        mode,
     ];
     if let Some(sid) = start_id {
         pbfhogg_args.push("--start-id");

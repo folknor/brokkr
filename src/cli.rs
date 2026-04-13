@@ -228,11 +228,6 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-        /// Implementation: `inmem` (in-memory FxHashMap, default) or
-        /// `external` (radix-partitioned tuple files on disk).
-        /// Only `external` scales to planet; `inmem` OOMs above Europe.
-        #[arg(long = "mode", value_name = "MODE", value_parser = validate_renumber_mode)]
-        renumber_mode: Option<String>,
     },
     /// [pbfhogg] Merge OSC changes
     #[command(name = "merge-changes", display_order = 2)]
@@ -1344,10 +1339,6 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
-        /// pbfhogg renumber mode to verify: `inmem` or `external`
-        #[arg(long = "mode", value_name = "MODE", default_value = "external",
-              value_parser = validate_renumber_mode)]
-        renumber_mode: String,
         /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
         #[arg(long = "start-id", value_name = "IDS")]
         start_id: Option<String>,
@@ -1434,16 +1425,6 @@ fn validate_meta_filter(s: &str) -> Result<String, String> {
         ));
     }
     Ok(s.to_owned())
-}
-
-/// Validate `--mode` for `renumber`: must be `inmem` or `external`.
-fn validate_renumber_mode(s: &str) -> Result<String, String> {
-    match s {
-        "inmem" | "external" => Ok(s.to_owned()),
-        _ => Err(format!(
-            "invalid renumber mode '{s}', expected 'inmem' or 'external'"
-        )),
-    }
 }
 
 fn validate_compression(s: &str) -> Result<String, String> {
@@ -1583,16 +1564,8 @@ impl Command {
             Self::GetidInvert { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::GetidInvert, None, empty))
             }
-            Self::Renumber {
-                mode,
-                pbf,
-                renumber_mode,
-            } => {
-                let mut params = HashMap::new();
-                if let Some(m) = renumber_mode {
-                    params.insert("renumber_mode".into(), m.clone());
-                }
-                Some((mode, pbf, PbfhoggCommand::Renumber, None, params))
+            Self::Renumber { mode, pbf } => {
+                Some((mode, pbf, PbfhoggCommand::Renumber, None, empty))
             }
             Self::ExtractSimple { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::ExtractSimple, None, empty))
