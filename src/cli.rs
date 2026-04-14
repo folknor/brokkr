@@ -1,4 +1,14 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+/// Index mode selection for `verify add-locations-to-ways`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum AltwMode {
+    Hash,
+    Sparse,
+    Dense,
+    External,
+    All,
+}
 
 #[derive(Parser)]
 #[command(name = "brokkr", about = "Shared development tooling", version)]
@@ -1297,6 +1307,9 @@ pub(crate) enum VerifyCommand {
         dataset: String,
         #[arg(long, default_value = "indexed")]
         variant: String,
+        /// Which index modes to verify. `all` runs hash, sparse, dense, external.
+        #[arg(long, value_enum, default_value = "all")]
+        mode: AltwMode,
         /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
         #[arg(long)]
         direct_io: bool,

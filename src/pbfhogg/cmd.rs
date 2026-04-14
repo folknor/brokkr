@@ -263,10 +263,11 @@ pub(crate) fn verify(
         VerifyCommand::AddLocationsToWays {
             dataset,
             variant,
+            mode,
             direct_io,
         } => {
             let pbf_path = resolve_pbf_path(&dataset, &variant, &paths, project_root)?;
-            super::verify_add_locations::run(&harness, &pbf_path, direct_io)
+            super::verify_add_locations::run(&harness, &pbf_path, mode, direct_io)
         }
         VerifyCommand::CheckRefs {
             dataset,

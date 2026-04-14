@@ -115,7 +115,7 @@ pub fn run(
     let t = Instant::now();
     run_one(
         "add-locations-to-ways",
-        verify_add_locations::run(harness, pbf, direct_io),
+        verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io),
         elapsed_ms(&t),
     );
 
