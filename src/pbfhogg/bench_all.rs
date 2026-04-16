@@ -47,7 +47,6 @@ pub fn run(
         pbf_path,
         osc_path.as_deref(),
         Some(&paths.scratch_dir),
-        file_mb,
         runs,
         bench_commands::ALL_COMMANDS,
         project_root,

@@ -266,18 +266,48 @@ fn run_pbfhogg_wallclock(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let mut args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
-    for flag in &io_args {
+
+    run_pbfhogg_wallclock_core(
+        &ctx.harness,
+        &ctx.binary,
+        command,
+        &cmd_ctx,
+        &io_args,
+        extra_params.compression.as_deref(),
+        req.runs(),
+        req.project_root,
+        true,
+    )
+}
+
+/// Run a single pbfhogg command via the wall-clock harness.
+///
+/// Shared by `run_pbfhogg_wallclock` (individual `brokkr <cmd>` invocations)
+/// and the suite runner in `pbfhogg::bench_commands`. Both paths produce
+/// identical DB rows — argv construction, BenchConfig fields, and scratch
+/// cleanup are all centralised here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_pbfhogg_wallclock_core(
+    harness: &harness::BenchHarness,
+    binary: &Path,
+    command: &PbfhoggCommand,
+    cmd_ctx: &CommandContext,
+    io_args: &[&'static str],
+    compression: Option<&str>,
+    runs: usize,
+    project_root: &Path,
+    announce: bool,
+) -> Result<(), DevError> {
+    let mut args = command.build_args(cmd_ctx, ArgMode::Bench)?;
+    for flag in io_args {
         args.push((*flag).into());
     }
-    if let Some(c) = &extra_params.compression {
+    if let Some(c) = compression {
         args.push("--compression".into());
-        args.push(c.clone());
+        args.push(c.to_owned());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    // Read the input file size from the resolved PBF in cmd_ctx — correct for
-    // both legacy commands (where pbf_path = resolve_pbf_path(dataset, variant))
-    // and DiffSnapshots (where pbf_path is the --from snapshot's PBF).
+
     let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
     let basename = cmd_ctx.pbf_basename();
 
@@ -288,31 +318,31 @@ fn run_pbfhogg_wallclock(
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
-        runs: req.runs(),
+        runs,
         cli_args: Some(harness::format_cli_args(
-            &ctx.binary.display().to_string(),
+            &binary.display().to_string(),
             &arg_refs,
         )),
         brokkr_args: None,
-        metadata: command.metadata(&cmd_ctx),
+        metadata: command.metadata(cmd_ctx),
     };
 
-    output::bench_msg(&format!(
-        "{} ({file_mb:.0} MB), {} run(s)",
-        command.id(),
-        req.runs(),
-    ));
+    if announce {
+        output::bench_msg(&format!(
+            "{} ({file_mb:.0} MB), {runs} run(s)",
+            command.id(),
+        ));
+    }
 
-    ctx.harness.run_external_ok(
+    harness.run_external_ok(
         &config,
-        &ctx.binary,
+        binary,
         &arg_refs,
-        req.project_root,
+        project_root,
         command.ok_exit_codes(),
     )?;
 
-    // Clean up scratch output files.
-    cleanup_pbfhogg_output(command, &cmd_ctx, ArgMode::Bench);
+    cleanup_pbfhogg_output(command, cmd_ctx, ArgMode::Bench);
 
     Ok(())
 }

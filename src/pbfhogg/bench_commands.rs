@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 
 use crate::dispatch;
 use crate::error::DevError;
-use crate::harness::{BenchConfig, BenchHarness};
+use crate::harness::BenchHarness;
 use crate::measure::{CommandContext, CommandParams};
 use crate::output;
 use crate::pbfhogg::commands::{
-    ArgMode, CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, PbfhoggCommand,
+    CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, PbfhoggCommand,
 };
 
 pub const ALL_COMMANDS: &[&str] = &[
@@ -233,14 +233,11 @@ pub fn run(
     pbf_path: &Path,
     osc_path: Option<&Path>,
     scratch_dir: Option<&Path>,
-    file_mb: f64,
     runs: usize,
     commands: &[&str],
     project_root: &Path,
     index_type: Option<&str>,
 ) -> Result<(), DevError> {
-    let (basename, _) = super::path_strs(pbf_path)?;
-
     // Resolve OSC path once if any preset needs it.
     let osc_pathbuf = if suite_needs_osc(commands)? {
         Some(
@@ -311,29 +308,17 @@ pub fn run(
             params,
         };
 
-        let args = cmd.build_args(&ctx, ArgMode::Bench)?;
-        let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-        let config = BenchConfig {
-            command: cmd.result_command(),
-            mode: None,
-            input_file: Some(basename.clone()),
-            input_mb: Some(file_mb),
-            cargo_features: None,
-            cargo_profile: "release".into(),
+        dispatch::run_pbfhogg_wallclock_core(
+            harness,
+            binary,
+            &cmd,
+            &ctx,
+            &[],
+            None,
             runs,
-            cli_args: Some(crate::harness::format_cli_args(
-                &binary.display().to_string(),
-                &args_refs,
-            )),
-            brokkr_args: None,
-            metadata: cmd.metadata(&ctx),
-        };
-
-        harness.run_external_ok(&config, binary, &args_refs, project_root, cmd.ok_exit_codes())?;
-
-        dispatch::cleanup_pbfhogg_output(&cmd, &ctx, ArgMode::Bench);
-        Ok(())
+            project_root,
+            false,
+        )
     })
 }
 

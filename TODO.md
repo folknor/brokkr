@@ -8,11 +8,6 @@ simplify the rest.
 
 ### Duplicated code paths
 
-#### `brokkr suite pbfhogg` vs `brokkr <cmd>` dispatch
-Two independent code paths to the same DB rows: `bench_commands.rs`
-for the suite runner vs `dispatch::run_pbfhogg_command_with_params`
-for individual commands. Unify.
-
 #### `BenchContext::new` vs `HarnessContext::new`
 Same shape minus the cargo build. Difference is ~20 lines. Either
 fold `HarnessContext` into `BenchContext` with an optional build, or
