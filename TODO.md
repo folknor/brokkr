@@ -50,11 +50,6 @@ Could be generated from the list of known axis-mirror names in code.
 
 ### File size / boundaries
 
-#### `main.rs` is ~2900 lines
-CLI dispatch + `run_measured` helpers + sidecar formatting +
-phase-summary printing + history + dozens of `cmd_` functions. Split
-into `cli_dispatch.rs`, `sidecar_fmt.rs`, `history_cmd.rs`, etc.
-
 #### `cli.rs` is ~1700 lines
 Clap definitions + `as_pbfhogg` adapter + validators. The adapter is
 the bridge between CLI shape and `PbfhoggCommand`; move it next to
