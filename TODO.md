@@ -31,10 +31,6 @@ Could be generated from the list of known axis-mirror names in code.
 
 ### File size / boundaries
 
-#### `cli.rs` is ~1700 lines
-Clap definitions + `as_pbfhogg` adapter + validators. The adapter is
-the bridge between CLI shape and `PbfhoggCommand`; move it next to
-commands.rs.
 
 ### Inconsistencies
 

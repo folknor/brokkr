@@ -26,6 +26,7 @@ pub mod bench_merge;
 pub mod bench_planetiler;
 pub mod bench_read;
 pub mod bench_write;
+pub mod cli_adapter;
 pub(crate) mod cmd;
 pub mod commands;
 pub mod dispatch;
