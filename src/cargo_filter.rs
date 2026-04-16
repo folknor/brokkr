@@ -123,6 +123,7 @@ pub struct ParsedTestResults {
 /// panic locations and messages, and aggregates `test result:` summary lines.
 /// Works on any iterator of lines — callers can pre-filter JSON lines out
 /// before passing non-JSON lines here.
+#[allow(clippy::too_many_lines)] // state-machine parser — splitting hurts clarity
 pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
     let mut failures: Vec<ParsedTestFailure> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
@@ -451,15 +452,14 @@ fn extract_location(block: &[String]) -> Option<String> {
 /// `"warning: unused variable: \`x\` [unused_variables]"` → `("warning[unused_variables]", "unused variable: \`x\`")`
 fn parse_header(line: &str) -> (String, String) {
     // error[CODE]: message
-    if line.starts_with("error[") || line.starts_with("warning[") {
-        if let Some(bracket_end) = line.find(']') {
+    if (line.starts_with("error[") || line.starts_with("warning["))
+        && let Some(bracket_end) = line.find(']') {
             let prefix = &line[..bracket_end + 1];
             let message = line[bracket_end + 1..]
                 .trim_start_matches(':')
                 .trim();
             return (prefix.to_string(), message.to_string());
         }
-    }
 
     // "warning: message [rule]" or "error: message"
     let (level, rest) = if let Some(rest) = line.strip_prefix("error: ") {
@@ -471,15 +471,13 @@ fn parse_header(line: &str) -> (String, String) {
     };
 
     // Check for trailing [rule].
-    if let Some(bracket_start) = rest.rfind('[') {
-        if let Some(bracket_end) = rest.rfind(']') {
-            if bracket_end > bracket_start {
+    if let Some(bracket_start) = rest.rfind('[')
+        && let Some(bracket_end) = rest.rfind(']')
+            && bracket_end > bracket_start {
                 let rule = &rest[bracket_start + 1..bracket_end];
                 let message = rest[..bracket_start].trim();
                 return (format!("{level}[{rule}]"), message.to_string());
             }
-        }
-    }
 
     (level.to_string(), rest.to_string())
 }

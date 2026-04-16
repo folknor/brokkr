@@ -86,6 +86,7 @@ pub struct TestSummaryEvent {
 ///
 /// Each line is a JSON object from cargo. Only lines with
 /// `"reason": "compiler-message"` are extracted; everything else is skipped.
+#[allow(clippy::too_many_lines)] // JSON walk — splitting just shuffles match arms
 pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEvent> {
     let mut events = Vec::new();
 
@@ -121,7 +122,7 @@ pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEve
             .get("code")
             .and_then(|c| c.get("code"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         let message = msg
             .get("message")
@@ -137,11 +138,11 @@ pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEve
 
         let (file, line_start, col_start, line_end, col_end) = match primary_span {
             Some(span) => (
-                span.get("file_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                span.get("line_start").and_then(|v| v.as_u64()),
-                span.get("column_start").and_then(|v| v.as_u64()),
-                span.get("line_end").and_then(|v| v.as_u64()),
-                span.get("column_end").and_then(|v| v.as_u64()),
+                span.get("file_name").and_then(|v| v.as_str()).map(std::string::ToString::to_string),
+                span.get("line_start").and_then(serde_json::Value::as_u64),
+                span.get("column_start").and_then(serde_json::Value::as_u64),
+                span.get("line_end").and_then(serde_json::Value::as_u64),
+                span.get("column_end").and_then(serde_json::Value::as_u64),
             ),
             None => (None, None, None, None, None),
         };
@@ -164,9 +165,9 @@ pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEve
                             .and_then(|spans| spans.first());
                         let (child_file, child_line, child_col) = match child_span {
                             Some(s) => (
-                                s.get("file_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                s.get("line_start").and_then(|v| v.as_u64()),
-                                s.get("column_start").and_then(|v| v.as_u64()),
+                                s.get("file_name").and_then(|v| v.as_str()).map(std::string::ToString::to_string),
+                                s.get("line_start").and_then(serde_json::Value::as_u64),
+                                s.get("column_start").and_then(serde_json::Value::as_u64),
                             ),
                             None => (None, None, None),
                         };

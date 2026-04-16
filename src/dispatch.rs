@@ -85,7 +85,7 @@ pub fn run_pbfhogg_command_with_params(
     let has_stage_flags =
         extra_params.contains_key("start_stage") || extra_params.contains_key("keep_scratch");
     if has_stage_flags
-        && extra_params.get("index_type").map_or(true, |v| v != "external")
+        && extra_params.get("index_type").is_none_or(|v| v != "external")
     {
         return Err(DevError::Config(
             "--start-stage and --keep-scratch require --index-type external".into(),

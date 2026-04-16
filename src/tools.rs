@@ -524,32 +524,6 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
     Ok(days * 86400 + hour * 3600 + minute * 60 + second)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_http_date_imf_fixdate() {
-        // Sun, 06 Nov 1994 08:49:37 GMT — the canonical example from RFC 7231.
-        let unix = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
-        assert_eq!(unix, 784111777);
-    }
-
-    #[test]
-    fn parse_http_date_modern() {
-        // Sat, 11 Apr 2026 12:34:56 GMT
-        let unix = parse_http_date("Sat, 11 Apr 2026 12:34:56 GMT").unwrap();
-        // Cross-check: 2026-04-11T12:34:56Z = 1775910896
-        assert_eq!(unix, 1775910896);
-    }
-
-    #[test]
-    fn parse_http_date_rejects_garbage() {
-        assert!(parse_http_date("not a date").is_err());
-        assert!(parse_http_date("Sun, 06 XYZ 1994 08:49:37 GMT").is_err());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tilemaker
 // ---------------------------------------------------------------------------
@@ -701,4 +675,30 @@ fn ensure_shortbread_config(data_dir: &Path) -> Result<PathBuf, DevError> {
     }
 
     Ok(shortbread_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_http_date_imf_fixdate() {
+        // Sun, 06 Nov 1994 08:49:37 GMT — the canonical example from RFC 7231.
+        let unix = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
+        assert_eq!(unix, 784111777);
+    }
+
+    #[test]
+    fn parse_http_date_modern() {
+        // Sat, 11 Apr 2026 12:34:56 GMT
+        let unix = parse_http_date("Sat, 11 Apr 2026 12:34:56 GMT").unwrap();
+        // Cross-check: 2026-04-11T12:34:56Z = 1775910896
+        assert_eq!(unix, 1775910896);
+    }
+
+    #[test]
+    fn parse_http_date_rejects_garbage() {
+        assert!(parse_http_date("not a date").is_err());
+        assert!(parse_http_date("Sun, 06 XYZ 1994 08:49:37 GMT").is_err());
+    }
 }
