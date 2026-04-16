@@ -462,9 +462,9 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-        /// Compression (comma-separated: none,zlib:6,zstd:3)
+        /// Compressions to benchmark (comma-separated: none,zlib:6,zstd:3)
         #[arg(long, default_value = "none,zlib:6,zstd:3")]
-        compression: String,
+        compressions: String,
     },
     /// [pbfhogg] Merge benchmark
     #[command(name = "merge", display_order = 2)]
@@ -473,9 +473,9 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-        /// Compression (comma-separated: zlib,none)
+        /// Compressions to benchmark (comma-separated: zlib,none)
         #[arg(long, default_value = "zlib,none")]
-        compression: String,
+        compressions: String,
         /// Use io-uring
         #[arg(long)]
         uring: bool,

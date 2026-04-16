@@ -306,7 +306,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Write {
             mode,
             pbf,
-            compression,
+            compressions,
         } => run_measured(
             &mode,
             &dev_config,
@@ -314,12 +314,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
-            |req| pbfhogg::cmd::bench_write(req, &compression),
+            |req| pbfhogg::cmd::bench_write(req, &compressions),
         ),
         Command::MergeBench {
             mode,
             pbf,
-            compression,
+            compressions,
             uring,
             osc_seq,
         } => run_measured(
@@ -330,7 +330,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &pbf.dataset,
             &pbf.variant,
             |req| {
-                pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compression)
+                pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions)
             },
         ),
 
