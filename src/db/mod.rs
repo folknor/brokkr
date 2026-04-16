@@ -8,7 +8,7 @@ pub(crate) mod sidecar;
 mod types;
 mod write;
 
-pub use format::{format_compare, format_details, format_table};
+pub use format::{format_compare, format_details, format_single_result, format_table};
 pub use hotpath::hotpath_data_from_json;
 pub use types::{
     CompareResult, Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,

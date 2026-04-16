@@ -1520,6 +1520,52 @@ fn format_epoch(epoch: i64) -> String {
     )
 }
 
+/// Render a detail-style result view. When the result set is exactly
+/// one row, use the new labelled-block layout via
+/// `db::format_single_result` — no compact table header, multi-line
+/// cli_args, brokkr_args surfaced, sidecar hint folded in as a field.
+/// When the result set has multiple rows (a UUID prefix that matched
+/// many), fall back to `format_table` + per-row `format_details`.
+fn render_single_or_multi(
+    rows: &[db::StoredRow],
+    sidecar_db: Option<&db::sidecar::SidecarDb>,
+    top: usize,
+) {
+    let has_sidecar = |uuid: &str| {
+        sidecar_db.is_some_and(|sdb| sdb.has_data(uuid))
+    };
+
+    if rows.len() == 1 {
+        let row = &rows[0];
+        let block = db::format_single_result(row, has_sidecar(&row.uuid));
+        println!("{block}");
+        if let Some(ref hotpath) = row.hotpath
+            && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, top)
+        {
+            println!("\n{report}");
+        }
+        return;
+    }
+
+    // Multi-row result set — keep the compact table + per-row details.
+    let table = db::format_table(rows);
+    println!("{table}");
+    for row in rows {
+        let details = db::format_details(row);
+        if !details.is_empty() {
+            println!("\n{details}");
+        }
+        if let Some(ref hotpath) = row.hotpath
+            && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, top)
+        {
+            println!("\n{report}");
+        }
+        if has_sidecar(&row.uuid) {
+            output::sidecar_msg("--timeline/--markers");
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
@@ -1702,27 +1748,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 output::result_msg("no matching results");
             }
         } else {
-            let table = db::format_table(&rows);
-            println!("{table}");
-            // Show detail fields and hotpath report for UUID lookups.
-            for row in &rows {
-                let details = db::format_details(row);
-                if !details.is_empty() {
-                    println!("\n{details}");
-                }
-                if let Some(ref hotpath) = row.hotpath
-                    && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, q.top)
-                {
-                    println!("\n{report}");
-                }
-                // Note if sidecar data exists.
-                if sidecar_db
-                    .as_ref()
-                    .is_some_and(|sdb| sdb.has_data(&row.uuid))
-                {
-                    output::sidecar_msg("profile data available (use --timeline or --markers)");
-                }
-            }
+            render_single_or_multi(&rows, sidecar_db.as_ref(), q.top);
         }
     } else if let Some(ref commits) = q.compare {
         let commit_a = commits.first().map_or("", String::as_str);
@@ -1776,27 +1802,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             if rows.is_empty() {
                 output::result_msg("no results yet");
             } else {
-                let table = db::format_table(&rows);
-                println!("{table}");
-                for row in &rows {
-                    let details = db::format_details(row);
-                    if !details.is_empty() {
-                        println!("\n{details}");
-                    }
-                    if let Some(ref hotpath) = row.hotpath
-                        && let Some(report) = hotpath_fmt::format_hotpath_report(hotpath, q.top)
-                    {
-                        println!("\n{report}");
-                    }
-                    if sidecar_db
-                        .as_ref()
-                        .is_some_and(|sdb| sdb.has_data(&row.uuid))
-                    {
-                        output::sidecar_msg(
-                            "profile data available (use --timeline or --markers)",
-                        );
-                    }
-                }
+                render_single_or_multi(&rows, sidecar_db.as_ref(), q.top);
             }
         } else {
             let filter = db::QueryFilter {
