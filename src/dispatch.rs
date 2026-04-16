@@ -677,7 +677,7 @@ fn build_diff_snapshots_context(
 }
 
 /// Clean up scratch output files after a benchmark run.
-fn cleanup_pbfhogg_output(command: &PbfhoggCommand, ctx: &CommandContext) {
+pub(crate) fn cleanup_pbfhogg_output(command: &PbfhoggCommand, ctx: &CommandContext) {
     // Multi-extract has custom cleanup: output dir + config JSON.
     if matches!(command, PbfhoggCommand::MultiExtract { .. }) {
         std::fs::remove_dir_all(ctx.scratch_dir.join("multi-extract")).ok();

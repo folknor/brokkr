@@ -8,13 +8,6 @@ simplify the rest.
 
 ### Duplicated code paths
 
-#### ★ `bench_commands.rs::command_args` duplicates `PbfhoggCommand::build_args`
-Two separate match-by-name arg builders for the same pbfhogg subcommands.
-Every consolidation (cat/extract/tags-filter/getid/inspect/diff) forced
-updating both places; `consolidated_command_name` is a bandaid on top.
-Fix: route the suite runner through `PbfhoggCommand` variants so only one
-source of truth for argv construction.
-
 #### `PbfhoggCommand::build_args` vs `build_hotpath_args`
 Nearly identical; differs only in output path and a few special-case
 overrides (ApplyChanges compression from ctx). Collapse into one
@@ -60,11 +53,6 @@ named or documented.
 `bench-<id>-output.osm.pbf` in `scratch_output_path`. Works today;
 becomes a problem if two benches of the same command want distinct
 outputs.
-
-#### `consolidated_command_name` mapping
-Hardcoded preset → consolidated name map in `bench_commands.rs`. Every
-future consolidation adds entries. Goes away if the suite runner
-routes through `PbfhoggCommand` (see first item).
 
 #### v12→v13 `DELETE FROM run_kv WHERE key IN (…)` list
 30 hardcoded meta key names. New axis-mirror keys would be forgotten.

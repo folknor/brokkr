@@ -1,10 +1,19 @@
 //! Benchmark: run pbfhogg CLI commands and measure wall-clock time.
+//!
+//! Routes every preset through `PbfhoggCommand::build_args` so argv
+//! construction has a single source of truth. `preset_to_command` is the
+//! only place suite-preset strings meet the typed command enum.
 
 use std::path::{Path, PathBuf};
 
+use crate::dispatch;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
+use crate::measure::{CommandContext, CommandParams};
 use crate::output;
+use crate::pbfhogg::commands::{
+    CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, OutputKind, PbfhoggCommand,
+};
 
 pub const ALL_COMMANDS: &[&str] = &[
     "inspect",
@@ -37,274 +46,137 @@ pub const ALL_COMMANDS: &[&str] = &[
     "diff-osc",
 ];
 
-/// Map a suite preset name to the consolidated brokkr command name.
+/// Hardcoded bbox used by the extract-{simple,complete,smart} suite presets.
+/// Kept for backwards compatibility with historical suite rows; the
+/// standalone `brokkr extract` command uses the dataset's configured bbox.
+const SUITE_EXTRACT_BBOX: &str = "12.4,55.6,12.7,55.8";
+
+/// Map a suite preset string to a fully-specified `PbfhoggCommand` variant.
 ///
-/// The suite keeps its per-preset iteration names (e.g. `cat-way`,
-/// `cat-relation`, `cat-dedupe`) so each row stays distinct in the DB,
-/// but the `command` column writes the consolidated spelling
-/// (e.g. `cat`) so queries line up with the user-facing subcommand
-/// shape. Unlisted presets pass through unchanged.
-fn consolidated_command_name(preset: &str) -> &str {
-    match preset {
-        "cat-way" | "cat-relation" | "cat-dedupe" => "cat",
-        "extract-simple" | "extract-complete" | "extract-smart" => "extract",
-        "tags-filter-way"
-        | "tags-filter-amenity"
-        | "tags-filter-twopass"
-        | "tags-filter-osc" => "tags-filter",
-        "getid-refs" | "getid-invert" => "getid",
-        "inspect-nodes" | "inspect-tags" | "inspect-tags-way" => "inspect",
-        "diff-osc" => "diff",
-        other => other,
-    }
+/// This is the single place where preset names are interpreted — once we
+/// have a `PbfhoggCommand`, argv, metadata, input/output kind, and result
+/// labels all come from the enum itself.
+fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
+    Ok(match name {
+        "inspect" => PbfhoggCommand::Inspect {
+            nodes: false,
+            tags: false,
+            type_filter: None,
+        },
+        "inspect-nodes" => PbfhoggCommand::Inspect {
+            nodes: true,
+            tags: false,
+            type_filter: None,
+        },
+        "inspect-tags" => PbfhoggCommand::Inspect {
+            nodes: false,
+            tags: true,
+            type_filter: None,
+        },
+        "inspect-tags-way" => PbfhoggCommand::Inspect {
+            nodes: false,
+            tags: true,
+            type_filter: Some("way".into()),
+        },
+        "check-refs" => PbfhoggCommand::CheckRefs,
+        "check-ids" => PbfhoggCommand::CheckIds,
+        "sort" => PbfhoggCommand::Sort,
+        "cat" => PbfhoggCommand::Cat {
+            type_filter: None,
+            dedupe: false,
+            clean: false,
+        },
+        "cat-way" => PbfhoggCommand::Cat {
+            type_filter: Some(CatTypeFilter::Way),
+            dedupe: false,
+            clean: false,
+        },
+        "cat-relation" => PbfhoggCommand::Cat {
+            type_filter: Some(CatTypeFilter::Relation),
+            dedupe: false,
+            clean: false,
+        },
+        "cat-dedupe" => PbfhoggCommand::Cat {
+            type_filter: None,
+            dedupe: true,
+            clean: false,
+        },
+        "tags-filter-way" => PbfhoggCommand::TagsFilter {
+            filter: "w/highway=primary".into(),
+            omit_referenced: true,
+            input_kind_osc: false,
+        },
+        "tags-filter-amenity" => PbfhoggCommand::TagsFilter {
+            filter: "amenity=restaurant".into(),
+            omit_referenced: true,
+            input_kind_osc: false,
+        },
+        "tags-filter-twopass" => PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            omit_referenced: false,
+            input_kind_osc: false,
+        },
+        "tags-filter-osc" => PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            omit_referenced: false,
+            input_kind_osc: true,
+        },
+        "getid" => PbfhoggCommand::Getid {
+            add_referenced: false,
+            invert: false,
+        },
+        "getparents" => PbfhoggCommand::Getparents,
+        "getid-invert" => PbfhoggCommand::Getid {
+            add_referenced: false,
+            invert: true,
+        },
+        "renumber" => PbfhoggCommand::Renumber,
+        "merge-changes" => PbfhoggCommand::MergeChanges,
+        "apply-changes" => PbfhoggCommand::ApplyChanges,
+        "add-locations-to-ways" => PbfhoggCommand::AddLocationsToWays,
+        "extract-simple" => PbfhoggCommand::Extract {
+            strategy: ExtractStrategy::Simple,
+        },
+        "extract-complete" => PbfhoggCommand::Extract {
+            strategy: ExtractStrategy::Complete,
+        },
+        "extract-smart" => PbfhoggCommand::Extract {
+            strategy: ExtractStrategy::Smart,
+        },
+        "time-filter" => PbfhoggCommand::TimeFilter,
+        "diff" => PbfhoggCommand::Diff {
+            format: DiffFormat::Default,
+        },
+        "diff-osc" => PbfhoggCommand::Diff {
+            format: DiffFormat::Osc,
+        },
+        _ => return Err(DevError::Config(format!("unknown suite preset: {name}"))),
+    })
 }
 
-/// Commands that need a second PBF (generated by merging base + OSC).
-const NEEDS_MERGED: &[&str] = &["diff", "diff-osc"];
-
-/// Commands that directly need an OSC file as input.
-const NEEDS_OSC: &[&str] = &["tags-filter-osc", "merge-changes", "apply-changes"];
-
-/// Commands that produce `.osc.gz` output instead of `.osm.pbf`.
-const OSC_OUTPUT: &[&str] = &["tags-filter-osc", "merge-changes", "diff-osc"];
-
-/// Commands that produce no output file (no `-o` flag). Everything else writes to scratch.
-const NO_OUTPUT_FILE: &[&str] = &[
-    "inspect",
-    "inspect-nodes",
-    "inspect-tags",
-    "inspect-tags-way",
-    "check-refs",
-    "check-ids",
-    "diff",
-];
-
-#[allow(clippy::too_many_lines)]
-fn command_args(
-    name: &str,
-    pbf: &str,
-    merged_pbf: Option<&str>,
-    osc: Option<&str>,
-    output: &str,
-    index_type: Option<&str>,
-) -> Result<Vec<String>, DevError> {
-    let args = match name {
-        "inspect" => vec!["inspect".into(), pbf.into()],
-        "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
-        "inspect-tags" => vec![
-            "inspect".into(),
-            "tags".into(),
-            pbf.into(),
-            "--min-count".into(),
-            "999999999".into(),
-        ],
-        "inspect-tags-way" => vec![
-            "inspect".into(),
-            "tags".into(),
-            pbf.into(),
-            "--type".into(),
-            "way".into(),
-            "--min-count".into(),
-            "999999999".into(),
-        ],
-        "check-refs" => vec!["check".into(), "--refs".into(), pbf.into()],
-        "check-ids" => vec!["check".into(), "--ids".into(), pbf.into()],
-        "sort" => vec!["sort".into(), pbf.into(), "-o".into(), output.into()],
-        "cat" => vec!["cat".into(), pbf.into(), "-o".into(), output.into()],
-        "cat-way" => vec![
-            "cat".into(),
-            pbf.into(),
-            "--type".into(),
-            "way".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "cat-relation" => vec![
-            "cat".into(),
-            pbf.into(),
-            "--type".into(),
-            "relation".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "cat-dedupe" => vec![
-            "cat".into(),
-            "--dedupe".into(),
-            pbf.into(),
-            pbf.into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "tags-filter-way" => vec![
-            "tags-filter".into(),
-            pbf.into(),
-            "-R".into(),
-            "w/highway=primary".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "tags-filter-amenity" => vec![
-            "tags-filter".into(),
-            pbf.into(),
-            "-R".into(),
-            "amenity=restaurant".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "tags-filter-twopass" => vec![
-            "tags-filter".into(),
-            pbf.into(),
-            "highway=primary".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "tags-filter-osc" => {
-            let o =
-                osc.ok_or_else(|| DevError::Config("tags-filter-osc requires an OSC file".into()))?;
-            vec![
-                "tags-filter".into(),
-                "--input-kind".into(),
-                "osc".into(),
-                o.into(),
-                "highway=primary".into(),
-                "-o".into(),
-                output.into(),
-            ]
-        }
-        "getid" => vec![
-            "getid".into(),
-            pbf.into(),
-            "n115722".into(),
-            "n115723".into(),
-            "n115724".into(),
-            "w2080".into(),
-            "w2081".into(),
-            "w2082".into(),
-            "r174".into(),
-            "r213".into(),
-            "r339".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "getparents" => vec![
-            "getparents".into(),
-            pbf.into(),
-            "n115722".into(),
-            "n115723".into(),
-            "w2080".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "getid-invert" => vec![
-            "getid".into(),
-            "--invert".into(),
-            pbf.into(),
-            "n115722".into(),
-            "n115723".into(),
-            "n115724".into(),
-            "w2080".into(),
-            "w2081".into(),
-            "w2082".into(),
-            "r174".into(),
-            "r213".into(),
-            "r339".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "renumber" => vec!["renumber".into(), pbf.into(), "-o".into(), output.into()],
-        "merge-changes" => {
-            let o =
-                osc.ok_or_else(|| DevError::Config("merge-changes requires an OSC file".into()))?;
-            vec!["merge-changes".into(), o.into(), "-o".into(), output.into()]
-        }
-        "apply-changes" => {
-            let o =
-                osc.ok_or_else(|| DevError::Config("apply-changes requires an OSC file".into()))?;
-            vec![
-                "apply-changes".into(),
-                pbf.into(),
-                o.into(),
-                "-o".into(),
-                output.into(),
-            ]
-        }
-        "add-locations-to-ways" => {
-            let mut args = vec![
-                "add-locations-to-ways".into(),
-                pbf.into(),
-                "-o".into(),
-                output.into(),
-            ];
-            if let Some(it) = index_type {
-                args.push("--index-type".into());
-                args.push(it.into());
-            }
-            args
-        }
-        "extract-simple" => vec![
-            "extract".into(),
-            pbf.into(),
-            "--simple".into(),
-            "-b".into(),
-            "12.4,55.6,12.7,55.8".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "extract-complete" => vec![
-            "extract".into(),
-            pbf.into(),
-            "-b".into(),
-            "12.4,55.6,12.7,55.8".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "extract-smart" => vec![
-            "extract".into(),
-            pbf.into(),
-            "--smart".into(),
-            "-b".into(),
-            "12.4,55.6,12.7,55.8".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "time-filter" => vec![
-            "time-filter".into(),
-            pbf.into(),
-            "2024-01-01T00:00:00Z".into(),
-            "-o".into(),
-            output.into(),
-        ],
-        "diff" => {
-            let m =
-                merged_pbf.ok_or_else(|| DevError::Config("diff requires merged PBF".into()))?;
-            vec!["diff".into(), pbf.into(), m.into(), "-c".into()]
-        }
-        "diff-osc" => {
-            let m = merged_pbf
-                .ok_or_else(|| DevError::Config("diff-osc requires merged PBF".into()))?;
-            vec![
-                "diff".into(),
-                "--format".into(),
-                "osc".into(),
-                pbf.into(),
-                m.into(),
-                "-o".into(),
-                output.into(),
-            ]
-        }
-        _ => unreachable!("unknown command: {name}"),
-    };
-    Ok(args)
+/// Whether any requested preset needs the merged PBF (apply-changes output).
+fn suite_needs_merged_pbf(commands: &[&str]) -> Result<bool, DevError> {
+    commands
+        .iter()
+        .map(|c| preset_to_command(c))
+        .try_fold(false, |acc, cmd| {
+            Ok(acc || matches!(cmd?.input_kind(), InputKind::PbfAndMerged))
+        })
 }
 
-/// Check whether any of the requested commands need a merged PBF.
-fn needs_merged_pbf(commands: &[&str]) -> bool {
-    commands.iter().any(|c| NEEDS_MERGED.contains(c))
-}
-
-/// Check whether any of the requested commands directly need an OSC file.
-fn needs_osc(commands: &[&str]) -> bool {
-    commands.iter().any(|c| NEEDS_OSC.contains(c))
+/// Whether any requested preset needs an OSC file directly as input.
+fn suite_needs_osc(commands: &[&str]) -> Result<bool, DevError> {
+    commands
+        .iter()
+        .map(|c| preset_to_command(c))
+        .try_fold(false, |acc, cmd| {
+            let kind = cmd?.input_kind();
+            Ok(acc
+                || matches!(
+                    kind,
+                    InputKind::PbfAndOsc | InputKind::OscOnly | InputKind::PbfAndMerged
+                ))
+        })
 }
 
 /// Ensure a merged PBF exists in the scratch directory. Returns the path.
@@ -367,24 +239,25 @@ pub fn run(
     project_root: &Path,
     index_type: Option<&str>,
 ) -> Result<(), DevError> {
-    let (basename, pbf_str) = super::path_strs(pbf_path)?;
+    let (basename, _) = super::path_strs(pbf_path)?;
 
-    // Resolve OSC path string for commands that directly need it.
-    let osc_str = if needs_osc(commands) {
-        let osc = osc_path.ok_or_else(|| {
-            DevError::Config("tags-filter-osc/merge-changes/apply-changes require an OSC file (dataset must have osc configured)".into())
-        })?;
+    // Resolve OSC path once if any preset needs it.
+    let osc_pathbuf = if suite_needs_osc(commands)? {
         Some(
-            osc.to_str()
-                .ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?
-                .to_owned(),
+            osc_path
+                .ok_or_else(|| {
+                    DevError::Config(
+                        "tags-filter-osc/merge-changes/apply-changes/diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
+                    )
+                })?
+                .to_path_buf(),
         )
     } else {
         None
     };
 
     // Generate merged PBF if any requested command needs it.
-    let merged_pbf = if needs_merged_pbf(commands) {
+    let merged_pbf = if suite_needs_merged_pbf(commands)? {
         let osc = osc_path.ok_or_else(|| {
             DevError::Config(
                 "diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
@@ -402,52 +275,47 @@ pub fn run(
     } else {
         None
     };
-    let merged_str = merged_pbf.as_ref().and_then(|p| p.to_str());
 
-    // Ensure scratch dir exists for commands that write output files.
-    let has_output_commands = commands.iter().any(|c| !NO_OUTPUT_FILE.contains(c));
-    if has_output_commands && let Some(sd) = scratch_dir {
-        std::fs::create_dir_all(sd)
-            .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
-    }
+    // Ensure scratch dir exists up front so per-preset contexts can reference it.
+    let scratch_dir = scratch_dir.ok_or_else(|| {
+        DevError::Config("bench_commands::run requires a scratch directory".into())
+    })?;
+    std::fs::create_dir_all(scratch_dir)
+        .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     crate::harness::run_variants("command", commands, |name| {
-        // Commands that produce output files write to scratch; others have no -o flag.
-        let scratch_output_path = if !NO_OUTPUT_FILE.contains(&name) {
-            let ext = if OSC_OUTPUT.contains(&name) {
-                "osc.gz"
-            } else {
-                "osm.pbf"
-            };
-            scratch_dir.map(|sd| sd.join(format!("bench-{name}-output.{ext}")))
+        let cmd = preset_to_command(name)?;
+
+        let mut params = CommandParams::default();
+        if let Some(it) = index_type {
+            params.index_type = Some(it.to_owned());
+        }
+
+        let osc_pathbuf_for_ctx = osc_pathbuf.clone();
+        let osc_paths = osc_pathbuf_for_ctx.clone().map(|p| vec![p]).unwrap_or_default();
+        let bbox = if matches!(cmd, PbfhoggCommand::Extract { .. }) {
+            Some(SUITE_EXTRACT_BBOX.into())
         } else {
             None
         };
-        let output_str = match scratch_output_path.as_ref().and_then(|p| p.to_str()) {
-            Some(s) => s.to_owned(),
-            None if NO_OUTPUT_FILE.contains(&name) => String::new(),
-            None => {
-                return Err(DevError::Config(format!(
-                    "command '{name}' produces output but no scratch directory is configured"
-                )));
-            }
+
+        let ctx = CommandContext {
+            binary: binary.to_path_buf(),
+            pbf_path: pbf_path.to_path_buf(),
+            osc_path: osc_pathbuf_for_ctx,
+            osc_paths,
+            pbf_b_path: merged_pbf.clone(),
+            scratch_dir: scratch_dir.to_path_buf(),
+            dataset: String::new(),
+            bbox,
+            params,
         };
 
-        let args = command_args(
-            name,
-            pbf_str,
-            merged_str,
-            osc_str.as_deref(),
-            &output_str,
-            index_type,
-        )?;
+        let args = cmd.build_args(&ctx)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
-            command: consolidated_command_name(name).into(),
-            // Index type (for add-locations-to-ways) is in cli_args
-            // via --index-type. Measurement mode and brokkr_args come
-            // from the harness.
+            command: cmd.result_command(),
             mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
@@ -459,15 +327,74 @@ pub fn run(
                 &args_refs,
             )),
             brokkr_args: None,
-            metadata: vec![],
+            metadata: cmd.metadata(&ctx),
         };
 
-        harness.run_external(&config, binary, &args_refs, project_root)?;
+        harness.run_external_ok(&config, binary, &args_refs, project_root, cmd.ok_exit_codes())?;
 
-        // Clean up scratch output file.
-        if let Some(ref path) = scratch_output_path {
-            std::fs::remove_file(path).ok();
-        }
+        dispatch::cleanup_pbfhogg_output(&cmd, &ctx);
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_preset_maps_to_a_command() {
+        for name in ALL_COMMANDS {
+            preset_to_command(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    #[test]
+    fn unknown_preset_errors() {
+        assert!(preset_to_command("not-a-command").is_err());
+    }
+
+    #[test]
+    fn cat_variants_share_result_command() {
+        // All four cat presets collapse to the consolidated "cat" command
+        // label in the DB (axes live in cli_args).
+        for name in ["cat", "cat-way", "cat-relation", "cat-dedupe"] {
+            assert_eq!(preset_to_command(name).unwrap().result_command(), "cat");
+        }
+    }
+
+    #[test]
+    fn extract_variants_use_hardcoded_bbox() {
+        let cmd = preset_to_command("extract-simple").unwrap();
+        assert!(matches!(
+            cmd,
+            PbfhoggCommand::Extract {
+                strategy: ExtractStrategy::Simple
+            }
+        ));
+    }
+
+    #[test]
+    fn output_kinds_match_legacy_classification() {
+        // No-output-file presets (inspect, check-*, diff default).
+        for name in [
+            "inspect",
+            "inspect-nodes",
+            "inspect-tags",
+            "inspect-tags-way",
+            "check-refs",
+            "check-ids",
+            "diff",
+        ] {
+            let cmd = preset_to_command(name).unwrap();
+            assert!(matches!(cmd.output_kind(), OutputKind::None), "{name}");
+        }
+        // OSC-output presets.
+        for name in ["tags-filter-osc", "merge-changes", "diff-osc"] {
+            let cmd = preset_to_command(name).unwrap();
+            assert!(
+                matches!(cmd.output_kind(), OutputKind::ScratchOsc(_)),
+                "{name}"
+            );
+        }
+    }
 }
