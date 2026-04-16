@@ -44,6 +44,13 @@ pub fn format_details(row: &StoredRow) -> String {
     if !row.hostname.is_empty() {
         fields.push(("hostname".into(), row.hostname.clone()));
     }
+    if !row.input_file.is_empty() {
+        let input = match row.input_mb {
+            Some(mb) => format!("{} ({mb:.0} MB)", row.input_file),
+            None => row.input_file.clone(),
+        };
+        fields.push(("input".into(), input));
+    }
     if !row.subject.is_empty() {
         fields.push(("subject".into(), row.subject.clone()));
     }
@@ -290,7 +297,7 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         if elapsed_str.len() > w.elapsed {
             w.elapsed = elapsed_str.len();
         }
-        let input_str = format_input(&row.input_file, row.input_mb);
+        let input_str = format_input_short(&row.input_file);
         if input_str.len() > w.input {
             w.input = input_str.len();
         }
@@ -331,7 +338,7 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
     use std::fmt::Write;
     let uuid_short = short_uuid(&row.uuid);
     let elapsed_str = format_elapsed(row.elapsed_ms);
-    let input_str = format_input(&row.input_file, row.input_mb);
+    let input_str = format_input_short(&row.input_file);
     let args_str = format_args_summary(&row.cli_args);
     write!(
         out,
@@ -366,17 +373,33 @@ fn format_elapsed(ms: i64) -> String {
 /// `denmark-raw.osm.pbf` → `denmark`). The full basename (minus extension)
 /// is used as a fallback when no dash is present, so non-conforming
 /// filenames remain visible.
-fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
+///
+/// Used in the main results table. The file size is not included —
+/// it's constant across rows for a given dataset and clutters the
+/// table. The detail view surfaces size via its own `input` field.
+fn format_input_short(input_file: &str) -> String {
     if input_file.is_empty() {
         return String::new();
     }
     let basename = Path::new(input_file)
         .file_stem()
         .map_or(input_file, |s| s.to_str().unwrap_or(input_file));
-    let short = basename.split_once('-').map_or(basename, |(head, _)| head);
+    basename
+        .split_once('-')
+        .map_or(basename, |(head, _)| head)
+        .to_owned()
+}
+
+/// Format an input filename with size for compare tables and the
+/// detail view (e.g. `europe (35262 MB)`).
+fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
+    let short = format_input_short(input_file);
+    if short.is_empty() {
+        return String::new();
+    }
     match input_mb {
         Some(mb) => format!("{short} ({mb:.0} MB)"),
-        None => short.to_owned(),
+        None => short,
     }
 }
 
