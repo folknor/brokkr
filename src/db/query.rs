@@ -158,13 +158,14 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(d.clone());
         clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
     }
-    if let Some(ref a) = filter.cli_args {
-        params.push(a.clone());
-        clauses.push(format!("cli_args LIKE '%'||?{}||'%'", params.len()));
-    }
-    if let Some(ref a) = filter.brokkr_args {
-        params.push(a.clone());
-        clauses.push(format!("brokkr_args LIKE '%'||?{}||'%'", params.len()));
+    if let Some(ref g) = filter.grep {
+        params.push(g.clone());
+        let i = params.len();
+        params.push(g.clone());
+        let j = params.len();
+        clauses.push(format!(
+            "(cli_args LIKE '%'||?{i}||'%' OR brokkr_args LIKE '%'||?{j}||'%')"
+        ));
     }
     // Metadata filters: each becomes an EXISTS subquery against run_kv. The
     // user passes key without the `meta.` prefix (e.g. `--meta format=osc`),
@@ -586,8 +587,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![("format".into(), "osc".into())],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -600,8 +600,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![("format".into(), "default".into())],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -615,8 +614,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -675,8 +673,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -690,8 +687,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -705,8 +701,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -721,8 +716,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -741,8 +735,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -796,8 +789,7 @@ mod tests {
                 mode: Some(String::from("zlib")),
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -811,8 +803,7 @@ mod tests {
                 mode: Some(String::from("buffered")),
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();
@@ -826,8 +817,7 @@ mod tests {
                 mode: Some(String::from("none")),
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 50,
             })
             .unwrap();

@@ -197,10 +197,10 @@ pub struct QueryFilter {
     /// with `meta.format = "osc"` in the run_kv table). Multiple filters AND
     /// together. Rows missing the key are silently excluded.
     pub meta: Vec<(String, String)>,
-    /// Substring match against `cli_args` (the literal subprocess invocation).
-    pub cli_args: Option<String>,
-    /// Substring match against `brokkr_args` (the literal brokkr invocation).
-    pub brokkr_args: Option<String>,
+    /// Substring match against `cli_args` OR `brokkr_args` (the two
+    /// literal-invocation columns). Like `git log --grep`: a single
+    /// pattern that scans the freeform-text columns for a token.
+    pub grep: Option<String>,
     pub limit: usize,
 }
 

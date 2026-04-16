@@ -201,8 +201,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                cli_args: None,
-                brokkr_args: None,
+                grep: None,
                 limit: 10,
             })
             .expect("query");

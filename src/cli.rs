@@ -737,15 +737,12 @@ Examples:
         #[arg(long, value_parser = validate_meta_filter)]
         meta: Vec<String>,
 
-        /// Substring match against the literal subprocess invocation stored
-        /// in the `cli_args` column (e.g. `--cli-args zstd:1`).
+        /// Substring match against either the subprocess invocation
+        /// (`cli_args`) or the brokkr invocation (`brokkr_args`). Think
+        /// `git log --grep`: a single token that scans both
+        /// freeform-invocation columns. E.g. `--grep zstd:1`.
         #[arg(long)]
-        cli_args: Option<String>,
-
-        /// Substring match against the literal brokkr invocation stored in
-        /// the `brokkr_args` column (e.g. `--brokkr-args "--regions 5"`).
-        #[arg(long)]
-        brokkr_args: Option<String>,
+        grep: Option<String>,
 
         /// Maximum number of results to show
         #[arg(long, short = 'n', default_value = "20")]
