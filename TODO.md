@@ -20,16 +20,6 @@ Second is the first plus a `stat()` call. Collapse.
 
 ### Hardcoded preset content
 
-#### `getid` — nine hardcoded IDs
-`n115722`, `w2080`, `r174`, … — valid for some test datasets, may be
-absent in others. No warning, no override. Consider either deriving
-IDs from the PBF at run time, exposing as a `--ids` flag, or moving
-to `brokkr.toml`.
-
-#### `inspect --tags` — `--min-count 999999999` hardcoded
-Defeats pbfhogg's default min-count filter. Magic number; should be
-named or documented.
-
 #### Scratch output filename pattern coupled to command id
 `bench-<id>-output.osm.pbf` in `scratch_output_path`. Works today;
 becomes a problem if two benches of the same command want distinct

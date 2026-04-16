@@ -130,6 +130,30 @@ impl ExtractStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// Hardcoded bench fixtures
+// ---------------------------------------------------------------------------
+
+/// Fixed ID set used by both `getid` and `getparents` suite presets. Includes
+/// three IDs of each object type (n/w/r) so the bench shape is reproducible.
+/// Some entries may not exist in very small test datasets — the pbfhogg
+/// binary tolerates missing IDs without erroring.
+const GETID_BENCH_IDS: &[&str] = &[
+    "n115722", "n115723", "n115724",
+    "w2080", "w2081", "w2082",
+    "r174", "r213", "r339",
+];
+
+/// Subset of `GETID_BENCH_IDS` used by the `getparents` preset — fewer
+/// ids because getparents is a superset operation and more inputs would
+/// dominate with parent-traversal cost.
+const GETPARENTS_BENCH_IDS: &[&str] = &["n115722", "n115723", "w2080"];
+
+/// Min-count threshold used by the bench version of `inspect tags`. Set
+/// impossibly high so pbfhogg's default tag-frequency filter never trims
+/// anything — we want the full decode cost measured, not just popular tags.
+const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
+
+// ---------------------------------------------------------------------------
 // PbfhoggCommand — the unified command enum
 // ---------------------------------------------------------------------------
 
@@ -434,7 +458,7 @@ impl PbfhoggCommand {
                             args.push(tf.clone());
                         }
                         args.push("--min-count".into());
-                        args.push("999999999".into());
+                        args.push(INSPECT_ALL_TAGS_MIN_COUNT.into());
                     }
                 } else if *nodes {
                     args.push("--nodes".into());
@@ -521,11 +545,8 @@ impl PbfhoggCommand {
                 if *add_referenced {
                     args.push("--add-referenced".into());
                 }
-                for id in [
-                    "n115722", "n115723", "n115724", "w2080", "w2081", "w2082", "r174", "r213",
-                    "r339",
-                ] {
-                    args.push(id.into());
+                for id in GETID_BENCH_IDS {
+                    args.push((*id).into());
                 }
                 args.push("-o".into());
                 args.push(path_to_string(&output)?);
@@ -533,15 +554,13 @@ impl PbfhoggCommand {
             }
             Self::Getparents => {
                 let output = scratch_output_path(ctx, self, mode);
-                Ok(vec![
-                    "getparents".into(),
-                    ctx.pbf_str()?.into(),
-                    "n115722".into(),
-                    "n115723".into(),
-                    "w2080".into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
+                let mut args: Vec<String> = vec!["getparents".into(), ctx.pbf_str()?.into()];
+                for id in GETPARENTS_BENCH_IDS {
+                    args.push((*id).into());
+                }
+                args.push("-o".into());
+                args.push(path_to_string(&output)?);
+                Ok(args)
             }
             Self::Renumber => {
                 let output = scratch_output_path(ctx, self, mode);
