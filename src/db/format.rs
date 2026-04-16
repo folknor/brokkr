@@ -202,6 +202,60 @@ struct TableWidths {
     mode: usize,
     elapsed: usize,
     input: usize,
+    args: usize,
+}
+
+/// Max width for the `args` column — anything longer gets truncated
+/// with `…`. Picked to keep a full table row under ~120 columns on
+/// typical command shapes.
+const ARGS_MAX_WIDTH: usize = 40;
+
+/// Build a compact args summary from the row's `cli_args`, dropping
+/// the leading binary path, the subcommand token (already represented
+/// by the `command` column, possibly under a preset alias like
+/// `write` → `bench-write`), any absolute-path positional arguments
+/// (input/output/config files), and the `-o <output>` pair. What's
+/// left is the row's distinguishing flag set.
+///
+/// Truncated to [`ARGS_MAX_WIDTH`] chars with a trailing `…` marker.
+/// Returns an empty string for rows without `cli_args` (older rows or
+/// internal-only commands).
+fn format_args_summary(cli_args: &str) -> String {
+    if cli_args.is_empty() {
+        return String::new();
+    }
+    let mut tokens = cli_args.split_whitespace();
+    // Drop the binary path.
+    tokens.next();
+    // Drop the subcommand token unconditionally — preset rows
+    // (`write` → `bench-write`, `diff-osc` → `diff`, etc.) have a
+    // different spelling than `command`, so matching on `command`
+    // would leak the preset name into the args column.
+    tokens.next();
+
+    let mut kept: Vec<&str> = Vec::new();
+    let mut iter = tokens.peekable();
+    while let Some(tok) = iter.next() {
+        // `-o <path>` — drop both tokens.
+        if tok == "-o" {
+            iter.next();
+            continue;
+        }
+        // Absolute paths (inputs, outputs, config files, tmp dirs).
+        if tok.starts_with('/') {
+            continue;
+        }
+        kept.push(tok);
+    }
+
+    let joined = kept.join(" ");
+    if joined.chars().count() <= ARGS_MAX_WIDTH {
+        joined
+    } else {
+        let mut out: String = joined.chars().take(ARGS_MAX_WIDTH - 1).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
@@ -213,6 +267,7 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         mode: 7,
         elapsed: 7,
         input: "dataset".len(),
+        args: "args".len(),
     };
     for row in rows {
         let uuid_short = short_uuid(&row.uuid);
@@ -239,6 +294,10 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         if input_str.len() > w.input {
             w.input = input_str.len();
         }
+        let args_str = format_args_summary(&row.cli_args);
+        if args_str.chars().count() > w.args {
+            w.args = args_str.chars().count();
+        }
     }
     w
 }
@@ -247,7 +306,7 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
     use std::fmt::Write;
     write!(
         out,
-        "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}",
+        "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}  {:<args_w$}",
         "uuid",
         "timestamp",
         "commit",
@@ -255,6 +314,7 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         "mode",
         "elapsed",
         "dataset",
+        "args",
         uuid_w = w.uuid,
         ts_w = w.timestamp,
         cm_w = w.commit,
@@ -262,6 +322,7 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         var_w = w.mode,
         el_w = w.elapsed,
         in_w = w.input,
+        args_w = w.args,
     )
     .expect("write to String is infallible");
 }
@@ -271,9 +332,10 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
     let uuid_short = short_uuid(&row.uuid);
     let elapsed_str = format_elapsed(row.elapsed_ms);
     let input_str = format_input(&row.input_file, row.input_mb);
+    let args_str = format_args_summary(&row.cli_args);
     write!(
         out,
-        "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}",
+        "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}  {:<args_w$}",
         uuid_short,
         row.timestamp,
         row.commit,
@@ -281,6 +343,7 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
         row.mode,
         elapsed_str,
         input_str,
+        args_str,
         uuid_w = w.uuid,
         ts_w = w.timestamp,
         cm_w = w.commit,
@@ -288,6 +351,7 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
         var_w = w.mode,
         el_w = w.elapsed,
         in_w = w.input,
+        args_w = w.args,
     )
     .expect("write to String is infallible");
 }

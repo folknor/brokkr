@@ -63,6 +63,26 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 
 ## Backlog
 
+### `--grep` is substring match, not real grep
+
+`brokkr results --grep X` currently compiles to
+`cli_args LIKE '%X%' OR brokkr_args LIKE '%X%'`. That's SQL substring
+match — no regex, no word boundaries, no inversion, only `%` / `_` as
+wildcards. The flag name `--grep` is aspirational.
+
+Upgrade path: register a `REGEXP` scalar function on the rusqlite
+connection (via `Connection::create_scalar_function` using the `regex`
+crate) and switch the generated SQL to `REGEXP ?`. Users then get
+`--grep "zstd:[1-3]"`, `--grep "direct-io.*uring"`, `--grep "^pbfhogg
+apply-changes"`, etc. Also consider accepting `--grep` multiple times
+(clap `Vec<String>`) with AND semantics so
+`--grep apply-changes --grep zstd:1` works naturally.
+
+Caveats: regex metachars (`.`, `*`, `+`, etc.) in user input become
+significant — `--grep "version 1.0"` would match "version 120". Cache
+the compiled regex to avoid per-row `Regex::new`. Adds a dep on the
+`regex` crate (not currently in the tree).
+
 ### Counter diffs in --compare-timeline
 Include counter values at matching phase boundaries in the comparison table. Currently `--compare-timeline` only shows duration, peak anon, and disk read.
 
