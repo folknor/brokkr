@@ -104,24 +104,14 @@ impl CatTypeFilter {
 
 /// Output format for `diff` / `diff-snapshots` (`pbfhogg diff` accepts both
 /// a default summary format and `--format osc`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+#[value(rename_all = "lowercase")]
 pub enum DiffFormat {
     /// Default summary diff (`pbfhogg diff <a> <b> -c`).
+    #[default]
     Default,
     /// OSC-format diff (`pbfhogg diff --format osc <a> <b> -o <out>`).
     Osc,
-}
-
-impl DiffFormat {
-    pub fn parse(s: &str) -> Result<Self, DevError> {
-        match s {
-            "default" => Ok(Self::Default),
-            "osc" => Ok(Self::Osc),
-            _ => Err(DevError::Config(format!(
-                "unknown diff format '{s}' (expected: default, osc)"
-            ))),
-        }
-    }
 }
 
 impl ExtractStrategy {

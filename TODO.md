@@ -16,16 +16,7 @@ share the inner setup via a helper.
 #### `resolve_pbf_path` vs `resolve_pbf_with_size`
 Second is the first plus a `stat()` call. Collapse.
 
-#### `DiffFormat::parse` + clap `value_parser = ["default", "osc"]`
-Same knowledge in two places. Either derive clap's parser from
-`DiffFormat::parse` via `ValueEnum`, or drop `parse` entirely and
-accept the String in `as_pbfhogg`.
-
 ### Stringly-typed plumbing
-
-#### `cargo_profile: String` with magic values
-Takes `"release"` / `"java"` / `"cmake"` / `"hotpath"` — make it an
-enum.
 
 ### Hardcoded preset content
 

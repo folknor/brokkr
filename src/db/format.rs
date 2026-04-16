@@ -153,14 +153,13 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
     if !row.hostname.is_empty() {
         fields.push(("hostname".into(), row.hostname.clone()));
     }
-    if !row.cargo_profile.is_empty() || !row.cargo_features.is_empty() {
-        let s = match (row.cargo_profile.as_str(), row.cargo_features.as_str()) {
-            ("", feats) => format!("features: {feats}"),
-            (prof, "") => prof.to_owned(),
-            (prof, feats) => format!("{prof}, features: {feats}"),
-        };
-        fields.push(("cargo".into(), s));
-    }
+    let prof = row.cargo_profile.as_str();
+    let s = if row.cargo_features.is_empty() {
+        prof.to_owned()
+    } else {
+        format!("{prof}, features: {}", row.cargo_features)
+    };
+    fields.push(("cargo".into(), s));
     if !row.kernel.is_empty() {
         fields.push(("kernel".into(), row.kernel.clone()));
     }
@@ -301,9 +300,7 @@ pub fn format_details(row: &StoredRow) -> String {
     if !row.cargo_features.is_empty() {
         fields.push(("cargo features".into(), row.cargo_features.clone()));
     }
-    if !row.cargo_profile.is_empty() {
-        fields.push(("cargo profile".into(), row.cargo_profile.clone()));
-    }
+    fields.push(("cargo profile".into(), row.cargo_profile.as_str().to_owned()));
     if !row.kernel.is_empty() {
         fields.push(("kernel".into(), row.kernel.clone()));
     }
@@ -1163,7 +1160,7 @@ mod tests {
             input_mb: None,
             elapsed_ms,
             cargo_features: String::new(),
-            cargo_profile: String::from("release"),
+            cargo_profile: crate::build::CargoProfile::Release,
             kernel: String::new(),
             cpu_governor: String::new(),
             avail_memory_mb: None,

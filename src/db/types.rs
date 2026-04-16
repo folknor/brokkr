@@ -2,6 +2,7 @@
 
 use std::io::Read;
 
+use crate::build::CargoProfile;
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ pub struct RunRow {
     pub elapsed_ms: i64,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: Option<String>,
-    pub cargo_profile: String,
+    pub cargo_profile: CargoProfile,
     pub kernel: Option<String>,
     pub cpu_governor: Option<String>,
     pub avail_memory_mb: Option<i64>,
@@ -162,7 +163,7 @@ pub struct StoredRow {
     pub elapsed_ms: i64,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: String,
-    pub cargo_profile: String,
+    pub cargo_profile: CargoProfile,
     pub kernel: String,
     pub cpu_governor: String,
     pub avail_memory_mb: Option<i64>,

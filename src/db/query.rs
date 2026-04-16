@@ -103,9 +103,11 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         cargo_features: row
             .get::<_, Option<String>>("cargo_features")?
             .unwrap_or_default(),
-        cargo_profile: row
-            .get::<_, Option<String>>("cargo_profile")?
-            .unwrap_or_default(),
+        cargo_profile: crate::build::CargoProfile::from_db(
+            row.get::<_, Option<String>>("cargo_profile")?
+                .as_deref()
+                .unwrap_or(""),
+        ),
         kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),
         cpu_governor: row
             .get::<_, Option<String>>("cpu_governor")?
@@ -550,7 +552,7 @@ mod tests {
             elapsed_ms: 100,
             peak_rss_mb: None,
             cargo_features: None,
-            cargo_profile: String::from("release"),
+            cargo_profile: crate::build::CargoProfile::Release,
             kernel: None,
             cpu_governor: None,
             avail_memory_mb: None,
@@ -645,7 +647,7 @@ mod tests {
             elapsed_ms: 100,
             peak_rss_mb: None,
             cargo_features: None,
-            cargo_profile: String::from("release"),
+            cargo_profile: crate::build::CargoProfile::Release,
             kernel: None,
             cpu_governor: None,
             avail_memory_mb: None,
@@ -763,7 +765,7 @@ mod tests {
             elapsed_ms: 100,
             peak_rss_mb: None,
             cargo_features: None,
-            cargo_profile: String::from("release"),
+            cargo_profile: crate::build::CargoProfile::Release,
             kernel: None,
             cpu_governor: None,
             avail_memory_mb: None,
@@ -850,7 +852,7 @@ mod tests {
             elapsed_ms: 500,
             peak_rss_mb: None,
             cargo_features: None,
-            cargo_profile: String::from("release"),
+            cargo_profile: crate::build::CargoProfile::Release,
             kernel: None,
             cpu_governor: None,
             avail_memory_mb: None,

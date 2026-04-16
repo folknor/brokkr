@@ -317,7 +317,7 @@ pub(crate) fn run_pbfhogg_wallclock_core(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs,
         cli_args: Some(harness::format_cli_args(
             &binary.display().to_string(),
@@ -438,7 +438,7 @@ fn run_pbfhogg_hotpath(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
@@ -1037,7 +1037,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
             None
         },
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
@@ -1118,7 +1118,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: 1, // example handles its own iterations
         cli_args: None,
         brokkr_args: None,
@@ -1219,7 +1219,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 input_file: Some(basename),
                 input_mb: Some(file_mb),
                 cargo_features: None,
-                cargo_profile: "release".into(),
+                cargo_profile: crate::build::CargoProfile::Release,
                 runs: req.runs(),
                 cli_args: Some(harness::format_cli_args(&binary_str, &arg_refs)),
                 brokkr_args: None,
@@ -1296,7 +1296,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 input_file: None,
                 input_mb: None,
                 cargo_features: Some(feature.into()),
-                cargo_profile: "release".into(),
+                cargo_profile: crate::build::CargoProfile::Release,
                 runs: 1,
                 cli_args: None,
                 brokkr_args: None,
@@ -1532,7 +1532,7 @@ fn run_nidhogg_ingest_bench(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),
@@ -1630,7 +1630,7 @@ fn run_nidhogg_hotpath(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(
             &ctx.binary.display().to_string(),

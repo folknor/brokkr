@@ -87,7 +87,7 @@ pub fn run(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: "cmake".into(),
+        cargo_profile: crate::build::CargoProfile::CMake,
         runs,
         cli_args: Some(harness::format_cli_args(
             &tm.tilemaker.display().to_string(),

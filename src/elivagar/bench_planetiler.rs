@@ -118,7 +118,7 @@ pub fn run(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: "java".into(),
+        cargo_profile: crate::build::CargoProfile::Java,
         runs,
         cli_args: Some(crate::harness::format_cli_args(
             &pt.java.display().to_string(),

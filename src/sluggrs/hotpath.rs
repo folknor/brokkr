@@ -95,7 +95,7 @@ pub fn run(
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs,
         cli_args: Some(harness::format_cli_args(binary_str, &[])),
         brokkr_args: None,

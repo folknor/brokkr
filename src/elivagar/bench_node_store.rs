@@ -50,7 +50,7 @@ pub fn run(
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: 1, // example handles its own iterations
         cli_args: None,
         brokkr_args: None,

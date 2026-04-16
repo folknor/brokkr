@@ -291,8 +291,8 @@ Examples:
         pbf: PbfArgs,
         /// Output format: `default` (summary diff) or `osc` (OSC-format
         /// diff written to scratch).
-        #[arg(long, default_value = "default", value_parser = ["default", "osc"])]
-        format: String,
+        #[arg(long, default_value_t, value_enum)]
+        format: crate::pbfhogg::commands::DiffFormat,
         /// OSC sequence number from brokkr.toml
         #[arg(long)]
         osc_seq: Option<String>,
@@ -346,8 +346,8 @@ Examples:
         variant: String,
         /// Output format: `default` (summary diff) or `osc` (OSC-format diff
         /// written to scratch).
-        #[arg(long, default_value = "default")]
-        format: String,
+        #[arg(long, default_value_t, value_enum)]
+        format: crate::pbfhogg::commands::DiffFormat,
     },
     /// [pbfhogg] Diff two PBFs (OSC output)
     /// [pbfhogg] Build geocode index
@@ -1661,10 +1661,6 @@ impl Command {
                 keep_cache,
                 snapshot,
             } => {
-                let format_enum = match format.as_str() {
-                    "osc" => crate::pbfhogg::commands::DiffFormat::Osc,
-                    _ => crate::pbfhogg::commands::DiffFormat::Default,
-                };
                 let params = CommandParams {
                     keep_cache: *keep_cache,
                     snapshot: snapshot.clone(),
@@ -1673,7 +1669,7 @@ impl Command {
                 Some((
                     mode,
                     pbf,
-                    PbfhoggCommand::Diff { format: format_enum },
+                    PbfhoggCommand::Diff { format: *format },
                     osc_seq.as_deref(),
                     params,
                 ))

@@ -245,7 +245,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 to_snapshot: Some(to.clone()),
                 ..Default::default()
             };
-            let format_enum = pbfhogg::commands::DiffFormat::parse(&format)?;
             run_measured(
                 &mode,
                 &dev_config,
@@ -255,9 +254,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &variant,
                 &brokkr_args,
                 |req| {
-                    let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots {
-                        format: format_enum,
-                    };
+                    let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots { format };
                     dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)
                 },
             )
@@ -1323,7 +1320,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
         brokkr_args: None,

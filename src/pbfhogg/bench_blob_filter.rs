@@ -100,7 +100,7 @@ pub fn run(
             input_file: Some(basename.to_owned()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: "release".into(),
+            cargo_profile: crate::build::CargoProfile::Release,
             runs,
             cli_args: Some(crate::harness::format_cli_args(
                 &binary.display().to_string(),

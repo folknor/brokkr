@@ -5,6 +5,44 @@ use crate::error::DevError;
 use crate::output;
 
 // ---------------------------------------------------------------------------
+// CargoProfile
+// ---------------------------------------------------------------------------
+
+/// Identifies how a benchmarked binary was built. Stored on every result row
+/// (column `cargo_profile`) so Rust-built runs stay distinguishable from
+/// external baselines that go through entirely different build systems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CargoProfile {
+    /// Rust `cargo build --release` — the standard brokkr-built binary.
+    #[default]
+    Release,
+    /// External Java/Maven build (Planetiler baseline).
+    Java,
+    /// External CMake/C++ build (Tilemaker baseline).
+    CMake,
+}
+
+impl CargoProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Java => "java",
+            Self::CMake => "cmake",
+        }
+    }
+
+    /// Parse a DB-stored value. Unknown / legacy strings map back to
+    /// `Release` so the enum stays total.
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "java" => Self::Java,
+            "cmake" => Self::CMake,
+            _ => Self::Release,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Build configuration
 // ---------------------------------------------------------------------------
 

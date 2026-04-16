@@ -53,7 +53,7 @@ pub fn run(
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,
-            cargo_profile: "release".into(),
+            cargo_profile: crate::build::CargoProfile::Release,
             runs,
             cli_args: None,
             brokkr_args: None,

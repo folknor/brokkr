@@ -136,7 +136,7 @@ mod tests {
             elapsed_ms: 100,
             peak_rss_mb: None,
             cargo_features: None,
-            cargo_profile: String::from("release"),
+            cargo_profile: crate::build::CargoProfile::Release,
             kernel: None,
             cpu_governor: None,
             avail_memory_mb: None,

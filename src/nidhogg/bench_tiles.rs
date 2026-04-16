@@ -110,7 +110,7 @@ pub fn run(
         input_file: Some(tiles_file.to_owned()),
         input_mb: Some(tiles_mb),
         cargo_features: None,
-        cargo_profile: "release".into(),
+        cargo_profile: crate::build::CargoProfile::Release,
         runs,
         cli_args: None,
         brokkr_args: None,

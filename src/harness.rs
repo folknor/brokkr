@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::build::CargoProfile;
 use crate::config::DriveConfig;
 use crate::db::{self, Distribution, HotpathData, KvPair, KvValue, ResultsDb, RunRow};
 use crate::env::EnvInfo;
@@ -25,7 +26,7 @@ pub struct BenchConfig {
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
     pub cargo_features: Option<String>,
-    pub cargo_profile: String,
+    pub cargo_profile: CargoProfile,
     pub runs: usize,
     /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
     /// dispatch from the argv it hands to the tool binary.

@@ -144,7 +144,7 @@ pub fn run(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: "java".into(),
+            cargo_profile: crate::build::CargoProfile::Java,
             runs: 1,
             cli_args: None,
             brokkr_args: None,
