@@ -511,12 +511,16 @@ pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sideca
             count += 1;
         }
 
+        let duration_ms = (end_us - start_us) / 1_000;
+
         if count == 0 {
-            println!("{name:<24} {:>8}", "(no samples)");
+            // Phase is shorter than the 100ms sampling interval (or landed
+            // entirely between two sample ticks). Still show the marker
+            // duration — zero samples is a real signal, not missing data.
+            println!("{name:<24} {duration_ms:>6}ms (no samples)");
             continue;
         }
 
-        let duration_ms = (end_us - start_us) / 1_000;
         let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
         // Clamp to 0: historical sidecar.db rows captured with the pre-fix
         // sidecar contained zero-io samples when the process exited between
