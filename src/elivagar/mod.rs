@@ -9,6 +9,7 @@ pub mod bench_tilemaker;
 pub(crate) mod cmd;
 pub mod commands;
 pub mod compare_tiles;
+pub mod dispatch;
 pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod verify;

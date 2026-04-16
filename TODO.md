@@ -46,10 +46,6 @@ Clap definitions + `as_pbfhogg` adapter + validators. The adapter is
 the bridge between CLI shape and `PbfhoggCommand`; move it next to
 commands.rs.
 
-#### `dispatch.rs` is ~1700 lines
-pbfhogg + elivagar + nidhogg dispatch all in one file. Split per
-project.
-
 #### `format.rs` is ~1300 lines
 Table + details + single-result + compare + pair-key + helpers + lots
 of tests. Split layouts into submodules.

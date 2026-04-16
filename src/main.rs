@@ -28,7 +28,6 @@ mod cli;
 mod config;
 mod context;
 mod db;
-mod dispatch;
 mod elivagar;
 mod env;
 mod error;
@@ -190,7 +189,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &pbf.dataset,
             &pbf.variant,
             &brokkr_args,
-            |req| dispatch::run_pbfhogg_command_with_params(req, &pbf_cmd, osc, &params),
+            |req| pbfhogg::dispatch::run_command_with_params(req, &pbf_cmd, osc, &params),
         );
     }
 
@@ -255,7 +254,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &brokkr_args,
                 |req| {
                     let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots { format };
-                    dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)
+                    pbfhogg::dispatch::run_command_with_params(req, &cmd, None, &params)
                 },
             )
         }
@@ -282,13 +281,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
                             let cmd =
                                 pbfhogg::commands::PbfhoggCommand::Extract { strategy: *strat };
-                            dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)?;
+                            pbfhogg::dispatch::run_command_with_params(req, &cmd, None, &params)?;
                         }
                         Ok(())
                     } else {
                         let strat = pbfhogg::commands::ExtractStrategy::parse(&strategy)?;
                         let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: strat };
-                        dispatch::run_pbfhogg_command_with_params(req, &cmd, None, &params)
+                        pbfhogg::dispatch::run_command_with_params(req, &cmd, None, &params)
                     }
                 },
             )
@@ -382,7 +381,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 &variant,
                 &brokkr_args,
-                |req| dispatch::run_elivagar_command(req, &cmd),
+                |req| elivagar::dispatch::run_command(req, &cmd),
             )
         }
         Command::PmtilesWriter { mode, tiles } => {
@@ -395,7 +394,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 "denmark",
                 "raw",
                 &brokkr_args,
-                |req| dispatch::run_elivagar_command(req, &cmd),
+                |req| elivagar::dispatch::run_command(req, &cmd),
             )
         }
         Command::NodeStore { mode, nodes } => {
@@ -408,7 +407,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 "denmark",
                 "raw",
                 &brokkr_args,
-                |req| dispatch::run_elivagar_command(req, &cmd),
+                |req| elivagar::dispatch::run_command(req, &cmd),
             )
         }
         Command::ElivPlanetiler {
@@ -425,7 +424,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 &variant,
                 &brokkr_args,
-                |req| dispatch::run_elivagar_command(req, &cmd),
+                |req| elivagar::dispatch::run_command(req, &cmd),
             )
         }
         Command::ElivTilemaker {
@@ -442,7 +441,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 &variant,
                 &brokkr_args,
-                |req| dispatch::run_elivagar_command(req, &cmd),
+                |req| elivagar::dispatch::run_command(req, &cmd),
             )
         }
 
@@ -461,7 +460,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 "raw",
                 &brokkr_args,
-                |req| dispatch::run_nidhogg_command(req, &cmd),
+                |req| nidhogg::dispatch::run_command(req, &cmd),
             )
         }
         Command::RunNidIngest {
@@ -478,7 +477,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 &variant,
                 &brokkr_args,
-                |req| dispatch::run_nidhogg_command(req, &cmd),
+                |req| nidhogg::dispatch::run_command(req, &cmd),
             )
         }
         Command::RunTiles {
@@ -499,7 +498,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 "raw",
                 &brokkr_args,
-                |req| dispatch::run_nidhogg_command(req, &cmd),
+                |req| nidhogg::dispatch::run_command(req, &cmd),
             )
         }
 
@@ -572,7 +571,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     "nidhogg" => {
                         project::require(project, Project::Nidhogg, "suite nidhogg")?;
                         nidhogg::cmd::bench_api(req, None)?;
-                        dispatch::run_nidhogg_command(
+                        nidhogg::dispatch::run_command(
                             req,
                             &nidhogg::commands::NidhoggCommand::Ingest,
                         )

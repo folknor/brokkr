@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::dispatch;
 use crate::error::DevError;
 use crate::harness::BenchHarness;
 use crate::measure::{CommandContext, CommandParams};
@@ -308,7 +307,7 @@ pub fn run(
             params,
         };
 
-        dispatch::run_pbfhogg_wallclock_core(
+        crate::pbfhogg::dispatch::run_wallclock_core(
             harness,
             binary,
             &cmd,

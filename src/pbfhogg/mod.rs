@@ -28,6 +28,7 @@ pub mod bench_read;
 pub mod bench_write;
 pub(crate) mod cmd;
 pub mod commands;
+pub mod dispatch;
 pub mod download;
 pub mod verify;
 pub mod verify_add_locations;
