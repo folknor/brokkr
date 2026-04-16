@@ -58,11 +58,10 @@ fn extra_variant_suffix(
         && let Some(from) = extra_params.get("from_snapshot")
         && let Some(to) = extra_params.get("to_snapshot")
     {
-        // diff-snapshots variant column is always
-        // "diff-snapshots-{from}-to-{to}", regardless of format. Format
-        // lives in metadata so substring queries on `--variant diff-snapshots`
-        // catch all snapshot diffs across both formats.
-        suffix.push_str(&format!("-{from}-to-{to}"));
+        // Emits `+{from}-to-{to}` so the variant column reads e.g.
+        // `base-to-20260411`. Format lives in metadata; substring queries
+        // on `--command diff-snapshots` catch all snapshot diffs.
+        suffix.push_str(&format!("+{from}-to-{to}"));
     }
 
     // Start-stage suffix: partial runs get `+from-stage4` etc. so they don't
@@ -350,16 +349,18 @@ fn run_pbfhogg_wallclock(
     let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
     let basename = cmd_ctx.pbf_basename();
 
-    // Append I/O mode suffix and any extra suffix (e.g. merge-changes range)
-    // to variant (e.g. "add-locations-to-ways+direct-io" or
-    // "merge-changes+range-4914-4920").
+    // Build the variant column from real variance axes: I/O mode suffix
+    // (`+direct-io`, `+uring`) and any extra suffix (`+nocompress`,
+    // `+range-4914-4920`, ...). The command name lives in the `command`
+    // column, not here.
     let extra_suffix = extra_variant_suffix(command, extra_params);
     let variant = match command.result_variant() {
         Some(v) => Some(format!("{v}{io_suffix}{extra_suffix}")),
-        None if !io_suffix.is_empty() || !extra_suffix.is_empty() => {
-            Some(format!("{}{io_suffix}{extra_suffix}", command.id()))
+        None => {
+            let combined = format!("{io_suffix}{extra_suffix}");
+            let trimmed = combined.trim_start_matches('+');
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
         }
-        None => None,
     };
 
     let config = BenchConfig {
@@ -472,9 +473,15 @@ fn run_pbfhogg_hotpath(
         output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
+    // Command column carries the identity (`hotpath add-locations-to-ways`);
+    // variant column holds only real variance axes. `variant_suffix` starts
+    // with `/` (alloc marker, e.g. `/alloc`), io/extra suffixes start with
+    // `+`. Drop the leading separator so the variant reads cleanly.
     let variant_suffix = harness::hotpath_variant_suffix(alloc);
     let extra_suffix = extra_variant_suffix(command, extra_params);
-    let variant = format!("{}{variant_suffix}{io_suffix}{extra_suffix}", command.id());
+    let axes = format!("{variant_suffix}{io_suffix}{extra_suffix}");
+    let axes_clean = axes.trim_start_matches(|c: char| c == '/' || c == '+');
+    let variant = (!axes_clean.is_empty()).then(|| axes_clean.to_owned());
 
     let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
@@ -487,8 +494,8 @@ fn run_pbfhogg_hotpath(
     metadata.push(KvPair::text("meta.test", command.id()));
 
     let config = BenchConfig {
-        command: "hotpath".into(),
-        variant: Some(variant),
+        command: format!("hotpath {}", command.id()),
+        variant,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,

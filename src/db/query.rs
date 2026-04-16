@@ -556,7 +556,7 @@ mod tests {
             hostname: String::from("testhost"),
             commit: String::from("aabbccdd"),
             subject: String::from("test"),
-            command: String::from("bench commands"),
+            command: String::from("bench diff-snapshots"),
             variant: Some(String::from(variant)),
             input_file: None,
             input_mb: None,
@@ -727,14 +727,15 @@ mod tests {
         assert_eq!(rows.len(), 2);
 
         // --command also matches against the variant column, so
-        // `--command renumber` finds rows where variant contains "renumber"
-        // even if the command column is "bench commands".
-        db.insert(&make_row("bench commands", "renumber")).unwrap();
-        db.insert(&make_row("bench commands", "sort")).unwrap();
+        // `--command zstd1` finds rows where variant contains "zstd1"
+        // even if the command column doesn't match.
+        db.insert(&make_row("bench apply-changes", "direct-io+zstd1"))
+            .unwrap();
+        db.insert(&make_row("bench apply-changes", "direct-io")).unwrap();
         let rows = db
             .query(&QueryFilter {
                 commit: None,
-                command: Some(String::from("renumber")),
+                command: Some(String::from("zstd1")),
                 variant: None,
                 dataset: None,
                 meta: vec![],
@@ -742,7 +743,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].variant, "renumber");
+        assert_eq!(rows[0].variant, "direct-io+zstd1");
 
         drop(db);
         cleanup(&dir, &db_path);

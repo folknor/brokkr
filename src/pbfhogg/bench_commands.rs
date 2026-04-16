@@ -423,8 +423,8 @@ pub fn run(
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
-            command: "bench commands".into(),
-            variant: Some(name.into()),
+            command: format!("bench {name}"),
+            variant: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,

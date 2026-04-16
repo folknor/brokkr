@@ -300,92 +300,30 @@ impl PbfhoggCommand {
         }
     }
 
-    /// The result command label for the DB.
-    pub fn result_command(&self) -> &'static str {
-        match self {
-            Self::Inspect
-            | Self::InspectNodes
-            | Self::InspectTags
-            | Self::InspectTagsWay
-            | Self::CheckRefs
-            | Self::CheckIds
-            | Self::Sort
-            | Self::Cat
-            | Self::CatWay
-            | Self::CatRelation
-            | Self::CatDedupe
-            | Self::CatClean
-            | Self::TagsFilterWay
-            | Self::TagsFilterAmenity
-            | Self::TagsFilterTwopass
-            | Self::TagsFilterOsc
-            | Self::Getid
-            | Self::GetidRefs
-            | Self::Getparents
-            | Self::GetidInvert
-            | Self::Renumber
-            | Self::MergeChanges
-            | Self::ApplyChanges
-            | Self::AddLocationsToWays
-            | Self::ExtractSimple
-            | Self::ExtractComplete
-            | Self::ExtractSmart
-            | Self::TimeFilter
-            | Self::Diff
-            | Self::DiffOsc
-            | Self::DiffSnapshots { .. } => "bench commands",
-            Self::BuildGeocodeIndex => "bench build-geocode-index",
-            Self::Extract { .. } => "bench extract",
-            Self::MultiExtract { .. } => "bench multi-extract",
-        }
+    /// The result command label for the DB (e.g. `"bench add-locations-to-ways"`).
+    ///
+    /// Every command gets its own distinct label so the `command` column in
+    /// `brokkr results` carries the real command name. Historically everything
+    /// collapsed to `"bench commands"` and the real name was stuffed into the
+    /// `variant` column — migration v11→v12 splits those old rows apart.
+    pub fn result_command(&self) -> String {
+        format!("bench {}", self.id())
     }
 
     /// The result variant label for the DB.
+    ///
+    /// Tool-CLI commands return `None` — the command name now lives in the
+    /// `command` column, not the variant. The dispatch layer appends any
+    /// real variance axes (io flags, compression, range, snapshot, ...) as
+    /// suffixes via `extra_variant_suffix`.
+    ///
+    /// `Extract` keeps the strategy as its variant (simple/complete/smart —
+    /// a real axis). `MultiExtract` keeps the region count.
     pub fn result_variant(&self) -> Option<String> {
         match self {
-            // Tool CLI commands use the command ID as the variant.
-            Self::Inspect
-            | Self::InspectNodes
-            | Self::InspectTags
-            | Self::InspectTagsWay
-            | Self::CheckRefs
-            | Self::CheckIds
-            | Self::Sort
-            | Self::Cat
-            | Self::CatWay
-            | Self::CatRelation
-            | Self::CatDedupe
-            | Self::CatClean
-            | Self::TagsFilterWay
-            | Self::TagsFilterAmenity
-            | Self::TagsFilterTwopass
-            | Self::TagsFilterOsc
-            | Self::Getid
-            | Self::GetidRefs
-            | Self::Getparents
-            | Self::GetidInvert
-            | Self::Renumber
-            | Self::MergeChanges
-            | Self::ApplyChanges
-            | Self::AddLocationsToWays
-            | Self::ExtractSimple
-            | Self::ExtractComplete
-            | Self::ExtractSmart
-            | Self::TimeFilter
-            | Self::Diff
-            | Self::DiffOsc => Some(self.id().to_owned()),
-
-            Self::BuildGeocodeIndex => None,
-
             Self::Extract { strategy } => Some(strategy.name().to_owned()),
             Self::MultiExtract { regions } => Some(format!("multi-extract-{regions}")),
-
-            // DiffSnapshots returns None — the full variant string
-            // ("diff-snapshots-{from}-to-{to}") is composed in the dispatch
-            // layer via `extra_variant_suffix` since it needs from/to from
-            // the cmd_ctx params. Format is recorded in metadata, not in
-            // the variant column (per the schema design — see Q7).
-            Self::DiffSnapshots { .. } => None,
+            _ => None,
         }
     }
 

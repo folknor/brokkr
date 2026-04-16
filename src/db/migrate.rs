@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 11;
+pub(super) const SCHEMA_VERSION: i64 = 12;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -49,6 +49,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
 
     if current < 11 {
         migrate_v10_to_v11(conn)?;
+    }
+    if current < 12 {
+        migrate_v11_to_v12(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -348,6 +351,111 @@ fn migrate_v10_to_v11(conn: &rusqlite::Connection) -> Result<(), DevError> {
         "UPDATE runs SET variant = 'renumber' WHERE variant = 'renumber+external'",
         [],
     )?;
+    Ok(())
+}
+
+/// v11 → v12: move the real command name out of `variant` and into `command`.
+///
+/// Historically every pbfhogg tool-CLI command (inspect, sort, cat, diff,
+/// add-locations-to-ways, ...) stored `command = 'bench commands'` with the
+/// real name stuffed into `variant` (optionally trailed with `+<suffix>`
+/// like `+nocompress`, `+direct-io`, `+range-LO-HI`). Hotpath rows had the
+/// same shape with `command = 'hotpath'` and an extra `/alloc` marker for
+/// alloc-tracking runs.
+///
+/// That made the `command` column useless and the `variant` column a
+/// name-plus-axis jumble. After this migration the command column carries
+/// the real name (`'bench add-locations-to-ways'`, `'hotpath inspect'`)
+/// and the variant column holds only real variance axes (`'nocompress'`,
+/// `'direct-io+zstd1'`, `'range-4914-4920'`, `'alloc'`).
+///
+/// Only pbfhogg rows are touched — the elivagar/nidhogg/sluggrs `command`
+/// values were never affected by the legacy naming.
+fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // --- bench rows --------------------------------------------------------
+    //
+    // Normalize diff-snapshots variants (legacy `-from-to-to` suffix) into
+    // the standard `+` separator shape so the split-on-+ step handles them
+    // uniformly.
+    conn.execute(
+        "UPDATE runs \
+         SET variant = 'diff-snapshots+' || substr(variant, length('diff-snapshots-') + 1) \
+         WHERE command = 'bench commands' \
+           AND variant LIKE 'diff-snapshots-%'",
+        [],
+    )?;
+
+    // Rows with no `+` suffix: the whole variant is the command name.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'bench ' || variant, variant = NULL \
+         WHERE command = 'bench commands' \
+           AND variant IS NOT NULL \
+           AND variant NOT LIKE '%+%'",
+        [],
+    )?;
+
+    // Rows with a `+` suffix: split on the first `+`. `variant[..first_plus]`
+    // becomes the command suffix, `variant[first_plus+1..]` becomes the new
+    // variant (NULL if empty).
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'bench ' || substr(variant, 1, instr(variant, '+') - 1), \
+             variant = NULLIF(substr(variant, instr(variant, '+') + 1), '') \
+         WHERE command = 'bench commands' \
+           AND variant LIKE '%+%'",
+        [],
+    )?;
+
+    // --- hotpath rows ------------------------------------------------------
+    //
+    // Variant formats in the wild: `<id>`, `<id>/alloc`, `<id>+<suffix>`,
+    // `<id>/alloc+<suffix>`. Split on whichever separator (`/` or `+`)
+    // appears first. The separator itself is dropped — except the `/alloc`
+    // marker, whose content is kept in the new variant as `alloc`.
+    //
+    // Restricted to pbfhogg so elivagar/nidhogg/sluggrs hotpath rows are
+    // left untouched.
+
+    // A. '/' appears and (no '+' OR '/' is earlier than '+'): split on '/'.
+    //    Everything after the '/' (e.g. `alloc+direct-io`) becomes variant.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'hotpath ' || substr(variant, 1, instr(variant, '/') - 1), \
+             variant = NULLIF(substr(variant, instr(variant, '/') + 1), '') \
+         WHERE command = 'hotpath' \
+           AND project = 'pbfhogg' \
+           AND variant IS NOT NULL \
+           AND instr(variant, '/') > 0 \
+           AND (instr(variant, '+') = 0 OR instr(variant, '/') < instr(variant, '+'))",
+        [],
+    )?;
+
+    // B. '+' appears and (no '/' OR '+' is earlier than '/'): split on '+'.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'hotpath ' || substr(variant, 1, instr(variant, '+') - 1), \
+             variant = NULLIF(substr(variant, instr(variant, '+') + 1), '') \
+         WHERE command = 'hotpath' \
+           AND project = 'pbfhogg' \
+           AND variant IS NOT NULL \
+           AND instr(variant, '+') > 0 \
+           AND (instr(variant, '/') = 0 OR instr(variant, '+') < instr(variant, '/'))",
+        [],
+    )?;
+
+    // C. No separator: the whole variant is the command id.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'hotpath ' || variant, variant = NULL \
+         WHERE command = 'hotpath' \
+           AND project = 'pbfhogg' \
+           AND variant IS NOT NULL \
+           AND instr(variant, '/') = 0 \
+           AND instr(variant, '+') = 0",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -963,23 +1071,231 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
-        // Helper to query variant by row id.
-        let variant_of = |id: i64| -> String {
+        // Helper to query (command, variant) by row id. v3→v4 renames the
+        // variant; v11→v12 then splits `bench commands` rows so the real
+        // command name moves into the `command` column and the residual
+        // suffix (or NULL) stays in variant. Both effects are checked.
+        let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
-                .query_row("SELECT variant FROM runs WHERE id = ?1", [id], |r| r.get(0))
+                .query_row(
+                    "SELECT command, variant FROM runs WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
                 .unwrap()
         };
 
-        assert_eq!(variant_of(1), "inspect-tags"); // tags-count -> inspect-tags
-        assert_eq!(variant_of(2), "inspect-nodes"); // node-stats -> inspect-nodes
-        assert_eq!(variant_of(3), "getid-invert"); // removeid -> getid-invert
-        assert_eq!(variant_of(4), "diff-osc"); // derive-changes -> diff-osc
-        assert_eq!(variant_of(5), "cat-dedupe"); // merge-pbf -> cat-dedupe
-        assert_eq!(variant_of(6), "inspect-nodes+raw"); // node-stats+raw -> inspect-nodes+raw
-        assert_eq!(variant_of(7), "apply-changes-zlib"); // merge-zlib -> apply-changes-zlib
-        assert_eq!(variant_of(8), "inspect-tags/alloc"); // tags-count/alloc -> inspect-tags/alloc
-        assert_eq!(variant_of(9), "inspect"); // unchanged
-        assert_eq!(variant_of(10), "tags-count"); // elivagar row: NOT renamed
+        // Rows 1-5, 9: originally `bench commands` with a bare variant.
+        // v3→v4 applied the variant rename, v11→v12 then moved the variant
+        // into the command column and nulled the variant.
+        assert_eq!(row_of(1), ("bench inspect-tags".into(), None)); // tags-count -> inspect-tags
+        assert_eq!(row_of(2), ("bench inspect-nodes".into(), None)); // node-stats
+        assert_eq!(row_of(3), ("bench getid-invert".into(), None)); // removeid
+        assert_eq!(row_of(4), ("bench diff-osc".into(), None)); // derive-changes
+        assert_eq!(row_of(5), ("bench cat-dedupe".into(), None)); // merge-pbf
+
+        // Row 6: `bench blob-filter` — v11→v12 only touches `bench commands`,
+        // so command is preserved; variant was renamed by v3→v4.
+        assert_eq!(
+            row_of(6),
+            ("bench blob-filter".into(), Some("inspect-nodes+raw".into()))
+        );
+
+        // Rows 7-8: pbfhogg `hotpath` rows. v3→v4 renames the variant;
+        // v11→v12 then splits the id out of the variant and into the
+        // command column (row 7 has no separator; row 8 has `/alloc`).
+        assert_eq!(row_of(7), ("hotpath apply-changes-zlib".into(), None));
+        assert_eq!(row_of(8), ("hotpath inspect-tags".into(), Some("alloc".into())));
+
+        // Row 9: `bench commands` with variant `inspect` (no v3→v4 rename) →
+        // split by v11→v12 into `bench inspect` / NULL.
+        assert_eq!(row_of(9), ("bench inspect".into(), None));
+
+        // Row 10: elivagar row — v3→v4 skipped it (project filter), v11→v12
+        // skipped it (command != 'bench commands').
+        assert_eq!(row_of(10), ("bench self".into(), Some("tags-count".into())));
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v11 -> v12 splits `bench commands` rows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v11_to_v12_splits_bench_commands() {
+        let (dir, db_path) = test_db("migrate_v11_v12");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V3_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 11).unwrap();
+
+            // 1. Bare command (no suffix).
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench commands", "inspect", "pbfhogg"],
+            )
+            .unwrap();
+            // 2. Single +suffix (`nocompress`).
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "bench commands",
+                    "add-locations-to-ways+nocompress",
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // 3. Multiple + suffixes: only the first + splits the command.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "bench commands",
+                    "apply-changes+direct-io+zstd1",
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // 4. Range suffix.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "bench commands",
+                    "merge-changes+range-4914-4920",
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // 5. Legacy diff-snapshots with `-from-to-to` trailer (no +):
+            //    step 1 of the migration rewrites it to `diff-snapshots+...`
+            //    before the split-on-+ pass runs.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "bench commands",
+                    "diff-snapshots-base-to-20260411",
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // 6. `bench extract` — command already distinct, left alone.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench extract", "simple", "pbfhogg"],
+            )
+            .unwrap();
+            // 7. Non-pbfhogg row — untouched.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench self", "whatever", "elivagar"],
+            )
+            .unwrap();
+            // 8. pbfhogg hotpath, bare id (no alloc, no io flags).
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "inspect-tags", "pbfhogg"],
+            )
+            .unwrap();
+            // 9. pbfhogg hotpath with `/alloc` marker only.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "inspect-tags/alloc", "pbfhogg"],
+            )
+            .unwrap();
+            // 10. pbfhogg hotpath with io/extra suffix.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "apply-changes+direct-io", "pbfhogg"],
+            )
+            .unwrap();
+            // 11. pbfhogg hotpath with `/alloc` and io/extra suffix.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "hotpath",
+                    "apply-changes/alloc+direct-io+zstd1",
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // 12. Non-pbfhogg hotpath row — untouched.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "tilegen/alloc", "elivagar"],
+            )
+            .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v11 to v12");
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let row_of = |id: i64| -> (String, Option<String>) {
+            db.conn
+                .query_row(
+                    "SELECT command, variant FROM runs WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .unwrap()
+        };
+
+        assert_eq!(row_of(1), ("bench inspect".into(), None));
+        assert_eq!(
+            row_of(2),
+            (
+                "bench add-locations-to-ways".into(),
+                Some("nocompress".into())
+            )
+        );
+        assert_eq!(
+            row_of(3),
+            (
+                "bench apply-changes".into(),
+                Some("direct-io+zstd1".into())
+            )
+        );
+        assert_eq!(
+            row_of(4),
+            (
+                "bench merge-changes".into(),
+                Some("range-4914-4920".into())
+            )
+        );
+        assert_eq!(
+            row_of(5),
+            (
+                "bench diff-snapshots".into(),
+                Some("base-to-20260411".into())
+            )
+        );
+        assert_eq!(row_of(6), ("bench extract".into(), Some("simple".into())));
+        assert_eq!(row_of(7), ("bench self".into(), Some("whatever".into())));
+        // Hotpath rows:
+        assert_eq!(row_of(8), ("hotpath inspect-tags".into(), None));
+        assert_eq!(
+            row_of(9),
+            ("hotpath inspect-tags".into(), Some("alloc".into()))
+        );
+        assert_eq!(
+            row_of(10),
+            ("hotpath apply-changes".into(), Some("direct-io".into()))
+        );
+        assert_eq!(
+            row_of(11),
+            (
+                "hotpath apply-changes".into(),
+                Some("alloc+direct-io+zstd1".into())
+            )
+        );
+        // Elivagar hotpath row — project filter protects it.
+        assert_eq!(row_of(12), ("hotpath".into(), Some("tilegen/alloc".into())));
 
         drop(db);
         cleanup(&dir, &db_path);
