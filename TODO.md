@@ -8,13 +8,6 @@ simplify the rest.
 
 ### Duplicated code paths
 
-#### `BenchContext::new` vs `HarnessContext::new`
-Same shape minus the cargo build. Difference is ~20 lines. Either
-fold `HarnessContext` into `BenchContext` with an optional build, or
-share the inner setup via a helper.
-
-#### `resolve_pbf_path` vs `resolve_pbf_with_size`
-Second is the first plus a `stat()` call. Collapse.
 
 ### Stringly-typed plumbing
 

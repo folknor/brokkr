@@ -54,6 +54,20 @@ pub(crate) struct HarnessContext {
     pub(crate) harness: harness::BenchHarness,
 }
 
+/// Shared bootstrap step for both context constructors: resolve host paths
+/// and compute the effective build root + db root pair.
+fn resolve_bootstrap_paths<'a>(
+    dev_config: &config::DevConfig,
+    project_root: &'a Path,
+    build_root: Option<&'a Path>,
+) -> Result<(config::ResolvedPaths, &'a Path, Option<&'a Path>), DevError> {
+    let pi = bootstrap(build_root)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let effective = build_root.unwrap_or(project_root);
+    let db_root = build_root.map(|_| project_root);
+    Ok((paths, effective, db_root))
+}
+
 impl HarnessContext {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -66,12 +80,18 @@ impl HarnessContext {
         wait: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
-        let pi = bootstrap(build_root)?;
-        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-        let effective = build_root.unwrap_or(project_root);
-        let db_root = build_root.map(|_| project_root);
-        let harness =
-            harness::BenchHarness::new(&paths, effective, db_root, project, lock_command, force, wait, stop_marker)?;
+        let (paths, effective, db_root) =
+            resolve_bootstrap_paths(dev_config, project_root, build_root)?;
+        let harness = harness::BenchHarness::new(
+            &paths,
+            effective,
+            db_root,
+            project,
+            lock_command,
+            force,
+            wait,
+            stop_marker,
+        )?;
         Ok(Self { paths, harness })
     }
 
@@ -118,9 +138,8 @@ impl BenchContext {
         wait: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
-        let effective_build_root = build_root.unwrap_or(project_root);
-        let pi = bootstrap(build_root)?;
-        let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+        let (paths, effective_build_root, db_root) =
+            resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         // Acquire the lock BEFORE building so concurrent brokkr invocations
         // block here instead of competing for CPU during cargo build.
         let lock_ctx = lockfile::LockContext {
@@ -146,7 +165,6 @@ impl BenchContext {
             Some(build_config.features.join(","))
         };
         let binary = build::cargo_build(&build_config, effective_build_root)?;
-        let db_root = build_root.map(|_| project_root);
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,
