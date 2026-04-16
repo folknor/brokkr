@@ -301,20 +301,18 @@ fn read_proc_status(pid: u32) -> Option<ProcStatus> {
 }
 
 /// Read all /proc metrics for a pid and assemble into a `Sample`.
+///
+/// All three `/proc` reads must succeed for the sample to be emitted — if
+/// any fails (usually because the process exited between reads), the
+/// sample is dropped entirely. Earlier versions substituted zeros for a
+/// failed io read, which corrupted phase deltas (the final sample's
+/// `read_bytes = 0` made `last_io.0 - first_io.0` go deeply negative on
+/// the tail phase). Dropping is safer: the preceding sample's values
+/// still anchor the phase correctly.
 fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sample> {
     let stat = read_proc_stat(pid)?;
-    let io = read_proc_io(pid);
+    let io = read_proc_io(pid)?;
     let status = read_proc_status(pid)?;
-
-    let io = io.unwrap_or(ProcIo {
-        rchar: 0,
-        wchar: 0,
-        read_bytes: 0,
-        write_bytes: 0,
-        cancelled_write_bytes: 0,
-        syscr: 0,
-        syscw: 0,
-    });
 
     Some(Sample {
         sample_idx,

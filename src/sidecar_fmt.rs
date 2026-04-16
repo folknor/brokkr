@@ -533,8 +533,13 @@ pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sideca
 
         let duration_ms = (end_us - start_us) / 1_000;
         let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
-        let disk_read = last_io.0 - first_rd;
-        let disk_write = last_io.1 - first_wr;
+        // Clamp to 0: historical sidecar.db rows captured with the pre-fix
+        // sidecar contained zero-io samples when the process exited between
+        // /proc reads, which made last_io - first_io negative on the tail
+        // phase. Treat any regression as "no measurement" rather than
+        // showing physically-impossible negative bytes.
+        let disk_read = (last_io.0 - first_rd).max(0);
+        let disk_write = (last_io.1 - first_wr).max(0);
         // Divide CPU delta by the sample span, not the marker span. `cpu_delta`
         // is sampled across the first-to-last sample inside the phase; if we
         // divided by the marker span (which can be up to one sample interval
@@ -791,7 +796,9 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
 
     PhaseStats {
         peak_anon,
-        disk_read_kb: (last_rd - first_rd.unwrap_or(0)) / 1024,
+        // Clamp negative deltas (historical pre-fix-sidecar samples could
+        // regress to zero when the process exited between /proc reads).
+        disk_read_kb: ((last_rd - first_rd.unwrap_or(0)).max(0)) / 1024,
         cpu_delta_jiffies: last_cpu - first_cpu.unwrap_or(last_cpu),
         sample_span_us: last_ts - first_ts.unwrap_or(last_ts),
     }
