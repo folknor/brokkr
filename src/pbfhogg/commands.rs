@@ -345,10 +345,10 @@ impl PbfhoggCommand {
                 // distinguish runs that paid the setup cost from runs that
                 // reused a cached file.
                 let mut meta = Vec::new();
-                if let Some(state) = ctx.param("merged_cache_state") {
+                if let Some(state) = &ctx.params.merged_cache_state {
                     meta.push(KvPair::text("meta.merged_cache", state));
                 }
-                if let Some(age) = ctx.param("merged_cache_age_s") {
+                if let Some(age) = &ctx.params.merged_cache_age_s {
                     meta.push(KvPair::text("meta.merged_cache_age_s", age));
                 }
                 meta
@@ -360,10 +360,10 @@ impl PbfhoggCommand {
                 // brokkr.toml. Record the resolved info so queries can
                 // identify which B-side file was actually consumed.
                 let mut meta = Vec::new();
-                if let Some(file) = ctx.param("to_snapshot_file") {
+                if let Some(file) = &ctx.params.to_snapshot_file {
                     meta.push(KvPair::text("meta.to_snapshot_file", file));
                 }
-                if let Some(mb) = ctx.param("to_snapshot_file_mb") {
+                if let Some(mb) = &ctx.params.to_snapshot_file_mb {
                     meta.push(KvPair::text("meta.to_snapshot_file_mb", mb));
                 }
                 meta
@@ -544,15 +544,15 @@ impl PbfhoggCommand {
                     "-o".into(),
                     path_to_string(&output)?,
                 ];
-                if let Some(it) = ctx.param("index_type") {
+                if let Some(it) = &ctx.params.index_type {
                     args.push("--index-type".into());
-                    args.push(it.into());
+                    args.push(it.clone());
                 }
-                if let Some(s) = ctx.param("start_stage") {
+                if let Some(s) = &ctx.params.start_stage {
                     args.push("--start-stage".into());
-                    args.push(s.into());
+                    args.push(s.clone());
                 }
-                if ctx.param("keep_scratch").is_some() {
+                if ctx.params.keep_scratch {
                     args.push("--keep-scratch".into());
                 }
                 Ok(args)
@@ -759,7 +759,7 @@ impl PbfhoggCommand {
             Self::ApplyChanges => {
                 // Hotpath apply-changes needs compression param from context.
                 let osc = ctx.osc_str()?;
-                let compression = ctx.param("compression").unwrap_or("zlib");
+                let compression = ctx.params.compression.as_deref().unwrap_or("zlib");
                 let output = ctx.scratch_output("hotpath-merged", "osm.pbf");
                 args.extend([
                     "apply-changes".into(),
@@ -779,15 +779,15 @@ impl PbfhoggCommand {
                     "-o".into(),
                     path_to_string(&output)?,
                 ]);
-                if let Some(it) = ctx.param("index_type") {
+                if let Some(it) = &ctx.params.index_type {
                     args.push("--index-type".into());
-                    args.push(it.into());
+                    args.push(it.clone());
                 }
-                if let Some(s) = ctx.param("start_stage") {
+                if let Some(s) = &ctx.params.start_stage {
                     args.push("--start-stage".into());
-                    args.push(s.into());
+                    args.push(s.clone());
                 }
-                if ctx.param("keep_scratch").is_some() {
+                if ctx.params.keep_scratch {
                     args.push("--keep-scratch".into());
                 }
             }
@@ -897,7 +897,7 @@ fn scratch_output_path(ctx: &CommandContext, cmd: &PbfhoggCommand) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::measure::CommandParams;
 
     fn test_ctx() -> CommandContext {
         CommandContext {
@@ -909,7 +909,7 @@ mod tests {
             scratch_dir: PathBuf::from("/data/scratch"),
             dataset: "denmark".into(),
             bbox: Some("12.4,55.6,12.7,55.8".into()),
-            params: HashMap::new(),
+            params: CommandParams::default(),
         }
     }
 
@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn add_locations_to_ways_with_index_type() {
         let mut ctx = test_ctx();
-        ctx.params.insert("index_type".into(), "external".into());
+        ctx.params.index_type = Some("external".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_args(&ctx).unwrap();
         assert!(args.contains(&String::from("--index-type")));
@@ -988,8 +988,8 @@ mod tests {
     #[test]
     fn altw_build_args_with_start_stage() {
         let mut ctx = test_ctx();
-        ctx.params.insert("index_type".into(), "external".into());
-        ctx.params.insert("start_stage".into(), "3".into());
+        ctx.params.index_type = Some("external".into());
+        ctx.params.start_stage = Some("3".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_args(&ctx).unwrap();
         assert!(args.contains(&String::from("--start-stage")));
@@ -999,8 +999,8 @@ mod tests {
     #[test]
     fn altw_build_args_with_keep_scratch() {
         let mut ctx = test_ctx();
-        ctx.params.insert("index_type".into(), "external".into());
-        ctx.params.insert("keep_scratch".into(), "true".into());
+        ctx.params.index_type = Some("external".into());
+        ctx.params.keep_scratch = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_args(&ctx).unwrap();
         assert!(args.contains(&String::from("--keep-scratch")));
@@ -1018,8 +1018,8 @@ mod tests {
     #[test]
     fn altw_hotpath_with_start_stage() {
         let mut ctx = test_ctx();
-        ctx.params.insert("index_type".into(), "external".into());
-        ctx.params.insert("start_stage".into(), "4".into());
+        ctx.params.index_type = Some("external".into());
+        ctx.params.start_stage = Some("4".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
         let args = cmd.build_hotpath_args(&ctx).unwrap();
         assert!(args.contains(&String::from("--index-type")));
@@ -1035,9 +1035,9 @@ mod tests {
         // metadata builder is reserved for runtime observations, so it
         // no longer mirrors user-supplied flags.
         let mut ctx = test_ctx();
-        ctx.params.insert("index_type".into(), "external".into());
-        ctx.params.insert("start_stage".into(), "3".into());
-        ctx.params.insert("keep_scratch".into(), "true".into());
+        ctx.params.index_type = Some("external".into());
+        ctx.params.start_stage = Some("3".into());
+        ctx.params.keep_scratch = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
         assert!(cmd.metadata(&ctx).is_empty());
     }

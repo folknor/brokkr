@@ -4,7 +4,6 @@
 //! dispatch for pbfhogg and elivagar with a single entry point per project that
 //! handles all measurement modes (wall-clock, hotpath, alloc).
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::config;
@@ -14,7 +13,7 @@ use crate::elivagar;
 use crate::elivagar::commands::ElivagarCommand;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::{CommandContext, MeasureMode, MeasureRequest};
+use crate::measure::{CommandContext, CommandParams, MeasureMode, MeasureRequest};
 use crate::nidhogg;
 use crate::oom;
 use crate::output;
@@ -37,10 +36,10 @@ use crate::resolve::{
 /// variant column only carries the measurement mode after v13.
 fn resolve_io_flags(
     command: &PbfhoggCommand,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<(Vec<&'static str>, Vec<&'static str>), DevError> {
-    let direct_io = extra_params.get("direct_io").is_some();
-    let io_uring = extra_params.get("io_uring").is_some();
+    let direct_io = extra_params.direct_io;
+    let io_uring = extra_params.io_uring;
 
     if io_uring && !command.supports_io_uring() {
         return Err(DevError::Config(format!(
@@ -77,16 +76,13 @@ pub fn run_pbfhogg_command_with_params(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Pbfhogg, command.id())?;
 
     // --start-stage and --keep-scratch are only meaningful for external join.
-    let has_stage_flags =
-        extra_params.contains_key("start_stage") || extra_params.contains_key("keep_scratch");
-    if has_stage_flags
-        && extra_params.get("index_type").is_none_or(|v| v != "external")
-    {
+    let has_stage_flags = extra_params.start_stage.is_some() || extra_params.keep_scratch;
+    if has_stage_flags && extra_params.index_type.as_deref() != Some("external") {
         return Err(DevError::Config(
             "--start-stage and --keep-scratch require --index-type external".into(),
         ));
@@ -119,7 +115,7 @@ fn run_pbfhogg_dry_run(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<(), DevError> {
     // Validate I/O flag compatibility (e.g. --io-uring on a command that
     // doesn't support it) and run io_uring preflight if requested.
@@ -146,7 +142,7 @@ fn run_pbfhogg_dry_run(
     for flag in &io_args {
         args.push((*flag).into());
     }
-    if let Some(c) = extra_params.get("compression") {
+    if let Some(c) = &extra_params.compression {
         args.push("--compression".into());
         args.push(c.clone());
     }
@@ -189,7 +185,7 @@ fn run_pbfhogg_run(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<(), DevError> {
     let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
@@ -218,7 +214,7 @@ fn run_pbfhogg_run(
     for flag in &io_args {
         args.push((*flag).into());
     }
-    if let Some(c) = extra_params.get("compression") {
+    if let Some(c) = &extra_params.compression {
         args.push("--compression".into());
         args.push(c.clone());
     }
@@ -246,7 +242,7 @@ fn run_pbfhogg_wallclock(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<(), DevError> {
     let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
@@ -274,7 +270,7 @@ fn run_pbfhogg_wallclock(
     for flag in &io_args {
         args.push((*flag).into());
     }
-    if let Some(c) = extra_params.get("compression") {
+    if let Some(c) = &extra_params.compression {
         args.push("--compression".into());
         args.push(c.clone());
     }
@@ -326,7 +322,7 @@ fn run_pbfhogg_hotpath(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<(), DevError> {
     if !command.supports_hotpath() {
         return Err(DevError::Config(format!(
@@ -385,7 +381,7 @@ fn run_pbfhogg_hotpath(
     for flag in &io_args {
         hotpath_args.push((*flag).into());
     }
-    if let Some(c) = extra_params.get("compression") {
+    if let Some(c) = &extra_params.compression {
         hotpath_args.push("--compression".into());
         hotpath_args.push(c.clone());
     }
@@ -453,7 +449,7 @@ fn build_pbfhogg_context(
     osc_seq: Option<&str>,
     binary: &Path,
     paths: &config::ResolvedPaths,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
     // DiffSnapshots resolves both PBFs via the snapshot resolver instead of
     // the standard pbf_path/osc/merged flow. Short-circuit here.
@@ -464,7 +460,7 @@ fn build_pbfhogg_context(
     // Parse the optional `--snapshot` flag from extra_params into a SnapshotRef.
     // None or "base" → SnapshotRef::Base (legacy top-level data, current
     // behavior preserved). Anything else → Named, validated.
-    let snapshot_ref = match extra_params.get("snapshot").map(String::as_str) {
+    let snapshot_ref = match extra_params.snapshot.as_deref() {
         None => resolve::SnapshotRef::Base,
         Some(s) => resolve::SnapshotRef::parse(s)?,
     };
@@ -490,7 +486,7 @@ fn build_pbfhogg_context(
     // Both resolution paths are snapshot-scoped: when --snapshot is set, OSCs
     // come from the snapshot's osc table, not the legacy top-level.
     let (osc_path, osc_paths, single_osc_seq) = if command.needs_osc() {
-        if let Some(range) = extra_params.get("osc_range") {
+        if let Some(range) = &extra_params.osc_range {
             let paths_vec = resolve::resolve_osc_range(
                 req.dataset,
                 &snapshot_ref,
@@ -530,7 +526,7 @@ fn build_pbfhogg_context(
 
     // Resolve bbox if needed. Check extra_params for a CLI override first.
     let bbox = if command.needs_bbox() {
-        let cli_bbox = extra_params.get("bbox").map(String::as_str);
+        let cli_bbox = extra_params.bbox.as_deref();
         Some(resolve_bbox(cli_bbox, req.dataset, paths)?)
     } else {
         None
@@ -565,8 +561,8 @@ fn resolve_merged_pbf(
     single_osc_seq: Option<&str>,
     snapshot_ref: &resolve::SnapshotRef,
     paths: &config::ResolvedPaths,
-    extra_params: &HashMap<String, String>,
-    params: &mut HashMap<String, String>,
+    extra_params: &CommandParams,
+    params: &mut CommandParams,
 ) -> Result<Option<std::path::PathBuf>, DevError> {
     if command.input_kind() != InputKind::PbfAndMerged {
         return Ok(None);
@@ -596,8 +592,7 @@ fn resolve_merged_pbf(
         return Ok(Some(paths.scratch_dir.join(merged_name)));
     }
 
-    let force_rebuild =
-        !matches!(req.mode, MeasureMode::Run) && !extra_params.contains_key("keep_cache");
+    let force_rebuild = !matches!(req.mode, MeasureMode::Run) && !extra_params.keep_cache;
     let (merged, state) = ensure_merged_pbf(
         binary,
         pbf_path,
@@ -612,11 +607,11 @@ fn resolve_merged_pbf(
     // emit it as KvPairs on the result row.
     match state {
         MergedCacheState::Hit { age_secs } => {
-            params.insert("merged_cache_state".into(), "hit".into());
-            params.insert("merged_cache_age_s".into(), age_secs.to_string());
+            params.merged_cache_state = Some("hit".into());
+            params.merged_cache_age_s = Some(age_secs.to_string());
         }
         MergedCacheState::Miss => {
-            params.insert("merged_cache_state".into(), "miss".into());
+            params.merged_cache_state = Some("miss".into());
         }
     }
     Ok(Some(merged))
@@ -629,12 +624,12 @@ fn build_diff_snapshots_context(
     req: &MeasureRequest,
     binary: &Path,
     paths: &config::ResolvedPaths,
-    extra_params: &HashMap<String, String>,
+    extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
-    let from_str = extra_params.get("from_snapshot").ok_or_else(|| {
+    let from_str = extra_params.from_snapshot.as_deref().ok_or_else(|| {
         DevError::Config("diff-snapshots requires --from".into())
     })?;
-    let to_str = extra_params.get("to_snapshot").ok_or_else(|| {
+    let to_str = extra_params.to_snapshot.as_deref().ok_or_else(|| {
         DevError::Config("diff-snapshots requires --to".into())
     })?;
 
@@ -662,10 +657,10 @@ fn build_diff_snapshots_context(
     // B-side via `--meta to_snapshot_file=<name>`.
     let mut params = extra_params.clone();
     if let Some(name) = to_path.file_name().and_then(|s| s.to_str()) {
-        params.insert("to_snapshot_file".into(), name.to_owned());
+        params.to_snapshot_file = Some(name.to_owned());
     }
     if let Ok(mb) = resolve::file_size_mb(&to_path) {
-        params.insert("to_snapshot_file_mb".into(), format!("{mb:.0}"));
+        params.to_snapshot_file_mb = Some(format!("{mb:.0}"));
     }
 
     Ok(CommandContext {

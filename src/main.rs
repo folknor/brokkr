@@ -176,15 +176,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
 
     // Pbfhogg measured commands: 28 commands → single dispatch path.
     if let Some((mode, pbf, pbf_cmd, osc, mut params)) = cli.command.as_pbfhogg() {
-        if pbf.direct_io {
-            params.insert("direct_io".into(), "true".into());
-        }
-        if pbf.io_uring {
-            params.insert("io_uring".into(), "true".into());
-        }
-        if let Some(c) = &pbf.compression {
-            params.insert("compression".into(), c.clone());
-        }
+        params.direct_io = pbf.direct_io;
+        params.io_uring = pbf.io_uring;
+        params.compression = pbf.compression.clone();
         return run_measured(
             mode,
             &dev_config,
@@ -243,9 +237,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
             format,
         } => {
-            let mut params = std::collections::HashMap::new();
-            params.insert("from_snapshot".into(), from.clone());
-            params.insert("to_snapshot".into(), to.clone());
+            let params = crate::measure::CommandParams {
+                from_snapshot: Some(from.clone()),
+                to_snapshot: Some(to.clone()),
+                ..Default::default()
+            };
             let format_enum = pbfhogg::commands::DiffFormat::parse(&format)?;
             run_measured(
                 &mode,
@@ -269,10 +265,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             strategy,
             bbox,
         } => {
-            let mut params = std::collections::HashMap::new();
-            if let Some(ref b) = bbox {
-                params.insert("bbox".into(), b.clone());
-            }
+            let params = crate::measure::CommandParams {
+                bbox: bbox.clone(),
+                ..Default::default()
+            };
             run_measured(
                 &mode,
                 &dev_config,

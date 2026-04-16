@@ -1,5 +1,133 @@
 # TODO
 
+## Structural debt (2026-04-16)
+
+Janitorial work surfaced while doing the schema/consolidation refactors.
+Items marked **★** are the highest-impact — doing them first would
+simplify the rest.
+
+### Duplicated code paths
+
+#### ★ `bench_commands.rs::command_args` duplicates `PbfhoggCommand::build_args`
+Two separate match-by-name arg builders for the same pbfhogg subcommands.
+Every consolidation (cat/extract/tags-filter/getid/inspect/diff) forced
+updating both places; `consolidated_command_name` is a bandaid on top.
+Fix: route the suite runner through `PbfhoggCommand` variants so only one
+source of truth for argv construction.
+
+#### `PbfhoggCommand::build_args` vs `build_hotpath_args`
+Nearly identical; differs only in output path and a few special-case
+overrides (ApplyChanges compression from ctx). Collapse into one
+function with a `HotpathMode` option.
+
+#### `brokkr suite pbfhogg` vs `brokkr <cmd>` dispatch
+Two independent code paths to the same DB rows: `bench_commands.rs`
+for the suite runner vs `dispatch::run_pbfhogg_command_with_params`
+for individual commands. Unify.
+
+#### `BenchContext::new` vs `HarnessContext::new`
+Same shape minus the cargo build. Difference is ~20 lines. Either
+fold `HarnessContext` into `BenchContext` with an optional build, or
+share the inner setup via a helper.
+
+#### `resolve_pbf_path` vs `resolve_pbf_with_size`
+Second is the first plus a `stat()` call. Collapse.
+
+#### `DiffFormat::parse` + clap `value_parser = ["default", "osc"]`
+Same knowledge in two places. Either derive clap's parser from
+`DiffFormat::parse` via `ValueEnum`, or drop `parse` entirely and
+accept the String in `as_pbfhogg`.
+
+### Stringly-typed plumbing
+
+#### `cargo_profile: String` with magic values
+Takes `"release"` / `"java"` / `"cmake"` / `"hotpath"` — make it an
+enum.
+
+### Hardcoded preset content
+
+#### `getid` — nine hardcoded IDs
+`n115722`, `w2080`, `r174`, … — valid for some test datasets, may be
+absent in others. No warning, no override. Consider either deriving
+IDs from the PBF at run time, exposing as a `--ids` flag, or moving
+to `brokkr.toml`.
+
+#### `inspect --tags` — `--min-count 999999999` hardcoded
+Defeats pbfhogg's default min-count filter. Magic number; should be
+named or documented.
+
+#### Scratch output filename pattern coupled to command id
+`bench-<id>-output.osm.pbf` in `scratch_output_path`. Works today;
+becomes a problem if two benches of the same command want distinct
+outputs.
+
+#### `consolidated_command_name` mapping
+Hardcoded preset → consolidated name map in `bench_commands.rs`. Every
+future consolidation adds entries. Goes away if the suite runner
+routes through `PbfhoggCommand` (see first item).
+
+#### v12→v13 `DELETE FROM run_kv WHERE key IN (…)` list
+30 hardcoded meta key names. New axis-mirror keys would be forgotten.
+Could be generated from the list of known axis-mirror names in code.
+
+### File size / boundaries
+
+#### `main.rs` is ~2900 lines
+CLI dispatch + `run_measured` helpers + sidecar formatting +
+phase-summary printing + history + dozens of `cmd_` functions. Split
+into `cli_dispatch.rs`, `sidecar_fmt.rs`, `history_cmd.rs`, etc.
+
+#### `cli.rs` is ~1700 lines
+Clap definitions + `as_pbfhogg` adapter + validators. The adapter is
+the bridge between CLI shape and `PbfhoggCommand`; move it next to
+commands.rs.
+
+#### `dispatch.rs` is ~1700 lines
+pbfhogg + elivagar + nidhogg dispatch all in one file. Split per
+project.
+
+#### `format.rs` is ~1300 lines
+Table + details + single-result + compare + pair-key + helpers + lots
+of tests. Split layouts into submodules.
+
+### Inconsistencies
+
+#### `VerifyCommand` args don't use `PbfArgs`
+Each verify variant re-declares `dataset` / `variant` / `direct_io`
+inline. Factor into a shared `VerifyArgs` or reuse `PbfArgs`.
+
+#### `PbfhoggCommand::metadata` takes `ctx: &CommandContext`, others take no args
+`NidhoggCommand::metadata()` takes nothing. Elivagar's was just gutted
+to return empty. Unify the signature.
+
+#### Harness builder methods split across types
+Some on `BenchHarness` (`with_cargo_features`, `with_brokkr_args`,
+`with_measure_mode`), some on `BenchContext`/`HarnessContext`
+(`with_request`). Pick one layer.
+
+#### `cmd.rs` layouts differ per project
+pbfhogg has `bench_read`/`bench_write`/… helpers plus a massive
+`verify` dispatch; elivagar has small per-subcommand functions;
+nidhogg mixes both. Settle on a consistent pattern.
+
+### Schema / test fragility
+
+#### Migration tests copy `V3_SCHEMA` verbatim
+If the real schema gets a new column before v3, we'd have to update
+the copy. Derive `V3_SCHEMA` from a schema constant or versioned
+snapshot.
+
+#### Cumulative migration tests force cascade updates
+Each new migration test forces prior migration tests to update their
+assertions — v11→v12, v12→v13, v13→v14, v14→v15 all required editing
+`migrate_v3_to_v4_renames_variants` + `migrate_v11_to_v12_splits_bench_commands`
+because those tests run the full chain. Consider per-migration tests
+that start at the precise prior version.
+
+#### `OutputKind::ScratchPbf(&'static str)` has an unused string
+Every call site passes `"bench-output"`; nothing reads it. Drop the
+payload.
+
 ## Punted
 
 ### `diff-snapshots` per-side variant selection (punted 2026-04-11)

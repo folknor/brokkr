@@ -1467,13 +1467,13 @@ fn validate_since(s: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 use crate::pbfhogg::commands::PbfhoggCommand;
-use std::collections::HashMap;
+use crate::measure::CommandParams;
 
 impl Command {
     /// Extract the pbfhogg measured-command parts from a CLI command variant.
     ///
     /// Returns `None` for non-pbfhogg commands (elivagar, nidhogg, shared, etc.).
-    /// The returned tuple is `(mode, pbf, command, osc_seq, extra_params)`.
+    /// The returned tuple is `(mode, pbf, command, osc_seq, params)`.
     #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub(crate) fn as_pbfhogg(
         &self,
@@ -1482,9 +1482,9 @@ impl Command {
         &PbfArgs,
         PbfhoggCommand,
         Option<&str>,
-        HashMap<String, String>,
+        CommandParams,
     )> {
-        let empty = HashMap::new();
+        let empty = CommandParams::default();
         match self {
             // Simple commands: mode + pbf, no extras
             Self::Inspect {
@@ -1552,10 +1552,10 @@ impl Command {
                 snapshot,
             } => {
                 let input_kind_osc = input_kind.as_deref() == Some("osc");
-                let mut params = HashMap::new();
-                if let Some(s) = snapshot {
-                    params.insert("snapshot".into(), s.clone());
-                }
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
                 Some((
                     mode,
                     pbf,
@@ -1595,11 +1595,10 @@ impl Command {
                 regions,
                 bbox,
             } => {
-                let mut params = HashMap::new();
-                params.insert("regions".into(), regions.to_string());
-                if let Some(b) = bbox {
-                    params.insert("bbox".into(), b.clone());
-                }
+                let params = CommandParams {
+                    bbox: bbox.clone(),
+                    ..Default::default()
+                };
                 Some((
                     mode,
                     pbf,
@@ -1623,13 +1622,11 @@ impl Command {
                 osc_range,
                 snapshot,
             } => {
-                let mut params = HashMap::new();
-                if let Some(r) = osc_range {
-                    params.insert("osc_range".into(), r.clone());
-                }
-                if let Some(s) = snapshot {
-                    params.insert("snapshot".into(), s.clone());
-                }
+                let params = CommandParams {
+                    osc_range: osc_range.clone(),
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
                 Some((
                     mode,
                     pbf,
@@ -1644,10 +1641,10 @@ impl Command {
                 osc_seq,
                 snapshot,
             } => {
-                let mut params = HashMap::new();
-                if let Some(s) = snapshot {
-                    params.insert("snapshot".into(), s.clone());
-                }
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
                 Some((
                     mode,
                     pbf,
@@ -1668,13 +1665,11 @@ impl Command {
                     "osc" => crate::pbfhogg::commands::DiffFormat::Osc,
                     _ => crate::pbfhogg::commands::DiffFormat::Default,
                 };
-                let mut params = HashMap::new();
-                if *keep_cache {
-                    params.insert("keep_cache".into(), "true".into());
-                }
-                if let Some(s) = snapshot {
-                    params.insert("snapshot".into(), s.clone());
-                }
+                let params = CommandParams {
+                    keep_cache: *keep_cache,
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
                 Some((
                     mode,
                     pbf,
@@ -1692,18 +1687,15 @@ impl Command {
                 start_stage,
                 keep_scratch,
             } => {
-                let mut params = HashMap::new();
-                if let Some(it) = index_type {
-                    params.insert("index_type".into(), it.clone());
-                }
-                if let Some(s) = start_stage {
-                    params.insert("start_stage".into(), s.clone());
-                }
                 // --start-stage implies --keep-scratch: without it the first
                 // partial run would clean up the scratch dir and break the next.
-                if *keep_scratch || params.contains_key("start_stage") {
-                    params.insert("keep_scratch".into(), "true".into());
-                }
+                let keep = *keep_scratch || start_stage.is_some();
+                let params = CommandParams {
+                    index_type: index_type.clone(),
+                    start_stage: start_stage.clone(),
+                    keep_scratch: keep,
+                    ..Default::default()
+                };
                 Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))
             }
 

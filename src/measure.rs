@@ -5,7 +5,6 @@
 //! defines `CommandContext` — the resolved runtime context that a command's
 //! arg-builder needs to produce its argument vector.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config;
@@ -132,6 +131,56 @@ impl MeasureRequest<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// CommandParams
+// ---------------------------------------------------------------------------
+
+/// Typed command-specific parameters.
+///
+/// Replaces the legacy `HashMap<String, String>` that threaded through the
+/// dispatch layer with a compile-time-checked struct. Configuration fields
+/// are populated from CLI args; runtime-observation fields are populated
+/// during dispatch (e.g. merged-PBF cache state, resolved snapshot filename).
+#[derive(Debug, Default, Clone)]
+pub struct CommandParams {
+    // ----- Configuration (from CLI) -----
+    /// `--direct-io` (pbfhogg, Linux).
+    pub direct_io: bool,
+    /// `--io-uring` (pbfhogg, Linux).
+    pub io_uring: bool,
+    /// `--compression <spec>` (pbfhogg).
+    pub compression: Option<String>,
+    /// `--bbox` CLI override for extract / multi-extract.
+    pub bbox: Option<String>,
+    /// `--index-type <mode>` for `add-locations-to-ways`.
+    pub index_type: Option<String>,
+    /// `--start-stage <N>` for `add-locations-to-ways`.
+    pub start_stage: Option<String>,
+    /// `--keep-scratch` for `add-locations-to-ways`.
+    pub keep_scratch: bool,
+    /// `--snapshot <key>`.
+    pub snapshot: Option<String>,
+    /// `--from <key>` for DiffSnapshots.
+    pub from_snapshot: Option<String>,
+    /// `--to <key>` for DiffSnapshots.
+    pub to_snapshot: Option<String>,
+    /// `--osc-range LO-HI`.
+    pub osc_range: Option<String>,
+    /// `--keep-cache` (skip rebuilt merged-PBF cache invalidation).
+    pub keep_cache: bool,
+
+    // ----- Runtime observations (set during dispatch) -----
+    /// Merged-PBF cache state: `"hit"` or `"miss"`. Observed when resolving
+    /// the B-side of diff-style commands.
+    pub merged_cache_state: Option<String>,
+    /// Age of cached merged PBF in seconds (when `merged_cache_state == "hit"`).
+    pub merged_cache_age_s: Option<String>,
+    /// Resolved `--to` snapshot filename (for DiffSnapshots metadata).
+    pub to_snapshot_file: Option<String>,
+    /// Resolved `--to` snapshot file size in MB (formatted).
+    pub to_snapshot_file_mb: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // CommandContext
 // ---------------------------------------------------------------------------
 
@@ -165,8 +214,8 @@ pub struct CommandContext {
     pub dataset: String,
     /// Bounding box string (e.g. `"12.4,55.6,12.7,55.8"`).
     pub bbox: Option<String>,
-    /// Command-specific parameters (e.g. `"index_type" -> "external"`).
-    pub params: HashMap<String, String>,
+    /// Command-specific parameters (flags, runtime observations).
+    pub params: CommandParams,
 }
 
 impl CommandContext {
@@ -214,11 +263,6 @@ impl CommandContext {
         self.binary
             .to_str()
             .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))
-    }
-
-    /// Look up a command-specific parameter by key.
-    pub fn param(&self, key: &str) -> Option<&str> {
-        self.params.get(key).map(String::as_str)
     }
 
     /// Build a scratch output file path with the given name and extension.
