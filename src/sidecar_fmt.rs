@@ -496,6 +496,8 @@ pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sideca
         let mut last_io: (i64, i64) = (0, 0);
         let mut first_cpu: Option<i64> = None;
         let mut last_cpu: i64 = 0;
+        let mut first_sample_ts: Option<i64> = None;
+        let mut last_sample_ts: i64 = 0;
         let mut count = 0;
 
         for s in samples
@@ -517,6 +519,10 @@ pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sideca
                 first_cpu = Some(cpu);
             }
             last_cpu = cpu;
+            if first_sample_ts.is_none() {
+                first_sample_ts = Some(s.timestamp_us);
+            }
+            last_sample_ts = s.timestamp_us;
             count += 1;
         }
 
@@ -529,7 +535,12 @@ pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sideca
         let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
         let disk_read = last_io.0 - first_rd;
         let disk_write = last_io.1 - first_wr;
-        let avg_cores = avg_cores_str(last_cpu - first_cpu.unwrap_or(0), *end_us - *start_us, clk_tck);
+        // Divide CPU delta by the sample span, not the marker span. `cpu_delta`
+        // is sampled across the first-to-last sample inside the phase; if we
+        // divided by the marker span (which can be up to one sample interval
+        // longer than the samples cover), sub-second phases would read low.
+        let sample_span_us = last_sample_ts - first_sample_ts.unwrap_or(last_sample_ts);
+        let avg_cores = avg_cores_str(last_cpu - first_cpu.unwrap_or(0), sample_span_us, clk_tck);
 
         println!(
             "{name:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB {:>10}",
@@ -638,17 +649,20 @@ pub(crate) fn print_compare_timeline(
     let short_a = &uuid_a[..8.min(uuid_a.len())];
     let short_b = &uuid_b[..8.min(uuid_b.len())];
 
+    let clk_tck = clk_tck_per_second();
+
     println!(
-        "{:<20} {:>22} {:>22} {:>8}",
+        "{:<20} {:>30} {:>30} {:>8}",
         "Phase",
         format!("Run A ({short_a})"),
         format!("Run B ({short_b})"),
         "Delta",
     );
-    println!("{}", "-".repeat(76));
+    println!("{}", "-".repeat(92));
 
     for (name, start_a, end_a) in &phases_a {
         let stats_a = phase_stats(samples_a, *start_a, *end_a);
+        let avg_cores_a = avg_cores_str(stats_a.cpu_delta_jiffies, stats_a.sample_span_us, clk_tck);
 
         // Find matching phase in B by name.
         let stats_b = phases_b
@@ -665,6 +679,7 @@ pub(crate) fn print_compare_timeline(
                     .find(|(n, _, _)| n == name)
                     .map(|(_, s, e)| (e - s) / 1_000)
                     .unwrap_or(0);
+                let avg_cores_b = avg_cores_str(sb.cpu_delta_jiffies, sb.sample_span_us, clk_tck);
 
                 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 let delta_pct = if dur_a > 0 {
@@ -674,24 +689,27 @@ pub(crate) fn print_compare_timeline(
                 };
 
                 println!(
-                    "{:<20} {:>5}ms {:>6}kB {:>5}MB  {:>5}ms {:>6}kB {:>5}MB  {:>+5}%",
+                    "{:<20} {:>5}ms {:>6}kB {:>5}MB {:>5}c  {:>5}ms {:>6}kB {:>5}MB {:>5}c  {:>+5}%",
                     name,
                     dur_a,
                     stats_a.peak_anon,
                     stats_a.disk_read_kb / 1024,
+                    avg_cores_a,
                     dur_b,
                     sb.peak_anon,
                     sb.disk_read_kb / 1024,
+                    avg_cores_b,
                     delta_pct,
                 );
             }
             None => {
                 println!(
-                    "{:<20} {:>5}ms {:>6}kB {:>5}MB  {:>22} {:>8}",
+                    "{:<20} {:>5}ms {:>6}kB {:>5}MB {:>5}c  {:>30} {:>8}",
                     name,
                     dur_a,
                     stats_a.peak_anon,
                     stats_a.disk_read_kb / 1024,
+                    avg_cores_a,
                     "(no match)",
                     "—",
                 );
@@ -703,6 +721,12 @@ pub(crate) fn print_compare_timeline(
 struct PhaseStats {
     peak_anon: i64,
     disk_read_kb: i64,
+    /// CPU jiffies accumulated between the first and last sample inside the
+    /// phase. Paired with `sample_span_us` for `avg_cores_str`.
+    cpu_delta_jiffies: i64,
+    /// Wall-clock microseconds from the first to the last sample inside the
+    /// phase. Zero if fewer than two samples landed in the phase.
+    sample_span_us: i64,
 }
 
 /// `sysconf(_SC_CLK_TCK)` — jiffies per second used to decode
@@ -738,6 +762,10 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
     let mut peak_anon: i64 = 0;
     let mut first_rd: Option<i64> = None;
     let mut last_rd: i64 = 0;
+    let mut first_cpu: Option<i64> = None;
+    let mut last_cpu: i64 = 0;
+    let mut first_ts: Option<i64> = None;
+    let mut last_ts: i64 = 0;
 
     for s in samples
         .iter()
@@ -750,11 +778,22 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
             first_rd = Some(s.read_bytes);
         }
         last_rd = s.read_bytes;
+        let cpu = s.utime + s.stime;
+        if first_cpu.is_none() {
+            first_cpu = Some(cpu);
+        }
+        last_cpu = cpu;
+        if first_ts.is_none() {
+            first_ts = Some(s.timestamp_us);
+        }
+        last_ts = s.timestamp_us;
     }
 
     PhaseStats {
         peak_anon,
         disk_read_kb: (last_rd - first_rd.unwrap_or(0)) / 1024,
+        cpu_delta_jiffies: last_cpu - first_cpu.unwrap_or(last_cpu),
+        sample_span_us: last_ts - first_ts.unwrap_or(last_ts),
     }
 }
 

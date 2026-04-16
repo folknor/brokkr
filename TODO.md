@@ -20,19 +20,6 @@ pbfhogg errors at runtime with `"--type is not valid with --dedupe"`. No
 brokkr preset uses this combination today, but a user hand-invoking would
 only learn at runtime. Would need `conflicts_with` on one of the two.
 
-#### `print_compare_timeline` missing `Avg Cores` column
-`--timeline --summary` shows the new `Avg Cores` column (added in 7ae22b3);
-`--compare-timeline` does not. Minor parity gap — if CPU utilization is
-regressing, the user has to diff two `--timeline --summary` outputs by hand.
-
-#### `avg_cores` denominator is marker span, not sample span
-`src/sidecar_fmt.rs:532` divides `cpu_delta` by `(end_us - start_us)` of
-the phase markers, but `cpu_delta` is measured across the first-to-last
-*sample* in that phase — which can be up to ~100ms shorter than the marker
-span if the phase ends between samples. Sub-second phases read slightly
-low. Acceptable precision for bench trends; fix by using
-`last_sample_ts - first_sample_ts` if exact numbers ever matter.
-
 #### Crate-level `#![cfg_attr(test, allow(…))]` is broader than it needs to be
 `src/main.rs:5-21` silences `too_many_arguments`, `cognitive_complexity`,
 `cast_*_truncation` etc. under `cfg(test)`, which also fires during
