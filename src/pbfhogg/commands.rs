@@ -54,6 +54,32 @@ pub enum ExtractStrategy {
     Smart,
 }
 
+/// `cat --type` filter — restrict passthrough to a specific object type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatTypeFilter {
+    Way,
+    Relation,
+}
+
+impl CatTypeFilter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Way => "way",
+            Self::Relation => "relation",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, DevError> {
+        match s {
+            "way" => Ok(Self::Way),
+            "relation" => Ok(Self::Relation),
+            _ => Err(DevError::Config(format!(
+                "unknown cat --type '{s}' (expected: way, relation)"
+            ))),
+        }
+    }
+}
+
 /// Output format for `diff` / `diff-snapshots` (`pbfhogg diff` accepts both
 /// a default summary format and `--format osc`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,13 +135,18 @@ pub enum PbfhoggCommand {
     CheckRefs,
     CheckIds,
     Sort,
-    Cat,
-    CatWay,
-    CatRelation,
-    CatDedupe,
-    /// `cat --clean` — forces the full-decode / re-frame Framed-chunks path
-    /// (cat_filtered) rather than the Raw passthrough.
-    CatClean,
+    /// Unified `cat` — all flags orthogonal:
+    ///   - `type_filter` → `--type way|relation` (restricts output to one
+    ///     object type; single-pass filter).
+    ///   - `dedupe` → `--dedupe` with two PBF inputs (merge-style dedupe,
+    ///     the only Cat flavour that supports `--io-uring`).
+    ///   - `clean` → `--clean`, forces the full-decode / re-frame Framed
+    ///     path (`cat_filtered`) rather than Raw passthrough.
+    Cat {
+        type_filter: Option<CatTypeFilter>,
+        dedupe: bool,
+        clean: bool,
+    },
     TagsFilterWay,
     TagsFilterAmenity,
     TagsFilterTwopass,
@@ -164,11 +195,7 @@ impl PbfhoggCommand {
             Self::CheckRefs => "check-refs",
             Self::CheckIds => "check-ids",
             Self::Sort => "sort",
-            Self::Cat => "cat",
-            Self::CatWay => "cat-way",
-            Self::CatRelation => "cat-relation",
-            Self::CatDedupe => "cat-dedupe",
-            Self::CatClean => "cat-clean",
+            Self::Cat { .. } => "cat",
             Self::TagsFilterWay => "tags-filter-way",
             Self::TagsFilterAmenity => "tags-filter-amenity",
             Self::TagsFilterTwopass => "tags-filter-twopass",
@@ -259,7 +286,7 @@ impl PbfhoggCommand {
     pub fn supports_io_uring(&self) -> bool {
         matches!(
             self,
-            Self::ApplyChanges | Self::Sort | Self::CatDedupe | Self::DiffOsc
+            Self::ApplyChanges | Self::Sort | Self::DiffOsc | Self::Cat { dedupe: true, .. }
         )
     }
 
@@ -385,58 +412,33 @@ impl PbfhoggCommand {
                     path_to_string(&output)?,
                 ])
             }
-            Self::Cat => {
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "cat".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
-            Self::CatWay => {
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "cat".into(),
-                    ctx.pbf_str()?.into(),
-                    "--type".into(),
-                    "way".into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
-            Self::CatRelation => {
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "cat".into(),
-                    ctx.pbf_str()?.into(),
-                    "--type".into(),
-                    "relation".into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
-            Self::CatDedupe => {
+            Self::Cat {
+                type_filter,
+                dedupe,
+                clean,
+            } => {
                 let output = scratch_output_path(ctx, self);
                 let pbf = ctx.pbf_str()?;
-                Ok(vec![
-                    "cat".into(),
-                    "--dedupe".into(),
-                    pbf.into(),
-                    pbf.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
-            Self::CatClean => {
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "cat".into(),
-                    "--clean".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
+                let mut args: Vec<String> = vec!["cat".into()];
+                if *dedupe {
+                    args.push("--dedupe".into());
+                }
+                if *clean {
+                    args.push("--clean".into());
+                }
+                // Input(s). `--dedupe` takes two PBFs (we pass the same
+                // file twice for a deterministic bench shape).
+                args.push(pbf.into());
+                if *dedupe {
+                    args.push(pbf.into());
+                }
+                if let Some(tf) = type_filter {
+                    args.push("--type".into());
+                    args.push(tf.as_str().into());
+                }
+                args.push("-o".into());
+                args.push(path_to_string(&output)?);
+                Ok(args)
             }
             Self::TagsFilterWay => {
                 let output = scratch_output_path(ctx, self);

@@ -120,52 +120,31 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
-    /// [pbfhogg] Cat passthrough (generate indexdata without re-encoding)
+    /// [pbfhogg] Cat passthrough. Flags are orthogonal:
+    ///   `--type way|relation` restricts output to one object kind;
+    ///   `--dedupe` runs the two-input dedupe path (and only this
+    ///     combination supports `--io-uring`);
+    ///   `--clean` forces the full-decode / re-frame Framed path
+    ///     instead of Raw passthrough.
     #[command(name = "cat", display_order = 2)]
     Cat {
         #[command(flatten)]
         mode: ModeArgs,
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        /// PBF variant to use (defaults to raw — passthrough's natural input)
-        #[arg(long, default_value = "raw")]
-        variant: String,
-        /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Restrict output to a single object kind (way or relation).
+        #[arg(
+            long = "type",
+            value_name = "KIND",
+            value_parser = ["way", "relation"],
+        )]
+        type_filter: Option<String>,
+        /// Run `cat --dedupe` with two PBF inputs.
         #[arg(long)]
-        direct_io: bool,
-    },
-    /// [pbfhogg] Cat way elements
-    #[command(name = "cat-way", display_order = 2)]
-    CatWay {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Cat relation elements
-    #[command(name = "cat-relation", display_order = 2)]
-    CatRelation {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Cat with deduplication
-    #[command(name = "cat-dedupe", display_order = 2)]
-    CatDedupe {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Cat with full decode + re-frame (forces cat_filtered / Framed path)
-    #[command(name = "cat-clean", display_order = 2)]
-    CatClean {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
+        dedupe: bool,
+        /// Force the full-decode / re-frame Framed path (cat_filtered).
+        #[arg(long)]
+        clean: bool,
     },
     /// [pbfhogg] Tags filter (way/highway=primary)
     #[command(name = "tags-filter-way", display_order = 2)]
@@ -1584,15 +1563,36 @@ impl Command {
                 Some((mode, pbf, PbfhoggCommand::CheckIds, None, empty))
             }
             Self::Sort { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Sort, None, empty)),
-            Self::CatWay { mode, pbf } => Some((mode, pbf, PbfhoggCommand::CatWay, None, empty)),
-            Self::CatRelation { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::CatRelation, None, empty))
-            }
-            Self::CatDedupe { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::CatDedupe, None, empty))
-            }
-            Self::CatClean { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::CatClean, None, empty))
+            Self::Cat {
+                mode,
+                pbf,
+                type_filter,
+                dedupe,
+                clean,
+            } => {
+                let tf = match type_filter.as_deref() {
+                    Some(s) => match crate::pbfhogg::commands::CatTypeFilter::parse(s) {
+                        Ok(f) => Some(f),
+                        // Bubble the parse error up as `None` — the command
+                        // dispatch layer will surface it via the build-args
+                        // error path if the user types a nonsense value.
+                        // But clap should already catch most bad input via
+                        // the value_parser below; we keep this tolerant.
+                        Err(_) => None,
+                    },
+                    None => None,
+                };
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::Cat {
+                        type_filter: tf,
+                        dedupe: *dedupe,
+                        clean: *clean,
+                    },
+                    None,
+                    empty,
+                ))
             }
             Self::TagsFilterWay { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::TagsFilterWay, None, empty))

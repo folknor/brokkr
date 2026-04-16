@@ -208,10 +208,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::CheckRefs { .. }
         | Command::CheckIds { .. }
         | Command::Sort { .. }
-        | Command::CatWay { .. }
-        | Command::CatRelation { .. }
-        | Command::CatDedupe { .. }
-        | Command::CatClean { .. }
+        | Command::Cat { .. }
         | Command::TagsFilterWay { .. }
         | Command::TagsFilterAmenity { .. }
         | Command::TagsFilterTwopass { .. }
@@ -250,34 +247,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &args,
         ),
         Command::Env => cmd_env(&dev_config, project, &project_root),
-        Command::Cat {
-            mode,
-            dataset,
-            variant,
-            direct_io,
-        } => {
-            let mut params = std::collections::HashMap::new();
-            if direct_io {
-                params.insert("direct_io".into(), "true".into());
-            }
-            run_measured(
-                &mode,
-                &dev_config,
-                project,
-                &project_root,
-                &dataset,
-                &variant,
-                &brokkr_args,
-                |req| {
-                    dispatch::run_pbfhogg_command_with_params(
-                        req,
-                        &pbfhogg::commands::PbfhoggCommand::Cat,
-                        None,
-                        &params,
-                    )
-                },
-            )
-        }
         Command::DiffSnapshots {
             mode,
             dataset,
