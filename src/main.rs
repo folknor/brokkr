@@ -221,9 +221,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::MergeChanges { .. }
         | Command::ApplyChanges { .. }
         | Command::AddLocationsToWays { .. }
-        | Command::ExtractSimple { .. }
-        | Command::ExtractComplete { .. }
-        | Command::ExtractSmart { .. }
         | Command::MultiExtract { .. }
         | Command::TimeFilter { .. }
         | Command::Diff { .. }

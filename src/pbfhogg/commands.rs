@@ -160,9 +160,6 @@ pub enum PbfhoggCommand {
     MergeChanges,
     ApplyChanges,
     AddLocationsToWays,
-    ExtractSimple,
-    ExtractComplete,
-    ExtractSmart,
     TimeFilter,
     Diff,
     DiffOsc,
@@ -208,9 +205,6 @@ impl PbfhoggCommand {
             Self::MergeChanges => "merge-changes",
             Self::ApplyChanges => "apply-changes",
             Self::AddLocationsToWays => "add-locations-to-ways",
-            Self::ExtractSimple => "extract-simple",
-            Self::ExtractComplete => "extract-complete",
-            Self::ExtractSmart => "extract-smart",
             Self::TimeFilter => "time-filter",
             Self::Diff => "diff",
             Self::DiffOsc => "diff-osc",
@@ -228,9 +222,6 @@ impl PbfhoggCommand {
             Self::MergeChanges => InputKind::OscOnly,
             Self::ApplyChanges => InputKind::PbfAndOsc,
             Self::Diff | Self::DiffOsc => InputKind::PbfAndMerged,
-            Self::ExtractSimple | Self::ExtractComplete | Self::ExtractSmart => {
-                InputKind::PbfAndBbox
-            }
             Self::Extract { .. } | Self::MultiExtract { .. } => InputKind::PbfAndBbox,
             // DiffSnapshots resolves both PBFs via the snapshot path resolver.
             // Doesn't need OSC or merged-PBF setup; the dispatch layer handles
@@ -605,50 +596,6 @@ impl PbfhoggCommand {
                 }
                 Ok(args)
             }
-            Self::ExtractSimple => {
-                let bbox = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    "--simple".into(),
-                    format!("-b={bbox}"),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
-            Self::ExtractComplete => {
-                let bbox = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    format!("-b={bbox}"),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
-            Self::ExtractSmart => {
-                let bbox = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = scratch_output_path(ctx, self);
-                Ok(vec![
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    "--smart".into(),
-                    format!("-b={bbox}"),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
-            }
             Self::TimeFilter => {
                 let output = scratch_output_path(ctx, self);
                 Ok(vec![
@@ -894,8 +841,7 @@ impl PbfhoggCommand {
                     "--force".into(),
                 ]);
             }
-            Self::ExtractSimple
-            | Self::Extract {
+            Self::Extract {
                 strategy: ExtractStrategy::Simple,
             } => {
                 let bbox = ctx
@@ -912,8 +858,7 @@ impl PbfhoggCommand {
                     path_to_string(&output)?,
                 ]);
             }
-            Self::ExtractComplete
-            | Self::Extract {
+            Self::Extract {
                 strategy: ExtractStrategy::Complete,
             } => {
                 let bbox = ctx
@@ -929,8 +874,7 @@ impl PbfhoggCommand {
                     path_to_string(&output)?,
                 ]);
             }
-            Self::ExtractSmart
-            | Self::Extract {
+            Self::Extract {
                 strategy: ExtractStrategy::Smart,
             } => {
                 let bbox = ctx

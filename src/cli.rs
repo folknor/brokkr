@@ -278,30 +278,6 @@ Examples:
         #[arg(long, requires = "index_type")]
         keep_scratch: bool,
     },
-    /// [pbfhogg] Extract by bounding box (simple strategy)
-    #[command(name = "extract-simple", display_order = 2)]
-    ExtractSimple {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Extract by bounding box (complete strategy)
-    #[command(name = "extract-complete", display_order = 2)]
-    ExtractComplete {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Extract by bounding box (smart strategy)
-    #[command(name = "extract-smart", display_order = 2)]
-    ExtractSmart {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
     /// [pbfhogg] Multi-extract benchmark (single-pass N regions)
     #[command(name = "multi-extract", display_order = 2)]
     MultiExtract {
@@ -1615,15 +1591,6 @@ impl Command {
             }
             Self::Renumber { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::Renumber, None, empty))
-            }
-            Self::ExtractSimple { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::ExtractSimple, None, empty))
-            }
-            Self::ExtractComplete { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::ExtractComplete, None, empty))
-            }
-            Self::ExtractSmart { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::ExtractSmart, None, empty))
             }
             Self::MultiExtract {
                 mode,

@@ -47,6 +47,7 @@ pub const ALL_COMMANDS: &[&str] = &[
 fn consolidated_command_name(preset: &str) -> &str {
     match preset {
         "cat-way" | "cat-relation" | "cat-dedupe" => "cat",
+        "extract-simple" | "extract-complete" | "extract-smart" => "extract",
         other => other,
     }
 }
