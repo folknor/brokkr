@@ -539,7 +539,7 @@ mod tests {
             input_mb: None,
             elapsed_ms,
             cargo_features: String::new(),
-            cargo_profile: crate::build::CargoProfile::Release,
+            cargo_profile: Some(crate::build::CargoProfile::Release),
             kernel: String::new(),
             cpu_governor: String::new(),
             avail_memory_mb: None,

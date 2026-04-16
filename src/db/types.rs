@@ -163,7 +163,10 @@ pub struct StoredRow {
     pub elapsed_ms: i64,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: String,
-    pub cargo_profile: CargoProfile,
+    /// `None` for legacy rows whose `cargo_profile` column is `NULL` or
+    /// empty — formatters skip the cargo field entirely rather than
+    /// inventing a `release` value.
+    pub cargo_profile: Option<CargoProfile>,
     pub kernel: String,
     pub cpu_governor: String,
     pub avail_memory_mb: Option<i64>,

@@ -605,7 +605,7 @@ impl BenchHarness {
                 .cargo_features
                 .clone()
                 .or_else(|| self.cargo_features.clone()),
-            cargo_profile: config.cargo_profile.clone(),
+            cargo_profile: config.cargo_profile,
             elapsed_ms: result.elapsed_ms,
             kernel: Some(self.env.kernel.clone()),
             cpu_governor: Some(self.env.governor.clone()),

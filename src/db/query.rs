@@ -103,11 +103,11 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         cargo_features: row
             .get::<_, Option<String>>("cargo_features")?
             .unwrap_or_default(),
-        cargo_profile: crate::build::CargoProfile::from_db(
-            row.get::<_, Option<String>>("cargo_profile")?
-                .as_deref()
-                .unwrap_or(""),
-        ),
+        cargo_profile: row
+            .get::<_, Option<String>>("cargo_profile")?
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::build::CargoProfile::from_db),
         kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),
         cpu_governor: row
             .get::<_, Option<String>>("cpu_governor")?

@@ -8,6 +8,58 @@ deliberately.
 
 ### Low ROI — not worth doing yet
 
+#### `-b=<val>` vs `-b <val>` in extract suite rows (cosmetic)
+After the build_args unification, suite presets `extract-simple`/`extract-complete`/
+`extract-smart` emit `format!("-b={bbox}")` as a single token; pre-refactor
+suite emitted `"-b"` then `"12.4,55.6,12.7,55.8"` as two tokens. Clap accepts
+both, but the `cli_args` column text differs between old and new rows. A user
+filtering with `--grep "-b 12.4"` would miss new rows (would need `--grep -b=12.4`
+or just `--grep 12.4`). Not a behaviour bug, just a textual shift in stored argv.
+
+#### `-R` flag position in tags-filter suite rows (cosmetic)
+`tags-filter-way` / `tags-filter-amenity`: old suite emitted `tags-filter pbf -R
+w/highway=primary -o out`; the enum emits `tags-filter -R pbf w/highway=primary
+-o out`. Same semantics (clap is order-independent for boolean flags), but the
+`cli_args` column text differs between old and new rows.
+
+#### Hotpath scratch filenames renamed
+Old code used ad-hoc `hotpath-merged`, `hotpath-altw`, `hotpath-extract-{simple,complete,smart}`.
+The unified `build_args` normalises to `hotpath-{cmd.id()}-output.{ext}`, so
+`hotpath-merged` becomes `hotpath-apply-changes-output`, etc. The cli_args
+column reflects the new names; historical rows keep the old names.
+
+#### `CargoProfile::from_db` silently maps unknown strings to `Release`
+`src/build.rs:36-42` quietly absorbs any non-`"java"`/`"cmake"` value into
+`Release`. Today's historical data only contains the three known values
+(verified via git log search), so no ambiguity in practice. If a future
+migration typos a profile name (e.g. `"relase"`) it would fail silently.
+Could switch to `TryFrom` + logged warning, but low urgency.
+
+#### Over-exposed visibility in split files
+Post-split audit flagged these as private-able: `sidecar_fmt::format_epoch`
+(only caller in same file), `results_cmd::render_single_or_multi` (same-file),
+`pbfhogg::dispatch::cleanup_output` (same-module only). Also three `pub` fns
+that could be `pub(crate)`: `pbfhogg::dispatch::run_command_with_params`,
+`elivagar::dispatch::run_command`, `nidhogg::dispatch::run_command` — all
+only called from `main.rs`. Pre-split they were already at the looser
+visibility, so this is carry-over, not a new mistake.
+
+#### Doc drift: `db/format/mod.rs` lists `format_elapsed` as used by compare
+`src/db/format/mod.rs:8-9` comment claims `format_elapsed` is among the
+cross-module helpers used by `compare.rs`. In reality `compare.rs` only
+imports `compute_rewrite_pct`, `find_output_bytes`, `format_blob_counts`,
+`format_input`. `format_elapsed` is used by `table.rs` and `single.rs` only.
+
+#### Doc drift: `CLAUDE.md` describes pre-split dispatch.rs layout
+`CLAUDE.md:31` still mentions `src/dispatch.rs` as the unified dispatch
+file, but it was split per-project in commit 0313f74. Needs a one-line
+update.
+
+#### Commit message inaccuracy on `681a2d6`
+The message claims the suite's ok_exit_codes improvement landed in that
+commit; it actually landed in `1fc2145`. Too late to fix without a rebase,
+but the file `brokkr/TODO.md` can note the actual history if anyone cares.
+
 #### Scratch output filename pattern coupled to command id
 `bench-<id>-output.osm.pbf` / `hotpath-<id>-output.osm.pbf` in
 `scratch_output_path`. Works today because benches run sequentially with

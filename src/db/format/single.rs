@@ -122,13 +122,18 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
     if !row.hostname.is_empty() {
         fields.push(("hostname".into(), row.hostname.clone()));
     }
-    let prof = row.cargo_profile.as_str();
-    let s = if row.cargo_features.is_empty() {
-        prof.to_owned()
-    } else {
-        format!("{prof}, features: {}", row.cargo_features)
-    };
-    fields.push(("cargo".into(), s));
+    match (row.cargo_profile, row.cargo_features.as_str()) {
+        (Some(prof), "") => {
+            fields.push(("cargo".into(), prof.as_str().to_owned()));
+        }
+        (Some(prof), feats) => {
+            fields.push(("cargo".into(), format!("{}, features: {feats}", prof.as_str())));
+        }
+        (None, "") => {}
+        (None, feats) => {
+            fields.push(("cargo".into(), format!("features: {feats}")));
+        }
+    }
     if !row.kernel.is_empty() {
         fields.push(("kernel".into(), row.kernel.clone()));
     }
