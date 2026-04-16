@@ -2177,11 +2177,13 @@ fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker])
         }
     }
 
+    let clk_tck = clk_tck_per_second();
+
     println!(
-        "{:<24} {:>8} {:>10} {:>10} {:>12} {:>12}",
-        "Phase", "Duration", "Peak RSS", "Peak Anon", "Disk Read", "Disk Write",
+        "{:<24} {:>8} {:>10} {:>10} {:>12} {:>12} {:>10}",
+        "Phase", "Duration", "Peak RSS", "Peak Anon", "Disk Read", "Disk Write", "Avg Cores",
     );
-    println!("{}", "-".repeat(81));
+    println!("{}", "-".repeat(92));
 
     for (name, start_us, end_us) in &phases {
         // Samples in [start_us, end_us).
@@ -2189,6 +2191,8 @@ fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker])
         let mut peak_anon: i64 = 0;
         let mut first_io: Option<(i64, i64)> = None;
         let mut last_io: (i64, i64) = (0, 0);
+        let mut first_cpu: Option<i64> = None;
+        let mut last_cpu: i64 = 0;
         let mut count = 0;
 
         for s in samples
@@ -2205,6 +2209,11 @@ fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker])
                 first_io = Some((s.read_bytes, s.write_bytes));
             }
             last_io = (s.read_bytes, s.write_bytes);
+            let cpu = s.utime + s.stime;
+            if first_cpu.is_none() {
+                first_cpu = Some(cpu);
+            }
+            last_cpu = cpu;
             count += 1;
         }
 
@@ -2217,14 +2226,16 @@ fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker])
         let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
         let disk_read = last_io.0 - first_rd;
         let disk_write = last_io.1 - first_wr;
+        let avg_cores = avg_cores_str(last_cpu - first_cpu.unwrap_or(0), *end_us - *start_us, clk_tck);
 
         println!(
-            "{name:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB",
+            "{name:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB {:>10}",
             duration_ms,
             peak_rss,
             peak_anon,
             disk_read / 1024,
             disk_write / 1024,
+            avg_cores,
         );
     }
 }
@@ -2389,6 +2400,35 @@ fn print_compare_timeline(
 struct PhaseStats {
     peak_anon: i64,
     disk_read_kb: i64,
+}
+
+/// `sysconf(_SC_CLK_TCK)` — jiffies per second used to decode
+/// `/proc/<pid>/stat`'s `utime`/`stime`. Always 100 on typical Linux
+/// x86_64, but the kernel can be built with 250, 300, or 1000; read it
+/// at runtime so we stay correct on arbitrary hosts.
+fn clk_tck_per_second() -> i64 {
+    // SAFETY: `sysconf` is a plain C function with no aliasing or
+    // memory-safety implications. Returns -1 if the name isn't
+    // supported; we clamp to 100 (the usual default) in that case.
+    let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if v <= 0 { 100 } else { v }
+}
+
+/// Format the average-cores-used figure over a phase. Takes the CPU
+/// jiffy delta (`utime + stime` at phase end minus at phase start),
+/// the wall-time delta in microseconds, and the system's clock-tick
+/// frequency. Returns a short string like `"3.1"` or `"—"` when the
+/// phase is too short for a stable measurement.
+fn avg_cores_str(cpu_delta_jiffies: i64, wall_us: i64, clk_tck: i64) -> String {
+    if wall_us <= 0 || clk_tck <= 0 || cpu_delta_jiffies < 0 {
+        return "—".to_owned();
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let cpu_secs = cpu_delta_jiffies as f64 / clk_tck as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let wall_secs = wall_us as f64 / 1_000_000.0;
+    let cores = cpu_secs / wall_secs;
+    format!("{cores:.1}")
 }
 
 fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> PhaseStats {
