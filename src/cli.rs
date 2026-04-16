@@ -1161,131 +1161,97 @@ pub(crate) struct PbfArgs {
     pub(crate) compression: Option<String>,
 }
 
+/// Shared dataset/variant/direct_io args for pbfhogg verify subcommands.
+/// (Verify doesn't take `--io-uring` or `--compression` — different surface
+/// than `PbfArgs`, hence a separate struct.)
+#[derive(Args, Clone)]
+pub(crate) struct VerifyPbfArgs {
+    /// Dataset name from brokkr.toml
+    #[arg(long, default_value = "denmark")]
+    pub(crate) dataset: String,
+    /// PBF variant to use (raw, indexed, locations)
+    #[arg(long, default_value = "indexed")]
+    pub(crate) variant: String,
+    /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
+    #[arg(long)]
+    pub(crate) direct_io: bool,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum VerifyCommand {
     /// [pbfhogg] Cross-validate sort against osmium sort
     #[command(display_order = 0)]
     Sort {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
     },
     /// [pbfhogg] Cross-validate cat (type filters) against osmium cat
     #[command(display_order = 1)]
     Cat {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
     },
     /// [pbfhogg] Cross-validate extract (bbox strategies) against osmium extract
     #[command(display_order = 2)]
     Extract {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
         #[arg(long)]
         bbox: Option<String>,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate multi-extract (single-pass vs sequential)
     #[command(name = "multi-extract", display_order = 2)]
     MultiExtract {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
         #[arg(long)]
         bbox: Option<String>,
         /// Number of non-overlapping bbox regions
         #[arg(long, default_value = "5")]
         regions: usize,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate tags-filter against osmium tags-filter
     #[command(display_order = 3)]
     TagsFilter {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
     },
     /// [pbfhogg] Cross-validate getid/getid --invert against osmium getid
     #[command(display_order = 4)]
     GetidRemoveid {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
     },
     /// [pbfhogg] Cross-validate add-locations-to-ways against osmium
     #[command(display_order = 5)]
     AddLocationsToWays {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
         /// Which index modes to verify. `all` runs hash, sparse, dense, external.
         #[arg(long, value_enum, default_value = "all")]
         mode: AltwMode,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate check --refs against osmium check-refs
     #[command(display_order = 6)]
     CheckRefs {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
-        /// Use O_DIRECT for reads (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
     },
     /// [pbfhogg] Cross-validate apply-changes against osmium/osmosis/osmconvert
     #[command(display_order = 7)]
     Merge {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
         #[arg(long)]
         osc_seq: Option<String>,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate diff --format osc roundtrip against osmium
     #[command(display_order = 8)]
     DeriveChanges {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
         #[arg(long)]
         osc_seq: Option<String>,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
     },
     /// [pbfhogg] Cross-validate renumber against osmium renumber
     #[command(display_order = 9)]
@@ -1314,17 +1280,12 @@ pub(crate) enum VerifyCommand {
     /// [pbfhogg] Run all verify commands sequentially
     #[command(display_order = 11)]
     All {
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        #[arg(long, default_value = "indexed")]
-        variant: String,
+        #[command(flatten)]
+        pbf: VerifyPbfArgs,
         #[arg(long)]
         osc_seq: Option<String>,
         #[arg(long)]
         bbox: Option<String>,
-        /// Use O_DIRECT for writes (requires linux-direct-io feature in pbfhogg)
-        #[arg(long)]
-        direct_io: bool,
     },
 
     /// [elivagar] Verify PMTiles output integrity

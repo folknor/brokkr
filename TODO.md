@@ -48,10 +48,6 @@ commands.rs.
 
 ### Inconsistencies
 
-#### `VerifyCommand` args don't use `PbfArgs`
-Each verify variant re-declares `dataset` / `variant` / `direct_io`
-inline. Factor into a shared `VerifyArgs` or reuse `PbfArgs`.
-
 #### `PbfhoggCommand::metadata` takes `ctx: &CommandContext`, others take no args
 `NidhoggCommand::metadata()` takes nothing. Elivagar's was just gutted
 to return empty. Unify the signature.
