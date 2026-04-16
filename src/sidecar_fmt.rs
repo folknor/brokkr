@@ -461,24 +461,9 @@ pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
 ///
 /// If there are no markers, treats the entire run as a single phase.
 pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker]) {
-    // Build phase boundaries: [start_us, end_us) — exclusive end to avoid
-    // double-counting samples at boundaries.
-    let mut phases: Vec<(&str, i64, i64)> = Vec::new(); // (name, start_us, end_us)
-
-    if markers.is_empty() {
-        if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-            // Single phase — inclusive end since there's no next phase to overlap.
-            phases.push(("(all)", first.timestamp_us, last.timestamp_us + 1));
-        }
-    } else {
-        let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
-        for (i, m) in markers.iter().enumerate() {
-            let phase_end = markers
-                .get(i + 1)
-                .map_or(final_us, |next| next.timestamp_us);
-            phases.push((&m.name, m.timestamp_us, phase_end));
-        }
-    }
+    // Shared with --compare-timeline: pairs `*_START`/`*_END` into a single
+    // phase rather than treating each marker as an independent boundary.
+    let phases = build_phases(markers, samples);
 
     let clk_tck = clk_tck_per_second();
 
@@ -805,25 +790,68 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
 }
 
 /// Build phase boundaries from markers (or single "(all)" phase if no markers).
-fn build_phases<'a>(
-    markers: &'a [sidecar::Marker],
+/// Build phases by pairing `*_START` / `*_END` markers — one phase per pair,
+/// spanning the full interval between the paired markers.
+///
+/// Markers without a matching `_END` (standalone events, or `_END` that
+/// never had a `_START`) become a point phase from their timestamp to the
+/// next chronological marker (or end-of-samples for the tail). The
+/// resulting phases are returned sorted by start time.
+///
+/// Replaces the old per-marker phase layout where every marker — including
+/// `_END` markers — became its own phase row, cluttering the summary with
+/// "(no samples)" dead-space rows for the sub-sample gaps between each
+/// `_END` and the following `_START`.
+fn build_phases(
+    markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
-) -> Vec<(&'a str, i64, i64)> {
+) -> Vec<(String, i64, i64)> {
     let mut phases = Vec::new();
     if markers.is_empty() {
         if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-            // Use a static str for the lifetime.
-            phases.push(("(all)" as &str, first.timestamp_us, last.timestamp_us + 1));
+            phases.push(("(all)".to_owned(), first.timestamp_us, last.timestamp_us + 1));
         }
-    } else {
-        let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
-        for (i, m) in markers.iter().enumerate() {
-            let phase_end = markers
-                .get(i + 1)
-                .map_or(final_us, |next| next.timestamp_us);
-            phases.push((m.name.as_str(), m.timestamp_us, phase_end));
+        return phases;
+    }
+
+    let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
+    let mut consumed = vec![false; markers.len()];
+
+    // First pass: pair _START with matching _END.
+    for (i, m) in markers.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        if let Some(base) = m.name.strip_suffix("_START") {
+            consumed[i] = true;
+            let end_name = format!("{base}_END");
+            let end_us = markers[i + 1..]
+                .iter()
+                .enumerate()
+                .find(|(_, m2)| m2.name == end_name)
+                .map(|(j, m2)| {
+                    consumed[i + 1 + j] = true;
+                    m2.timestamp_us
+                })
+                .unwrap_or(final_us);
+            phases.push((base.to_owned(), m.timestamp_us, end_us));
         }
     }
+
+    // Second pass: standalone markers (no _START/_END structure, or orphaned
+    // _END markers). Span from the marker to the next chronologically-later
+    // marker, or end-of-samples for the tail.
+    for (i, m) in markers.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        let next_us = markers[i + 1..]
+            .first()
+            .map_or(final_us, |next| next.timestamp_us);
+        phases.push((m.name.clone(), m.timestamp_us, next_us));
+    }
+
+    phases.sort_by_key(|(_, start, _)| *start);
     phases
 }
 
