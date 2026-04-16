@@ -381,6 +381,15 @@ fn migrate_v10_to_v11(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// Only pbfhogg rows are touched — the elivagar/nidhogg/sluggrs `command`
 /// values were never affected by the legacy naming.
 fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // Idempotency guard. A DB can legitimately reach this migration with
+    // `variant` already gone if a different brokkr branch applied a
+    // superset of these steps and didn't bump `user_version` past 11
+    // (observed on databases copied between projects). Treat it as
+    // already-applied rather than erroring.
+    if !has_column(conn, "runs", "variant") {
+        return Ok(());
+    }
+
     // --- bench rows --------------------------------------------------------
     //
     // Normalize diff-snapshots variants (legacy `-from-to-to` suffix) into
@@ -493,6 +502,13 @@ fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
     //    fresh SCHEMA that already has it).
     if !has_column(conn, "runs", "brokkr_args") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")?;
+    }
+
+    // Idempotency guard for the rest: every subsequent step reads/writes
+    // `variant`. If it's already been renamed to `mode` (post-v14) by a
+    // different brokkr branch that didn't bump user_version, skip.
+    if !has_column(conn, "runs", "variant") {
+        return Ok(());
     }
 
     // 2. Extend v11→v12's hotpath split to non-pbfhogg projects. Same SQL
