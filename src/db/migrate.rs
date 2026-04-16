@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 14;
+pub(super) const SCHEMA_VERSION: i64 = 15;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -58,6 +58,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 14 {
         migrate_v13_to_v14(conn)?;
+    }
+    if current < 15 {
+        migrate_v14_to_v15(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -612,6 +615,52 @@ fn migrate_v13_to_v14(conn: &rusqlite::Connection) -> Result<(), DevError> {
     if has_column(conn, "runs", "variant") && !has_column(conn, "runs", "mode") {
         conn.execute_batch("ALTER TABLE runs RENAME COLUMN variant TO mode")?;
     }
+    Ok(())
+}
+
+/// v14 → v15: collapse preset subcommand names into their consolidated
+/// forms after the cat/extract/tags-filter/getid/inspect/diff
+/// consolidation.
+///
+/// Historical rows carry the old preset spelling in the `command`
+/// column (e.g. `cat-way`, `extract-simple`, `tags-filter-amenity`,
+/// `getid-refs`, `inspect-tags-way`, `diff-osc`). The consolidated
+/// subcommands live under a single name per family (`cat`, `extract`,
+/// `tags-filter`, `getid`, `inspect`, `diff`); the distinguishing
+/// flags are already present in each row's `cli_args`, so no flag
+/// reconstruction is needed — we just rewrite the command column.
+fn migrate_v14_to_v15(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    const RENAMES: &[(&str, &str)] = &[
+        // Cat family.
+        ("cat-way", "cat"),
+        ("cat-relation", "cat"),
+        ("cat-dedupe", "cat"),
+        ("cat-clean", "cat"),
+        // Extract family.
+        ("extract-simple", "extract"),
+        ("extract-complete", "extract"),
+        ("extract-smart", "extract"),
+        // Tags-filter family.
+        ("tags-filter-way", "tags-filter"),
+        ("tags-filter-amenity", "tags-filter"),
+        ("tags-filter-twopass", "tags-filter"),
+        ("tags-filter-osc", "tags-filter"),
+        // Getid family.
+        ("getid-refs", "getid"),
+        ("getid-invert", "getid"),
+        // Inspect family.
+        ("inspect-nodes", "inspect"),
+        ("inspect-tags", "inspect"),
+        ("inspect-tags-way", "inspect"),
+        // Diff family.
+        ("diff-osc", "diff"),
+    ];
+
+    let mut stmt = conn.prepare("UPDATE runs SET command = ?1 WHERE command = ?2")?;
+    for &(old, new) in RENAMES {
+        stmt.execute(rusqlite::params![new, old])?;
+    }
+
     Ok(())
 }
 
@@ -1255,12 +1304,15 @@ mod tests {
         // Rows 1-5, 9: originally `bench commands` / <variant>.
         //   v3→v4 renames the variant (e.g. tags-count → inspect-tags);
         //   v11→v12 splits into `bench <id>` / NULL;
-        //   v12→v13 strips `bench ` and sets variant = 'bench'.
-        assert_eq!(row_of(1), ("inspect-tags".into(), Some("bench".into())));
-        assert_eq!(row_of(2), ("inspect-nodes".into(), Some("bench".into())));
-        assert_eq!(row_of(3), ("getid-invert".into(), Some("bench".into())));
-        assert_eq!(row_of(4), ("diff-osc".into(), Some("bench".into())));
-        assert_eq!(row_of(5), ("cat-dedupe".into(), Some("bench".into())));
+        //   v12→v13 strips `bench ` and sets variant = 'bench';
+        //   v13→v14 renames variant column to mode (no data change);
+        //   v14→v15 collapses preset names (inspect-tags → inspect,
+        //     getid-invert → getid, diff-osc → diff, cat-dedupe → cat).
+        assert_eq!(row_of(1), ("inspect".into(), Some("bench".into())));
+        assert_eq!(row_of(2), ("inspect".into(), Some("bench".into())));
+        assert_eq!(row_of(3), ("getid".into(), Some("bench".into())));
+        assert_eq!(row_of(4), ("diff".into(), Some("bench".into())));
+        assert_eq!(row_of(5), ("cat".into(), Some("bench".into())));
 
         // Row 6: `bench blob-filter` / `node-stats+raw` — v3→v4 renames
         // variant to `inspect-nodes+raw`; v11→v12 skips (command wasn't
@@ -1270,9 +1322,10 @@ mod tests {
 
         // Rows 7-8: pbfhogg `hotpath` rows. v3→v4 renames the variant;
         // v11→v12 splits `hotpath X` out; v12→v13 strips `hotpath ` and
-        // sets variant to `hotpath` or `alloc`.
+        // sets variant to `hotpath` or `alloc`. v14→v15 collapses the
+        // `inspect-tags` preset on row 8 down to `inspect`.
         assert_eq!(row_of(7), ("apply-changes-zlib".into(), Some("hotpath".into())));
-        assert_eq!(row_of(8), ("inspect-tags".into(), Some("alloc".into())));
+        assert_eq!(row_of(8), ("inspect".into(), Some("alloc".into())));
 
         // Row 9: `bench commands` / `inspect` → `bench inspect` / NULL →
         // `inspect` / `bench`.
@@ -1414,9 +1467,10 @@ mod tests {
                 .unwrap()
         };
 
-        // End-state after all migrations including v13. v11→v12 splits
-        // `bench commands` into `bench <id>`; v13 then strips `bench `
-        // prefix and overwrites variant with the measurement mode.
+        // End-state after all migrations. v11→v12 splits `bench commands`
+        // into `bench <id>`; v13 strips `bench ` and sets mode; v14→v15
+        // collapses preset names (inspect-tags → inspect, diff-snapshots
+        // is its own distinct command and stays).
         assert_eq!(row_of(1), ("inspect".into(), Some("bench".into())));
         assert_eq!(
             row_of(2),
@@ -1427,11 +1481,10 @@ mod tests {
         assert_eq!(row_of(5), ("diff-snapshots".into(), Some("bench".into())));
         assert_eq!(row_of(6), ("extract".into(), Some("bench".into())));
         assert_eq!(row_of(7), ("self".into(), Some("bench".into())));
-        // Hotpath rows. v11→v12 split pbfhogg hotpath rows (8-11). v13
-        // now also splits the elivagar hotpath row (12) — the v11→v12
-        // pbfhogg restriction is lifted by v13.
-        assert_eq!(row_of(8), ("inspect-tags".into(), Some("hotpath".into())));
-        assert_eq!(row_of(9), ("inspect-tags".into(), Some("alloc".into())));
+        // Hotpath rows. Rows 8-9 were `hotpath inspect-tags` / alloc
+        // marker — v14→v15 collapses preset name to `inspect`.
+        assert_eq!(row_of(8), ("inspect".into(), Some("hotpath".into())));
+        assert_eq!(row_of(9), ("inspect".into(), Some("alloc".into())));
         assert_eq!(
             row_of(10),
             ("apply-changes".into(), Some("hotpath".into()))
@@ -1663,6 +1716,88 @@ mod tests {
         };
         assert_eq!(mode_of(1), Some("bench".into()));
         assert_eq!(mode_of(2), Some("hotpath".into()));
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v14 → v15 collapses preset command names into consolidated
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v14_to_v15_rewrites_preset_command_names() {
+        let (dir, db_path) = test_db("migrate_v14_v15");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V3_SCHEMA).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE run_kv ( \
+                    run_id INTEGER NOT NULL, \
+                    key TEXT NOT NULL, \
+                    value_int INTEGER, value_real REAL, value_text TEXT, \
+                    PRIMARY KEY (run_id, key) \
+                 )",
+            )
+            .unwrap();
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT").unwrap();
+            // The test fixture predates the variant→mode rename: use the
+            // old schema name, the v13→v14 migration will rename it.
+            conn.pragma_update(None, "user_version", 13).unwrap();
+
+            // One row per preset family + one unchanged row to check
+            // the migration doesn't touch non-preset commands.
+            let preset_rows: &[(&str, &str)] = &[
+                ("cat-way", "cat"),
+                ("cat-relation", "cat"),
+                ("cat-dedupe", "cat"),
+                ("cat-clean", "cat"),
+                ("extract-simple", "extract"),
+                ("extract-complete", "extract"),
+                ("extract-smart", "extract"),
+                ("tags-filter-way", "tags-filter"),
+                ("tags-filter-amenity", "tags-filter"),
+                ("tags-filter-twopass", "tags-filter"),
+                ("tags-filter-osc", "tags-filter"),
+                ("getid-refs", "getid"),
+                ("getid-invert", "getid"),
+                ("inspect-nodes", "inspect"),
+                ("inspect-tags", "inspect"),
+                ("inspect-tags-way", "inspect"),
+                ("diff-osc", "diff"),
+                ("sort", "sort"),      // untouched
+                ("getid", "getid"),    // already consolidated
+                ("inspect", "inspect"),// already consolidated
+            ];
+            for (old, _) in preset_rows {
+                conn.execute(V3_INSERT, rusqlite::params![old, "bench", "pbfhogg"])
+                    .unwrap();
+            }
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v14 to v15");
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let commands: Vec<String> = db
+            .conn
+            .prepare("SELECT command FROM runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        let expected: Vec<&str> = vec![
+            "cat", "cat", "cat", "cat", "extract", "extract", "extract", "tags-filter",
+            "tags-filter", "tags-filter", "tags-filter", "getid", "getid", "inspect", "inspect",
+            "inspect", "diff", "sort", "getid", "inspect",
+        ];
+        assert_eq!(commands, expected);
 
         drop(db);
         cleanup(&dir, &db_path);

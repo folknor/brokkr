@@ -202,21 +202,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Lock
         | Command::History { .. }
         | Command::Inspect { .. }
-        | Command::InspectNodes { .. }
-        | Command::InspectTags { .. }
-        | Command::InspectTagsWay { .. }
         | Command::CheckRefs { .. }
         | Command::CheckIds { .. }
         | Command::Sort { .. }
         | Command::Cat { .. }
-        | Command::TagsFilterWay { .. }
-        | Command::TagsFilterAmenity { .. }
-        | Command::TagsFilterTwopass { .. }
-        | Command::TagsFilterOsc { .. }
+        | Command::TagsFilter { .. }
         | Command::Getid { .. }
-        | Command::GetidRefs { .. }
         | Command::Getparents { .. }
-        | Command::GetidInvert { .. }
         | Command::Renumber { .. }
         | Command::MergeChanges { .. }
         | Command::ApplyChanges { .. }
@@ -224,7 +216,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::MultiExtract { .. }
         | Command::TimeFilter { .. }
         | Command::Diff { .. }
-        | Command::DiffOsc { .. }
         | Command::BuildGeocodeIndex { .. } => unreachable!(),
         Command::Check {
             features,

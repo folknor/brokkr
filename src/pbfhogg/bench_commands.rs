@@ -48,6 +48,13 @@ fn consolidated_command_name(preset: &str) -> &str {
     match preset {
         "cat-way" | "cat-relation" | "cat-dedupe" => "cat",
         "extract-simple" | "extract-complete" | "extract-smart" => "extract",
+        "tags-filter-way"
+        | "tags-filter-amenity"
+        | "tags-filter-twopass"
+        | "tags-filter-osc" => "tags-filter",
+        "getid-refs" | "getid-invert" => "getid",
+        "inspect-nodes" | "inspect-tags" | "inspect-tags-way" => "inspect",
+        "diff-osc" => "diff",
         other => other,
     }
 }

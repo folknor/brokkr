@@ -64,37 +64,31 @@ Examples:
     #[command(display_order = 1)]
     Env,
     // ----- pbfhogg tool CLI commands (display_order = 2) -----
-    /// [pbfhogg] Inspect PBF metadata
+    /// [pbfhogg] Inspect PBF. Flags select mode:
+    ///   no flag   → metadata (block count / bbox / stats)
+    ///   `--nodes` → node statistics
+    ///   `--tags`  → tag frequencies (optionally narrowed by
+    ///               `--type node|way|relation`)
     #[command(name = "inspect", display_order = 2)]
     Inspect {
         #[command(flatten)]
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-    },
-    /// [pbfhogg] Inspect PBF node statistics
-    #[command(name = "inspect-nodes", display_order = 2)]
-    InspectNodes {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Inspect PBF tag frequencies
-    #[command(name = "inspect-tags", display_order = 2)]
-    InspectTags {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Inspect PBF tag frequencies (way type only)
-    #[command(name = "inspect-tags-way", display_order = 2)]
-    InspectTagsWay {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
+        /// Show node statistics (mutually exclusive with `--tags`).
+        #[arg(long, conflicts_with = "tags")]
+        nodes: bool,
+        /// Show tag frequencies (mutually exclusive with `--nodes`).
+        #[arg(long)]
+        tags: bool,
+        /// Restrict `--tags` to a single object type.
+        #[arg(
+            long = "type",
+            value_name = "KIND",
+            value_parser = ["node", "way", "relation"],
+            requires = "tags",
+        )]
+        type_filter: Option<String>,
     },
     /// [pbfhogg] Check referential integrity
     #[command(name = "check-refs", display_order = 2)]
@@ -146,73 +140,57 @@ Examples:
         #[arg(long)]
         clean: bool,
     },
-    /// [pbfhogg] Tags filter (way/highway=primary)
-    #[command(name = "tags-filter-way", display_order = 2)]
-    TagsFilterWay {
+    /// [pbfhogg] Tags filter. Orthogonal flags:
+    ///   `--filter EXPR` — pbfhogg filter expression (default
+    ///     `w/highway=primary`). Examples: `amenity=restaurant`,
+    ///     `highway=primary`, `w/building=yes`.
+    ///   `-R` / `--omit-referenced` — single-pass; drop referenced
+    ///     objects (default: two-pass with references).
+    ///   `--input-kind osc` — read an OSC diff instead of a PBF.
+    #[command(name = "tags-filter", display_order = 2)]
+    TagsFilter {
         #[command(flatten)]
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-    },
-    /// [pbfhogg] Tags filter (amenity=restaurant)
-    #[command(name = "tags-filter-amenity", display_order = 2)]
-    TagsFilterAmenity {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Tags filter two-pass
-    #[command(name = "tags-filter-twopass", display_order = 2)]
-    TagsFilterTwopass {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Tags filter OSC input
-    #[command(name = "tags-filter-osc", display_order = 2)]
-    TagsFilterOsc {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-        /// OSC sequence number from brokkr.toml
+        /// Filter expression passed through to pbfhogg tags-filter.
+        #[arg(long, default_value = "w/highway=primary")]
+        filter: String,
+        /// Single-pass filter: match objects only, drop referenced ones.
+        #[arg(short = 'R', long = "omit-referenced")]
+        omit_referenced: bool,
+        /// Read an OSC diff as input instead of a PBF.
+        #[arg(long = "input-kind", value_parser = ["pbf", "osc"])]
+        input_kind: Option<String>,
+        /// OSC sequence number from brokkr.toml (only used with
+        /// `--input-kind osc`).
         #[arg(long)]
         osc_seq: Option<String>,
-        /// Snapshot key to read PBF and OSC from. Use `base` (or omit) for
-        /// the dataset's primary/legacy data; pass a snapshot key registered
-        /// under `[dataset.snapshot.<key>]` to read from a historical snapshot.
+        /// Snapshot key to read from (OSC input). Use `base` (or omit)
+        /// for the primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Get elements by ID
+    /// [pbfhogg] Get elements by hardcoded ID set. Flags:
+    ///   `--add-referenced` — also pull in referenced objects (two-pass);
+    ///   `--invert` — select everything NOT in the ID set.
     #[command(name = "getid", display_order = 2)]
     Getid {
         #[command(flatten)]
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
-    },
-    /// [pbfhogg] Get elements by ID with referenced element collection
-    #[command(name = "getid-refs", display_order = 2)]
-    GetidRefs {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
+        /// Two-pass: include objects referenced by the matched set.
+        #[arg(long = "add-referenced")]
+        add_referenced: bool,
+        /// Select everything NOT in the hardcoded ID set.
+        #[arg(long)]
+        invert: bool,
     },
     /// [pbfhogg] Get parent elements
     #[command(name = "getparents", display_order = 2)]
     Getparents {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-    },
-    /// [pbfhogg] Get elements by ID (inverted)
-    #[command(name = "getid-invert", display_order = 2)]
-    GetidInvert {
         #[command(flatten)]
         mode: ModeArgs,
         #[command(flatten)]
@@ -301,13 +279,20 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
-    /// [pbfhogg] Diff two PBFs (summary)
+    /// [pbfhogg] Diff base PBF against the applied-changes merged PBF.
+    /// `--format osc` switches output from summary (stdout) to an OSC
+    /// file. The brokkr runner generates the merged PBF from base +
+    /// OSC before diffing.
     #[command(name = "diff", display_order = 2)]
     Diff {
         #[command(flatten)]
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Output format: `default` (summary diff) or `osc` (OSC-format
+        /// diff written to scratch).
+        #[arg(long, default_value = "default", value_parser = ["default", "osc"])]
+        format: String,
         /// OSC sequence number from brokkr.toml
         #[arg(long)]
         osc_seq: Option<String>,
@@ -365,26 +350,6 @@ Examples:
         format: String,
     },
     /// [pbfhogg] Diff two PBFs (OSC output)
-    #[command(name = "diff-osc", display_order = 2)]
-    DiffOsc {
-        #[command(flatten)]
-        mode: ModeArgs,
-        #[command(flatten)]
-        pbf: PbfArgs,
-        /// OSC sequence number from brokkr.toml
-        #[arg(long)]
-        osc_seq: Option<String>,
-        /// Reuse the cached merged PBF in measured modes (default: rebuild
-        /// before bench/hotpath/alloc so total invocation wall time is
-        /// reproducible). No-op in run mode (cache is always reused there).
-        #[arg(long)]
-        keep_cache: bool,
-        /// Snapshot key to read PBF and OSC from. Use `base` (or omit) for
-        /// the dataset's primary/legacy data; pass a snapshot key to read
-        /// from a historical snapshot.
-        #[arg(long)]
-        snapshot: Option<String>,
-    },
     /// [pbfhogg] Build geocode index
     #[command(name = "build-geocode-index", display_order = 2)]
     BuildGeocodeIndex {
@@ -1522,16 +1487,23 @@ impl Command {
         let empty = HashMap::new();
         match self {
             // Simple commands: mode + pbf, no extras
-            Self::Inspect { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Inspect, None, empty)),
-            Self::InspectNodes { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::InspectNodes, None, empty))
-            }
-            Self::InspectTags { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::InspectTags, None, empty))
-            }
-            Self::InspectTagsWay { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::InspectTagsWay, None, empty))
-            }
+            Self::Inspect {
+                mode,
+                pbf,
+                nodes,
+                tags,
+                type_filter,
+            } => Some((
+                mode,
+                pbf,
+                PbfhoggCommand::Inspect {
+                    nodes: *nodes,
+                    tags: *tags,
+                    type_filter: type_filter.clone(),
+                },
+                None,
+                empty,
+            )),
             Self::CheckRefs { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::CheckRefs, None, empty))
             }
@@ -1570,24 +1542,49 @@ impl Command {
                     empty,
                 ))
             }
-            Self::TagsFilterWay { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::TagsFilterWay, None, empty))
+            Self::TagsFilter {
+                mode,
+                pbf,
+                filter,
+                omit_referenced,
+                input_kind,
+                osc_seq,
+                snapshot,
+            } => {
+                let input_kind_osc = input_kind.as_deref() == Some("osc");
+                let mut params = HashMap::new();
+                if let Some(s) = snapshot {
+                    params.insert("snapshot".into(), s.clone());
+                }
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::TagsFilter {
+                        filter: filter.clone(),
+                        omit_referenced: *omit_referenced,
+                        input_kind_osc,
+                    },
+                    osc_seq.as_deref(),
+                    params,
+                ))
             }
-            Self::TagsFilterAmenity { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::TagsFilterAmenity, None, empty))
-            }
-            Self::TagsFilterTwopass { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::TagsFilterTwopass, None, empty))
-            }
-            Self::Getid { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Getid, None, empty)),
-            Self::GetidRefs { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::GetidRefs, None, empty))
-            }
+            Self::Getid {
+                mode,
+                pbf,
+                add_referenced,
+                invert,
+            } => Some((
+                mode,
+                pbf,
+                PbfhoggCommand::Getid {
+                    add_referenced: *add_referenced,
+                    invert: *invert,
+                },
+                None,
+                empty,
+            )),
             Self::Getparents { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::Getparents, None, empty))
-            }
-            Self::GetidInvert { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::GetidInvert, None, empty))
             }
             Self::Renumber { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::Renumber, None, empty))
@@ -1619,24 +1616,6 @@ impl Command {
             }
 
             // Commands with OSC sequence
-            Self::TagsFilterOsc {
-                mode,
-                pbf,
-                osc_seq,
-                snapshot,
-            } => {
-                let mut params = HashMap::new();
-                if let Some(s) = snapshot {
-                    params.insert("snapshot".into(), s.clone());
-                }
-                Some((
-                    mode,
-                    pbf,
-                    PbfhoggCommand::TagsFilterOsc,
-                    osc_seq.as_deref(),
-                    params,
-                ))
-            }
             Self::MergeChanges {
                 mode,
                 pbf,
@@ -1680,26 +1659,15 @@ impl Command {
             Self::Diff {
                 mode,
                 pbf,
+                format,
                 osc_seq,
                 keep_cache,
                 snapshot,
             } => {
-                let mut params = HashMap::new();
-                if *keep_cache {
-                    params.insert("keep_cache".into(), "true".into());
-                }
-                if let Some(s) = snapshot {
-                    params.insert("snapshot".into(), s.clone());
-                }
-                Some((mode, pbf, PbfhoggCommand::Diff, osc_seq.as_deref(), params))
-            }
-            Self::DiffOsc {
-                mode,
-                pbf,
-                osc_seq,
-                keep_cache,
-                snapshot,
-            } => {
+                let format_enum = match format.as_str() {
+                    "osc" => crate::pbfhogg::commands::DiffFormat::Osc,
+                    _ => crate::pbfhogg::commands::DiffFormat::Default,
+                };
                 let mut params = HashMap::new();
                 if *keep_cache {
                     params.insert("keep_cache".into(), "true".into());
@@ -1710,7 +1678,7 @@ impl Command {
                 Some((
                     mode,
                     pbf,
-                    PbfhoggCommand::DiffOsc,
+                    PbfhoggCommand::Diff { format: format_enum },
                     osc_seq.as_deref(),
                     params,
                 ))
@@ -1768,15 +1736,30 @@ mod tests {
 
     #[test]
     fn inspect_tags_accepts_mode_flags() {
-        let parsed =
-            Cli::try_parse_from(["brokkr", "inspect-tags", "--hotpath", "--dataset", "japan"])
-                .expect("parse");
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "inspect",
+            "--tags",
+            "--hotpath",
+            "--dataset",
+            "japan",
+        ])
+        .expect("parse");
 
-        let Command::InspectTags { mode, pbf } = parsed.command else {
-            panic!("expected inspect-tags command");
+        let Command::Inspect {
+            mode,
+            pbf,
+            tags,
+            type_filter,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected inspect command");
         };
         assert!(mode.hotpath.is_some());
         assert_eq!(pbf.dataset, "japan");
+        assert!(tags);
+        assert_eq!(type_filter, None);
     }
 
     #[test]
