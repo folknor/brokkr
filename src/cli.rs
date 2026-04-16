@@ -157,7 +157,8 @@ Examples:
         #[arg(long, default_value = "w/highway=primary")]
         filter: String,
         /// Single-pass filter: match objects only, drop referenced ones.
-        #[arg(short = 'R', long = "omit-referenced")]
+        /// Not valid with `--input-kind osc` (pbfhogg rejects it at runtime).
+        #[arg(short = 'R', long = "omit-referenced", conflicts_with = "input_kind")]
         omit_referenced: bool,
         /// Read an OSC diff as input instead of a PBF.
         #[arg(long = "input-kind", value_parser = ["pbf", "osc"])]
@@ -182,7 +183,8 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
         /// Two-pass: include objects referenced by the matched set.
-        #[arg(long = "add-referenced")]
+        /// Mutually exclusive with `--invert` (pbfhogg rejects the combo).
+        #[arg(long = "add-referenced", conflicts_with = "invert")]
         add_referenced: bool,
         /// Select everything NOT in the hardcoded ID set.
         #[arg(long)]
@@ -641,8 +643,9 @@ Examples:
         command: Option<String>,
 
         /// Filter by measurement mode (substring match; exact values are
-        /// `bench`, `hotpath`, `alloc`).
-        #[arg(long)]
+        /// `bench`, `hotpath`, `alloc`). `--variant` accepted as a legacy
+        /// alias for muscle memory from the pre-rename days.
+        #[arg(long, alias = "variant")]
         mode: Option<String>,
 
         /// Filter by dataset (substring match on input filename, e.g. "europe"

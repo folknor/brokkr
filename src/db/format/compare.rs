@@ -119,7 +119,7 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
     let mut b_map: HashMap<String, RowData> = HashMap::new();
 
     for row in rows_a {
-        let key = pair_key(&row.command, &row.mode, &row.input_file);
+        let key = pair_key(&row.command, &row.mode, &row.input_file, &row.brokkr_args);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
             e.insert(RowData {
@@ -134,7 +134,7 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
         }
     }
     for row in rows_b {
-        let key = pair_key(&row.command, &row.mode, &row.input_file);
+        let key = pair_key(&row.command, &row.mode, &row.input_file, &row.brokkr_args);
         if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
@@ -188,12 +188,21 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
         .collect()
 }
 
-fn pair_key(command: &str, variant: &str, input_file: &str) -> String {
-    format!("{command}\t{variant}\t{input_file}")
+/// Build the dedup/pair key for the compare view.
+///
+/// Post-v13 the axis (direct-io, compression, snapshot, index-type, …) lives
+/// in `cli_args` / `brokkr_args` rather than in the `variant` column, so
+/// `(command, mode, input_file)` alone would collapse axis-distinct runs
+/// into one pair (silently hiding the rest). We include `brokkr_args` so
+/// two runs of the same command with different flags show as separate rows.
+fn pair_key(command: &str, mode: &str, input_file: &str, brokkr_args: &str) -> String {
+    format!("{command}\t{mode}\t{input_file}\t{brokkr_args}")
 }
 
 fn split_pair_key(key: &str) -> (&str, &str, &str) {
-    let mut parts = key.splitn(3, '\t');
+    // splitn(4, …) — the 4th part is brokkr_args, only used for deduping.
+    // Callers only consume the first three (command, mode, input_file).
+    let mut parts = key.splitn(4, '\t');
     let cmd = parts.next().unwrap_or("");
     let var = parts.next().unwrap_or("");
     let input = parts.next().unwrap_or("");
@@ -562,7 +571,7 @@ mod tests {
 
     #[test]
     fn pair_key_roundtrip_normal() {
-        let key = pair_key("read", "mmap", "denmark.osm.pbf");
+        let key = pair_key("read", "mmap", "denmark.osm.pbf", "brokkr read --dataset denmark");
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "read");
         assert_eq!(var, "mmap");
@@ -571,7 +580,7 @@ mod tests {
 
     #[test]
     fn pair_key_roundtrip_empty_fields() {
-        let key = pair_key("read", "", "");
+        let key = pair_key("read", "", "", "");
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "read");
         assert_eq!(var, "");
@@ -580,7 +589,7 @@ mod tests {
 
     #[test]
     fn pair_key_roundtrip_all_empty() {
-        let key = pair_key("", "", "");
+        let key = pair_key("", "", "", "");
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "");
         assert_eq!(var, "");
@@ -588,15 +597,34 @@ mod tests {
     }
 
     #[test]
-    fn pair_key_preserves_tabs_in_values() {
-        // If a field contained a tab, splitn(3, '\t') would mangle it.
-        // pair_key("a\tb", "c", "d") produces "a\tb\tc\td"
-        // splitn(3, '\t') splits into ["a", "b", "c\td"]
-        let key = pair_key("a\tb", "c", "d");
+    fn pair_key_distinguishes_by_brokkr_args() {
+        // Same command/mode/input but different flags → different keys,
+        // so --compare shows both runs instead of collapsing them.
+        let k1 = pair_key(
+            "apply-changes",
+            "bench",
+            "denmark.osm.pbf",
+            "brokkr apply-changes --bench",
+        );
+        let k2 = pair_key(
+            "apply-changes",
+            "bench",
+            "denmark.osm.pbf",
+            "brokkr apply-changes --direct-io --bench",
+        );
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn pair_key_tabs_in_values_still_bleed() {
+        // splitn(4, '\t') means a tab inside the command field still
+        // corrupts downstream fields. None of our inputs have tabs in
+        // practice, but document the pitfall.
+        let key = pair_key("a\tb", "c", "d", "");
         let (cmd, var, input) = split_pair_key(&key);
-        assert_eq!(cmd, "a", "tab in command corrupts first field");
-        assert_eq!(var, "b", "original variant is lost");
-        assert_eq!(input, "c\td", "variant bleeds into input field");
+        assert_eq!(cmd, "a");
+        assert_eq!(var, "b");
+        assert_eq!(input, "c");
     }
 
     #[test]

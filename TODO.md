@@ -8,6 +8,51 @@ deliberately.
 
 ### Low ROI — not worth doing yet
 
+#### `--clean` only emits `version` attr
+`brokkr cat --clean` hardcodes the emitted attr as `version`. pbfhogg's
+real flag accepts multiple attrs (`version|changeset|timestamp|uid|user`,
+comma-separated or repeated). If we ever want to bench the cost of
+stripping each attr independently we'd need to change brokkr's `clean: bool`
+into `clean: Option<Vec<String>>`.
+
+#### `cat --type --dedupe` isn't rejected at clap level
+pbfhogg errors at runtime with `"--type is not valid with --dedupe"`. No
+brokkr preset uses this combination today, but a user hand-invoking would
+only learn at runtime. Would need `conflicts_with` on one of the two.
+
+#### `print_compare_timeline` missing `Avg Cores` column
+`--timeline --summary` shows the new `Avg Cores` column (added in 7ae22b3);
+`--compare-timeline` does not. Minor parity gap — if CPU utilization is
+regressing, the user has to diff two `--timeline --summary` outputs by hand.
+
+#### `avg_cores` denominator is marker span, not sample span
+`src/sidecar_fmt.rs:532` divides `cpu_delta` by `(end_us - start_us)` of
+the phase markers, but `cpu_delta` is measured across the first-to-last
+*sample* in that phase — which can be up to ~100ms shorter than the marker
+span if the phase ends between samples. Sub-second phases read slightly
+low. Acceptable precision for bench trends; fix by using
+`last_sample_ts - first_sample_ts` if exact numbers ever matter.
+
+#### Crate-level `#![cfg_attr(test, allow(…))]` is broader than it needs to be
+`src/main.rs:5-21` silences `too_many_arguments`, `cognitive_complexity`,
+`cast_*_truncation` etc. under `cfg(test)`, which also fires during
+`cargo clippy --all-targets` (or `--tests`). If CI uses either flag,
+those production-code lints silently stop catching regressions in the
+non-test binary too. Tightening: move the allow onto the individual
+`mod tests { }` blocks, not the crate root.
+
+#### No flag to restore the old bare `brokkr results` table view
+Pre-22e5e7e, bare `brokkr results` showed a table of recent rows. Post-
+commit, it shows the single last-row detail view instead. Users with
+muscle memory get a different layout; `brokkr results -n 10` still works
+for the table. Could add `--table` / `--latest N` to bring back the old
+default, but no one's asked yet.
+
+#### `--clean` argument shape misalignment with pbfhogg
+(documented above — brokkr emits bare `--clean <attr>`, pbfhogg accepts
+`--clean ATTR` repeatable; combinations like `--clean version --clean uid`
+aren't reachable from brokkr.)
+
 #### `-b=<val>` vs `-b <val>` in extract suite rows (cosmetic)
 After the build_args unification, suite presets `extract-simple`/`extract-complete`/
 `extract-smart` emit `format!("-b={bbox}")` as a single token; pre-refactor

@@ -491,7 +491,12 @@ impl PbfhoggCommand {
                     args.push("--dedupe".into());
                 }
                 if *clean {
+                    // pbfhogg's --clean takes an ATTR value
+                    // (version|changeset|timestamp|uid|user). For bench purposes
+                    // we just need to force the full-decode / Framed path —
+                    // `version` is the lightest-weight strip and always present.
                     args.push("--clean".into());
+                    args.push("version".into());
                 }
                 // Input(s). `--dedupe` takes two PBFs (we pass the same
                 // file twice for a deterministic bench shape).
