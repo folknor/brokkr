@@ -17,7 +17,7 @@ use crate::measure::{CommandContext, CommandParams, MeasureMode, MeasureRequest}
 use crate::nidhogg;
 use crate::oom;
 use crate::output;
-use crate::pbfhogg::commands::{InputKind, OutputKind, PbfhoggCommand};
+use crate::pbfhogg::commands::{ArgMode, InputKind, OutputKind, PbfhoggCommand};
 use crate::project::{self, Project};
 use crate::resolve::{
     self, resolve_bbox, resolve_pbf_with_size,
@@ -126,8 +126,8 @@ fn run_pbfhogg_dry_run(
     let pi = crate::context::bootstrap(req.build_root)?;
     let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
 
-    // Fake binary path for the CommandContext. `build_args` for wall-clock
-    // mode doesn't touch it; `build_hotpath_args` uses it only as a leading
+    // Fake binary path for the CommandContext. `build_args(_, Bench)`
+    // doesn't touch it; `build_args(_, Hotpath)` uses it only as a leading
     // argv[0] string. Use the brokkr binary's own path so any accidental
     // stat still succeeds.
     let fake_binary = std::env::current_exe()
@@ -138,7 +138,7 @@ fn run_pbfhogg_dry_run(
 
     // Construct the wall-clock arg vector (catches any build_args failures,
     // e.g. missing bbox for extract, missing osc for merge).
-    let mut args = command.build_args(&cmd_ctx)?;
+    let mut args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
     for flag in &io_args {
         args.push((*flag).into());
     }
@@ -150,7 +150,7 @@ fn run_pbfhogg_dry_run(
     // Also validate the hotpath arg construction path when supported, so
     // `--dry-run --hotpath` is meaningful.
     if command.supports_hotpath() {
-        let _ = command.build_hotpath_args(&cmd_ctx)?;
+        let _ = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
     }
 
     output::run_msg(&format!(
@@ -210,7 +210,7 @@ fn run_pbfhogg_run(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let mut args = command.build_args(&cmd_ctx)?;
+    let mut args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
     for flag in &io_args {
         args.push((*flag).into());
     }
@@ -225,7 +225,7 @@ fn run_pbfhogg_run(
 
     let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
 
-    cleanup_pbfhogg_output(command, &cmd_ctx);
+    cleanup_pbfhogg_output(command, &cmd_ctx, ArgMode::Bench);
 
     if out.code != 0 && !command.ok_exit_codes().contains(&out.code) {
         return Err(DevError::ExitCode(out.code));
@@ -266,7 +266,7 @@ fn run_pbfhogg_wallclock(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let mut args = command.build_args(&cmd_ctx)?;
+    let mut args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
     for flag in &io_args {
         args.push((*flag).into());
     }
@@ -312,7 +312,7 @@ fn run_pbfhogg_wallclock(
     )?;
 
     // Clean up scratch output files.
-    cleanup_pbfhogg_output(command, &cmd_ctx);
+    cleanup_pbfhogg_output(command, &cmd_ctx, ArgMode::Bench);
 
     Ok(())
 }
@@ -377,7 +377,7 @@ fn run_pbfhogg_hotpath(
         req.no_mem_check || matches!(command, PbfhoggCommand::Renumber);
     oom::check_memory(file_mb, &risk, skip_mem_check)?;
 
-    let mut hotpath_args = command.build_hotpath_args(&cmd_ctx)?;
+    let mut hotpath_args = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
     for flag in &io_args {
         hotpath_args.push((*flag).into());
     }
@@ -437,7 +437,7 @@ fn run_pbfhogg_hotpath(
         Ok(result)
     })?;
 
-    cleanup_pbfhogg_output(command, &cmd_ctx);
+    cleanup_pbfhogg_output(command, &cmd_ctx, ArgMode::Hotpath);
 
     Ok(())
 }
@@ -677,7 +677,11 @@ fn build_diff_snapshots_context(
 }
 
 /// Clean up scratch output files after a benchmark run.
-pub(crate) fn cleanup_pbfhogg_output(command: &PbfhoggCommand, ctx: &CommandContext) {
+pub(crate) fn cleanup_pbfhogg_output(
+    command: &PbfhoggCommand,
+    ctx: &CommandContext,
+    mode: ArgMode,
+) {
     // Multi-extract has custom cleanup: output dir + config JSON.
     if matches!(command, PbfhoggCommand::MultiExtract { .. }) {
         std::fs::remove_dir_all(ctx.scratch_dir.join("multi-extract")).ok();
@@ -686,15 +690,11 @@ pub(crate) fn cleanup_pbfhogg_output(command: &PbfhoggCommand, ctx: &CommandCont
     }
 
     match command.output_kind() {
-        OutputKind::ScratchPbf(_) => {
-            let name = command.id();
-            let path = ctx.scratch_dir.join(format!("bench-{name}-output.osm.pbf"));
-            std::fs::remove_file(path).ok();
-        }
-        OutputKind::ScratchOsc(_) => {
-            let name = command.id();
-            let path = ctx.scratch_dir.join(format!("bench-{name}-output.osc.gz"));
-            std::fs::remove_file(path).ok();
+        OutputKind::ScratchPbf | OutputKind::ScratchOsc => {
+            std::fs::remove_file(crate::pbfhogg::commands::scratch_output_path(
+                ctx, command, mode,
+            ))
+            .ok();
         }
         OutputKind::ScratchDir(dir_name) => {
             let path = ctx.scratch_dir.join(format!("{dir_name}-{}", ctx.dataset));

@@ -8,11 +8,6 @@ simplify the rest.
 
 ### Duplicated code paths
 
-#### `PbfhoggCommand::build_args` vs `build_hotpath_args`
-Nearly identical; differs only in output path and a few special-case
-overrides (ApplyChanges compression from ctx). Collapse into one
-function with a `HotpathMode` option.
-
 #### `brokkr suite pbfhogg` vs `brokkr <cmd>` dispatch
 Two independent code paths to the same DB rows: `bench_commands.rs`
 for the suite runner vs `dispatch::run_pbfhogg_command_with_params`
@@ -112,9 +107,6 @@ assertions — v11→v12, v12→v13, v13→v14, v14→v15 all required editing
 because those tests run the full chain. Consider per-migration tests
 that start at the precise prior version.
 
-#### `OutputKind::ScratchPbf(&'static str)` has an unused string
-Every call site passes `"bench-output"`; nothing reads it. Drop the
-payload.
 
 ## Punted
 

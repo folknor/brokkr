@@ -12,7 +12,7 @@ use crate::harness::{BenchConfig, BenchHarness};
 use crate::measure::{CommandContext, CommandParams};
 use crate::output;
 use crate::pbfhogg::commands::{
-    CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, OutputKind, PbfhoggCommand,
+    ArgMode, CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, PbfhoggCommand,
 };
 
 pub const ALL_COMMANDS: &[&str] = &[
@@ -311,7 +311,7 @@ pub fn run(
             params,
         };
 
-        let args = cmd.build_args(&ctx)?;
+        let args = cmd.build_args(&ctx, ArgMode::Bench)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
@@ -332,7 +332,7 @@ pub fn run(
 
         harness.run_external_ok(&config, binary, &args_refs, project_root, cmd.ok_exit_codes())?;
 
-        dispatch::cleanup_pbfhogg_output(&cmd, &ctx);
+        dispatch::cleanup_pbfhogg_output(&cmd, &ctx, ArgMode::Bench);
         Ok(())
     })
 }
@@ -340,6 +340,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pbfhogg::commands::OutputKind;
 
     #[test]
     fn every_preset_maps_to_a_command() {
@@ -392,7 +393,7 @@ mod tests {
         for name in ["tags-filter-osc", "merge-changes", "diff-osc"] {
             let cmd = preset_to_command(name).unwrap();
             assert!(
-                matches!(cmd.output_kind(), OutputKind::ScratchOsc(_)),
+                matches!(cmd.output_kind(), OutputKind::ScratchOsc),
                 "{name}"
             );
         }

@@ -265,11 +265,6 @@ impl CommandContext {
             .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))
     }
 
-    /// Build a scratch output file path with the given name and extension.
-    pub fn scratch_output(&self, name: &str, ext: &str) -> PathBuf {
-        self.scratch_dir.join(format!("{name}.{ext}"))
-    }
-
     /// PBF file basename (e.g. `"denmark-with-indexdata.osm.pbf"`).
     pub fn pbf_basename(&self) -> String {
         self.pbf_path

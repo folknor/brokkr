@@ -5,8 +5,11 @@ Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, and slug
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
 - Never chain commands with &&. Write a script instead.
+- Never chain commands with ;. Write a script instead.
 - Never pipe commands with |. Write a script instead.
+- Never capture stdout into env vars (`UUID=$(...)`) — shell state doesn't persist between tool calls. Read the output directly and use the value inline.
 - Never read or write from /tmp. All data lives in the project.
+- Prefer `brokkr check` over `cargo build` / `cargo clippy` / `cargo test`.
 
 ## How it works
 

@@ -33,13 +33,35 @@ pub enum InputKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputKind {
     /// Writes a scratch `.osm.pbf` file.
-    ScratchPbf(&'static str),
+    ScratchPbf,
     /// Writes a scratch `.osc.gz` file.
-    ScratchOsc(&'static str),
-    /// Writes to a scratch directory.
+    ScratchOsc,
+    /// Writes to a scratch directory. The payload is the directory name stem
+    /// (e.g. `"geocode"`) — suffixed with the dataset at resolution time.
     ScratchDir(&'static str),
     /// No output file (read-only / stdout-only commands).
     None,
+}
+
+/// Which build-args flavor to produce: the default wallclock/suite args,
+/// or the hotpath-profile args (binary prepended, hotpath-prefixed scratch
+/// filenames, a few simplified argv forms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgMode {
+    Bench,
+    Hotpath,
+}
+
+impl ArgMode {
+    /// Scratch output filename prefix. Keeps bench/hotpath runs in separate
+    /// files so a hotpath run on the same command doesn't clobber a bench
+    /// cache file between sequential invocations.
+    fn scratch_prefix(self) -> &'static str {
+        match self {
+            Self::Bench => "bench",
+            Self::Hotpath => "hotpath",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,16 +283,14 @@ impl PbfhoggCommand {
             Self::TagsFilter { input_kind_osc: true, .. }
             | Self::MergeChanges
             | Self::Diff { format: DiffFormat::Osc }
-            | Self::DiffSnapshots { format: DiffFormat::Osc } => {
-                OutputKind::ScratchOsc("bench-output")
-            }
+            | Self::DiffSnapshots { format: DiffFormat::Osc } => OutputKind::ScratchOsc,
 
             // Directory output.
             Self::BuildGeocodeIndex => OutputKind::ScratchDir("geocode"),
             Self::MultiExtract { .. } => OutputKind::ScratchDir("multi-extract"),
 
             // Everything else writes a scratch PBF.
-            _ => OutputKind::ScratchPbf("bench-output"),
+            _ => OutputKind::ScratchPbf,
         }
     }
 
@@ -374,11 +394,34 @@ impl PbfhoggCommand {
 
     /// Build the argument vector for this command given the resolved context.
     ///
-    /// The returned `Vec<String>` contains arguments to pass to the pbfhogg
-    /// binary (or external tool binary).  The binary path itself is NOT
-    /// included — the caller prepends it.
+    /// `ArgMode::Bench` produces argv without the binary path (the caller
+    /// passes the binary separately when spawning). `ArgMode::Hotpath`
+    /// prepends the binary path (matching the format expected by
+    /// `run_hotpath_capture`) and picks hotpath-prefixed scratch filenames.
+    /// A few commands have small argv differences between modes — those are
+    /// called out inline.
     #[allow(clippy::too_many_lines)]
-    pub fn build_args(&self, ctx: &CommandContext) -> Result<Vec<String>, DevError> {
+    pub fn build_args(
+        &self,
+        ctx: &CommandContext,
+        mode: ArgMode,
+    ) -> Result<Vec<String>, DevError> {
+        let mut prefix: Vec<String> = Vec::new();
+        if mode == ArgMode::Hotpath {
+            prefix.push(ctx.binary_str()?.to_owned());
+        }
+        let body = self.build_body(ctx, mode)?;
+        prefix.extend(body);
+        Ok(prefix)
+    }
+
+    /// Build the body of the argument vector (no binary prefix).
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+    fn build_body(
+        &self,
+        ctx: &CommandContext,
+        mode: ArgMode,
+    ) -> Result<Vec<String>, DevError> {
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
@@ -392,12 +435,17 @@ impl PbfhoggCommand {
                 if *tags {
                     args.push("tags".into());
                     args.push(ctx.pbf_str()?.into());
-                    if let Some(tf) = type_filter {
-                        args.push("--type".into());
-                        args.push(tf.clone());
+                    // Hotpath legacy: the pre-unification build_hotpath_args
+                    // dropped --type and --min-count for `inspect tags`.
+                    // Preserved here so hotpath result rows don't shift.
+                    if mode == ArgMode::Bench {
+                        if let Some(tf) = type_filter {
+                            args.push("--type".into());
+                            args.push(tf.clone());
+                        }
+                        args.push("--min-count".into());
+                        args.push("999999999".into());
                     }
-                    args.push("--min-count".into());
-                    args.push("999999999".into());
                 } else if *nodes {
                     args.push("--nodes".into());
                     args.push(ctx.pbf_str()?.into());
@@ -409,7 +457,7 @@ impl PbfhoggCommand {
             Self::CheckRefs => Ok(vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()]),
             Self::CheckIds => Ok(vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()]),
             Self::Sort => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 Ok(vec![
                     "sort".into(),
                     ctx.pbf_str()?.into(),
@@ -422,7 +470,7 @@ impl PbfhoggCommand {
                 dedupe,
                 clean,
             } => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 let pbf = ctx.pbf_str()?;
                 let mut args: Vec<String> = vec!["cat".into()];
                 if *dedupe {
@@ -450,7 +498,7 @@ impl PbfhoggCommand {
                 omit_referenced,
                 input_kind_osc,
             } => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 let mut args: Vec<String> = vec!["tags-filter".into()];
                 if *input_kind_osc {
                     args.push("--input-kind".into());
@@ -474,7 +522,7 @@ impl PbfhoggCommand {
                 add_referenced,
                 invert,
             } => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 let mut args: Vec<String> = vec!["getid".into()];
                 if *invert {
                     args.push("--invert".into());
@@ -494,7 +542,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::Getparents => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 Ok(vec![
                     "getparents".into(),
                     ctx.pbf_str()?.into(),
@@ -506,7 +554,7 @@ impl PbfhoggCommand {
                 ])
             }
             Self::Renumber => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 Ok(vec![
                     "renumber".into(),
                     ctx.pbf_str()?.into(),
@@ -515,7 +563,7 @@ impl PbfhoggCommand {
                 ])
             }
             Self::MergeChanges => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 let oscs = ctx.osc_strs()?;
                 let mut args = vec!["merge-changes".into()];
                 for o in oscs {
@@ -526,18 +574,29 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::ApplyChanges => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 let osc = ctx.osc_str()?;
-                Ok(vec![
+                let mut args = vec![
                     "apply-changes".into(),
                     ctx.pbf_str()?.into(),
                     osc.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ])
+                ];
+                // Hotpath legacy: pre-unification build_hotpath_args always
+                // emitted --compression (default zlib) for apply-changes. The
+                // dispatch layer also appends --compression from CLI, so
+                // hotpath runs with an explicit --compression CLI flag end up
+                // with it twice (pbfhogg takes the last one).
+                if mode == ArgMode::Hotpath {
+                    let compression = ctx.params.compression.as_deref().unwrap_or("zlib");
+                    args.push("--compression".into());
+                    args.push(compression.into());
+                }
+                args.push("-o".into());
+                args.push(path_to_string(&output)?);
+                Ok(args)
             }
             Self::AddLocationsToWays => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 let mut args = vec![
                     "add-locations-to-ways".into(),
                     ctx.pbf_str()?.into(),
@@ -558,7 +617,7 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::TimeFilter => {
-                let output = scratch_output_path(ctx, self);
+                let output = scratch_output_path(ctx, self, mode);
                 Ok(vec![
                     "time-filter".into(),
                     ctx.pbf_str()?.into(),
@@ -578,7 +637,7 @@ impl PbfhoggCommand {
                         "-c".into(),
                     ]),
                     DiffFormat::Osc => {
-                        let output = scratch_output_path(ctx, self);
+                        let output = scratch_output_path(ctx, self, mode);
                         Ok(vec![
                             "diff".into(),
                             "--format".into(),
@@ -604,7 +663,7 @@ impl PbfhoggCommand {
                         "-c".into(),
                     ]),
                     DiffFormat::Osc => {
-                        let output = scratch_output_path(ctx, self);
+                        let output = scratch_output_path(ctx, self, mode);
                         Ok(vec![
                             "diff".into(),
                             "--format".into(),
@@ -705,7 +764,7 @@ impl PbfhoggCommand {
                     .bbox
                     .as_deref()
                     .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = ctx.scratch_output("bench-extract-output", "osm.pbf");
+                let output = scratch_output_path(ctx, self, mode);
                 let output_str = path_to_string(&output)?;
                 match strategy {
                     ExtractStrategy::Simple => Ok(vec![
@@ -736,134 +795,6 @@ impl PbfhoggCommand {
         }
     }
 
-    /// Build the argument vector for hotpath profiling.
-    ///
-    /// This produces the full command line INCLUDING the binary path as the
-    /// first element, matching the format expected by `run_hotpath_capture`.
-    ///
-    /// Only commands where `supports_hotpath()` returns true should call this.
-    #[allow(clippy::too_many_lines)]
-    pub fn build_hotpath_args(&self, ctx: &CommandContext) -> Result<Vec<String>, DevError> {
-        let binary = ctx.binary_str()?;
-        let mut args = vec![binary.to_owned()];
-
-        match self {
-            // Hotpath versions of commands may differ slightly from bench
-            // versions (e.g. the hotpath "cat" test uses different flags).
-            Self::Inspect { tags: true, .. } => {
-                args.extend(["inspect".into(), "tags".into(), ctx.pbf_str()?.into()]);
-            }
-            Self::CheckRefs => {
-                args.extend(["check".into(), "--refs".into(), ctx.pbf_str()?.into()]);
-            }
-            Self::ApplyChanges => {
-                // Hotpath apply-changes needs compression param from context.
-                let osc = ctx.osc_str()?;
-                let compression = ctx.params.compression.as_deref().unwrap_or("zlib");
-                let output = ctx.scratch_output("hotpath-merged", "osm.pbf");
-                args.extend([
-                    "apply-changes".into(),
-                    ctx.pbf_str()?.into(),
-                    osc.into(),
-                    "--compression".into(),
-                    compression.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ]);
-            }
-            Self::AddLocationsToWays => {
-                let output = ctx.scratch_output("hotpath-altw", "osm.pbf");
-                args.extend([
-                    "add-locations-to-ways".into(),
-                    ctx.pbf_str()?.into(),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ]);
-                if let Some(it) = &ctx.params.index_type {
-                    args.push("--index-type".into());
-                    args.push(it.clone());
-                }
-                if let Some(s) = &ctx.params.start_stage {
-                    args.push("--start-stage".into());
-                    args.push(s.clone());
-                }
-                if ctx.params.keep_scratch {
-                    args.push("--keep-scratch".into());
-                }
-            }
-            Self::BuildGeocodeIndex => {
-                let output_dir = ctx.scratch_dir.join(format!("geocode-{}", ctx.dataset));
-                let output_dir_str = output_dir.to_str().ok_or_else(|| {
-                    DevError::Config("geocode output dir path is not valid UTF-8".into())
-                })?;
-                args.extend([
-                    "build-geocode-index".into(),
-                    ctx.pbf_str()?.into(),
-                    "--output-dir".into(),
-                    output_dir_str.into(),
-                    "--force".into(),
-                ]);
-            }
-            Self::Extract {
-                strategy: ExtractStrategy::Simple,
-            } => {
-                let bbox = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = ctx.scratch_output("hotpath-extract-simple", "osm.pbf");
-                args.extend([
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    "--simple".into(),
-                    format!("-b={bbox}"),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ]);
-            }
-            Self::Extract {
-                strategy: ExtractStrategy::Complete,
-            } => {
-                let bbox = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = ctx.scratch_output("hotpath-extract-complete", "osm.pbf");
-                args.extend([
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    format!("-b={bbox}"),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ]);
-            }
-            Self::Extract {
-                strategy: ExtractStrategy::Smart,
-            } => {
-                let bbox = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
-                let output = ctx.scratch_output("hotpath-extract-smart", "osm.pbf");
-                args.extend([
-                    "extract".into(),
-                    ctx.pbf_str()?.into(),
-                    "--smart".into(),
-                    format!("-b={bbox}"),
-                    "-o".into(),
-                    path_to_string(&output)?,
-                ]);
-            }
-            // For all other hotpath-capable commands, the args are identical
-            // to the bench version, just prefixed with the binary path.
-            other => {
-                let bench_args = other.build_args(ctx)?;
-                args.extend(bench_args);
-            }
-        }
-
-        Ok(args)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -878,11 +809,23 @@ fn path_to_string(path: &Path) -> Result<String, DevError> {
 }
 
 /// Compute the scratch output path for a command based on its output kind.
-fn scratch_output_path(ctx: &CommandContext, cmd: &PbfhoggCommand) -> PathBuf {
+///
+/// Bench and hotpath runs land in distinct filenames so back-to-back runs
+/// in the same scratch dir don't clobber each other between invocations.
+pub(crate) fn scratch_output_path(
+    ctx: &CommandContext,
+    cmd: &PbfhoggCommand,
+    mode: ArgMode,
+) -> PathBuf {
     let name = cmd.id();
+    let prefix = mode.scratch_prefix();
     match cmd.output_kind() {
-        OutputKind::ScratchPbf(_) => ctx.scratch_dir.join(format!("bench-{name}-output.osm.pbf")),
-        OutputKind::ScratchOsc(_) => ctx.scratch_dir.join(format!("bench-{name}-output.osc.gz")),
+        OutputKind::ScratchPbf => ctx
+            .scratch_dir
+            .join(format!("{prefix}-{name}-output.osm.pbf")),
+        OutputKind::ScratchOsc => ctx
+            .scratch_dir
+            .join(format!("{prefix}-{name}-output.osc.gz")),
         OutputKind::ScratchDir(dir_name) => {
             ctx.scratch_dir.join(format!("{dir_name}-{}", ctx.dataset))
         }
@@ -921,7 +864,7 @@ mod tests {
             tags: false,
             type_filter: None,
         };
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf"]);
     }
 
@@ -933,7 +876,7 @@ mod tests {
             tags: true,
             type_filter: None,
         };
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(
             args,
             vec![
@@ -950,7 +893,7 @@ mod tests {
     fn apply_changes_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::ApplyChanges;
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args[0], "apply-changes");
         assert_eq!(args[1], "/data/denmark.osm.pbf");
         assert_eq!(args[2], "/data/denmark-4705.osc.gz");
@@ -963,7 +906,7 @@ mod tests {
         let cmd = PbfhoggCommand::Diff {
             format: DiffFormat::Default,
         };
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(
             args,
             vec![
@@ -980,7 +923,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.index_type = Some("external".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
     }
@@ -991,7 +934,7 @@ mod tests {
         ctx.params.index_type = Some("external".into());
         ctx.params.start_stage = Some("3".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(args.contains(&String::from("--start-stage")));
         assert!(args.contains(&String::from("3")));
     }
@@ -1002,7 +945,7 @@ mod tests {
         ctx.params.index_type = Some("external".into());
         ctx.params.keep_scratch = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(args.contains(&String::from("--keep-scratch")));
     }
 
@@ -1011,7 +954,7 @@ mod tests {
         // Hotpath should NOT default to --index-type external when omitted.
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_hotpath_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
         assert!(!args.contains(&String::from("--index-type")));
     }
 
@@ -1021,7 +964,7 @@ mod tests {
         ctx.params.index_type = Some("external".into());
         ctx.params.start_stage = Some("4".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_hotpath_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
         assert!(args.contains(&String::from("--start-stage")));
@@ -1046,7 +989,7 @@ mod tests {
     fn build_geocode_index_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::BuildGeocodeIndex;
-        let args = cmd.build_args(&ctx).unwrap();
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args[0], "build-geocode-index");
         assert_eq!(args[1], "/data/denmark.osm.pbf");
         assert_eq!(args[2], "--output-dir");
