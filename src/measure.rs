@@ -95,12 +95,13 @@ impl MeasureRequest<'_> {
         matches!(self.mode, MeasureMode::Alloc { .. })
     }
 
-    /// Variant string recorded in the DB for this measurement mode.
+    /// Measurement mode as the string recorded in the DB's `mode`
+    /// column.
     ///
     /// Returns `None` for `Run` mode (which doesn't write to the DB at
     /// all). The three DB-writing modes map to `"bench"`, `"hotpath"`,
     /// `"alloc"`.
-    pub fn variant_mode(&self) -> Option<&'static str> {
+    pub fn mode_label(&self) -> Option<&'static str> {
         match self.mode {
             MeasureMode::Run => None,
             MeasureMode::Bench { .. } => Some("bench"),

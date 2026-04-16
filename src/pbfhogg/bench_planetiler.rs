@@ -140,7 +140,7 @@ pub fn run(
             // command column as `planetiler-<mode>`. Query with
             // `--command planetiler` (substring) for the whole suite.
             command: format!("planetiler-{mode}"),
-            variant: None,
+            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,

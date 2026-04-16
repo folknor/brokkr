@@ -46,7 +46,7 @@ pub fn run(
         // Nodes count is in cli_args (`--nodes N`) and brokkr_args
         // (`brokkr node-store --nodes N`). Measurement mode comes from
         // the harness.
-        variant: None,
+        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,

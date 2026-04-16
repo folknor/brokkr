@@ -287,7 +287,7 @@ fn run_pbfhogg_wallclock(
 
     let config = BenchConfig {
         command: command.result_command(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -408,7 +408,7 @@ fn run_pbfhogg_hotpath(
 
     let config = BenchConfig {
         command: command.result_command(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -1000,7 +1000,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
 
     let mut bench_config = BenchConfig {
         command: command.result_command().into(),
-        variant: None,
+        mode: None,
         input_file: if command.needs_pbf() {
             Some(basename)
         } else {
@@ -1089,7 +1089,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
 
     let config = BenchConfig {
         command: command.result_command().into(),
-        variant: None,
+        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
@@ -1190,7 +1190,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
             let config = BenchConfig {
                 command: command.result_command().into(),
-                variant: None,
+                mode: None,
                 input_file: Some(basename),
                 input_mb: Some(file_mb),
                 cargo_features: None,
@@ -1267,7 +1267,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
             let config = BenchConfig {
                 command: command.result_command().into(),
-                variant: None,
+                mode: None,
                 input_file: None,
                 input_mb: None,
                 cargo_features: Some(feature.into()),
@@ -1503,7 +1503,7 @@ fn run_nidhogg_ingest_bench(
 
     let config = BenchConfig {
         command: command.result_command().into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -1601,7 +1601,7 @@ fn run_nidhogg_hotpath(
 
     let config = BenchConfig {
         command: command.result_command().into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,

@@ -310,7 +310,7 @@ fn run_osmpbf_baseline(
             // row, distinguished by command. No natural cli/brokkr args
             // discriminator since baselines run different tools entirely.
             command: format!("baseline-{variant}"),
-            variant: None,
+            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -366,7 +366,7 @@ fn run_osmium_baseline(
 
     let config = BenchConfig {
         command: "baseline-osmium-cat-opl".into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -398,7 +398,7 @@ fn run_osmium_baseline(
 
     let altw_config = BenchConfig {
         command: "baseline-osmium-add-locations-to-ways".into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,

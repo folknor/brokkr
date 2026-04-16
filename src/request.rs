@@ -5,7 +5,7 @@ pub(crate) struct ResultsQuery {
     pub(crate) compare: Option<Vec<String>>,
     pub(crate) compare_last: bool,
     pub(crate) command: Option<String>,
-    pub(crate) variant: Option<String>,
+    pub(crate) mode: Option<String>,
     pub(crate) dataset: Option<String>,
     /// Metadata filters as `key=value` strings, parsed into `(key, value)`
     /// pairs by `cmd_results`. Multiple filters AND together.

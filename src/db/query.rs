@@ -93,7 +93,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         commit: row.get("commit")?,
         subject: row.get("subject")?,
         command: row.get("command")?,
-        variant: row.get::<_, Option<String>>("variant")?.unwrap_or_default(),
+        mode: row.get::<_, Option<String>>("mode")?.unwrap_or_default(),
         input_file: row
             .get::<_, Option<String>>("input_file")?
             .unwrap_or_default(),
@@ -147,12 +147,12 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(cmd.clone());
         let j = params.len();
         clauses.push(format!(
-            "(command LIKE '%'||?{i}||'%' OR variant LIKE '%'||?{j}||'%')"
+            "(command LIKE '%'||?{i}||'%' OR mode LIKE '%'||?{j}||'%')"
         ));
     }
-    if let Some(ref v) = filter.variant {
+    if let Some(ref v) = filter.mode {
         params.push(v.clone());
-        clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
+        clauses.push(format!("mode LIKE '%'||?{}||'%'", params.len()));
     }
     if let Some(ref d) = filter.dataset {
         params.push(d.clone());
@@ -371,7 +371,7 @@ mod tests {
         let filter = QueryFilter {
             commit: Some(String::from("abc123")),
             command: Some(String::from("read")),
-            variant: Some(String::from("mmap")),
+            mode: Some(String::from("mmap")),
             limit: 10,
             ..Default::default()
         };
@@ -384,11 +384,11 @@ mod tests {
             "command should be ?2 contains"
         );
         assert!(
-            sql.contains("variant LIKE '%'||?3||'%'"),
+            sql.contains("mode LIKE '%'||?3||'%'"),
             "command should also check variant as ?3"
         );
         assert!(
-            sql.contains("variant LIKE '%'||?4||'%'"),
+            sql.contains("mode LIKE '%'||?4||'%'"),
             "variant filter should be ?4 contains"
         );
         assert!(sql.contains("LIMIT ?5"), "limit should be ?5");
@@ -420,7 +420,7 @@ mod tests {
     fn build_query_sql_command_and_variant_no_commit() {
         let filter = QueryFilter {
             command: Some(String::from("write")),
-            variant: Some(String::from("direct")),
+            mode: Some(String::from("direct")),
             limit: 5,
             ..Default::default()
         };
@@ -429,8 +429,8 @@ mod tests {
         // Without commit, command becomes ?1 (+ variant fallback ?2),
         // variant filter ?3, limit ?4
         assert!(sql.contains("command LIKE '%'||?1||'%'"));
-        assert!(sql.contains("variant LIKE '%'||?2||'%'"));
-        assert!(sql.contains("variant LIKE '%'||?3||'%'"));
+        assert!(sql.contains("mode LIKE '%'||?2||'%'"));
+        assert!(sql.contains("mode LIKE '%'||?3||'%'"));
         assert!(sql.contains("LIMIT ?4"));
         assert_eq!(params.len(), 4);
         assert_eq!(params[0], "write");
@@ -470,7 +470,7 @@ mod tests {
 
         // command becomes ?1 + variant fallback ?2, dataset filter ?3, limit ?4
         assert!(sql.contains("command LIKE '%'||?1||'%'"));
-        assert!(sql.contains("variant LIKE '%'||?2||'%'"));
+        assert!(sql.contains("mode LIKE '%'||?2||'%'"));
         assert!(sql.contains("input_file LIKE '%'||?3||'%'"));
         assert!(sql.contains("LIMIT ?4"));
         assert_eq!(params.len(), 4);
@@ -543,7 +543,7 @@ mod tests {
             commit: String::from("aabbccdd"),
             subject: String::from("test"),
             command: String::from("bench diff-snapshots"),
-            variant: Some(String::from(variant)),
+            mode: Some(String::from(variant)),
             input_file: None,
             input_mb: None,
             elapsed_ms: 100,
@@ -583,7 +583,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: None,
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![("format".into(), "osc".into())],
                 cli_args: None,
@@ -597,7 +597,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: None,
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![("format".into(), "default".into())],
                 cli_args: None,
@@ -612,7 +612,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: None,
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -641,7 +641,7 @@ mod tests {
             commit: String::from("aabbccdd"),
             subject: String::from("test"),
             command: String::from(cmd),
-            variant: Some(String::from(variant)),
+            mode: Some(String::from(variant)),
             input_file: None,
             input_mb: None,
             elapsed_ms: 100,
@@ -672,7 +672,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: Some(String::from("merge")),
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -687,7 +687,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: Some(String::from("bench")),
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -702,7 +702,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: Some(String::from("read")),
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -718,7 +718,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: Some(String::from("bench merge")),
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -738,7 +738,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: Some(String::from("zstd1")),
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -747,7 +747,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].variant, "direct-io+zstd1");
+        assert_eq!(rows[0].mode, "direct-io+zstd1");
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -764,7 +764,7 @@ mod tests {
             commit: String::from("aabbccdd"),
             subject: String::from("test"),
             command: String::from("bench merge"),
-            variant: Some(String::from(variant)),
+            mode: Some(String::from(variant)),
             input_file: None,
             input_mb: None,
             elapsed_ms: 100,
@@ -793,7 +793,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: None,
-                variant: Some(String::from("zlib")),
+                mode: Some(String::from("zlib")),
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -808,7 +808,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: None,
-                variant: Some(String::from("buffered")),
+                mode: Some(String::from("buffered")),
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -823,7 +823,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: None,
-                variant: Some(String::from("none")),
+                mode: Some(String::from("none")),
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -832,7 +832,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].variant, "buffered+none");
+        assert_eq!(rows[0].mode, "buffered+none");
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -854,7 +854,7 @@ mod tests {
             commit: String::from("aabbccdd"),
             subject: String::from("test"),
             command: String::from("hotpath"),
-            variant: Some(String::from("default")),
+            mode: Some(String::from("default")),
             input_file: None,
             input_mb: None,
             elapsed_ms: 500,

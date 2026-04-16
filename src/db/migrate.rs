@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 13;
+pub(super) const SCHEMA_VERSION: i64 = 14;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -55,6 +55,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 13 {
         migrate_v12_to_v13(conn)?;
+    }
+    if current < 14 {
+        migrate_v13_to_v14(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -592,6 +595,26 @@ fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
     Ok(())
 }
 
+/// v13 → v14: rename the `variant` column to `mode`.
+///
+/// After v13, the `variant` column holds nothing but the measurement
+/// mode (`bench`/`hotpath`/`alloc`) — the name was inherited from when
+/// it carried a freeform axis bag. Renaming to `mode` makes the
+/// semantics obvious and lets future docs/filters read naturally.
+///
+/// Uses SQLite's `ALTER TABLE ... RENAME COLUMN` (available since
+/// SQLite 3.25). Indexes on the column (if any) and child-table
+/// foreign keys (none — variant was never referenced) are unaffected.
+fn migrate_v13_to_v14(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // Guard: only rename if the old column still exists. On fresh
+    // databases `SCHEMA` already created the table with `mode`, so the
+    // rename would fail.
+    if has_column(conn, "runs", "variant") && !has_column(conn, "runs", "mode") {
+        conn.execute_batch("ALTER TABLE runs RENAME COLUMN variant TO mode")?;
+    }
+    Ok(())
+}
+
 /// Parse existing extra/metadata JSON and insert into child tables.
 fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError> {
     let mut stmt = conn.prepare(
@@ -871,7 +894,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: Some(String::from("aabb")),
                 command: None,
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -882,9 +905,9 @@ mod tests {
         assert_eq!(rows.len(), 1);
         // v12→v13 strips the `bench ` prefix; the original row was
         // `("bench read", "mmap")` and lands as command=`read`,
-        // variant=`bench` here.
+        // mode=`bench` here (after v13→v14 renamed `variant`→`mode`).
         assert_eq!(rows[0].command, "read");
-        assert_eq!(rows[0].variant, "bench");
+        assert_eq!(rows[0].mode, "bench");
         assert_eq!(rows[0].elapsed_ms, 1234);
 
         // UUID was backfilled.
@@ -949,7 +972,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: Some(String::from("aabb")),
                 command: None,
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -1224,7 +1247,7 @@ mod tests {
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
                 .query_row(
-                    "SELECT command, variant FROM runs WHERE id = ?1",
+                    "SELECT command, mode FROM runs WHERE id = ?1",
                     [id],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                 )
@@ -1386,7 +1409,7 @@ mod tests {
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
                 .query_row(
-                    "SELECT command, variant FROM runs WHERE id = ?1",
+                    "SELECT command, mode FROM runs WHERE id = ?1",
                     [id],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                 )
@@ -1538,7 +1561,7 @@ mod tests {
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
                 .query_row(
-                    "SELECT command, variant FROM runs WHERE id = ?1",
+                    "SELECT command, mode FROM runs WHERE id = ?1",
                     [id],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                 )
@@ -1579,6 +1602,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, 1, "meta.merged_cache should be preserved");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v13 → v14 renames `variant` column to `mode`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v13_to_v14_renames_variant_to_mode() {
+        let (dir, db_path) = test_db("migrate_v13_v14");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V3_SCHEMA).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE run_kv ( \
+                    run_id INTEGER NOT NULL, \
+                    key TEXT NOT NULL, \
+                    value_int INTEGER, value_real REAL, value_text TEXT, \
+                    PRIMARY KEY (run_id, key) \
+                 )",
+            )
+            .unwrap();
+            // Post-v13 row shape: command = bare id, variant = measurement
+            // mode (this is what v13 produces and v14 inherits).
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT").unwrap();
+            conn.pragma_update(None, "user_version", 13).unwrap();
+
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["add-locations-to-ways", "bench", "pbfhogg"],
+            )
+            .unwrap();
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["inspect-tags", "hotpath", "pbfhogg"],
+            )
+            .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v13 to v14");
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // `variant` gone, `mode` present and carrying the same values.
+        assert!(!has_column(&db.conn, "runs", "variant"));
+        assert!(has_column(&db.conn, "runs", "mode"));
+
+        let mode_of = |id: i64| -> Option<String> {
+            db.conn
+                .query_row("SELECT mode FROM runs WHERE id = ?1", [id], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(mode_of(1), Some("bench".into()));
+        assert_eq!(mode_of(2), Some("hotpath".into()));
 
         drop(db);
         cleanup(&dir, &db_path);

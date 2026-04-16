@@ -83,7 +83,7 @@ impl HarnessContext {
         self.harness = self
             .harness
             .with_brokkr_args(req.brokkr_args.to_owned())
-            .with_measure_mode(req.variant_mode());
+            .with_measure_mode(req.mode_label());
         self
     }
 }
@@ -172,7 +172,7 @@ impl BenchContext {
         self.harness = self
             .harness
             .with_brokkr_args(req.brokkr_args.to_owned())
-            .with_measure_mode(req.variant_mode());
+            .with_measure_mode(req.mode_label());
         self
     }
 }

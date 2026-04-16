@@ -115,7 +115,11 @@ pub struct RunRow {
     pub commit: String,
     pub subject: String,
     pub command: String,
-    pub variant: Option<String>,
+    /// Measurement mode — exactly one of `"bench"`, `"hotpath"`, or
+    /// `"alloc"`. `None` only occurs for pre-v13 rows that haven't had
+    /// a mode assigned yet (should not exist in practice after the
+    /// v12→v13 migration). Was previously called `variant`.
+    pub mode: Option<String>,
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
     pub elapsed_ms: i64,
@@ -149,7 +153,10 @@ pub struct StoredRow {
     pub commit: String,
     pub subject: String,
     pub command: String,
-    pub variant: String,
+    /// Measurement mode — `"bench"`, `"hotpath"`, or `"alloc"`. Empty
+    /// string for (very old) pre-v13 rows that predate the shape.
+    /// Was previously called `variant`.
+    pub mode: String,
     pub input_file: String,
     pub input_mb: Option<f64>,
     pub elapsed_ms: i64,
@@ -178,7 +185,9 @@ pub type CompareResult = (String, Vec<StoredRow>, String, Vec<StoredRow>);
 pub struct QueryFilter {
     pub commit: Option<String>,
     pub command: Option<String>,
-    pub variant: Option<String>,
+    /// Substring match against the `mode` column (post-v13 — only
+    /// `"bench"`/`"hotpath"`/`"alloc"`). Was previously called `variant`.
+    pub mode: Option<String>,
     /// Substring match against the `input_file` column. Useful for filtering
     /// by the dataset name embedded in benchmark input filenames (e.g.
     /// `europe-20260301-seq4714-with-indexdata.osm` matches `europe`).

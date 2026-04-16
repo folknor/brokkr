@@ -82,7 +82,7 @@ pub fn run(
 
     let mut config = BenchConfig {
         command: "self".into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,

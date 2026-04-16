@@ -114,7 +114,7 @@ pub fn run(
         // size is a runtime observation (derived from input size, not
         // a user-provided flag) so it stays in metadata.
         command: "planetiler".into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,

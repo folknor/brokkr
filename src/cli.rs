@@ -691,11 +691,11 @@ Examples:
   brokkr results 0b74fb6f                           # look up by UUID prefix
   brokkr results --commit a65a                      # filter by commit prefix
   brokkr results --command 'bench read'             # filter by command
-  brokkr results --variant pipelined                # filter by variant (substring match)
+  brokkr results --mode hotpath                     # filter by measurement mode
   brokkr results --dataset europe                   # filter by dataset (substring match on input file)
   brokkr results --command tags-filter --dataset eu # combine filters
   brokkr results --compare a65a 911c                # compare two commits
-  brokkr results --compare a65a 911c --variant sync # compare, filtered
+  brokkr results --compare a65a 911c --mode bench   # compare, filtered
   brokkr results --compare-last                     # compare two most recent commits
   brokkr results --compare-last --command hotpath   # compare hotpath runs (shows function diff)"
     )]
@@ -712,7 +712,7 @@ Examples:
         #[arg(long, num_args = 2, value_names = ["COMMIT_A", "COMMIT_B"])]
         compare: Option<Vec<String>>,
 
-        /// Compare the two most recent commits (use with --command/--variant to narrow)
+        /// Compare the two most recent commits (use with --command/--mode to narrow)
         #[arg(long, conflicts_with_all = ["query", "commit", "compare"])]
         compare_last: bool,
 
@@ -720,9 +720,10 @@ Examples:
         #[arg(long)]
         command: Option<String>,
 
-        /// Filter by variant (substring match, e.g. "zlib" matches "buffered+zlib")
+        /// Filter by measurement mode (substring match; exact values are
+        /// `bench`, `hotpath`, `alloc`).
         #[arg(long)]
-        variant: Option<String>,
+        mode: Option<String>,
 
         /// Filter by dataset (substring match on input filename, e.g. "europe"
         /// or "eu" matches "europe-20260301-seq4714-with-indexdata.osm")

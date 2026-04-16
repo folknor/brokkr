@@ -49,7 +49,7 @@ pub fn run(
             // (curl-style HTTP). Different query rows are distinguished
             // by the command column: `api-<query>`.
             command: format!("api-{name}"),
-            variant: None,
+            mode: None,
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,

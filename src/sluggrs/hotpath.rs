@@ -91,7 +91,7 @@ pub fn run(
         command: command_label.to_owned(),
         // Harness carries the measurement mode (bench/hotpath/alloc) and
         // the brokkr invocation — no need to set them here.
-        variant: None,
+        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
@@ -143,7 +143,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         req.stop_marker.map(str::to_owned),
     )?
     .with_brokkr_args(req.brokkr_args.to_owned())
-    .with_measure_mode(req.variant_mode());
+    .with_measure_mode(req.mode_label());
 
     // The target name is the command label for the DB (and also the cargo
     // example name, with "_bench" appended). The default "hotpath" target

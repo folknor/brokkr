@@ -83,7 +83,7 @@ pub fn run(
 
     let config = BenchConfig {
         command: "tilemaker".into(),
-        variant: None,
+        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,

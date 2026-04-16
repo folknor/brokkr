@@ -40,7 +40,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             row.commit,
             row.subject,
             row.command,
-            row.variant,
+            row.mode,
             row.input_file,
             row.input_mb,
             row.elapsed_ms,
@@ -165,7 +165,7 @@ mod tests {
             commit: String::from("aabbccdd"),
             subject: String::from("test subject"),
             command: String::from("read"),
-            variant: Some(String::from("mmap")),
+            mode: Some(String::from("bench")),
             input_file: Some(String::from("denmark.osm.pbf")),
             input_mb: Some(42.5),
             elapsed_ms: 1234,
@@ -191,7 +191,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: Some(String::from("aabbccdd")),
                 command: None,
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,
@@ -201,7 +201,7 @@ mod tests {
             .expect("query");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].command, "read");
-        assert_eq!(rows[0].variant, "mmap");
+        assert_eq!(rows[0].mode, "bench");
         assert_eq!(rows[0].input_file, "denmark.osm.pbf");
         assert_eq!(rows[0].elapsed_ms, 1234);
         assert_eq!(rows[0].cli_args, "--fast");

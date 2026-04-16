@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS sidecar_meta (
     binary_path    TEXT,
     binary_xxh128  TEXT,
     git_commit     TEXT,
-    variant        TEXT,
+    mode           TEXT,
     dataset        TEXT,
     exit_code      INTEGER
 );
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 4;
+const SIDECAR_VERSION: i64 = 5;
 
 /// Run pending migrations based on `PRAGMA user_version`.
 fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -120,7 +120,7 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
             "binary_path TEXT",
             "binary_xxh128 TEXT",
             "git_commit TEXT",
-            "variant TEXT",
+            "mode TEXT",
             "dataset TEXT",
             "exit_code INTEGER",
         ] {
@@ -128,6 +128,35 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
             // Ignore "duplicate column name" errors from fresh databases.
             #[allow(clippy::let_underscore_must_use)]
             let _ = conn.execute_batch(&sql);
+        }
+    }
+    // v4 -> v5: rename `variant` column to `mode` to match the results
+    //           DB rename in v13→v14. Only applies if the old column
+    //           still exists (fresh DBs created with the v5 DDL already
+    //           have `mode`).
+    if current < 5 {
+        let has_variant = conn
+            .prepare("PRAGMA table_info(sidecar_meta)")
+            .and_then(|mut stmt| {
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(Result::ok)
+                    .collect();
+                Ok(names.iter().any(|n| n == "variant"))
+            })
+            .unwrap_or(false);
+        let has_mode = conn
+            .prepare("PRAGMA table_info(sidecar_meta)")
+            .and_then(|mut stmt| {
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(Result::ok)
+                    .collect();
+                Ok(names.iter().any(|n| n == "mode"))
+            })
+            .unwrap_or(false);
+        if has_variant && !has_mode {
+            conn.execute_batch("ALTER TABLE sidecar_meta RENAME COLUMN variant TO mode")?;
         }
     }
 
@@ -148,7 +177,7 @@ pub struct RunInfo {
     pub binary_path: Option<String>,
     pub binary_xxh128: Option<String>,
     pub git_commit: Option<String>,
-    pub variant: Option<String>,
+    pub mode: Option<String>,
     pub dataset: Option<String>,
     pub exit_code: Option<i32>,
 }
@@ -306,7 +335,7 @@ impl SidecarDb {
             "INSERT OR REPLACE INTO sidecar_meta (
                 result_uuid, best_run_idx, total_runs,
                 run_start_epoch, pid, command, binary_path, binary_xxh128,
-                git_commit, variant, dataset, exit_code
+                git_commit, mode, dataset, exit_code
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 result_uuid,
@@ -318,7 +347,7 @@ impl SidecarDb {
                 run_info.as_ref().and_then(|r| r.binary_path.as_deref()),
                 run_info.as_ref().and_then(|r| r.binary_xxh128.as_deref()),
                 run_info.as_ref().and_then(|r| r.git_commit.as_deref()),
-                run_info.as_ref().and_then(|r| r.variant.as_deref()),
+                run_info.as_ref().and_then(|r| r.mode.as_deref()),
                 run_info.as_ref().and_then(|r| r.dataset.as_deref()),
                 run_info.and_then(|r| r.exit_code),
             ],
@@ -351,7 +380,7 @@ impl SidecarDb {
         self.conn
             .query_row(
                 "SELECT run_start_epoch, pid, command, binary_path, binary_xxh128,
-                        git_commit, variant, dataset, exit_code
+                        git_commit, mode, dataset, exit_code
                  FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
                 rusqlite::params![uuid_prefix],
                 |row| {
@@ -362,7 +391,7 @@ impl SidecarDb {
                         binary_path: row.get(3)?,
                         binary_xxh128: row.get(4)?,
                         git_commit: row.get(5)?,
-                        variant: row.get(6)?,
+                        mode: row.get(6)?,
                         dataset: row.get(7)?,
                         exit_code: row.get(8)?,
                     })

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS runs (
     [commit]        TEXT NOT NULL,
     subject         TEXT NOT NULL,
     command         TEXT NOT NULL,
-    variant         TEXT,
+    mode            TEXT,
     input_file      TEXT,
     input_mb        REAL,
     elapsed_ms      INTEGER NOT NULL,
@@ -103,14 +103,14 @@ CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id)
 // ---------------------------------------------------------------------------
 
 pub(super) const SELECT_COLS: &str = "\
-id, timestamp, hostname, [commit], subject, command, variant, \
+id, timestamp, hostname, [commit], subject, command, mode, \
 input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
 kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
 cli_args, project, stop_marker, brokkr_args";
 
 pub(super) const INSERT_SQL: &str = "\
 INSERT INTO runs (\
-    timestamp, hostname, [commit], subject, command, variant, \
+    timestamp, hostname, [commit], subject, command, mode, \
     input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
     kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
     cli_args, project, stop_marker, brokkr_args\

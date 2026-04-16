@@ -66,7 +66,7 @@ pub fn run(
             // Strategy is in cli_args (--simple/--smart/none=complete).
             // Bbox is in cli_args (-b). Measurement mode and brokkr_args
             // come from the harness.
-            variant: None,
+            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,

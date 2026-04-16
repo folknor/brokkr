@@ -43,7 +43,7 @@ pub fn run(
         command: "pmtiles".into(),
         // Tiles count is in cli_args (`--tiles N`) and brokkr_args.
         // Measurement mode comes from the harness.
-        variant: None,
+        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,

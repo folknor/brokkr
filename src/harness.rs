@@ -16,7 +16,12 @@ use crate::output;
 /// Configuration for a benchmark run.
 pub struct BenchConfig {
     pub command: String,
-    pub variant: Option<String>,
+    /// Measurement mode override (`"bench"`/`"hotpath"`/`"alloc"`).
+    /// Usually left `None`; the harness fills it from its
+    /// `measure_mode` field, set via `with_measure_mode` at
+    /// construction. Individual writers only set this when they need
+    /// to override the harness default.
+    pub mode: Option<String>,
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
     pub cargo_features: Option<String>,
@@ -486,7 +491,7 @@ impl BenchHarness {
             binary_path: Some(program.display().to_string()),
             binary_xxh128,
             git_commit: Some(self.git.commit.clone()),
-            variant: config.variant.clone(),
+            mode: config.mode.clone(),
             dataset: config.input_file.clone(),
             exit_code,
         }
@@ -577,10 +582,10 @@ impl BenchHarness {
         // Harness-level values take precedence. The individual writers
         // don't have to know or care about the measurement mode or the
         // brokkr invocation string — the harness attaches them.
-        let variant = self
+        let mode = self
             .measure_mode
             .clone()
-            .or_else(|| config.variant.clone());
+            .or_else(|| config.mode.clone());
         let brokkr_args = self
             .brokkr_args
             .clone()
@@ -591,7 +596,7 @@ impl BenchHarness {
             commit: self.git.commit.clone(),
             subject: self.git.subject.clone(),
             command: config.command.clone(),
-            variant,
+            mode,
             input_file: config.input_file.clone(),
             input_mb: config.input_mb,
             peak_rss_mb,
@@ -625,8 +630,8 @@ fn format_result_line(config: &BenchConfig, result: &BenchResult, git: &GitInfo)
     let mut parts = Vec::with_capacity(8);
     parts.push(format!("command={}", config.command));
 
-    if let Some(ref v) = config.variant {
-        parts.push(format!("variant={v}"));
+    if let Some(ref v) = config.mode {
+        parts.push(format!("mode={v}"));
     }
 
     parts.push(format!("elapsed_ms={}", result.elapsed_ms));

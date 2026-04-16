@@ -12,7 +12,7 @@ use crate::error::DevError;
 
 impl ResultsDb {
     /// Query two commits for side-by-side comparison. Each commit is matched
-    /// by prefix. Optional command/variant/dataset filters narrow the results.
+    /// by prefix. Optional command/mode/dataset filters narrow the results.
     /// `dataset` is a substring match against the `input_file` column.
     /// Loads kv + hotpath children for each row (needed for output_bytes and diffs).
     pub fn query_compare(
@@ -20,7 +20,7 @@ impl ResultsDb {
         a: &str,
         b: &str,
         command: Option<&str>,
-        variant: Option<&str>,
+        mode: Option<&str>,
         dataset: Option<&str>,
     ) -> Result<(Vec<super::StoredRow>, Vec<super::StoredRow>), DevError> {
         let mut clauses = vec!["[commit] LIKE ?1||'%'".to_owned()];
@@ -31,16 +31,16 @@ impl ResultsDb {
             params.push(cmd.to_owned());
             clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
         }
-        if let Some(v) = variant {
+        if let Some(v) = mode {
             params.push(v.to_owned());
-            clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
+            clauses.push(format!("mode LIKE '%'||?{}||'%'", params.len()));
         }
         if let Some(d) = dataset {
             params.push(d.to_owned());
             clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
         }
         let sql = format!(
-            "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, variant, id DESC",
+            "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, mode, id DESC",
             clauses.join(" AND ")
         );
         let mut rows_a = query_commit_filtered(&self.conn, &sql, a, &params)?;
@@ -52,11 +52,11 @@ impl ResultsDb {
     }
 
     /// Find the two most recent distinct commits and compare them.
-    /// Optional command/variant/dataset filters narrow the search.
+    /// Optional command/mode/dataset filters narrow the search.
     pub fn query_compare_last(
         &self,
         command: Option<&str>,
-        variant: Option<&str>,
+        mode: Option<&str>,
         dataset: Option<&str>,
     ) -> Result<Option<CompareResult>, DevError> {
         // Find two most recent distinct commits matching the filters.
@@ -66,9 +66,9 @@ impl ResultsDb {
             params.push(cmd.to_owned());
             clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
         }
-        if let Some(v) = variant {
+        if let Some(v) = mode {
             params.push(v.to_owned());
-            clauses.push(format!("variant LIKE '%'||?{}||'%'", params.len()));
+            clauses.push(format!("mode LIKE '%'||?{}||'%'", params.len()));
         }
         if let Some(d) = dataset {
             params.push(d.to_owned());
@@ -96,7 +96,7 @@ impl ResultsDb {
         }
 
         let (rows_a, rows_b) =
-            self.query_compare(&commits[1], &commits[0], command, variant, dataset)?;
+            self.query_compare(&commits[1], &commits[0], command, mode, dataset)?;
         Ok(Some((
             commits[1].clone(),
             rows_a,
@@ -124,13 +124,13 @@ mod tests {
             .join(format!("compare-{name}-{}-{stamp}.db", std::process::id()))
     }
 
-    fn make_row(commit: &str, command: &str, variant: &str) -> RunRow {
+    fn make_row(commit: &str, command: &str, mode: &str) -> RunRow {
         RunRow {
             hostname: String::from("testhost"),
             commit: String::from(commit),
             subject: String::from("test subject"),
             command: String::from(command),
-            variant: Some(String::from(variant)),
+            mode: Some(String::from(mode)),
             input_file: Some(String::from("in.osm.pbf")),
             input_mb: Some(1.0),
             elapsed_ms: 100,
@@ -198,7 +198,7 @@ mod tests {
             .query(&QueryFilter {
                 commit: None,
                 command: Some(String::from("bench write")),
-                variant: None,
+                mode: None,
                 dataset: None,
                 meta: vec![],
                 cli_args: None,

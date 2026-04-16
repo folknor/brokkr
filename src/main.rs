@@ -654,7 +654,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             compare,
             compare_last,
             command,
-            variant,
+            mode,
             dataset,
             meta,
             cli_args,
@@ -684,7 +684,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 compare,
                 compare_last,
                 command,
-                variant,
+                mode,
                 dataset,
                 meta,
                 cli_args,
@@ -1456,7 +1456,7 @@ fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
         return;
     }
 
-    // Line 1: timestamp, PID, command, variant, dataset.
+    // Line 1: timestamp, PID, command, mode, dataset.
     if let Some(epoch) = info.run_start_epoch {
         let dt = format_epoch(epoch);
         let mut parts = vec![format!("run {dt}")];
@@ -1466,8 +1466,8 @@ fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
         if let Some(ref cmd) = info.command {
             parts.push(format!("command: {cmd}"));
         }
-        if let Some(ref variant) = info.variant {
-            parts.push(format!("variant: {variant}"));
+        if let Some(ref mode) = info.mode {
+            parts.push(format!("mode: {mode}"));
         }
         if let Some(ref dataset) = info.dataset {
             parts.push(format!("dataset: {dataset}"));
@@ -1776,7 +1776,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             commit_a,
             commit_b,
             q.command.as_deref(),
-            q.variant.as_deref(),
+            q.mode.as_deref(),
             q.dataset.as_deref(),
         )?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top);
@@ -1784,7 +1784,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     } else if q.compare_last {
         match results_db.query_compare_last(
             q.command.as_deref(),
-            q.variant.as_deref(),
+            q.mode.as_deref(),
             q.dataset.as_deref(),
         )? {
             Some((commit_a, rows_a, commit_b, rows_b)) => {
@@ -1808,7 +1808,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         // Bare `brokkr results` with no filters: show detail view for the last result.
         let no_filters = q.commit.is_none()
             && q.command.is_none()
-            && q.variant.is_none()
+            && q.mode.is_none()
             && q.dataset.is_none()
             && meta_pairs.is_empty();
 
@@ -1847,7 +1847,7 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
             let filter = db::QueryFilter {
                 commit: q.commit.clone(),
                 command: q.command.clone(),
-                variant: q.variant.clone(),
+                mode: q.mode.clone(),
                 dataset: q.dataset.clone(),
                 meta: meta_pairs,
                 cli_args: q.cli_args.clone(),
@@ -2891,7 +2891,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
 
     let config = harness::BenchConfig {
         command: "default".into(),
-        variant: None,
+        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,

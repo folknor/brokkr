@@ -199,7 +199,7 @@ struct TableWidths {
     timestamp: usize,
     commit: usize,
     command: usize,
-    variant: usize,
+    mode: usize,
     elapsed: usize,
     input: usize,
 }
@@ -210,7 +210,7 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         timestamp: 9,
         commit: 6,
         command: 7,
-        variant: 7,
+        mode: 7,
         elapsed: 7,
         input: "dataset".len(),
     };
@@ -228,8 +228,8 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         if row.command.len() > w.command {
             w.command = row.command.len();
         }
-        if row.variant.len() > w.variant {
-            w.variant = row.variant.len();
+        if row.mode.len() > w.mode {
+            w.mode = row.mode.len();
         }
         let elapsed_str = format_elapsed(row.elapsed_ms);
         if elapsed_str.len() > w.elapsed {
@@ -252,14 +252,14 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         "timestamp",
         "commit",
         "command",
-        "variant",
+        "mode",
         "elapsed",
         "dataset",
         uuid_w = w.uuid,
         ts_w = w.timestamp,
         cm_w = w.commit,
         cmd_w = w.command,
-        var_w = w.variant,
+        var_w = w.mode,
         el_w = w.elapsed,
         in_w = w.input,
     )
@@ -278,14 +278,14 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
         row.timestamp,
         row.commit,
         row.command,
-        row.variant,
+        row.mode,
         elapsed_str,
         input_str,
         uuid_w = w.uuid,
         ts_w = w.timestamp,
         cm_w = w.commit,
         cmd_w = w.command,
-        var_w = w.variant,
+        var_w = w.mode,
         el_w = w.elapsed,
         in_w = w.input,
     )
@@ -322,7 +322,7 @@ fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
 
 struct CompareWidths {
     command: usize,
-    variant: usize,
+    mode: usize,
     input: usize,
     col_a: usize,
     col_b: usize,
@@ -413,7 +413,7 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
     let mut b_map: HashMap<String, RowData> = HashMap::new();
 
     for row in rows_a {
-        let key = pair_key(&row.command, &row.variant, &row.input_file);
+        let key = pair_key(&row.command, &row.mode, &row.input_file);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
             e.insert(RowData {
@@ -428,7 +428,7 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
         }
     }
     for row in rows_b {
-        let key = pair_key(&row.command, &row.variant, &row.input_file);
+        let key = pair_key(&row.command, &row.mode, &row.input_file);
         if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
@@ -513,7 +513,7 @@ fn compute_compare_widths(
         .any(|p| p.a_blobs.is_some() || p.b_blobs.is_some());
     let mut w = CompareWidths {
         command: 7,
-        variant: 7,
+        mode: 7,
         input: "dataset".len(),
         col_a: commit_a.len().max(2),
         col_b: commit_b.len().max(2),
@@ -536,7 +536,7 @@ fn compute_compare_widths(
     for pair in pairs {
         let (cmd, var, _) = split_pair_key(&pair.key);
         w.command = w.command.max(cmd.len());
-        w.variant = w.variant.max(var.len());
+        w.mode = w.mode.max(var.len());
         w.input = w.input.max(pair.input_display.len());
         w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms).len());
         w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms).len());
@@ -581,13 +581,13 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
         out,
         "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
         "command",
-        "variant",
+        "mode",
         "dataset",
         commit_a,
         commit_b,
         "change",
         cmd_w = w.command,
-        var_w = w.variant,
+        var_w = w.mode,
         in_w = w.input,
         a_w = w.col_a,
         b_w = w.col_b,
@@ -660,7 +660,7 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
         b_str,
         ch,
         cmd_w = w.command,
-        var_w = w.variant,
+        var_w = w.mode,
         in_w = w.input,
         a_w = w.col_a,
         b_w = w.col_b,
@@ -827,7 +827,7 @@ mod tests {
             commit: String::from("aabbccdd"),
             subject: String::from("test commit"),
             command: command.to_owned(),
-            variant: variant.to_owned(),
+            mode: variant.to_owned(),
             input_file: input_file.to_owned(),
             input_mb: None,
             elapsed_ms,

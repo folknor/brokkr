@@ -106,7 +106,7 @@ pub fn run(
 
     let config = BenchConfig {
         command: "tiles".into(),
-        variant: None,
+        mode: None,
         input_file: Some(tiles_file.to_owned()),
         input_mb: Some(tiles_mb),
         cargo_features: None,

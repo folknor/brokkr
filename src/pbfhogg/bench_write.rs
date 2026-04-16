@@ -41,7 +41,7 @@ pub fn run(
             // Writer-mode/compression discriminators are in cli_args
             // (`--writer`, `--compression`). Measurement mode and
             // brokkr_args come from the harness.
-            variant: None,
+            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
