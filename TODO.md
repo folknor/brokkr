@@ -46,10 +46,6 @@ Clap definitions + `as_pbfhogg` adapter + validators. The adapter is
 the bridge between CLI shape and `PbfhoggCommand`; move it next to
 commands.rs.
 
-#### `format.rs` is ~1300 lines
-Table + details + single-result + compare + pair-key + helpers + lots
-of tests. Split layouts into submodules.
-
 ### Inconsistencies
 
 #### `VerifyCommand` args don't use `PbfArgs`
