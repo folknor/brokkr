@@ -159,6 +159,14 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
+    /// [pbfhogg] Cat with full decode + re-frame (forces cat_filtered / Framed path)
+    #[command(name = "cat-clean", display_order = 2)]
+    CatClean {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+    },
     /// [pbfhogg] Tags filter (way/highway=primary)
     #[command(name = "tags-filter-way", display_order = 2)]
     TagsFilterWay {
@@ -1574,6 +1582,9 @@ impl Command {
             }
             Self::CatDedupe { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::CatDedupe, None, empty))
+            }
+            Self::CatClean { mode, pbf } => {
+                Some((mode, pbf, PbfhoggCommand::CatClean, None, empty))
             }
             Self::TagsFilterWay { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::TagsFilterWay, None, empty))

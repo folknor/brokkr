@@ -128,6 +128,9 @@ pub enum PbfhoggCommand {
     CatWay,
     CatRelation,
     CatDedupe,
+    /// `cat --clean` — forces the full-decode / re-frame Framed-chunks path
+    /// (cat_filtered) rather than the Raw passthrough.
+    CatClean,
     TagsFilterWay,
     TagsFilterAmenity,
     TagsFilterTwopass,
@@ -180,6 +183,7 @@ impl PbfhoggCommand {
             Self::CatWay => "cat-way",
             Self::CatRelation => "cat-relation",
             Self::CatDedupe => "cat-dedupe",
+            Self::CatClean => "cat-clean",
             Self::TagsFilterWay => "tags-filter-way",
             Self::TagsFilterAmenity => "tags-filter-amenity",
             Self::TagsFilterTwopass => "tags-filter-twopass",
@@ -310,6 +314,7 @@ impl PbfhoggCommand {
             | Self::CatWay
             | Self::CatRelation
             | Self::CatDedupe
+            | Self::CatClean
             | Self::TagsFilterWay
             | Self::TagsFilterAmenity
             | Self::TagsFilterTwopass
@@ -350,6 +355,7 @@ impl PbfhoggCommand {
             | Self::CatWay
             | Self::CatRelation
             | Self::CatDedupe
+            | Self::CatClean
             | Self::TagsFilterWay
             | Self::TagsFilterAmenity
             | Self::TagsFilterTwopass
@@ -559,6 +565,16 @@ impl PbfhoggCommand {
                     "--dedupe".into(),
                     pbf.into(),
                     pbf.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
+                ])
+            }
+            Self::CatClean => {
+                let output = scratch_output_path(ctx, self);
+                Ok(vec![
+                    "cat".into(),
+                    "--clean".into(),
+                    ctx.pbf_str()?.into(),
                     "-o".into(),
                     path_to_string(&output)?,
                 ])

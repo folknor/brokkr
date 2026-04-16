@@ -169,6 +169,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::CatWay { .. }
         | Command::CatRelation { .. }
         | Command::CatDedupe { .. }
+        | Command::CatClean { .. }
         | Command::TagsFilterWay { .. }
         | Command::TagsFilterAmenity { .. }
         | Command::TagsFilterTwopass { .. }
