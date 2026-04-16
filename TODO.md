@@ -1,59 +1,55 @@
 # TODO
 
-## Structural debt (2026-04-16)
+## Structural debt (remaining after 2026-04-16 sprint)
 
-Janitorial work surfaced while doing the schema/consolidation refactors.
-Items marked **★** are the highest-impact — doing them first would
-simplify the rest.
+The high-impact items from the 2026-04-16 audit are done. What's listed
+below is either speculative, subjective, or low-ROI and has been left
+deliberately.
 
-### Duplicated code paths
-
-
-### Stringly-typed plumbing
-
-### Hardcoded preset content
+### Low ROI — not worth doing yet
 
 #### Scratch output filename pattern coupled to command id
-`bench-<id>-output.osm.pbf` in `scratch_output_path`. Works today;
-becomes a problem if two benches of the same command want distinct
-outputs.
+`bench-<id>-output.osm.pbf` / `hotpath-<id>-output.osm.pbf` in
+`scratch_output_path`. Works today because benches run sequentially with
+cleanup between; becomes a problem if two benches of the same command
+want distinct outputs within one suite run.
 
-#### v12→v13 `DELETE FROM run_kv WHERE key IN (…)` list
-30 hardcoded meta key names. New axis-mirror keys would be forgotten.
-Could be generated from the list of known axis-mirror names in code.
-
-### File size / boundaries
-
-
-### Inconsistencies
-
-#### `PbfhoggCommand::metadata` takes `ctx: &CommandContext`, others take no args
-`NidhoggCommand::metadata()` takes nothing. Elivagar's was just gutted
-to return empty. Unify the signature.
+#### `PbfhoggCommand::metadata` takes `&CommandContext`, others don't
+Pbfhogg's metadata reads runtime observations from `ctx.params`; elivagar
+and nidhogg don't have any. The signature difference reflects a real
+semantic difference, not duplication.
 
 #### Harness builder methods split across types
-Some on `BenchHarness` (`with_cargo_features`, `with_brokkr_args`,
-`with_measure_mode`), some on `BenchContext`/`HarnessContext`
-(`with_request`). Pick one layer.
+`BenchHarness::with_cargo_features` / `with_brokkr_args` / `with_measure_mode`
+vs `BenchContext::with_request` (which wraps two of them). Different
+abstraction levels — `with_request` is a convenience for `MeasureRequest`
+callers; removing it would add boilerplate to every measured-command
+dispatch.
 
 #### `cmd.rs` layouts differ per project
-pbfhogg has `bench_read`/`bench_write`/… helpers plus a massive
-`verify` dispatch; elivagar has small per-subcommand functions;
-nidhogg mixes both. Settle on a consistent pattern.
+pbfhogg: top-level cmd dispatch + per-bench helpers + verify dispatch.
+elivagar: small per-subcommand fns. nidhogg: mixes both. Each reflects
+that project's feature shape; no clean unification.
 
-### Schema / test fragility
+### Speculative — wait for the trigger
+
+#### v12→v13 `DELETE FROM run_kv WHERE key IN (…)` list
+30 hardcoded meta key names. The TODO suggested generating from a
+code-level list, but historic migrations are frozen — changing code
+would not affect v12 databases, so the list has to stay literal.
+Future migrations can add their own DELETE statements as needed.
 
 #### Migration tests copy `V3_SCHEMA` verbatim
-If the real schema gets a new column before v3, we'd have to update
-the copy. Derive `V3_SCHEMA` from a schema constant or versioned
-snapshot.
+If a schema change ever lands that modifies v3-era columns (extremely
+unlikely — v3 is pre-brokkr-v1), the copy would need updating. Not
+worth the indirection until that happens.
 
 #### Cumulative migration tests force cascade updates
-Each new migration test forces prior migration tests to update their
-assertions — v11→v12, v12→v13, v13→v14, v14→v15 all required editing
-`migrate_v3_to_v4_renames_variants` + `migrate_v11_to_v12_splits_bench_commands`
-because those tests run the full chain. Consider per-migration tests
-that start at the precise prior version.
+Each new migration test runs the full chain from `V3_SCHEMA`, so adding
+a v16 forces edits to the `migrate_v3_to_v4` and `migrate_v11_to_v12`
+test assertions. Per-migration tests that start at the precise prior
+version would fix this but require redesigning `tests::test_db` to
+accept a starting schema version.
 
 
 ## Punted
