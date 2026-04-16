@@ -71,44 +71,24 @@ impl NidhoggCommand {
         }
     }
 
-    /// The result command label for the DB.
+    /// The result command label for the DB — the bare subcommand id. The
+    /// measurement mode (`bench`/`hotpath`/`alloc`) is recorded in the
+    /// `variant` column.
     pub fn result_command(&self) -> &'static str {
         match self {
-            Self::Api { .. } => "bench api",
-            Self::Ingest => "bench ingest",
-            Self::Tiles { .. } => "bench tiles",
-        }
-    }
-
-    /// The result variant label for the DB.
-    ///
-    /// Api uses the query name as the variant (each query is stored
-    /// separately). Ingest and Tiles have no variant.
-    pub fn result_variant(&self) -> Option<String> {
-        match self {
-            Self::Api { query: Some(q) } => Some(q.clone()),
-            Self::Api { query: None } => None,
-            Self::Ingest => None,
-            Self::Tiles { .. } => None,
+            Self::Api { .. } => "api",
+            Self::Ingest => "ingest",
+            Self::Tiles { .. } => "tiles",
         }
     }
 
     /// Build metadata key-value pairs for the result DB.
     ///
-    /// Tiles carries the uring flag. Api carries query and port info
-    /// (port is populated by the dispatch layer, not here — we only
-    /// include what's known from the enum fields).
+    /// Post-v13 this is reserved for runtime observations. Axis-like
+    /// fields (query name, uring flag) are already captured in the
+    /// `brokkr_args` column, so we don't mirror them here.
     pub fn metadata(&self) -> Vec<KvPair> {
-        match self {
-            Self::Api { query: Some(q) } => {
-                vec![KvPair::text("meta.query", q)]
-            }
-            Self::Api { query: None } => vec![],
-            Self::Ingest => vec![],
-            Self::Tiles { uring, .. } => {
-                vec![KvPair::text("meta.uring", uring.to_string())]
-            }
-        }
+        Vec::new()
     }
 
     /// Whether this command needs a binary build before execution.
@@ -220,62 +200,39 @@ mod tests {
     fn result_command_labels() {
         assert_eq!(
             NidhoggCommand::Api { query: None }.result_command(),
-            "bench api"
+            "api"
         );
-        assert_eq!(NidhoggCommand::Ingest.result_command(), "bench ingest");
+        assert_eq!(NidhoggCommand::Ingest.result_command(), "ingest");
         assert_eq!(
             NidhoggCommand::Tiles {
                 tiles_variant: None,
                 uring: false,
             }
             .result_command(),
-            "bench tiles"
+            "tiles"
         );
     }
 
     #[test]
-    fn api_variant_from_query() {
-        let cmd = NidhoggCommand::Api {
-            query: Some("bbox-small".into()),
-        };
-        assert_eq!(cmd.result_variant(), Some("bbox-small".into()));
-
-        let cmd_no_query = NidhoggCommand::Api { query: None };
-        assert_eq!(cmd_no_query.result_variant(), None);
-    }
-
-    #[test]
-    fn ingest_and_tiles_have_no_variant() {
-        assert_eq!(NidhoggCommand::Ingest.result_variant(), None);
-        assert_eq!(
+    fn metadata_is_empty_post_v13() {
+        // Axis-like fields (query, uring) live in brokkr_args/cli_args after
+        // v13; nidhogg's metadata() now returns no runtime observations.
+        assert!(
+            NidhoggCommand::Api {
+                query: Some("bbox-small".into())
+            }
+            .metadata()
+            .is_empty()
+        );
+        assert!(NidhoggCommand::Ingest.metadata().is_empty());
+        assert!(
             NidhoggCommand::Tiles {
-                tiles_variant: Some("elivagar".into()),
+                tiles_variant: None,
                 uring: true,
             }
-            .result_variant(),
-            None
+            .metadata()
+            .is_empty()
         );
-    }
-
-    #[test]
-    fn tiles_metadata_includes_uring() {
-        let cmd = NidhoggCommand::Tiles {
-            tiles_variant: None,
-            uring: true,
-        };
-        let meta = cmd.metadata();
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].key, "meta.uring");
-    }
-
-    #[test]
-    fn api_metadata_includes_query() {
-        let cmd = NidhoggCommand::Api {
-            query: Some("bbox-small".into()),
-        };
-        let meta = cmd.metadata();
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].key, "meta.query");
     }
 
     #[test]

@@ -306,14 +306,18 @@ fn run_osmpbf_baseline(
         let (_, elapsed_ms, kv) = variant_data.iter().find(|(v, ..)| v == variant).expect("variant exists in variant_data");
 
         let config = BenchConfig {
-            command: "bench baseline".into(),
-            variant: Some(variant.into()),
+            // `baseline-<tool>/<op>` — each external baseline is its own
+            // row, distinguished by command. No natural cli/brokkr args
+            // discriminator since baselines run different tools entirely.
+            command: format!("baseline-{variant}"),
+            variant: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
             cargo_profile: "release".into(),
             runs: 1,
             cli_args: None,
+            brokkr_args: None,
             metadata: vec![],
         };
 
@@ -361,14 +365,15 @@ fn run_osmium_baseline(
     ];
 
     let config = BenchConfig {
-        command: "bench baseline".into(),
-        variant: Some("osmium/cat-opl".into()),
+        command: "baseline-osmium-cat-opl".into(),
+        variant: None,
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &osmium_args)),
+        brokkr_args: None,
         metadata: vec![],
     };
 
@@ -392,14 +397,15 @@ fn run_osmium_baseline(
     ];
 
     let altw_config = BenchConfig {
-        command: "bench baseline".into(),
-        variant: Some("osmium/add-locations-to-ways".into()),
+        command: "baseline-osmium-add-locations-to-ways".into(),
+        variant: None,
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &altw_args)),
+        brokkr_args: None,
         metadata: vec![],
     };
 

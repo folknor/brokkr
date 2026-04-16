@@ -840,6 +840,7 @@ mod tests {
             peak_rss_mb: None,
             uuid: String::from("abcdef1234567890"),
             cli_args: String::new(),
+            brokkr_args: String::new(),
             project: String::from("test"),
             stop_marker: String::new(),
             kv: vec![],

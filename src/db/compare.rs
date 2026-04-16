@@ -142,6 +142,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
+            brokkr_args: None,
             project: String::from("pbfhogg"),
             stop_marker: None,
             kv: vec![],
@@ -200,6 +201,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 10,
             })
             .expect("query");

@@ -11,7 +11,6 @@
 use std::path::Path;
 
 use crate::build;
-use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness};
 use crate::measure::MeasureRequest;
@@ -73,7 +72,7 @@ pub fn run(
     alloc: bool,
     project_root: &Path,
     scratch_dir: &Path,
-    variant_base: &str,
+    command_label: &str,
 ) -> Result<(), DevError> {
     let binary_str = binary
         .to_str()
@@ -88,19 +87,19 @@ pub fn run(
         output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
-    let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("{variant_base}{variant_suffix}");
-
     let config = BenchConfig {
-        command: "hotpath".into(),
-        variant: Some(variant),
+        command: command_label.to_owned(),
+        // Harness carries the measurement mode (bench/hotpath/alloc) and
+        // the brokkr invocation — no need to set them here.
+        variant: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: "release".into(),
         runs,
         cli_args: Some(harness::format_cli_args(binary_str, &[])),
-        metadata: vec![KvPair::text("meta.alloc", alloc.to_string())],
+        brokkr_args: None,
+        metadata: vec![],
     };
 
     harness.run_internal(&config, |_i| {
@@ -142,12 +141,14 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         req.project,
         req.force,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_brokkr_args(req.brokkr_args.to_owned())
+    .with_measure_mode(req.variant_mode());
 
-    // The target name is the variant label (and also the cargo example name,
-    // with "_bench" appended). The default "hotpath" example maps to "render"
-    // for backwards compatibility.
-    let variant_base = if target == "hotpath" {
+    // The target name is the command label for the DB (and also the cargo
+    // example name, with "_bench" appended). The default "hotpath" target
+    // maps to "render" for backwards compatibility with historical rows.
+    let command_label = if target == "hotpath" {
         "render".to_owned()
     } else {
         target.to_owned()
@@ -160,6 +161,6 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         req.is_alloc(),
         effective_root,
         &paths.scratch_dir,
-        &variant_base,
+        &command_label,
     )
 }

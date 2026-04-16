@@ -65,13 +65,6 @@ pub enum DiffFormat {
 }
 
 impl DiffFormat {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Osc => "osc",
-        }
-    }
-
     pub fn parse(s: &str) -> Result<Self, DevError> {
         match s {
             "default" => Ok(Self::Default),
@@ -84,14 +77,6 @@ impl DiffFormat {
 }
 
 impl ExtractStrategy {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Simple => "simple",
-            Self::Complete => "complete",
-            Self::Smart => "smart",
-        }
-    }
-
     pub fn all() -> &'static [ExtractStrategy] {
         &[Self::Simple, Self::Complete, Self::Smart]
     }
@@ -300,86 +285,35 @@ impl PbfhoggCommand {
         }
     }
 
-    /// The result command label for the DB (e.g. `"bench add-locations-to-ways"`).
-    ///
-    /// Every command gets its own distinct label so the `command` column in
-    /// `brokkr results` carries the real command name. Historically everything
-    /// collapsed to `"bench commands"` and the real name was stuffed into the
-    /// `variant` column — migration v11→v12 splits those old rows apart.
+    /// The result command label for the DB — just the subcommand id
+    /// (`"add-locations-to-ways"`, `"cat"`, `"diff-snapshots"`, ...). The
+    /// measurement mode (`bench`/`hotpath`/`alloc`) lives in the
+    /// `variant` column; axes (direct-io, compression, snapshot, …) live
+    /// in `cli_args` and `brokkr_args`.
     pub fn result_command(&self) -> String {
-        format!("bench {}", self.id())
-    }
-
-    /// The result variant label for the DB.
-    ///
-    /// Tool-CLI commands return `None` — the command name now lives in the
-    /// `command` column, not the variant. The dispatch layer appends any
-    /// real variance axes (io flags, compression, range, snapshot, ...) as
-    /// suffixes via `extra_variant_suffix`.
-    ///
-    /// `Extract` keeps the strategy as its variant (simple/complete/smart —
-    /// a real axis). `MultiExtract` keeps the region count.
-    pub fn result_variant(&self) -> Option<String> {
-        match self {
-            Self::Extract { strategy } => Some(strategy.name().to_owned()),
-            Self::MultiExtract { regions } => Some(format!("multi-extract-{regions}")),
-            _ => None,
-        }
+        self.id().to_owned()
     }
 
     /// Build metadata key-value pairs for the result DB.
+    ///
+    /// Post-v13, this holds only *runtime observations* — things the
+    /// harness learned that cli_args/brokkr_args can't tell you (e.g. the
+    /// Diff merged-PBF cache state observed at dispatch time, the
+    /// resolved filename/size for a snapshot key, …). Axis-like fields
+    /// (index_type, snapshot key, strategy, bbox, …) are passed on the
+    /// brokkr command line and recorded in the brokkr_args/cli_args
+    /// columns, so they don't need mirroring here.
     pub fn metadata(&self, ctx: &CommandContext) -> Vec<crate::db::KvPair> {
         use crate::db::KvPair;
 
-        // Snapshot metadata: emit `meta.snapshot = <key>` for any OSC-consuming
-        // command run with `--snapshot <key>` (when key != "base"). Lets
-        // `brokkr results --meta snapshot=<key>` find every command that
-        // operated on a particular snapshot.
-        let snapshot_meta: Vec<KvPair> = ctx
-            .param("snapshot")
-            .filter(|s| *s != "base")
-            .map(|s| vec![KvPair::text("meta.snapshot", s)])
-            .unwrap_or_default();
-
         match self {
-            Self::AddLocationsToWays => {
-                let mut meta = Vec::new();
-                if let Some(it) = ctx.param("index_type") {
-                    meta.push(KvPair::text("meta.index_type", it));
-                }
-                if let Some(s) = ctx.param("start_stage") {
-                    meta.push(KvPair::text("meta.start_stage", s));
-                }
-                if ctx.param("keep_scratch").is_some() {
-                    meta.push(KvPair::text("meta.keep_scratch", "true"));
-                }
-                meta
-            }
-            Self::Extract { strategy } => {
-                let mut meta = vec![KvPair::text("meta.strategy", strategy.name())];
-                if let Some(ref bbox) = ctx.bbox {
-                    meta.push(KvPair::text("meta.bbox", bbox.as_str()));
-                }
-                meta
-            }
-            Self::MultiExtract { regions } => {
-                let mut meta = vec![KvPair::text("meta.regions", regions.to_string())];
-                if let Some(ref bbox) = ctx.bbox {
-                    meta.push(KvPair::text("meta.bbox", bbox.as_str()));
-                }
-                meta
-            }
-            Self::ExtractSimple | Self::ExtractComplete | Self::ExtractSmart => {
-                // The tool CLI extract commands also carry bbox in metadata
-                // when used through the extract benchmark path.
-                vec![]
-            }
             Self::Diff | Self::DiffOsc => {
-                // Record merged-PBF cache state so `brokkr results <uuid>`
-                // can distinguish runs that paid the apply-changes setup cost
-                // from runs that reused a cached file. Also emit snapshot
-                // metadata if --snapshot was passed.
-                let mut meta = snapshot_meta;
+                // Merged-PBF cache state is observed at dispatch time
+                // (the caller sets the params based on whether the cached
+                // merged file was reused). Lets `brokkr results <uuid>`
+                // distinguish runs that paid the setup cost from runs that
+                // reused a cached file.
+                let mut meta = Vec::new();
                 if let Some(state) = ctx.param("merged_cache_state") {
                     meta.push(KvPair::text("meta.merged_cache", state));
                 }
@@ -388,26 +322,13 @@ impl PbfhoggCommand {
                 }
                 meta
             }
-            Self::TagsFilterOsc
-            | Self::MergeChanges
-            | Self::ApplyChanges => snapshot_meta,
-            Self::DiffSnapshots { format } => {
-                // Format and snapshot identities live in metadata so the
-                // variant column stays format-agnostic. Query osc-only runs
-                // via `brokkr results --variant diff-snapshots --meta format=osc`.
-                //
-                // The from-side file/size are already on the result row as
-                // input_file/input_mb (set from cmd_ctx.pbf_path). Add to-side
-                // file + size as metadata so result queries can identify or
-                // filter by the B-side input — without these, half the
-                // workload shape was invisible to `brokkr results`.
-                let mut meta = vec![KvPair::text("meta.format", format.name())];
-                if let Some(from) = ctx.param("from_snapshot") {
-                    meta.push(KvPair::text("meta.from_snapshot", from));
-                }
-                if let Some(to) = ctx.param("to_snapshot") {
-                    meta.push(KvPair::text("meta.to_snapshot", to));
-                }
+            Self::DiffSnapshots { .. } => {
+                // The --to snapshot's resolved filename and size are
+                // observations — the user passed a key like `20260411`,
+                // the dispatch layer resolved it to an actual file via
+                // brokkr.toml. Record the resolved info so queries can
+                // identify which B-side file was actually consumed.
+                let mut meta = Vec::new();
                 if let Some(file) = ctx.param("to_snapshot_file") {
                     meta.push(KvPair::text("meta.to_snapshot_file", file));
                 }
@@ -1189,16 +1110,17 @@ mod tests {
     }
 
     #[test]
-    fn altw_metadata_with_start_stage() {
+    fn altw_metadata_has_no_axis_mirrors() {
+        // After v13 the index_type / start_stage / keep_scratch axes
+        // live in cli_args and brokkr_args (grep-able from there); the
+        // metadata builder is reserved for runtime observations, so it
+        // no longer mirrors user-supplied flags.
         let mut ctx = test_ctx();
         ctx.params.insert("index_type".into(), "external".into());
         ctx.params.insert("start_stage".into(), "3".into());
         ctx.params.insert("keep_scratch".into(), "true".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        let meta = cmd.metadata(&ctx);
-        assert!(meta.iter().any(|kv| kv.key == "meta.index_type"));
-        assert!(meta.iter().any(|kv| kv.key == "meta.start_stage"));
-        assert!(meta.iter().any(|kv| kv.key == "meta.keep_scratch"));
+        assert!(cmd.metadata(&ctx).is_empty());
     }
 
     #[test]

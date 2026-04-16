@@ -134,14 +134,20 @@ pub fn run(
         let result = results.iter().find(|r| r.mode == mode).expect("mode exists in results");
 
         let config = BenchConfig {
-            command: "bench planetiler".into(),
-            variant: Some(mode.into()),
+            // Planetiler emits multiple mode results per Java subprocess
+            // run (elements/blobs/features/…). Neither cli_args nor
+            // brokkr_args distinguishes them, so the mode goes in the
+            // command column as `planetiler-<mode>`. Query with
+            // `--command planetiler` (substring) for the whole suite.
+            command: format!("planetiler-{mode}"),
+            variant: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
             cargo_profile: "java".into(),
             runs: 1,
             cli_args: None,
+            brokkr_args: None,
             metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
         };
 

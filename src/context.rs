@@ -74,6 +74,18 @@ impl HarnessContext {
             harness::BenchHarness::new(&paths, effective, db_root, project, lock_command, force, wait, stop_marker)?;
         Ok(Self { paths, harness })
     }
+
+    /// Attach the brokkr invocation string and measurement mode from the
+    /// given `MeasureRequest` to the harness. Every row built by this
+    /// harness will carry them in the `brokkr_args` and `variant`
+    /// columns, so individual bench writers don't have to plumb them.
+    pub(crate) fn with_request(mut self, req: &crate::measure::MeasureRequest) -> Self {
+        self.harness = self
+            .harness
+            .with_brokkr_args(req.brokkr_args.to_owned())
+            .with_measure_mode(req.variant_mode());
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +162,18 @@ impl BenchContext {
             harness,
             binary,
         })
+    }
+
+    /// Attach the brokkr invocation string and measurement mode from the
+    /// given `MeasureRequest` to the harness. Every row built by this
+    /// harness will carry them in the `brokkr_args` and `variant`
+    /// columns, so individual bench writers don't have to plumb them.
+    pub(crate) fn with_request(mut self, req: &crate::measure::MeasureRequest) -> Self {
+        self.harness = self
+            .harness
+            .with_brokkr_args(req.brokkr_args.to_owned())
+            .with_measure_mode(req.variant_mode());
+        self
     }
 }
 

@@ -35,7 +35,8 @@ pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), De
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
@@ -72,7 +73,8 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, true)?;
@@ -131,7 +133,8 @@ pub(crate) fn bench_merge(
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let osc_path = match osc_seq {
@@ -170,7 +173,8 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let effective = req.build_root.unwrap_or(req.project_root);

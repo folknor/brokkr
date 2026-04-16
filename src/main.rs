@@ -45,6 +45,7 @@ use resolve::results_db_path;
 
 /// Shared setup for all measured commands: resolve mode/features, set quiet,
 /// handle worktree, construct `MeasureRequest`, call the provided closure.
+#[allow(clippy::too_many_arguments)]
 fn run_measured<F>(
     mode: &cli::ModeArgs,
     dev_config: &config::DevConfig,
@@ -52,6 +53,7 @@ fn run_measured<F>(
     project_root: &std::path::PathBuf,
     dataset: &str,
     variant: &str,
+    brokkr_args: &str,
     f: F,
 ) -> Result<(), DevError>
 where
@@ -71,6 +73,7 @@ where
             features: &features,
             force: mode.force,
             mode: mm,
+            brokkr_args,
             no_mem_check: mode.no_mem_check,
             wait: mode.wait,
             dry_run: mode.dry_run,
@@ -78,6 +81,21 @@ where
         };
         f(&req)
     })
+}
+
+/// Build the canonical brokkr invocation string from `std::env::args()`.
+///
+/// Shell-quotes any argv element containing whitespace or special characters
+/// so the joined string is unambiguous. Stored on each result row in the
+/// `brokkr_args` column, parallel to `cli_args` (the subprocess invocation).
+fn capture_brokkr_args() -> String {
+    let argv: Vec<String> = std::env::args().collect();
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    if let Some((program, args)) = refs.split_first() {
+        harness::format_cli_args(program, args)
+    } else {
+        String::new()
+    }
 }
 
 fn main() {
@@ -132,6 +150,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
     }
 
     let (project, dev_config, project_root) = project::detect()?;
+    let brokkr_args = capture_brokkr_args();
 
     // Pbfhogg measured commands: 28 commands → single dispatch path.
     if let Some((mode, pbf, pbf_cmd, osc, mut params)) = cli.command.as_pbfhogg() {
@@ -151,6 +170,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
+            &brokkr_args,
             |req| dispatch::run_pbfhogg_command_with_params(req, &pbf_cmd, osc, &params),
         );
     }
@@ -225,6 +245,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 &variant,
+                &brokkr_args,
                 |req| {
                     dispatch::run_pbfhogg_command_with_params(
                         req,
@@ -254,6 +275,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 &variant,
+                &brokkr_args,
                 |req| {
                     let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots {
                         format: format_enum,
@@ -279,6 +301,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &pbf.dataset,
                 &pbf.variant,
+                &brokkr_args,
                 |req| {
                     if strategy == "all" {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
@@ -302,6 +325,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
+            &brokkr_args,
             |req| pbfhogg::cmd::bench_read(req, &modes),
         ),
         Command::Write {
@@ -315,6 +339,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
+            &brokkr_args,
             |req| pbfhogg::cmd::bench_write(req, &compressions),
         ),
         Command::MergeBench {
@@ -330,6 +355,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &pbf.dataset,
             &pbf.variant,
+            &brokkr_args,
             |req| {
                 pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions)
             },
@@ -380,6 +406,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 &variant,
+                &brokkr_args,
                 |req| dispatch::run_elivagar_command(req, &cmd),
             )
         }
@@ -392,6 +419,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 "denmark",
                 "raw",
+                &brokkr_args,
                 |req| dispatch::run_elivagar_command(req, &cmd),
             )
         }
@@ -404,6 +432,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 "denmark",
                 "raw",
+                &brokkr_args,
                 |req| dispatch::run_elivagar_command(req, &cmd),
             )
         }
@@ -420,6 +449,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 &variant,
+                &brokkr_args,
                 |req| dispatch::run_elivagar_command(req, &cmd),
             )
         }
@@ -436,6 +466,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 &variant,
+                &brokkr_args,
                 |req| dispatch::run_elivagar_command(req, &cmd),
             )
         }
@@ -454,6 +485,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 "raw",
+                &brokkr_args,
                 |req| dispatch::run_nidhogg_command(req, &cmd),
             )
         }
@@ -470,6 +502,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 &variant,
+                &brokkr_args,
                 |req| dispatch::run_nidhogg_command(req, &cmd),
             )
         }
@@ -490,6 +523,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &dataset,
                 "raw",
+                &brokkr_args,
                 |req| dispatch::run_nidhogg_command(req, &cmd),
             )
         }
@@ -507,6 +541,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &dataset,
             &variant,
+            &brokkr_args,
             |req| {
                 if req.dry_run {
                     return Err(DevError::Config(
@@ -535,6 +570,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &dataset,
             &variant,
+            &brokkr_args,
             |req| {
                 if req.dry_run {
                     return Err(DevError::Config(
@@ -599,6 +635,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
             dataset,
             meta,
+            cli_args,
+            brokkr_args,
             limit,
             top,
             timeline,
@@ -627,6 +665,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 variant,
                 dataset,
                 meta,
+                cli_args,
+                brokkr_args,
                 limit,
                 top,
                 timeline,
@@ -850,6 +890,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 features: &features,
                 force,
                 mode: mm,
+                brokkr_args: &brokkr_args,
                 no_mem_check,
                 wait,
                 // Sluggrs hotpath uses Command::Hotpath, not ModeArgs — no
@@ -1537,12 +1578,8 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         Some(prefix.clone())
     } else if q.timeline || q.markers {
         let filter = db::QueryFilter {
-            commit: None,
-            command: None,
-            variant: None,
-            dataset: None,
-            meta: vec![],
             limit: 1,
+            ..Default::default()
         };
         let rows = results_db.query(&filter)?;
         if let Some(row) = rows.first() {
@@ -1749,12 +1786,8 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
 
         if no_filters {
             let filter = db::QueryFilter {
-                commit: None,
-                command: None,
-                variant: None,
-                dataset: None,
-                meta: vec![],
                 limit: 1,
+                ..Default::default()
             };
             let rows = results_db.query(&filter)?;
             if rows.is_empty() {
@@ -1789,6 +1822,8 @@ fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
                 variant: q.variant.clone(),
                 dataset: q.dataset.clone(),
                 meta: meta_pairs,
+                cli_args: q.cli_args.clone(),
+                brokkr_args: q.brokkr_args.clone(),
                 limit: q.limit,
             };
             let rows = results_db.query(&filter)?;
@@ -2813,7 +2848,8 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let alloc = req.is_alloc();
     let label = harness::hotpath_feature(alloc);
@@ -2823,21 +2859,19 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
-    let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("default{variant_suffix}");
-
     let binary_str = ctx.binary.display().to_string();
 
     let config = harness::BenchConfig {
-        command: "hotpath".into(),
-        variant: Some(variant),
+        command: "default".into(),
+        variant: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: "release".into(),
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
-        metadata: vec![db::KvPair::text("meta.alloc", alloc.to_string())],
+        brokkr_args: None,
+        metadata: vec![],
     };
 
     ctx.harness.run_internal(&config, |_i| {

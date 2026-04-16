@@ -17,7 +17,8 @@ pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_planetiler::run(
@@ -41,7 +42,8 @@ pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_tilemaker::run(
@@ -65,7 +67,8 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     super::bench_all::run(

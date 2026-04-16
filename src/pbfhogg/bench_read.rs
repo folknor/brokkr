@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 
@@ -75,8 +74,11 @@ pub fn run(
         let bench_args: Vec<&str> = vec!["bench-read", pbf_str, "--mode", mode_name];
 
         let config = BenchConfig {
-            command: "bench read".into(),
-            variant: Some(mode_name.into()),
+            command: "read".into(),
+            // Variant (measurement mode) and brokkr_args are attached by
+            // the harness via `with_request`. The mode discriminator
+            // (sequential/parallel/…) is already in cli_args via `--mode`.
+            variant: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -86,7 +88,8 @@ pub fn run(
                 &binary.display().to_string(),
                 &bench_args,
             )),
-            metadata: vec![KvPair::text("meta.mode", mode_name)],
+            brokkr_args: None,
+            metadata: vec![],
         };
 
         harness.run_external_with_kv(&config, binary, &bench_args, project_root).map(|_| ())

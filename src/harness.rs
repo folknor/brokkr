@@ -22,7 +22,14 @@ pub struct BenchConfig {
     pub cargo_features: Option<String>,
     pub cargo_profile: String,
     pub runs: usize,
+    /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
+    /// dispatch from the argv it hands to the tool binary.
     pub cli_args: Option<String>,
+    /// Literal `brokkr <...>` invocation (std::env::args joined). Populated
+    /// by main.rs and threaded through `MeasureRequest`. Stored parallel to
+    /// `cli_args` so queries can grep either what the user asked brokkr to
+    /// do or what brokkr asked the tool to do.
+    pub brokkr_args: Option<String>,
     pub metadata: Vec<KvPair>,
 }
 
@@ -49,6 +56,17 @@ pub struct BenchHarness {
     cargo_features: Option<String>,
     project: crate::project::Project,
     stop_marker: Option<String>,
+    /// Literal `brokkr <...>` invocation (std::env::args joined). Set once
+    /// per harness via `with_brokkr_args`; every row built by this harness
+    /// inherits it via `build_row`. Lets individual bench writers stay
+    /// agnostic of the brokkr-level invocation.
+    brokkr_args: Option<String>,
+    /// Measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`). Set
+    /// once per harness via `with_measure_mode`. Overrides
+    /// `BenchConfig.variant` when set — individual bench writers only
+    /// need to set `variant` when they mean to override (they almost
+    /// never do post-v13).
+    measure_mode: Option<String>,
 }
 
 impl BenchHarness {
@@ -125,6 +143,8 @@ impl BenchHarness {
             cargo_features: None,
             project,
             stop_marker,
+            brokkr_args: None,
+            measure_mode: None,
         })
     }
 
@@ -135,6 +155,22 @@ impl BenchHarness {
     /// values override the harness default when set.
     pub fn with_cargo_features(mut self, features: Option<String>) -> Self {
         self.cargo_features = features;
+        self
+    }
+
+    /// Set the literal `brokkr <...>` invocation string for this harness.
+    /// All rows recorded by this harness will carry it in the `brokkr_args`
+    /// column unless the individual `BenchConfig` overrides it explicitly.
+    pub fn with_brokkr_args(mut self, args: String) -> Self {
+        self.brokkr_args = Some(args);
+        self
+    }
+
+    /// Set the measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`).
+    /// This overrides whatever `BenchConfig.variant` is set to, so
+    /// individual writers don't have to supply it.
+    pub fn with_measure_mode(mut self, mode: Option<&str>) -> Self {
+        self.measure_mode = mode.map(str::to_owned);
         self
     }
 
@@ -538,12 +574,24 @@ impl BenchHarness {
             kv.push(pair.clone());
         }
 
+        // Harness-level values take precedence. The individual writers
+        // don't have to know or care about the measurement mode or the
+        // brokkr invocation string — the harness attaches them.
+        let variant = self
+            .measure_mode
+            .clone()
+            .or_else(|| config.variant.clone());
+        let brokkr_args = self
+            .brokkr_args
+            .clone()
+            .or_else(|| config.brokkr_args.clone());
+
         RunRow {
             hostname: self.env.hostname.clone(),
             commit: self.git.commit.clone(),
             subject: self.git.subject.clone(),
             command: config.command.clone(),
-            variant: config.variant.clone(),
+            variant,
             input_file: config.input_file.clone(),
             input_mb: config.input_mb,
             peak_rss_mb,
@@ -558,6 +606,7 @@ impl BenchHarness {
             avail_memory_mb: i64::try_from(self.env.memory_available_mb).ok(),
             storage_notes: self.storage_notes.clone(),
             cli_args: config.cli_args.clone(),
+            brokkr_args,
             project: self.project.name().to_owned(),
             stop_marker: self.stop_marker.clone(),
             kv,
@@ -736,11 +785,6 @@ fn maybe_quote(s: &str) -> String {
 /// Return the cargo feature name for hotpath mode: `"hotpath"` or `"hotpath-alloc"`.
 pub fn hotpath_feature(alloc: bool) -> &'static str {
     if alloc { "hotpath-alloc" } else { "hotpath" }
-}
-
-/// Return the variant suffix for hotpath mode: `"/alloc"` or `""`.
-pub fn hotpath_variant_suffix(alloc: bool) -> &'static str {
-    if alloc { "/alloc" } else { "" }
 }
 
 /// Convert a `Duration` to milliseconds as `i64`.
@@ -1439,7 +1483,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // hotpath_feature / hotpath_variant_suffix
+    // hotpath_feature
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1450,30 +1494,6 @@ mod tests {
     #[test]
     fn hotpath_feature_with_alloc() {
         assert_eq!(hotpath_feature(true), "hotpath-alloc");
-    }
-
-    #[test]
-    fn hotpath_variant_suffix_without_alloc() {
-        assert_eq!(hotpath_variant_suffix(false), "");
-    }
-
-    #[test]
-    fn hotpath_variant_suffix_with_alloc() {
-        assert_eq!(hotpath_variant_suffix(true), "/alloc");
-    }
-
-    #[test]
-    fn hotpath_feature_and_suffix_are_consistent() {
-        // The feature name should contain "alloc" iff the suffix does
-        for alloc in [true, false] {
-            let feature = hotpath_feature(alloc);
-            let suffix = hotpath_variant_suffix(alloc);
-            assert_eq!(
-                feature.contains("alloc"),
-                suffix.contains("alloc"),
-                "feature={feature} and suffix={suffix} should agree on alloc presence"
-            );
-        }
     }
 
     // -------------------------------------------------------------------

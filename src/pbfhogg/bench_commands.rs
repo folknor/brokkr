@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -423,7 +422,10 @@ pub fn run(
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
-            command: format!("bench {name}"),
+            command: name.into(),
+            // Index type (for add-locations-to-ways) is in cli_args
+            // via --index-type. Measurement mode and brokkr_args come
+            // from the harness.
             variant: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
@@ -434,10 +436,8 @@ pub fn run(
                 &binary.display().to_string(),
                 &args_refs,
             )),
-            metadata: match index_type {
-                Some(it) => vec![KvPair::text("meta.index_type", it)],
-                None => vec![],
-            },
+            brokkr_args: None,
+            metadata: vec![],
         };
 
         harness.run_external(&config, binary, &args_refs, project_root)?;

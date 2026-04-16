@@ -34,7 +34,12 @@ CREATE TABLE IF NOT EXISTS runs (
     cli_args        TEXT,
     metadata        TEXT,
     project         TEXT NOT NULL DEFAULT 'pbfhogg',
-    stop_marker     TEXT
+    stop_marker     TEXT,
+    -- Literal brokkr invocation (std::env::args joined). Parallel to
+    -- cli_args which captures the subprocess invocation of the tool.
+    -- Both are stored so queries can grep either the brokkr-level ask
+    -- or the tool-level subprocess invocation.
+    brokkr_args     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs([commit]);
 CREATE INDEX IF NOT EXISTS idx_runs_command ON runs(command);
@@ -101,19 +106,19 @@ pub(super) const SELECT_COLS: &str = "\
 id, timestamp, hostname, [commit], subject, command, variant, \
 input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
 kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
-cli_args, project, stop_marker";
+cli_args, project, stop_marker, brokkr_args";
 
 pub(super) const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, variant, \
     input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
     kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
-    cli_args, project, stop_marker\
+    cli_args, project, stop_marker, brokkr_args\
 ) VALUES (\
     datetime('now'), ?1, ?2, ?3, ?4, ?5, \
     ?6, ?7, ?8, ?9, ?10, ?11, \
     ?12, ?13, ?14, ?15, ?16, \
-    ?17, ?18, ?19\
+    ?17, ?18, ?19, ?20\
 )";
 
 // ---------------------------------------------------------------------------

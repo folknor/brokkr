@@ -45,18 +45,19 @@ pub fn run(
         run_curl_timed(&url, body)?;
 
         let config = BenchConfig {
-            command: "bench api".into(),
-            variant: Some(name.into()),
+            // Each query variant shares the same brokkr/cli invocation
+            // (curl-style HTTP). Different query rows are distinguished
+            // by the command column: `api-<query>`.
+            command: format!("api-{name}"),
+            variant: None,
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,
             cargo_profile: "release".into(),
             runs,
             cli_args: None,
-            metadata: vec![
-                KvPair::int("meta.port", port as i64),
-                KvPair::text("meta.query", name),
-            ],
+            brokkr_args: None,
+            metadata: vec![KvPair::int("meta.port", port as i64)],
         };
 
         let url_clone = url.clone();

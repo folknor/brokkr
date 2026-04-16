@@ -82,8 +82,8 @@ pub fn run(
     let args_refs: Vec<&str> = args_owned.iter().map(String::as_str).collect();
 
     let config = BenchConfig {
-        command: "bench tilemaker".into(),
-        variant: Some("shortbread".into()),
+        command: "tilemaker".into(),
+        variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -93,6 +93,7 @@ pub fn run(
             &tm.tilemaker.display().to_string(),
             &args_refs,
         )),
+        brokkr_args: None,
         metadata: vec![],
     };
 

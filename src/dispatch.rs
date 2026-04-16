@@ -28,74 +28,17 @@ use crate::resolve::{
 // pbfhogg dispatch
 // ---------------------------------------------------------------------------
 
-/// Compute a per-command result variant suffix from extra_params (e.g.
-/// `+range-4914-4920` for `merge-changes --osc-range`). Returns an empty
-/// string for commands without such a suffix. Multiple suffixes (e.g. range
-/// + snapshot) concatenate.
-fn extra_variant_suffix(
-    command: &PbfhoggCommand,
-    extra_params: &HashMap<String, String>,
-) -> String {
-    let mut suffix = String::new();
-
-    if matches!(command, PbfhoggCommand::MergeChanges)
-        && let Some(range) = extra_params.get("osc_range")
-        && let Some((lo, hi)) = range.split_once("..")
-    {
-        suffix.push_str(&format!("+range-{lo}-{hi}"));
-    }
-
-    // Snapshot suffix: appended to OSC-consuming commands when --snapshot is
-    // set to a non-Base value. Lets `brokkr results --variant snap-20260411`
-    // surface every command run against that snapshot.
-    if let Some(snap) = extra_params.get("snapshot")
-        && snap != "base"
-    {
-        suffix.push_str(&format!("+snap-{snap}"));
-    }
-
-    if matches!(command, PbfhoggCommand::DiffSnapshots { .. })
-        && let Some(from) = extra_params.get("from_snapshot")
-        && let Some(to) = extra_params.get("to_snapshot")
-    {
-        // Emits `+{from}-to-{to}` so the variant column reads e.g.
-        // `base-to-20260411`. Format lives in metadata; substring queries
-        // on `--command diff-snapshots` catch all snapshot diffs.
-        suffix.push_str(&format!("+{from}-to-{to}"));
-    }
-
-    // Start-stage suffix: partial runs get `+from-stage4` etc. so they don't
-    // mix with full-pipeline results.
-    if matches!(command, PbfhoggCommand::AddLocationsToWays) {
-        if let Some(s) = extra_params.get("start_stage") {
-            suffix.push_str(&format!("+from-stage{s}"));
-        }
-        if extra_params.contains_key("keep_scratch") {
-            suffix.push_str("+keep-scratch");
-        }
-    }
-
-    // Compression suffix: `--compression zstd:1` → `+zstd1`, `none` → `+nocompress`.
-    // Default (no flag) stays unsuffixed so historical baselines remain comparable.
-    if let Some(c) = extra_params.get("compression") {
-        let tag = match c.as_str() {
-            "none" => "nocompress".to_string(),
-            other => other.replace(':', ""),
-        };
-        suffix.push_str(&format!("+{tag}"));
-    }
-
-    suffix
-}
-
 /// Extract I/O mode flags from extra_params, run preflight checks, and return:
 /// - extra cargo features to add to the build
 /// - extra CLI args to append to the binary invocation
-/// - variant suffix for the result DB
+///
+/// The chosen I/O flags end up in the subprocess arg string (cli_args) via
+/// the caller, so no separate variant-suffix is needed — the result DB's
+/// variant column only carries the measurement mode after v13.
 fn resolve_io_flags(
     command: &PbfhoggCommand,
     extra_params: &HashMap<String, String>,
-) -> Result<(Vec<&'static str>, Vec<&'static str>, String), DevError> {
+) -> Result<(Vec<&'static str>, Vec<&'static str>), DevError> {
     let direct_io = extra_params.get("direct_io").is_some();
     let io_uring = extra_params.get("io_uring").is_some();
 
@@ -112,26 +55,17 @@ fn resolve_io_flags(
 
     let mut features = Vec::new();
     let mut args = Vec::new();
-    let mut suffix_parts = Vec::new();
 
     if direct_io {
         features.push("linux-direct-io");
         args.push("--direct-io");
-        suffix_parts.push("direct-io");
     }
     if io_uring {
         features.push("linux-io-uring");
         args.push("--io-uring");
-        suffix_parts.push("uring");
     }
 
-    let suffix = if suffix_parts.is_empty() {
-        String::new()
-    } else {
-        format!("+{}", suffix_parts.join("+"))
-    };
-
-    Ok((features, args, suffix))
+    Ok((features, args))
 }
 
 /// Run a single pbfhogg command with the specified measurement mode.
@@ -189,7 +123,7 @@ fn run_pbfhogg_dry_run(
 ) -> Result<(), DevError> {
     // Validate I/O flag compatibility (e.g. --io-uring on a command that
     // doesn't support it) and run io_uring preflight if requested.
-    let (_io_features, io_args, _io_suffix) = resolve_io_flags(command, extra_params)?;
+    let (_io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
     // Resolve paths without building. bootstrap() reads cargo metadata for
     // target_dir — cheap, doesn't trigger a compile.
@@ -257,7 +191,7 @@ fn run_pbfhogg_run(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    let (io_features, io_args, _) = resolve_io_flags(command, extra_params)?;
+    let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
@@ -275,7 +209,8 @@ fn run_pbfhogg_run(
         true,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
@@ -313,7 +248,7 @@ fn run_pbfhogg_wallclock(
     osc_seq: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> Result<(), DevError> {
-    let (io_features, io_args, io_suffix) = resolve_io_flags(command, extra_params)?;
+    let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
@@ -330,7 +265,8 @@ fn run_pbfhogg_wallclock(
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
@@ -349,23 +285,9 @@ fn run_pbfhogg_wallclock(
     let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
     let basename = cmd_ctx.pbf_basename();
 
-    // Build the variant column from real variance axes: I/O mode suffix
-    // (`+direct-io`, `+uring`) and any extra suffix (`+nocompress`,
-    // `+range-4914-4920`, ...). The command name lives in the `command`
-    // column, not here.
-    let extra_suffix = extra_variant_suffix(command, extra_params);
-    let variant = match command.result_variant() {
-        Some(v) => Some(format!("{v}{io_suffix}{extra_suffix}")),
-        None => {
-            let combined = format!("{io_suffix}{extra_suffix}");
-            let trimmed = combined.trim_start_matches('+');
-            (!trimmed.is_empty()).then(|| trimmed.to_owned())
-        }
-    };
-
     let config = BenchConfig {
-        command: command.result_command().into(),
-        variant,
+        command: command.result_command(),
+        variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -375,6 +297,7 @@ fn run_pbfhogg_wallclock(
             &ctx.binary.display().to_string(),
             &arg_refs,
         )),
+        brokkr_args: None,
         metadata: command.metadata(&cmd_ctx),
     };
 
@@ -414,7 +337,7 @@ fn run_pbfhogg_hotpath(
 
     let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
     let feature = harness::hotpath_feature(alloc);
-    let (io_features, io_args, io_suffix) = resolve_io_flags(command, extra_params)?;
+    let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
     // Build features: hotpath + user features + I/O features.
     let mut all_features: Vec<&str> = vec![feature];
@@ -437,7 +360,8 @@ fn run_pbfhogg_hotpath(
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
@@ -473,29 +397,18 @@ fn run_pbfhogg_hotpath(
         output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
     }
 
-    // Command column carries the identity (`hotpath add-locations-to-ways`);
-    // variant column holds only real variance axes. `variant_suffix` starts
-    // with `/` (alloc marker, e.g. `/alloc`), io/extra suffixes start with
-    // `+`. Drop the leading separator so the variant reads cleanly.
-    let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let extra_suffix = extra_variant_suffix(command, extra_params);
-    let axes = format!("{variant_suffix}{io_suffix}{extra_suffix}");
-    let axes_clean = axes.trim_start_matches(|c: char| c == '/' || c == '+');
-    let variant = (!axes_clean.is_empty()).then(|| axes_clean.to_owned());
-
     let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
 
-    // Compose metadata from the command's metadata builder + hotpath-specific
-    // fields. This keeps merged_cache, snapshot, and any future per-command
-    // metadata consistent across measurement modes (wall-clock vs hotpath/alloc).
-    let mut metadata = command.metadata(&cmd_ctx);
-    metadata.push(KvPair::text("meta.alloc", alloc.to_string()));
-    metadata.push(KvPair::text("meta.test", command.id()));
+    // Metadata is reserved for runtime observations post-v13 (cache state,
+    // detected features, resolved file paths). The alloc mode and the
+    // command id that used to be dumped here are now recorded in the
+    // variant and command columns respectively.
+    let metadata = command.metadata(&cmd_ctx);
 
     let config = BenchConfig {
-        command: format!("hotpath {}", command.id()),
-        variant,
+        command: command.result_command(),
+        variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -505,6 +418,7 @@ fn run_pbfhogg_hotpath(
             &ctx.binary.display().to_string(),
             &subprocess_args,
         )),
+        brokkr_args: None,
         metadata,
     };
 
@@ -948,7 +862,8 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 true,
                 req.wait,
                 req.stop_marker.map(str::to_owned),
-            )?;
+            )?
+            .with_request(req);
 
             let pbf_str = if command.needs_pbf() {
                 let (p, _) =
@@ -1056,7 +971,8 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let (pbf_path, file_mb) = if command.needs_pbf() {
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?
@@ -1084,7 +1000,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
 
     let mut bench_config = BenchConfig {
         command: command.result_command().into(),
-        variant: command.result_variant(),
+        variant: None,
         input_file: if command.needs_pbf() {
             Some(basename)
         } else {
@@ -1102,6 +1018,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
             &ctx.binary.display().to_string(),
             &arg_refs,
         )),
+        brokkr_args: None,
         metadata: command.metadata(),
     };
 
@@ -1142,7 +1059,8 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let example = command.example().ok_or_else(|| {
         DevError::Config(format!("command '{}' has no cargo example", command.id()))
@@ -1171,13 +1089,14 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
 
     let config = BenchConfig {
         command: command.result_command().into(),
-        variant: command.result_variant(),
+        variant: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
         cli_args: None,
+        brokkr_args: None,
         metadata: command.metadata(),
     };
 
@@ -1218,8 +1137,6 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
     let alloc = req.is_alloc();
     let feature = harness::hotpath_feature(alloc);
-    let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("{}{variant_suffix}", command.id());
 
     output::hotpath_msg(&format!("=== {} {feature} ===", command.id()));
     if alloc {
@@ -1242,7 +1159,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 req.force,
                 req.wait,
                 req.stop_marker.map(str::to_owned),
-            )?;
+            )?
+            .with_request(req);
 
             let (pbf_path, file_mb) =
                 resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -1268,18 +1186,18 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
             let binary_str = ctx.binary.display().to_string();
 
-            let mut metadata = command.metadata();
-            metadata.push(KvPair::text("meta.alloc", alloc.to_string()));
+            let metadata = command.metadata();
 
             let config = BenchConfig {
-                command: "hotpath".into(),
-                variant: Some(variant),
+                command: command.result_command().into(),
+                variant: None,
                 input_file: Some(basename),
                 input_mb: Some(file_mb),
                 cargo_features: None,
                 cargo_profile: "release".into(),
                 runs: req.runs(),
                 cli_args: Some(harness::format_cli_args(&binary_str, &arg_refs)),
+                brokkr_args: None,
                 metadata,
             };
 
@@ -1325,7 +1243,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 req.force,
                 req.wait,
                 req.stop_marker.map(str::to_owned),
-            )?;
+            )?
+            .with_request(req);
 
             let binary = crate::build::cargo_build(
                 &crate::build::BuildConfig {
@@ -1344,18 +1263,18 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-            let mut metadata = command.metadata();
-            metadata.push(KvPair::text("meta.alloc", alloc.to_string()));
+            let metadata = command.metadata();
 
             let config = BenchConfig {
-                command: "hotpath".into(),
-                variant: Some(variant),
+                command: command.result_command().into(),
+                variant: None,
                 input_file: None,
                 input_mb: None,
                 cargo_features: Some(feature.into()),
                 cargo_profile: "release".into(),
                 runs: 1,
                 cli_args: None,
+                brokkr_args: None,
                 metadata,
             };
 
@@ -1505,7 +1424,8 @@ fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
         true,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let (pbf_path, _) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -1556,7 +1476,8 @@ fn run_nidhogg_ingest_bench(
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -1582,7 +1503,7 @@ fn run_nidhogg_ingest_bench(
 
     let config = BenchConfig {
         command: command.result_command().into(),
-        variant: command.result_variant(),
+        variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -1592,6 +1513,7 @@ fn run_nidhogg_ingest_bench(
             &ctx.binary.display().to_string(),
             &args,
         )),
+        brokkr_args: None,
         metadata: command.metadata(),
     };
 
@@ -1630,8 +1552,6 @@ fn run_nidhogg_hotpath(
 ) -> Result<(), DevError> {
     let alloc = req.is_alloc();
     let feature = harness::hotpath_feature(alloc);
-    let variant_suffix = harness::hotpath_variant_suffix(alloc);
-    let variant = format!("{}{variant_suffix}", command.id());
 
     output::hotpath_msg(&format!("=== nidhogg {} {feature} ===", command.id()));
     if alloc {
@@ -1651,7 +1571,8 @@ fn run_nidhogg_hotpath(
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
 
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
@@ -1679,8 +1600,8 @@ fn run_nidhogg_hotpath(
     let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
 
     let config = BenchConfig {
-        command: "hotpath".into(),
-        variant: Some(variant),
+        command: command.result_command().into(),
+        variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -1690,7 +1611,8 @@ fn run_nidhogg_hotpath(
             &ctx.binary.display().to_string(),
             &args,
         )),
-        metadata: vec![KvPair::text("meta.alloc", alloc.to_string())],
+        brokkr_args: None,
+        metadata: vec![],
     };
 
     let binary_str = ctx.binary.display().to_string();

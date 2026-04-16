@@ -10,6 +10,10 @@ pub(crate) struct ResultsQuery {
     /// Metadata filters as `key=value` strings, parsed into `(key, value)`
     /// pairs by `cmd_results`. Multiple filters AND together.
     pub(crate) meta: Vec<String>,
+    /// Substring match against the `cli_args` column (literal subprocess invocation).
+    pub(crate) cli_args: Option<String>,
+    /// Substring match against the `brokkr_args` column (literal brokkr invocation).
+    pub(crate) brokkr_args: Option<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
     pub(crate) timeline: bool,

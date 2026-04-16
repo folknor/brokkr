@@ -105,7 +105,7 @@ pub fn run(
     }
 
     let config = BenchConfig {
-        command: "bench tiles".into(),
+        command: "tiles".into(),
         variant: None,
         input_file: Some(tiles_file.to_owned()),
         input_mb: Some(tiles_mb),
@@ -113,6 +113,7 @@ pub fn run(
         cargo_profile: "release".into(),
         runs,
         cli_args: None,
+        brokkr_args: None,
         metadata,
     };
 

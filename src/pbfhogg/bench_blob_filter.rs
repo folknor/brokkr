@@ -90,8 +90,13 @@ pub fn run(
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
-            command: "bench blob-filter".into(),
-            variant: Some(variant.into()),
+            command: "blob-filter".into(),
+            // Sub-command + indexed/raw discriminator is visible in
+            // cli_args (different argv per row — e.g. `cat --type way`
+            // with `--force` only on raw) and in input_file (different
+            // PBF per row). Measurement mode and brokkr_args come from
+            // the harness.
+            variant: None,
             input_file: Some(basename.to_owned()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -101,6 +106,7 @@ pub fn run(
                 &binary.display().to_string(),
                 &args_refs,
             )),
+            brokkr_args: None,
             metadata: vec![],
         };
 

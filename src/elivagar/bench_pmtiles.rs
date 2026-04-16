@@ -40,7 +40,9 @@ pub fn run(
     output::bench_msg(&format!("bench_pmtiles: {tiles} tiles, {runs} runs"));
 
     let config = BenchConfig {
-        command: "bench pmtiles".into(),
+        command: "pmtiles".into(),
+        // Tiles count is in cli_args (`--tiles N`) and brokkr_args.
+        // Measurement mode comes from the harness.
         variant: None,
         input_file: None,
         input_mb: None,
@@ -48,11 +50,8 @@ pub fn run(
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
         cli_args: None,
-        #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![
-            KvPair::int("meta.tiles", tiles as i64),
-            KvPair::int("meta.internal_runs", runs as i64),
-        ],
+        brokkr_args: None,
+        metadata: vec![],
     };
 
     harness.run_internal(&config, |_i| {

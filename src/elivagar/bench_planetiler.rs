@@ -110,8 +110,11 @@ pub fn run(
     let args_refs: Vec<&str> = args_owned.iter().map(String::as_str).collect();
 
     let config = BenchConfig {
-        command: "bench planetiler".into(),
-        variant: Some("shortbread".into()),
+        // `planetiler` comparison baseline, shortbread profile. Heap
+        // size is a runtime observation (derived from input size, not
+        // a user-provided flag) so it stays in metadata.
+        command: "planetiler".into(),
+        variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -121,6 +124,7 @@ pub fn run(
             &pt.java.display().to_string(),
             &args_refs,
         )),
+        brokkr_args: None,
         metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
     };
 

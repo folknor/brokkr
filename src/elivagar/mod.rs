@@ -74,45 +74,6 @@ impl PipelineOpts<'_> {
         push_ocean_args(args, data_dir, self.no_ocean);
     }
 
-    /// Build common metadata KvPairs for benchmark storage.
-    pub fn metadata(&self) -> Vec<crate::db::KvPair> {
-        let mut m = vec![
-            crate::db::KvPair::text("meta.ocean", (!self.no_ocean).to_string()),
-            crate::db::KvPair::text("meta.force_sorted", self.force_sorted.to_string()),
-            crate::db::KvPair::text(
-                "meta.allow_unsafe_flat_index",
-                self.allow_unsafe_flat_index.to_string(),
-            ),
-        ];
-        if let Some(v) = self.tile_format {
-            m.push(crate::db::KvPair::text("meta.tile_format", v));
-        }
-        if let Some(v) = self.tile_compression {
-            m.push(crate::db::KvPair::text("meta.tile_compression", v));
-        }
-        m.push(crate::db::KvPair::text(
-            "meta.compress_sort_chunks",
-            self.compress_sort_chunks.unwrap_or("none"),
-        ));
-        m.push(crate::db::KvPair::text(
-            "meta.in_memory",
-            self.in_memory.to_string(),
-        ));
-        m.push(crate::db::KvPair::text(
-            "meta.locations_on_ways_cli",
-            self.locations_on_ways.to_string(),
-        ));
-        if let Some(n) = self.fanout_cap_default {
-            m.push(crate::db::KvPair::int("meta.fanout_cap_default", n as i64));
-        }
-        if let Some(spec) = self.fanout_cap {
-            m.push(crate::db::KvPair::text("meta.fanout_cap", spec));
-        }
-        if let Some(f) = self.polygon_simplify_factor {
-            m.push(crate::db::KvPair::real("meta.polygon_simplify_factor", f));
-        }
-        m
-    }
 }
 
 /// Detect ocean shapefiles in the data directory.

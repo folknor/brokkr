@@ -180,20 +180,17 @@ impl<'a> ElivagarCommand<'a> {
         matches!(self, Self::Tilegen { .. })
     }
 
-    /// The DB command label for result storage.
+    /// The DB command label for result storage — the bare subcommand id.
+    /// The measurement mode (`bench`/`hotpath`/`alloc`) is recorded in the
+    /// `variant` column.
     pub fn result_command(&self) -> &'static str {
         match self {
-            Self::Tilegen { .. } => "bench self",
-            Self::PmtilesWriter { .. } => "bench pmtiles",
-            Self::NodeStore { .. } => "bench node-store",
-            Self::Planetiler => "bench planetiler",
-            Self::Tilemaker => "bench tilemaker",
+            Self::Tilegen { .. } => "self",
+            Self::PmtilesWriter { .. } => "pmtiles",
+            Self::NodeStore { .. } => "node-store",
+            Self::Planetiler => "planetiler",
+            Self::Tilemaker => "tilemaker",
         }
-    }
-
-    /// The DB variant label for result storage.
-    pub fn result_variant(&self) -> Option<String> {
-        None
     }
 
     /// Build the argument vector for this command.
@@ -267,36 +264,14 @@ impl<'a> ElivagarCommand<'a> {
     }
 
     /// Build metadata KV pairs for result storage.
-    #[allow(clippy::cast_possible_wrap)]
+    ///
+    /// Post-v13 this is reserved for runtime observations. Axis-like
+    /// fields (skip_to, compression_level, tiles count, nodes count,
+    /// pipeline opts like ocean/tile_format/fanout-cap/etc.) are all
+    /// captured in `brokkr_args`/`cli_args` so don't need mirroring
+    /// here. `locations_on_ways_detected` is observed after the run
+    /// and added by the dispatch layer.
     pub fn metadata(&self) -> Vec<KvPair> {
-        match self {
-            Self::Tilegen {
-                opts,
-                skip_to,
-                compression_level,
-            } => {
-                let mut m = opts.metadata();
-                if let Some(v) = skip_to {
-                    m.push(KvPair::text("meta.skip_to", *v));
-                }
-                if let Some(v) = compression_level {
-                    m.push(KvPair::int("meta.compression_level", *v as i64));
-                }
-                m
-            }
-            Self::PmtilesWriter { tiles } => {
-                vec![
-                    KvPair::int("meta.tiles", *tiles as i64),
-                    KvPair::int("meta.internal_runs", 1),
-                ]
-            }
-            Self::NodeStore { nodes } => {
-                vec![
-                    KvPair::int("meta.nodes_millions", *nodes as i64),
-                    KvPair::int("meta.internal_runs", 1),
-                ]
-            }
-            Self::Planetiler | Self::Tilemaker => vec![],
-        }
+        Vec::new()
     }
 }

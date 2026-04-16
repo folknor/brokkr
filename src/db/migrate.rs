@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -52,6 +52,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 12 {
         migrate_v11_to_v12(conn)?;
+    }
+    if current < 13 {
+        migrate_v12_to_v13(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -459,6 +462,136 @@ fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
     Ok(())
 }
 
+/// v12 → v13: `command` becomes the bare pbfhogg/elivagar/nidhogg
+/// subcommand name, `variant` becomes the measurement mode
+/// (`bench`/`hotpath`/`alloc`), and runtime-redundant `meta.*` keys
+/// (axes already captured in `cli_args` or the new `brokkr_args`) are
+/// dropped. Adds the `brokkr_args TEXT` column for future writes; all
+/// historical rows leave it NULL.
+///
+/// Steps:
+///   1. Add the `brokkr_args` column.
+///   2. Extend v11→v12's hotpath split to *all* projects (the previous
+///      migration restricted it to pbfhogg; elivagar/nidhogg/sluggrs
+///      hotpath rows still have `command = 'hotpath'` with the id jammed
+///      into variant, and a `/alloc` marker).
+///   3. Strip the `bench `/`hotpath ` prefix from command and set variant
+///      to the measurement mode. Old variant content (axis suffixes like
+///      `+nocompress`, `+direct-io`, etc.) drops — it was always a mirror
+///      of cli_args, nothing is lost.
+///   4. Delete redundant `meta.*` keys from run_kv. run_kv survives only
+///      for genuine runtime observations (cache state, detected features,
+///      resolved file info).
+fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // 1. Add brokkr_args column (if not already present — guards against a
+    //    fresh SCHEMA that already has it).
+    if !has_column(conn, "runs", "brokkr_args") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")?;
+    }
+
+    // 2. Extend v11→v12's hotpath split to non-pbfhogg projects. Same SQL
+    //    pattern, `project = 'pbfhogg'` filter dropped.
+
+    // 2A. '/' appears and (no '+' OR '/' is earlier than '+'): split on '/'.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'hotpath ' || substr(variant, 1, instr(variant, '/') - 1), \
+             variant = NULLIF(substr(variant, instr(variant, '/') + 1), '') \
+         WHERE command = 'hotpath' \
+           AND variant IS NOT NULL \
+           AND instr(variant, '/') > 0 \
+           AND (instr(variant, '+') = 0 OR instr(variant, '/') < instr(variant, '+'))",
+        [],
+    )?;
+
+    // 2B. '+' appears and (no '/' OR '+' is earlier than '/'): split on '+'.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'hotpath ' || substr(variant, 1, instr(variant, '+') - 1), \
+             variant = NULLIF(substr(variant, instr(variant, '+') + 1), '') \
+         WHERE command = 'hotpath' \
+           AND variant IS NOT NULL \
+           AND instr(variant, '+') > 0 \
+           AND (instr(variant, '/') = 0 OR instr(variant, '+') < instr(variant, '/'))",
+        [],
+    )?;
+
+    // 2C. No separator: the whole variant is the command id.
+    conn.execute(
+        "UPDATE runs \
+         SET command = 'hotpath ' || variant, variant = NULL \
+         WHERE command = 'hotpath' \
+           AND variant IS NOT NULL \
+           AND instr(variant, '/') = 0 \
+           AND instr(variant, '+') = 0",
+        [],
+    )?;
+
+    // 3. Strip prefix + set variant to mode.
+    //    - `bench X` → command `X`, variant `bench`
+    //    - `hotpath X` AND variant LIKE 'alloc%' → command `X`, variant `alloc`
+    //    - `hotpath X` (otherwise) → command `X`, variant `hotpath`
+
+    conn.execute(
+        "UPDATE runs \
+         SET command = substr(command, length('bench ') + 1), \
+             variant = 'bench' \
+         WHERE command LIKE 'bench %'",
+        [],
+    )?;
+
+    // Hotpath alloc rows first (variant starts with `alloc`), so the
+    // subsequent hotpath-non-alloc pass doesn't overwrite them.
+    conn.execute(
+        "UPDATE runs \
+         SET command = substr(command, length('hotpath ') + 1), \
+             variant = 'alloc' \
+         WHERE command LIKE 'hotpath %' \
+           AND variant IS NOT NULL \
+           AND (variant = 'alloc' OR variant LIKE 'alloc+%' OR variant LIKE 'alloc/%')",
+        [],
+    )?;
+
+    conn.execute(
+        "UPDATE runs \
+         SET command = substr(command, length('hotpath ') + 1), \
+             variant = 'hotpath' \
+         WHERE command LIKE 'hotpath %'",
+        [],
+    )?;
+
+    // 4. Delete redundant meta.* keys. These mirror data already in
+    //    cli_args (subprocess flags) or brokkr_args (the brokkr
+    //    invocation, NULL for historical rows but grepable for future
+    //    rows). Keys not in this list are kept — they represent genuine
+    //    runtime observations.
+    //
+    //    Guard on `run_kv` existence: old-schema migration tests (v3,
+    //    v0→v3) start from a schema that only contains the `runs` table
+    //    and rely on `ResultsDb::open` to call `SCHEMA` *after* this
+    //    migration to create the missing child tables.
+    if has_table(conn, "run_kv") {
+        conn.execute(
+            "DELETE FROM run_kv WHERE key IN ( \
+                'meta.compression', 'meta.writer_mode', 'meta.io_mode', 'meta.mode', \
+                'meta.strategy', 'meta.bbox', 'meta.regions', \
+                'meta.snapshot', 'meta.from_snapshot', 'meta.to_snapshot', \
+                'meta.index_type', 'meta.start_stage', 'meta.keep_scratch', \
+                'meta.format', 'meta.alloc', 'meta.test', \
+                'meta.skip_to', 'meta.compression_level', \
+                'meta.ocean', 'meta.force_sorted', 'meta.allow_unsafe_flat_index', \
+                'meta.tile_format', 'meta.tile_compression', 'meta.compress_sort_chunks', \
+                'meta.in_memory', 'meta.locations_on_ways_cli', \
+                'meta.fanout_cap_default', 'meta.fanout_cap', 'meta.polygon_simplify_factor', \
+                'meta.query', 'meta.uring' \
+             )",
+            [],
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Parse existing extra/metadata JSON and insert into child tables.
 fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError> {
     let mut stmt = conn.prepare(
@@ -741,11 +874,17 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 10,
             })
             .expect("query");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].command, "bench read");
+        // v12→v13 strips the `bench ` prefix; the original row was
+        // `("bench read", "mmap")` and lands as command=`read`,
+        // variant=`bench` here.
+        assert_eq!(rows[0].command, "read");
+        assert_eq!(rows[0].variant, "bench");
         assert_eq!(rows[0].elapsed_ms, 1234);
 
         // UUID was backfilled.
@@ -813,6 +952,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 10,
             })
             .expect("query");
@@ -935,7 +1076,10 @@ mod tests {
     fn migrate_v2_metadata_json() {
         let (dir, db_path) = test_db("migrate_v2_meta");
 
-        let metadata = r#"{"compression":"zlib","io_mode":"buffered"}"#;
+        // Use keys that survive v13's cleanup (runtime observations, not
+        // axis mirrors) so we can verify the v2→v3 JSON-to-run_kv
+        // migration preserves them end-to-end.
+        let metadata = r#"{"merged_cache":"cached","locations_on_ways_detected":"true"}"#;
 
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -951,25 +1095,25 @@ mod tests {
         let db = ResultsDb::open(&db_path).expect("open should migrate metadata");
 
         // Metadata migrated to run_kv with meta. prefix.
-        let compression: String = db
+        let merged_cache: String = db
             .conn
             .query_row(
-                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.compression'",
+                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.merged_cache'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(compression, "zlib");
+        assert_eq!(merged_cache, "cached");
 
-        let io_mode: String = db
+        let detected: String = db
             .conn
             .query_row(
-                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.io_mode'",
+                "SELECT value_text FROM run_kv WHERE run_id = 1 AND key = 'meta.locations_on_ways_detected'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(io_mode, "buffered");
+        assert_eq!(detected, "true");
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -1071,10 +1215,12 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
-        // Helper to query (command, variant) by row id. v3→v4 renames the
-        // variant; v11→v12 then splits `bench commands` rows so the real
-        // command name moves into the `command` column and the residual
-        // suffix (or NULL) stays in variant. Both effects are checked.
+        // Helper to query (command, variant) by row id. These tests start
+        // at v3 and run every migration up to the current SCHEMA_VERSION,
+        // so assertions reflect the cumulative end-state. v3→v4 renames
+        // variants, v11→v12 splits `bench commands` rows, v12→v13 strips
+        // `bench `/`hotpath ` prefixes and shrinks variant to the
+        // measurement mode.
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
                 .query_row(
@@ -1085,35 +1231,36 @@ mod tests {
                 .unwrap()
         };
 
-        // Rows 1-5, 9: originally `bench commands` with a bare variant.
-        // v3→v4 applied the variant rename, v11→v12 then moved the variant
-        // into the command column and nulled the variant.
-        assert_eq!(row_of(1), ("bench inspect-tags".into(), None)); // tags-count -> inspect-tags
-        assert_eq!(row_of(2), ("bench inspect-nodes".into(), None)); // node-stats
-        assert_eq!(row_of(3), ("bench getid-invert".into(), None)); // removeid
-        assert_eq!(row_of(4), ("bench diff-osc".into(), None)); // derive-changes
-        assert_eq!(row_of(5), ("bench cat-dedupe".into(), None)); // merge-pbf
+        // Rows 1-5, 9: originally `bench commands` / <variant>.
+        //   v3→v4 renames the variant (e.g. tags-count → inspect-tags);
+        //   v11→v12 splits into `bench <id>` / NULL;
+        //   v12→v13 strips `bench ` and sets variant = 'bench'.
+        assert_eq!(row_of(1), ("inspect-tags".into(), Some("bench".into())));
+        assert_eq!(row_of(2), ("inspect-nodes".into(), Some("bench".into())));
+        assert_eq!(row_of(3), ("getid-invert".into(), Some("bench".into())));
+        assert_eq!(row_of(4), ("diff-osc".into(), Some("bench".into())));
+        assert_eq!(row_of(5), ("cat-dedupe".into(), Some("bench".into())));
 
-        // Row 6: `bench blob-filter` — v11→v12 only touches `bench commands`,
-        // so command is preserved; variant was renamed by v3→v4.
-        assert_eq!(
-            row_of(6),
-            ("bench blob-filter".into(), Some("inspect-nodes+raw".into()))
-        );
+        // Row 6: `bench blob-filter` / `node-stats+raw` — v3→v4 renames
+        // variant to `inspect-nodes+raw`; v11→v12 skips (command wasn't
+        // `bench commands`); v12→v13 strips `bench ` prefix and sets
+        // variant to `bench`, dropping the old axis-bag content.
+        assert_eq!(row_of(6), ("blob-filter".into(), Some("bench".into())));
 
         // Rows 7-8: pbfhogg `hotpath` rows. v3→v4 renames the variant;
-        // v11→v12 then splits the id out of the variant and into the
-        // command column (row 7 has no separator; row 8 has `/alloc`).
-        assert_eq!(row_of(7), ("hotpath apply-changes-zlib".into(), None));
-        assert_eq!(row_of(8), ("hotpath inspect-tags".into(), Some("alloc".into())));
+        // v11→v12 splits `hotpath X` out; v12→v13 strips `hotpath ` and
+        // sets variant to `hotpath` or `alloc`.
+        assert_eq!(row_of(7), ("apply-changes-zlib".into(), Some("hotpath".into())));
+        assert_eq!(row_of(8), ("inspect-tags".into(), Some("alloc".into())));
 
-        // Row 9: `bench commands` with variant `inspect` (no v3→v4 rename) →
-        // split by v11→v12 into `bench inspect` / NULL.
-        assert_eq!(row_of(9), ("bench inspect".into(), None));
+        // Row 9: `bench commands` / `inspect` → `bench inspect` / NULL →
+        // `inspect` / `bench`.
+        assert_eq!(row_of(9), ("inspect".into(), Some("bench".into())));
 
-        // Row 10: elivagar row — v3→v4 skipped it (project filter), v11→v12
-        // skipped it (command != 'bench commands').
-        assert_eq!(row_of(10), ("bench self".into(), Some("tags-count".into())));
+        // Row 10: elivagar `bench self` / `tags-count` — v3→v4 skipped
+        // (project filter); v11→v12 skipped (not `bench commands`);
+        // v12→v13 strips `bench ` and overwrites variant with `bench`.
+        assert_eq!(row_of(10), ("self".into(), Some("bench".into())));
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -1246,56 +1393,192 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(row_of(1), ("bench inspect".into(), None));
+        // End-state after all migrations including v13. v11→v12 splits
+        // `bench commands` into `bench <id>`; v13 then strips `bench `
+        // prefix and overwrites variant with the measurement mode.
+        assert_eq!(row_of(1), ("inspect".into(), Some("bench".into())));
         assert_eq!(
             row_of(2),
-            (
-                "bench add-locations-to-ways".into(),
-                Some("nocompress".into())
-            )
+            ("add-locations-to-ways".into(), Some("bench".into()))
         );
-        assert_eq!(
-            row_of(3),
-            (
-                "bench apply-changes".into(),
-                Some("direct-io+zstd1".into())
-            )
-        );
-        assert_eq!(
-            row_of(4),
-            (
-                "bench merge-changes".into(),
-                Some("range-4914-4920".into())
-            )
-        );
-        assert_eq!(
-            row_of(5),
-            (
-                "bench diff-snapshots".into(),
-                Some("base-to-20260411".into())
-            )
-        );
-        assert_eq!(row_of(6), ("bench extract".into(), Some("simple".into())));
-        assert_eq!(row_of(7), ("bench self".into(), Some("whatever".into())));
-        // Hotpath rows:
-        assert_eq!(row_of(8), ("hotpath inspect-tags".into(), None));
-        assert_eq!(
-            row_of(9),
-            ("hotpath inspect-tags".into(), Some("alloc".into()))
-        );
+        assert_eq!(row_of(3), ("apply-changes".into(), Some("bench".into())));
+        assert_eq!(row_of(4), ("merge-changes".into(), Some("bench".into())));
+        assert_eq!(row_of(5), ("diff-snapshots".into(), Some("bench".into())));
+        assert_eq!(row_of(6), ("extract".into(), Some("bench".into())));
+        assert_eq!(row_of(7), ("self".into(), Some("bench".into())));
+        // Hotpath rows. v11→v12 split pbfhogg hotpath rows (8-11). v13
+        // now also splits the elivagar hotpath row (12) — the v11→v12
+        // pbfhogg restriction is lifted by v13.
+        assert_eq!(row_of(8), ("inspect-tags".into(), Some("hotpath".into())));
+        assert_eq!(row_of(9), ("inspect-tags".into(), Some("alloc".into())));
         assert_eq!(
             row_of(10),
-            ("hotpath apply-changes".into(), Some("direct-io".into()))
+            ("apply-changes".into(), Some("hotpath".into()))
         );
-        assert_eq!(
-            row_of(11),
-            (
-                "hotpath apply-changes".into(),
-                Some("alloc+direct-io+zstd1".into())
+        assert_eq!(row_of(11), ("apply-changes".into(), Some("alloc".into())));
+        assert_eq!(row_of(12), ("tilegen".into(), Some("alloc".into())));
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v12 → v13 — strip command prefix, variant becomes mode,
+    // drop redundant meta.* keys, add brokkr_args column.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v12_to_v13_rewrites_command_and_variant() {
+        let (dir, db_path) = test_db("migrate_v12_v13");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V3_SCHEMA).unwrap();
+            // v12→v13 also deletes redundant `meta.*` keys from run_kv;
+            // V3_SCHEMA only creates `runs`, so we have to stand up the
+            // child table explicitly for this test to exercise step 4.
+            conn.execute_batch(
+                "CREATE TABLE run_kv ( \
+                    run_id INTEGER NOT NULL, \
+                    key TEXT NOT NULL, \
+                    value_int INTEGER, value_real REAL, value_text TEXT, \
+                    PRIMARY KEY (run_id, key) \
+                 )",
             )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 12).unwrap();
+
+            // Post-v12 bench row: `bench <id>` / `<axes>`. After v13:
+            // `<id>` / `bench`, with the axes dropped (they live in
+            // cli_args / brokkr_args for future rows).
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench add-locations-to-ways", "nocompress", "pbfhogg"],
+            )
+            .unwrap();
+            // Post-v12 bench row with NULL variant.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "bench inspect",
+                    rusqlite::types::Null,
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // Post-v12 pbfhogg hotpath row (non-alloc).
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath apply-changes", "direct-io", "pbfhogg"],
+            )
+            .unwrap();
+            // Post-v12 pbfhogg hotpath row with alloc marker.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params![
+                    "hotpath apply-changes",
+                    "alloc+direct-io",
+                    "pbfhogg"
+                ],
+            )
+            .unwrap();
+            // Elivagar hotpath (pre-split — still has the id in variant
+            // because v11→v12 was pbfhogg-only). v13 must split it too.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "tilegen/alloc", "elivagar"],
+            )
+            .unwrap();
+            // Elivagar hotpath with only a '+' suffix, no '/alloc'.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["hotpath", "pmtiles+gzip", "elivagar"],
+            )
+            .unwrap();
+            // Elivagar bench row.
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench self", rusqlite::types::Null, "elivagar"],
+            )
+            .unwrap();
+            // Nidhogg bench with existing variant (e.g. api query name).
+            conn.execute(
+                V3_INSERT,
+                rusqlite::params!["bench api", "bbox-small", "nidhogg"],
+            )
+            .unwrap();
+
+            // Add a meta.* key that should be deleted (duplicates cli_args)
+            // and one that should survive (runtime observation).
+            // Row id is assigned sequentially starting at 1; we latch onto
+            // row 1 for the delete case and row 2 for the keep case.
+            conn.execute(
+                "INSERT INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+                rusqlite::params![1, "meta.compression", "zstd:1"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+                rusqlite::params![2, "meta.merged_cache", "cached"],
+            )
+            .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v12 to v13");
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // brokkr_args column now exists (NULL for historical rows).
+        assert!(has_column(&db.conn, "runs", "brokkr_args"));
+
+        let row_of = |id: i64| -> (String, Option<String>) {
+            db.conn
+                .query_row(
+                    "SELECT command, variant FROM runs WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .unwrap()
+        };
+
+        assert_eq!(
+            row_of(1),
+            ("add-locations-to-ways".into(), Some("bench".into()))
         );
-        // Elivagar hotpath row — project filter protects it.
-        assert_eq!(row_of(12), ("hotpath".into(), Some("tilegen/alloc".into())));
+        assert_eq!(row_of(2), ("inspect".into(), Some("bench".into())));
+        assert_eq!(
+            row_of(3),
+            ("apply-changes".into(), Some("hotpath".into()))
+        );
+        assert_eq!(row_of(4), ("apply-changes".into(), Some("alloc".into())));
+        assert_eq!(row_of(5), ("tilegen".into(), Some("alloc".into())));
+        assert_eq!(row_of(6), ("pmtiles".into(), Some("hotpath".into())));
+        assert_eq!(row_of(7), ("self".into(), Some("bench".into())));
+        assert_eq!(row_of(8), ("api".into(), Some("bench".into())));
+
+        // run_kv: meta.compression deleted, meta.merged_cache kept.
+        let deleted: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_kv WHERE key = 'meta.compression'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted, 0, "meta.compression should have been deleted");
+        let kept: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_kv WHERE key = 'meta.merged_cache'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "meta.merged_cache should be preserved");
 
         drop(db);
         cleanup(&dir, &db_path);

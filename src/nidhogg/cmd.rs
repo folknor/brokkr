@@ -210,7 +210,8 @@ pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(),
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let port = resolve_port(req.dev_config);
 
     // Resolve dataset PBF for metadata recording.
@@ -258,7 +259,8 @@ pub(crate) fn bench_tiles(
         req.force,
         req.wait,
         req.stop_marker.map(str::to_owned),
-    )?;
+    )?
+    .with_request(req);
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
     let port = resolve_port(req.dev_config);
 

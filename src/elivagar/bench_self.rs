@@ -74,16 +74,14 @@ pub fn run(
         "elivagar pipeline: {basename} ({file_mb:.0} MB), {runs} run(s)"
     ));
 
-    let mut metadata = opts.metadata();
-    if let Some(v) = skip_to {
-        metadata.push(KvPair::text("meta.skip_to", v));
-    }
-    if let Some(v) = compression_level {
-        metadata.push(KvPair::int("meta.compression_level", v as i64));
-    }
+    // All the pipeline tuning options (skip_to, compression_level, opts
+    // flags like --no-ocean, --force-sorted, etc.) are in cli_args and
+    // brokkr_args — no need to mirror them here. Metadata is empty;
+    // locations_on_ways_detected is attached below from stderr.
+    let metadata: Vec<KvPair> = Vec::new();
 
     let mut config = BenchConfig {
-        command: "bench self".into(),
+        command: "self".into(),
         variant: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
@@ -94,6 +92,7 @@ pub fn run(
             &binary.display().to_string(),
             &arg_refs,
         )),
+        brokkr_args: None,
         metadata,
     };
 

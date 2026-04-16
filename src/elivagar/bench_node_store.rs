@@ -42,7 +42,10 @@ pub fn run(
     ));
 
     let config = BenchConfig {
-        command: "bench node-store".into(),
+        command: "node-store".into(),
+        // Nodes count is in cli_args (`--nodes N`) and brokkr_args
+        // (`brokkr node-store --nodes N`). Measurement mode comes from
+        // the harness.
         variant: None,
         input_file: None,
         input_mb: None,
@@ -50,11 +53,8 @@ pub fn run(
         cargo_profile: "release".into(),
         runs: 1, // example handles its own iterations
         cli_args: None,
-        #[allow(clippy::cast_possible_wrap)]
-        metadata: vec![
-            KvPair::int("meta.nodes_millions", nodes_millions as i64),
-            KvPair::int("meta.internal_runs", runs as i64),
-        ],
+        brokkr_args: None,
+        metadata: vec![],
     };
 
     harness.run_internal(&config, |_i| {

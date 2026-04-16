@@ -68,6 +68,11 @@ pub struct MeasureRequest<'a> {
     pub force: bool,
     /// How to measure.
     pub mode: MeasureMode,
+    /// The literal `brokkr <...>` invocation (std::env::args joined).
+    /// Stored on each result row so queries can grep the command the user
+    /// actually typed, even when brokkr translates it into something
+    /// different before handing off to the tool subprocess.
+    pub brokkr_args: &'a str,
     /// Skip the OOM memory check.
     pub no_mem_check: bool,
     /// Wait for the lock instead of failing immediately.
@@ -88,6 +93,20 @@ impl MeasureRequest<'_> {
     /// Whether we are in allocation profiling mode.
     pub fn is_alloc(&self) -> bool {
         matches!(self.mode, MeasureMode::Alloc { .. })
+    }
+
+    /// Variant string recorded in the DB for this measurement mode.
+    ///
+    /// Returns `None` for `Run` mode (which doesn't write to the DB at
+    /// all). The three DB-writing modes map to `"bench"`, `"hotpath"`,
+    /// `"alloc"`.
+    pub fn variant_mode(&self) -> Option<&'static str> {
+        match self.mode {
+            MeasureMode::Run => None,
+            MeasureMode::Bench { .. } => Some("bench"),
+            MeasureMode::Hotpath { .. } => Some("hotpath"),
+            MeasureMode::Alloc { .. } => Some("alloc"),
+        }
     }
 
     /// Build the full feature list for hotpath/alloc builds.

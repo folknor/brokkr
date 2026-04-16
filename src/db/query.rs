@@ -118,6 +118,9 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         cli_args: row
             .get::<_, Option<String>>("cli_args")?
             .unwrap_or_default(),
+        brokkr_args: row
+            .get::<_, Option<String>>("brokkr_args")?
+            .unwrap_or_default(),
         project: row
             .get::<_, Option<String>>("project")?
             .unwrap_or_else(|| "pbfhogg".to_owned()),
@@ -154,6 +157,14 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     if let Some(ref d) = filter.dataset {
         params.push(d.clone());
         clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
+    }
+    if let Some(ref a) = filter.cli_args {
+        params.push(a.clone());
+        clauses.push(format!("cli_args LIKE '%'||?{}||'%'", params.len()));
+    }
+    if let Some(ref a) = filter.brokkr_args {
+        params.push(a.clone());
+        clauses.push(format!("brokkr_args LIKE '%'||?{}||'%'", params.len()));
     }
     // Metadata filters: each becomes an EXISTS subquery against run_kv. The
     // user passes key without the `meta.` prefix (e.g. `--meta format=osc`),
@@ -343,12 +354,8 @@ mod tests {
     #[test]
     fn build_query_sql_no_filters() {
         let filter = QueryFilter {
-            commit: None,
-            command: None,
-            variant: None,
-            dataset: None,
-            meta: vec![],
             limit: 50,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -365,9 +372,8 @@ mod tests {
             commit: Some(String::from("abc123")),
             command: Some(String::from("read")),
             variant: Some(String::from("mmap")),
-            dataset: None,
-            meta: vec![],
             limit: 10,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -398,11 +404,8 @@ mod tests {
     fn build_query_sql_commit_only() {
         let filter = QueryFilter {
             commit: Some(String::from("deadbeef")),
-            command: None,
-            variant: None,
-            dataset: None,
-            meta: vec![],
             limit: 25,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -416,12 +419,10 @@ mod tests {
     #[test]
     fn build_query_sql_command_and_variant_no_commit() {
         let filter = QueryFilter {
-            commit: None,
             command: Some(String::from("write")),
             variant: Some(String::from("direct")),
-            dataset: None,
-            meta: vec![],
             limit: 5,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -441,12 +442,9 @@ mod tests {
     #[test]
     fn build_query_sql_dataset_only() {
         let filter = QueryFilter {
-            commit: None,
-            command: None,
-            variant: None,
             dataset: Some(String::from("europe")),
-            meta: vec![],
             limit: 20,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -463,12 +461,10 @@ mod tests {
     #[test]
     fn build_query_sql_command_and_dataset() {
         let filter = QueryFilter {
-            commit: None,
             command: Some(String::from("tags-filter")),
-            variant: None,
             dataset: Some(String::from("eu")),
-            meta: vec![],
             limit: 10,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -487,12 +483,8 @@ mod tests {
     #[test]
     fn build_query_sql_selects_correct_columns() {
         let filter = QueryFilter {
-            commit: None,
-            command: None,
-            variant: None,
-            dataset: None,
-            meta: vec![],
             limit: 1,
+            ..Default::default()
         };
         let (sql, _) = build_query_sql(&filter);
         assert!(sql.starts_with(&format!("SELECT {SELECT_COLS} FROM runs")));
@@ -501,12 +493,9 @@ mod tests {
     #[test]
     fn build_query_sql_single_meta_filter() {
         let filter = QueryFilter {
-            commit: None,
-            command: None,
-            variant: None,
-            dataset: None,
             meta: vec![("format".into(), "osc".into())],
             limit: 20,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -523,15 +512,12 @@ mod tests {
     #[test]
     fn build_query_sql_multi_meta_filters_are_anded() {
         let filter = QueryFilter {
-            commit: None,
-            command: None,
-            variant: None,
-            dataset: None,
             meta: vec![
                 ("format".into(), "osc".into()),
                 ("from_snapshot".into(), "base".into()),
             ],
             limit: 20,
+            ..Default::default()
         };
         let (sql, params) = build_query_sql(&filter);
 
@@ -569,6 +555,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
+            brokkr_args: None,
             project: String::from("test"),
             stop_marker: None,
             kv,
@@ -599,6 +586,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![("format".into(), "osc".into())],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -611,6 +600,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![("format".into(), "default".into())],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -624,6 +615,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -660,6 +653,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
+            brokkr_args: None,
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -681,6 +675,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -694,6 +690,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -707,6 +705,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -721,6 +721,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -739,6 +741,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -772,6 +776,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
+            brokkr_args: None,
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -791,6 +796,8 @@ mod tests {
                 variant: Some(String::from("zlib")),
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -804,6 +811,8 @@ mod tests {
                 variant: Some(String::from("buffered")),
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -817,6 +826,8 @@ mod tests {
                 variant: Some(String::from("none")),
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 50,
             })
             .unwrap();
@@ -855,6 +866,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
+            brokkr_args: None,
             project: String::from("test"),
             stop_marker: None,
             kv: vec![

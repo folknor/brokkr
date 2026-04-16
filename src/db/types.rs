@@ -127,6 +127,7 @@ pub struct RunRow {
     pub avail_memory_mb: Option<i64>,
     pub storage_notes: Option<String>,
     pub cli_args: Option<String>,
+    pub brokkr_args: Option<String>,
     pub project: String,
     pub stop_marker: Option<String>,
     pub kv: Vec<KvPair>,
@@ -161,6 +162,7 @@ pub struct StoredRow {
     pub storage_notes: String,
     pub uuid: String,
     pub cli_args: String,
+    pub brokkr_args: String,
     pub project: String,
     pub stop_marker: String,
     pub kv: Vec<KvPair>,
@@ -172,6 +174,7 @@ pub struct StoredRow {
 pub type CompareResult = (String, Vec<StoredRow>, String, Vec<StoredRow>);
 
 /// Filters for querying stored rows.
+#[derive(Default)]
 pub struct QueryFilter {
     pub commit: Option<String>,
     pub command: Option<String>,
@@ -185,6 +188,10 @@ pub struct QueryFilter {
     /// with `meta.format = "osc"` in the run_kv table). Multiple filters AND
     /// together. Rows missing the key are silently excluded.
     pub meta: Vec<(String, String)>,
+    /// Substring match against `cli_args` (the literal subprocess invocation).
+    pub cli_args: Option<String>,
+    /// Substring match against `brokkr_args` (the literal brokkr invocation).
+    pub brokkr_args: Option<String>,
     pub limit: usize,
 }
 

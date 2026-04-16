@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 
@@ -38,8 +37,11 @@ pub fn run(
         ];
 
         let config = BenchConfig {
-            command: "bench write".into(),
-            variant: Some(variant.into()),
+            command: "write".into(),
+            // Writer-mode/compression discriminators are in cli_args
+            // (`--writer`, `--compression`). Measurement mode and
+            // brokkr_args come from the harness.
+            variant: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -49,10 +51,8 @@ pub fn run(
                 &binary.display().to_string(),
                 &bench_args,
             )),
-            metadata: vec![
-                KvPair::text("meta.compression", compression),
-                KvPair::text("meta.writer_mode", writer_mode),
-            ],
+            brokkr_args: None,
+            metadata: vec![],
         };
 
         harness.run_external_with_kv(&config, binary, &bench_args, project_root).map(|_| ())

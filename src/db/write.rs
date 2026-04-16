@@ -55,6 +55,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             row.cli_args,
             row.project,
             row.stop_marker,
+            row.brokkr_args,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -176,6 +177,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: Some(String::from("--fast")),
+            brokkr_args: Some(String::from("brokkr test --fast")),
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -192,6 +194,8 @@ mod tests {
                 variant: None,
                 dataset: None,
                 meta: vec![],
+                cli_args: None,
+                brokkr_args: None,
                 limit: 10,
             })
             .expect("query");
@@ -201,6 +205,7 @@ mod tests {
         assert_eq!(rows[0].input_file, "denmark.osm.pbf");
         assert_eq!(rows[0].elapsed_ms, 1234);
         assert_eq!(rows[0].cli_args, "--fast");
+        assert_eq!(rows[0].brokkr_args, "brokkr test --fast");
 
         // Clean up.
         drop(std::fs::remove_file(&db_path));
