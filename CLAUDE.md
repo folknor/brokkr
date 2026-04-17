@@ -37,7 +37,7 @@ Single crate, single binary. No workspace.
 - `src/config.rs` — `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` — `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` — `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/request.rs` — `ResultsQuery` struct for the results command
+- `src/request.rs` — `ResultsQuery` / `SidecarQuery` structs for the results and sidecar commands
 - `src/db/` — ResultsDb, SidecarDb, schema, migrations, queries, formatting, comparison
 - `src/sidecar.rs` — Monitoring sidecar: `/proc` sampling, FIFO marker protocol, `run_sidecar()`, `SidecarFifo`, `SidecarRunResult`. Always-on for all measured modes
 - `src/output.rs` — Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners (`run_captured`, `spawn_captured`, `run_passthrough_timed`)
@@ -211,7 +211,7 @@ Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`, `run_exter
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement. Sidecar data is stored even when the child fails (OOM, signal, non-zero exit).
 
-Query sidecar data with `brokkr results --timeline` (JSONL), `--timeline --summary` (phase table), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. All sidecar flags default to the last result when no UUID is given. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
+Query sidecar data with `brokkr sidecar --timeline` (JSONL), `--timeline --summary` (phase table), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. All sidecar flags default to the last result when no UUID is given. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
 
 ## Removed features
 

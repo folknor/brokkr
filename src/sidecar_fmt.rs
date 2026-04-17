@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::error::DevError;
-use crate::request::ResultsQuery;
+use crate::request::SidecarQuery;
 use crate::sidecar;
 
 /// Format a Unix epoch as a local ISO-8601 timestamp.
@@ -253,7 +253,7 @@ fn parse_where_cond(cond: &str) -> Result<(&str, &str, i64), DevError> {
 /// Apply --where, --every, --head, --tail filters to a sample list.
 pub(crate) fn apply_timeline_filter<'a>(
     samples: &'a [sidecar::Sample],
-    q: &ResultsQuery,
+    q: &SidecarQuery,
 ) -> Vec<&'a sidecar::Sample> {
     let mut result: Vec<&sidecar::Sample> = samples.iter().collect();
 

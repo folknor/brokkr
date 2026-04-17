@@ -230,21 +230,21 @@ Sidecar data is stored even when the child is OOM-killed — the `/proc` traject
 ### Querying sidecar data
 
 ```
-brokkr results --timeline                          # raw JSONL samples (last result)
-brokkr results --timeline --summary                # per-phase table (last result)
-brokkr results <uuid> --timeline --stat anon       # min/max/avg/p50/p95 for a field
-brokkr results <uuid> --timeline --fields rss,anon --every 10  # project + downsample
-brokkr results <uuid> --timeline --where "majflt>0" --tail 20  # filter + range
-brokkr results <uuid> --timeline --phase STAGE2 --stat anon    # per-phase stats
-brokkr results <uuid> --timeline --range 10.0..82.0            # time window filter
-brokkr results --markers                           # raw JSONL markers (last result)
-brokkr results --markers --durations               # START/END pair timings (last result)
-brokkr results --markers --phases                  # durations + peak RSS/majflt (last result)
-brokkr results --compare-timeline <uuid_a> <uuid_b>  # phase-aligned comparison
-brokkr results dirty --timeline --stat anon        # inspect last failed/dirty run
+brokkr sidecar --timeline                          # raw JSONL samples (last result)
+brokkr sidecar --timeline --summary                # per-phase table (last result)
+brokkr sidecar <uuid> --timeline --stat anon       # min/max/avg/p50/p95 for a field
+brokkr sidecar <uuid> --timeline --fields rss,anon --every 10  # project + downsample
+brokkr sidecar <uuid> --timeline --where "majflt>0" --tail 20  # filter + range
+brokkr sidecar <uuid> --timeline --phase STAGE2 --stat anon    # per-phase stats
+brokkr sidecar <uuid> --timeline --range 10.0..82.0            # time window filter
+brokkr sidecar --markers                           # raw JSONL markers (last result)
+brokkr sidecar --markers --durations               # START/END pair timings (last result)
+brokkr sidecar --markers --phases                  # durations + peak RSS/majflt (last result)
+brokkr sidecar --compare-timeline <uuid_a> <uuid_b>  # phase-aligned comparison
+brokkr sidecar dirty --timeline --stat anon        # inspect last failed/dirty run
 ```
 
-All sidecar flags (`--timeline`, `--markers`, etc.) default to the last result when no UUID is given.
+All sidecar flags default to the last result when no UUID is given.
 
 All timeline flags compose: `--phase STAGE2 --where "anon>100000" --stat majflt` works.
 

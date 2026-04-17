@@ -1,4 +1,4 @@
-/// Query parameters for the results command.
+/// Query parameters for the `results` command.
 pub(crate) struct ResultsQuery {
     pub(crate) query: Option<String>,
     pub(crate) commit: Option<String>,
@@ -15,6 +15,15 @@ pub(crate) struct ResultsQuery {
     pub(crate) grep: Option<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
+}
+
+/// Query parameters for the `sidecar` command.
+///
+/// Sidecar views always operate on a single result identified by UUID
+/// prefix (falling back to the most recent DB row), except for
+/// `compare_timeline` which takes two UUIDs.
+pub(crate) struct SidecarQuery {
+    pub(crate) query: Option<String>,
     pub(crate) timeline: bool,
     pub(crate) markers: bool,
     pub(crate) summary: bool,

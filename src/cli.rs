@@ -674,12 +674,36 @@ Examples:
         /// Maximum number of functions shown in hotpath reports (0 = all)
         #[arg(long, default_value = "10")]
         top: usize,
+    },
+    /// Query sidecar /proc timelines, markers, and phase summaries
+    #[command(
+        display_order = 4,
+        long_about = "\
+Query sidecar data captured in .brokkr/sidecar.db during `--bench`,
+`--hotpath`, and `--alloc` runs. All views default to the best run of
+the most recent result; pass a UUID prefix to pick a specific result
+and `--run N|all` to pick a different run.
 
-        /// Output sidecar samples as JSONL (defaults to last result if no UUID given)
+Examples:
+  brokkr sidecar --timeline                           # raw JSONL samples (last result)
+  brokkr sidecar --timeline --summary                 # per-phase table (last result)
+  brokkr sidecar --timeline --stat rss                # min/max/avg/p50/p95 for a field
+  brokkr sidecar --timeline --phase STAGE2            # samples within a marker phase
+  brokkr sidecar --markers                            # raw JSONL markers
+  brokkr sidecar --markers --durations                # START/END pair timings
+  brokkr sidecar --markers --phases                   # durations + peak RSS/majflt
+  brokkr sidecar --markers --counters                 # application counters
+  brokkr sidecar --compare-timeline a65a 911c         # phase-aligned compare"
+    )]
+    Sidecar {
+        /// UUID prefix to look up (default: last result)
+        query: Option<String>,
+
+        /// Output sidecar samples as JSONL
         #[arg(long, conflicts_with = "markers")]
         timeline: bool,
 
-        /// Output sidecar markers as JSONL (defaults to last result if no UUID given)
+        /// Output sidecar markers as JSONL
         #[arg(long, conflicts_with = "timeline")]
         markers: bool,
 
@@ -743,18 +767,18 @@ Examples:
 
         /// Compare sidecar timelines of two results (phase-aligned summary)
         #[arg(long, num_args = 2, value_names = ["UUID_A", "UUID_B"],
-              conflicts_with_all = ["query", "commit", "compare", "compare_last", "timeline", "markers"])]
+              conflicts_with_all = ["query", "timeline", "markers"])]
         compare_timeline: Option<Vec<String>>,
     },
     /// Clean build artifacts and scratch data
-    #[command(display_order = 4)]
+    #[command(display_order = 5)]
     Clean,
     /// Show lock status (who holds the benchmark lock)
-    #[command(display_order = 5)]
+    #[command(display_order = 6)]
     Lock,
     /// Browse command history
     #[command(
-        display_order = 6,
+        display_order = 7,
         long_about = "\
 Browse the global command history log (~/.local/share/brokkr/history.db).
 

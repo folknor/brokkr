@@ -50,6 +50,7 @@ mod request;
 mod resolve;
 mod results_cmd;
 mod sidecar;
+mod sidecar_cmd;
 mod sidecar_fmt;
 mod sluggrs;
 mod tools;
@@ -65,7 +66,7 @@ use cli::{Cli, Command, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
-use request::ResultsQuery;
+use request::{ResultsQuery, SidecarQuery};
 
 /// Shared setup for all measured commands: resolve mode/features, set quiet,
 /// handle worktree, construct `MeasureRequest`, call the provided closure.
@@ -612,6 +613,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
             grep,
             limit,
             top,
+        } => {
+            let rq = ResultsQuery {
+                query,
+                commit,
+                compare,
+                compare_last,
+                command,
+                mode,
+                dataset,
+                meta,
+                grep,
+                limit,
+                top,
+            };
+            results_cmd::cmd_results(&project_root, &rq)
+        }
+        Command::Sidecar {
+            query,
             timeline,
             markers,
             summary,
@@ -630,18 +649,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             counters,
             human,
         } => {
-            let rq = ResultsQuery {
+            let sq = SidecarQuery {
                 query,
-                commit,
-                compare,
-                compare_last,
-                command,
-                mode,
-                dataset,
-                meta,
-                grep,
-                limit,
-                top,
                 timeline,
                 markers,
                 summary,
@@ -660,7 +669,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 counters,
                 human,
             };
-            results_cmd::cmd_results(&project_root, &rq)
+            sidecar_cmd::cmd_sidecar(&project_root, &sq)
         }
         Command::Clean => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
