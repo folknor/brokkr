@@ -192,17 +192,24 @@ impl StoredRow {
     /// Stable fingerprint of the captured env set, for pair-key dedup.
     /// Empty string when no env was captured (keeps pre-capture pair
     /// keys unchanged).
+    ///
+    /// Joined with `\x1f` (ASCII unit separator) rather than `,` because
+    /// env values legitimately contain commas — `MALLOC_CONF` is
+    /// comma-delimited by glibc convention (e.g.
+    /// `dirty_decay_ms:0,narenas:1`). A comma joiner would make two
+    /// one-var rows with `MALLOC_CONF=a,b=1` indistinguishable from one
+    /// two-var row with `MALLOC_CONF=a` + `b=1`.
     pub fn env_fingerprint(&self) -> String {
         if self.captured_env.is_empty() {
             return String::new();
         }
-        let mut parts: Vec<String> = self
-            .captured_env
+        // BTreeMap iterates sorted, so the produced order is stable
+        // without a separate sort step.
+        self.captured_env
             .iter()
             .map(|(k, v)| format!("{k}={v}"))
-            .collect();
-        parts.sort();
-        parts.join(",")
+            .collect::<Vec<_>>()
+            .join("\x1f")
     }
 }
 
@@ -300,5 +307,71 @@ mod tests {
     fn short_uuid_empty() {
         let result = short_uuid("");
         assert_eq!(result, "");
+    }
+
+    fn stored_row_with_env(env: &[(&str, &str)]) -> StoredRow {
+        StoredRow {
+            id: 0,
+            timestamp: String::new(),
+            hostname: String::new(),
+            commit: String::new(),
+            subject: String::new(),
+            command: String::new(),
+            mode: String::new(),
+            input_file: String::new(),
+            input_mb: None,
+            elapsed_ms: 0,
+            peak_rss_mb: None,
+            cargo_features: String::new(),
+            cargo_profile: None,
+            kernel: String::new(),
+            cpu_governor: String::new(),
+            avail_memory_mb: None,
+            storage_notes: String::new(),
+            uuid: String::new(),
+            cli_args: String::new(),
+            brokkr_args: String::new(),
+            project: String::new(),
+            stop_marker: String::new(),
+            kv: Vec::new(),
+            captured_env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            distribution: None,
+            hotpath: None,
+        }
+    }
+
+    #[test]
+    fn env_fingerprint_empty_when_no_captures() {
+        assert_eq!(stored_row_with_env(&[]).env_fingerprint(), "");
+    }
+
+    #[test]
+    fn env_fingerprint_disambiguates_comma_in_value() {
+        // Regression: the fingerprint used to join with ',' so a single
+        // var whose value contains ',' was indistinguishable from two
+        // vars. `MALLOC_CONF` is literally the motivating example —
+        // glibc accepts `dirty_decay_ms:0,narenas:1` syntax.
+        let row_one_comma_value =
+            stored_row_with_env(&[("MALLOC_CONF", "dirty_decay_ms:0,narenas:1")]);
+        let row_two_vars_collision = stored_row_with_env(&[
+            ("MALLOC_CONF", "dirty_decay_ms:0"),
+            ("narenas:1", ""),
+        ]);
+        assert_ne!(
+            row_one_comma_value.env_fingerprint(),
+            row_two_vars_collision.env_fingerprint()
+        );
+    }
+
+    #[test]
+    fn env_fingerprint_stable_order() {
+        // BTreeMap iteration is already sorted; two rows built in
+        // different insertion orders must fingerprint identically.
+        let a = stored_row_with_env(&[("A", "1"), ("B", "2")]);
+        let b = stored_row_with_env(&[("B", "2"), ("A", "1")]);
+        assert_eq!(a.env_fingerprint(), b.env_fingerprint());
     }
 }

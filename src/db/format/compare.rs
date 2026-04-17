@@ -25,7 +25,14 @@ pub fn format_compare(
     for pair in &pairs {
         append_compare_row(&mut out, pair, &widths);
         out.push('\n');
-        if let Some(annotation) = format_env_diff(&pair.a_env, &pair.b_env) {
+        // Skip the env annotation when the pair is one-sided — the row
+        // already shows `--` for the missing side's elapsed, so a
+        // trailing "env: X=1 vs (unset)" would just duplicate that
+        // signal and add noise on pairs where env isn't the
+        // interesting axis at all.
+        if pair.a_ms.is_some() && pair.b_ms.is_some()
+            && let Some(annotation) = format_env_diff(&pair.a_env, &pair.b_env)
+        {
             out.push_str(&annotation);
             out.push('\n');
         }

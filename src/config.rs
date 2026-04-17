@@ -277,8 +277,16 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     ))
 }
 
-/// Parse the optional top-level `capture_env = ["PBFHOGG_*", "MALLOC_CONF"]`
-/// list. Each entry is either an exact env var name or a `PREFIX_*` glob.
+/// Parse the optional top-level `capture_env = ["PBFHOGG*", "MALLOC_CONF"]`
+/// list. Each entry is either an exact env var name or a `PREFIX*` glob;
+/// `*` is only supported as the final character.
+///
+/// Validated eagerly to catch three footguns before they silently do
+/// the wrong thing: bare `"*"` (would match *every* env var, including
+/// PATH, SSH_AUTH_SOCK, and any API tokens — those would then land in
+/// the results DB); empty strings; and patterns with `*` anywhere
+/// other than the tail (like `"FOO*BAR"`, which today is treated as an
+/// exact name and silently matches nothing).
 fn parse_capture_env(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Vec<String>, DevError> {
@@ -290,11 +298,41 @@ fn parse_capture_env(
     })?;
     let mut out = Vec::with_capacity(arr.len());
     for entry in arr {
-        let s = entry.as_str().ok_or_else(|| {
+        let raw = entry.as_str().ok_or_else(|| {
             DevError::Config(format!(
                 "capture_env entries must be strings (got {entry})"
             ))
         })?;
+        let s = raw.trim();
+        if s.is_empty() {
+            return Err(DevError::Config(
+                "capture_env contains an empty string".into(),
+            ));
+        }
+        if s == "*" {
+            return Err(DevError::Config(
+                "capture_env pattern '*' would capture every env var \
+                 (PATH, credentials, …) into results.db — refusing. \
+                 List the specific prefixes you want."
+                    .into(),
+            ));
+        }
+        // `*` is only legal as the last character. `FOO*BAR` and `*FOO`
+        // are rejected rather than silently treated as exact names that
+        // never match.
+        let star_count = s.matches('*').count();
+        if star_count > 0 && !s.ends_with('*') {
+            return Err(DevError::Config(format!(
+                "capture_env pattern {s:?}: '*' is only supported as the \
+                 trailing character (got '*' elsewhere)"
+            )));
+        }
+        if star_count > 1 {
+            return Err(DevError::Config(format!(
+                "capture_env pattern {s:?}: only a single trailing '*' \
+                 is supported"
+            )));
+        }
         out.push(s.to_owned());
     }
     Ok(out)
@@ -439,9 +477,10 @@ pub(crate) fn validate_snapshot_key(key: &str) -> Result<(), String> {
 /// Walk brokkr's own environment and return an `env.<NAME> = <value>`
 /// [`crate::db::KvPair`] for every variable that matches one of the
 /// `capture_env` patterns in `config`. Each pattern is either an exact
-/// name (`MALLOC_CONF`) or a `PREFIX_*` glob; the suffix `*` is the
-/// only supported wildcard and matches at the end only. Returns an
-/// empty vec when `capture_env` is empty.
+/// name (`MALLOC_CONF`) or a `PREFIX*` glob; the trailing `*` is the
+/// only supported wildcard. Patterns are validated at
+/// `parse_capture_env` time, so a pattern reaching this point is
+/// known-good. Returns an empty vec when `capture_env` is empty.
 ///
 /// The capture runs on brokkr's inherited env, so a user invocation like
 /// `PBFHOGG_USE_NEW_PATH=1 brokkr apply-changes --bench` records that
@@ -654,6 +693,81 @@ capture_env = "oops"
         let root: toml::Value = toml::from_str(text).unwrap();
         let table = root.as_table().unwrap();
         assert!(parse_capture_env(table).is_err());
+    }
+
+    #[test]
+    fn capture_env_rejects_bare_star() {
+        // `"*"` would capture every env var into results.db, including
+        // PATH, SSH_AUTH_SOCK, and any API tokens. Validation is the
+        // safety net.
+        let text = r#"
+project = "pbfhogg"
+capture_env = ["*"]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        let err = parse_capture_env(table).unwrap_err();
+        assert!(matches!(err, DevError::Config(_)));
+    }
+
+    #[test]
+    fn capture_env_rejects_middle_star() {
+        // `"FOO*BAR"` would today be treated as an exact name (matches
+        // nothing) — reject it loudly rather than silently no-op.
+        let text = r#"
+project = "pbfhogg"
+capture_env = ["FOO*BAR"]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        assert!(parse_capture_env(table).is_err());
+    }
+
+    #[test]
+    fn capture_env_rejects_leading_star() {
+        let text = r#"
+project = "pbfhogg"
+capture_env = ["*FOO"]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        assert!(parse_capture_env(table).is_err());
+    }
+
+    #[test]
+    fn capture_env_rejects_empty_string() {
+        let text = r#"
+project = "pbfhogg"
+capture_env = [""]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        assert!(parse_capture_env(table).is_err());
+    }
+
+    #[test]
+    fn capture_env_rejects_multiple_stars() {
+        let text = r#"
+project = "pbfhogg"
+capture_env = ["FOO**"]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        assert!(parse_capture_env(table).is_err());
+    }
+
+    #[test]
+    fn capture_env_trims_whitespace() {
+        // Leading/trailing whitespace used to be accepted literally,
+        // so " PBFHOGG*" silently never matched. Trim eagerly.
+        let text = r#"
+project = "pbfhogg"
+capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        let got = parse_capture_env(table).unwrap();
+        assert_eq!(got, vec!["PBFHOGG*", "MALLOC_CONF"]);
     }
 
     fn empty_dataset() -> Dataset {
