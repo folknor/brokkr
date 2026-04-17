@@ -73,6 +73,11 @@ pub struct BenchHarness {
     /// need to set `variant` when they mean to override (they almost
     /// never do post-v13).
     measure_mode: Option<String>,
+    /// Env var snapshot captured at `with_request` time. Merged into
+    /// every row's kv via `build_row` as `env.<NAME>` entries — lets
+    /// env-gated code paths (A/B feature flags set from the shell) be
+    /// distinguished across result rows.
+    env_kv: Vec<crate::db::KvPair>,
 }
 
 impl BenchHarness {
@@ -151,6 +156,7 @@ impl BenchHarness {
             stop_marker,
             brokkr_args: None,
             measure_mode: None,
+            env_kv: Vec::new(),
         })
     }
 
@@ -177,6 +183,13 @@ impl BenchHarness {
     /// individual writers don't have to supply it.
     pub fn with_measure_mode(mut self, mode: Option<&str>) -> Self {
         self.measure_mode = mode.map(str::to_owned);
+        self
+    }
+
+    /// Attach captured env-var snapshot (see [`crate::config::captured_env_pairs`]).
+    /// Merged into every row's kv via `build_row`.
+    pub fn with_env_kv(mut self, env_kv: Vec<crate::db::KvPair>) -> Self {
+        self.env_kv = env_kv;
         self
     }
 
@@ -603,6 +616,9 @@ impl BenchHarness {
     /// Build a `RunRow` from harness state, config, and result.
     fn build_row(&self, config: &BenchConfig, result: &BenchResult) -> RunRow {
         let mut kv = config.metadata.clone();
+        // Env capture comes before result kv so runtime counters win on
+        // the unlikely key collision (env.foo vs a runtime env.foo).
+        kv.extend(self.env_kv.iter().cloned());
         let mut peak_rss_mb: Option<f64> = None;
         for pair in &result.kv {
             if pair.key == "peak_rss_kb" {

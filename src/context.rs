@@ -103,7 +103,8 @@ impl HarnessContext {
         self.harness = self
             .harness
             .with_brokkr_args(req.brokkr_args.to_owned())
-            .with_measure_mode(req.mode_label());
+            .with_measure_mode(req.mode_label())
+            .with_env_kv(config::captured_env_pairs(req.dev_config));
         self
     }
 }
@@ -190,7 +191,8 @@ impl BenchContext {
         self.harness = self
             .harness
             .with_brokkr_args(req.brokkr_args.to_owned())
-            .with_measure_mode(req.mode_label());
+            .with_measure_mode(req.mode_label())
+            .with_env_kv(config::captured_env_pairs(req.dev_config));
         self
     }
 }

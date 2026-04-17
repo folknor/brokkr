@@ -15,6 +15,10 @@ pub struct DevConfig {
     pub hosts: HashMap<String, HostConfig>,
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
+    /// Env var names / globs to capture into `run_kv` on every measured
+    /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
+    /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
+    pub capture_env: Vec<String>,
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
@@ -258,6 +262,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
 
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
+    let capture_env = parse_capture_env(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
 
@@ -267,8 +272,32 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             hosts,
             litehtml,
             sluggrs,
+            capture_env,
         },
     ))
+}
+
+/// Parse the optional top-level `capture_env = ["PBFHOGG_*", "MALLOC_CONF"]`
+/// list. Each entry is either an exact env var name or a `PREFIX_*` glob.
+fn parse_capture_env(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<String>, DevError> {
+    let Some(value) = table.get("capture_env") else {
+        return Ok(Vec::new());
+    };
+    let arr = value.as_array().ok_or_else(|| {
+        DevError::Config("capture_env must be an array of strings".into())
+    })?;
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let s = entry.as_str().ok_or_else(|| {
+            DevError::Config(format!(
+                "capture_env entries must be strings (got {entry})"
+            ))
+        })?;
+        out.push(s.to_owned());
+    }
+    Ok(out)
 }
 
 /// Every top-level key that is a table and is not `project` is
@@ -278,7 +307,11 @@ fn parse_hosts(
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
     for (key, value) in table {
-        if key == "project" || key == "litehtml" || key == "sluggrs" {
+        if key == "project"
+            || key == "litehtml"
+            || key == "sluggrs"
+            || key == "capture_env"
+        {
             continue;
         }
         if !value.is_table() {
@@ -402,6 +435,40 @@ pub(crate) fn validate_snapshot_key(key: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Host features
 // ---------------------------------------------------------------------------
+
+/// Walk brokkr's own environment and return an `env.<NAME> = <value>`
+/// [`crate::db::KvPair`] for every variable that matches one of the
+/// `capture_env` patterns in `config`. Each pattern is either an exact
+/// name (`MALLOC_CONF`) or a `PREFIX_*` glob; the suffix `*` is the
+/// only supported wildcard and matches at the end only. Returns an
+/// empty vec when `capture_env` is empty.
+///
+/// The capture runs on brokkr's inherited env, so a user invocation like
+/// `PBFHOGG_USE_NEW_PATH=1 brokkr apply-changes --bench` records that
+/// var without any per-command plumbing.
+pub fn captured_env_pairs(config: &DevConfig) -> Vec<crate::db::KvPair> {
+    if config.capture_env.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<crate::db::KvPair> = Vec::new();
+    for (name, value) in std::env::vars() {
+        if matches_capture(&name, &config.capture_env) {
+            out.push(crate::db::KvPair::text(format!("env.{name}"), value));
+        }
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
+}
+
+fn matches_capture(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| {
+        if let Some(prefix) = p.strip_suffix('*') {
+            name.starts_with(prefix)
+        } else {
+            name == p
+        }
+    })
+}
 
 /// Return the default cargo features configured for the current host.
 pub fn host_features(config: &DevConfig) -> Vec<String> {
@@ -543,7 +610,50 @@ mod tests {
             hosts,
             litehtml: None,
             sluggrs: None,
+            capture_env: Vec::new(),
         }
+    }
+
+    #[test]
+    fn capture_env_matcher() {
+        let patterns = vec!["PBFHOGG*".to_owned(), "MALLOC_CONF".to_owned()];
+        assert!(matches_capture("PBFHOGG_USE_NEW_PATH", &patterns));
+        assert!(matches_capture("PBFHOGG", &patterns));
+        assert!(matches_capture("MALLOC_CONF", &patterns));
+        assert!(!matches_capture("MALLOC_ARENA_MAX", &patterns));
+        assert!(!matches_capture("PATH", &patterns));
+        assert!(!matches_capture("XPBFHOGG", &patterns));
+    }
+
+    #[test]
+    fn capture_env_parse_array() {
+        let text = r#"
+project = "pbfhogg"
+capture_env = ["PBFHOGG*", "MALLOC_CONF"]
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        let got = parse_capture_env(table).unwrap();
+        assert_eq!(got, vec!["PBFHOGG*", "MALLOC_CONF"]);
+    }
+
+    #[test]
+    fn capture_env_absent_ok() {
+        let text = r#"project = "pbfhogg""#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        assert!(parse_capture_env(table).unwrap().is_empty());
+    }
+
+    #[test]
+    fn capture_env_rejects_non_array() {
+        let text = r#"
+project = "pbfhogg"
+capture_env = "oops"
+"#;
+        let root: toml::Value = toml::from_str(text).unwrap();
+        let table = root.as_table().unwrap();
+        assert!(parse_capture_env(table).is_err());
     }
 
     fn empty_dataset() -> Dataset {
