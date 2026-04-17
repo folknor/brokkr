@@ -53,7 +53,7 @@ pub struct BenchResult {
 
 /// The benchmark harness. Holds lockfile guard, database, env snapshot, git info.
 pub struct BenchHarness {
-    _lock: LockGuard,
+    lock: LockGuard,
     db: ResultsDb,
     db_dir: std::path::PathBuf,
     env: EnvInfo,
@@ -140,7 +140,7 @@ impl BenchHarness {
         }
 
         Ok(Self {
-            _lock: lock,
+            lock,
             db,
             db_dir,
             env,
@@ -187,9 +187,11 @@ impl BenchHarness {
         F: Fn(usize) -> Result<BenchResult, DevError>,
     {
         let mut best: Option<BenchResult> = None;
+        let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            self.lock.set_progress(clamp_u32(i + 1), total);
             let result = f(i)?;
             best = Some(pick_best(best, result));
         }
@@ -241,9 +243,11 @@ impl BenchHarness {
         let mut last_pid: u32 = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
+        let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            self.lock.set_progress(clamp_u32(i + 1), total);
 
             // Reopen FIFO read end between runs so the next child's write
             // end connects to a fresh reader (not one stuck at EOF).
@@ -255,6 +259,7 @@ impl BenchHarness {
             let start = Instant::now();
             let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
             last_pid = child.id();
+            self.lock.set_child_pid(last_pid);
 
             // run_sidecar takes ownership of the child, drains stdout/stderr
             // in background threads, and returns everything when the child exits.
@@ -318,9 +323,11 @@ impl BenchHarness {
         F: Fn(usize) -> Result<i64, DevError>,
     {
         let mut samples = Vec::with_capacity(config.runs);
+        let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            self.lock.set_progress(clamp_u32(i + 1), total);
             let ms = f(i)?;
             samples.push(ms);
         }
@@ -390,9 +397,11 @@ impl BenchHarness {
         let mut last_pid: u32 = 0;
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
+        let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            self.lock.set_progress(clamp_u32(i + 1), total);
 
             if i > 0 {
                 fifo.reopen()?;
@@ -402,6 +411,7 @@ impl BenchHarness {
             let start = Instant::now();
             let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
             last_pid = child.id();
+            self.lock.set_child_pid(last_pid);
             let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
             let stopped = sidecar_result.stopped_by_marker;
 
@@ -703,6 +713,10 @@ fn append_kv_fields(parts: &mut Vec<String>, kv: &[KvPair]) {
 ///
 /// Returns the exit code if the process exited normally, or `128 + signal`
 /// if it was killed by a signal (matching shell convention: 137 = OOM kill).
+fn clamp_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;

@@ -1,11 +1,30 @@
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::error::DevError;
+
+/// Mutable lock-file state — maintained while brokkr holds the lock so
+/// `brokkr lock` (from another invocation) can see the current child PID
+/// and bench-run progress.
+struct LockState {
+    project: String,
+    command: String,
+    /// Full brokkr invocation minus argv[0] (e.g. `add-locations-to-ways
+    /// --dataset europe --bench 3`). Captured at acquire time.
+    args: String,
+    project_root: String,
+    /// PID of the most recent child process brokkr spawned under the lock.
+    /// Updated by the harness each iteration of a bench run.
+    child_pid: Option<u32>,
+    /// Current bench-run progress as `(run, total)` (1-based).
+    progress: Option<(u32, u32)>,
+}
 
 /// RAII lock guard. Releases the flock on drop; `OwnedFd` closes the fd.
 pub struct LockGuard {
     fd: OwnedFd,
+    state: Mutex<LockState>,
 }
 
 impl Drop for LockGuard {
@@ -14,6 +33,26 @@ impl Drop for LockGuard {
         // unlock explicitly for clarity. OwnedFd handles close.
         unsafe {
             libc::flock(self.fd.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+impl LockGuard {
+    /// Record the PID of the child process currently running under the lock,
+    /// and rewrite the lock file so concurrent `brokkr lock` invocations can
+    /// see it.
+    pub fn set_child_pid(&self, pid: u32) {
+        if let Ok(mut state) = self.state.lock() {
+            state.child_pid = Some(pid);
+            rewrite_from_state(self.fd.as_raw_fd(), &state);
+        }
+    }
+
+    /// Record current bench-run progress (1-based run index out of total).
+    pub fn set_progress(&self, run: u32, total: u32) {
+        if let Ok(mut state) = self.state.lock() {
+            state.progress = Some((run, total));
+            rewrite_from_state(self.fd.as_raw_fd(), &state);
         }
     }
 }
@@ -30,7 +69,10 @@ pub struct LockInfo {
     pub pid: u32,
     pub project: String,
     pub command: String,
+    pub args: String,
     pub project_root: String,
+    pub child_pid: Option<u32>,
+    pub progress: Option<(u32, u32)>,
 }
 
 /// Resolve the global lock file path.
@@ -64,8 +106,12 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
             // SAFETY: `fd` is a valid open file descriptor returned by `open_lock_file`,
             // and we take unique ownership here — it is not used elsewhere.
             let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-            write_lock_contents(owned.as_raw_fd(), ctx);
-            Ok(LockGuard { fd: owned })
+            let state = build_state(ctx);
+            rewrite_from_state(owned.as_raw_fd(), &state);
+            Ok(LockGuard {
+                fd: owned,
+                state: Mutex::new(state),
+            })
         }
         Err(held_by) => {
             // flock failed — close the fd before returning the error.
@@ -131,8 +177,12 @@ pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    write_lock_contents(owned.as_raw_fd(), ctx);
-    Ok(LockGuard { fd: owned })
+    let state = build_state(ctx);
+    rewrite_from_state(owned.as_raw_fd(), &state);
+    Ok(LockGuard {
+        fd: owned,
+        state: Mutex::new(state),
+    })
 }
 
 /// Check the global lock status. Returns `None` if no lock is held.
@@ -170,7 +220,10 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             pid: 0,
             project: "unknown".into(),
             command: "unknown".into(),
+            args: String::new(),
             project_root: "unknown".into(),
+            child_pid: None,
+            progress: None,
         }));
     };
 
@@ -184,6 +237,12 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
     }
 
     Ok(Some(info))
+}
+
+/// Public wrapper around `process_uptime_str` for callers outside this module
+/// (e.g. `brokkr lock` displaying the brokkr PID's uptime).
+pub fn process_uptime(pid: u32) -> Option<String> {
+    process_uptime_str(pid)
 }
 
 /// Get how long a process has been running, as a human-readable string.
@@ -373,22 +432,40 @@ fn try_flock(fd: RawFd) -> Result<(), DevError> {
     }
 }
 
-/// Write PID + context to the lock file as newline-separated fields:
+/// Build the initial `LockState` for a freshly-acquired lock. Captures the
+/// current brokkr invocation args (argv minus argv[0]) so `brokkr lock`
+/// can show exactly what the user typed.
+fn build_state(ctx: &LockContext<'_>) -> LockState {
+    LockState {
+        project: ctx.project.to_owned(),
+        command: ctx.command.to_owned(),
+        args: current_invocation_args(),
+        project_root: ctx.project_root.to_owned(),
+        child_pid: None,
+        progress: None,
+    }
+}
+
+/// Rewrite the lock file contents from the given state.
 ///
-/// ```text
-/// pid=12345
-/// project=pbfhogg
-/// command=bench read
-/// root=/home/user/Projects/pbfhogg
-/// ```
-fn write_lock_contents(fd: RawFd, ctx: &LockContext<'_>) {
-    let contents = format!(
-        "pid={}\nproject={}\ncommand={}\nroot={}\n",
+/// Fields are newline-separated `key=value` pairs. `child_pid=` and
+/// `progress=` are only emitted when set, so a bare acquire without any
+/// bench activity produces the minimal file.
+fn rewrite_from_state(fd: RawFd, state: &LockState) {
+    let mut contents = format!(
+        "pid={}\nproject={}\ncommand={}\nargs={}\nroot={}\n",
         std::process::id(),
-        ctx.project,
-        ctx.command,
-        ctx.project_root,
+        state.project,
+        state.command,
+        state.args,
+        state.project_root,
     );
+    if let Some(pid) = state.child_pid {
+        contents.push_str(&format!("child_pid={pid}\n"));
+    }
+    if let Some((run, total)) = state.progress {
+        contents.push_str(&format!("progress={run}/{total}\n"));
+    }
 
     unsafe {
         if libc::ftruncate(fd, 0) == -1 {
@@ -415,9 +492,27 @@ fn write_lock_contents(fd: RawFd, ctx: &LockContext<'_>) {
     }
 }
 
+/// Capture `std::env::args()` minus argv[0], shell-quoting any element that
+/// contains whitespace or a double-quote so the joined string is unambiguous.
+fn current_invocation_args() -> String {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    args.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() || s.chars().any(|c| c.is_whitespace() || c == '"') {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        s.to_owned()
+    }
+}
+
 /// Read lock file contents and parse the key=value fields.
 fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 2048];
 
     unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
 
@@ -432,7 +527,10 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
     let mut pid: u32 = 0;
     let mut project = String::new();
     let mut command = String::new();
+    let mut args = String::new();
     let mut root = String::new();
+    let mut child_pid: Option<u32> = None;
+    let mut progress: Option<(u32, u32)> = None;
 
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("pid=") {
@@ -441,8 +539,18 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
             project = v.trim().to_owned();
         } else if let Some(v) = line.strip_prefix("command=") {
             command = v.trim().to_owned();
+        } else if let Some(v) = line.strip_prefix("args=") {
+            args = v.trim().to_owned();
         } else if let Some(v) = line.strip_prefix("root=") {
             root = v.trim().to_owned();
+        } else if let Some(v) = line.strip_prefix("child_pid=") {
+            child_pid = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("progress=") {
+            if let Some((r, t)) = v.trim().split_once('/') {
+                if let (Ok(r), Ok(t)) = (r.parse::<u32>(), t.parse::<u32>()) {
+                    progress = Some((r, t));
+                }
+            }
         }
     }
 
@@ -454,7 +562,10 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
         pid,
         project,
         command,
+        args,
         project_root: root,
+        child_pid,
+        progress,
     })
 }
 

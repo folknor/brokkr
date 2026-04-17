@@ -1188,32 +1188,56 @@ fn cmd_clean(
 }
 
 fn cmd_lock() -> Result<(), DevError> {
-    match lockfile::status()? {
-        Some(info) => {
-            output::lock_msg(&format!(
-                "held by PID {}: {} {} ({})",
-                info.pid, info.project, info.command, info.project_root,
-            ));
-            if info.pid > 0 {
-                if let Some(summary) = lockfile::process_summary(info.pid) {
-                    output::lock_msg(&summary);
-                }
-                // Show the last sidecar marker if available.
-                let status_path = std::path::Path::new(&info.project_root)
-                    .join(".brokkr")
-                    .join(".sidecar-status");
-                if let Ok(marker) = std::fs::read_to_string(&status_path) {
-                    let marker = marker.trim();
-                    if !marker.is_empty() {
-                        output::lock_msg(&format!("last marker: {marker}"));
-                    }
-                }
+    let Some(info) = lockfile::status()? else {
+        output::lock_msg("no active lock");
+        return Ok(());
+    };
+
+    // Line 1: brokkr orchestrator + the invocation it was asked to run.
+    let brokkr_uptime = if info.pid > 0 {
+        lockfile::process_uptime(info.pid)
+    } else {
+        None
+    };
+    let uptime_suffix = brokkr_uptime
+        .as_deref()
+        .map(|u| format!(" running {u}"))
+        .unwrap_or_default();
+    let invocation = if info.args.is_empty() {
+        format!("{} {}", info.project, info.command)
+    } else {
+        format!("{} {}", info.project, info.args)
+    };
+    output::lock_msg(&format!(
+        "brokkr PID {}{}: {}",
+        info.pid, uptime_suffix, invocation,
+    ));
+    output::lock_msg(&format!("root: {}", info.project_root));
+
+    // Line 3: child process stats (if brokkr is currently running one).
+    if let Some(child_pid) = info.child_pid
+        && let Some(summary) = lockfile::process_summary(child_pid)
+    {
+        let prefix = info
+            .progress
+            .map(|(r, t)| format!("run {r}/{t}, "))
+            .unwrap_or_default();
+        output::lock_msg(&format!("{prefix}child PID {child_pid} {summary}"));
+    }
+
+    // Line 4: most recent sidecar marker, if any.
+    if info.pid > 0 {
+        let status_path = std::path::Path::new(&info.project_root)
+            .join(".brokkr")
+            .join(".sidecar-status");
+        if let Ok(marker) = std::fs::read_to_string(&status_path) {
+            let marker = marker.trim();
+            if !marker.is_empty() {
+                output::lock_msg(&format!("last marker: {marker}"));
             }
         }
-        None => {
-            output::lock_msg("no active lock");
-        }
     }
+
     Ok(())
 }
 
