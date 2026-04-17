@@ -180,6 +180,13 @@ impl BenchHarness {
         self
     }
 
+    /// Expose the held lock so callers that spawn children outside of
+    /// `run_external` (notably `run_hotpath_capture`) can still report
+    /// `child_pid` into the lockfile for `brokkr lock`.
+    pub fn lock(&self) -> &LockGuard {
+        &self.lock
+    }
+
     /// Internal timing: closure called N times, returns `BenchResult`.
     /// Best-of-N (minimum `elapsed_ms`).
     pub fn run_internal<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
@@ -820,6 +827,7 @@ pub fn elapsed_to_ms(duration: &Duration) -> i64 {
 /// + sidecar loop so /proc metrics are sampled during the run.
 ///
 /// Creates and manages its own FIFO in `scratch_dir`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_hotpath_capture(
     binary: &str,
     args: &[&str],
@@ -828,6 +836,7 @@ pub fn run_hotpath_capture(
     extra_env: &[(&str, &str)],
     ok_codes: &[i32],
     stop_marker: Option<&str>,
+    lock: Option<&LockGuard>,
 ) -> Result<(BenchResult, Vec<u8>, crate::sidecar::SidecarData), crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
@@ -845,6 +854,9 @@ pub fn run_hotpath_capture(
 
     let start = std::time::Instant::now();
     let child = output::spawn_captured(binary, args, project_root, &env)?;
+    if let Some(lock) = lock {
+        lock.set_child_pid(child.id());
+    }
     let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start, stop_marker);
     let stopped = sidecar_result.stopped_by_marker;
 

@@ -414,6 +414,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     &[("ELIVAGAR_NODE_STATS", "1")],
                     &[],
                     req.stop_marker,
+                    Some(ctx.harness.lock()),
                 )?;
                 result.kv.push(KvPair::text(
                     "meta.locations_on_ways_detected",
@@ -491,6 +492,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     &[],
                     &[],
                     req.stop_marker,
+                    Some(ctx.harness.lock()),
                 )?;
                 Ok(result)
             })?;

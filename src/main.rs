@@ -1364,6 +1364,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
             &[],
             &[],
             req.stop_marker,
+            Some(ctx.harness.lock()),
         )?;
         Ok(result)
     })?;

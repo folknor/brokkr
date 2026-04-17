@@ -266,8 +266,16 @@ fn run_nidhogg_hotpath(
     let binary_str = ctx.binary.display().to_string();
 
     ctx.harness.run_internal(&config, |_i| {
-        let (result, _stderr, _sidecar) =
-            harness::run_hotpath_capture(&binary_str, &args, &ctx.paths.scratch_dir, req.project_root, &[], &[], req.stop_marker)?;
+        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+            &binary_str,
+            &args,
+            &ctx.paths.scratch_dir,
+            req.project_root,
+            &[],
+            &[],
+            req.stop_marker,
+            Some(ctx.harness.lock()),
+        )?;
         Ok(result)
     })?;
 

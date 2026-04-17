@@ -49,7 +49,12 @@ impl LockGuard {
     }
 
     /// Record current bench-run progress (1-based run index out of total).
+    /// Skips the update when `total <= 1` — a lone "run 1/1" line in
+    /// `brokkr lock` is noise.
     pub fn set_progress(&self, run: u32, total: u32) {
+        if total <= 1 {
+            return;
+        }
         if let Ok(mut state) = self.state.lock() {
             state.progress = Some((run, total));
             rewrite_from_state(self.fd.as_raw_fd(), &state);
@@ -452,12 +457,14 @@ fn build_state(ctx: &LockContext<'_>) -> LockState {
 /// `progress=` are only emitted when set, so a bare acquire without any
 /// bench activity produces the minimal file.
 fn rewrite_from_state(fd: RawFd, state: &LockState) {
+    // Field order: all fixed-size / short fields first, then the unbounded
+    // `args=` line last. Truncation from read buffer limits (or a long argv)
+    // only sacrifices `args`; `pid`/`child_pid`/`progress`/`root` are safe.
     let mut contents = format!(
-        "pid={}\nproject={}\ncommand={}\nargs={}\nroot={}\n",
+        "pid={}\nproject={}\ncommand={}\nroot={}\n",
         std::process::id(),
         state.project,
         state.command,
-        state.args,
         state.project_root,
     );
     if let Some(pid) = state.child_pid {
@@ -466,15 +473,14 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) {
     if let Some((run, total)) = state.progress {
         contents.push_str(&format!("progress={run}/{total}\n"));
     }
+    contents.push_str(&format!("args={}\n", state.args));
 
+    // Write first, then truncate. The inverse order (truncate → write) gave
+    // a concurrent `brokkr lock` reader a window to read 0 bytes and print
+    // `PID 0: unknown`. Writing first means any reader sees either the old
+    // full contents or a valid new prefix (plus harmless stale trailing
+    // bytes that line-prefix parsing ignores).
     unsafe {
-        if libc::ftruncate(fd, 0) == -1 {
-            eprintln!(
-                "[lock] warning: failed to truncate lock file: {}",
-                std::io::Error::last_os_error()
-            );
-            return;
-        }
         if libc::lseek(fd, 0, libc::SEEK_SET) == -1 {
             eprintln!(
                 "[lock] warning: failed to seek lock file: {}",
@@ -486,6 +492,16 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) {
         if n == -1 {
             eprintln!(
                 "[lock] warning: failed to write lock metadata: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        // Trim any stale tail from a previous longer write. In practice
+        // we only ever grow (fields are append-only once set), so this is
+        // usually a no-op.
+        if libc::ftruncate(fd, n as libc::off_t) == -1 {
+            eprintln!(
+                "[lock] warning: failed to truncate lock file: {}",
                 std::io::Error::last_os_error()
             );
         }
@@ -512,17 +528,28 @@ fn shell_quote(s: &str) -> String {
 
 /// Read lock file contents and parse the key=value fields.
 fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
-    let mut buf = [0u8; 2048];
-
+    // Read the full file, not a fixed-size prefix — a long argv could
+    // otherwise push the trailing lines out of range.
     unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
 
-    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if n <= 0 {
+    let mut contents: Vec<u8> = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+    loop {
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+        let len = usize::try_from(n).ok()?;
+        contents.extend_from_slice(&chunk[..len]);
+        if len < chunk.len() {
+            break;
+        }
+    }
+    if contents.is_empty() {
         return None;
     }
 
-    let len = usize::try_from(n).ok()?;
-    let text = std::str::from_utf8(&buf[..len]).ok()?;
+    let text = std::str::from_utf8(&contents).ok()?;
 
     let mut pid: u32 = 0;
     let mut project = String::new();

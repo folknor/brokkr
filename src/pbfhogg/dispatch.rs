@@ -451,6 +451,7 @@ fn run_pbfhogg_hotpath(
             &[],
             ok_codes,
             req.stop_marker,
+            Some(ctx.harness.lock()),
         )?;
         Ok(result)
     })?;
