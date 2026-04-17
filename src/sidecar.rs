@@ -127,6 +127,10 @@ pub struct SidecarRunResult {
     /// Callers should treat this as a successful exit even though the exit
     /// status reflects SIGKILL.
     pub stopped_by_marker: bool,
+    /// True when the child was killed because brokkr caught SIGTERM (via
+    /// `brokkr kill`). Callers store the partial sidecar and then abort
+    /// the bench, letting the outer layer run scratch cleanup.
+    pub stopped_by_signal: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +562,7 @@ fn drain_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u
 ///
 /// Returns a `SidecarRunResult` containing the child's exit status,
 /// captured output, wall-clock elapsed time, and sidecar profile data.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_sidecar(
     mut child: Child,
     fifo: &mut SidecarFifo,
@@ -594,6 +599,7 @@ pub(crate) fn run_sidecar(
     #[allow(unused_assignments)] // initial None is never read; every branch assigns before use
     let mut child_elapsed: Option<Duration> = None;
     let mut stopped_by_marker = false;
+    let mut stopped_by_signal = false;
 
     loop {
         #[allow(clippy::cast_possible_truncation)]
@@ -628,6 +634,17 @@ pub(crate) fn run_sidecar(
                 stopped_by_marker = true;
                 break;
             }
+        }
+
+        // Graceful shutdown via `brokkr kill` (SIGTERM handler set this flag).
+        if crate::shutdown::is_shutdown_requested() {
+            output::sidecar_msg("shutdown requested, killing child");
+            child.kill().ok();
+            let status = child.wait().ok();
+            child_elapsed = Some(start.elapsed());
+            exit_status = status;
+            stopped_by_signal = true;
+            break;
         }
 
         // Check child exit via handle (not bare PID — PIDs can be reused).
@@ -700,6 +717,7 @@ pub(crate) fn run_sidecar(
             },
         },
         stopped_by_marker,
+        stopped_by_signal,
     }
 }
 

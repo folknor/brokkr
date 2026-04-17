@@ -764,6 +764,26 @@ Examples:
     /// Show lock status (who holds the benchmark lock)
     #[command(display_order = 6)]
     Lock,
+    /// Gracefully stop the active bench (SIGTERM → clean shutdown + scratch cleanup)
+    #[command(
+        display_order = 6,
+        long_about = "\
+Ask the brokkr process holding the lock to wrap up cleanly.
+
+Default: sends SIGTERM to the brokkr process. Brokkr catches it,
+SIGKILLs the tool being measured, flushes partial sidecar data
+(reachable via `brokkr sidecar dirty`), releases the lock, and
+runs `brokkr clean` for the project.
+
+--hard: sends SIGKILL to both the brokkr PID and the recorded
+child PID without any cleanup. Use when the default path is
+wedged; follow up with `brokkr clean` manually."
+    )]
+    Kill {
+        /// SIGKILL immediately (brokkr + child) without graceful cleanup.
+        #[arg(long)]
+        hard: bool,
+    },
     /// Browse command history
     #[command(
         display_order = 7,

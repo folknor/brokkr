@@ -272,6 +272,7 @@ impl BenchHarness {
             // in background threads, and returns everything when the child exits.
             let result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
             let stopped = result.stopped_by_marker;
+            let interrupted = result.stopped_by_signal;
 
             let captured = output::CapturedOutput {
                 status: result.exit_status,
@@ -285,6 +286,16 @@ impl BenchHarness {
             // child is OOM-killed, since the /proc trajectory shows what
             // happened before the kill.
             sidecar_runs.push(result.data);
+
+            // `brokkr kill` caught SIGTERM and we killed the child in the
+            // sidecar loop. Save the partial data under `dirty` and bail.
+            if interrupted {
+                drop(fifo);
+                let exit_code = exit_code_from_status(&captured.status);
+                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
+                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
+                return Err(DevError::Interrupted);
+            }
 
             // When the child was killed by a --stop marker, the exit status
             // is SIGKILL — not a real failure.
@@ -421,6 +432,7 @@ impl BenchHarness {
             self.lock.set_child_pid(last_pid);
             let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
             let stopped = sidecar_result.stopped_by_marker;
+            let interrupted = sidecar_result.stopped_by_signal;
 
             let captured = output::CapturedOutput {
                 status: sidecar_result.exit_status,
@@ -430,6 +442,14 @@ impl BenchHarness {
             };
 
             sidecar_runs.push(sidecar_result.data);
+
+            if interrupted {
+                drop(fifo);
+                let exit_code = exit_code_from_status(&captured.status);
+                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
+                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
+                return Err(DevError::Interrupted);
+            }
 
             if !stopped {
                 let exit_err = captured.check_success(&prog_str).err();
@@ -859,6 +879,7 @@ pub fn run_hotpath_capture(
     }
     let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start, stop_marker);
     let stopped = sidecar_result.stopped_by_marker;
+    let interrupted = sidecar_result.stopped_by_signal;
 
     drop(fifo);
 
@@ -868,6 +889,9 @@ pub fn run_hotpath_capture(
         stderr: sidecar_result.stderr,
         elapsed: sidecar_result.elapsed,
     };
+    if interrupted {
+        return Err(crate::error::DevError::Interrupted);
+    }
     if !stopped {
         captured.check_success_or(binary, ok_codes)?;
     }

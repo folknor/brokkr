@@ -31,6 +31,10 @@ pub enum DevError {
     /// Used by passthrough commands (run, elivagar) to propagate exit codes
     /// without calling `process::exit` in handlers.
     ExitCode(i32),
+    /// `brokkr kill` requested a cooperative shutdown (SIGTERM). The bench
+    /// aborted mid-run, partial sidecar data was stored under the `dirty`
+    /// alias, and `main` should run scratch cleanup and exit 130.
+    Interrupted,
 }
 
 impl fmt::Display for DevError {
@@ -65,6 +69,7 @@ impl fmt::Display for DevError {
             DevError::Database(msg) => write!(f, "database: {msg}"),
             DevError::Verify(msg) => write!(f, "verify: {msg}"),
             DevError::ExitCode(_) => Ok(()),
+            DevError::Interrupted => write!(f, "interrupted by shutdown request"),
         }
     }
 }
@@ -80,7 +85,8 @@ impl StdError for DevError {
             | DevError::Lock(_)
             | DevError::Database(_)
             | DevError::Verify(_)
-            | DevError::ExitCode(_) => None,
+            | DevError::ExitCode(_)
+            | DevError::Interrupted => None,
         }
     }
 }

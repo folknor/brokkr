@@ -49,6 +49,7 @@ mod project;
 mod request;
 mod resolve;
 mod results_cmd;
+mod shutdown;
 mod sidecar;
 mod sidecar_cmd;
 mod sidecar_fmt;
@@ -127,6 +128,11 @@ fn main() {
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
 
+    // Install SIGTERM handler before anything else so an early `brokkr kill`
+    // still triggers the cooperative path (rather than Rust's default
+    // terminate) even during cargo build or sidecar FIFO setup.
+    shutdown::install_sigterm_handler();
+
     let cli = Cli::parse();
 
     // Don't record `history` itself (avoids recursive noise).
@@ -138,6 +144,7 @@ fn main() {
     let exit_code = match &result {
         Ok(()) => 0,
         Err(DevError::ExitCode(code)) => *code,
+        Err(DevError::Interrupted) => 130,
         Err(_) => 1,
     };
 
@@ -148,6 +155,17 @@ fn main() {
     match result {
         Ok(()) => {}
         Err(DevError::ExitCode(code)) => process::exit(code),
+        Err(DevError::Interrupted) => {
+            output::lock_msg("interrupted — running scratch cleanup");
+            // Best-effort cleanup; if project detection fails here, the
+            // user already has `brokkr clean` as a follow-up.
+            if let Ok((project, dev_config, project_root)) = project::detect()
+                && let Err(e) = cmd_clean(&dev_config, project, &project_root)
+            {
+                output::error(&format!("cleanup failed: {e}"));
+            }
+            process::exit(130);
+        }
         Err(e) => {
             output::error(&e.to_string());
             process::exit(1);
@@ -160,6 +178,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
     // These commands work without a project root.
     if matches!(cli.command, Command::Lock) {
         return cmd_lock();
+    }
+    if let Command::Kill { hard } = cli.command {
+        return cmd_kill(hard);
     }
     if let Command::History {
         command,
@@ -197,6 +218,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
     match cli.command {
         // Already handled by as_pbfhogg() above the match.
         Command::Lock
+        | Command::Kill { .. }
         | Command::History { .. }
         | Command::Inspect { .. }
         | Command::CheckRefs { .. }
@@ -1249,6 +1271,61 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
         pmtiles::run(file)?;
     }
     Ok(())
+}
+
+/// Ask the brokkr process holding the lock to shut down. Default sends
+/// SIGTERM (cooperative — brokkr handles cleanup itself). `--hard`
+/// sends SIGKILL to both brokkr and the recorded child PID.
+fn cmd_kill(hard: bool) -> Result<(), DevError> {
+    let Some(info) = lockfile::status()? else {
+        output::lock_msg("no active lock");
+        return Ok(());
+    };
+    if info.pid == 0 {
+        output::lock_msg("lock held by unknown process; nothing to kill");
+        return Ok(());
+    }
+
+    if hard {
+        let brokkr_sent = send_signal(info.pid, libc::SIGKILL);
+        output::lock_msg(&format!(
+            "SIGKILL brokkr PID {}: {}",
+            info.pid,
+            if brokkr_sent { "sent" } else { "not running" },
+        ));
+        if let Some(child_pid) = info.child_pid {
+            let child_sent = send_signal(child_pid, libc::SIGKILL);
+            output::lock_msg(&format!(
+                "SIGKILL child PID {child_pid}: {}",
+                if child_sent { "sent" } else { "not running" },
+            ));
+        }
+        output::lock_msg("follow up with `brokkr clean` to wipe scratch");
+        return Ok(());
+    }
+
+    if !send_signal(info.pid, libc::SIGTERM) {
+        output::lock_msg(&format!(
+            "brokkr PID {} is not running; nothing to kill",
+            info.pid,
+        ));
+        return Ok(());
+    }
+    output::lock_msg(&format!(
+        "SIGTERM sent to brokkr PID {} — cleanup in progress",
+        info.pid,
+    ));
+    Ok(())
+}
+
+/// Send a signal to a PID. Returns `true` if the process existed.
+fn send_signal(pid: u32, signal: libc::c_int) -> bool {
+    let ret = unsafe { libc::kill(pid.cast_signed(), signal) };
+    if ret == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    err.raw_os_error() != Some(libc::ESRCH)
 }
 
 // ---------------------------------------------------------------------------
