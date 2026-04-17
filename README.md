@@ -84,7 +84,7 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 - `brokkr extract` — `--strategy simple|complete|smart` picks the extract algorithm
 - `brokkr diff` — `--format default|osc` picks the output shape
 
-`add-locations-to-ways` accepts `--index-type` (dense, sparse, external; default: hash). When using `--index-type external`, two additional flags are available for iterating on individual pipeline stages: `--keep-scratch` preserves the external join's intermediate scratch directory after the run, and `--start-stage N` (2-4) skips stages 1..N-1 by reusing the scratch from a prior `--keep-scratch` run. `--start-stage` implies `--keep-scratch` so subsequent partial runs don't clean up the scratch. All of `--index-type`, `--start-stage`, and `--keep-scratch` land in `cli_args` verbatim, so partial runs don't mix with full-pipeline baselines and can be isolated via `brokkr results --grep 'start-stage' --command add-locations-to-ways`.
+`add-locations-to-ways` accepts `--index-type` (dense, sparse, external; default: hash). Lands in `cli_args` verbatim.
 
 Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`, `--modes`, `--compressions` flags — `--compressions` is plural because the single-value `--compression` collides with pbfhogg's passthrough flag on `write` / `merge`).
 

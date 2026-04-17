@@ -217,16 +217,9 @@ impl Command {
                 mode,
                 pbf,
                 index_type,
-                start_stage,
-                keep_scratch,
             } => {
-                // --start-stage implies --keep-scratch: without it the first
-                // partial run would clean up the scratch dir and break the next.
-                let keep = *keep_scratch || start_stage.is_some();
                 let params = CommandParams {
                     index_type: index_type.clone(),
-                    start_stage: start_stage.clone(),
-                    keep_scratch: keep,
                     ..Default::default()
                 };
                 Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))

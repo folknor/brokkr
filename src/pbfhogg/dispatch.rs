@@ -68,14 +68,6 @@ pub fn run_command_with_params(
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Pbfhogg, command.id())?;
 
-    // --start-stage and --keep-scratch are only meaningful for external join.
-    let has_stage_flags = extra_params.start_stage.is_some() || extra_params.keep_scratch;
-    if has_stage_flags && extra_params.index_type.as_deref() != Some("external") {
-        return Err(DevError::Config(
-            "--start-stage and --keep-scratch require --index-type external".into(),
-        ));
-    }
-
     if req.dry_run {
         return run_pbfhogg_dry_run(req, command, osc_seq, extra_params);
     }

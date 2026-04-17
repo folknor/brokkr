@@ -153,10 +153,6 @@ pub struct CommandParams {
     pub bbox: Option<String>,
     /// `--index-type <mode>` for `add-locations-to-ways`.
     pub index_type: Option<String>,
-    /// `--start-stage <N>` for `add-locations-to-ways`.
-    pub start_stage: Option<String>,
-    /// `--keep-scratch` for `add-locations-to-ways`.
-    pub keep_scratch: bool,
     /// `--snapshot <key>`.
     pub snapshot: Option<String>,
     /// `--from <key>` for DiffSnapshots.

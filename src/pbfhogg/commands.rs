@@ -621,13 +621,6 @@ impl PbfhoggCommand {
                     args.push("--index-type".into());
                     args.push(it.clone());
                 }
-                if let Some(s) = &ctx.params.start_stage {
-                    args.push("--start-stage".into());
-                    args.push(s.clone());
-                }
-                if ctx.params.keep_scratch {
-                    args.push("--keep-scratch".into());
-                }
                 Ok(args)
             }
             Self::TimeFilter => {
@@ -943,27 +936,6 @@ mod tests {
     }
 
     #[test]
-    fn altw_build_args_with_start_stage() {
-        let mut ctx = test_ctx();
-        ctx.params.index_type = Some("external".into());
-        ctx.params.start_stage = Some("3".into());
-        let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
-        assert!(args.contains(&String::from("--start-stage")));
-        assert!(args.contains(&String::from("3")));
-    }
-
-    #[test]
-    fn altw_build_args_with_keep_scratch() {
-        let mut ctx = test_ctx();
-        ctx.params.index_type = Some("external".into());
-        ctx.params.keep_scratch = true;
-        let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
-        assert!(args.contains(&String::from("--keep-scratch")));
-    }
-
-    #[test]
     fn altw_hotpath_no_index_type_default() {
         // Hotpath should NOT default to --index-type external when omitted.
         let ctx = test_ctx();
@@ -973,28 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn altw_hotpath_with_start_stage() {
-        let mut ctx = test_ctx();
-        ctx.params.index_type = Some("external".into());
-        ctx.params.start_stage = Some("4".into());
-        let cmd = PbfhoggCommand::AddLocationsToWays;
-        let args = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
-        assert!(args.contains(&String::from("--index-type")));
-        assert!(args.contains(&String::from("external")));
-        assert!(args.contains(&String::from("--start-stage")));
-        assert!(args.contains(&String::from("4")));
-    }
-
-    #[test]
     fn altw_metadata_has_no_axis_mirrors() {
-        // After v13 the index_type / start_stage / keep_scratch axes
-        // live in cli_args and brokkr_args (grep-able from there); the
-        // metadata builder is reserved for runtime observations, so it
-        // no longer mirrors user-supplied flags.
+        // After v13 the index_type axis lives in cli_args and brokkr_args
+        // (grep-able from there); the metadata builder is reserved for
+        // runtime observations, so it no longer mirrors user-supplied flags.
         let mut ctx = test_ctx();
         ctx.params.index_type = Some("external".into());
-        ctx.params.start_stage = Some("3".into());
-        ctx.params.keep_scratch = true;
         let cmd = PbfhoggCommand::AddLocationsToWays;
         assert!(cmd.metadata(&ctx).is_empty());
     }
