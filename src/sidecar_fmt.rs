@@ -6,7 +6,7 @@ use crate::request::SidecarQuery;
 use crate::sidecar;
 
 /// Format a Unix epoch as a local ISO-8601 timestamp.
-pub(crate) fn format_epoch(epoch: i64) -> String {
+fn format_epoch(epoch: i64) -> String {
     // Use libc localtime_r for zero-dependency local time formatting.
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
     let time_t = epoch as libc::time_t;

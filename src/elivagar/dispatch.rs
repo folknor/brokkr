@@ -17,7 +17,7 @@ use crate::resolve::resolve_pbf_with_size;
 /// Handles run, bench, hotpath, and alloc for any elivagar command.
 /// External commands (Planetiler, Tilemaker) delegate to old handlers for
 /// bench mode but do not support run/hotpath/alloc.
-pub fn run_command(
+pub(crate) fn run_command(
     req: &MeasureRequest,
     command: &ElivagarCommand,
 ) -> Result<(), DevError> {

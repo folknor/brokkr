@@ -496,6 +496,23 @@ fn resolve_relative(base: &Path, rel: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::unwrap_in_result,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::float_cmp,
+        clippy::approx_constant,
+        clippy::needless_pass_by_value,
+        clippy::let_underscore_must_use,
+        clippy::useless_vec
+    )]
     use super::*;
 
     fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {

@@ -134,7 +134,7 @@ Examples:
         )]
         type_filter: Option<String>,
         /// Run `cat --dedupe` with two PBF inputs.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "type_filter")]
         dedupe: bool,
         /// Force the full-decode / re-frame Framed path (cat_filtered).
         #[arg(long)]
@@ -1464,6 +1464,23 @@ fn validate_since(s: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::unwrap_in_result,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::float_cmp,
+        clippy::approx_constant,
+        clippy::needless_pass_by_value,
+        clippy::let_underscore_must_use,
+        clippy::useless_vec
+    )]
     use super::*;
 
     #[test]

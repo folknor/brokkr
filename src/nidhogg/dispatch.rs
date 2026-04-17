@@ -14,7 +14,7 @@ use crate::resolve::resolve_pbf_with_size;
 ///
 /// Ingest follows the standard build+run_external pattern (like pbfhogg).
 /// Api and Tiles have custom lifecycles and delegate to per-module functions.
-pub fn run_command(
+pub(crate) fn run_command(
     req: &MeasureRequest,
     command: &crate::nidhogg::commands::NidhoggCommand,
 ) -> Result<(), DevError> {

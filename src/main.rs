@@ -1,24 +1,10 @@
 // Clippy's `restriction` lints (unwrap_used, too_many_lines, etc.) are useful
 // for library code but noisy in tests where `.unwrap()` on a fixture and
-// long table-driven test functions are idiomatic. Allow them in the test
-// compilation only; the main binary still gets the full strict lint set.
-#![cfg_attr(test, allow(
-    clippy::unwrap_used,
-    clippy::unwrap_in_result,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    clippy::too_many_arguments,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::float_cmp,
-    clippy::approx_constant,
-    clippy::needless_pass_by_value,
-    clippy::let_underscore_must_use,
-    clippy::useless_vec,
-))]
+// long table-driven test functions are idiomatic. The test-only allows live
+// as inner attributes on each `mod tests { }` block so they only silence
+// lints inside test code — production code still gets the strict lint set
+// even when compiled under `cargo clippy --all-targets` (which sets
+// `cfg(test)` on the whole crate for the test-harness build).
 
 mod build;
 mod cargo_filter;

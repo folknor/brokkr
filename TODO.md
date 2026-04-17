@@ -15,19 +15,6 @@ comma-separated or repeated). If we ever want to bench the cost of
 stripping each attr independently we'd need to change brokkr's `clean: bool`
 into `clean: Option<Vec<String>>`.
 
-#### `cat --type --dedupe` isn't rejected at clap level
-pbfhogg errors at runtime with `"--type is not valid with --dedupe"`. No
-brokkr preset uses this combination today, but a user hand-invoking would
-only learn at runtime. Would need `conflicts_with` on one of the two.
-
-#### Crate-level `#![cfg_attr(test, allow(…))]` is broader than it needs to be
-`src/main.rs:5-21` silences `too_many_arguments`, `cognitive_complexity`,
-`cast_*_truncation` etc. under `cfg(test)`, which also fires during
-`cargo clippy --all-targets` (or `--tests`). If CI uses either flag,
-those production-code lints silently stop catching regressions in the
-non-test binary too. Tightening: move the allow onto the individual
-`mod tests { }` blocks, not the crate root.
-
 #### `--clean` argument shape misalignment with pbfhogg
 (documented above — brokkr emits bare `--clean <attr>`, pbfhogg accepts
 `--clean ATTR` repeatable; combinations like `--clean version --clean uid`
@@ -59,26 +46,6 @@ column reflects the new names; historical rows keep the old names.
 (verified via git log search), so no ambiguity in practice. If a future
 migration typos a profile name (e.g. `"relase"`) it would fail silently.
 Could switch to `TryFrom` + logged warning, but low urgency.
-
-#### Over-exposed visibility in split files
-Post-split audit flagged these as private-able: `sidecar_fmt::format_epoch`
-(only caller in same file), `results_cmd::render_single_or_multi` (same-file),
-`pbfhogg::dispatch::cleanup_output` (same-module only). Also three `pub` fns
-that could be `pub(crate)`: `pbfhogg::dispatch::run_command_with_params`,
-`elivagar::dispatch::run_command`, `nidhogg::dispatch::run_command` — all
-only called from `main.rs`. Pre-split they were already at the looser
-visibility, so this is carry-over, not a new mistake.
-
-#### Doc drift: `db/format/mod.rs` lists `format_elapsed` as used by compare
-`src/db/format/mod.rs:8-9` comment claims `format_elapsed` is among the
-cross-module helpers used by `compare.rs`. In reality `compare.rs` only
-imports `compute_rewrite_pct`, `find_output_bytes`, `format_blob_counts`,
-`format_input`. `format_elapsed` is used by `table.rs` and `single.rs` only.
-
-#### Doc drift: `CLAUDE.md` describes pre-split dispatch.rs layout
-`CLAUDE.md:31` still mentions `src/dispatch.rs` as the unified dispatch
-file, but it was split per-project in commit 0313f74. Needs a one-line
-update.
 
 #### Commit message inaccuracy on `681a2d6`
 The message claims the suite's ok_exit_codes improvement landed in that

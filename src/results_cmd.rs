@@ -26,7 +26,7 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
 /// cli_args, brokkr_args surfaced, sidecar hint folded in as a field.
 /// When the result set has multiple rows (a UUID prefix that matched
 /// many), fall back to `format_table` + per-row `format_details`.
-pub(crate) fn render_single_or_multi(
+fn render_single_or_multi(
     rows: &[db::StoredRow],
     sidecar_db: Option<&db::sidecar::SidecarDb>,
     top: usize,

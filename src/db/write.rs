@@ -149,6 +149,23 @@ fn insert_kv_row(conn: &rusqlite::Connection, run_id: i64, kv: &KvPair) -> Resul
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::unwrap_in_result,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::float_cmp,
+        clippy::approx_constant,
+        clippy::needless_pass_by_value,
+        clippy::let_underscore_must_use,
+        clippy::useless_vec
+    )]
     use crate::db::{QueryFilter, ResultsDb, RunRow};
 
     #[test]

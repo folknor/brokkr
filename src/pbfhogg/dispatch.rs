@@ -60,7 +60,7 @@ fn resolve_io_flags(
 /// Handles run, bench, hotpath, and alloc for any pbfhogg command.
 /// `extra_params` carries command-specific parameters (e.g. `index_type`
 /// for `add-locations-to-ways`, `bbox` for extract).
-pub fn run_command_with_params(
+pub(crate) fn run_command_with_params(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
     osc_seq: Option<&str>,
@@ -688,7 +688,7 @@ fn build_diff_snapshots_context(
 }
 
 /// Clean up scratch output files after a benchmark run.
-pub(crate) fn cleanup_output(
+fn cleanup_output(
     command: &PbfhoggCommand,
     ctx: &CommandContext,
     mode: ArgMode,
