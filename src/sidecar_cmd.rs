@@ -170,7 +170,7 @@ fn run_durations(
         output::result_msg("no sidecar markers for this result");
         return Ok(());
     }
-    print_marker_durations(&markers);
+    print_marker_durations(&markers, q.human);
     Ok(())
 }
 
@@ -186,7 +186,7 @@ fn run_counters(
         output::result_msg("no counters for this result");
         return Ok(());
     }
-    print_counters(&counters);
+    print_counters(&counters, q.human);
     Ok(())
 }
 

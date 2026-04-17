@@ -731,8 +731,9 @@ Examples:
               conflicts_with_all = ["query", "samples", "markers", "durations", "counters", "stat"])]
         compare: Option<Vec<String>>,
 
-        /// Render as a fixed-width table where a human layout exists
-        /// (default view and --compare). JSONL views are unaffected.
+        /// Render as a fixed-width table instead of JSONL. Applies to the
+        /// default view, --durations, --counters, and --compare. No-op for
+        /// --samples / --markers / --stat (always JSONL).
         #[arg(long)]
         human: bool,
 

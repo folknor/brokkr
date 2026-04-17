@@ -676,8 +676,9 @@ fn print_phase_summary_jsonl(
 /// Print duration between _START/_END marker pairs.
 ///
 /// Matches markers by stripping the `_START`/`_END` suffix to find pairs.
-/// For unpaired markers (standalone), prints the timestamp only.
-pub(crate) fn print_marker_durations(markers: &[sidecar::Marker]) {
+/// For unpaired markers (standalone), prints the timestamp only. JSONL by
+/// default; `human` renders the fixed-width table.
+pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool) {
     // Build a map of base_name -> (start_us, end_us).
     let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
 
@@ -712,13 +713,57 @@ pub(crate) fn print_marker_durations(markers: &[sidecar::Marker]) {
         }
     }
 
+    if human {
+        print_marker_durations_human(&pairs, &standalone);
+    } else {
+        print_marker_durations_jsonl(&pairs, &standalone);
+    }
+}
+
+fn print_marker_durations_jsonl(
+    pairs: &[(String, i64, Option<i64>)],
+    standalone: &[&sidecar::Marker],
+) {
+    for (name, start_us, end_us) in pairs {
+        let obj = match end_us {
+            Some(end) => serde_json::json!({
+                "type": "phase",
+                "name": name,
+                "start_us": start_us,
+                "end_us": end,
+                "duration_ms": (end - start_us) / 1_000,
+            }),
+            None => serde_json::json!({
+                "type": "phase",
+                "name": name,
+                "start_us": start_us,
+                "end_us": serde_json::Value::Null,
+                "duration_ms": serde_json::Value::Null,
+            }),
+        };
+        println!("{obj}");
+    }
+    for m in standalone {
+        let obj = serde_json::json!({
+            "type": "standalone",
+            "name": m.name,
+            "timestamp_us": m.timestamp_us,
+        });
+        println!("{obj}");
+    }
+}
+
+fn print_marker_durations_human(
+    pairs: &[(String, i64, Option<i64>)],
+    standalone: &[&sidecar::Marker],
+) {
     if !pairs.is_empty() {
         println!(
             "{:<32} {:>12} {:>12} {:>12}",
             "Phase", "Start", "End", "Duration"
         );
         println!("{}", "-".repeat(71));
-        for (name, start_us, end_us) in &pairs {
+        for (name, start_us, end_us) in pairs {
             match end_us {
                 Some(end) => {
                     let dur_ms = (end - start_us) / 1_000;
@@ -742,7 +787,7 @@ pub(crate) fn print_marker_durations(markers: &[sidecar::Marker]) {
             println!();
         }
         println!("Standalone markers:");
-        for m in &standalone {
+        for m in standalone {
             let ms = m.timestamp_us / 1_000;
             println!("  {:<32} {:>9}ms", m.name, ms);
         }
@@ -1045,11 +1090,24 @@ fn build_phases(
 
 /// Print START/END marker pairs with duration + peak RSS and majflt from samples.
 /// Print counters as a simple list.
-pub(crate) fn print_counters(counters: &[sidecar::Counter]) {
+pub(crate) fn print_counters(counters: &[sidecar::Counter], human: bool) {
+    if human {
+        for c in counters {
+            #[allow(clippy::cast_precision_loss)]
+            let t_sec = c.timestamp_us as f64 / 1_000_000.0;
+            println!("t={t_sec:<10.3} {}={}", c.name, c.value);
+        }
+        return;
+    }
     for c in counters {
         #[allow(clippy::cast_precision_loss)]
         let t_sec = c.timestamp_us as f64 / 1_000_000.0;
-        println!("t={t_sec:<10.3} {}={}", c.name, c.value);
+        let obj = serde_json::json!({
+            "t": t_sec,
+            "name": c.name,
+            "value": c.value,
+        });
+        println!("{obj}");
     }
 }
 

@@ -77,7 +77,11 @@ pub fn history_msg(msg: &str) {
 
 pub fn sidecar_msg(msg: &str) {
     if !is_quiet() {
-        println!("[sidecar] {msg}");
+        // Always stderr — every [sidecar] line is narration (run provenance,
+        // "attached to pid X", "showing run N/M"), never the data the caller
+        // is asking for. Keeping them off stdout lets `brokkr sidecar …
+        // --samples | jq` Just Work.
+        eprintln!("[sidecar] {msg}");
     }
 }
 
