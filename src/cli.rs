@@ -680,25 +680,31 @@ Examples:
         display_order = 4,
         long_about = "\
 Query sidecar data captured in .brokkr/sidecar.db during `--bench`,
-`--hotpath`, and `--alloc` runs. All views default to the best run of
-the most recent result; pass a UUID prefix to pick a specific result
-and `--run N|all` to pick a different run.
+`--hotpath`, and `--alloc` runs. A UUID prefix is required — use
+`brokkr results` to find one. `--run N|all` picks a specific run
+within the result (default: best run).
+
+The `dirty` pseudo-UUID resolves to the most recent forced or failed
+run — runs produced via `--force` (dirty tree) or that exited non-zero
+have no results.db row, but their sidecar data is still stored and
+reachable this way.
 
 Examples:
-  brokkr sidecar                                      # per-phase summary (default view)
-  brokkr sidecar <uuid>                               # per-phase summary for a specific result
-  brokkr sidecar --human                              # same, as a fixed-width table
-  brokkr sidecar --timeline                           # raw JSONL samples (last result)
-  brokkr sidecar --timeline --stat rss                # min/max/avg/p50/p95 for a field
-  brokkr sidecar --timeline --phase STAGE2            # samples within a marker phase
-  brokkr sidecar --markers                            # raw JSONL markers
-  brokkr sidecar --markers --durations                # START/END pair timings
-  brokkr sidecar --markers --phases                   # durations + peak RSS/majflt
-  brokkr sidecar --markers --counters                 # application counters
+  brokkr sidecar <uuid>                               # per-phase summary (default view)
+  brokkr sidecar dirty                                # the last forced/failed run
+  brokkr sidecar <uuid> --human                       # same, as a fixed-width table
+  brokkr sidecar <uuid> --timeline                    # raw JSONL samples
+  brokkr sidecar <uuid> --timeline --stat rss         # min/max/avg/p50/p95 for a field
+  brokkr sidecar <uuid> --timeline --phase STAGE2     # samples within a marker phase
+  brokkr sidecar <uuid> --markers                     # raw JSONL markers
+  brokkr sidecar <uuid> --markers --durations         # START/END pair timings
+  brokkr sidecar <uuid> --markers --phases            # durations + peak RSS/majflt
+  brokkr sidecar <uuid> --markers --counters          # application counters
   brokkr sidecar --compare-timeline a65a 911c         # phase-aligned compare"
     )]
     Sidecar {
-        /// UUID prefix to look up (default: last result)
+        /// UUID prefix to look up (required; use `brokkr results` to find one)
+        #[arg(required_unless_present = "compare_timeline")]
         query: Option<String>,
 
         /// Output sidecar samples as JSONL

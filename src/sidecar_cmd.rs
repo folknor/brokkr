@@ -7,7 +7,7 @@ use crate::db;
 use crate::error::DevError;
 use crate::output;
 use crate::request::SidecarQuery;
-use crate::resolve::{results_db_path, sidecar_db_path};
+use crate::resolve::sidecar_db_path;
 use crate::sidecar_fmt::{
     apply_timeline_filter, parse_time_range, print_compare_timeline, print_counters,
     print_field_stat, print_marker_durations, print_marker_phases_with_counters,
@@ -83,27 +83,12 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     let timeline = q.timeline || !q.markers;
     let summary = q.summary || (!q.timeline && !q.markers);
 
-    // Resolve UUID: explicit query arg, or last result from DB.
-    let uuid_prefix: String = if let Some(ref prefix) = q.query {
-        prefix.clone()
-    } else {
-        let db_path = results_db_path(project_root);
-        if !db_path.exists() {
-            output::result_msg("no results yet (run a benchmark first)");
-            return Ok(());
-        }
-        let results_db = db::ResultsDb::open(&db_path)?;
-        let filter = db::QueryFilter {
-            limit: 1,
-            ..Default::default()
-        };
-        let rows = results_db.query(&filter)?;
-        let Some(row) = rows.first() else {
-            output::result_msg("no results yet");
-            return Ok(());
-        };
-        row.uuid.clone()
-    };
+    // Clap enforces that `query` is present whenever `--compare-timeline`
+    // isn't, so the unwrap cannot fire.
+    let uuid_prefix = q
+        .query
+        .clone()
+        .expect("clap required_unless_present guarantees query is set");
 
     if timeline {
         print_run_info(&sdb, &uuid_prefix);

@@ -211,7 +211,7 @@ Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`, `run_exter
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement. Sidecar data is stored even when the child fails (OOM, signal, non-zero exit).
 
-Query sidecar data with `brokkr sidecar --timeline` (JSONL), `--timeline --summary` (phase table), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. All sidecar flags default to the last result when no UUID is given. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
+Query sidecar data with `brokkr sidecar <uuid>` — bare form is the per-phase JSONL summary (pass `--human` for a table). Other views: `--timeline` (raw JSONL samples), `--timeline --stat <field>`, `--markers --durations`, `--markers --phases`, `--compare-timeline <a> <b>`. A UUID prefix is required (except for `--compare-timeline`); the `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
 
 ## Removed features
 
