@@ -31,6 +31,7 @@ pub(crate) struct SidecarQuery {
     pub(crate) markers: bool,
     pub(crate) durations: bool,
     pub(crate) counters: bool,
+    pub(crate) stalls: bool,
     pub(crate) stat: Option<String>,
     pub(crate) compare: Option<Vec<String>>,
     pub(crate) human: bool,

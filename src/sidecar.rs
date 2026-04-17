@@ -553,6 +553,34 @@ fn drain_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u
     })
 }
 
+/// Resolve a `--stop` spelling against a batch of freshly-drained
+/// markers. Returns the matched marker name when a hit lands, `None`
+/// otherwise. See the inline comment at the call site for the three
+/// accepted spellings.
+fn stop_match(stop: &str, recent: &[Marker]) -> Option<String> {
+    // `-FOO` → canonical `FOO_END`. No fallback — the sigil is
+    // explicit, so a mismatch is a mismatch.
+    if let Some(suffix) = stop.strip_prefix('-') {
+        let canonical = format!("{suffix}_END");
+        return recent
+            .iter()
+            .find(|m| m.name == canonical)
+            .map(|m| m.name.clone());
+    }
+    // Verbatim first — preserves existing `--stop FOO_END` semantics.
+    if let Some(m) = recent.iter().find(|m| m.name == stop) {
+        return Some(m.name.clone());
+    }
+    // Fallback: `--stop FOO` resolves to `FOO_END` for the common
+    // pbfhogg naming convention. The caller prints a notice so the
+    // resolved form is visible in the sidecar log line.
+    let canonical = format!("{stop}_END");
+    recent
+        .iter()
+        .find(|m| m.name == canonical)
+        .map(|m| m.name.clone())
+}
+
 /// Run the sidecar sampling loop for a single benchmark run.
 ///
 /// Takes ownership of the `Child` process. Drains stdout/stderr in
@@ -626,12 +654,31 @@ pub(crate) fn run_sidecar(
         fifo.drain(&mut markers, &mut marker_idx, &mut counters);
 
         // If a stop marker was requested, check if it was just emitted.
+        //
+        // Three accepted spellings, in priority order:
+        //   1. Verbatim:   `--stop FOO_END`        matches a marker named `FOO_END`.
+        //   2. Span-end:   `--stop -FOO`           matches `FOO_END` (the `-` sigil
+        //                                           mirrors the span-close semantics
+        //                                           we'd adopt if we ever introduce
+        //                                           a typed span protocol).
+        //   3. Fallback:   `--stop FOO`            matches `FOO_END` after the
+        //                                           verbatim check fails; prints a
+        //                                           one-line notice so the resolved
+        //                                           form is visible.
         if let Some(stop) = stop_marker {
-            let matched = markers[marker_count_before..]
-                .iter()
-                .any(|m| m.name == stop);
-            if matched {
-                output::sidecar_msg(&format!("stop marker \"{stop}\" received, killing child"));
+            let matched = stop_match(
+                stop,
+                &markers[marker_count_before..],
+            );
+            if let Some(matched_name) = matched {
+                let display = if matched_name == stop {
+                    format!("stop marker \"{stop}\" received, killing child")
+                } else {
+                    format!(
+                        "stop marker \"{stop}\" → \"{matched_name}\" received, killing child"
+                    )
+                };
+                output::sidecar_msg(&display);
                 child.kill().ok();
                 // Wait for process to actually exit so we can collect status.
                 let status = child.wait().ok();

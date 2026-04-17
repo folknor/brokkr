@@ -242,13 +242,26 @@ brokkr sidecar <uuid> --samples --range 10.0..82.0            # time window filt
 brokkr sidecar <uuid> --markers                    # raw marker events (JSONL)
 brokkr sidecar <uuid> --durations                  # START/END pair timings
 brokkr sidecar <uuid> --counters                   # application counters
+brokkr sidecar <uuid> --stalls                     # WAIT_* stall attribution (see conventions below)
 brokkr sidecar <uuid> --stat anon                  # min/max/avg/p50/p95 for a field
 brokkr sidecar <uuid> --stat anon --phase STAGE2   # per-phase stat
 brokkr sidecar --compare <uuid_a> <uuid_b>         # phase-aligned comparison
 brokkr sidecar dirty --stat anon                   # inspect last failed/dirty run
 ```
 
-Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--stat`.
+Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--stat`; `--phase` also composes with `--counters`.
+
+### Sidecar conventions
+
+The FIFO protocol is convention-free — brokkr doesn't mandate any naming scheme on markers or counters. Two optional conventions unlock richer views when emitters adopt them:
+
+- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` (and `--stalls`, see below) to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. `--stop FOO_END` kills the child on the end marker verbatim; `--stop -FOO` and `--stop FOO` are shorthand aliases that resolve to `FOO_END` (the fallback form prints a one-line notice so the resolved name is visible).
+
+- **`WAIT_<CATEGORY>_START` / `WAIT_<CATEGORY>_END` stall spans.** Wrap blocking points (channel sends, mutex waits, I/O backpressure) in marker pairs whose name begins `WAIT_`. `brokkr sidecar <uuid> --stalls` sums durations by category and reports them as a fraction of run wall-clock. Categories are free-form: `WAIT_WRITER`, `WAIT_PAYLOAD`, `WAIT_SPILL`, `WAIT_DECODE`, whatever names the blocking points the project wants to attribute. Runs from before a project adopts the convention produce a clear "no WAIT_* marker pairs" message rather than silent empty output.
+
+Both conventions are additive — projects can opt in incrementally. Existing emissions keep working with no change, and the only required mechanical migration is whichever blocking points you want to instrument.
+
+See [`notes/sidecar.md`](notes/sidecar.md) for the scoped plan these conventions were introduced with; [`LLM.md`](LLM.md) has broader history.
 
 ## Results database
 

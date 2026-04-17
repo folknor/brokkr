@@ -80,6 +80,9 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     if q.counters {
         return run_counters(&sdb, &uuid_prefix, q);
     }
+    if q.stalls {
+        return run_stalls(&sdb, &uuid_prefix, q);
+    }
     if let Some(ref field) = q.stat {
         return run_stat(&sdb, &uuid_prefix, field, q);
     }
@@ -171,6 +174,27 @@ fn run_durations(
         return Ok(());
     }
     print_marker_durations(&markers, q.human);
+    Ok(())
+}
+
+fn run_stalls(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+    if markers.is_empty() {
+        output::result_msg("no sidecar markers for this result");
+        return Ok(());
+    }
+    let samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    let wall_us = samples
+        .first()
+        .zip(samples.last())
+        .map_or(0, |(a, b)| b.timestamp_us - a.timestamp_us);
+    crate::sidecar_fmt::print_stalls(&markers, wall_us, q.human);
     Ok(())
 }
 

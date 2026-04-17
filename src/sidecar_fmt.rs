@@ -482,6 +482,45 @@ struct PhaseSummary {
     disk_write_kb: i64,
     sample_span_us: i64,
     cpu_delta_jiffies: i64,
+    /// Per-phase utime / stime split. `cpu_delta_jiffies` above is
+    /// still the combined total (retained for compatibility with the
+    /// pre-split `avg_cores` rendering); these two break it down so
+    /// consumers can compute user_cores vs kernel_cores.
+    utime_delta_jiffies: i64,
+    stime_delta_jiffies: i64,
+    /// Full per-phase deltas for page faults and context switches.
+    /// `peak_majflt` above captures single-sample spikes; these are
+    /// the cumulative totals across the whole phase.
+    majflt_delta: i64,
+    minflt_delta: i64,
+    vol_cs_delta: i64,
+    nonvol_cs_delta: i64,
+    /// Max thread count observed across in-phase samples. Zero when
+    /// `samples == 0`.
+    peak_threads: i64,
+}
+
+/// Running min/max/first/last accumulator for a per-phase scalar field
+/// pulled from `/proc`. `first` is set on the first in-phase sample,
+/// `last` tracks every subsequent one. Delta is `last - first` clamped
+/// to zero (historical pre-fix-sidecar samples can regress when the
+/// process exits between /proc reads).
+#[derive(Default)]
+struct Running {
+    first: Option<i64>,
+    last: i64,
+}
+
+impl Running {
+    fn observe(&mut self, v: i64) {
+        if self.first.is_none() {
+            self.first = Some(v);
+        }
+        self.last = v;
+    }
+    fn delta(&self) -> i64 {
+        (self.last - self.first.unwrap_or(self.last)).max(0)
+    }
 }
 
 fn compute_phase_summary(
@@ -493,54 +532,44 @@ fn compute_phase_summary(
     let mut peak_rss: i64 = 0;
     let mut peak_anon: i64 = 0;
     let mut peak_majflt: i64 = 0;
+    let mut peak_threads: i64 = 0;
     let mut prev_majflt: Option<i64> = None;
-    let mut first_io: Option<(i64, i64)> = None;
-    let mut last_io: (i64, i64) = (0, 0);
-    let mut first_cpu: Option<i64> = None;
-    let mut last_cpu: i64 = 0;
-    let mut first_ts: Option<i64> = None;
-    let mut last_ts: i64 = 0;
+    let mut rd = Running::default();
+    let mut wr = Running::default();
+    let mut utime = Running::default();
+    let mut stime = Running::default();
+    let mut minflt = Running::default();
+    let mut majflt_cum = Running::default();
+    let mut vol_cs = Running::default();
+    let mut nonvol_cs = Running::default();
+    let mut ts = Running::default();
     let mut count: u32 = 0;
 
     for s in samples
         .iter()
         .filter(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us)
     {
-        if s.rss_kb > peak_rss {
-            peak_rss = s.rss_kb;
-        }
-        if s.anon_kb > peak_anon {
-            peak_anon = s.anon_kb;
-        }
+        peak_rss = peak_rss.max(s.rss_kb);
+        peak_anon = peak_anon.max(s.anon_kb);
+        peak_threads = peak_threads.max(s.num_threads);
         if let Some(prev) = prev_majflt {
-            let delta = s.majflt - prev;
-            if delta > peak_majflt {
-                peak_majflt = delta;
-            }
+            peak_majflt = peak_majflt.max(s.majflt - prev);
         }
         prev_majflt = Some(s.majflt);
-        if first_io.is_none() {
-            first_io = Some((s.read_bytes, s.write_bytes));
-        }
-        last_io = (s.read_bytes, s.write_bytes);
-        let cpu = s.utime + s.stime;
-        if first_cpu.is_none() {
-            first_cpu = Some(cpu);
-        }
-        last_cpu = cpu;
-        if first_ts.is_none() {
-            first_ts = Some(s.timestamp_us);
-        }
-        last_ts = s.timestamp_us;
+        rd.observe(s.read_bytes);
+        wr.observe(s.write_bytes);
+        utime.observe(s.utime);
+        stime.observe(s.stime);
+        minflt.observe(s.minflt);
+        majflt_cum.observe(s.majflt);
+        vol_cs.observe(s.vol_cs);
+        nonvol_cs.observe(s.nonvol_cs);
+        ts.observe(s.timestamp_us);
         count += 1;
     }
 
-    let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
-    // Clamp negative deltas: historical pre-fix-sidecar samples can regress
-    // to zero when the process exited between /proc reads, which would
-    // otherwise make last_io - first_io go deeply negative on the tail.
-    let disk_read_bytes = (last_io.0 - first_rd).max(0);
-    let disk_write_bytes = (last_io.1 - first_wr).max(0);
+    let utime_delta = utime.delta();
+    let stime_delta = stime.delta();
     PhaseSummary {
         name: name.to_owned(),
         start_us,
@@ -549,10 +578,17 @@ fn compute_phase_summary(
         peak_rss_kb: peak_rss,
         peak_anon_kb: peak_anon,
         peak_majflt,
-        disk_read_kb: disk_read_bytes / 1024,
-        disk_write_kb: disk_write_bytes / 1024,
-        sample_span_us: last_ts - first_ts.unwrap_or(last_ts),
-        cpu_delta_jiffies: last_cpu - first_cpu.unwrap_or(last_cpu),
+        disk_read_kb: rd.delta() / 1024,
+        disk_write_kb: wr.delta() / 1024,
+        sample_span_us: ts.delta(),
+        cpu_delta_jiffies: utime_delta + stime_delta,
+        utime_delta_jiffies: utime_delta,
+        stime_delta_jiffies: stime_delta,
+        majflt_delta: majflt_cum.delta(),
+        minflt_delta: minflt.delta(),
+        vol_cs_delta: vol_cs.delta(),
+        nonvol_cs_delta: nonvol_cs.delta(),
+        peak_threads,
     }
 }
 
@@ -614,6 +650,21 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
             s.disk_write_kb,
             avg_cores,
         );
+        // Continuation line: user/kernel core split + fault/ctxt deltas +
+        // peak thread count. Kept indented to read as a per-phase
+        // detail, not a separate phase. Field labels are inline so
+        // grep-style inspection stays workable.
+        let user_cores = avg_cores_str(s.utime_delta_jiffies, s.sample_span_us, clk_tck);
+        let kernel_cores = avg_cores_str(s.stime_delta_jiffies, s.sample_span_us, clk_tck);
+        println!(
+            "{:<24}   user={user_cores} kern={kernel_cores} majflt={} minflt={} vol_cs={} nonvol_cs={} peak_threads={}",
+            "",
+            s.majflt_delta,
+            s.minflt_delta,
+            s.vol_cs_delta,
+            s.nonvol_cs_delta,
+            s.peak_threads,
+        );
     }
 }
 
@@ -654,6 +705,8 @@ fn print_phase_summary_jsonl(
             })
         } else {
             let avg_cores = avg_cores_f64(s.cpu_delta_jiffies, s.sample_span_us, clk_tck);
+            let user_cores = avg_cores_f64(s.utime_delta_jiffies, s.sample_span_us, clk_tck);
+            let kernel_cores = avg_cores_f64(s.stime_delta_jiffies, s.sample_span_us, clk_tck);
             serde_json::json!({
                 "type": "phase",
                 "name": s.name,
@@ -668,6 +721,13 @@ fn print_phase_summary_jsonl(
                 "sample_span_us": s.sample_span_us,
                 "cpu_delta_jiffies": s.cpu_delta_jiffies,
                 "avg_cores": avg_cores,
+                "user_cores": user_cores,
+                "kernel_cores": kernel_cores,
+                "majflt_delta": s.majflt_delta,
+                "minflt_delta": s.minflt_delta,
+                "vol_cs_delta": s.vol_cs_delta,
+                "nonvol_cs_delta": s.nonvol_cs_delta,
+                "peak_threads": s.peak_threads,
             })
         };
         println!("{obj}");
@@ -1087,6 +1147,100 @@ fn build_phases(
         phases.push((m.name.clone(), m.timestamp_us, phase_end));
     }
     phases
+}
+
+/// Sum `WAIT_<CATEGORY>_START`/`_END` pair durations by category and
+/// render as total ms + fraction of run wall-clock. Runs that predate
+/// the convention — no `WAIT_*` markers at all — print a clear message
+/// pointing at the conventions section of the README so users don't
+/// confuse "nothing instrumented" with "no stalls observed."
+///
+/// Pairing reuses the same `_START`/`_END` logic as `--durations`.
+/// Unpaired `WAIT_*_START` markers are silently ignored (consistent
+/// with `--durations` treating them as "no duration known"). We could
+/// surface them as truncated-stall hints but they're rare enough in
+/// practice to not justify the noise.
+pub(crate) fn print_stalls(
+    markers: &[sidecar::Marker],
+    wall_us: i64,
+    human: bool,
+) {
+    use std::collections::BTreeMap;
+
+    let mut totals_us: BTreeMap<String, i64> = BTreeMap::new();
+    let mut consumed = vec![false; markers.len()];
+
+    for (i, m) in markers.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        let Some(base) = m.name.strip_suffix("_START") else {
+            continue;
+        };
+        let Some(category) = base.strip_prefix("WAIT_") else {
+            continue;
+        };
+        consumed[i] = true;
+        let end_name = format!("{base}_END");
+        let end = markers[i + 1..]
+            .iter()
+            .enumerate()
+            .find(|(_, m2)| m2.name == end_name);
+        if let Some((j, end_m)) = end {
+            consumed[i + 1 + j] = true;
+            let dur_us = end_m.timestamp_us - m.timestamp_us;
+            *totals_us.entry(category.to_owned()).or_insert(0) += dur_us.max(0);
+        }
+    }
+
+    if totals_us.is_empty() {
+        crate::output::result_msg(
+            "no WAIT_* marker pairs in this run — see the \"Sidecar conventions\" \
+             section of brokkr's README for the stall-attribution convention",
+        );
+        return;
+    }
+
+    if human {
+        print_stalls_human(&totals_us, wall_us);
+    } else {
+        print_stalls_jsonl(&totals_us, wall_us);
+    }
+}
+
+fn print_stalls_human(totals_us: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
+    println!("{:<24} {:>12} {:>10}", "Category", "Total", "% of wall");
+    println!("{}", "-".repeat(48));
+    let mut entries: Vec<(&String, &i64)> = totals_us.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1));
+    for (cat, total_us) in entries {
+        let ms = total_us / 1_000;
+        let pct = wall_pct(*total_us, wall_us);
+        let pct_str = pct.map_or_else(|| "-".to_owned(), |p| format!("{p:>6.2}%"));
+        println!("{cat:<24} {ms:>9}ms {pct_str:>10}");
+    }
+}
+
+fn print_stalls_jsonl(totals_us: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
+    for (cat, total_us) in totals_us {
+        let obj = serde_json::json!({
+            "type": "stall",
+            "category": cat,
+            "total_ms": total_us / 1_000,
+            "total_us": total_us,
+            "wall_us": wall_us,
+            "wall_fraction": wall_pct(*total_us, wall_us).map(|p| p / 100.0),
+        });
+        println!("{obj}");
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn wall_pct(numerator_us: i64, wall_us: i64) -> Option<f64> {
+    if wall_us <= 0 {
+        return None;
+    }
+    Some(numerator_us as f64 / wall_us as f64 * 100.0)
 }
 
 /// Print START/END marker pairs with duration + peak RSS and majflt from samples.
