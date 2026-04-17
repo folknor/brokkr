@@ -693,90 +693,81 @@ Examples:
   brokkr sidecar <uuid>                               # per-phase summary (default view)
   brokkr sidecar dirty                                # the last forced/failed run
   brokkr sidecar <uuid> --human                       # same, as a fixed-width table
-  brokkr sidecar <uuid> --timeline                    # raw JSONL samples
-  brokkr sidecar <uuid> --timeline --stat rss         # min/max/avg/p50/p95 for a field
-  brokkr sidecar <uuid> --timeline --phase STAGE2     # samples within a marker phase
-  brokkr sidecar <uuid> --markers                     # raw JSONL markers
-  brokkr sidecar <uuid> --markers --durations         # START/END pair timings
-  brokkr sidecar <uuid> --markers --phases            # durations + peak RSS/majflt
-  brokkr sidecar <uuid> --markers --counters          # application counters
-  brokkr sidecar --compare-timeline a65a 911c         # phase-aligned compare"
+  brokkr sidecar <uuid> --samples                     # raw /proc sample stream (JSONL)
+  brokkr sidecar <uuid> --samples --phase STAGE2      # samples within a marker phase
+  brokkr sidecar <uuid> --markers                     # raw marker events (JSONL)
+  brokkr sidecar <uuid> --durations                   # START/END pair timings
+  brokkr sidecar <uuid> --counters                    # application counters
+  brokkr sidecar <uuid> --stat rss                    # min/max/avg/p50/p95 for a field
+  brokkr sidecar --compare a65a 911c                  # two results, phase-aligned"
     )]
     Sidecar {
         /// UUID prefix to look up (required; use `brokkr results` to find one)
-        #[arg(required_unless_present = "compare_timeline")]
+        #[arg(required_unless_present = "compare")]
         query: Option<String>,
 
-        /// Output sidecar samples as JSONL
-        #[arg(long, conflicts_with = "markers")]
-        timeline: bool,
+        /// Raw /proc samples as JSONL (one record per 100ms sample)
+        #[arg(long, conflicts_with_all = ["markers", "durations", "counters", "stat", "compare"])]
+        samples: bool,
 
-        /// Output sidecar markers as JSONL
-        #[arg(long, conflicts_with = "timeline")]
+        /// Raw marker events as JSONL
+        #[arg(long, conflicts_with_all = ["samples", "durations", "counters", "stat", "compare"])]
         markers: bool,
 
-        /// Show per-phase summary — JSONL by default (one record per phase);
-        /// pair with `--human` for the fixed-width table layout.
-        #[arg(long, requires = "timeline")]
-        summary: bool,
-
-        /// Render `--summary` and `--compare-timeline` as a fixed-width,
-        /// human-scannable table instead of the default JSONL.
-        #[arg(long)]
-        human: bool,
-
-        /// Show duration between _START/_END marker pairs (use with --markers)
-        #[arg(long, requires = "markers")]
+        /// START/END marker-pair durations
+        #[arg(long, conflicts_with_all = ["samples", "markers", "counters", "stat", "compare"])]
         durations: bool,
 
-        /// Show phase pairs with duration + peak RSS/majflt from samples (use with --markers)
-        #[arg(long, requires = "markers")]
-        phases: bool,
-
-        /// Show application-level counters (use with --markers)
-        #[arg(long, requires = "markers")]
+        /// Application-level counters
+        #[arg(long, conflicts_with_all = ["samples", "markers", "durations", "stat", "compare"])]
         counters: bool,
 
-        /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt")
-        #[arg(long, requires = "timeline", value_delimiter = ',')]
-        fields: Vec<String>,
-
-        /// Output every Nth sample (downsample)
-        #[arg(long, requires = "timeline")]
-        every: Option<usize>,
-
-        /// Output only the first N samples
-        #[arg(long, requires = "timeline")]
-        head: Option<usize>,
-
-        /// Output only the last N samples
-        #[arg(long, requires = "timeline")]
-        tail: Option<usize>,
-
-        /// Filter samples where a field meets a condition (e.g. "majflt>0", "anon>100000")
-        #[arg(long, requires = "timeline", name = "COND")]
-        r#where: Option<String>,
-
-        /// Compute min/max/avg/p50/p95 for a field
-        #[arg(long, requires = "timeline")]
+        /// Compute min/max/avg/p50/p95 for a /proc field (e.g. `--stat rss`)
+        #[arg(long, conflicts_with_all = ["samples", "markers", "durations", "counters", "compare"])]
         stat: Option<String>,
 
-        /// Filter to samples within a marker phase (e.g. "STAGE2")
-        #[arg(long, requires = "timeline")]
-        phase: Option<String>,
+        /// Compare two results phase-by-phase (no UUID argument)
+        #[arg(long, num_args = 2, value_names = ["UUID_A", "UUID_B"],
+              conflicts_with_all = ["query", "samples", "markers", "durations", "counters", "stat"])]
+        compare: Option<Vec<String>>,
 
-        /// Filter by time range in seconds (e.g. "10.0..82.0")
-        #[arg(long, requires = "timeline")]
-        range: Option<String>,
+        /// Render as a fixed-width table where a human layout exists
+        /// (default view and --compare). JSONL views are unaffected.
+        #[arg(long)]
+        human: bool,
 
         /// Show a specific run index (0-based), or "all" for all runs. Defaults to the best run.
         #[arg(long)]
         run: Option<String>,
 
-        /// Compare sidecar timelines of two results (phase-aligned summary)
-        #[arg(long, num_args = 2, value_names = ["UUID_A", "UUID_B"],
-              conflicts_with_all = ["query", "timeline", "markers"])]
-        compare_timeline: Option<Vec<String>>,
+        /// Filter samples to a marker phase (e.g. "STAGE2")
+        #[arg(long, conflicts_with_all = ["markers", "durations", "counters", "compare"])]
+        phase: Option<String>,
+
+        /// Filter samples by time range in seconds (e.g. "10.0..82.0")
+        #[arg(long, conflicts_with_all = ["markers", "durations", "counters", "compare"])]
+        range: Option<String>,
+
+        /// Filter samples where a field meets a condition (e.g. "majflt>0", "anon>100000")
+        #[arg(long, name = "COND",
+              conflicts_with_all = ["markers", "durations", "counters", "compare"])]
+        r#where: Option<String>,
+
+        /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt"). Only with --samples.
+        #[arg(long, value_delimiter = ',', requires = "samples")]
+        fields: Vec<String>,
+
+        /// Output every Nth sample (downsample). Only with --samples.
+        #[arg(long, requires = "samples")]
+        every: Option<usize>,
+
+        /// Output only the first N samples. Only with --samples.
+        #[arg(long, requires = "samples")]
+        head: Option<usize>,
+
+        /// Output only the last N samples. Only with --samples.
+        #[arg(long, requires = "samples")]
+        tail: Option<usize>,
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 5)]

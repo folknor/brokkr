@@ -19,28 +19,24 @@ pub(crate) struct ResultsQuery {
 
 /// Query parameters for the `sidecar` command.
 ///
-/// Sidecar views always operate on a single result identified by UUID
-/// prefix (falling back to the most recent DB row), except for
-/// `compare_timeline` which takes two UUIDs.
+/// Each `SidecarQuery` picks exactly one view (the default is the
+/// per-phase summary when no selector is set). `compare` takes two
+/// UUIDs instead of the single `query` UUID; clap enforces that.
 pub(crate) struct SidecarQuery {
     pub(crate) query: Option<String>,
-    pub(crate) timeline: bool,
+    pub(crate) samples: bool,
     pub(crate) markers: bool,
-    pub(crate) summary: bool,
     pub(crate) durations: bool,
+    pub(crate) counters: bool,
+    pub(crate) stat: Option<String>,
+    pub(crate) compare: Option<Vec<String>>,
+    pub(crate) human: bool,
+    pub(crate) run: Option<String>,
+    pub(crate) phase: Option<String>,
+    pub(crate) range: Option<String>,
+    pub(crate) where_cond: Option<String>,
     pub(crate) fields: Vec<String>,
     pub(crate) every: Option<usize>,
     pub(crate) head: Option<usize>,
     pub(crate) tail: Option<usize>,
-    pub(crate) where_cond: Option<String>,
-    pub(crate) stat: Option<String>,
-    pub(crate) phase: Option<String>,
-    pub(crate) range: Option<String>,
-    pub(crate) run: Option<String>,
-    pub(crate) compare_timeline: Option<Vec<String>>,
-    pub(crate) phases: bool,
-    pub(crate) counters: bool,
-    /// Render human-friendly table output instead of the default JSONL.
-    /// Applies to `--timeline --summary` and `--compare-timeline`.
-    pub(crate) human: bool,
 }

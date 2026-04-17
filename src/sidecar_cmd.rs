@@ -1,5 +1,7 @@
-//! Implementation of the `sidecar` command — timeline / marker / phase views
-//! over sidecar data captured by `.brokkr/sidecar.db`.
+//! Implementation of the `sidecar` command — per-phase summary, raw
+//! sample/marker export, START/END durations, counters, single-field
+//! stats, and two-result phase compare. Each invocation picks exactly
+//! one view; clap enforces the mutual exclusion.
 
 use std::path::Path;
 
@@ -10,9 +12,8 @@ use crate::request::SidecarQuery;
 use crate::resolve::sidecar_db_path;
 use crate::sidecar_fmt::{
     apply_timeline_filter, parse_time_range, print_compare_timeline, print_counters,
-    print_field_stat, print_marker_durations, print_marker_phases_with_counters,
-    print_phase_summary, print_run_info, resolve_phase_range, sidecar_marker_json,
-    sidecar_sample_json_projected,
+    print_field_stat, print_marker_durations, print_phase_summary, print_run_info,
+    resolve_phase_range, sidecar_marker_json, sidecar_sample_json_projected,
 };
 
 fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
@@ -49,113 +50,191 @@ fn resolve_run_filter(
     Ok(run_filter)
 }
 
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), DevError> {
     let Some(sdb) = open_sidecar_db(project_root) else {
         output::result_msg("no sidecar.db found");
         return Ok(());
     };
 
-    // --compare-timeline <uuid_a> <uuid_b>
-    if let Some(ref uuids) = q.compare_timeline {
-        let uuid_a = &uuids[0];
-        let uuid_b = &uuids[1];
-        let (best_a, _) = sdb.query_meta(uuid_a);
-        let (best_b, _) = sdb.query_meta(uuid_b);
-        let samples_a = sdb.query_samples(uuid_a, Some(best_a))?;
-        let samples_b = sdb.query_samples(uuid_b, Some(best_b))?;
-        if samples_a.is_empty() || samples_b.is_empty() {
-            output::result_msg("one or both results have no sidecar data");
-            return Ok(());
-        }
-        let markers_a = sdb.query_markers(uuid_a, Some(best_a))?;
-        let markers_b = sdb.query_markers(uuid_b, Some(best_b))?;
-        print_compare_timeline(
-            uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b, q.human,
-        );
-        return Ok(());
+    // --compare A B takes a different path: no single UUID, two full timelines.
+    if let Some(ref uuids) = q.compare {
+        return run_compare(&sdb, uuids, q.human);
     }
 
-    // Default view when no selector is given: the per-phase timeline summary
-    // (JSONL). Equivalent to `--timeline --summary` — the overview that
-    // wants to exist anyway, and the only view where "nothing specified"
-    // has an obvious meaning.
-    let timeline = q.timeline || !q.markers;
-    let summary = q.summary || (!q.timeline && !q.markers);
-
-    // Clap enforces that `query` is present whenever `--compare-timeline`
-    // isn't, so the unwrap cannot fire.
+    // Clap's `required_unless_present = "compare"` guarantees query is set
+    // whenever we get here.
     let uuid_prefix = q
         .query
         .clone()
         .expect("clap required_unless_present guarantees query is set");
 
-    if timeline {
-        print_run_info(&sdb, &uuid_prefix);
-        let run_filter = resolve_run_filter(&sdb, &uuid_prefix, q.run.as_deref())?;
-
-        let mut samples = sdb.query_samples(&uuid_prefix, run_filter)?;
-        if samples.is_empty() {
-            output::result_msg("no sidecar data for this result");
-            return Ok(());
-        }
-        if summary {
-            let markers = sdb.query_markers(&uuid_prefix, run_filter)?;
-            print_phase_summary(&samples, &markers, q.human);
-            return Ok(());
-        }
-        if let Some(ref phase_name) = q.phase {
-            let markers = sdb.query_markers(&uuid_prefix, run_filter)?;
-            let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
-            samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
-        }
-        if let Some(ref range_str) = q.range {
-            let (start_us, end_us) = parse_time_range(range_str)?;
-            samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
-        }
-        if let Some(ref field) = q.stat {
-            let filtered = apply_timeline_filter(&samples, q);
-            print_field_stat(&filtered, field)?;
-        } else {
-            let filtered = apply_timeline_filter(&samples, q);
-            let fields = if q.fields.is_empty() {
-                None
-            } else {
-                Some(&q.fields)
-            };
-            for s in &filtered {
-                println!("{}", sidecar_sample_json_projected(s, fields));
-            }
-        }
-        return Ok(());
+    if q.samples {
+        return run_samples(&sdb, &uuid_prefix, q);
     }
-
-    // q.markers
-    print_run_info(&sdb, &uuid_prefix);
-    let run_filter = resolve_run_filter(&sdb, &uuid_prefix, q.run.as_deref())?;
-    let markers = sdb.query_markers(&uuid_prefix, run_filter)?;
-
+    if q.markers {
+        return run_markers(&sdb, &uuid_prefix, q);
+    }
+    if q.durations {
+        return run_durations(&sdb, &uuid_prefix, q);
+    }
     if q.counters {
-        let counters = sdb.query_counters(&uuid_prefix, run_filter)?;
-        if counters.is_empty() {
-            output::result_msg("no counters for this result");
-        } else {
-            print_counters(&counters);
-        }
+        return run_counters(&sdb, &uuid_prefix, q);
+    }
+    if let Some(ref field) = q.stat {
+        return run_stat(&sdb, &uuid_prefix, field, q);
+    }
+
+    // Default view: per-phase summary (JSONL, or a fixed-width table with --human).
+    run_phase_summary(&sdb, &uuid_prefix, q)
+}
+
+fn run_phase_summary(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    if samples.is_empty() {
+        output::result_msg("no sidecar data for this result");
         return Ok(());
     }
+    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+    print_phase_summary(&samples, &markers, q.human);
+    Ok(())
+}
+
+fn run_samples(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let mut samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    if samples.is_empty() {
+        output::result_msg("no sidecar data for this result");
+        return Ok(());
+    }
+
+    if let Some(ref phase_name) = q.phase {
+        let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+        let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
+        samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
+    }
+    if let Some(ref range_str) = q.range {
+        let (start_us, end_us) = parse_time_range(range_str)?;
+        samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
+    }
+
+    let filtered = apply_timeline_filter(&samples, q);
+    let fields = if q.fields.is_empty() {
+        None
+    } else {
+        Some(&q.fields)
+    };
+    for s in &filtered {
+        println!("{}", sidecar_sample_json_projected(s, fields));
+    }
+    Ok(())
+}
+
+fn run_markers(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
     if markers.is_empty() {
         output::result_msg("no sidecar markers for this result");
-    } else if q.phases {
-        let samples = sdb.query_samples(&uuid_prefix, run_filter)?;
-        let counters = sdb.query_counters(&uuid_prefix, run_filter)?;
-        print_marker_phases_with_counters(&markers, &samples, &counters);
-    } else if q.durations {
-        print_marker_durations(&markers);
-    } else {
-        for m in &markers {
-            println!("{}", sidecar_marker_json(m));
-        }
+        return Ok(());
     }
+    for m in &markers {
+        println!("{}", sidecar_marker_json(m));
+    }
+    Ok(())
+}
+
+fn run_durations(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+    if markers.is_empty() {
+        output::result_msg("no sidecar markers for this result");
+        return Ok(());
+    }
+    print_marker_durations(&markers);
+    Ok(())
+}
+
+fn run_counters(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let counters = sdb.query_counters(uuid_prefix, run_filter)?;
+    if counters.is_empty() {
+        output::result_msg("no counters for this result");
+        return Ok(());
+    }
+    print_counters(&counters);
+    Ok(())
+}
+
+fn run_stat(
+    sdb: &db::sidecar::SidecarDb,
+    uuid_prefix: &str,
+    field: &str,
+    q: &SidecarQuery,
+) -> Result<(), DevError> {
+    print_run_info(sdb, uuid_prefix);
+    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+    let mut samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    if samples.is_empty() {
+        output::result_msg("no sidecar data for this result");
+        return Ok(());
+    }
+    if let Some(ref phase_name) = q.phase {
+        let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+        let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
+        samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
+    }
+    if let Some(ref range_str) = q.range {
+        let (start_us, end_us) = parse_time_range(range_str)?;
+        samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
+    }
+    let filtered = apply_timeline_filter(&samples, q);
+    print_field_stat(&filtered, field)
+}
+
+fn run_compare(
+    sdb: &db::sidecar::SidecarDb,
+    uuids: &[String],
+    human: bool,
+) -> Result<(), DevError> {
+    let uuid_a = &uuids[0];
+    let uuid_b = &uuids[1];
+    let (best_a, _) = sdb.query_meta(uuid_a);
+    let (best_b, _) = sdb.query_meta(uuid_b);
+    let samples_a = sdb.query_samples(uuid_a, Some(best_a))?;
+    let samples_b = sdb.query_samples(uuid_b, Some(best_b))?;
+    if samples_a.is_empty() || samples_b.is_empty() {
+        output::result_msg("one or both results have no sidecar data");
+        return Ok(());
+    }
+    let markers_a = sdb.query_markers(uuid_a, Some(best_a))?;
+    let markers_b = sdb.query_markers(uuid_b, Some(best_b))?;
+    print_compare_timeline(
+        uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b, human,
+    );
     Ok(())
 }

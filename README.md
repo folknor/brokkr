@@ -229,25 +229,26 @@ Sidecar data is stored even when the child is OOM-killed — the `/proc` traject
 
 ### Querying sidecar data
 
-A UUID prefix is required — use `brokkr results` to find one. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
+A UUID prefix is required (except for `--compare`) — use `brokkr results` to find one. The `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
 
 ```
 brokkr sidecar <uuid>                              # per-phase summary (default view)
 brokkr sidecar <uuid> --human                      # same, as a fixed-width table
-brokkr sidecar <uuid> --timeline                   # raw JSONL samples
-brokkr sidecar <uuid> --timeline --stat anon       # min/max/avg/p50/p95 for a field
-brokkr sidecar <uuid> --timeline --fields rss,anon --every 10  # project + downsample
-brokkr sidecar <uuid> --timeline --where "majflt>0" --tail 20  # filter + range
-brokkr sidecar <uuid> --timeline --phase STAGE2 --stat anon    # per-phase stats
-brokkr sidecar <uuid> --timeline --range 10.0..82.0            # time window filter
-brokkr sidecar <uuid> --markers                    # raw JSONL markers
-brokkr sidecar <uuid> --markers --durations        # START/END pair timings
-brokkr sidecar <uuid> --markers --phases           # durations + peak RSS/majflt
-brokkr sidecar --compare-timeline <uuid_a> <uuid_b>  # phase-aligned comparison
-brokkr sidecar dirty --timeline --stat anon        # inspect last failed/dirty run
+brokkr sidecar <uuid> --samples                    # raw /proc samples (JSONL)
+brokkr sidecar <uuid> --samples --fields rss,anon --every 10  # project + downsample
+brokkr sidecar <uuid> --samples --where "majflt>0" --tail 20  # filter + range
+brokkr sidecar <uuid> --samples --phase STAGE2                # filter to a marker phase
+brokkr sidecar <uuid> --samples --range 10.0..82.0            # time window filter
+brokkr sidecar <uuid> --markers                    # raw marker events (JSONL)
+brokkr sidecar <uuid> --durations                  # START/END pair timings
+brokkr sidecar <uuid> --counters                   # application counters
+brokkr sidecar <uuid> --stat anon                  # min/max/avg/p50/p95 for a field
+brokkr sidecar <uuid> --stat anon --phase STAGE2   # per-phase stat
+brokkr sidecar --compare <uuid_a> <uuid_b>         # phase-aligned comparison
+brokkr sidecar dirty --stat anon                   # inspect last failed/dirty run
 ```
 
-All timeline flags compose: `--phase STAGE2 --where "anon>100000" --stat majflt` works.
+Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--stat`.
 
 ## Results database
 
