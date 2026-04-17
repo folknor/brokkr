@@ -107,7 +107,16 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
             .get::<_, Option<String>>("cargo_profile")?
             .as_deref()
             .filter(|s| !s.is_empty())
-            .map(crate::build::CargoProfile::from_db),
+            .map(|s| match crate::build::CargoProfile::from_db(s) {
+                Ok(p) => p,
+                Err(crate::build::UnknownCargoProfile(raw)) => {
+                    crate::output::error(&format!(
+                        "unknown cargo_profile {raw:?} in results DB — \
+                         treating as 'release' (likely a migration typo)"
+                    ));
+                    crate::build::CargoProfile::Release
+                }
+            }),
         kernel: row.get::<_, Option<String>>("kernel")?.unwrap_or_default(),
         cpu_governor: row
             .get::<_, Option<String>>("cpu_governor")?

@@ -31,16 +31,21 @@ impl CargoProfile {
         }
     }
 
-    /// Parse a DB-stored value. Unknown / legacy strings map back to
-    /// `Release` so the enum stays total.
-    pub fn from_db(s: &str) -> Self {
+    /// Parse a DB-stored value. Returns `Err` on unknown strings so the
+    /// caller can surface a migration typo instead of silently coercing
+    /// to `Release`.
+    pub fn from_db(s: &str) -> Result<Self, UnknownCargoProfile> {
         match s {
-            "java" => Self::Java,
-            "cmake" => Self::CMake,
-            _ => Self::Release,
+            "release" => Ok(Self::Release),
+            "java" => Ok(Self::Java),
+            "cmake" => Ok(Self::CMake),
+            other => Err(UnknownCargoProfile(other.to_owned())),
         }
     }
 }
+
+#[derive(Debug)]
+pub struct UnknownCargoProfile(pub String);
 
 // ---------------------------------------------------------------------------
 // Build configuration

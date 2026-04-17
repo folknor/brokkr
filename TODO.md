@@ -40,13 +40,6 @@ The unified `build_args` normalises to `hotpath-{cmd.id()}-output.{ext}`, so
 `hotpath-merged` becomes `hotpath-apply-changes-output`, etc. The cli_args
 column reflects the new names; historical rows keep the old names.
 
-#### `CargoProfile::from_db` silently maps unknown strings to `Release`
-`src/build.rs:36-42` quietly absorbs any non-`"java"`/`"cmake"` value into
-`Release`. Today's historical data only contains the three known values
-(verified via git log search), so no ambiguity in practice. If a future
-migration typos a profile name (e.g. `"relase"`) it would fail silently.
-Could switch to `TryFrom` + logged warning, but low urgency.
-
 #### Commit message inaccuracy on `681a2d6`
 The message claims the suite's ok_exit_codes improvement landed in that
 commit; it actually landed in `1fc2145`. Too late to fix without a rebase,
