@@ -35,7 +35,7 @@ pub fn run(
     // 1. bench commands -- all
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(
-        &build::BuildConfig::release(Some("pbfhogg-cli")),
+        &build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), &paths.features),
         project_root,
     )?;
     let osc_path = crate::resolve::get_default_osc_entry(dataset, paths)

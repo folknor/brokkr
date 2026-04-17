@@ -23,7 +23,11 @@ pub(crate) enum Command {
     #[command(
         display_order = 0,
         long_about = "\
-Run clippy + tests. Extra args are forwarded raw to `cargo test`.
+Run clippy first, then tests. Clippy warnings are denied by the project's
+Cargo.toml lints, so a clippy failure short-circuits — tests only run when
+clippy passes. Extra args after `--` are forwarded raw to `cargo test`
+(invoke `cargo test` directly if you want to skip clippy for a targeted
+test run).
 
 Examples:
   brokkr check                                     # clippy + all tests
@@ -689,6 +693,7 @@ Examples:
   brokkr sidecar <uuid> --stat rss                    # min/max/avg/p50/p95 for a field
   brokkr sidecar --compare a65a 911c                  # two results, phase-aligned",
         group(ArgGroup::new("sample_view").args(&["samples", "stat"]).multiple(false)),
+        group(ArgGroup::new("phased_view").args(&["samples", "stat", "counters"]).multiple(false)),
     )]
     Sidecar {
         /// UUID prefix to look up (required; use `brokkr results` to find one)
@@ -730,8 +735,9 @@ Examples:
         #[arg(long)]
         run: Option<String>,
 
-        /// Filter samples to a marker phase (e.g. "STAGE2"). Requires --samples or --stat.
-        #[arg(long, requires = "sample_view")]
+        /// Filter to a marker phase (e.g. "STAGE2"). Requires --samples,
+        /// --stat, or --counters.
+        #[arg(long, requires = "phased_view")]
         phase: Option<String>,
 
         /// Filter samples by time range in seconds (e.g. "10.0..82.0"). Requires --samples or --stat.
@@ -794,41 +800,60 @@ Every brokkr invocation is recorded with timing and exit status.
 
 Examples:
   brokkr history                        # last 25 entries
+  brokkr history 1234                   # detail view for a single entry
   brokkr history -n 50                  # last 50
   brokkr history --all                  # everything
   brokkr history --command bench        # filter by command substring
   brokkr history --project pbfhogg      # filter by project
+  brokkr history --project-dir /clone2  # filter by cwd substring
   brokkr history --failed               # only non-zero exit
+  brokkr history --status 130           # filter by exit code (e.g. 130 = interrupt)
   brokkr history --since 2026-03-01     # from date (YYYY-MM-DD)
+  brokkr history --until 2026-03-05     # up to date (YYYY-MM-DD)
   brokkr history --slow 10000           # commands that took >10s"
     )]
     History {
+        /// Look up a single history entry by id (shown in the leftmost column of the default view)
+        id: Option<i64>,
+
         /// Filter by command (substring match)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "id")]
         command: Option<String>,
 
         /// Filter by project name
-        #[arg(long)]
+        #[arg(long, conflicts_with = "id")]
         project: Option<String>,
 
+        /// Filter by cwd substring (useful for multiple clones of the same project)
+        #[arg(long, conflicts_with = "id")]
+        project_dir: Option<String>,
+
         /// Show only failed commands (non-zero exit)
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["id", "status"])]
         failed: bool,
 
+        /// Filter by exact exit status code
+        #[arg(long, conflicts_with = "id")]
+        status: Option<i32>,
+
         /// Show entries from this date onward (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
-        #[arg(long, value_parser = validate_since)]
+        #[arg(long, value_parser = validate_since, conflicts_with = "id")]
         since: Option<String>,
 
+        /// Show entries up to this date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        #[arg(long, value_parser = validate_since, conflicts_with = "id")]
+        until: Option<String>,
+
         /// Show commands that took at least this many milliseconds
-        #[arg(long)]
+        #[arg(long, conflicts_with = "id")]
         slow: Option<i64>,
 
         /// Maximum number of entries to show
-        #[arg(long, short = 'n', default_value = "25", conflicts_with = "all")]
+        #[arg(long, short = 'n', default_value = "25", conflicts_with_all = ["all", "id"])]
         limit: usize,
 
         /// Show all entries (ignores -n)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "id")]
         all: bool,
     },
     /// Cross-validate output against reference tools
@@ -1427,24 +1452,29 @@ fn validate_osc_range(s: &str) -> Result<String, String> {
 
 /// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.
 fn validate_since(s: &str) -> Result<String, String> {
-    let date_ok = s.len() == 10
-        && s.as_bytes().get(4) == Some(&b'-')
-        && s.as_bytes().get(7) == Some(&b'-')
-        && s[..4].chars().all(|c| c.is_ascii_digit())
-        && s[5..7].chars().all(|c| c.is_ascii_digit())
-        && s[8..10].chars().all(|c| c.is_ascii_digit());
+    let b = s.as_bytes();
+    let date_ok = b.len() >= 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit);
 
-    let datetime_ok = s.len() == 19
-        && !date_ok
-        && validate_since(&s[..10]).is_ok()
-        && s.as_bytes().get(10) == Some(&b' ')
-        && s[11..13].chars().all(|c| c.is_ascii_digit())
-        && s.as_bytes().get(13) == Some(&b':')
-        && s[14..16].chars().all(|c| c.is_ascii_digit())
-        && s.as_bytes().get(16) == Some(&b':')
-        && s[17..19].chars().all(|c| c.is_ascii_digit());
+    let shape_ok = match b.len() {
+        10 => date_ok,
+        19 => {
+            date_ok
+                && b[10] == b' '
+                && b[13] == b':'
+                && b[16] == b':'
+                && b[11..13].iter().all(u8::is_ascii_digit)
+                && b[14..16].iter().all(u8::is_ascii_digit)
+                && b[17..19].iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    };
 
-    if date_ok || datetime_ok {
+    if shape_ok {
         Ok(s.to_owned())
     } else {
         Err(format!(

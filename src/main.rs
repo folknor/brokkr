@@ -164,16 +164,32 @@ fn run(cli: Cli) -> Result<(), DevError> {
         return cmd_kill(hard);
     }
     if let Command::History {
+        id,
         command,
         project,
+        project_dir,
         failed,
+        status,
         since,
+        until,
         slow,
         limit,
         all,
     } = cli.command
     {
-        return history_cmd::cmd_history(command, project, failed, since, slow, limit, all);
+        return history_cmd::cmd_history(history_cmd::HistoryQuery {
+            id,
+            command,
+            project,
+            project_dir,
+            failed,
+            status,
+            since,
+            until,
+            slow,
+            limit,
+            all,
+        });
     }
 
     let (project, dev_config, project_root) = project::detect()?;

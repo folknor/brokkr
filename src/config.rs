@@ -419,21 +419,29 @@ pub fn host_features(config: &DevConfig) -> Vec<String> {
 // Hostname
 // ---------------------------------------------------------------------------
 
-/// Get the current hostname via `libc::gethostname()`.
+/// Get the current hostname via `libc::gethostname()`. Cached for the
+/// life of the process — the hostname doesn't change under us and the
+/// FFI call gets hit from the hot path (harness bootstrap, history
+/// init, host-feature resolution).
 pub fn hostname() -> Result<String, DevError> {
-    let mut buf = [0u8; 256];
-    let ret = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-    if ret != 0 {
-        return Err(DevError::Config("gethostname failed".into()));
-    }
-
-    let len = buf
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or_else(|| DevError::Config("hostname not null-terminated".into()))?;
-
-    String::from_utf8(buf[..len].to_vec())
-        .map_err(|e| DevError::Config(format!("hostname is not utf-8: {e}")))
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Result<String, String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let mut buf = [0u8; 256];
+            let ret = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+            if ret != 0 {
+                return Err("gethostname failed".to_owned());
+            }
+            let len = buf
+                .iter()
+                .position(|&b| b == 0)
+                .ok_or_else(|| "hostname not null-terminated".to_owned())?;
+            String::from_utf8(buf[..len].to_vec())
+                .map_err(|e| format!("hostname is not utf-8: {e}"))
+        })
+        .clone()
+        .map_err(DevError::Config)
 }
 
 // ---------------------------------------------------------------------------

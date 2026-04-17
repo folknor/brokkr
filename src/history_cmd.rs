@@ -8,25 +8,40 @@ use crate::git;
 use crate::history;
 use crate::project;
 
-#[allow(clippy::fn_params_excessive_bools)]
-pub(crate) fn cmd_history(
-    command: Option<String>,
-    project: Option<String>,
-    failed: bool,
-    since: Option<String>,
-    slow: Option<i64>,
-    limit: usize,
-    all: bool,
-) -> Result<(), DevError> {
+pub(crate) struct HistoryQuery {
+    pub id: Option<i64>,
+    pub command: Option<String>,
+    pub project: Option<String>,
+    pub project_dir: Option<String>,
+    pub failed: bool,
+    pub status: Option<i32>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub slow: Option<i64>,
+    pub limit: usize,
+    pub all: bool,
+}
+
+pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
     let db = history::HistoryDb::open()?;
+    if let Some(id) = q.id {
+        match db.get_by_id(id)? {
+            Some(entry) => println!("{}", history::format_detail(&entry)),
+            None => crate::output::result_msg(&format!("no history entry with id {id}")),
+        }
+        return Ok(());
+    }
     let filter = history::HistoryFilter {
-        command,
-        project,
-        failed,
-        since,
-        slow_ms: slow,
-        limit,
-        all,
+        command: q.command,
+        project: q.project,
+        project_dir: q.project_dir,
+        failed: q.failed,
+        status: q.status,
+        since: q.since,
+        until: q.until,
+        slow_ms: q.slow,
+        limit: q.limit,
+        all: q.all,
     };
     let entries = db.query(&filter)?;
     let output = history::format_history(&entries);

@@ -139,6 +139,24 @@ All paths are constructed from known UTF-8 components, so `.display().to_string(
 ### `#[allow(clippy::too_many_arguments)]` proliferation
 Functions genuinely need many parameters. `BenchContext` and `HarnessContext` cover the common cases; remaining allows are the pragmatic choice.
 
+### `Project::Other` `Box::leak`
+`config.rs`: `Project::Other(Box::leak(...))` leaks the project name
+string once at startup. Removing the leak requires dropping the `Copy`
+derive on `Project` (or switching to a `'static` interner), both of
+which cascade through every `fn foo(project: Project)` signature for
+no runtime benefit — `Project` is constructed exactly once per process.
+
+### Suite without `--bench` stores results in DB
+`brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores
+results. Suite is inherently a benchmarking operation — there's no
+meaningful "measure without storing" mode to preserve.
+
+### `test` and `list` are generic top-level names
+These only work for litehtml/sluggrs but are natural names users might
+try in any project. The project-gating error message now includes the
+current project and the expected one, which is good enough; renaming
+would churn every litehtml/sluggrs invocation in CI and docs.
+
 ---
 
 ## Backlog
@@ -166,9 +184,6 @@ the compiled regex to avoid per-row `Regex::new`. Adds a dep on the
 ### Counter diffs in `brokkr sidecar --compare`
 Include counter values at matching phase boundaries in the comparison table. Currently `--compare` only shows duration, peak anon, and disk read.
 
-### `--phase` filter for `--counters`
-`--phase` currently requires `--samples` or `--stat` (clap ArgGroup). Letting `brokkr sidecar <uuid> --counters --phase STAGE4` show only counters within a phase would be useful for targeted analysis.
-
 ### Sidecar: result+sidecar persistence is not atomic
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
@@ -189,12 +204,6 @@ for per-run memory caps. Nothing equivalent survives after the
 project-agnostic flag (e.g. on `ModeArgs` / `Passthrough`) so any
 measured command can cap child RSS.
 
-### Project::Other memory leak
-`config.rs`: `Project::Other(Box::leak(...))` leaks memory. Called once at startup so technically fine, but would leak in a loop (tests). The `Copy` derive on `Project` forces the leak.
-
-### hostname() called multiple times per run
-`config::hostname()` calls `libc::gethostname()` via FFI every time. Cheap but could be called once during config loading and stored on `DevConfig`.
-
 ---
 
 ## History command enhancements
@@ -208,46 +217,15 @@ On non-zero exit, capture the last 4KB of stderr into a nullable `error_tail TEX
 ### `--json` output
 Useful for scripting (jq, dashboards, CI analysis) instead of only human-formatted lines.
 
-### `history <id>` detail view
-One command to inspect full metadata for a specific entry (cwd, commit, dirty, kernel, memory, exit status).
-
 ### `--from-last-success` / `--failed` + `--rerun <id>`
 Fast recovery loop: find last failed command and re-execute it exactly.
-
-### `--project-dir <path-substring>` filter
-`--project` is great, but directory filter helps when you have multiple clones/worktrees of the same project.
-
-### `--until <date>` in addition to `--since`
-Time-range queries are much more useful than one-sided filtering.
-
-### `--status <code>` filter
-`--failed` is coarse; filtering specific exit codes (e.g. 130 for interrupt) is valuable.
 
 ### `--sort slow|recent` and `--top-slowest N`
 Makes performance triage easier without external tooling.
 
 ---
 
-## CLI remaining issues
-
-### Suite without --bench stores results in DB
-`brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores results. May not be worth fixing — suite is inherently a benchmarking operation.
-
-### Suite builds without host features
-`bench_all.rs` calls `cargo_build` without host features from `brokkr.toml`. Individual commands correctly include them via `BenchContext::new`. Pre-existing.
-
-### validate_since tautology
-`cli.rs`: `s[..10].len() == 10` is always true when `s.len() == 19`. The recursive `validate_since(&s[..10])` call works but is unnecessarily clever. Dead code in the check.
-
-### check does not really forward args raw to cargo test
-`brokkr check` help says extra args are forwarded raw to `cargo test`, but every invocation runs clippy first. That means `brokkr check -- --help` and single-test workflows are blocked by clippy failures and do not behave like a clean cargo-test passthrough. The help text should be tightened or the command split.
-
----
-
-## CLI flattening follow-ups
-
-### `test` and `list` are generic top-level names
-These only work for litehtml/sluggrs but are natural names users might try in any project. `brokkr test` from pbfhogg gives a project-gating error, which could confuse users expecting it to run `cargo test` (that's `brokkr check`). No immediate fix needed — the error message now includes the current project and is clear.
+## CLI
 
 ### Help output lacks section headers
 With 55+ top-level commands, `--help` is a wall of text. `display_order` groups by project but there are no visual separators. Clap's `next_help_heading` could inject section headers like "Visual Testing Commands:", "Litehtml Commands:", etc.

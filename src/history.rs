@@ -83,6 +83,35 @@ impl HistoryDb {
         Ok(())
     }
 
+    /// Look up a single entry by row id. Returns `Ok(None)` when the id
+    /// doesn't exist.
+    pub fn get_by_id(&self, id: i64) -> Result<Option<HistoryEntry>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timestamp, project, cwd, command, elapsed_ms, exit_status, \
+                    hostname, commit_hash, dirty, kernel, avail_memory_mb \
+             FROM history WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(HistoryEntry {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                project: row.get(2)?,
+                cwd: row.get(3)?,
+                command: row.get(4)?,
+                elapsed_ms: row.get(5)?,
+                exit_status: row.get(6)?,
+                hostname: row.get(7)?,
+                commit_hash: row.get(8)?,
+                dirty: row.get(9)?,
+                kernel: row.get(10)?,
+                avail_memory_mb: row.get(11)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Query history rows with optional filters.
     pub fn query(&self, filter: &HistoryFilter) -> Result<Vec<HistoryEntry>, DevError> {
         let mut clauses = Vec::new();
@@ -96,12 +125,24 @@ impl HistoryDb {
             params.push(Box::new(project.clone()));
             clauses.push(format!("project = ?{}", params.len()));
         }
+        if let Some(ref dir) = filter.project_dir {
+            params.push(Box::new(format!("%{dir}%")));
+            clauses.push(format!("cwd LIKE ?{}", params.len()));
+        }
         if filter.failed {
             clauses.push("exit_status != 0".to_owned());
+        }
+        if let Some(status) = filter.status {
+            params.push(Box::new(status));
+            clauses.push(format!("exit_status = ?{}", params.len()));
         }
         if let Some(ref since) = filter.since {
             params.push(Box::new(since.clone()));
             clauses.push(format!("timestamp >= ?{}", params.len()));
+        }
+        if let Some(ref until) = filter.until {
+            params.push(Box::new(until.clone()));
+            clauses.push(format!("timestamp <= ?{}", params.len()));
         }
         if let Some(slow_ms) = filter.slow_ms {
             params.push(Box::new(slow_ms));
@@ -190,11 +231,15 @@ pub struct HistoryEntry {
 }
 
 /// Filters for history queries.
+#[derive(Default)]
 pub struct HistoryFilter {
     pub command: Option<String>,
     pub project: Option<String>,
+    pub project_dir: Option<String>,
     pub failed: bool,
     pub since: Option<String>,
+    pub until: Option<String>,
+    pub status: Option<i32>,
     pub slow_ms: Option<i64>,
     pub limit: usize,
     pub all: bool,
@@ -203,6 +248,44 @@ pub struct HistoryFilter {
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
+
+/// Format a single history entry as a labelled detail block for
+/// `brokkr history <id>`.
+pub fn format_detail(entry: &HistoryEntry) -> String {
+    use std::fmt::Write;
+    let mut fields: Vec<(&str, String)> = Vec::new();
+    fields.push(("id", entry.id.to_string()));
+    fields.push(("timestamp", entry.timestamp.clone()));
+    if let Some(ref p) = entry.project {
+        fields.push(("project", p.clone()));
+    }
+    fields.push(("cwd", entry.cwd.clone()));
+    fields.push(("command", entry.command.clone()));
+    if let Some(ms) = entry.elapsed_ms {
+        fields.push(("elapsed", format!("{ms} ms")));
+    }
+    fields.push(("exit_status", entry.exit_status.to_string()));
+    fields.push(("hostname", entry.hostname.clone()));
+    if let Some(ref c) = entry.commit_hash {
+        let dirty = if entry.dirty == Some(true) { " (dirty)" } else { "" };
+        fields.push(("commit", format!("{c}{dirty}")));
+    }
+    if let Some(ref k) = entry.kernel {
+        fields.push(("kernel", k.clone()));
+    }
+    if let Some(mb) = entry.avail_memory_mb {
+        fields.push(("memory", format!("{mb} MB")));
+    }
+    let width = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for (label, value) in &fields {
+        writeln!(out, "{label:<width$}  {value}").expect("write to String is infallible");
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
 
 /// Format history entries for display.
 pub fn format_history(entries: &[HistoryEntry]) -> String {
@@ -356,13 +439,8 @@ mod tests {
         db.insert(&make_row("check", 1)).unwrap();
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 2);
@@ -380,12 +458,8 @@ mod tests {
 
         let filter = HistoryFilter {
             command: Some("bench".into()),
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 2);
@@ -401,13 +475,9 @@ mod tests {
         db.insert(&row).unwrap();
 
         let filter = HistoryFilter {
-            command: None,
             project: Some("elivagar".into()),
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 1);
@@ -421,13 +491,9 @@ mod tests {
         db.insert(&make_row("bench self", 1)).unwrap();
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
             failed: true,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 1);
@@ -442,13 +508,8 @@ mod tests {
         }
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 3,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 3);
@@ -462,13 +523,9 @@ mod tests {
         }
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 3,
             all: true,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 10);
@@ -485,13 +542,8 @@ mod tests {
         db.insert(&make_row("check", 1)).unwrap();
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         let output = format_history(&entries);
@@ -515,13 +567,8 @@ mod tests {
         db.insert(&row).unwrap();
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         let output = format_history(&entries);
@@ -546,13 +593,8 @@ mod tests {
         db.insert(&row).unwrap();
 
         let filter = HistoryFilter {
-            command: None,
-            project: None,
-            failed: false,
-            since: None,
-            slow_ms: None,
             limit: 25,
-            all: false,
+            ..Default::default()
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 1);

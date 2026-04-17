@@ -27,7 +27,10 @@ pub fn run(
 ) -> Result<(), DevError> {
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
-    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+    let binary = build::cargo_build(
+        &build::BuildConfig::release_with_owned_features(None, &paths.features),
+        project_root,
+    )?;
     let opts = super::PipelineOpts {
         no_ocean: false,
         force_sorted: false,

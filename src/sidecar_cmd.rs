@@ -181,10 +181,17 @@ fn run_counters(
 ) -> Result<(), DevError> {
     print_run_info(sdb, uuid_prefix);
     let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let counters = sdb.query_counters(uuid_prefix, run_filter)?;
+    let mut counters = sdb.query_counters(uuid_prefix, run_filter)?;
     if counters.is_empty() {
         output::result_msg("no counters for this result");
         return Ok(());
+    }
+    if let Some(ref phase_name) = q.phase {
+        let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+        let samples = sdb.query_samples(uuid_prefix, run_filter)?;
+        let (start_us, end_us) =
+            crate::sidecar_fmt::resolve_phase_range(phase_name, &markers, &samples)?;
+        counters.retain(|c| c.timestamp_us >= start_us && c.timestamp_us < end_us);
     }
     print_counters(&counters, q.human);
     Ok(())
