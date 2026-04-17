@@ -76,10 +76,12 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
         return Ok(());
     }
 
-    if !q.timeline && !q.markers {
-        output::result_msg("specify --timeline or --markers (see --help)");
-        return Ok(());
-    }
+    // Default view when no selector is given: the per-phase timeline summary
+    // (JSONL). Equivalent to `--timeline --summary` — the overview that
+    // wants to exist anyway, and the only view where "nothing specified"
+    // has an obvious meaning.
+    let timeline = q.timeline || !q.markers;
+    let summary = q.summary || (!q.timeline && !q.markers);
 
     // Resolve UUID: explicit query arg, or last result from DB.
     let uuid_prefix: String = if let Some(ref prefix) = q.query {
@@ -103,7 +105,7 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
         row.uuid.clone()
     };
 
-    if q.timeline {
+    if timeline {
         print_run_info(&sdb, &uuid_prefix);
         let run_filter = resolve_run_filter(&sdb, &uuid_prefix, q.run.as_deref())?;
 
@@ -112,7 +114,7 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
             output::result_msg("no sidecar data for this result");
             return Ok(());
         }
-        if q.summary {
+        if summary {
             let markers = sdb.query_markers(&uuid_prefix, run_filter)?;
             print_phase_summary(&samples, &markers, q.human);
             return Ok(());

@@ -685,8 +685,10 @@ the most recent result; pass a UUID prefix to pick a specific result
 and `--run N|all` to pick a different run.
 
 Examples:
+  brokkr sidecar                                      # per-phase summary (default view)
+  brokkr sidecar <uuid>                               # per-phase summary for a specific result
+  brokkr sidecar --human                              # same, as a fixed-width table
   brokkr sidecar --timeline                           # raw JSONL samples (last result)
-  brokkr sidecar --timeline --summary                 # per-phase table (last result)
   brokkr sidecar --timeline --stat rss                # min/max/avg/p50/p95 for a field
   brokkr sidecar --timeline --phase STAGE2            # samples within a marker phase
   brokkr sidecar --markers                            # raw JSONL markers
