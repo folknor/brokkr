@@ -44,8 +44,8 @@ impl Command {
             Self::CheckRefs { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::CheckRefs, None, empty))
             }
-            Self::CheckIds { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::CheckIds, None, empty))
+            Self::CheckIds { mode, pbf, full } => {
+                Some((mode, pbf, PbfhoggCommand::CheckIds { full: *full }, None, empty))
             }
             Self::Sort { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Sort, None, empty)),
             Self::Cat {

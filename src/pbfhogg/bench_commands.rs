@@ -78,7 +78,7 @@ fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
             type_filter: Some("way".into()),
         },
         "check-refs" => PbfhoggCommand::CheckRefs,
-        "check-ids" => PbfhoggCommand::CheckIds,
+        "check-ids" => PbfhoggCommand::CheckIds { full: false },
         "sort" => PbfhoggCommand::Sort,
         "cat" => PbfhoggCommand::Cat {
             type_filter: None,

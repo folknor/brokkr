@@ -109,6 +109,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Additionally detect duplicate IDs per type. Allocates
+        /// RoaringTreemap sets; higher memory + CPU than the streaming
+        /// default.
+        #[arg(long)]
+        full: bool,
     },
     /// [pbfhogg] Sort PBF
     #[command(name = "sort", display_order = 2)]

@@ -178,7 +178,10 @@ pub enum PbfhoggCommand {
         type_filter: Option<String>,
     },
     CheckRefs,
-    CheckIds,
+    /// `check --ids`. `full` adds `--full` — per-type duplicate-ID detection
+    /// via RoaringTreemap sets, in addition to the streaming monotonicity /
+    /// type-order checks.
+    CheckIds { full: bool },
     Sort,
     /// Unified `cat` — all flags orthogonal:
     ///   - `type_filter` → `--type way|relation` (restricts output to one
@@ -248,7 +251,7 @@ impl PbfhoggCommand {
         match self {
             Self::Inspect { .. } => "inspect",
             Self::CheckRefs => "check-refs",
-            Self::CheckIds => "check-ids",
+            Self::CheckIds { .. } => "check-ids",
             Self::Sort => "sort",
             Self::Cat { .. } => "cat",
             Self::TagsFilter { .. } => "tags-filter",
@@ -289,7 +292,7 @@ impl PbfhoggCommand {
             // No output file (read-only / stdout commands).
             Self::Inspect { .. }
             | Self::CheckRefs
-            | Self::CheckIds
+            | Self::CheckIds { .. }
             | Self::Diff { format: DiffFormat::Default }
             | Self::DiffSnapshots { format: DiffFormat::Default } => OutputKind::None,
 
@@ -469,7 +472,13 @@ impl PbfhoggCommand {
                 Ok(args)
             }
             Self::CheckRefs => Ok(vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()]),
-            Self::CheckIds => Ok(vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()]),
+            Self::CheckIds { full } => {
+                let mut args = vec!["check".into(), "--ids".into(), ctx.pbf_str()?.into()];
+                if *full {
+                    args.push("--full".into());
+                }
+                Ok(args)
+            }
             Self::Sort => {
                 let output = scratch_output_path(ctx, self, mode);
                 Ok(vec![
