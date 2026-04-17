@@ -291,41 +291,21 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
             .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
             .collect();
 
-        // Bare `brokkr results` with no filters: show detail view for the last result.
-        let no_filters = q.commit.is_none()
-            && q.command.is_none()
-            && q.mode.is_none()
-            && q.dataset.is_none()
-            && meta_pairs.is_empty();
-
-        if no_filters {
-            let filter = db::QueryFilter {
-                limit: 1,
-                ..Default::default()
-            };
-            let rows = results_db.query(&filter)?;
-            if rows.is_empty() {
-                output::result_msg("no results yet");
-            } else {
-                render_single_or_multi(&rows, sidecar_db.as_ref(), q.top);
-            }
+        let filter = db::QueryFilter {
+            commit: q.commit.clone(),
+            command: q.command.clone(),
+            mode: q.mode.clone(),
+            dataset: q.dataset.clone(),
+            meta: meta_pairs,
+            grep: q.grep.clone(),
+            limit: q.limit,
+        };
+        let rows = results_db.query(&filter)?;
+        if rows.is_empty() {
+            output::result_msg("no matching results");
         } else {
-            let filter = db::QueryFilter {
-                commit: q.commit.clone(),
-                command: q.command.clone(),
-                mode: q.mode.clone(),
-                dataset: q.dataset.clone(),
-                meta: meta_pairs,
-                grep: q.grep.clone(),
-                limit: q.limit,
-            };
-            let rows = results_db.query(&filter)?;
-            if rows.is_empty() {
-                output::result_msg("no matching results");
-            } else {
-                let table = db::format_table(&rows);
-                println!("{table}");
-            }
+            let table = db::format_table(&rows);
+            println!("{table}");
         }
     }
 

@@ -139,7 +139,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 
 - `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features`, `--no-default-features`, `--raw` (unfiltered cargo output), and `--json` (NDJSON diagnostics and summaries). `--raw` and `--json` are mutually exclusive (clap enforced). Default text mode: each diagnostic becomes one line, compilation noise stripped, passing tests aggregated. `--json` mode: uses cargo `--message-format=json` for full-fidelity structured diagnostics, emits one JSON object per line to stdout with no prefixed output. Always emits summary events even on success.
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
-- `results` — query the results database (`.brokkr/results.db`). Bare `brokkr results` shows detail view of the last result. Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
+- `results` — query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--compare-last`, `--command`, `--variant`, `-n`, `--top`
 - `clean` — remove scratch/temp files
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`

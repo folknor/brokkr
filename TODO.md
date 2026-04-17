@@ -28,13 +28,6 @@ those production-code lints silently stop catching regressions in the
 non-test binary too. Tightening: move the allow onto the individual
 `mod tests { }` blocks, not the crate root.
 
-#### No flag to restore the old bare `brokkr results` table view
-Pre-22e5e7e, bare `brokkr results` showed a table of recent rows. Post-
-commit, it shows the single last-row detail view instead. Users with
-muscle memory get a different layout; `brokkr results -n 10` still works
-for the table. Could add `--table` / `--latest N` to bring back the old
-default, but no one's asked yet.
-
 #### `--clean` argument shape misalignment with pbfhogg
 (documented above — brokkr emits bare `--clean <attr>`, pbfhogg accepts
 `--clean ATTR` repeatable; combinations like `--clean version --clean uid`

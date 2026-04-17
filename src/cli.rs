@@ -608,7 +608,7 @@ Examples:
 Query benchmark results from .brokkr/results.db.
 
 Examples:
-  brokkr results                                    # detail view of last result
+  brokkr results                                    # last 20 results
   brokkr results --command read                     # last 20 matching 'read'
   brokkr results 0b74fb6f                           # look up by UUID prefix
   brokkr results --commit a65a                      # filter by commit prefix

@@ -253,7 +253,7 @@ All timeline flags compose: `--phase STAGE2 --where "anon>100000" --stat majflt`
 Query stored benchmarks with `brokkr results`:
 
 ```
-brokkr results                                      # detail view of last result
+brokkr results                                      # table of last 20 results
 brokkr results 0b74fb6f                             # look up by UUID prefix
 brokkr results --command read                       # last 20 matching 'read'
 brokkr results --commit a65a                        # filter by commit
