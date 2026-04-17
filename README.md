@@ -267,8 +267,6 @@ brokkr results --meta merged_cache=miss             # filter by runtime-observat
 brokkr results --command diff-snapshots --grep 'format osc'     # osc-only diff-snapshots runs
 brokkr results --meta merged_cache=miss --command diff           # cold-cache diff runs only
 brokkr results --compare a65a 911c                  # compare two commits side-by-side
-brokkr results --compare-last                       # compare two most recent commits
-brokkr results --compare-last --mode hotpath        # compare two most recent hotpath runs
 ```
 
 Columns that drive the filters:

@@ -617,9 +617,7 @@ Examples:
   brokkr results --dataset europe                   # filter by dataset (substring match on input file)
   brokkr results --command tags-filter --dataset eu # combine filters
   brokkr results --compare a65a 911c                # compare two commits
-  brokkr results --compare a65a 911c --mode bench   # compare, filtered
-  brokkr results --compare-last                     # compare two most recent commits
-  brokkr results --compare-last --command hotpath   # compare hotpath runs (shows function diff)"
+  brokkr results --compare a65a 911c --mode bench   # compare, filtered"
     )]
     Results {
         /// UUID prefix to look up specific result(s)
@@ -633,10 +631,6 @@ Examples:
         /// Compare two commits side-by-side
         #[arg(long, num_args = 2, value_names = ["COMMIT_A", "COMMIT_B"])]
         compare: Option<Vec<String>>,
-
-        /// Compare the two most recent commits (use with --command/--mode to narrow)
-        #[arg(long, conflicts_with_all = ["query", "commit", "compare"])]
-        compare_last: bool,
 
         /// Filter by command (substring match, e.g. "read" matches "bench read")
         #[arg(long)]
@@ -1468,12 +1462,6 @@ fn validate_since(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn results_compare_last_conflicts_with_query() {
-        let parsed = Cli::try_parse_from(["brokkr", "results", "abc123", "--compare-last"]);
-        assert!(parsed.is_err());
-    }
 
     #[test]
     fn results_compare_requires_two_commits() {

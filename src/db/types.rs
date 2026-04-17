@@ -181,9 +181,6 @@ pub struct StoredRow {
     pub hotpath: Option<HotpathData>,
 }
 
-/// Two-commit comparison: (commit_a, rows_a, commit_b, rows_b).
-pub type CompareResult = (String, Vec<StoredRow>, String, Vec<StoredRow>);
-
 /// Filters for querying stored rows.
 #[derive(Default)]
 pub struct QueryFilter {

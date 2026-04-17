@@ -1,6 +1,5 @@
 //! Comparison queries for the results database.
 
-use super::CompareResult;
 use super::ResultsDb;
 use super::query::{load_children, query_commit_filtered};
 use super::schema::SELECT_COLS;
@@ -51,59 +50,6 @@ impl ResultsDb {
         Ok((rows_a, rows_b))
     }
 
-    /// Find the two most recent distinct commits and compare them.
-    /// Optional command/mode/dataset filters narrow the search.
-    pub fn query_compare_last(
-        &self,
-        command: Option<&str>,
-        mode: Option<&str>,
-        dataset: Option<&str>,
-    ) -> Result<Option<CompareResult>, DevError> {
-        // Find two most recent distinct commits matching the filters.
-        let mut clauses = Vec::new();
-        let mut params: Vec<String> = Vec::new();
-        if let Some(cmd) = command {
-            params.push(cmd.to_owned());
-            clauses.push(format!("command LIKE '%'||?{}||'%'", params.len()));
-        }
-        if let Some(v) = mode {
-            params.push(v.to_owned());
-            clauses.push(format!("mode LIKE '%'||?{}||'%'", params.len()));
-        }
-        if let Some(d) = dataset {
-            params.push(d.to_owned());
-            clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
-        }
-        let mut sql = "SELECT [commit] FROM runs".to_owned();
-        if !clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&clauses.join(" AND "));
-        }
-        sql.push_str(" GROUP BY [commit] ORDER BY MAX(id) DESC LIMIT 2");
-
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|p| p as &dyn rusqlite::types::ToSql)
-            .collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let commits: Vec<String> = stmt
-            .query_map(param_refs.as_slice(), |row| row.get(0))?
-            .filter_map(Result::ok)
-            .collect();
-
-        if commits.len() < 2 {
-            return Ok(None);
-        }
-
-        let (rows_a, rows_b) =
-            self.query_compare(&commits[1], &commits[0], command, mode, dataset)?;
-        Ok(Some((
-            commits[1].clone(),
-            rows_a,
-            commits[0].clone(),
-            rows_b,
-        )))
-    }
 }
 
 #[cfg(test)]
@@ -151,63 +97,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compare_last_returns_none_with_fewer_than_two_commits() {
-        let db_path = unique_db("none");
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir");
-        }
-        let db = ResultsDb::open(&db_path).expect("open");
-        db.insert(&make_row("aaaa1111", "bench read", "sequential"))
-            .expect("insert");
-
-        let result = db.query_compare_last(None, None, None).expect("query");
-        assert!(result.is_none());
-
-        drop(db);
-        drop(std::fs::remove_file(&db_path));
-    }
-
-    #[test]
-    fn compare_last_respects_command_filter() {
-        let db_path = unique_db("filter");
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir");
-        }
-        let db = ResultsDb::open(&db_path).expect("open");
-
-        db.insert(&make_row("aaaa1111", "bench read", "sequential"))
-            .expect("insert");
-        db.insert(&make_row("bbbb2222", "bench read", "sequential"))
-            .expect("insert");
-        db.insert(&make_row("cccc3333", "bench write", "sync-zlib"))
-            .expect("insert");
-
-        let compared = db
-            .query_compare_last(Some("bench read"), None, None)
-            .expect("compare")
-            .expect("two commits");
-        assert_eq!(compared.0, "aaaa1111");
-        assert_eq!(compared.2, "bbbb2222");
-        assert_eq!(compared.1.len(), 1);
-        assert_eq!(compared.3.len(), 1);
-        assert_eq!(compared.1[0].command, "bench read");
-        assert_eq!(compared.3[0].command, "bench read");
-
-        let rows = db
-            .query(&QueryFilter {
-                commit: None,
-                command: Some(String::from("bench write")),
-                mode: None,
-                dataset: None,
-                meta: vec![],
-                grep: None,
-                limit: 10,
-            })
-            .expect("query");
-        assert_eq!(rows.len(), 1);
-
-        drop(db);
-        drop(std::fs::remove_file(&db_path));
-    }
 }

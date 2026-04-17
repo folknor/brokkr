@@ -116,22 +116,6 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
         return Ok(());
     }
 
-    if q.compare_last {
-        match results_db.query_compare_last(
-            q.command.as_deref(),
-            q.mode.as_deref(),
-            q.dataset.as_deref(),
-        )? {
-            Some((commit_a, rows_a, commit_b, rows_b)) => {
-                let table = db::format_compare(&commit_a, &rows_a, &commit_b, &rows_b, q.top);
-                println!("{table}");
-            }
-            None => {
-                output::result_msg("need at least two distinct commits to compare");
-            }
-        }
-        return Ok(());
-    }
 
     // Parse --meta KEY=VALUE strings into (key, value) pairs. The CLI
     // validator already guarantees each entry contains '=', so split_once
