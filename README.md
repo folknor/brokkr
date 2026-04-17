@@ -221,7 +221,7 @@ All benchmarks run through `BenchHarness`, which provides:
 
 Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored — local to the machine that ran it). The main results in `.brokkr/results.db` stay small and git-tracked.
 
-The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`. Markers are point-in-time bookmarks — the protocol has no notion of spans or pairs. `--markers --durations` derives pair durations from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it, but nothing else assumes that structure.
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`. Markers are point-in-time bookmarks — the protocol has no notion of spans or pairs. `brokkr sidecar <uuid> --durations` derives pair durations from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it, but nothing else assumes that structure.
 
 `--stop <marker>` kills the child process as soon as the named marker is emitted, allowing benchmarks of individual phases without waiting for the full run to complete. The SIGKILL exit is treated as success.
 

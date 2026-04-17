@@ -518,10 +518,10 @@ impl BenchHarness {
     /// Store sidecar data in the separate sidecar.db.
     ///
     /// `best_run_idx` records which of the N runs produced the reported
-    /// elapsed_ms, so `--timeline` defaults to showing the right run.
+    /// elapsed_ms, so `brokkr sidecar <uuid>` defaults to the right run.
     ///
     /// `run_info` carries provenance metadata (timestamp, binary hash, git
-    /// commit, variant, dataset, exit code) so that `brokkr results dirty`
+    /// commit, variant, dataset, exit code) so that `brokkr sidecar dirty`
     /// can identify exactly which run produced the sidecar data.
     ///
     /// When `uuid` is `None` (dirty tree or failed run), generates a fresh

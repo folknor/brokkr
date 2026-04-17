@@ -12,8 +12,9 @@ use super::table::format_elapsed;
 ///   2. Host/build context: hostname, cargo, kernel, governor, memory, storage
 ///   3. Invocations: brokkr_args (single line), cli_args (pretty-printed
 ///      one flag/positional per line with `\` continuation, copy-pasteable)
-///   4. Sidecar hint — only when `has_sidecar` is true. Terse form
-///      `--timeline/--markers`.
+///   4. Sidecar hint — only when `has_sidecar` is true. Shows the
+///      `brokkr sidecar <uuid>` invocation that opens the default
+///      phase summary for the row.
 ///
 /// Plus trailing sections for distribution stats and kv pairs when present.
 pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
@@ -24,7 +25,11 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
     let invo = invocation_fields(row);
     let extras = extras_fields(row);
     let sidecar: Vec<(String, String)> = if has_sidecar {
-        vec![("sidecar".into(), "--timeline/--markers".to_owned())]
+        let short = &row.uuid[..8.min(row.uuid.len())];
+        vec![(
+            "sidecar".into(),
+            format!("brokkr sidecar {short} (+ --samples/--markers/--durations/--counters/--stat)"),
+        )]
     } else {
         Vec::new()
     };

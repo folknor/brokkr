@@ -212,11 +212,11 @@ significant — `--grep "version 1.0"` would match "version 120". Cache
 the compiled regex to avoid per-row `Regex::new`. Adds a dep on the
 `regex` crate (not currently in the tree).
 
-### Counter diffs in --compare-timeline
-Include counter values at matching phase boundaries in the comparison table. Currently `--compare-timeline` only shows duration, peak anon, and disk read.
+### Counter diffs in `brokkr sidecar --compare`
+Include counter values at matching phase boundaries in the comparison table. Currently `--compare` only shows duration, peak anon, and disk read.
 
-### --phase filter for --markers --counters
-`--phase` currently requires `--timeline` (clap constraint). Adding `--markers --counters --phase STAGE4` to show only counters within a phase would be useful for targeted analysis.
+### `--phase` filter for `--counters`
+`--phase` currently requires `--samples` or `--stat` (clap ArgGroup). Letting `brokkr sidecar <uuid> --counters --phase STAGE4` show only counters within a phase would be useful for targeted analysis.
 
 ### `brokkr results` dataset short-name is heuristic
 

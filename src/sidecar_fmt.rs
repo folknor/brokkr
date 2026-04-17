@@ -25,7 +25,7 @@ pub(crate) fn format_epoch(epoch: i64) -> String {
 /// Print run provenance header for sidecar queries.
 ///
 /// Writes to stderr so it never contaminates the raw JSONL stream on
-/// stdout (`--timeline` / `--markers` without `--summary` etc.).
+/// stdout (`--samples`, `--markers`, the default phase summary, etc.).
 pub(crate) fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
     let Some(info) = sdb.query_run_info(uuid_prefix) else {
         return;
@@ -473,9 +473,10 @@ struct PhaseSummary {
     /// "no measurement" signal rather than sniffing for zero values.
     peak_rss_kb: i64,
     peak_anon_kb: i64,
-    /// Largest single-sample major-fault delta observed in the phase
-    /// (matches the "Peak Mflt" column from `--markers --phases`). Zero
-    /// when the phase has fewer than two samples.
+    /// Largest single-sample major-fault delta observed in the phase.
+    /// Zero when the phase has fewer than two in-phase samples (the
+    /// delta is computed across consecutive filter-passing samples
+    /// only, so the first contributes nothing).
     peak_majflt: i64,
     disk_read_kb: i64,
     disk_write_kb: i64,
@@ -563,7 +564,7 @@ pub(crate) fn print_phase_summary(
     markers: &[sidecar::Marker],
     human: bool,
 ) {
-    // Shared with --compare-timeline: pairs `*_START`/`*_END` into a single
+    // Shared with `--compare`: pairs `*_START`/`*_END` into a single
     // phase rather than treating each marker as an independent boundary.
     let phases = build_phases(markers, samples);
     let clk_tck = clk_tck_per_second();
@@ -1064,8 +1065,8 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
 ///
 /// We deliberately DON'T interpret any naming convention (`_START`/`_END`)
 /// as span structure. If you want duration between paired markers, use
-/// `print_marker_durations` (`--markers --durations`), which is explicitly
-/// opt-in about the pairing.
+/// `print_marker_durations` (`--durations`), which is explicitly opt-in
+/// about the pairing.
 fn build_phases(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],

@@ -61,7 +61,10 @@ pub(crate) fn render_single_or_multi(
             println!("\n{report}");
         }
         if has_sidecar(&row.uuid) {
-            output::sidecar_msg("use `brokkr sidecar --timeline/--markers`");
+            output::sidecar_msg(&format!(
+                "use `brokkr sidecar {}` (add --samples/--markers/--durations/--counters for raw views)",
+                &row.uuid[..8.min(row.uuid.len())],
+            ));
         }
     }
 }
@@ -91,7 +94,9 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
                 && sdb.has_data(uuid_prefix)
             {
                 output::result_msg("sidecar-only run (no results DB entry — dirty tree or failed)");
-                output::result_msg("use `brokkr sidecar --timeline` / `--markers` / `--markers --phases`");
+                output::result_msg(&format!(
+                    "use `brokkr sidecar {uuid_prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
+                ));
             } else {
                 output::result_msg("no matching results");
             }
