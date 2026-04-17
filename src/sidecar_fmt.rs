@@ -473,6 +473,10 @@ struct PhaseSummary {
     /// "no measurement" signal rather than sniffing for zero values.
     peak_rss_kb: i64,
     peak_anon_kb: i64,
+    /// Largest single-sample major-fault delta observed in the phase
+    /// (matches the "Peak Mflt" column from `--markers --phases`). Zero
+    /// when the phase has fewer than two samples.
+    peak_majflt: i64,
     disk_read_kb: i64,
     disk_write_kb: i64,
     sample_span_us: i64,
@@ -487,6 +491,8 @@ fn compute_phase_summary(
 ) -> PhaseSummary {
     let mut peak_rss: i64 = 0;
     let mut peak_anon: i64 = 0;
+    let mut peak_majflt: i64 = 0;
+    let mut prev_majflt: Option<i64> = None;
     let mut first_io: Option<(i64, i64)> = None;
     let mut last_io: (i64, i64) = (0, 0);
     let mut first_cpu: Option<i64> = None;
@@ -505,6 +511,13 @@ fn compute_phase_summary(
         if s.anon_kb > peak_anon {
             peak_anon = s.anon_kb;
         }
+        if let Some(prev) = prev_majflt {
+            let delta = s.majflt - prev;
+            if delta > peak_majflt {
+                peak_majflt = delta;
+            }
+        }
+        prev_majflt = Some(s.majflt);
         if first_io.is_none() {
             first_io = Some((s.read_bytes, s.write_bytes));
         }
@@ -534,6 +547,7 @@ fn compute_phase_summary(
         samples: count,
         peak_rss_kb: peak_rss,
         peak_anon_kb: peak_anon,
+        peak_majflt,
         disk_read_kb: disk_read_bytes / 1024,
         disk_write_kb: disk_write_bytes / 1024,
         sample_span_us: last_ts - first_ts.unwrap_or(last_ts),
@@ -568,8 +582,15 @@ pub(crate) fn print_phase_summary(
 
 fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
     println!(
-        "{:<24} {:>8} {:>10} {:>10} {:>12} {:>12} {:>10}",
-        "Phase", "Duration", "Peak RSS", "Peak Anon", "Disk Read", "Disk Write", "Avg Cores",
+        "{:<24} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12} {:>10}",
+        "Phase",
+        "Duration",
+        "Peak RSS",
+        "Peak Anon",
+        "Peak Mflt",
+        "Disk Read",
+        "Disk Write",
+        "Avg Cores",
     );
 
     for s in summaries {
@@ -582,11 +603,12 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
         }
         let avg_cores = avg_cores_str(s.cpu_delta_jiffies, s.sample_span_us, clk_tck);
         println!(
-            "{:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB {:>10}",
+            "{:<24} {:>6}ms {:>7} kB {:>7} kB {:>10} {:>9} kB {:>9} kB {:>10}",
             s.name,
             s.duration_ms,
             s.peak_rss_kb,
             s.peak_anon_kb,
+            s.peak_majflt,
             s.disk_read_kb,
             s.disk_write_kb,
             avg_cores,
@@ -639,6 +661,7 @@ fn print_phase_summary_jsonl(
                 "samples": s.samples,
                 "peak_rss_kb": s.peak_rss_kb,
                 "peak_anon_kb": s.peak_anon_kb,
+                "peak_majflt": s.peak_majflt,
                 "disk_read_kb": s.disk_read_kb,
                 "disk_write_kb": s.disk_write_kb,
                 "sample_span_us": s.sample_span_us,
