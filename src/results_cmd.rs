@@ -138,6 +138,11 @@ pub(crate) fn cmd_results(
         .iter()
         .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
         .collect();
+    let env_pairs: Vec<(String, String)> = q
+        .env
+        .iter()
+        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
+        .collect();
 
     let filter = db::QueryFilter {
         commit: q.commit.clone(),
@@ -145,6 +150,7 @@ pub(crate) fn cmd_results(
         mode: q.mode.clone(),
         dataset: q.dataset.clone(),
         meta: meta_pairs,
+        env: env_pairs,
         grep: q.grep.clone(),
         limit: q.limit,
     };

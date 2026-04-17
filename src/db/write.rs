@@ -212,6 +212,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 10,
             })
             .expect("query");

@@ -25,6 +25,10 @@ pub fn format_compare(
     for pair in &pairs {
         append_compare_row(&mut out, pair, &widths);
         out.push('\n');
+        if let Some(annotation) = format_env_diff(&pair.a_env, &pair.b_env) {
+            out.push_str(&annotation);
+            out.push('\n');
+        }
     }
 
     // Append hotpath diff tables for pairs that have hotpath data on both sides.
@@ -101,6 +105,10 @@ struct ComparisonPair {
     b_blobs: Option<String>,
     /// Pre-formatted input string for display.
     input_display: String,
+    /// Captured env on each side. Same-env pairs render without an env
+    /// line; differing pairs get a per-pair annotation.
+    a_env: std::collections::BTreeMap<String, String>,
+    b_env: std::collections::BTreeMap<String, String>,
 }
 
 fn build_comparison_pairs(
@@ -118,42 +126,47 @@ fn build_comparison_pairs(
         rewrite_pct: Option<f64>,
         blobs: Option<String>,
         input_display: String,
+        captured_env: std::collections::BTreeMap<String, String>,
     }
+
+    let row_data = |row: &StoredRow| RowData {
+        elapsed_ms: row.elapsed_ms,
+        hotpath: row.hotpath.clone(),
+        output_bytes: find_output_bytes(&row.kv),
+        peak_rss_mb: row.peak_rss_mb,
+        rewrite_pct: compute_rewrite_pct(&row.kv),
+        blobs: format_blob_counts(&row.kv),
+        input_display: format_input(&row.input_file, row.input_mb, matcher),
+        captured_env: row.captured_env.clone(),
+    };
+    let row_key = |row: &StoredRow| {
+        pair_key(
+            &row.command,
+            &row.mode,
+            &row.input_file,
+            &row.brokkr_args,
+            &row.env_fingerprint(),
+        )
+    };
 
     let mut keys: Vec<String> = Vec::new();
     let mut a_map: HashMap<String, RowData> = HashMap::new();
     let mut b_map: HashMap<String, RowData> = HashMap::new();
 
     for row in rows_a {
-        let key = pair_key(&row.command, &row.mode, &row.input_file, &row.brokkr_args);
+        let key = row_key(row);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
-            e.insert(RowData {
-                elapsed_ms: row.elapsed_ms,
-                hotpath: row.hotpath.clone(),
-                output_bytes: find_output_bytes(&row.kv),
-                peak_rss_mb: row.peak_rss_mb,
-                rewrite_pct: compute_rewrite_pct(&row.kv),
-                blobs: format_blob_counts(&row.kv),
-                input_display: format_input(&row.input_file, row.input_mb, matcher),
-            });
+            e.insert(row_data(row));
         }
     }
     for row in rows_b {
-        let key = pair_key(&row.command, &row.mode, &row.input_file, &row.brokkr_args);
+        let key = row_key(row);
         if let std::collections::hash_map::Entry::Vacant(e) = b_map.entry(key.clone()) {
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
             }
-            e.insert(RowData {
-                elapsed_ms: row.elapsed_ms,
-                hotpath: row.hotpath.clone(),
-                output_bytes: find_output_bytes(&row.kv),
-                peak_rss_mb: row.peak_rss_mb,
-                rewrite_pct: compute_rewrite_pct(&row.kv),
-                blobs: format_blob_counts(&row.kv),
-                input_display: format_input(&row.input_file, row.input_mb, matcher),
-            });
+            e.insert(row_data(row));
         }
     }
 
@@ -174,6 +187,14 @@ fn build_comparison_pairs(
             let b_rewrite_pct = b.as_ref().and_then(|r| r.rewrite_pct);
             let a_blobs = a.as_ref().and_then(|r| r.blobs.clone());
             let b_blobs = b.as_ref().and_then(|r| r.blobs.clone());
+            let a_env = a
+                .as_ref()
+                .map(|r| r.captured_env.clone())
+                .unwrap_or_default();
+            let b_env = b
+                .as_ref()
+                .map(|r| r.captured_env.clone())
+                .unwrap_or_default();
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
@@ -189,9 +210,42 @@ fn build_comparison_pairs(
                 a_blobs,
                 b_blobs,
                 input_display,
+                a_env,
+                b_env,
             }
         })
         .collect()
+}
+
+/// Format a per-pair env annotation when A and B captured different
+/// env sets. Returns `None` when the sets are identical (the common
+/// case — captured_env is empty on >95% of historical rows). The
+/// emitted line sits under the compare row, indented two spaces.
+fn format_env_diff(
+    a: &std::collections::BTreeMap<String, String>,
+    b: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if a == b {
+        return None;
+    }
+    let mut keys: std::collections::BTreeSet<&str> =
+        a.keys().map(String::as_str).collect();
+    keys.extend(b.keys().map(String::as_str));
+    let mut parts: Vec<String> = Vec::new();
+    for key in keys {
+        let av = a.get(key);
+        let bv = b.get(key);
+        if av == bv {
+            continue;
+        }
+        let a_str = av.map_or("(unset)", String::as_str);
+        let b_str = bv.map_or("(unset)", String::as_str);
+        parts.push(format!("{key}={a_str} vs {b_str}"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("  env: {}", parts.join(", ")))
 }
 
 /// Build the dedup/pair key for the compare view.
@@ -200,15 +254,24 @@ fn build_comparison_pairs(
 /// in `cli_args` / `brokkr_args` rather than in the `variant` column, so
 /// `(command, mode, input_file)` alone would collapse axis-distinct runs
 /// into one pair (silently hiding the rest). We include `brokkr_args` so
-/// two runs of the same command with different flags show as separate rows.
-fn pair_key(command: &str, mode: &str, input_file: &str, brokkr_args: &str) -> String {
-    format!("{command}\t{mode}\t{input_file}\t{brokkr_args}")
+/// two runs of the same command with different flags show as separate
+/// rows, and `env_fingerprint` so env-gated A/B rows on the same commit
+/// don't collide either.
+fn pair_key(
+    command: &str,
+    mode: &str,
+    input_file: &str,
+    brokkr_args: &str,
+    env_fp: &str,
+) -> String {
+    format!("{command}\t{mode}\t{input_file}\t{brokkr_args}\t{env_fp}")
 }
 
 fn split_pair_key(key: &str) -> (&str, &str, &str) {
-    // splitn(4, …) — the 4th part is brokkr_args, only used for deduping.
-    // Callers only consume the first three (command, mode, input_file).
-    let mut parts = key.splitn(4, '\t');
+    // splitn(5, …) — parts 4..=5 are brokkr_args / env_fingerprint, only
+    // used for deduping. Callers only consume the first three
+    // (command, mode, input_file).
+    let mut parts = key.splitn(5, '\t');
     let cmd = parts.next().unwrap_or("");
     let var = parts.next().unwrap_or("");
     let input = parts.next().unwrap_or("");
@@ -583,6 +646,7 @@ mod tests {
             project: String::from("test"),
             stop_marker: String::new(),
             kv: vec![],
+            captured_env: std::collections::BTreeMap::new(),
             distribution: None,
             hotpath: None,
         }
@@ -594,7 +658,13 @@ mod tests {
 
     #[test]
     fn pair_key_roundtrip_normal() {
-        let key = pair_key("read", "mmap", "denmark.osm.pbf", "brokkr read --dataset denmark");
+        let key = pair_key(
+            "read",
+            "mmap",
+            "denmark.osm.pbf",
+            "brokkr read --dataset denmark",
+            "",
+        );
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "read");
         assert_eq!(var, "mmap");
@@ -603,7 +673,7 @@ mod tests {
 
     #[test]
     fn pair_key_roundtrip_empty_fields() {
-        let key = pair_key("read", "", "", "");
+        let key = pair_key("read", "", "", "", "");
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "read");
         assert_eq!(var, "");
@@ -612,7 +682,7 @@ mod tests {
 
     #[test]
     fn pair_key_roundtrip_all_empty() {
-        let key = pair_key("", "", "", "");
+        let key = pair_key("", "", "", "", "");
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "");
         assert_eq!(var, "");
@@ -628,22 +698,40 @@ mod tests {
             "bench",
             "denmark.osm.pbf",
             "brokkr apply-changes --bench",
+            "",
         );
         let k2 = pair_key(
             "apply-changes",
             "bench",
             "denmark.osm.pbf",
             "brokkr apply-changes --direct-io --bench",
+            "",
         );
         assert_ne!(k1, k2);
     }
 
     #[test]
+    fn pair_key_distinguishes_by_env_fingerprint() {
+        // Same command/mode/input/flags but different captured env →
+        // different keys, so env-gated A/B rows on the same commit stay
+        // distinct in --compare instead of one silently winning.
+        let k_off = pair_key("apply-changes", "bench", "dk.pbf", "args", "");
+        let k_on = pair_key(
+            "apply-changes",
+            "bench",
+            "dk.pbf",
+            "args",
+            "PBFHOGG_USE_NEW_PATH=1",
+        );
+        assert_ne!(k_off, k_on);
+    }
+
+    #[test]
     fn pair_key_tabs_in_values_still_bleed() {
-        // splitn(4, '\t') means a tab inside the command field still
+        // splitn(5, '\t') means a tab inside the command field still
         // corrupts downstream fields. None of our inputs have tabs in
         // practice, but document the pitfall.
-        let key = pair_key("a\tb", "c", "d", "");
+        let key = pair_key("a\tb", "c", "d", "", "");
         let (cmd, var, input) = split_pair_key(&key);
         assert_eq!(cmd, "a");
         assert_eq!(var, "b");

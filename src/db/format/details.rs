@@ -51,6 +51,9 @@ pub fn format_details(row: &StoredRow) -> String {
     if !row.cli_args.is_empty() {
         fields.push(("cli args".into(), row.cli_args.clone()));
     }
+    for (k, v) in &row.captured_env {
+        fields.push((format!("env {k}"), v.clone()));
+    }
     if !row.project.is_empty() && row.project != "pbfhogg" {
         fields.push(("project".into(), row.project.clone()));
     }

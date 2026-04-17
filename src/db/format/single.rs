@@ -22,6 +22,7 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
 
     let ident = identity_fields(row);
     let host = host_fields(row);
+    let env = env_fields(row);
     let invo = invocation_fields(row);
     let extras = extras_fields(row);
     let sidecar: Vec<(String, String)> = if has_sidecar {
@@ -36,7 +37,7 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
 
     // Label width is computed across every field (including cli_args,
     // which is rendered multi-line but still uses the label column).
-    let max_label = [&ident, &host, &invo, &extras, &sidecar]
+    let max_label = [&ident, &host, &env, &invo, &extras, &sidecar]
         .iter()
         .flat_map(|v| v.iter().map(|(l, _)| l.len()))
         .chain(if row.cli_args.is_empty() {
@@ -63,6 +64,7 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
 
     render_section(&mut out, &ident);
     render_section(&mut out, &host);
+    render_section(&mut out, &env);
 
     // Invocations: brokkr_args (single-line) + cli_args (multi-line).
     let has_invo = !invo.is_empty() || !row.cli_args.is_empty();
@@ -120,6 +122,18 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
         fields.push(("input".into(), input));
     }
     fields
+}
+
+/// Captured env block — first-class axis for env-gated code paths.
+/// Empty for the vast majority of rows (no capture configured before
+/// this feature, and `capture_env` is opt-in per brokkr.toml). Rows
+/// with captured vars get a dedicated labeled block between the host
+/// info and the invocation rather than being buried in generic kv.
+fn env_fields(row: &StoredRow) -> Vec<(String, String)> {
+    row.captured_env
+        .iter()
+        .map(|(k, v)| (format!("env {k}"), v.clone()))
+        .collect()
 }
 
 fn host_fields(row: &StoredRow) -> Vec<(String, String)> {

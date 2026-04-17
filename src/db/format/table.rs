@@ -41,12 +41,70 @@ struct TableWidths {
     elapsed: usize,
     input: usize,
     args: usize,
+    /// Width of the `env` column. `0` means "elide the column entirely" —
+    /// the common case, since captured_env is empty on almost every
+    /// historical row and opt-in per brokkr.toml for new runs.
+    env: usize,
 }
 
 /// Max width for the `args` column — anything longer gets truncated
 /// with `…`. Picked to keep a full table row under ~120 columns on
 /// typical command shapes.
 const ARGS_MAX_WIDTH: usize = 40;
+
+/// Max width for the `env` column (appears only when any row has
+/// captured env vars). Narrower than `args` — env vars are typically
+/// a handful of `KEY=VALUE` flags.
+const ENV_MAX_WIDTH: usize = 30;
+
+/// Format the captured-env map as a short, scannable cell for the
+/// results table. Empty string when no vars were captured (the column
+/// itself is then elided at header/row time). Keys are shown without
+/// the project prefix when all keys share the same leading
+/// `UPPERCASE_` token, otherwise the full names are used.
+fn format_env_summary(env: &std::collections::BTreeMap<String, String>) -> String {
+    if env.is_empty() {
+        return String::new();
+    }
+    let strip = common_uppercase_prefix(env.keys().map(String::as_str));
+    let mut parts: Vec<String> = env
+        .iter()
+        .map(|(k, v)| {
+            let short = strip
+                .as_deref()
+                .and_then(|p| k.strip_prefix(p))
+                .unwrap_or(k);
+            format!("{short}={v}")
+        })
+        .collect();
+    parts.sort();
+    let joined = parts.join(",");
+    if joined.chars().count() <= ENV_MAX_WIDTH {
+        joined
+    } else {
+        let mut out: String = joined.chars().take(ENV_MAX_WIDTH - 1).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Return the longest `UPPERCASE_` prefix common to every key (including
+/// the trailing underscore), or `None` if the keys don't share one.
+fn common_uppercase_prefix<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut iter = keys.into_iter();
+    let first = iter.next()?;
+    let end = first.find('_')?;
+    if !first[..end].chars().all(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let prefix = &first[..=end];
+    for k in iter {
+        if !k.starts_with(prefix) {
+            return None;
+        }
+    }
+    Some(prefix.to_owned())
+}
 
 /// Build a compact args summary from the row's `cli_args`, dropping
 /// the leading binary path, the subcommand token (already represented
@@ -97,6 +155,7 @@ fn format_args_summary(cli_args: &str) -> String {
 }
 
 fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWidths {
+    let has_env = rows.iter().any(|r| !r.captured_env.is_empty());
     let mut w = TableWidths {
         uuid: 4,
         timestamp: 9,
@@ -106,6 +165,7 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
         elapsed: 7,
         input: "dataset".len(),
         args: "args".len(),
+        env: if has_env { "env".len() } else { 0 },
     };
     for row in rows {
         let uuid_short = short_uuid(&row.uuid);
@@ -136,6 +196,12 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
         if args_str.chars().count() > w.args {
             w.args = args_str.chars().count();
         }
+        if has_env {
+            let env_str = format_env_summary(&row.captured_env);
+            if env_str.chars().count() > w.env {
+                w.env = env_str.chars().count();
+            }
+        }
     }
     w
 }
@@ -163,6 +229,10 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
         args_w = w.args,
     )
     .expect("write to String is infallible");
+    if w.env > 0 {
+        write!(out, "  {:<env_w$}", "env", env_w = w.env)
+            .expect("write to String is infallible");
+    }
 }
 
 fn append_table_row(
@@ -197,6 +267,11 @@ fn append_table_row(
         args_w = w.args,
     )
     .expect("write to String is infallible");
+    if w.env > 0 {
+        let env_str = format_env_summary(&row.captured_env);
+        write!(out, "  {env_str:<env_w$}", env_w = w.env)
+            .expect("write to String is infallible");
+    }
 }
 
 pub(super) fn format_elapsed(ms: i64) -> String {

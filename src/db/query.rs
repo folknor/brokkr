@@ -66,7 +66,22 @@ pub(super) fn load_children(
     row: &mut StoredRow,
 ) -> Result<(), DevError> {
     row.distribution = load_distribution(conn, row.id)?;
-    row.kv = load_kv(conn, row.id)?;
+    let mut kv = load_kv(conn, row.id)?;
+    // Promote `env.*` entries to a first-class `captured_env` field.
+    // They're still stored in run_kv (no migration needed), but every
+    // downstream consumer — display, pair-key dedup, filters — treats
+    // them as a distinct axis instead of anonymous kv.
+    let mut captured_env = std::collections::BTreeMap::new();
+    kv.retain(|p| {
+        if let Some(name) = p.key.strip_prefix("env.") {
+            captured_env.insert(name.to_owned(), p.value.to_string());
+            false
+        } else {
+            true
+        }
+    });
+    row.kv = kv;
+    row.captured_env = captured_env;
     row.hotpath = load_hotpath(conn, row.id, &row.kv)?;
     Ok(())
 }
@@ -139,6 +154,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
             .get::<_, Option<String>>("stop_marker")?
             .unwrap_or_default(),
         kv: Vec::new(),
+        captured_env: std::collections::BTreeMap::new(),
         distribution: None,
         hotpath: None,
     })
@@ -184,6 +200,20 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     // excluded (no row matches => EXISTS is false). Multiple filters AND.
     for (key, value) in &filter.meta {
         params.push(format!("meta.{key}"));
+        let key_idx = params.len();
+        params.push(value.clone());
+        let val_idx = params.len();
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM run_kv WHERE run_kv.run_id = runs.id \
+             AND run_kv.key = ?{key_idx} AND run_kv.value_text = ?{val_idx})"
+        ));
+    }
+    // Env filters: like meta but keyed under `env.<NAME>`. No missing-as-0
+    // coercion — rows without the key are excluded. Explicit baseline runs
+    // (`PBFHOGG_USE_NEW_PATH=0 brokkr ...`) are the intended way to record
+    // "off" rather than relying on implicit absence.
+    for (key, value) in &filter.env {
+        params.push(format!("env.{key}"));
         let key_idx = params.len();
         params.push(value.clone());
         let val_idx = params.len();
@@ -616,6 +646,7 @@ mod tests {
                 dataset: None,
                 meta: vec![("format".into(), "osc".into())],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -629,6 +660,7 @@ mod tests {
                 dataset: None,
                 meta: vec![("format".into(), "default".into())],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -643,6 +675,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -702,6 +735,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -716,6 +750,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -730,6 +765,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -745,6 +781,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -764,6 +801,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -818,6 +856,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -832,6 +871,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
@@ -846,6 +886,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: None,
+                env: Vec::new(),
                 limit: 50,
             })
             .unwrap();

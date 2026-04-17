@@ -652,6 +652,14 @@ Examples:
         #[arg(long, value_parser = validate_meta_filter)]
         meta: Vec<String>,
 
+        /// Filter by captured env var KEY=VALUE (multiple allowed, AND
+        /// semantics). Keys are bare env var names (no `env.` prefix),
+        /// e.g. `--env PBFHOGG_USE_NEW_PATH=1`. Rows without the key
+        /// are excluded — use an explicit baseline value (e.g. `=0`)
+        /// on the off runs rather than relying on absence.
+        #[arg(long, value_parser = validate_meta_filter)]
+        env: Vec<String>,
+
         /// Substring match against either the subprocess invocation
         /// (`cli_args`) or the brokkr invocation (`brokkr_args`). Think
         /// `git log --grep`: a single token that scans both

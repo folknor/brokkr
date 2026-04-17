@@ -1,5 +1,6 @@
 //! Data types for the results database.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use crate::build::CargoProfile;
@@ -177,8 +178,32 @@ pub struct StoredRow {
     pub project: String,
     pub stop_marker: String,
     pub kv: Vec<KvPair>,
+    /// Env vars captured per `capture_env` in brokkr.toml, extracted from
+    /// the `env.*` kv pairs at query time. First-class axis alongside
+    /// `cargo_features` / `mode` / `brokkr_args`: env-gated code paths
+    /// change *what* ran, not just metadata. Empty for the vast majority
+    /// of historical rows predating the capture feature.
+    pub captured_env: BTreeMap<String, String>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
+}
+
+impl StoredRow {
+    /// Stable fingerprint of the captured env set, for pair-key dedup.
+    /// Empty string when no env was captured (keeps pre-capture pair
+    /// keys unchanged).
+    pub fn env_fingerprint(&self) -> String {
+        if self.captured_env.is_empty() {
+            return String::new();
+        }
+        let mut parts: Vec<String> = self
+            .captured_env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        parts.sort();
+        parts.join(",")
+    }
 }
 
 /// Filters for querying stored rows.
@@ -202,6 +227,12 @@ pub struct QueryFilter {
     /// literal-invocation columns). Like `git log --grep`: a single
     /// pattern that scans the freeform-text columns for a token.
     pub grep: Option<String>,
+    /// Captured-env filters as `(key, value)` pairs. The key is the bare
+    /// env var name without the `env.` prefix (e.g. `("PBFHOGG_USE_NEW_PATH",
+    /// "1")` matches rows where the captured var equals `"1"`). Multiple
+    /// filters AND together; rows missing the key are excluded (no
+    /// missing-as-0 coercion — set the baseline explicitly).
+    pub env: Vec<(String, String)>,
     pub limit: usize,
 }
 

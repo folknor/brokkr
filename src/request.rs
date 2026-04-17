@@ -9,6 +9,10 @@ pub(crate) struct ResultsQuery {
     /// Metadata filters as `key=value` strings, parsed into `(key, value)`
     /// pairs by `cmd_results`. Multiple filters AND together.
     pub(crate) meta: Vec<String>,
+    /// Captured-env filters as `KEY=VALUE` strings, parsed by
+    /// `cmd_results`. Multiple filters AND. Rows without the key are
+    /// excluded (no missing-as-0 coercion).
+    pub(crate) env: Vec<String>,
     /// Substring match against the `cli_args` OR `brokkr_args` columns
     /// (unified `--grep`, à la `git log --grep`).
     pub(crate) grep: Option<String>,

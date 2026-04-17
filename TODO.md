@@ -184,6 +184,13 @@ the compiled regex to avoid per-row `Regex::new`. Adds a dep on the
 ### Counter diffs in `brokkr sidecar --compare`
 Include counter values at matching phase boundaries in the comparison table. Currently `--compare` only shows duration, peak anon, and disk read.
 
+### Captured env: filter flag short form
+`brokkr results --env PBFHOGG_USE_NEW_PATH=1` works. Since the only
+project-defined prefix in current use is `PBFHOGG_`, supporting a bare
+`--env USE_NEW_PATH=1` that auto-resolves against the single common
+prefix in `capture_env` would be nice. Low priority; the full name is
+always accepted.
+
 ### Sidecar: result+sidecar persistence is not atomic
 
 The benchmark result row is committed first, then sidecar rows are inserted in separate per-run transactions. If sidecar storage fails after the result is committed, the DB has a result with partial/no sidecar data. Not catastrophic (partial data is better than none), but could be wrapped in a single transaction.
