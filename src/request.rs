@@ -31,4 +31,7 @@ pub(crate) struct ResultsQuery {
     pub(crate) compare_timeline: Option<Vec<String>>,
     pub(crate) phases: bool,
     pub(crate) counters: bool,
+    /// Render human-friendly table output instead of the default JSONL.
+    /// Applies to `--timeline --summary` and `--compare-timeline`.
+    pub(crate) human: bool,
 }

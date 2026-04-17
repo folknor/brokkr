@@ -628,6 +628,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             compare_timeline,
             phases,
             counters,
+            human,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -657,6 +658,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 compare_timeline,
                 phases,
                 counters,
+                human,
             };
             results_cmd::cmd_results(&project_root, &rq)
         }

@@ -221,17 +221,7 @@ All benchmarks run through `BenchHarness`, which provides:
 
 Every measured run (bench, hotpath, alloc) automatically samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals. Data is stored in `.brokkr/sidecar.db` (gitignored — local to the machine that ran it). The main results in `.brokkr/results.db` stay small and git-tracked.
 
-The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`.
-
-### Marker naming convention — `_START` / `_END` pairs are special
-
-`--timeline --summary`, `--compare-timeline`, and `--markers --durations` pair markers by suffix: `FOO_START` at time t1 and `FOO_END` at time t2 collapse into one phase row `FOO` spanning `[t1, t2)`. This is convention-driven — nothing in the sidecar protocol enforces it, but the reporting tooling expects it.
-
-If you emit `FOO_START` without a matching `FOO_END`, the tail of the run (up to end-of-samples) becomes the phase body. If you emit a bare `FOO` with no `_START`/`_END` suffix, it becomes a single standalone phase ending at the next marker.
-
-When nesting, emit the outer pair around the inner pairs (`STAGE1_START`, then inner `_START`/`_END` pairs, then `STAGE1_END`). The pairing is name-based, so nesting depth doesn't matter — what matters is that a `_START` has exactly one matching `_END` with the same base name.
-
-**Don't** reuse the same base name for multiple parallel events within one run (e.g. 26 `SCHEDULE_START` + 26 `SCHEDULE_END` from parallel worker threads). The pairing picks the first matching `_END` for each `_START`; everything after that is unpaired and the summary reads badly. For per-task spans, synthesise unique base names (`SCHEDULE_TASK_42_START`) or use counters instead.
+The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe for application phase markers and counters. Markers are lines of the form `<timestamp_us> <name>`, counters are `<timestamp_us> @<name>=<value>`. Markers are point-in-time bookmarks — the protocol has no notion of spans or pairs. `--markers --durations` derives pair durations from a `FOO_START` / `FOO_END` convention if the emitter happens to follow it, but nothing else assumes that structure.
 
 `--stop <marker>` kills the child process as soon as the named marker is emitted, allowing benchmarks of individual phases without waiting for the full run to complete. The SIGKILL exit is treated as success.
 

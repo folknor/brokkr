@@ -102,7 +102,7 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
         let markers_a = sdb.query_markers(uuid_a, Some(best_a))?;
         let markers_b = sdb.query_markers(uuid_b, Some(best_b))?;
         print_compare_timeline(
-            uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b,
+            uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b, q.human,
         );
         return Ok(());
     }
@@ -157,7 +157,7 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
                 output::result_msg("no sidecar data for this result");
             } else if q.summary {
                 let markers = sdb.query_markers(uuid_prefix, run_filter)?;
-                print_phase_summary(&samples, &markers);
+                print_phase_summary(&samples, &markers, q.human);
             } else {
                 if let Some(ref phase_name) = q.phase {
                     let markers = sdb.query_markers(uuid_prefix, run_filter)?;

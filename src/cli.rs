@@ -683,9 +683,15 @@ Examples:
         #[arg(long, conflicts_with = "timeline")]
         markers: bool,
 
-        /// Show per-phase summary table (use with --timeline)
+        /// Show per-phase summary — JSONL by default (one record per phase);
+        /// pair with `--human` for the fixed-width table layout.
         #[arg(long, requires = "timeline")]
         summary: bool,
+
+        /// Render `--summary` and `--compare-timeline` as a fixed-width,
+        /// human-scannable table instead of the default JSONL.
+        #[arg(long)]
+        human: bool,
 
         /// Show duration between _START/_END marker pairs (use with --markers)
         #[arg(long, requires = "markers")]

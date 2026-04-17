@@ -460,91 +460,193 @@ pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
 /// anon RSS, and disk I/O deltas per phase.
 ///
 /// If there are no markers, treats the entire run as a single phase.
-pub(crate) fn print_phase_summary(samples: &[sidecar::Sample], markers: &[sidecar::Marker]) {
+/// Aggregated metrics for a single phase. Computed once by
+/// `compute_phase_summary`, consumed by both the JSONL and human-table
+/// renderers so the two paths stay in lockstep.
+struct PhaseSummary {
+    name: String,
+    start_us: i64,
+    duration_ms: i64,
+    samples: u32,
+    /// Fields below are 0 when `samples == 0` (phase too short to land a
+    /// sample at the 100ms cadence). Consumers treat `samples == 0` as the
+    /// "no measurement" signal rather than sniffing for zero values.
+    peak_rss_kb: i64,
+    peak_anon_kb: i64,
+    disk_read_kb: i64,
+    disk_write_kb: i64,
+    sample_span_us: i64,
+    cpu_delta_jiffies: i64,
+}
+
+fn compute_phase_summary(
+    name: &str,
+    start_us: i64,
+    end_us: i64,
+    samples: &[sidecar::Sample],
+) -> PhaseSummary {
+    let mut peak_rss: i64 = 0;
+    let mut peak_anon: i64 = 0;
+    let mut first_io: Option<(i64, i64)> = None;
+    let mut last_io: (i64, i64) = (0, 0);
+    let mut first_cpu: Option<i64> = None;
+    let mut last_cpu: i64 = 0;
+    let mut first_ts: Option<i64> = None;
+    let mut last_ts: i64 = 0;
+    let mut count: u32 = 0;
+
+    for s in samples
+        .iter()
+        .filter(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us)
+    {
+        if s.rss_kb > peak_rss {
+            peak_rss = s.rss_kb;
+        }
+        if s.anon_kb > peak_anon {
+            peak_anon = s.anon_kb;
+        }
+        if first_io.is_none() {
+            first_io = Some((s.read_bytes, s.write_bytes));
+        }
+        last_io = (s.read_bytes, s.write_bytes);
+        let cpu = s.utime + s.stime;
+        if first_cpu.is_none() {
+            first_cpu = Some(cpu);
+        }
+        last_cpu = cpu;
+        if first_ts.is_none() {
+            first_ts = Some(s.timestamp_us);
+        }
+        last_ts = s.timestamp_us;
+        count += 1;
+    }
+
+    let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
+    // Clamp negative deltas: historical pre-fix-sidecar samples can regress
+    // to zero when the process exited between /proc reads, which would
+    // otherwise make last_io - first_io go deeply negative on the tail.
+    let disk_read_bytes = (last_io.0 - first_rd).max(0);
+    let disk_write_bytes = (last_io.1 - first_wr).max(0);
+    PhaseSummary {
+        name: name.to_owned(),
+        start_us,
+        duration_ms: (end_us - start_us) / 1_000,
+        samples: count,
+        peak_rss_kb: peak_rss,
+        peak_anon_kb: peak_anon,
+        disk_read_kb: disk_read_bytes / 1024,
+        disk_write_kb: disk_write_bytes / 1024,
+        sample_span_us: last_ts - first_ts.unwrap_or(last_ts),
+        cpu_delta_jiffies: last_cpu - first_cpu.unwrap_or(last_cpu),
+    }
+}
+
+/// Print the per-phase summary. `human = true` renders the fixed-width
+/// table; the default is JSONL — one summary object then one phase object
+/// per line — designed for machine/LLM consumption.
+pub(crate) fn print_phase_summary(
+    samples: &[sidecar::Sample],
+    markers: &[sidecar::Marker],
+    human: bool,
+) {
     // Shared with --compare-timeline: pairs `*_START`/`*_END` into a single
     // phase rather than treating each marker as an independent boundary.
     let phases = build_phases(markers, samples);
-
     let clk_tck = clk_tck_per_second();
 
+    let summaries: Vec<PhaseSummary> = phases
+        .iter()
+        .map(|(name, start, end)| compute_phase_summary(name, *start, *end, samples))
+        .collect();
+
+    if human {
+        print_phase_summary_human(&summaries, clk_tck);
+    } else {
+        print_phase_summary_jsonl(&summaries, samples, clk_tck);
+    }
+}
+
+fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
     println!(
         "{:<24} {:>8} {:>10} {:>10} {:>12} {:>12} {:>10}",
         "Phase", "Duration", "Peak RSS", "Peak Anon", "Disk Read", "Disk Write", "Avg Cores",
     );
-    println!("{}", "-".repeat(92));
 
-    for (name, start_us, end_us) in &phases {
-        // Samples in [start_us, end_us).
-        let mut peak_rss: i64 = 0;
-        let mut peak_anon: i64 = 0;
-        let mut first_io: Option<(i64, i64)> = None;
-        let mut last_io: (i64, i64) = (0, 0);
-        let mut first_cpu: Option<i64> = None;
-        let mut last_cpu: i64 = 0;
-        let mut first_sample_ts: Option<i64> = None;
-        let mut last_sample_ts: i64 = 0;
-        let mut count = 0;
-
-        for s in samples
-            .iter()
-            .filter(|s| s.timestamp_us >= *start_us && s.timestamp_us < *end_us)
-        {
-            if s.rss_kb > peak_rss {
-                peak_rss = s.rss_kb;
-            }
-            if s.anon_kb > peak_anon {
-                peak_anon = s.anon_kb;
-            }
-            if first_io.is_none() {
-                first_io = Some((s.read_bytes, s.write_bytes));
-            }
-            last_io = (s.read_bytes, s.write_bytes);
-            let cpu = s.utime + s.stime;
-            if first_cpu.is_none() {
-                first_cpu = Some(cpu);
-            }
-            last_cpu = cpu;
-            if first_sample_ts.is_none() {
-                first_sample_ts = Some(s.timestamp_us);
-            }
-            last_sample_ts = s.timestamp_us;
-            count += 1;
-        }
-
-        let duration_ms = (end_us - start_us) / 1_000;
-
-        if count == 0 {
+    for s in summaries {
+        if s.samples == 0 {
             // Phase is shorter than the 100ms sampling interval (or landed
             // entirely between two sample ticks). Still show the marker
             // duration — zero samples is a real signal, not missing data.
-            println!("{name:<24} {duration_ms:>6}ms (no samples)");
+            println!("{:<24} {:>6}ms (no samples)", s.name, s.duration_ms);
             continue;
         }
-
-        let (first_rd, first_wr) = first_io.unwrap_or((0, 0));
-        // Clamp to 0: historical sidecar.db rows captured with the pre-fix
-        // sidecar contained zero-io samples when the process exited between
-        // /proc reads, which made last_io - first_io negative on the tail
-        // phase. Treat any regression as "no measurement" rather than
-        // showing physically-impossible negative bytes.
-        let disk_read = (last_io.0 - first_rd).max(0);
-        let disk_write = (last_io.1 - first_wr).max(0);
-        // Divide CPU delta by the sample span, not the marker span. `cpu_delta`
-        // is sampled across the first-to-last sample inside the phase; if we
-        // divided by the marker span (which can be up to one sample interval
-        // longer than the samples cover), sub-second phases would read low.
-        let sample_span_us = last_sample_ts - first_sample_ts.unwrap_or(last_sample_ts);
-        let avg_cores = avg_cores_str(last_cpu - first_cpu.unwrap_or(0), sample_span_us, clk_tck);
-
+        let avg_cores = avg_cores_str(s.cpu_delta_jiffies, s.sample_span_us, clk_tck);
         println!(
-            "{name:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB {:>10}",
-            duration_ms,
-            peak_rss,
-            peak_anon,
-            disk_read / 1024,
-            disk_write / 1024,
+            "{:<24} {:>6}ms {:>7} kB {:>7} kB {:>9} kB {:>9} kB {:>10}",
+            s.name,
+            s.duration_ms,
+            s.peak_rss_kb,
+            s.peak_anon_kb,
+            s.disk_read_kb,
+            s.disk_write_kb,
             avg_cores,
         );
+    }
+}
+
+fn print_phase_summary_jsonl(
+    summaries: &[PhaseSummary],
+    samples: &[sidecar::Sample],
+    clk_tck: i64,
+) {
+    // Top-level summary record: how many phases, total wall time, peak
+    // thread count observed across the whole run. Always emitted first so
+    // a streaming parser can allocate based on `phases`.
+    let wall_ms = samples
+        .first()
+        .zip(samples.last())
+        .map(|(a, b)| (b.timestamp_us - a.timestamp_us) / 1_000)
+        .unwrap_or(0);
+    let peak_threads = samples.iter().map(|s| s.num_threads).max().unwrap_or(0);
+    let header = serde_json::json!({
+        "type": "summary",
+        "phases": summaries.len(),
+        "wall_ms": wall_ms,
+        "peak_threads": peak_threads,
+    });
+    println!("{header}");
+
+    for s in summaries {
+        // `avg_cores` is `null` (not 0) when we couldn't measure — zero is
+        // ambiguous with "truly idle". Same for the memory/io fields, which
+        // we simply omit when samples == 0.
+        let obj = if s.samples == 0 {
+            serde_json::json!({
+                "type": "phase",
+                "name": s.name,
+                "start_us": s.start_us,
+                "duration_ms": s.duration_ms,
+                "samples": 0,
+                "avg_cores": serde_json::Value::Null,
+            })
+        } else {
+            let avg_cores = avg_cores_f64(s.cpu_delta_jiffies, s.sample_span_us, clk_tck);
+            serde_json::json!({
+                "type": "phase",
+                "name": s.name,
+                "start_us": s.start_us,
+                "duration_ms": s.duration_ms,
+                "samples": s.samples,
+                "peak_rss_kb": s.peak_rss_kb,
+                "peak_anon_kb": s.peak_anon_kb,
+                "disk_read_kb": s.disk_read_kb,
+                "disk_write_kb": s.disk_write_kb,
+                "sample_span_us": s.sample_span_us,
+                "cpu_delta_jiffies": s.cpu_delta_jiffies,
+                "avg_cores": avg_cores,
+            })
+        };
+        println!("{obj}");
     }
 }
 
@@ -624,10 +726,9 @@ pub(crate) fn print_marker_durations(markers: &[sidecar::Marker]) {
     }
 }
 
-/// Print phase-aligned comparison of two sidecar timelines.
-///
-/// For each phase (defined by markers in run A), shows duration, peak anon RSS,
-/// total disk read, and the delta between the two runs.
+/// Print phase-aligned comparison of two sidecar timelines. Default is
+/// JSONL (`{"type":"compare","name":...,"a":{...},"b":{...},"delta_pct":...}`);
+/// `human = true` gives the fixed-width table.
 pub(crate) fn print_compare_timeline(
     uuid_a: &str,
     samples_a: &[sidecar::Sample],
@@ -635,15 +736,36 @@ pub(crate) fn print_compare_timeline(
     uuid_b: &str,
     samples_b: &[sidecar::Sample],
     markers_b: &[sidecar::Marker],
+    human: bool,
 ) {
     // Build phases from run A's markers (or all markers if A has none).
     let phases_a = build_phases(markers_a, samples_a);
     let phases_b = build_phases(markers_b, samples_b);
+    let clk_tck = clk_tck_per_second();
 
+    if human {
+        print_compare_timeline_human(
+            uuid_a, samples_a, &phases_a, samples_b, &phases_b, uuid_b, clk_tck,
+        );
+    } else {
+        print_compare_timeline_jsonl(
+            uuid_a, samples_a, &phases_a, samples_b, &phases_b, uuid_b, clk_tck,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_compare_timeline_human(
+    uuid_a: &str,
+    samples_a: &[sidecar::Sample],
+    phases_a: &[(String, i64, i64)],
+    samples_b: &[sidecar::Sample],
+    phases_b: &[(String, i64, i64)],
+    uuid_b: &str,
+    clk_tck: i64,
+) {
     let short_a = &uuid_a[..8.min(uuid_a.len())];
     let short_b = &uuid_b[..8.min(uuid_b.len())];
-
-    let clk_tck = clk_tck_per_second();
 
     println!(
         "{:<20} {:>30} {:>30} {:>8}",
@@ -652,27 +774,21 @@ pub(crate) fn print_compare_timeline(
         format!("Run B ({short_b})"),
         "Delta",
     );
-    println!("{}", "-".repeat(92));
 
-    for (name, start_a, end_a) in &phases_a {
+    for (name, start_a, end_a) in phases_a {
         let stats_a = phase_stats(samples_a, *start_a, *end_a);
         let avg_cores_a = avg_cores_str(stats_a.cpu_delta_jiffies, stats_a.sample_span_us, clk_tck);
 
-        // Find matching phase in B by name.
-        let stats_b = phases_b
+        let match_b = phases_b
             .iter()
             .find(|(n, _, _)| n == name)
-            .map(|(_, start, end)| phase_stats(samples_b, *start, *end));
+            .map(|(_, start, end)| (phase_stats(samples_b, *start, *end), *start, *end));
 
         let dur_a = (end_a - start_a) / 1_000;
 
-        match stats_b {
-            Some(sb) => {
-                let dur_b = phases_b
-                    .iter()
-                    .find(|(n, _, _)| n == name)
-                    .map(|(_, s, e)| (e - s) / 1_000)
-                    .unwrap_or(0);
+        match match_b {
+            Some((sb, sb_start, sb_end)) => {
+                let dur_b = (sb_end - sb_start) / 1_000;
                 let avg_cores_b = avg_cores_str(sb.cpu_delta_jiffies, sb.sample_span_us, clk_tck);
 
                 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -712,6 +828,72 @@ pub(crate) fn print_compare_timeline(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn print_compare_timeline_jsonl(
+    uuid_a: &str,
+    samples_a: &[sidecar::Sample],
+    phases_a: &[(String, i64, i64)],
+    samples_b: &[sidecar::Sample],
+    phases_b: &[(String, i64, i64)],
+    uuid_b: &str,
+    clk_tck: i64,
+) {
+    let header = serde_json::json!({
+        "type": "compare_summary",
+        "a_uuid": uuid_a,
+        "b_uuid": uuid_b,
+        "phases": phases_a.len(),
+    });
+    println!("{header}");
+
+    for (name, start_a, end_a) in phases_a {
+        let stats_a = phase_stats(samples_a, *start_a, *end_a);
+        let match_b = phases_b
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, start, end)| (phase_stats(samples_b, *start, *end), *start, *end));
+
+        let dur_a_ms = (end_a - start_a) / 1_000;
+        let a_obj = compare_side_json(&stats_a, dur_a_ms, clk_tck);
+
+        let (b_obj, delta_pct) = match match_b {
+            Some((sb, sb_start, sb_end)) => {
+                let dur_b_ms = (sb_end - sb_start) / 1_000;
+                #[allow(clippy::cast_precision_loss)]
+                let pct = if dur_a_ms > 0 {
+                    let raw = (dur_b_ms - dur_a_ms) as f64 / dur_a_ms as f64 * 100.0;
+                    // Round to 2 decimals — same rationale as avg_cores.
+                    Some((raw * 100.0).round() / 100.0)
+                } else {
+                    None
+                };
+                (compare_side_json(&sb, dur_b_ms, clk_tck), pct)
+            }
+            None => (serde_json::Value::Null, None),
+        };
+
+        let obj = serde_json::json!({
+            "type": "compare_phase",
+            "name": name,
+            "a": a_obj,
+            "b": b_obj,
+            "delta_pct": delta_pct,
+        });
+        println!("{obj}");
+    }
+}
+
+fn compare_side_json(stats: &PhaseStats, duration_ms: i64, clk_tck: i64) -> serde_json::Value {
+    serde_json::json!({
+        "duration_ms": duration_ms,
+        "peak_anon_kb": stats.peak_anon,
+        "disk_read_kb": stats.disk_read_kb,
+        "cpu_delta_jiffies": stats.cpu_delta_jiffies,
+        "sample_span_us": stats.sample_span_us,
+        "avg_cores": avg_cores_f64(stats.cpu_delta_jiffies, stats.sample_span_us, clk_tck),
+    })
+}
+
 struct PhaseStats {
     peak_anon: i64,
     disk_read_kb: i64,
@@ -741,15 +923,25 @@ fn clk_tck_per_second() -> i64 {
 /// frequency. Returns a short string like `"3.1"` or `"—"` when the
 /// phase is too short for a stable measurement.
 fn avg_cores_str(cpu_delta_jiffies: i64, wall_us: i64, clk_tck: i64) -> String {
+    avg_cores_f64(cpu_delta_jiffies, wall_us, clk_tck)
+        .map_or_else(|| "—".to_owned(), |c| format!("{c:.1}"))
+}
+
+/// Numeric core of `avg_cores_str`. Returns `None` when the sample span is
+/// too short (or degenerate) to give a stable reading — callers pick how
+/// to render: "—" for the table, `null` for JSON.
+///
+/// Result is rounded to 2 decimal places so JSON consumers aren't staring
+/// at f64 precision artefacts like `0.36274423029811576`.
+fn avg_cores_f64(cpu_delta_jiffies: i64, wall_us: i64, clk_tck: i64) -> Option<f64> {
     if wall_us <= 0 || clk_tck <= 0 || cpu_delta_jiffies < 0 {
-        return "—".to_owned();
+        return None;
     }
     #[allow(clippy::cast_precision_loss)]
     let cpu_secs = cpu_delta_jiffies as f64 / clk_tck as f64;
     #[allow(clippy::cast_precision_loss)]
     let wall_secs = wall_us as f64 / 1_000_000.0;
-    let cores = cpu_secs / wall_secs;
-    format!("{cores:.1}")
+    Some(((cpu_secs / wall_secs) * 100.0).round() / 100.0)
 }
 
 fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> PhaseStats {
@@ -794,18 +986,18 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
 }
 
 /// Build phase boundaries from markers (or single "(all)" phase if no markers).
-/// Build phases by pairing `*_START` / `*_END` markers — one phase per pair,
-/// spanning the full interval between the paired markers.
+/// Split the sample stream into inter-marker segments.
 ///
-/// Markers without a matching `_END` (standalone events, or `_END` that
-/// never had a `_START`) become a point phase from their timestamp to the
-/// next chronological marker (or end-of-samples for the tail). The
-/// resulting phases are returned sorted by start time.
+/// Markers are point-in-time bookmarks in the stream (see the FIFO protocol
+/// in pbfhogg's `emit_marker` — timestamp + name, nothing else). A segment
+/// runs from marker N to marker N+1; the last segment runs from the final
+/// marker to end-of-samples. The segment is labelled with the name of the
+/// marker that opens it.
 ///
-/// Replaces the old per-marker phase layout where every marker — including
-/// `_END` markers — became its own phase row, cluttering the summary with
-/// "(no samples)" dead-space rows for the sub-sample gaps between each
-/// `_END` and the following `_START`.
+/// We deliberately DON'T interpret any naming convention (`_START`/`_END`)
+/// as span structure. If you want duration between paired markers, use
+/// `print_marker_durations` (`--markers --durations`), which is explicitly
+/// opt-in about the pairing.
 fn build_phases(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
@@ -819,43 +1011,12 @@ fn build_phases(
     }
 
     let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
-    let mut consumed = vec![false; markers.len()];
-
-    // First pass: pair _START with matching _END.
     for (i, m) in markers.iter().enumerate() {
-        if consumed[i] {
-            continue;
-        }
-        if let Some(base) = m.name.strip_suffix("_START") {
-            consumed[i] = true;
-            let end_name = format!("{base}_END");
-            let end_us = markers[i + 1..]
-                .iter()
-                .enumerate()
-                .find(|(_, m2)| m2.name == end_name)
-                .map(|(j, m2)| {
-                    consumed[i + 1 + j] = true;
-                    m2.timestamp_us
-                })
-                .unwrap_or(final_us);
-            phases.push((base.to_owned(), m.timestamp_us, end_us));
-        }
-    }
-
-    // Second pass: standalone markers (no _START/_END structure, or orphaned
-    // _END markers). Span from the marker to the next chronologically-later
-    // marker, or end-of-samples for the tail.
-    for (i, m) in markers.iter().enumerate() {
-        if consumed[i] {
-            continue;
-        }
-        let next_us = markers[i + 1..]
-            .first()
+        let phase_end = markers
+            .get(i + 1)
             .map_or(final_us, |next| next.timestamp_us);
-        phases.push((m.name.clone(), m.timestamp_us, next_us));
+        phases.push((m.name.clone(), m.timestamp_us, phase_end));
     }
-
-    phases.sort_by_key(|(_, start, _)| *start);
     phases
 }
 
