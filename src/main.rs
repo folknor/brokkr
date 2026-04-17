@@ -128,11 +128,6 @@ fn main() {
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
 
-    // Install SIGTERM handler before anything else so an early `brokkr kill`
-    // still triggers the cooperative path (rather than Rust's default
-    // terminate) even during cargo build or sidecar FIFO setup.
-    shutdown::install_sigterm_handler();
-
     let cli = Cli::parse();
 
     // Don't record `history` itself (avoids recursive noise).
@@ -1287,12 +1282,10 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
     }
 
     if hard {
-        let brokkr_sent = send_signal(info.pid, libc::SIGKILL);
-        output::lock_msg(&format!(
-            "SIGKILL brokkr PID {}: {}",
-            info.pid,
-            if brokkr_sent { "sent" } else { "not running" },
-        ));
+        // Kill the child first, then brokkr — otherwise there's a brief
+        // window where brokkr is dead but the tool it was measuring is
+        // still alive (and anyone peeking at `brokkr lock` sees stale
+        // state pointing at a live child with no owner).
         if let Some(child_pid) = info.child_pid {
             let child_sent = send_signal(child_pid, libc::SIGKILL);
             output::lock_msg(&format!(
@@ -1300,6 +1293,12 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
                 if child_sent { "sent" } else { "not running" },
             ));
         }
+        let brokkr_sent = send_signal(info.pid, libc::SIGKILL);
+        output::lock_msg(&format!(
+            "SIGKILL brokkr PID {}: {}",
+            info.pid,
+            if brokkr_sent { "sent" } else { "not running" },
+        ));
         output::lock_msg("follow up with `brokkr clean` to wipe scratch");
         return Ok(());
     }

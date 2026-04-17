@@ -743,7 +743,7 @@ Examples:
         r#where: Option<String>,
 
         /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt"). Only with --samples.
-        #[arg(long, value_delimiter = ',', requires = "samples")]
+        #[arg(long, value_delimiter = ',', requires = "samples", conflicts_with = "stat")]
         fields: Vec<String>,
 
         /// Output every Nth sample (downsample). Requires --samples or --stat.

@@ -570,6 +570,12 @@ pub(crate) fn run_sidecar(
     start: Instant,
     stop_marker: Option<&str>,
 ) -> SidecarRunResult {
+    // Scope the SIGTERM handler to the sidecar window only. Outside this
+    // RAII guard's lifetime, `brokkr kill` falls through to the default
+    // terminate action — exactly what the user expects during cargo build
+    // / brokkr check / other non-sidecar work where there's no child to
+    // reap and no graceful partial-state to preserve.
+    let _shutdown_guard = crate::shutdown::SigtermGuard::install();
     let pid = child.id();
 
     // Take stdout/stderr handles from the child and drain them in background
