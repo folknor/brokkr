@@ -22,6 +22,7 @@ mod harness;
 mod history;
 mod history_cmd;
 mod hotpath_fmt;
+mod invalidate_cmd;
 mod litehtml;
 mod lockfile;
 mod measure;
@@ -687,6 +688,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 tail,
             };
             sidecar_cmd::cmd_sidecar(&project_root, &sq)
+        }
+        Command::Invalidate { uuid, commit, force } => {
+            invalidate_cmd::cmd_invalidate(&project_root, uuid.as_deref(), commit.as_deref(), force)
         }
         Command::Clean => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;

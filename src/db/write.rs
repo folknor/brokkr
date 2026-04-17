@@ -25,6 +25,34 @@ impl ResultsDb {
         let short = short_uuid(&uuid);
         Ok((uuid, short))
     }
+
+    /// Delete every run whose uuid starts with `uuid_prefix`, along with all
+    /// FK children (`run_distribution`, `run_kv`, `hotpath_functions`,
+    /// `hotpath_threads`). FK cascade isn't active (no `PRAGMA foreign_keys`),
+    /// so children are deleted explicitly in one transaction.
+    ///
+    /// Returns the number of `runs` rows removed.
+    pub fn delete_by_uuid_prefix(&self, uuid_prefix: &str) -> Result<usize, DevError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ids: Vec<i64> = {
+            let mut stmt =
+                tx.prepare("SELECT id FROM runs WHERE uuid LIKE ?1||'%'")?;
+            let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| row.get::<_, i64>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &ids {
+            tx.execute("DELETE FROM run_distribution WHERE run_id = ?1", rusqlite::params![id])?;
+            tx.execute("DELETE FROM run_kv WHERE run_id = ?1", rusqlite::params![id])?;
+            tx.execute("DELETE FROM hotpath_functions WHERE run_id = ?1", rusqlite::params![id])?;
+            tx.execute("DELETE FROM hotpath_threads WHERE run_id = ?1", rusqlite::params![id])?;
+        }
+        let removed = tx.execute(
+            "DELETE FROM runs WHERE uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
 }
 
 // ---------------------------------------------------------------------------

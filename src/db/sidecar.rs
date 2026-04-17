@@ -582,6 +582,73 @@ impl SidecarDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
     }
 
+    /// Delete every sidecar row whose `result_uuid` starts with
+    /// `uuid_prefix`. Also drops any `sidecar_latest` pointer rows that
+    /// currently resolve to a deleted UUID so `brokkr sidecar dirty`
+    /// doesn't point at a ghost.
+    ///
+    /// Does NOT call `resolve_latest` on the input: the caller has already
+    /// resolved the real UUID (invalidate_cmd computes the full target
+    /// UUIDs up front so the dry-run view matches what gets deleted).
+    ///
+    /// Returns the number of `sidecar_summary` rows removed (one per
+    /// (uuid, run_idx) session, i.e. the run count).
+    pub fn delete_by_uuid_prefix(&self, uuid_prefix: &str) -> Result<usize, DevError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM sidecar_samples WHERE result_uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        tx.execute(
+            "DELETE FROM sidecar_markers WHERE result_uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        tx.execute(
+            "DELETE FROM sidecar_counters WHERE result_uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        tx.execute(
+            "DELETE FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        tx.execute(
+            "DELETE FROM sidecar_latest WHERE uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM sidecar_summary WHERE result_uuid LIKE ?1||'%'",
+            rusqlite::params![uuid_prefix],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Enumerate distinct `result_uuid` values whose prefix matches.
+    /// Used by `brokkr invalidate` to find sidecar-only runs (dirty/failed)
+    /// that have no row in the results DB.
+    pub fn uuids_matching_prefix(&self, uuid_prefix: &str) -> Result<Vec<String>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT result_uuid FROM sidecar_summary WHERE result_uuid LIKE ?1||'%' \
+             UNION SELECT DISTINCT result_uuid FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// Enumerate distinct `result_uuid` values whose `sidecar_meta.git_commit`
+    /// starts with `commit_prefix`. Only sessions that were tagged with a
+    /// commit (v4+ schema) are found this way.
+    pub fn uuids_matching_commit_prefix(
+        &self,
+        commit_prefix: &str,
+    ) -> Result<Vec<String>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT result_uuid FROM sidecar_meta WHERE git_commit LIKE ?1||'%'",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![commit_prefix], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
     /// Check whether sidecar data exists for a result UUID prefix.
     ///
     /// Resolves latest-keys (e.g. "dirty") before querying.

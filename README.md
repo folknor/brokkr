@@ -63,6 +63,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `check` | Run clippy + tests (extra args forwarded to `cargo test`) |
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
+| `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
 | `clean` | Remove scratch/temp files |
 | `pmtiles-stats` | PMTiles v3 file statistics |
 | `history` | Browse global command history |
@@ -295,6 +296,22 @@ Use `--grep` for anything that's a flag/axis (`--grep zstd:1`, `--grep 'snapshot
 The `dataset` column in the output table is the first dash-separated component of the input filename — `europe-20260301-seq4714-with-indexdata.osm.pbf` renders as `europe`. This is a display heuristic: filtering via `--dataset` always substring-matches the full `input_file` column, so filters still work even when the short name collapses distinct datasets (e.g. a hypothetical `europe-west` would display as `europe`). The full filename and size are shown in the single-result detail view (`brokkr results <uuid>`) as the `input` field. See TODO.md for the proper fix.
 
 The compare view shows timing, output size, peak RSS, rewrite ratio, and blob distribution columns as applicable. Hotpath comparisons include function-level timing diffs.
+
+### Invalidating results
+
+A benchmark run under the wrong pretences (wrong dataset, wrong features, wrong git state, interrupted sidecar, …) produces numbers that will skew every future comparison. `brokkr invalidate` hard-deletes such runs from both `.brokkr/results.db` (runs + `run_distribution` + `run_kv` + `hotpath_functions` + `hotpath_threads`) and `.brokkr/sidecar.db` (samples, markers, summary, counters, meta, and any `sidecar_latest` pointer rows like `dirty` that resolve to a deleted UUID).
+
+Dry-run by default — the command prints each matched UUID and tags whether sidecar data is present, then exits. Pass `-f` / `--force` to actually delete.
+
+```
+brokkr invalidate 0b74fb6f              # preview by UUID prefix
+brokkr invalidate 0b74fb6f -f           # perform
+brokkr invalidate --commit a65a         # preview every run on matching commits
+brokkr invalidate --commit a65a -f      # perform
+brokkr invalidate dirty -f              # nuke the last dirty/failed run's sidecar
+```
+
+Sidecar-only UUIDs (dirty-tree or failed runs with no results DB row) are picked up too, so a single invalidate call cleans both sides. Deletions in `.brokkr/results.db` should be committed like any other change to that file — git history preserves the audit trail.
 
 ## Quick runtime timing
 

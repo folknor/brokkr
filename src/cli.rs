@@ -879,6 +879,37 @@ Examples:
         #[arg(long, conflicts_with = "id")]
         all: bool,
     },
+    /// Delete results and sidecar data by UUID or commit prefix
+    #[command(
+        display_order = 8,
+        long_about = "\
+Delete rows from .brokkr/results.db (runs + FK children) and
+.brokkr/sidecar.db (samples, markers, summary, counters, meta, latest)
+matching a UUID prefix or commit prefix. Useful when a benchmark was
+run under wrong pretences and the numbers are garbage.
+
+Dry-run by default: lists the rows that would be deleted. Pass -f
+to actually delete.
+
+Examples:
+  brokkr invalidate 0b74fb6f           # preview deletion by UUID prefix
+  brokkr invalidate 0b74fb6f -f        # perform deletion
+  brokkr invalidate --commit a65a      # preview: every row on commit a65a...
+  brokkr invalidate --commit a65a -f   # perform"
+    )]
+    Invalidate {
+        /// UUID prefix to invalidate (mutually exclusive with --commit)
+        #[arg(value_name = "UUID", conflicts_with = "commit", required_unless_present = "commit")]
+        uuid: Option<String>,
+
+        /// Commit hash prefix — invalidate every result rooted at matching commits
+        #[arg(long)]
+        commit: Option<String>,
+
+        /// Actually delete (without this flag, the command is a dry-run)
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Cross-validate output against reference tools
     #[command(display_order = 11)]
     Verify {
