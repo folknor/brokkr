@@ -1,24 +1,20 @@
 # TODO
 
-## Structural debt (remaining after 2026-04-16 sprint)
+## Structural debt (last audited 2026-04-17)
 
-The high-impact items from the 2026-04-16 audit are done. What's listed
-below is either speculative, subjective, or low-ROI and has been left
+The high-impact items have been worked off. What's listed below is
+either speculative, subjective, or low-ROI and has been left
 deliberately.
 
 ### Low ROI — not worth doing yet
 
-#### `--clean` only emits `version` attr
+#### `--clean` only emits `version` attr (brokkr cat)
 `brokkr cat --clean` hardcodes the emitted attr as `version`. pbfhogg's
 real flag accepts multiple attrs (`version|changeset|timestamp|uid|user`,
-comma-separated or repeated). If we ever want to bench the cost of
-stripping each attr independently we'd need to change brokkr's `clean: bool`
-into `clean: Option<Vec<String>>`.
-
-#### `--clean` argument shape misalignment with pbfhogg
-(documented above — brokkr emits bare `--clean <attr>`, pbfhogg accepts
-`--clean ATTR` repeatable; combinations like `--clean version --clean uid`
-aren't reachable from brokkr.)
+comma-separated or repeated). Combinations like `--clean version --clean
+uid` aren't reachable from brokkr. Would need to change brokkr's
+`clean: bool` into `clean: Option<Vec<String>>` to bench the cost of
+stripping each attr independently.
 
 #### `-b=<val>` vs `-b <val>` in extract suite rows (cosmetic)
 After the build_args unification, suite presets `extract-simple`/`extract-complete`/
@@ -39,11 +35,6 @@ Old code used ad-hoc `hotpath-merged`, `hotpath-altw`, `hotpath-extract-{simple,
 The unified `build_args` normalises to `hotpath-{cmd.id()}-output.{ext}`, so
 `hotpath-merged` becomes `hotpath-apply-changes-output`, etc. The cli_args
 column reflects the new names; historical rows keep the old names.
-
-#### Commit message inaccuracy on `681a2d6`
-The message claims the suite's ok_exit_codes improvement landed in that
-commit; it actually landed in `1fc2145`. Too late to fix without a rebase,
-but the file `brokkr/TODO.md` can note the actual history if anyone cares.
 
 #### Scratch output filename pattern coupled to command id
 `bench-<id>-output.osm.pbf` / `hotpath-<id>-output.osm.pbf` in
@@ -190,9 +181,13 @@ Currently `find_executable` infers the expected binary name from `BuildConfig.bi
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper — probably not worth the complexity.
 
-### `--mem` systemd-run wrapping for `brokkr run`
+### `--mem` systemd-run wrapping
 
-The old `run_elivagar` had `--mem 8G` support via systemd-run. Could be promoted to a project-agnostic `brokkr run --mem 8G` flag in `src/cli.rs`.
+Pre-rewrite elivagar invocations had `--mem 8G` support via systemd-run
+for per-run memory caps. Nothing equivalent survives after the
+`Command::Passthrough` consolidation. Could be promoted to a
+project-agnostic flag (e.g. on `ModeArgs` / `Passthrough`) so any
+measured command can cap child RSS.
 
 ### Project::Other memory leak
 `config.rs`: `Project::Other(Box::leak(...))` leaks memory. Called once at startup so technically fine, but would leak in a loop (tests). The `Copy` derive on `Project` forces the leak.
@@ -241,9 +236,6 @@ Makes performance triage easier without external tooling.
 ### Suite builds without host features
 `bench_all.rs` calls `cargo_build` without host features from `brokkr.toml`. Individual commands correctly include them via `BenchContext::new`. Pre-existing.
 
-### ~~Standalone extract commands use hardcoded Copenhagen bbox~~ DONE
-Standalone extract variants now use dataset bbox via `ctx.bbox`, same as `Extract { strategy }`.
-
 ### validate_since tautology
 `cli.rs`: `s[..10].len() == 10` is always true when `s.len() == 19`. The recursive `validate_since(&s[..10])` call works but is unnecessarily clever. Dead code in the check.
 
@@ -272,25 +264,18 @@ New flags that could warrant additional `bench commands` variants or verify cove
 - `getid`: `-I/--id-osm-file`, `--remove-tags`, `--verbose-ids`
 - `diff`: `--summary`, `--quiet`, `--output`
 - `inspect`: `-e/--extended`, `-g/--get`, `--json`
-- `extract`: `--config` (multi-extract from JSON), `--clean`, `--set-bounds`
-- `cat`: `--clean`
+- `extract`: `--clean`, `--set-bounds`
 - `check-refs`: `--show-ids`
 - `derive-changes`: `--update-timestamp`, `--increment-version`
 - `tags-count`: `-M`, `-s`
 
-### elivagar: missing `verify` integration
+### elivagar: memory-budget run flags not exposed
 
-Elivagar now has a `verify` subcommand for PMTiles output validation. Not wired into brokkr — should be added as a verify command.
-
-### elivagar: new `run` flags not exposed in benchmarks
-
-The following elivagar flags are not forwarded through `bench self`, `hotpath`, or `profile`:
-
-- `--tile-format` (mvt/mlt) — MLT is a new tile format, benchmarking it matters
-- `--tile-compression` (gzip/brotli) — compression strategy affects perf
-- `--compress-sort-chunks` — LZ4 compression of sort spill data
-- `--in-memory` — keep tile blob in RAM
-- `--locations-on-ways` — PBF format flag
-- Memory budgets (`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget`) — tuning knobs, lower priority
-
-No schema changes needed: `bench_self.rs` already stores flags as `meta.*` kv pairs in `run_kv` and the full command line in `cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>", ...)` entries in the metadata vec.
+`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget` —
+tuning knobs that aren't forwarded through `bench self` / `hotpath` /
+`alloc`. Lower priority than the structural flags which are already
+wired (tile-format, tile-compression, compress-sort-chunks, in-memory,
+locations-on-ways). No schema changes needed: `bench_self.rs` stores
+flags as `meta.*` kv pairs in `run_kv` and the full command line in
+`cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>",
+...)` entries in the metadata vec.
