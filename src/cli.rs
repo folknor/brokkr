@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 /// Index mode selection for `verify add-locations-to-ways`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -693,7 +693,8 @@ Examples:
   brokkr sidecar <uuid> --durations                   # START/END pair timings
   brokkr sidecar <uuid> --counters                    # application counters
   brokkr sidecar <uuid> --stat rss                    # min/max/avg/p50/p95 for a field
-  brokkr sidecar --compare a65a 911c                  # two results, phase-aligned"
+  brokkr sidecar --compare a65a 911c                  # two results, phase-aligned",
+        group(ArgGroup::new("sample_view").args(&["samples", "stat"]).multiple(false)),
     )]
     Sidecar {
         /// UUID prefix to look up (required; use `brokkr results` to find one)
@@ -735,33 +736,32 @@ Examples:
         #[arg(long)]
         run: Option<String>,
 
-        /// Filter samples to a marker phase (e.g. "STAGE2")
-        #[arg(long, conflicts_with_all = ["markers", "durations", "counters", "compare"])]
+        /// Filter samples to a marker phase (e.g. "STAGE2"). Requires --samples or --stat.
+        #[arg(long, requires = "sample_view")]
         phase: Option<String>,
 
-        /// Filter samples by time range in seconds (e.g. "10.0..82.0")
-        #[arg(long, conflicts_with_all = ["markers", "durations", "counters", "compare"])]
+        /// Filter samples by time range in seconds (e.g. "10.0..82.0"). Requires --samples or --stat.
+        #[arg(long, requires = "sample_view")]
         range: Option<String>,
 
-        /// Filter samples where a field meets a condition (e.g. "majflt>0", "anon>100000")
-        #[arg(long, name = "COND",
-              conflicts_with_all = ["markers", "durations", "counters", "compare"])]
+        /// Filter samples where a field meets a condition (e.g. "majflt>0"). Requires --samples or --stat.
+        #[arg(long, name = "COND", requires = "sample_view")]
         r#where: Option<String>,
 
         /// Output only these fields (comma-separated, e.g. "t,rss,anon,majflt"). Only with --samples.
         #[arg(long, value_delimiter = ',', requires = "samples")]
         fields: Vec<String>,
 
-        /// Output every Nth sample (downsample). Only with --samples.
-        #[arg(long, requires = "samples")]
+        /// Output every Nth sample (downsample). Requires --samples or --stat.
+        #[arg(long, requires = "sample_view")]
         every: Option<usize>,
 
-        /// Output only the first N samples. Only with --samples.
-        #[arg(long, requires = "samples")]
+        /// Output only the first N samples. Requires --samples or --stat.
+        #[arg(long, requires = "sample_view")]
         head: Option<usize>,
 
-        /// Output only the last N samples. Only with --samples.
-        #[arg(long, requires = "samples")]
+        /// Output only the last N samples. Requires --samples or --stat.
+        #[arg(long, requires = "sample_view")]
         tail: Option<usize>,
     },
     /// Clean build artifacts and scratch data
