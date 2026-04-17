@@ -1,4 +1,5 @@
 use super::super::{HotpathData, StoredRow};
+use super::DatasetMatcher;
 use super::table::{compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input};
 
 /// Format side-by-side comparison of two commits.
@@ -8,8 +9,9 @@ pub fn format_compare(
     commit_b: &str,
     rows_b: &[StoredRow],
     top: usize,
+    matcher: &DatasetMatcher,
 ) -> String {
-    let pairs = build_comparison_pairs(rows_a, rows_b);
+    let pairs = build_comparison_pairs(rows_a, rows_b, matcher);
     if pairs.is_empty() {
         return String::from("(no results)");
     }
@@ -101,7 +103,11 @@ struct ComparisonPair {
     input_display: String,
 }
 
-fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<ComparisonPair> {
+fn build_comparison_pairs(
+    rows_a: &[StoredRow],
+    rows_b: &[StoredRow],
+    matcher: &DatasetMatcher,
+) -> Vec<ComparisonPair> {
     use std::collections::HashMap;
 
     struct RowData {
@@ -129,7 +135,7 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
                 peak_rss_mb: row.peak_rss_mb,
                 rewrite_pct: compute_rewrite_pct(&row.kv),
                 blobs: format_blob_counts(&row.kv),
-                input_display: format_input(&row.input_file, row.input_mb),
+                input_display: format_input(&row.input_file, row.input_mb, matcher),
             });
         }
     }
@@ -146,7 +152,7 @@ fn build_comparison_pairs(rows_a: &[StoredRow], rows_b: &[StoredRow]) -> Vec<Com
                 peak_rss_mb: row.peak_rss_mb,
                 rewrite_pct: compute_rewrite_pct(&row.kv),
                 blobs: format_blob_counts(&row.kv),
-                input_display: format_input(&row.input_file, row.input_mb),
+                input_display: format_input(&row.input_file, row.input_mb, matcher),
             });
         }
     }
@@ -660,7 +666,7 @@ mod tests {
     fn comparison_pairs_both_have_same_benchmark() {
         let a = vec![row("read", "mmap", "dk.pbf", 100)];
         let b = vec![row("read", "mmap", "dk.pbf", 90)];
-        let pairs = build_comparison_pairs(&a, &b);
+        let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].a_ms, Some(100));
@@ -671,7 +677,7 @@ mod tests {
     fn comparison_pairs_a_only() {
         let a = vec![row("read", "mmap", "dk.pbf", 100)];
         let b: Vec<StoredRow> = vec![];
-        let pairs = build_comparison_pairs(&a, &b);
+        let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].a_ms, Some(100));
@@ -682,7 +688,7 @@ mod tests {
     fn comparison_pairs_b_only() {
         let a: Vec<StoredRow> = vec![];
         let b = vec![row("write", "", "out.pbf", 200)];
-        let pairs = build_comparison_pairs(&a, &b);
+        let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].a_ms, None);
@@ -700,7 +706,7 @@ mod tests {
             row("read", "mmap", "dk.pbf", 50),
             row("read", "mmap", "dk.pbf", 888),
         ];
-        let pairs = build_comparison_pairs(&a, &b);
+        let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
         assert_eq!(
@@ -718,7 +724,7 @@ mod tests {
         // Expected key order: X, Y (from A), then Z (new from B).
         let a = vec![row("x-cmd", "", "", 10), row("y-cmd", "", "", 20)];
         let b = vec![row("y-cmd", "", "", 25), row("z-cmd", "", "", 30)];
-        let pairs = build_comparison_pairs(&a, &b);
+        let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 3);
         let key_strings: Vec<String> = pairs
@@ -747,7 +753,7 @@ mod tests {
             row("read", "mmap", "se.pbf", 300),
         ];
         let b = vec![row("read", "mmap", "dk.pbf", 90)];
-        let pairs = build_comparison_pairs(&a, &b);
+        let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 3);
         // Only the first pair should have both sides.
@@ -758,7 +764,7 @@ mod tests {
 
     #[test]
     fn comparison_pairs_empty_both_sides() {
-        let pairs = build_comparison_pairs(&[], &[]);
+        let pairs = build_comparison_pairs(&[], &[], &DatasetMatcher::empty());
         assert!(pairs.is_empty());
     }
 
@@ -852,7 +858,7 @@ mod tests {
             KvPair::int("blobs_passthrough", 1210),
             KvPair::int("blobs_rewritten", 90),
         ];
-        let pairs = build_comparison_pairs(&[a], &[b]);
+        let pairs = build_comparison_pairs(&[a], &[b], &DatasetMatcher::empty());
         assert_eq!(pairs.len(), 1);
 
         let p = &pairs[0];
@@ -885,7 +891,14 @@ mod tests {
             KvPair::int("blobs_passthrough", 95),
             KvPair::int("blobs_rewritten", 15),
         ];
-        let output = format_compare("abc1234", &[a], "def5678", &[b], 10);
+        let output = format_compare(
+            "abc1234",
+            &[a],
+            "def5678",
+            &[b],
+            10,
+            &DatasetMatcher::empty(),
+        );
         assert!(output.contains("rewrite_a"), "should have rewrite_a header");
         assert!(output.contains("rewrite_b"), "should have rewrite_b header");
         assert!(output.contains("blobs_a"), "should have blobs_a header");
@@ -912,7 +925,7 @@ mod tests {
     fn format_compare_hides_rewrite_columns_when_absent() {
         let a = row("read", "mmap", "dk.pbf", 100);
         let b = row("read", "mmap", "dk.pbf", 90);
-        let output = format_compare("aaa", &[a], "bbb", &[b], 10);
+        let output = format_compare("aaa", &[a], "bbb", &[b], 10, &DatasetMatcher::empty());
         assert!(
             !output.contains("rewrite_a"),
             "no rewrite columns for non-merge"

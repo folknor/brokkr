@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
+use crate::config::{self, DevConfig};
 use crate::db;
+use crate::db::DatasetMatcher;
 use crate::error::DevError;
 use crate::hotpath_fmt;
 use crate::output;
@@ -30,6 +32,7 @@ fn render_single_or_multi(
     rows: &[db::StoredRow],
     sidecar_db: Option<&db::sidecar::SidecarDb>,
     top: usize,
+    matcher: &DatasetMatcher,
 ) {
     let has_sidecar = |uuid: &str| {
         sidecar_db.is_some_and(|sdb| sdb.has_data(uuid))
@@ -48,7 +51,7 @@ fn render_single_or_multi(
     }
 
     // Multi-row result set — keep the compact table + per-row details.
-    let table = db::format_table(rows);
+    let table = db::format_table(rows, matcher);
     println!("{table}");
     for row in rows {
         let details = db::format_details(row);
@@ -69,8 +72,13 @@ fn render_single_or_multi(
     }
 }
 
-pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
+pub(crate) fn cmd_results(
+    dev_config: &DevConfig,
+    project_root: &Path,
+    q: &ResultsQuery,
+) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
+    let matcher = DatasetMatcher::new(config::all_dataset_keys(dev_config));
 
     if !db_path.exists() {
         output::result_msg("no results yet (run a benchmark first)");
@@ -101,7 +109,7 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
                 output::result_msg("no matching results");
             }
         } else {
-            render_single_or_multi(&rows, sidecar_db.as_ref(), q.top);
+            render_single_or_multi(&rows, sidecar_db.as_ref(), q.top, &matcher);
         }
         return Ok(());
     }
@@ -116,7 +124,7 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
             q.mode.as_deref(),
             q.dataset.as_deref(),
         )?;
-        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top);
+        let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top, &matcher);
         println!("{table}");
         return Ok(());
     }
@@ -144,7 +152,7 @@ pub(crate) fn cmd_results(project_root: &Path, q: &ResultsQuery) -> Result<(), D
     if rows.is_empty() {
         output::result_msg("no matching results");
     } else {
-        let table = db::format_table(&rows);
+        let table = db::format_table(&rows, &matcher);
         println!("{table}");
     }
 

@@ -1,15 +1,14 @@
-use std::path::Path;
-
 use super::super::types::short_uuid;
 use super::super::{KvPair, KvValue, StoredRow};
+use super::DatasetMatcher;
 
 /// Format rows as a column-aligned table for stdout.
-pub fn format_table(rows: &[StoredRow]) -> String {
+pub fn format_table(rows: &[StoredRow], matcher: &DatasetMatcher) -> String {
     if rows.is_empty() {
         return String::from("(no results)");
     }
 
-    let widths = compute_table_widths(rows);
+    let widths = compute_table_widths(rows, matcher);
     let mut out = String::new();
 
     // Header line.
@@ -18,7 +17,7 @@ pub fn format_table(rows: &[StoredRow]) -> String {
 
     // Data lines.
     for row in rows {
-        append_table_row(&mut out, row, &widths);
+        append_table_row(&mut out, row, &widths, matcher);
         out.push('\n');
     }
 
@@ -97,7 +96,7 @@ fn format_args_summary(cli_args: &str) -> String {
     }
 }
 
-fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
+fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWidths {
     let mut w = TableWidths {
         uuid: 4,
         timestamp: 9,
@@ -129,7 +128,7 @@ fn compute_table_widths(rows: &[StoredRow]) -> TableWidths {
         if elapsed_str.len() > w.elapsed {
             w.elapsed = elapsed_str.len();
         }
-        let input_str = format_input_short(&row.input_file);
+        let input_str = matcher.short_name(&row.input_file);
         if input_str.len() > w.input {
             w.input = input_str.len();
         }
@@ -166,11 +165,16 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
     .expect("write to String is infallible");
 }
 
-fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths) {
+fn append_table_row(
+    out: &mut String,
+    row: &StoredRow,
+    w: &TableWidths,
+    matcher: &DatasetMatcher,
+) {
     use std::fmt::Write;
     let uuid_short = short_uuid(&row.uuid);
     let elapsed_str = format_elapsed(row.elapsed_ms);
-    let input_str = format_input_short(&row.input_file);
+    let input_str = matcher.short_name(&row.input_file);
     let args_str = format_args_summary(&row.cli_args);
     write!(
         out,
@@ -199,33 +203,18 @@ pub(super) fn format_elapsed(ms: i64) -> String {
     format!("{ms} ms")
 }
 
-/// Format an input filename as a short, scannable dataset label for the
-/// results table. Extracts the first dash-separated component of the
-/// basename (e.g. `europe-20260301-seq4714-with-indexdata.osm` → `europe`,
-/// `denmark-raw.osm.pbf` → `denmark`). The full basename (minus extension)
-/// is used as a fallback when no dash is present, so non-conforming
-/// filenames remain visible.
-///
-/// Used in the main results table. The file size is not included —
-/// it's constant across rows for a given dataset and clutters the
-/// table. The detail view surfaces size via its own `input` field.
-fn format_input_short(input_file: &str) -> String {
-    if input_file.is_empty() {
-        return String::new();
-    }
-    let basename = Path::new(input_file)
-        .file_stem()
-        .map_or(input_file, |s| s.to_str().unwrap_or(input_file));
-    basename
-        .split_once('-')
-        .map_or(basename, |(head, _)| head)
-        .to_owned()
-}
-
-/// Format an input filename with size for compare tables and the
-/// detail view (e.g. `europe (35262 MB)`).
-pub(super) fn format_input(input_file: &str, input_mb: Option<f64>) -> String {
-    let short = format_input_short(input_file);
+/// Format an input filename with size for compare tables
+/// (e.g. `europe (35262 MB)`). Uses `matcher` to produce the short
+/// dataset label — when configured dataset keys are available this
+/// preserves hyphenated names like `greater-london`; otherwise the
+/// fallback heuristic emits the first dash-separated component of the
+/// basename.
+pub(super) fn format_input(
+    input_file: &str,
+    input_mb: Option<f64>,
+    matcher: &DatasetMatcher,
+) -> String {
+    let short = matcher.short_name(input_file);
     if short.is_empty() {
         return String::new();
     }
@@ -294,78 +283,82 @@ mod tests {
     )]
     use super::*;
 
+    fn format_input_with_empty(input_file: &str, input_mb: Option<f64>) -> String {
+        format_input(input_file, input_mb, &DatasetMatcher::empty())
+    }
+
     // -----------------------------------------------------------------------
     // format_input
     // -----------------------------------------------------------------------
 
     #[test]
     fn format_input_empty_filename() {
-        let result = format_input("", None);
+        let result = format_input_with_empty("", None);
         assert_eq!(result, "");
     }
 
     #[test]
     fn format_input_empty_filename_with_mb() {
         // Even if MB is provided, empty filename returns empty.
-        let result = format_input("", Some(42.0));
+        let result = format_input_with_empty("", Some(42.0));
         assert_eq!(result, "");
     }
 
     #[test]
     fn format_input_with_extension_no_mb() {
         // No dash in basename: show the stem unchanged.
-        let result = format_input("denmark.osm.pbf", None);
+        let result = format_input_with_empty("denmark.osm.pbf", None);
         assert_eq!(result, "denmark.osm");
     }
 
     #[test]
     fn format_input_with_extension_and_mb() {
-        let result = format_input("denmark.osm.pbf", Some(123.4));
+        let result = format_input_with_empty("denmark.osm.pbf", Some(123.4));
         assert_eq!(result, "denmark.osm (123 MB)");
     }
 
     #[test]
     fn format_input_no_extension() {
-        let result = format_input("rawfile", None);
+        let result = format_input_with_empty("rawfile", None);
         assert_eq!(result, "rawfile");
     }
 
     #[test]
     fn format_input_no_extension_with_mb() {
-        let result = format_input("rawfile", Some(0.5));
+        let result = format_input_with_empty("rawfile", Some(0.5));
         assert_eq!(result, "rawfile (0 MB)");
     }
 
     #[test]
     fn format_input_path_with_directory() {
         // file_stem should extract from the basename
-        let result = format_input("data/inputs/denmark.pbf", None);
+        let result = format_input_with_empty("data/inputs/denmark.pbf", None);
         assert_eq!(result, "denmark");
     }
 
     #[test]
     fn format_input_single_extension() {
-        let result = format_input("test.csv", Some(10.0));
+        let result = format_input_with_empty("test.csv", Some(10.0));
         assert_eq!(result, "test (10 MB)");
     }
 
     #[test]
     fn format_input_dataset_prefix_dated() {
         // Convention filename: <dataset>-<date>-<seq>-<variant>.osm
-        let result = format_input("europe-20260301-seq4714-with-indexdata.osm", Some(35262.0));
+        let result = format_input_with_empty("europe-20260301-seq4714-with-indexdata.osm", Some(35262.0));
         assert_eq!(result, "europe (35262 MB)");
     }
 
     #[test]
     fn format_input_dataset_prefix_raw() {
-        let result = format_input("denmark-raw.osm.pbf", None);
+        let result = format_input_with_empty("denmark-raw.osm.pbf", None);
         assert_eq!(result, "denmark");
     }
 
     #[test]
     fn format_input_pmtiles_variant() {
         // PMTiles files like `denmark-elivagar.pmtiles` collapse to the dataset.
-        let result = format_input("denmark-elivagar.pmtiles", Some(250.0));
+        let result = format_input_with_empty("denmark-elivagar.pmtiles", Some(250.0));
         assert_eq!(result, "denmark (250 MB)");
     }
 

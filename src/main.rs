@@ -628,7 +628,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 limit,
                 top,
             };
-            results_cmd::cmd_results(&project_root, &rq)
+            results_cmd::cmd_results(&dev_config, &project_root, &rq)
         }
         Command::Sidecar {
             query,

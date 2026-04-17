@@ -483,6 +483,21 @@ pub fn resolve_paths(
     }
 }
 
+/// Collect every dataset key configured across every host section. The
+/// results DB is shared across hosts, so the `brokkr results` view
+/// should recognize dataset names from rows that originated on a
+/// different machine too. Keys are returned deduped.
+pub fn all_dataset_keys(config: &DevConfig) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for host in config.hosts.values() {
+        for key in host.datasets.keys() {
+            keys.insert(key.clone());
+        }
+    }
+    keys.into_iter().collect()
+}
+
 /// Resolve a potentially relative path against a base directory.
 /// Absolute paths are returned as-is.
 fn resolve_relative(base: &Path, rel: &str) -> PathBuf {

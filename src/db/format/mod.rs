@@ -16,11 +16,13 @@
 //   * `compare` — side-by-side two-commit comparison (`format_compare`).
 
 mod compare;
+mod dataset;
 mod details;
 mod single;
 mod table;
 
 pub use compare::format_compare;
+pub use dataset::DatasetMatcher;
 pub use details::format_details;
 pub use single::format_single_result;
 pub use table::format_table;
