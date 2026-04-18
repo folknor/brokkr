@@ -25,7 +25,7 @@ pub fn format_compare(
     for pair in &pairs {
         append_compare_row(&mut out, pair, &widths);
         out.push('\n');
-        // Skip the env annotation when the pair is one-sided — the row
+        // Skip the env annotation when the pair is one-sided - the row
         // already shows `--` for the missing side's elapsed, so a
         // trailing "env: X=1 vs (unset)" would just duplicate that
         // signal and add noise on pairs where env isn't the
@@ -50,10 +50,10 @@ pub fn format_compare(
                 format!("{cmd} {var}")
             };
             let heading = if pair.input_display.is_empty() {
-                format!("\n{label} — {commit_a} vs {commit_b}")
+                format!("\n{label} - {commit_a} vs {commit_b}")
             } else {
                 format!(
-                    "\n{label} - {} — {commit_a} vs {commit_b}",
+                    "\n{label} - {} - {commit_a} vs {commit_b}",
                     pair.input_display
                 )
             };
@@ -226,7 +226,7 @@ fn build_comparison_pairs(
 
 /// Format a per-pair env annotation when A and B captured different
 /// env sets. Returns `None` when the sets are identical (the common
-/// case — captured_env is empty on >95% of historical rows). The
+/// case - captured_env is empty on >95% of historical rows). The
 /// emitted line sits under the compare row, indented two spaces.
 fn format_env_diff(
     a: &std::collections::BTreeMap<String, String>,
@@ -275,7 +275,7 @@ fn pair_key(
 }
 
 fn split_pair_key(key: &str) -> (&str, &str, &str) {
-    // splitn(5, …) — parts 4..=5 are brokkr_args / env_fingerprint, only
+    // splitn(5, …) - parts 4..=5 are brokkr_args / env_fingerprint, only
     // used for deduping. Callers only consume the first three
     // (command, mode, input_file).
     let mut parts = key.splitn(5, '\t');

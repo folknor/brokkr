@@ -58,7 +58,7 @@ impl std::fmt::Display for Project {
 /// Detect the project from `./brokkr.toml` in the current working directory.
 ///
 /// Returns the project type, the parsed config, and the project root directory
-/// (cwd). This is the single entry point — `brokkr.toml` is read and parsed
+/// (cwd). This is the single entry point - `brokkr.toml` is read and parsed
 /// exactly once via [`config::load`].
 pub fn detect() -> Result<(Project, DevConfig, PathBuf), DevError> {
     let cwd = std::env::current_dir()

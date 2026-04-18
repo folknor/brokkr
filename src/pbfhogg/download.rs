@@ -247,7 +247,7 @@ fn has_existing_osc(dataset: Option<&Dataset>, data_dir: &Path, seq: u64) -> Opt
     }
 }
 
-/// Find the "raw" PBF path — either the configured `raw` variant, or a
+/// Find the "raw" PBF path - either the configured `raw` variant, or a
 /// dated filename as fallback.
 fn raw_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, date: &str) -> PathBuf {
     if let Some(ds) = dataset
@@ -258,7 +258,7 @@ fn raw_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, d
     data_dir.join(format!("{dataset_key}-{date}.osm.pbf"))
 }
 
-/// Find the "indexed" PBF path — either the configured `indexed` variant, or
+/// Find the "indexed" PBF path - either the configured `indexed` variant, or
 /// a dated filename as fallback.
 fn indexed_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, date: &str) -> PathBuf {
     if let Some(ds) = dataset
@@ -392,7 +392,7 @@ fn append_snapshot_pbf_entry(
 /// Body lines (file = "...", xxhash = "...", seq = N, etc.) are preserved
 /// unchanged. Comments and other dataset blocks are not touched.
 ///
-/// This is line-based, not a TOML parser — it works only on brokkr-generated
+/// This is line-based, not a TOML parser - it works only on brokkr-generated
 /// TOML where each table starts with `[name]` on its own line. Hand-edited
 /// TOMLs with unusual formatting may break it; that's a known limitation
 /// documented in CLAUDE.md.
@@ -835,7 +835,7 @@ fn run_as_snapshot(
     // -- Download OSC diffs (snapshot-scoped, not anchored to legacy chain) --
     let mut osc_downloaded: Vec<(u64, PathBuf)> = Vec::new();
     if let Some(target_seq) = osc_seq {
-        // Snapshot OSC chains start fresh — they're not extending the legacy chain.
+        // Snapshot OSC chains start fresh - they're not extending the legacy chain.
         // Download every seq from min to target. Without a min lower bound we'd
         // download forever, so for now we require the user to invoke later with
         // a tighter range. Simplest: download just `target_seq` itself.
@@ -885,7 +885,7 @@ fn run_as_snapshot(
     }
 
     // -- Update brokkr.toml --
-    // Always write the snapshot header (the snapshot is new — we errored
+    // Always write the snapshot header (the snapshot is new - we errored
     // earlier if it already existed).
     //
     // The snapshot's `download_date` should reflect the snapshot's
@@ -1069,7 +1069,7 @@ fn run_refresh(
         ))
     })?;
 
-    // The legacy pbf.raw entry must exist — refresh rotates it into the snapshot.
+    // The legacy pbf.raw entry must exist - refresh rotates it into the snapshot.
     let legacy_raw = ds.pbf.get("raw").ok_or_else(|| {
         DevError::Config(format!(
             "dataset '{dataset_key}' has no pbf.raw entry to rotate. \
@@ -1174,7 +1174,7 @@ fn run_refresh(
         tools::download_file(&pbf_url, &new_pbf_dest)?;
     }
 
-    // -- Step 4: rotate TOML — rename existing pbf/osc tables into the snapshot block --
+    // -- Step 4: rotate TOML - rename existing pbf/osc tables into the snapshot block --
     rotate_dataset_to_snapshot(
         project_root,
         hostname,

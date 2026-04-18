@@ -8,7 +8,7 @@ use crate::error::DevError;
 /// A single requirement that must be satisfied before a subcommand runs.
 ///
 /// Some variants (File, DiskSpace, KernelParam) are dispatched in `run_check`
-/// but not yet constructed by any caller — they exist for future preflight checks.
+/// but not yet constructed by any caller - they exist for future preflight checks.
 #[allow(dead_code)]
 pub enum Check {
     /// Binary must exist in PATH.
@@ -132,7 +132,7 @@ fn available_bytes(path: &Path) -> Option<u64> {
 fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<String> {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        // Not on Linux, or procfs not mounted — skip the check.
+        // Not on Linux, or procfs not mounted - skip the check.
         Err(_) => return None,
     };
 
@@ -149,7 +149,7 @@ fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<S
 fn check_kernel_param_at_most(path: &str, max_value: i32, description: &str) -> Option<String> {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        // Not on Linux, or procfs not mounted — skip the check.
+        // Not on Linux, or procfs not mounted - skip the check.
         Err(_) => return None,
     };
 

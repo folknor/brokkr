@@ -1,4 +1,4 @@
-# Sidecar enrichment — scoped plan
+# Sidecar enrichment - scoped plan
 
 Status: **design for immediate implementation.** Supersedes the earlier
 `sidecar-mvp.md` and `sidecar-protocol-v2.md` drafts. Both of those
@@ -48,7 +48,7 @@ run that has sidecar samples.
   Today we silently drop them.
 - **Dropped events.** When FIFO writes fail (buffer full, O_NONBLOCK),
   the sidecar already knows. Surface the count as a run-level field in
-  the detail view — a non-zero value means the marker/counter trace is
+  the detail view - a non-zero value means the marker/counter trace is
   partial. If the sidecar doesn't currently track this, add a single
   `dropped_events` counter to `SidecarData` and surface it in the
   `print_run_info` block.
@@ -62,7 +62,7 @@ brokkr sidecar <uuid> --stalls
 Sums durations of spans (marker pairs) whose name begins `WAIT_`,
 grouped by the prefix-stripped category, expressed as a fraction of
 the enclosing top-level span's wall-clock time. Pure query over
-existing markers — brokkr doesn't validate the naming; any span named
+existing markers - brokkr doesn't validate the naming; any span named
 `WAIT_FOO` is treated as a stall in category `FOO`.
 
 Pbfhogg adopts the convention at its own pace, for the blocking points
@@ -97,7 +97,7 @@ Pre-convention rows will:
 - Work with both `--stop FOO_END` (verbatim) and `--stop FOO`
   (falls back to `FOO_END`).
 
-Truncated-span detection also works retroactively — any historical
+Truncated-span detection also works retroactively - any historical
 unpaired `_START` becomes a visible `status=truncated` entry in the
 phase summary on the next query.
 
@@ -108,7 +108,7 @@ README and in `brokkr sidecar --help`):
 
 - **`WAIT_*` stall spans.** Wrap blocking points in named spans whose
   name begins `WAIT_` so `--stalls` can attribute stall time by
-  category. Categories are free-form — pbfhogg decides on
+  category. Categories are free-form - pbfhogg decides on
   `WAIT_WRITER`, `WAIT_PAYLOAD`, `WAIT_COORD`, etc. as the ALTW
   rewrites expose interesting blocking points.
 - **Span naming for `--stop`.** `MARKER_END` is still the canonical
@@ -135,7 +135,7 @@ is **deferred until a concrete ALTW pain point justifies it**:
 Pointer-only: if after running ALTW opportunity #1 against the
 enriched phase summary + `--stalls` view you find a question the
 current shape genuinely can't answer, that's the trigger for
-revisiting the v2 design — informed by *use*, not speculation.
+revisiting the v2 design - informed by *use*, not speculation.
 
 ## Acceptance
 

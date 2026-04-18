@@ -60,7 +60,7 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".into());
 
-        // Try to detect project and git info — these are optional.
+        // Try to detect project and git info - these are optional.
         let (project_name, commit_hash, dirty) = match project::detect() {
             Ok((project, _config, project_root)) => match git::collect(&project_root) {
                 Ok(gi) => (

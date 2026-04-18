@@ -50,11 +50,11 @@ pub struct PmtilesEntry {
     pub xxhash: Option<String>,
 }
 
-/// A historical snapshot of a dataset — a different point-in-time capture
+/// A historical snapshot of a dataset - a different point-in-time capture
 /// of the same region. Snapshots are first-class for the `diff-snapshots`
 /// command and any future operation that takes a pair of snapshot refs.
 ///
-/// Snapshots are NOT variants in the `pbf.raw` / `pbf.indexed` sense — those
+/// Snapshots are NOT variants in the `pbf.raw` / `pbf.indexed` sense - those
 /// are transforms of one PBF. A snapshot is a different PBF (e.g. a different
 /// weekly planet dump). Each snapshot can carry its own pbf variants and its
 /// own OSC chain anchored at its own replication seq.
@@ -68,7 +68,7 @@ pub struct Snapshot {
     #[serde(default)]
     pub pbf: HashMap<String, PbfEntry>,
     /// OSC files keyed by sequence number. Stored but not consumed by any
-    /// current command — pre-positioned for future `apply-changes --snapshot`
+    /// current command - pre-positioned for future `apply-changes --snapshot`
     /// / `merge-changes --snapshot` style commands.
     #[serde(default)]
     pub osc: HashMap<String, OscEntry>,
@@ -283,7 +283,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
 ///
 /// Validated eagerly to catch three footguns before they silently do
 /// the wrong thing: bare `"*"` (would match *every* env var, including
-/// PATH, SSH_AUTH_SOCK, and any API tokens — those would then land in
+/// PATH, SSH_AUTH_SOCK, and any API tokens - those would then land in
 /// the results DB); empty strings; and patterns with `*` anywhere
 /// other than the tail (like `"FOO*BAR"`, which today is treated as an
 /// exact name and silently matches nothing).
@@ -312,7 +312,7 @@ fn parse_capture_env(
         if s == "*" {
             return Err(DevError::Config(
                 "capture_env pattern '*' would capture every env var \
-                 (PATH, credentials, …) into results.db — refusing. \
+                 (PATH, credentials, …) into results.db - refusing. \
                  List the specific prefixes you want."
                     .into(),
             ));
@@ -526,7 +526,7 @@ pub fn host_features(config: &DevConfig) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Get the current hostname via `libc::gethostname()`. Cached for the
-/// life of the process — the hostname doesn't change under us and the
+/// life of the process - the hostname doesn't change under us and the
 /// FFI call gets hit from the hot path (harness bootstrap, history
 /// init, host-feature resolution).
 pub fn hostname() -> Result<String, DevError> {
@@ -713,7 +713,7 @@ capture_env = ["*"]
     #[test]
     fn capture_env_rejects_middle_star() {
         // `"FOO*BAR"` would today be treated as an exact name (matches
-        // nothing) — reject it loudly rather than silently no-op.
+        // nothing) - reject it loudly rather than silently no-op.
         let text = r#"
 project = "pbfhogg"
 capture_env = ["FOO*BAR"]

@@ -12,7 +12,7 @@ use super::table::format_elapsed;
 ///   2. Host/build context: hostname, cargo, kernel, governor, memory, storage
 ///   3. Invocations: brokkr_args (single line), cli_args (pretty-printed
 ///      one flag/positional per line with `\` continuation, copy-pasteable)
-///   4. Sidecar hint — only when `has_sidecar` is true. Shows the
+///   4. Sidecar hint - only when `has_sidecar` is true. Shows the
 ///      `brokkr sidecar <uuid>` invocation that opens the default
 ///      phase summary for the row.
 ///
@@ -124,7 +124,7 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
     fields
 }
 
-/// Captured env block — first-class axis for env-gated code paths.
+/// Captured env block - first-class axis for env-gated code paths.
 /// Empty for the vast majority of rows (no capture configured before
 /// this feature, and `capture_env` is opt-in per brokkr.toml). Rows
 /// with captured vars get a dedicated labeled block between the host
@@ -185,7 +185,7 @@ fn invocation_fields(row: &StoredRow) -> Vec<(String, String)> {
     if !row.brokkr_args.is_empty() {
         fields.push(("brokkr_args".into(), row.brokkr_args.clone()));
     }
-    // cli_args is rendered specially (multi-line) by the caller — not
+    // cli_args is rendered specially (multi-line) by the caller - not
     // included here.
     fields
 }

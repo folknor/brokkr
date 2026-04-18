@@ -593,8 +593,8 @@ fn compute_phase_summary(
 }
 
 /// Print the per-phase summary. `human = true` renders the fixed-width
-/// table; the default is JSONL — one summary object then one phase object
-/// per line — designed for machine/LLM consumption.
+/// table; the default is JSONL - one summary object then one phase object
+/// per line - designed for machine/LLM consumption.
 pub(crate) fn print_phase_summary(
     samples: &[sidecar::Sample],
     markers: &[sidecar::Marker],
@@ -634,7 +634,7 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
         if s.samples == 0 {
             // Phase is shorter than the 100ms sampling interval (or landed
             // entirely between two sample ticks). Still show the marker
-            // duration — zero samples is a real signal, not missing data.
+            // duration - zero samples is a real signal, not missing data.
             println!("{:<24} {:>6}ms (no samples)", s.name, s.duration_ms);
             continue;
         }
@@ -691,7 +691,7 @@ fn print_phase_summary_jsonl(
     println!("{header}");
 
     for s in summaries {
-        // `avg_cores` is `null` (not 0) when we couldn't measure — zero is
+        // `avg_cores` is `null` (not 0) when we couldn't measure - zero is
         // ambiguous with "truly idle". Same for the memory/io fields, which
         // we simply omit when samples == 0.
         let obj = if s.samples == 0 {
@@ -836,7 +836,7 @@ fn print_marker_durations_human(
                     let start_ms = start_us / 1_000;
                     println!(
                         "{name:<32} {:>9}ms {:>12} {:>12}",
-                        start_ms, "(no end)", "—"
+                        start_ms, "(no end)", "-"
                     );
                 }
             }
@@ -950,7 +950,7 @@ fn print_compare_timeline_human(
                     stats_a.disk_read_kb / 1024,
                     avg_cores_a,
                     "(no match)",
-                    "—",
+                    "-",
                 );
             }
         }
@@ -991,7 +991,7 @@ fn print_compare_timeline_jsonl(
                 #[allow(clippy::cast_precision_loss)]
                 let pct = if dur_a_ms > 0 {
                     let raw = (dur_b_ms - dur_a_ms) as f64 / dur_a_ms as f64 * 100.0;
-                    // Round to 2 decimals — same rationale as avg_cores.
+                    // Round to 2 decimals - same rationale as avg_cores.
                     Some((raw * 100.0).round() / 100.0)
                 } else {
                     None
@@ -1034,7 +1034,7 @@ struct PhaseStats {
     sample_span_us: i64,
 }
 
-/// `sysconf(_SC_CLK_TCK)` — jiffies per second used to decode
+/// `sysconf(_SC_CLK_TCK)` - jiffies per second used to decode
 /// `/proc/<pid>/stat`'s `utime`/`stime`. Always 100 on typical Linux
 /// x86_64, but the kernel can be built with 250, 300, or 1000; read it
 /// at runtime so we stay correct on arbitrary hosts.
@@ -1049,16 +1049,16 @@ fn clk_tck_per_second() -> i64 {
 /// Format the average-cores-used figure over a phase. Takes the CPU
 /// jiffy delta (`utime + stime` at phase end minus at phase start),
 /// the wall-time delta in microseconds, and the system's clock-tick
-/// frequency. Returns a short string like `"3.1"` or `"—"` when the
+/// frequency. Returns a short string like `"3.1"` or `"-"` when the
 /// phase is too short for a stable measurement.
 fn avg_cores_str(cpu_delta_jiffies: i64, wall_us: i64, clk_tck: i64) -> String {
     avg_cores_f64(cpu_delta_jiffies, wall_us, clk_tck)
-        .map_or_else(|| "—".to_owned(), |c| format!("{c:.1}"))
+        .map_or_else(|| "-".to_owned(), |c| format!("{c:.1}"))
 }
 
 /// Numeric core of `avg_cores_str`. Returns `None` when the sample span is
-/// too short (or degenerate) to give a stable reading — callers pick how
-/// to render: "—" for the table, `null` for JSON.
+/// too short (or degenerate) to give a stable reading - callers pick how
+/// to render: "-" for the table, `null` for JSON.
 ///
 /// Result is rounded to 2 decimal places so JSON consumers aren't staring
 /// at f64 precision artefacts like `0.36274423029811576`.
@@ -1118,7 +1118,7 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
 /// Split the sample stream into inter-marker segments.
 ///
 /// Markers are point-in-time bookmarks in the stream (see the FIFO protocol
-/// in pbfhogg's `emit_marker` — timestamp + name, nothing else). A segment
+/// in pbfhogg's `emit_marker` - timestamp + name, nothing else). A segment
 /// runs from marker N to marker N+1; the last segment runs from the final
 /// marker to end-of-samples. The segment is labelled with the name of the
 /// marker that opens it.
@@ -1151,7 +1151,7 @@ fn build_phases(
 
 /// Sum `WAIT_<CATEGORY>_START`/`_END` pair durations by category and
 /// render as total ms + fraction of run wall-clock. Runs that predate
-/// the convention — no `WAIT_*` markers at all — print a clear message
+/// the convention - no `WAIT_*` markers at all - print a clear message
 /// pointing at the conventions section of the README so users don't
 /// confuse "nothing instrumented" with "no stalls observed."
 ///
@@ -1195,7 +1195,7 @@ pub(crate) fn print_stalls(
 
     if totals_us.is_empty() {
         crate::output::result_msg(
-            "no WAIT_* marker pairs in this run — see the \"Sidecar conventions\" \
+            "no WAIT_* marker pairs in this run - see the \"Sidecar conventions\" \
              section of brokkr's README for the stall-attribution convention",
         );
         return;

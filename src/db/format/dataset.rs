@@ -5,8 +5,8 @@
 //! dataset keys are available (loaded from `brokkr.toml`), the matcher
 //! prefers the longest configured key that is a prefix of the basename
 //! so datasets with hyphens in their names (`greater-london`,
-//! `north-america`) survive intact. With no configured keys — or a
-//! filename that doesn't match any of them — it falls back to the first
+//! `north-america`) survive intact. With no configured keys - or a
+//! filename that doesn't match any of them - it falls back to the first
 //! dash-separated component of the basename.
 
 use std::path::Path;

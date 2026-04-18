@@ -1,4 +1,4 @@
-//! Verify: add-locations-to-ways — pbfhogg vs osmium, across index-type modes.
+//! Verify: add-locations-to-ways - pbfhogg vs osmium, across index-type modes.
 
 use std::path::Path;
 
@@ -70,7 +70,7 @@ fn run_all(
     osmium_out: &Path,
     direct_io: bool,
 ) -> Result<(), DevError> {
-    // Hash is the baseline — must succeed, diffed directly against osmium.
+    // Hash is the baseline - must succeed, diffed directly against osmium.
     let hash_out = outdir.join("pbfhogg.osm.pbf");
     let captured = run_pbfhogg_mode(harness, pbf_str, &hash_out, None, direct_io)?;
     harness.check_exit(&captured, "pbfhogg add-locations-to-ways")?;
@@ -78,7 +78,7 @@ fn run_all(
     report_diff(harness, osmium_out, &hash_out, "hash vs osmium")?;
     harness.compare_sort_feature(&hash_out, osmium_out)?;
 
-    // Optional variants — compared against hash baseline, tolerating alloc failure.
+    // Optional variants - compared against hash baseline, tolerating alloc failure.
     run_optional_variant(harness, outdir, pbf_str, &hash_out, "sparse", direct_io, false)?;
     run_optional_variant(harness, outdir, pbf_str, &hash_out, "dense", direct_io, true)?;
     run_optional_variant(harness, outdir, pbf_str, &hash_out, "external", direct_io, false)?;
@@ -127,7 +127,7 @@ fn run_optional_variant(
         report_diff(harness, hash_out, &out_path, &format!("hash vs {index_type}"))?;
     } else if alloc_may_fail {
         verify_msg(&format!(
-            "  {index_type} index skipped (allocation failed — expected on systems without vm.overcommit_memory=1)"
+            "  {index_type} index skipped (allocation failed - expected on systems without vm.overcommit_memory=1)"
         ));
     } else {
         verify_msg(&format!("  {index_type} index FAILED (non-zero exit)"));

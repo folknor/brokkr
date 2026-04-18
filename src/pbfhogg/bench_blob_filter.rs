@@ -92,7 +92,7 @@ pub fn run(
         let config = BenchConfig {
             command: "blob-filter".into(),
             // Sub-command + indexed/raw discriminator is visible in
-            // cli_args (different argv per row — e.g. `cat --type way`
+            // cli_args (different argv per row - e.g. `cat --type way`
             // with `--force` only on raw) and in input_file (different
             // PBF per row). Measurement mode and brokkr_args come from
             // the harness.

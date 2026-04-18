@@ -5,7 +5,7 @@ pub(super) const SCHEMA_VERSION: i64 = 15;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    // Fresh database — no tables yet, nothing to migrate.
+    // Fresh database - no tables yet, nothing to migrate.
     if !has_table(conn, "runs") {
         return Ok(());
     }
@@ -378,7 +378,7 @@ fn migrate_v10_to_v11(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// and the variant column holds only real variance axes (`'nocompress'`,
 /// `'direct-io+zstd1'`, `'range-4914-4920'`, `'alloc'`).
 ///
-/// Only pbfhogg rows are touched — the elivagar/nidhogg/sluggrs `command`
+/// Only pbfhogg rows are touched - the elivagar/nidhogg/sluggrs `command`
 /// values were never affected by the legacy naming.
 fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // Idempotency guard. A DB can legitimately reach this migration with
@@ -429,7 +429,7 @@ fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
     //
     // Variant formats in the wild: `<id>`, `<id>/alloc`, `<id>+<suffix>`,
     // `<id>/alloc+<suffix>`. Split on whichever separator (`/` or `+`)
-    // appears first. The separator itself is dropped — except the `/alloc`
+    // appears first. The separator itself is dropped - except the `/alloc`
     // marker, whose content is kept in the new variant as `alloc`.
     //
     // Restricted to pbfhogg so elivagar/nidhogg/sluggrs hotpath rows are
@@ -492,13 +492,13 @@ fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
 ///      into variant, and a `/alloc` marker).
 ///   3. Strip the `bench `/`hotpath ` prefix from command and set variant
 ///      to the measurement mode. Old variant content (axis suffixes like
-///      `+nocompress`, `+direct-io`, etc.) drops — it was always a mirror
+///      `+nocompress`, `+direct-io`, etc.) drops - it was always a mirror
 ///      of cli_args, nothing is lost.
 ///   4. Delete redundant `meta.*` keys from run_kv. run_kv survives only
 ///      for genuine runtime observations (cache state, detected features,
 ///      resolved file info).
 fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    // 1. Add brokkr_args column (if not already present — guards against a
+    // 1. Add brokkr_args column (if not already present - guards against a
     //    fresh SCHEMA that already has it).
     if !has_column(conn, "runs", "brokkr_args") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")?;
@@ -585,7 +585,7 @@ fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // 4. Delete redundant meta.* keys. These mirror data already in
     //    cli_args (subprocess flags) or brokkr_args (the brokkr
     //    invocation, NULL for historical rows but grepable for future
-    //    rows). Keys not in this list are kept — they represent genuine
+    //    rows). Keys not in this list are kept - they represent genuine
     //    runtime observations.
     //
     //    Guard on `run_kv` existence: old-schema migration tests (v3,
@@ -617,13 +617,13 @@ fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// v13 → v14: rename the `variant` column to `mode`.
 ///
 /// After v13, the `variant` column holds nothing but the measurement
-/// mode (`bench`/`hotpath`/`alloc`) — the name was inherited from when
+/// mode (`bench`/`hotpath`/`alloc`) - the name was inherited from when
 /// it carried a freeform axis bag. Renaming to `mode` makes the
 /// semantics obvious and lets future docs/filters read naturally.
 ///
 /// Uses SQLite's `ALTER TABLE ... RENAME COLUMN` (available since
 /// SQLite 3.25). Indexes on the column (if any) and child-table
-/// foreign keys (none — variant was never referenced) are unaffected.
+/// foreign keys (none - variant was never referenced) are unaffected.
 fn migrate_v13_to_v14(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // Guard: only rename if the old column still exists. On fresh
     // databases `SCHEMA` already created the table with `mode`, so the
@@ -644,7 +644,7 @@ fn migrate_v13_to_v14(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// subcommands live under a single name per family (`cat`, `extract`,
 /// `tags-filter`, `getid`, `inspect`, `diff`); the distinguishing
 /// flags are already present in each row's `cli_args`, so no flag
-/// reconstruction is needed — we just rewrite the command column.
+/// reconstruction is needed - we just rewrite the command column.
 fn migrate_v14_to_v15(conn: &rusqlite::Connection) -> Result<(), DevError> {
     const RENAMES: &[(&str, &str)] = &[
         // Cat family.
@@ -968,7 +968,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Open via ResultsDb — triggers all migrations.
+        // Open via ResultsDb - triggers all migrations.
         let db = ResultsDb::open(&db_path).expect("open should migrate v0 to v3");
 
         // Row is preserved and queryable.
@@ -1304,7 +1304,7 @@ mod tests {
             )
             .unwrap();
 
-            // elivagar row with same old variant name — should NOT be touched.
+            // elivagar row with same old variant name - should NOT be touched.
             conn.execute(
                 V3_INSERT,
                 rusqlite::params!["bench self", "tags-count", "elivagar"],
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(row_of(4), ("diff".into(), Some("bench".into())));
         assert_eq!(row_of(5), ("cat".into(), Some("bench".into())));
 
-        // Row 6: `bench blob-filter` / `node-stats+raw` — v3→v4 renames
+        // Row 6: `bench blob-filter` / `node-stats+raw` - v3→v4 renames
         // variant to `inspect-nodes+raw`; v11→v12 skips (command wasn't
         // `bench commands`); v12→v13 strips `bench ` prefix and sets
         // variant to `bench`, dropping the old axis-bag content.
@@ -1366,7 +1366,7 @@ mod tests {
         // `inspect` / `bench`.
         assert_eq!(row_of(9), ("inspect".into(), Some("bench".into())));
 
-        // Row 10: elivagar `bench self` / `tags-count` — v3→v4 skipped
+        // Row 10: elivagar `bench self` / `tags-count` - v3→v4 skipped
         // (project filter); v11→v12 skipped (not `bench commands`);
         // v12→v13 strips `bench ` and overwrites variant with `bench`.
         assert_eq!(row_of(10), ("self".into(), Some("bench".into())));
@@ -1436,13 +1436,13 @@ mod tests {
                 ],
             )
             .unwrap();
-            // 6. `bench extract` — command already distinct, left alone.
+            // 6. `bench extract` - command already distinct, left alone.
             conn.execute(
                 V3_INSERT,
                 rusqlite::params!["bench extract", "simple", "pbfhogg"],
             )
             .unwrap();
-            // 7. Non-pbfhogg row — untouched.
+            // 7. Non-pbfhogg row - untouched.
             conn.execute(
                 V3_INSERT,
                 rusqlite::params!["bench self", "whatever", "elivagar"],
@@ -1476,7 +1476,7 @@ mod tests {
                 ],
             )
             .unwrap();
-            // 12. Non-pbfhogg hotpath row — untouched.
+            // 12. Non-pbfhogg hotpath row - untouched.
             conn.execute(
                 V3_INSERT,
                 rusqlite::params!["hotpath", "tilegen/alloc", "elivagar"],
@@ -1517,7 +1517,7 @@ mod tests {
         assert_eq!(row_of(6), ("extract".into(), Some("bench".into())));
         assert_eq!(row_of(7), ("self".into(), Some("bench".into())));
         // Hotpath rows. Rows 8-9 were `hotpath inspect-tags` / alloc
-        // marker — v14→v15 collapses preset name to `inspect`.
+        // marker - v14→v15 collapses preset name to `inspect`.
         assert_eq!(row_of(8), ("inspect".into(), Some("hotpath".into())));
         assert_eq!(row_of(9), ("inspect".into(), Some("alloc".into())));
         assert_eq!(
@@ -1532,7 +1532,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Migration: v12 → v13 — strip command prefix, variant becomes mode,
+    // Migration: v12 → v13 - strip command prefix, variant becomes mode,
     // drop redundant meta.* keys, add brokkr_args column.
     // -----------------------------------------------------------------------
 
@@ -1591,7 +1591,7 @@ mod tests {
                 ],
             )
             .unwrap();
-            // Elivagar hotpath (pre-split — still has the id in variant
+            // Elivagar hotpath (pre-split - still has the id in variant
             // because v11→v12 was pbfhogg-only). v13 must split it too.
             conn.execute(
                 V3_INSERT,

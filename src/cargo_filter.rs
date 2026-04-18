@@ -65,7 +65,7 @@ pub fn filter_clippy(output: &str) -> String {
 
     if errors.is_empty() && warnings.is_empty() {
         // If the output had lines that look like errors/warnings but we extracted
-        // nothing, the parser failed — fall back to raw output.
+        // nothing, the parser failed - fall back to raw output.
         let has_error_lines = output
             .lines()
             .any(|l| l.starts_with("error:") || l.starts_with("error["));
@@ -121,9 +121,9 @@ pub struct ParsedTestResults {
 ///
 /// Handles the two `failures:` sections (detail then name-list), extracts
 /// panic locations and messages, and aggregates `test result:` summary lines.
-/// Works on any iterator of lines — callers can pre-filter JSON lines out
+/// Works on any iterator of lines - callers can pre-filter JSON lines out
 /// before passing non-JSON lines here.
-#[allow(clippy::too_many_lines)] // state-machine parser — splitting hurts clarity
+#[allow(clippy::too_many_lines)] // state-machine parser - splitting hurts clarity
 pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
     let mut failures: Vec<ParsedTestFailure> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
@@ -289,7 +289,7 @@ fn flush_parsed_failure(
     });
 }
 
-/// Filter cargo test output — one line per failure, compact summary on success.
+/// Filter cargo test output - one line per failure, compact summary on success.
 ///
 /// On success:
 /// ```text
@@ -306,7 +306,7 @@ fn flush_parsed_failure(
 /// On compilation error (no test results):
 /// Falls back to `filter_clippy` to show the build errors.
 pub fn filter_test(stdout: &str, stderr: &str) -> String {
-    // Compilation failure — no test results, just build errors.
+    // Compilation failure - no test results, just build errors.
     let has_test_result = stdout.lines().any(|l| l.starts_with("test result:"));
     let has_compile_error = stderr.lines().any(|l| {
         let t = l.trim_start();
@@ -324,12 +324,12 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
     let lines: Vec<&str> = stdout.lines().collect();
     let parsed = parse_test_output(&lines);
 
-    // All passed — compact summary.
+    // All passed - compact summary.
     if parsed.failures.is_empty() && parsed.suites > 0 {
         return format_test_summary(&parsed);
     }
 
-    // Parser found no failures but stdout has FAILED lines — fall back to raw.
+    // Parser found no failures but stdout has FAILED lines - fall back to raw.
     if parsed.failures.is_empty() {
         let has_failed = stdout.lines().any(|l| l.contains("FAILED"));
         if has_failed {
@@ -347,7 +347,7 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         }
     }
 
-    // Failures present — format as one-liners.
+    // Failures present - format as one-liners.
     format_test_failures(&parsed)
 }
 
@@ -538,7 +538,7 @@ fn extract_detail(block: &[String]) -> Option<String> {
                 found = Some(rest.to_string());
             }
         } else if expected.is_some() && found.is_none() {
-            // Continuation line under `= note:` — often the `found` part.
+            // Continuation line under `= note:` - often the `found` part.
             let trimmed = line.trim();
             if trimmed.starts_with("found") {
                 found = Some(trimmed.to_string());
@@ -558,7 +558,7 @@ fn extract_detail(block: &[String]) -> Option<String> {
 /// → `"error[E0425] src/foo.rs:10:5 cannot find value ..."`
 ///
 /// When the block contains "expected/found" detail, it is appended:
-/// `"error[E0308] src/foo.rs:20:5 mismatched types — expected `i32`, found `&str`"`
+/// `"error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"`
 fn format_diagnostic(block: &[String]) -> String {
     let (mut prefix, message) = parse_header(&block[0]);
     // If the header didn't carry a [rule], try to recover one from a
@@ -579,7 +579,7 @@ fn format_diagnostic(block: &[String]) -> String {
     };
 
     match detail {
-        Some(d) => format!("{base} — {d}"),
+        Some(d) => format!("{base} - {d}"),
         None => base,
     }
 }
@@ -651,7 +651,7 @@ error: aborting due to 1 previous error
         assert!(result.starts_with("cargo clippy: 1 errors, 1 warnings"), "got: {result}");
         // Error line: one-liner with code, location, message, and type detail.
         assert!(
-            result.contains("error[E0308] src/foo.rs:20:5 mismatched types — expected `i32`, found `&str`"),
+            result.contains("error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"),
             "got: {result}"
         );
         // Warning line: one-liner with rule, location, message.
@@ -705,7 +705,7 @@ warning: this could be simplified [clippy::needless_return]
 ";
         let result = filter_clippy(output);
         assert!(result.contains("0 errors, 4 warnings"), "got: {result}");
-        // Each warning is its own line — no grouping.
+        // Each warning is its own line - no grouping.
         assert_eq!(result.matches("warning[unused_variables]").count(), 3, "got: {result}");
         assert!(result.contains("warning[clippy::needless_return]"), "got: {result}");
     }
@@ -741,7 +741,7 @@ error: aborting due to 1 previous error
         let result = filter_clippy(output);
         // The inline expected/found line should be captured.
         assert!(
-            result.contains("— expected `RenumberStats`, found `GetparentsStats`"),
+            result.contains("- expected `RenumberStats`, found `GetparentsStats`"),
             "got: {result}"
         );
     }
@@ -793,7 +793,7 @@ error: aborting due to 1 previous error
 ";
         let result = filter_clippy(output);
         assert!(
-            result.contains("— expected reference `&Vec<u8>`, found reference `&Vec<i32>`"),
+            result.contains("- expected reference `&Vec<u8>`, found reference `&Vec<i32>`"),
             "got: {result}"
         );
     }

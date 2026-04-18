@@ -1,4 +1,4 @@
-//! Verify: extract — pbfhogg extract vs osmium extract for each strategy.
+//! Verify: extract - pbfhogg extract vs osmium extract for each strategy.
 
 use std::path::Path;
 
@@ -30,7 +30,7 @@ pub fn run(
         match *strategy {
             "simple" => pbfhogg_args.push("--simple"),
             "smart" => pbfhogg_args.push("--smart"),
-            // "complete" is the default — no extra flag needed.
+            // "complete" is the default - no extra flag needed.
             _ => {}
         }
         if direct_io {

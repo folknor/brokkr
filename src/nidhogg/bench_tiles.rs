@@ -48,7 +48,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Check whether a stderr line indicates the server is ready.
 ///
-/// Matches case-insensitively on "listening" — this is more resilient than
+/// Matches case-insensitively on "listening" - this is more resilient than
 /// matching the exact phrase "Listening on" which could change across nidhogg
 /// versions.
 fn is_ready_line(line: &str) -> bool {
@@ -319,7 +319,7 @@ fn spawn_server(
 }
 
 /// Fire a single tile GET request. Non-fatal on HTTP errors (tile misses
-/// are valid — the server counts them in tile_misses).
+/// are valid - the server counts them in tile_misses).
 fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     let url = super::client::tile_url(port, z, x, y);
 

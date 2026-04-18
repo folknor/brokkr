@@ -5,20 +5,20 @@
 //! different execution patterns: Api does HTTP against a running server,
 //! Ingest runs an external binary with per-run scratch cleanup, and Tiles
 //! manages a full server lifecycle.  The enum captures identity, capabilities,
-//! and metadata — dispatch handles execution.
+//! and metadata - dispatch handles execution.
 
 use crate::db::KvPair;
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
-// NidhoggCommand — the unified command enum
+// NidhoggCommand - the unified command enum
 // ---------------------------------------------------------------------------
 
 /// Every measurable nidhogg command.
 ///
-/// - `Api` — queries a running nidhogg server via HTTP (no build needed).
-/// - `Ingest` — builds nidhogg, runs `nidhogg ingest <pbf> <output_dir>`.
-/// - `Tiles` — builds nidhogg, manages server lifecycle (start → requests → stop).
+/// - `Api` - queries a running nidhogg server via HTTP (no build needed).
+/// - `Ingest` - builds nidhogg, runs `nidhogg ingest <pbf> <output_dir>`.
+/// - `Tiles` - builds nidhogg, manages server lifecycle (start → requests → stop).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NidhoggCommand {
     /// API query benchmark: fires spatial queries at a running server.
@@ -50,7 +50,7 @@ impl NidhoggCommand {
 
     /// Whether this command supports hotpath profiling.
     ///
-    /// Only Ingest supports hotpath — the current hotpath implementation
+    /// Only Ingest supports hotpath - the current hotpath implementation
     /// always runs `nidhogg ingest` with hotpath features enabled.
     /// Api talks to a running server (no binary instrumentation) and
     /// Tiles manages a server lifecycle (hotpath not wired).
@@ -71,7 +71,7 @@ impl NidhoggCommand {
         }
     }
 
-    /// The result command label for the DB — the bare subcommand id. The
+    /// The result command label for the DB - the bare subcommand id. The
     /// measurement mode (`bench`/`hotpath`/`alloc`) is recorded in the
     /// `variant` column.
     pub fn result_command(&self) -> &'static str {
@@ -93,7 +93,7 @@ impl NidhoggCommand {
 
     /// Whether this command needs a binary build before execution.
     ///
-    /// Api talks to an already-running server via HTTP — no build needed.
+    /// Api talks to an already-running server via HTTP - no build needed.
     /// Ingest and Tiles both need the nidhogg binary.
     pub fn needs_build(&self) -> bool {
         match self {
@@ -115,7 +115,7 @@ impl NidhoggCommand {
 
     /// Build the argument vector for commands that run an external binary.
     ///
-    /// Only Ingest supports this — Api/Tiles have custom lifecycles.
+    /// Only Ingest supports this - Api/Tiles have custom lifecycles.
     /// `pbf_str` is the resolved PBF path, `output_dir` is the scratch
     /// output directory for ingested data.
     pub fn build_args(&self, pbf_str: &str, output_dir: &str) -> Result<Vec<String>, DevError> {

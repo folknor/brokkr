@@ -1,4 +1,4 @@
-//! Verify: apply-changes — 4-tool comparison: pbfhogg, osmium, osmosis, osmconvert.
+//! Verify: apply-changes - 4-tool comparison: pbfhogg, osmium, osmosis, osmconvert.
 
 use std::path::Path;
 use std::process::{Command, Stdio};

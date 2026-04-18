@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn version_from_no_digit_word() {
-        // No word starts with a digit — should fall back to "unknown".
+        // No word starts with a digit - should fall back to "unknown".
         let stdout = b"some tool running fine";
         assert_eq!(extract_version_from_stdout(stdout), "unknown");
     }

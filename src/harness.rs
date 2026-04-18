@@ -69,12 +69,12 @@ pub struct BenchHarness {
     brokkr_args: Option<String>,
     /// Measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`). Set
     /// once per harness via `with_measure_mode`. Overrides
-    /// `BenchConfig.variant` when set — individual bench writers only
+    /// `BenchConfig.variant` when set - individual bench writers only
     /// need to set `variant` when they mean to override (they almost
     /// never do post-v13).
     measure_mode: Option<String>,
     /// Env var snapshot captured at `with_request` time. Merged into
-    /// every row's kv via `build_row` as `env.<NAME>` entries — lets
+    /// every row's kv via `build_row` as `env.<NAME>` entries - lets
     /// env-gated code paths (A/B feature flags set from the shell) be
     /// distinguished across result rows.
     env_kv: Vec<crate::db::KvPair>,
@@ -135,10 +135,10 @@ impl BenchHarness {
 
         if !git.is_clean {
             if force {
-                output::warn("dirty tree — results will NOT be stored in database");
+                output::warn("dirty tree - results will NOT be stored in database");
             } else {
                 return Err(DevError::Preflight(vec![
-                    "dirty tree — commit or stash changes before benchmarking".into(),
+                    "dirty tree - commit or stash changes before benchmarking".into(),
                     "run with --force to bench anyway (results will not be stored)".into(),
                 ]));
             }
@@ -295,7 +295,7 @@ impl BenchHarness {
             };
             let ms = elapsed_to_ms(&captured.elapsed);
 
-            // Always collect sidecar data — especially valuable when the
+            // Always collect sidecar data - especially valuable when the
             // child is OOM-killed, since the /proc trajectory shows what
             // happened before the kill.
             sidecar_runs.push(result.data);
@@ -311,7 +311,7 @@ impl BenchHarness {
             }
 
             // When the child was killed by a --stop marker, the exit status
-            // is SIGKILL — not a real failure.
+            // is SIGKILL - not a real failure.
             if !stopped {
                 let exit_err = captured.check_success_or(&prog_str, ok_codes).err();
                 if let Some(e) = exit_err {
@@ -405,7 +405,7 @@ impl BenchHarness {
         Ok(best)
     }
 
-    /// Like `run_external_with_kv` but does NOT record — returns the best
+    /// Like `run_external_with_kv` but does NOT record - returns the best
     /// result and the raw stderr from the best run. Caller is responsible for
     /// calling `record_result` after any post-processing.
     pub fn run_external_with_kv_raw(
@@ -634,7 +634,7 @@ impl BenchHarness {
 
         // Harness-level values take precedence. The individual writers
         // don't have to know or care about the measurement mode or the
-        // brokkr invocation string — the harness attaches them.
+        // brokkr invocation string - the harness attaches them.
         let mode = self
             .measure_mode
             .clone()
@@ -763,7 +763,7 @@ fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;
     }
-    // Killed by signal — use shell convention (128 + signum).
+    // Killed by signal - use shell convention (128 + signum).
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -795,7 +795,7 @@ pub fn format_cli_args(program: &str, args: &[&str]) -> String {
 
 /// Run a closure for each variant, collecting failures instead of aborting.
 ///
-/// Each variant runs independently — failure of one does not skip the rest.
+/// Each variant runs independently - failure of one does not skip the rest.
 /// On completion, returns `Ok(())` if all succeeded, or a summary error
 /// listing which variants failed and why.
 ///
@@ -1368,7 +1368,7 @@ mod tests {
 
     #[test]
     fn parse_kv_stderr_empty_value_treated_as_string() {
-        // "tag=" has empty value — not parseable as i64 or f64, so becomes a string
+        // "tag=" has empty value - not parseable as i64 or f64, so becomes a string
         let stderr = b"elapsed_ms=100\ntag=\n";
         let result = parse_kv_stderr(stderr).unwrap();
         let find = |k: &str| result.kv.iter().find(|p| p.key == k).unwrap();
@@ -1676,7 +1676,7 @@ mod tests {
         assert!(base.exists());
         let good_size = std::fs::metadata(&base).unwrap().len();
 
-        // Attempt backup from a non-SQLite source — should fail.
+        // Attempt backup from a non-SQLite source - should fail.
         let bad_source = dir.join("not-a-database.db");
         std::fs::write(&bad_source, b"this is not sqlite").unwrap();
 

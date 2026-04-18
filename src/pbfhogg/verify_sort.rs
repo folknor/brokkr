@@ -1,4 +1,4 @@
-//! Verify: sort — pbfhogg sort vs osmium sort.
+//! Verify: sort - pbfhogg sort vs osmium sort.
 
 use std::path::Path;
 

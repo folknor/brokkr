@@ -44,7 +44,7 @@ pub(crate) fn bootstrap_config(
 }
 
 // ---------------------------------------------------------------------------
-// HarnessContext — shared bootstrap for no-build command handlers
+// HarnessContext - shared bootstrap for no-build command handlers
 // ---------------------------------------------------------------------------
 
 /// Lighter context for commands that need a harness but don't build a binary
@@ -110,7 +110,7 @@ impl HarnessContext {
 }
 
 // ---------------------------------------------------------------------------
-// BenchContext — shared bootstrap for benchmark command handlers
+// BenchContext - shared bootstrap for benchmark command handlers
 // ---------------------------------------------------------------------------
 
 pub(crate) struct BenchContext {

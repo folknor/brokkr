@@ -2,7 +2,7 @@
 //!
 //! Each variant of [`ElivagarCommand`] captures the identity, options, build
 //! requirements, measurement capabilities, and metadata for one measurable
-//! command. This is the single source of truth — bench, hotpath, profile, and
+//! command. This is the single source of truth - bench, hotpath, profile, and
 //! the `brokkr run` surface all derive their behaviour from these definitions.
 
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use crate::error::DevError;
 use super::PipelineOpts;
 
 // ---------------------------------------------------------------------------
-// BuildKind — how to build a command
+// BuildKind - how to build a command
 // ---------------------------------------------------------------------------
 
 /// Describes how to build the binary for an elivagar command.
@@ -27,7 +27,7 @@ pub enum BuildKind {
 }
 
 // ---------------------------------------------------------------------------
-// ElivagarCommand — the unified command enum
+// ElivagarCommand - the unified command enum
 // ---------------------------------------------------------------------------
 
 /// All elivagar measurable commands.
@@ -180,7 +180,7 @@ impl<'a> ElivagarCommand<'a> {
         matches!(self, Self::Tilegen { .. })
     }
 
-    /// The DB command label for result storage — the bare subcommand id.
+    /// The DB command label for result storage - the bare subcommand id.
     /// The measurement mode (`bench`/`hotpath`/`alloc`) is recorded in the
     /// `variant` column.
     pub fn result_command(&self) -> &'static str {
@@ -257,7 +257,7 @@ impl<'a> ElivagarCommand<'a> {
                 "1".into(),
             ]),
             Self::Planetiler | Self::Tilemaker => Err(DevError::Config(format!(
-                "build_args called on external command '{}' — external tools have their own arg construction",
+                "build_args called on external command '{}' - external tools have their own arg construction",
                 self.id()
             ))),
         }

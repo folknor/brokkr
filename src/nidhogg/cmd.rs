@@ -65,7 +65,7 @@ pub(crate) fn serve(
 
     if data_dir_str.is_none() && tiles_str.is_none() {
         return Err(DevError::Config(format!(
-            "dataset '{dataset}' has neither data_dir nor pmtiles configured — \
+            "dataset '{dataset}' has neither data_dir nor pmtiles configured - \
              nothing to serve"
         )));
     }

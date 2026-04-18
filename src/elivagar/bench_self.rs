@@ -76,7 +76,7 @@ pub fn run(
 
     // All the pipeline tuning options (skip_to, compression_level, opts
     // flags like --no-ocean, --force-sorted, etc.) are in cli_args and
-    // brokkr_args — no need to mirror them here. Metadata is empty;
+    // brokkr_args - no need to mirror them here. Metadata is empty;
     // locations_on_ways_detected is attached below from stderr.
     let metadata: Vec<KvPair> = Vec::new();
 

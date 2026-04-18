@@ -1,4 +1,4 @@
-//! Verify: all — run all verify commands sequentially.
+//! Verify: all - run all verify commands sequentially.
 
 use std::path::Path;
 use std::time::Instant;
@@ -12,7 +12,7 @@ use super::{
 use crate::error::DevError;
 use crate::output::verify_msg;
 
-/// Elapsed milliseconds as u64 (truncation is safe — verify commands won't run for 584M years).
+/// Elapsed milliseconds as u64 (truncation is safe - verify commands won't run for 584M years).
 #[allow(clippy::cast_possible_truncation)]
 fn elapsed_ms(t: &Instant) -> u64 {
     t.elapsed().as_millis() as u64
@@ -131,7 +131,7 @@ pub fn run(
     // 8. apply-changes
     verify_msg("========== apply-changes ==========");
     if let Some(osc_path) = osc {
-        // Best-effort osmosis setup — merge works without it.
+        // Best-effort osmosis setup - merge works without it.
         let osmosis = match crate::tools::ensure_osmosis(data_dir, project_root) {
             Ok(tools) => Some(tools),
             Err(e) => {

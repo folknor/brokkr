@@ -1,4 +1,4 @@
-//! Verify: check --refs — pbfhogg check --refs vs osmium check-refs.
+//! Verify: check --refs - pbfhogg check --refs vs osmium check-refs.
 //!
 //! The two tools use different output formats, so we parse the missing-reference
 //! counts structurally rather than comparing raw text. Known semantic differences:
@@ -28,7 +28,7 @@ struct CheckRefCounts {
     /// Missing way members in relations.
     ways_in_relations: Option<u64>,
     /// Missing relation member references (occurrences). pbfhogg outputs
-    /// "N (M references)" — we extract M. osmium outputs M directly.
+    /// "N (M references)" - we extract M. osmium outputs M directly.
     relations_in_relations: Option<u64>,
     /// Whether the output indicates all checks passed with no issues.
     integrity_ok: bool,

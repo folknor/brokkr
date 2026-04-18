@@ -2,7 +2,7 @@
 //!
 //! Replaces the separate `BenchRequest` / `HotpathRequest` / `ProfileRequest`
 //! structs with a single `MeasureRequest` carrying a `MeasureMode`.  Also
-//! defines `CommandContext` — the resolved runtime context that a command's
+//! defines `CommandContext` - the resolved runtime context that a command's
 //! arg-builder needs to produce its argument vector.
 
 use std::path::{Path, PathBuf};

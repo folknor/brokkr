@@ -52,7 +52,7 @@ const SUITE_EXTRACT_BBOX: &str = "12.4,55.6,12.7,55.8";
 
 /// Map a suite preset string to a fully-specified `PbfhoggCommand` variant.
 ///
-/// This is the single place where preset names are interpreted — once we
+/// This is the single place where preset names are interpreted - once we
 /// have a `PbfhoggCommand`, argv, metadata, input/output kind, and result
 /// labels all come from the enum itself.
 fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {

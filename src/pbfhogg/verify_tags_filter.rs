@@ -1,4 +1,4 @@
-//! Verify: tags-filter — pbfhogg tags-filter vs osmium tags-filter.
+//! Verify: tags-filter - pbfhogg tags-filter vs osmium tags-filter.
 
 use std::path::Path;
 

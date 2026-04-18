@@ -117,7 +117,7 @@ pub struct RunRow {
     pub commit: String,
     pub subject: String,
     pub command: String,
-    /// Measurement mode — exactly one of `"bench"`, `"hotpath"`, or
+    /// Measurement mode - exactly one of `"bench"`, `"hotpath"`, or
     /// `"alloc"`. `None` only occurs for pre-v13 rows that haven't had
     /// a mode assigned yet (should not exist in practice after the
     /// v12→v13 migration). Was previously called `variant`.
@@ -144,7 +144,7 @@ pub struct RunRow {
 /// A row read back from the database.
 ///
 /// Nullable columns (`variant`, `input_file`, `cargo_features`, etc.) are
-/// mapped to `String` via `unwrap_or_default()` — `NULL` becomes `""`.
+/// mapped to `String` via `unwrap_or_default()` - `NULL` becomes `""`.
 /// This is intentional: all consumers use `.is_empty()` checks, so the
 /// distinction between NULL and empty string is not needed.
 #[allow(dead_code)]
@@ -155,7 +155,7 @@ pub struct StoredRow {
     pub commit: String,
     pub subject: String,
     pub command: String,
-    /// Measurement mode — `"bench"`, `"hotpath"`, or `"alloc"`. Empty
+    /// Measurement mode - `"bench"`, `"hotpath"`, or `"alloc"`. Empty
     /// string for (very old) pre-v13 rows that predate the shape.
     /// Was previously called `variant`.
     pub mode: String,
@@ -165,7 +165,7 @@ pub struct StoredRow {
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: String,
     /// `None` for legacy rows whose `cargo_profile` column is `NULL` or
-    /// empty — formatters skip the cargo field entirely rather than
+    /// empty - formatters skip the cargo field entirely rather than
     /// inventing a `release` value.
     pub cargo_profile: Option<CargoProfile>,
     pub kernel: String,
@@ -194,7 +194,7 @@ impl StoredRow {
     /// keys unchanged).
     ///
     /// Joined with `\x1f` (ASCII unit separator) rather than `,` because
-    /// env values legitimately contain commas — `MALLOC_CONF` is
+    /// env values legitimately contain commas - `MALLOC_CONF` is
     /// comma-delimited by glibc convention (e.g.
     /// `dirty_decay_ms:0,narenas:1`). A comma joiner would make two
     /// one-var rows with `MALLOC_CONF=a,b=1` indistinguishable from one
@@ -218,7 +218,7 @@ impl StoredRow {
 pub struct QueryFilter {
     pub commit: Option<String>,
     pub command: Option<String>,
-    /// Substring match against the `mode` column (post-v13 — only
+    /// Substring match against the `mode` column (post-v13 - only
     /// `"bench"`/`"hotpath"`/`"alloc"`). Was previously called `variant`.
     pub mode: Option<String>,
     /// Substring match against the `input_file` column. Useful for filtering
@@ -238,7 +238,7 @@ pub struct QueryFilter {
     /// env var name without the `env.` prefix (e.g. `("PBFHOGG_USE_NEW_PATH",
     /// "1")` matches rows where the captured var equals `"1"`). Multiple
     /// filters AND together; rows missing the key are excluded (no
-    /// missing-as-0 coercion — set the baseline explicitly).
+    /// missing-as-0 coercion - set the baseline explicitly).
     pub env: Vec<(String, String)>,
     pub limit: usize,
 }
@@ -352,7 +352,7 @@ mod tests {
     fn env_fingerprint_disambiguates_comma_in_value() {
         // Regression: the fingerprint used to join with ',' so a single
         // var whose value contains ',' was indistinguishable from two
-        // vars. `MALLOC_CONF` is literally the motivating example —
+        // vars. `MALLOC_CONF` is literally the motivating example -
         // glibc accepts `dirty_decay_ms:0,narenas:1` syntax.
         let row_one_comma_value =
             stored_row_with_env(&[("MALLOC_CONF", "dirty_decay_ms:0,narenas:1")]);

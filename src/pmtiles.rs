@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn tile_id_to_zxy_z1() {
-        // z1 tile IDs 1–4, base=1
+        // z1 tile IDs 1-4, base=1
         assert_eq!(tile_id_to_zxy(1), (1, 0, 0));
         assert_eq!(tile_id_to_zxy(2), (1, 0, 1));
         assert_eq!(tile_id_to_zxy(3), (1, 1, 1));

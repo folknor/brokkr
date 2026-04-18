@@ -20,7 +20,7 @@ use crate::resolve::{self, resolve_bbox};
 /// - extra CLI args to append to the binary invocation
 ///
 /// The chosen I/O flags end up in the subprocess arg string (cli_args) via
-/// the caller, so no separate variant-suffix is needed — the result DB's
+/// the caller, so no separate variant-suffix is needed - the result DB's
 /// variant column only carries the measurement mode after v13.
 fn resolve_io_flags(
     command: &PbfhoggCommand,
@@ -102,7 +102,7 @@ fn run_pbfhogg_dry_run(
     let (_io_features, io_args) = resolve_io_flags(command, extra_params)?;
 
     // Resolve paths without building. bootstrap() reads cargo metadata for
-    // target_dir — cheap, doesn't trigger a compile.
+    // target_dir - cheap, doesn't trigger a compile.
     let pi = crate::context::bootstrap(req.build_root)?;
     let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
 
@@ -264,7 +264,7 @@ fn run_pbfhogg_wallclock(
 ///
 /// Shared by `run_pbfhogg_wallclock` (individual `brokkr <cmd>` invocations)
 /// and the suite runner in `pbfhogg::bench_commands`. Both paths produce
-/// identical DB rows — argv construction, BenchConfig fields, and scratch
+/// identical DB rows - argv construction, BenchConfig fields, and scratch
 /// cleanup are all centralised here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wallclock_core(
@@ -372,7 +372,7 @@ fn run_pbfhogg_hotpath(
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
 
-    // Read input file size from the resolved PBF in cmd_ctx — correct for both
+    // Read input file size from the resolved PBF in cmd_ctx - correct for both
     // legacy commands and DiffSnapshots (which resolves a snapshot's PBF).
     let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
     let risk = if alloc {
@@ -592,7 +592,7 @@ fn resolve_merged_pbf(
     if req.dry_run {
         // Synthesize the would-be merged path from the same key format
         // `ensure_merged_pbf` uses, without running apply-changes. The
-        // existence of the cache file is irrelevant to dry-run — we just
+        // existence of the cache file is irrelevant to dry-run - we just
         // need a populated `pbf_b_path` so `build_args` can reference it.
         let stem = pbf_path
             .file_stem()
@@ -629,7 +629,7 @@ fn resolve_merged_pbf(
 }
 
 /// Build the `CommandContext` for `DiffSnapshots`. Resolves both PBF paths
-/// via the snapshot resolver — `pbf_path` is the `--from` side, `pbf_b_path`
+/// via the snapshot resolver - `pbf_path` is the `--from` side, `pbf_b_path`
 /// is the `--to` side. The `--variant` is applied symmetrically to both.
 fn build_diff_snapshots_context(
     req: &MeasureRequest,
@@ -734,7 +734,7 @@ enum MergedCacheState {
 /// The cache key includes the snapshot key AND the OSC seq so neither
 /// `--snapshot` nor `--osc-seq` invocations can silently reuse each other's
 /// merged files. If `force_rebuild` is set, any existing cached file is
-/// deleted before checking — used by measured modes (bench/hotpath/alloc) to
+/// deleted before checking - used by measured modes (bench/hotpath/alloc) to
 /// make total invocation wall time deterministic regardless of prior session
 /// state.
 #[allow(clippy::too_many_arguments)]

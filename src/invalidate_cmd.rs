@@ -1,4 +1,4 @@
-//! Implementation of the `invalidate` command — hard-delete benchmark results
+//! Implementation of the `invalidate` command - hard-delete benchmark results
 //! and their sidecar profile data by UUID prefix or commit prefix.
 //!
 //! Dry-run by default: previews which UUIDs would go, then requires `-f` to
@@ -35,7 +35,7 @@ pub(crate) fn cmd_invalidate(
     };
 
     if rdb.is_none() && sdb.is_none() {
-        output::result_msg("no results.db or sidecar.db found — nothing to invalidate");
+        output::result_msg("no results.db or sidecar.db found - nothing to invalidate");
         return Ok(());
     }
 
@@ -65,7 +65,7 @@ pub(crate) fn cmd_invalidate(
     preview(&target_list, rdb.as_ref(), sdb.as_ref(), &descriptor);
 
     if !force {
-        output::result_msg("dry-run — re-run with -f / --force to delete");
+        output::result_msg("dry-run - re-run with -f / --force to delete");
         return Ok(());
     }
 

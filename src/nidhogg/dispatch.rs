@@ -31,7 +31,7 @@ pub(crate) fn run_command(
     match req.mode {
         MeasureMode::Run => match command {
             NidhoggCommand::Ingest => run_nidhogg_ingest_run(req),
-            // Api/Tiles have no lightweight run mode — fall through to bench.
+            // Api/Tiles have no lightweight run mode - fall through to bench.
             NidhoggCommand::Api { query } => nidhogg::cmd::bench_api(req, query.as_deref()),
             NidhoggCommand::Tiles { tiles_variant, uring } => {
                 nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring)
@@ -203,7 +203,7 @@ fn run_nidhogg_hotpath(
 
     output::hotpath_msg(&format!("=== nidhogg {} {feature} ===", command.id()));
     if alloc {
-        output::hotpath_msg("NOTE: alloc profiling — wall-clock times are not meaningful");
+        output::hotpath_msg("NOTE: alloc profiling - wall-clock times are not meaningful");
     }
 
     let hotpath_features = req.hotpath_features();

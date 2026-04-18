@@ -86,7 +86,7 @@ pub struct TestSummaryEvent {
 ///
 /// Each line is a JSON object from cargo. Only lines with
 /// `"reason": "compiler-message"` are extracted; everything else is skipped.
-#[allow(clippy::too_many_lines)] // JSON walk — splitting just shuffles match arms
+#[allow(clippy::too_many_lines)] // JSON walk - splitting just shuffles match arms
 pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEvent> {
     let mut events = Vec::new();
 

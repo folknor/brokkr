@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use crate::error::DevError;
 
-/// Mutable lock-file state — maintained while brokkr holds the lock so
+/// Mutable lock-file state - maintained while brokkr holds the lock so
 /// `brokkr lock` (from another invocation) can see the current child PID
 /// and bench-run progress.
 struct LockState {
@@ -49,7 +49,7 @@ impl LockGuard {
     }
 
     /// Record current bench-run progress (1-based run index out of total).
-    /// Skips the update when `total <= 1` — a lone "run 1/1" line in
+    /// Skips the update when `total <= 1` - a lone "run 1/1" line in
     /// `brokkr lock` is noise.
     pub fn set_progress(&self, run: u32, total: u32) {
         if total <= 1 {
@@ -109,7 +109,7 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     match try_flock(fd) {
         Ok(()) => {
             // SAFETY: `fd` is a valid open file descriptor returned by `open_lock_file`,
-            // and we take unique ownership here — it is not used elsewhere.
+            // and we take unique ownership here - it is not used elsewhere.
             let owned = unsafe { OwnedFd::from_raw_fd(fd) };
             let state = build_state(ctx);
             rewrite_from_state(owned.as_raw_fd(), &state);
@@ -119,8 +119,8 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
             })
         }
         Err(held_by) => {
-            // flock failed — close the fd before returning the error.
-            // SAFETY: same as above — valid fd, unique ownership.
+            // flock failed - close the fd before returning the error.
+            // SAFETY: same as above - valid fd, unique ownership.
             let _close = unsafe { OwnedFd::from_raw_fd(fd) };
             Err(held_by)
         }
@@ -148,7 +148,7 @@ pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
                         .map(|u| format!(", running {u}"))
                         .unwrap_or_default();
                     format!(
-                        "PID {} — {} {} ({}{})",
+                        "PID {} - {} {} ({}{})",
                         i.pid, i.project, i.command, i.project_root, uptime
                     )
                 }
@@ -204,7 +204,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
     let c_path = path_to_cstring(&path)?;
     let fd = open_lock_file(&c_path)?;
 
-    // Try to acquire — if we succeed, no one holds it.
+    // Try to acquire - if we succeed, no one holds it.
     let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
 
     if ret == 0 {
@@ -220,7 +220,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
     let _close = unsafe { OwnedFd::from_raw_fd(fd) };
 
     let Some(info) = info else {
-        // Could not parse — report as unknown holder.
+        // Could not parse - report as unknown holder.
         return Ok(Some(LockInfo {
             pid: 0,
             project: "unknown".into(),
@@ -234,7 +234,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
 
     // Check if the PID is still alive.
     if info.pid > 0 && !pid_alive(info.pid) {
-        // Stale lock — the holder crashed. Remove the file so the next
+        // Stale lock - the holder crashed. Remove the file so the next
         // flock attempt can succeed (the dead process's flock is already
         // released by the kernel, but removing the file is cleaner).
         std::fs::remove_file(&path).ok();
@@ -424,7 +424,7 @@ fn try_flock(fd: RawFd) -> Result<(), DevError> {
                     .map(|u| format!(", running {u}"))
                     .unwrap_or_default();
                 Err(DevError::Lock(format!(
-                    "already locked by PID {} — {} {} ({}{})\nuse --wait to queue behind the lock",
+                    "already locked by PID {} - {} {} ({}{})\nuse --wait to queue behind the lock",
                     info.pid, info.project, info.command, info.project_root, uptime
                 )))
             }
@@ -528,7 +528,7 @@ fn shell_quote(s: &str) -> String {
 
 /// Read lock file contents and parse the key=value fields.
 fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
-    // Read the full file, not a fixed-size prefix — a long argv could
+    // Read the full file, not a fixed-size prefix - a long argv could
     // otherwise push the trailing lines out of range.
     unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
 

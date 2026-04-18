@@ -69,7 +69,7 @@ pub(super) fn load_children(
     let mut kv = load_kv(conn, row.id)?;
     // Promote `env.*` entries to a first-class `captured_env` field.
     // They're still stored in run_kv (no migration needed), but every
-    // downstream consumer — display, pair-key dedup, filters — treats
+    // downstream consumer - display, pair-key dedup, filters - treats
     // them as a distinct axis instead of anonymous kv.
     let mut captured_env = std::collections::BTreeMap::new();
     kv.retain(|p| {
@@ -126,7 +126,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
                 Ok(p) => p,
                 Err(crate::build::UnknownCargoProfile(raw)) => {
                     crate::output::error(&format!(
-                        "unknown cargo_profile {raw:?} in results DB — \
+                        "unknown cargo_profile {raw:?} in results DB - \
                          treating as 'release' (likely a migration typo)"
                     ));
                     crate::build::CargoProfile::Release
@@ -209,7 +209,7 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         ));
     }
     // Env filters: like meta but keyed under `env.<NAME>`. No missing-as-0
-    // coercion — rows without the key are excluded. Explicit baseline runs
+    // coercion - rows without the key are excluded. Explicit baseline runs
     // (`PBFHOGG_USE_NEW_PATH=0 brokkr ...`) are the intended way to record
     // "off" rather than relying on implicit absence.
     for (key, value) in &filter.env {
@@ -666,7 +666,7 @@ mod tests {
             .unwrap();
         assert_eq!(default_only.len(), 1, "only the default row should match");
 
-        // No filter — all 3 rows.
+        // No filter - all 3 rows.
         let all = db
             .query(&QueryFilter {
                 commit: None,

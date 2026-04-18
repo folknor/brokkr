@@ -305,7 +305,7 @@ fn run_osmpbf_baseline(
         let (_, elapsed_ms, kv) = variant_data.iter().find(|(v, ..)| v == variant).expect("variant exists in variant_data");
 
         let config = BenchConfig {
-            // `baseline-<tool>/<op>` — each external baseline is its own
+            // `baseline-<tool>/<op>` - each external baseline is its own
             // row, distinguished by command. No natural cli/brokkr args
             // discriminator since baselines run different tools entirely.
             command: format!("baseline-{variant}"),

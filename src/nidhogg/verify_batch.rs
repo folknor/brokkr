@@ -63,7 +63,7 @@ pub fn run(port: u16, bbox: &str) -> Result<(), DevError> {
             }
             Some(bc) => {
                 output::error(&format!(
-                    "{ind_name}: count mismatch — batch={bc}, individual={ind_count}"
+                    "{ind_name}: count mismatch - batch={bc}, individual={ind_count}"
                 ));
                 failures += 1;
             }

@@ -1,4 +1,4 @@
-//! Verify: diff — pbfhogg diff vs osmium diff summary comparison.
+//! Verify: diff - pbfhogg diff vs osmium diff summary comparison.
 
 use std::fs;
 use std::path::Path;
@@ -33,7 +33,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
         harness.run_pbfhogg(&["apply-changes", &pbf_str, &osc_str, "-o", &new_pbf_str])?;
     harness.check_exit(&captured, "pbfhogg apply-changes")?;
 
-    // pbfhogg diff — exits non-zero when differences exist, so do NOT check_exit.
+    // pbfhogg diff - exits non-zero when differences exist, so do NOT check_exit.
     verify_msg("--- pbfhogg diff ---");
     let captured = harness.run_pbfhogg(&["diff", "-c", &pbf_str, &new_pbf_str])?;
 
@@ -42,7 +42,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     let pbfhogg_diff = String::from_utf8_lossy(&captured.stdout);
     let pbfhogg_summary = String::from_utf8_lossy(&captured.stderr);
 
-    // osmium diff — exits non-zero when differences exist, so do NOT check_exit.
+    // osmium diff - exits non-zero when differences exist, so do NOT check_exit.
     verify_msg("--- osmium diff ---");
     let captured = harness.run_tool("osmium", &["diff", &pbf_str, &new_pbf_str, "--summary"])?;
 

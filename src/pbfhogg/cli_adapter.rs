@@ -55,7 +55,7 @@ impl Command {
                 dedupe,
                 clean,
             } => {
-                // Parse errors become `None` — clap's value_parser catches
+                // Parse errors become `None` - clap's value_parser catches
                 // most bad input upstream; dispatch will surface anything
                 // that slips through.
                 let tf = type_filter

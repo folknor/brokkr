@@ -141,17 +141,17 @@ fn check_unzip() -> Result<(), DevError> {
 /// Ensure EPSG:4326 ocean shapefiles exist.
 ///
 /// Downloads full-resolution 4326 polygons directly, then reprojects the
-/// simplified 3857 polygons to 4326 via `ogr2ogr`. Idempotent — skips
+/// simplified 3857 polygons to 4326 via `ogr2ogr`. Idempotent - skips
 /// downloads and reprojection if the output shapefiles already exist.
 pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
     tools::check_curl()?;
     check_unzip()?;
     std::fs::create_dir_all(data_dir)?;
 
-    // Full-resolution 4326 — direct download.
+    // Full-resolution 4326 - direct download.
     download_variant(data_dir, &FULL_RES_4326)?;
 
-    // Simplified 4326 — reprojected from 3857 source via ogr2ogr.
+    // Simplified 4326 - reprojected from 3857 source via ogr2ogr.
     let simplified_dir = data_dir.join("simplified-water-polygons-split-4326");
     let simplified = simplified_dir.join("simplified_water_polygons.shp");
 

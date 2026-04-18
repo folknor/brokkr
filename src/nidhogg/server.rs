@@ -144,7 +144,7 @@ fn stop_pid(pid: i32) -> bool {
         }
     }
 
-    // Still alive after 5s — check if the PID was recycled before escalating.
+    // Still alive after 5s - check if the PID was recycled before escalating.
     if !is_nidhogg_process(pid) {
         // PID was recycled to a different process; the original nidhogg exited.
         return true;

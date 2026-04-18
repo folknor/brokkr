@@ -1,4 +1,4 @@
-//! Sidecar profile database — separate from the results DB.
+//! Sidecar profile database - separate from the results DB.
 //!
 //! Sidecar data (samples, markers, summaries) is stored in `.brokkr/sidecar.db`
 //! which is gitignored. The results DB (`.brokkr/results.db`) is tracked in git
@@ -816,7 +816,7 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            // Don't drop db yet — keep writer alive too.
+            // Don't drop db yet - keep writer alive too.
 
             backup_to_path(&src, &dst).unwrap();
         }

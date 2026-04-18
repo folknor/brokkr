@@ -1,6 +1,6 @@
 //! Verify harness: cross-validate pbfhogg output against reference tools.
 //!
-//! Provides [`VerifyHarness`] — a shared context for verify subcommands that
+//! Provides [`VerifyHarness`] - a shared context for verify subcommands that
 //! handles locking, building the CLI binary, and common operations like
 //! running pbfhogg/external tools, diffing PBFs, and checking sort order.
 
@@ -22,7 +22,7 @@ use crate::output::CapturedOutput;
 /// the path to the freshly-built CLI binary, and the output directory
 /// under `target/verify/`.
 pub struct VerifyHarness {
-    /// RAII lock — released on drop.
+    /// RAII lock - released on drop.
     _lock: crate::lockfile::LockGuard,
     /// Path to the built `pbfhogg` release binary.
     pub binary: PathBuf,
@@ -69,7 +69,7 @@ impl VerifyHarness {
 
     /// Run the pbfhogg CLI with the given arguments.
     ///
-    /// Does **not** check the exit status — the caller decides whether
+    /// Does **not** check the exit status - the caller decides whether
     /// non-zero is an error (some commands exit non-zero normally).
     pub fn run_pbfhogg(&self, args: &[&str]) -> Result<CapturedOutput, DevError> {
         output::run_captured(&self.binary.display().to_string(), args, &self.project_root)

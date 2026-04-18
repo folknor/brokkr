@@ -37,7 +37,7 @@ pub enum OutputKind {
     /// Writes a scratch `.osc.gz` file.
     ScratchOsc,
     /// Writes to a scratch directory. The payload is the directory name stem
-    /// (e.g. `"geocode"`) — suffixed with the dataset at resolution time.
+    /// (e.g. `"geocode"`) - suffixed with the dataset at resolution time.
     ScratchDir(&'static str),
     /// No output file (read-only / stdout-only commands).
     None,
@@ -76,7 +76,7 @@ pub enum ExtractStrategy {
     Smart,
 }
 
-/// `cat --type` filter — restrict passthrough to a specific object type.
+/// `cat --type` filter - restrict passthrough to a specific object type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatTypeFilter {
     Way,
@@ -135,7 +135,7 @@ impl ExtractStrategy {
 
 /// Fixed ID set used by both `getid` and `getparents` suite presets. Includes
 /// three IDs of each object type (n/w/r) so the bench shape is reproducible.
-/// Some entries may not exist in very small test datasets — the pbfhogg
+/// Some entries may not exist in very small test datasets - the pbfhogg
 /// binary tolerates missing IDs without erroring.
 const GETID_BENCH_IDS: &[&str] = &[
     "n115722", "n115723", "n115724",
@@ -143,18 +143,18 @@ const GETID_BENCH_IDS: &[&str] = &[
     "r174", "r213", "r339",
 ];
 
-/// Subset of `GETID_BENCH_IDS` used by the `getparents` preset — fewer
+/// Subset of `GETID_BENCH_IDS` used by the `getparents` preset - fewer
 /// ids because getparents is a superset operation and more inputs would
 /// dominate with parent-traversal cost.
 const GETPARENTS_BENCH_IDS: &[&str] = &["n115722", "n115723", "w2080"];
 
 /// Min-count threshold used by the bench version of `inspect tags`. Set
 /// impossibly high so pbfhogg's default tag-frequency filter never trims
-/// anything — we want the full decode cost measured, not just popular tags.
+/// anything - we want the full decode cost measured, not just popular tags.
 const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
 
 // ---------------------------------------------------------------------------
-// PbfhoggCommand — the unified command enum
+// PbfhoggCommand - the unified command enum
 // ---------------------------------------------------------------------------
 
 /// Every measurable pbfhogg command.
@@ -178,12 +178,12 @@ pub enum PbfhoggCommand {
         type_filter: Option<String>,
     },
     CheckRefs,
-    /// `check --ids`. `full` adds `--full` — per-type duplicate-ID detection
+    /// `check --ids`. `full` adds `--full` - per-type duplicate-ID detection
     /// via RoaringTreemap sets, in addition to the streaming monotonicity /
     /// type-order checks.
     CheckIds { full: bool },
     Sort,
-    /// Unified `cat` — all flags orthogonal:
+    /// Unified `cat` - all flags orthogonal:
     ///   - `type_filter` → `--type way|relation` (restricts output to one
     ///     object type; single-pass filter).
     ///   - `dedupe` → `--dedupe` with two PBF inputs (merge-style dedupe,
@@ -196,7 +196,7 @@ pub enum PbfhoggCommand {
         clean: bool,
     },
     /// Unified `tags-filter`. Orthogonal flags:
-    ///   - `filter` — the pbfhogg filter expression (e.g.
+    ///   - `filter` - the pbfhogg filter expression (e.g.
     ///     `w/highway=primary`, `amenity=restaurant`); defaults to
     ///     `w/highway=primary`.
     ///   - `omit_referenced` → `-R` (single-pass, matched objects only;
@@ -232,7 +232,7 @@ pub enum PbfhoggCommand {
     /// Two-snapshot diff: compares two PBFs from different point-in-time
     /// snapshots of the same dataset (e.g. `planet-20260223` vs
     /// `planet-20260411`). Unlike `Diff`, neither side is derived from
-    /// `apply-changes` — both come from independent snapshot resolution.
+    /// `apply-changes` - both come from independent snapshot resolution.
     /// The format flag selects between summary diff and OSC-format diff.
     DiffSnapshots { format: DiffFormat },
 
@@ -354,7 +354,7 @@ impl PbfhoggCommand {
         }
     }
 
-    /// The result command label for the DB — just the subcommand id
+    /// The result command label for the DB - just the subcommand id
     /// (`"add-locations-to-ways"`, `"cat"`, `"diff-snapshots"`, ...). The
     /// measurement mode (`bench`/`hotpath`/`alloc`) lives in the
     /// `variant` column; axes (direct-io, compression, snapshot, …) live
@@ -365,7 +365,7 @@ impl PbfhoggCommand {
 
     /// Build metadata key-value pairs for the result DB.
     ///
-    /// Post-v13, this holds only *runtime observations* — things the
+    /// Post-v13, this holds only *runtime observations* - things the
     /// harness learned that cli_args/brokkr_args can't tell you (e.g. the
     /// Diff merged-PBF cache state observed at dispatch time, the
     /// resolved filename/size for a snapshot key, …). Axis-like fields
@@ -393,7 +393,7 @@ impl PbfhoggCommand {
             }
             Self::DiffSnapshots { .. } => {
                 // The --to snapshot's resolved filename and size are
-                // observations — the user passed a key like `20260411`,
+                // observations - the user passed a key like `20260411`,
                 // the dispatch layer resolved it to an actual file via
                 // brokkr.toml. Record the resolved info so queries can
                 // identify which B-side file was actually consumed.
@@ -416,7 +416,7 @@ impl PbfhoggCommand {
     /// passes the binary separately when spawning). `ArgMode::Hotpath`
     /// prepends the binary path (matching the format expected by
     /// `run_hotpath_capture`) and picks hotpath-prefixed scratch filenames.
-    /// A few commands have small argv differences between modes — those are
+    /// A few commands have small argv differences between modes - those are
     /// called out inline.
     #[allow(clippy::too_many_lines)]
     pub fn build_args(
@@ -503,7 +503,7 @@ impl PbfhoggCommand {
                 if *clean {
                     // pbfhogg's --clean takes an ATTR value
                     // (version|changeset|timestamp|uid|user). For bench purposes
-                    // we just need to force the full-decode / Framed path —
+                    // we just need to force the full-decode / Framed path -
                     // `version` is the lightest-weight strip and always present.
                     args.push("--clean".into());
                     args.push("version".into());

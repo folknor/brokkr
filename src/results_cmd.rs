@@ -1,4 +1,4 @@
-//! Implementation of the `results` command — query the results DB and render
+//! Implementation of the `results` command - query the results DB and render
 //! rows as a compact table (or as a detailed block when a UUID prefix
 //! resolves to a single row).
 
@@ -24,7 +24,7 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
 
 /// Render a detail-style result view. When the result set is exactly
 /// one row, use the new labelled-block layout via
-/// `db::format_single_result` — no compact table header, multi-line
+/// `db::format_single_result` - no compact table header, multi-line
 /// cli_args, brokkr_args surfaced, sidecar hint folded in as a field.
 /// When the result set has multiple rows (a UUID prefix that matched
 /// many), fall back to `format_table` + per-row `format_details`.
@@ -50,7 +50,7 @@ fn render_single_or_multi(
         return;
     }
 
-    // Multi-row result set — keep the compact table + per-row details.
+    // Multi-row result set - keep the compact table + per-row details.
     let table = db::format_table(rows, matcher);
     println!("{table}");
     for row in rows {
@@ -97,11 +97,11 @@ pub(crate) fn cmd_results(
             .unwrap_or_else(|| uuid_prefix.to_owned());
         let rows = results_db.query_by_uuid(&resolved_prefix)?;
         if rows.is_empty() {
-            // No results DB entry — check if sidecar data exists (dirty/failed run).
+            // No results DB entry - check if sidecar data exists (dirty/failed run).
             if let Some(ref sdb) = sidecar_db
                 && sdb.has_data(uuid_prefix)
             {
-                output::result_msg("sidecar-only run (no results DB entry — dirty tree or failed)");
+                output::result_msg("sidecar-only run (no results DB entry - dirty tree or failed)");
                 output::result_msg(&format!(
                     "use `brokkr sidecar {uuid_prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
                 ));

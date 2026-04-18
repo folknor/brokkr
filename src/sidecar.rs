@@ -306,7 +306,7 @@ fn read_proc_status(pid: u32) -> Option<ProcStatus> {
 
 /// Read all /proc metrics for a pid and assemble into a `Sample`.
 ///
-/// All three `/proc` reads must succeed for the sample to be emitted — if
+/// All three `/proc` reads must succeed for the sample to be emitted - if
 /// any fails (usually because the process exited between reads), the
 /// sample is dropped entirely. Earlier versions substituted zeros for a
 /// failed io read, which corrupted phase deltas (the final sample's
@@ -433,8 +433,8 @@ impl SidecarFifo {
     /// Non-blocking: returns immediately if no data is available.
     ///
     /// Protocol:
-    /// - `<timestamp_us> <name>\n` — phase marker
-    /// - `<timestamp_us> @<name>=<value>\n` — counter
+    /// - `<timestamp_us> <name>\n` - phase marker
+    /// - `<timestamp_us> @<name>=<value>\n` - counter
     fn drain(
         &mut self,
         markers: &mut Vec<Marker>,
@@ -558,7 +558,7 @@ fn drain_pipe(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u
 /// otherwise. See the inline comment at the call site for the three
 /// accepted spellings.
 fn stop_match(stop: &str, recent: &[Marker]) -> Option<String> {
-    // `-FOO` → canonical `FOO_END`. No fallback — the sigil is
+    // `-FOO` → canonical `FOO_END`. No fallback - the sigil is
     // explicit, so a mismatch is a mismatch.
     if let Some(suffix) = stop.strip_prefix('-') {
         let canonical = format!("{suffix}_END");
@@ -567,7 +567,7 @@ fn stop_match(stop: &str, recent: &[Marker]) -> Option<String> {
             .find(|m| m.name == canonical)
             .map(|m| m.name.clone());
     }
-    // Verbatim first — preserves existing `--stop FOO_END` semantics.
+    // Verbatim first - preserves existing `--stop FOO_END` semantics.
     if let Some(m) = recent.iter().find(|m| m.name == stop) {
         return Some(m.name.clone());
     }
@@ -600,7 +600,7 @@ pub(crate) fn run_sidecar(
 ) -> SidecarRunResult {
     // Scope the SIGTERM handler to the sidecar window only. Outside this
     // RAII guard's lifetime, `brokkr kill` falls through to the default
-    // terminate action — exactly what the user expects during cargo build
+    // terminate action - exactly what the user expects during cargo build
     // / brokkr check / other non-sidecar work where there's no child to
     // reap and no graceful partial-state to preserve.
     let _shutdown_guard = crate::shutdown::SigtermGuard::install();
@@ -609,7 +609,7 @@ pub(crate) fn run_sidecar(
     // Take stdout/stderr handles from the child and drain them in background
     // threads. This prevents the classic pipe-buffer deadlock: if the child
     // writes >64 KiB to a piped stream, it blocks until someone reads, but
-    // the sidecar loop is waiting for the child to exit — deadlock.
+    // the sidecar loop is waiting for the child to exit - deadlock.
     let stdout_thread = child.stdout.take().map(drain_pipe);
     let stderr_thread = child.stderr.take().map(drain_pipe);
 
@@ -700,7 +700,7 @@ pub(crate) fn run_sidecar(
             break;
         }
 
-        // Check child exit via handle (not bare PID — PIDs can be reused).
+        // Check child exit via handle (not bare PID - PIDs can be reused).
         match child.try_wait() {
             Ok(Some(status)) => {
                 child_elapsed = Some(start.elapsed());
@@ -719,7 +719,7 @@ pub(crate) fn run_sidecar(
         next_tick_ns += interval_ns;
     }
 
-    // Final drain — markers/counters may have arrived between last sample and exit.
+    // Final drain - markers/counters may have arrived between last sample and exit.
     fifo.drain(&mut markers, &mut marker_idx, &mut counters);
 
     // Join pipe drain threads. These complete quickly once the child exits
@@ -737,7 +737,7 @@ pub(crate) fn run_sidecar(
     let exit_status = exit_status.unwrap_or_else(|| {
         child_elapsed = Some(start.elapsed());
         child.wait().unwrap_or_else(|_| {
-            // Process already reaped — synthesize a failure status.
+            // Process already reaped - synthesize a failure status.
             std::process::ExitStatus::default()
         })
     });
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn read_proc_io_tolerates_extra_lines() {
-        // Simulate a /proc/io with an unexpected line — should not crash.
+        // Simulate a /proc/io with an unexpected line - should not crash.
         // We can't easily inject content into /proc, but we verify our own
         // /proc/io parses correctly (which has the standard 7 lines).
         let pid = std::process::id();

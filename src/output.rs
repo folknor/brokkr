@@ -77,7 +77,7 @@ pub fn history_msg(msg: &str) {
 
 pub fn sidecar_msg(msg: &str) {
     if !is_quiet() {
-        // Always stderr — every [sidecar] line is narration (run provenance,
+        // Always stderr - every [sidecar] line is narration (run provenance,
         // "attached to pid X", "showing run N/M"), never the data the caller
         // is asking for. Keeping them off stdout lets `brokkr sidecar …
         // --samples | jq` Just Work.
@@ -251,7 +251,7 @@ pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<Passthrough
         None => {
             let signal = status.signal().unwrap_or(0);
             let signal_name = match signal {
-                9 => " (SIGKILL — possible OOM kill)",
+                9 => " (SIGKILL - possible OOM kill)",
                 15 => " (SIGTERM)",
                 11 => " (SIGSEGV)",
                 _ => "",

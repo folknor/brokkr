@@ -425,7 +425,7 @@ fn format_section_diff(
 
     let mut out = String::new();
 
-    // Header line — prefer A's description, fall back to B's.
+    // Header line - prefer A's description, fall back to B's.
     let desc_a = data_a.first().and_then(|f| f.description.as_deref());
     let desc_b = data_b.first().and_then(|f| f.description.as_deref());
     let description = desc_a.or(desc_b).unwrap_or("");
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn detect_percentile_keys_mixed_across_entries() {
-        // p50 on first entry, p99 on second — both should be detected.
+        // p50 on first entry, p99 on second - both should be detected.
         let funcs = vec![
             make_fn("a", Some("1 ms"), None, None),
             make_fn("b", None, None, Some("3 ms")),

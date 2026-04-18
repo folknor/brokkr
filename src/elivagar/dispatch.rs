@@ -344,7 +344,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
     output::hotpath_msg(&format!("=== {} {feature} ===", command.id()));
     if alloc {
-        output::hotpath_msg("NOTE: alloc profiling — wall-clock times are not meaningful");
+        output::hotpath_msg("NOTE: alloc profiling - wall-clock times are not meaningful");
     }
 
     match command.build_config() {

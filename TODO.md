@@ -6,7 +6,7 @@ The high-impact items have been worked off. What's listed below is
 either speculative, subjective, or low-ROI and has been left
 deliberately.
 
-### Low ROI — not worth doing yet
+### Low ROI - not worth doing yet
 
 #### `--clean` only emits `version` attr (brokkr cat)
 `brokkr cat --clean` hardcodes the emitted attr as `version`. pbfhogg's
@@ -50,7 +50,7 @@ semantic difference, not duplication.
 #### Harness builder methods split across types
 `BenchHarness::with_cargo_features` / `with_brokkr_args` / `with_measure_mode`
 vs `BenchContext::with_request` (which wraps two of them). Different
-abstraction levels — `with_request` is a convenience for `MeasureRequest`
+abstraction levels - `with_request` is a convenience for `MeasureRequest`
 callers; removing it would add boilerplate to every measured-command
 dispatch.
 
@@ -59,17 +59,17 @@ pbfhogg: top-level cmd dispatch + per-bench helpers + verify dispatch.
 elivagar: small per-subcommand fns. nidhogg: mixes both. Each reflects
 that project's feature shape; no clean unification.
 
-### Speculative — wait for the trigger
+### Speculative - wait for the trigger
 
 #### v12→v13 `DELETE FROM run_kv WHERE key IN (…)` list
 30 hardcoded meta key names. The TODO suggested generating from a
-code-level list, but historic migrations are frozen — changing code
+code-level list, but historic migrations are frozen - changing code
 would not affect v12 databases, so the list has to stay literal.
 Future migrations can add their own DELETE statements as needed.
 
 #### Migration tests copy `V3_SCHEMA` verbatim
 If a schema change ever lands that modifies v3-era columns (extremely
-unlikely — v3 is pre-brokkr-v1), the copy would need updating. Not
+unlikely - v3 is pre-brokkr-v1), the copy would need updating. Not
 worth the indirection until that happens.
 
 #### Cumulative migration tests force cascade updates
@@ -98,10 +98,10 @@ user-need report.
 
 **Original design decision (Q3 of the snapshot feature spec)**: explicitly
 went with a single `--variant` flag (default `indexed`), with the reasoning
-"YAGNI on the split flags — no known use case for asymmetric variants, and
+"YAGNI on the split flags - no known use case for asymmetric variants, and
 the error-if-missing behavior on the receiving snapshot is the right default.
 Add `--variant-from` / `--variant-to` later only when a concrete need shows
-up." Today's review (2026-04-11) confirmed that decision still holds — the
+up." Today's review (2026-04-11) confirmed that decision still holds - the
 pbfhogg dev's roadmap doesn't include any workflow that intentionally
 produces asymmetric snapshots.
 
@@ -121,7 +121,7 @@ deliberately wants to diff `--from raw --to indexed` for some reason; a
 third party releasing snapshots in a non-standard variant set.
 
 **If revisited**: the original feature request walkthrough lists the most
-plausible CLI shape — `--variant-from` / `--variant-to` overriding `--variant`
+plausible CLI shape - `--variant-from` / `--variant-to` overriding `--variant`
 on each side independently. But "wait for a real use case to inform the
 shape" was the principled call; the use case might suggest a different shape
 (e.g. `--variants from=X,to=Y`).
@@ -131,7 +131,7 @@ shape" was the principled call; the use case might suggest a different shape
 ## Won't fix
 
 ### Inconsistent path-to-string conversion
-All paths are constructed from known UTF-8 components, so `.display().to_string()` won't corrupt in practice. 100+ occurrences across 30+ files — not worth the churn.
+All paths are constructed from known UTF-8 components, so `.display().to_string()` won't corrupt in practice. 100+ occurrences across 30+ files - not worth the churn.
 
 ### Hand-rolled UUID via `/dev/urandom`
 10 correct lines in `src/db.rs`. Not worth adding the `uuid` crate as a dependency.
@@ -144,11 +144,11 @@ Functions genuinely need many parameters. `BenchContext` and `HarnessContext` co
 string once at startup. Removing the leak requires dropping the `Copy`
 derive on `Project` (or switching to a `'static` interner), both of
 which cascade through every `fn foo(project: Project)` signature for
-no runtime benefit — `Project` is constructed exactly once per process.
+no runtime benefit - `Project` is constructed exactly once per process.
 
 ### Suite without `--bench` stores results in DB
 `brokkr suite pbfhogg` (no `--bench`) calls `bench_all` which stores
-results. Suite is inherently a benchmarking operation — there's no
+results. Suite is inherently a benchmarking operation - there's no
 meaningful "measure without storing" mode to preserve.
 
 ### `test` and `list` are generic top-level names
@@ -165,7 +165,7 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 `brokkr results --grep X` currently compiles to
 `cli_args LIKE '%X%' OR brokkr_args LIKE '%X%'`. That's SQL substring
-match — no regex, no word boundaries, no inversion, only `%` / `_` as
+match - no regex, no word boundaries, no inversion, only `%` / `_` as
 wildcards. The flag name `--grep` is aspirational.
 
 Upgrade path: register a `REGEXP` scalar function on the rusqlite
@@ -177,7 +177,7 @@ apply-changes"`, etc. Also consider accepting `--grep` multiple times
 `--grep apply-changes --grep zstd:1` works naturally.
 
 Caveats: regex metachars (`.`, `*`, `+`, etc.) in user input become
-significant — `--grep "version 1.0"` would match "version 120". Cache
+significant - `--grep "version 1.0"` would match "version 120". Cache
 the compiled regex to avoid per-row `Regex::new`. Adds a dep on the
 `regex` crate (not currently in the tree).
 
@@ -201,7 +201,7 @@ Currently `find_executable` infers the expected binary name from `BuildConfig.bi
 
 ### `Worktree` has no `Drop` impl
 
-If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper — probably not worth the complexity.
+If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper - probably not worth the complexity.
 
 ### `--mem` systemd-run wrapping
 
@@ -216,10 +216,10 @@ measured command can cap child RSS.
 ## History command enhancements
 
 ### Capture brokkr's own output
-All brokkr output goes through `output::*` helpers (`build_msg`, `bench_msg`, `error`, etc.). Add a tee layer that copies prefixed lines into a global buffer, flushed to a nullable `output TEXT` column at end of invocation. Cap at 64KB. Does NOT cover passthrough subprocess output (`brokkr run`, `brokkr serve`) which uses `Stdio::inherit()` — capturing that would require piped tee threads and changes live output UX. Schema v2 migration alongside `error_tail`.
+All brokkr output goes through `output::*` helpers (`build_msg`, `bench_msg`, `error`, etc.). Add a tee layer that copies prefixed lines into a global buffer, flushed to a nullable `output TEXT` column at end of invocation. Cap at 64KB. Does NOT cover passthrough subprocess output (`brokkr run`, `brokkr serve`) which uses `Stdio::inherit()` - capturing that would require piped tee threads and changes live output UX. Schema v2 migration alongside `error_tail`.
 
 ### Capture stderr tail on failure
-On non-zero exit, capture the last 4KB of stderr into a nullable `error_tail TEXT` column. Requires schema v2 migration. Only stored on failure — success path stays lightweight. The `history <id>` detail view would display it, and `brokkr history --failed` could show a one-line preview.
+On non-zero exit, capture the last 4KB of stderr into a nullable `error_tail TEXT` column. Requires schema v2 migration. Only stored on failure - success path stays lightweight. The `history <id>` detail view would display it, and `brokkr history --failed` could show a one-line preview.
 
 ### `--json` output
 Useful for scripting (jq, dashboards, CI analysis) instead of only human-formatted lines.
@@ -256,7 +256,7 @@ New flags that could warrant additional `bench commands` variants or verify cove
 
 ### elivagar: memory-budget run flags not exposed
 
-`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget` —
+`--sort-budget`, `--way-budget`, `--rel-budget`, `--assemble-budget` -
 tuning knobs that aren't forwarded through `bench self` / `hotpath` /
 `alloc`. Lower priority than the structural flags which are already
 wired (tile-format, tile-compression, compress-sort-chunks, in-memory,

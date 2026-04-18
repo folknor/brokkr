@@ -90,7 +90,7 @@ pub fn run(
     let config = BenchConfig {
         command: command_label.to_owned(),
         // Harness carries the measurement mode (bench/hotpath/alloc) and
-        // the brokkr invocation — no need to set them here.
+        // the brokkr invocation - no need to set them here.
         mode: None,
         input_file: None,
         input_mb: None,

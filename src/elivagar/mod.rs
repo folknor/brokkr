@@ -100,7 +100,7 @@ pub fn detect_ocean(data_dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
 /// from the PBF header (or CLI flag). This is the source of truth for whether
 /// the locations-on-ways code path was actually used.
 pub fn detect_locations_on_ways_stderr(stderr: &[u8]) -> bool {
-    // Fast byte search — avoids UTF-8 conversion.
+    // Fast byte search - avoids UTF-8 conversion.
     stderr
         .windows(b"LocationsOnWays".len())
         .any(|w| w == b"LocationsOnWays")

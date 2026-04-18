@@ -1,4 +1,4 @@
-//! Verify: renumber — `pbfhogg renumber` vs `osmium renumber`.
+//! Verify: renumber - `pbfhogg renumber` vs `osmium renumber`.
 //!
 //! Cross-validates pbfhogg's renumber output against osmium. Unlike the other
 //! verify subcommands, a small number of diffs is expected and treated as a
@@ -276,7 +276,7 @@ pub fn run(
     let inspect_text = String::from_utf8_lossy(&inspect.stdout);
     let total_relations = parse_total_relations(&inspect_text).ok_or_else(|| {
         DevError::Verify(
-            "renumber: could not parse 'Relations:' count from pbfhogg inspect output — \
+            "renumber: could not parse 'Relations:' count from pbfhogg inspect output - \
              has the inspect output format changed? Refusing to run the threshold check \
              with total_relations=0 (would let any relation-only regression PASS)."
                 .into(),
@@ -457,9 +457,9 @@ mod tests {
     #[test]
     fn categorize_blocks_ignores_non_headers() {
         let detail = "*not-a-header\n*n foo\n*nabc\nregular line\n";
-        // "*not-a-header" — type char is 'n', next char is 'o' (not digit) → skipped.
-        // "*n foo" — next char is ' ' → skipped.
-        // "*nabc" — next char is 'a' → skipped.
+        // "*not-a-header" - type char is 'n', next char is 'o' (not digit) → skipped.
+        // "*n foo" - next char is ' ' → skipped.
+        // "*nabc" - next char is 'a' → skipped.
         let c = categorize_blocks(detail);
         assert_eq!(c.nodes, 0);
         assert_eq!(c.ways, 0);

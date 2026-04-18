@@ -444,7 +444,7 @@ pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
     }
 
     // Parse the headers. With `-L`, redirects are followed and we get multiple
-    // header blocks separated by blank lines — we want the LAST one (the final
+    // header blocks separated by blank lines - we want the LAST one (the final
     // resource). Look for `Last-Modified:` case-insensitively.
     let body = String::from_utf8_lossy(&output.stdout);
     let last_modified = body
@@ -468,7 +468,7 @@ pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
 /// seconds. Returns `Err` if the format isn't recognized.
 ///
 /// Only supports the IMF-fixdate format (`"Sun, 06 Nov 1994 08:49:37 GMT"`)
-/// which is the canonical form per RFC 7231 §7.1.1.1 — what every modern
+/// which is the canonical form per RFC 7231 §7.1.1.1 - what every modern
 /// origin server emits. Doesn't support the obsolete RFC 850 or asctime forms.
 fn parse_http_date(s: &str) -> Result<i64, String> {
     // Format: "Day, DD Mon YYYY HH:MM:SS GMT"
@@ -507,7 +507,7 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
         .map_err(|e| format!("second: {e}"))?;
 
     // Convert (Y, M, D) to days since 1970-01-01 using Howard Hinnant's
-    // algorithm — same one used by `pbfhogg::download::days_to_civil` in
+    // algorithm - same one used by `pbfhogg::download::days_to_civil` in
     // reverse.
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -573,7 +573,7 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
         captured.check_success("git")?;
     } else {
         let tilemaker_dir_str = tilemaker_dir.display().to_string();
-        // Tolerate failure — just use what's there.
+        // Tolerate failure - just use what's there.
         drop(output::run_captured(
             "git",
             &["-C", &tilemaker_dir_str, "pull", "--ff-only"],
@@ -596,7 +596,7 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
         && let Ok(cached) = fs::read_to_string(&version_file)
         && cached.trim() == commit
     {
-        // Version matches and binary exists — skip build.
+        // Version matches and binary exists - skip build.
         let shortbread_dir = ensure_shortbread_config(data_dir)?;
         return Ok(TilemakerTools {
             tilemaker: tilemaker_bin,
@@ -666,7 +666,7 @@ fn ensure_shortbread_config(data_dir: &Path) -> Result<PathBuf, DevError> {
         captured.check_success("git")?;
     } else {
         let shortbread_dir_str = shortbread_dir.display().to_string();
-        // Tolerate failure — just use what's there.
+        // Tolerate failure - just use what's there.
         drop(output::run_captured(
             "git",
             &["-C", &shortbread_dir_str, "pull", "--ff-only"],
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn parse_http_date_imf_fixdate() {
-        // Sun, 06 Nov 1994 08:49:37 GMT — the canonical example from RFC 7231.
+        // Sun, 06 Nov 1994 08:49:37 GMT - the canonical example from RFC 7231.
         let unix = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
         assert_eq!(unix, 784111777);
     }

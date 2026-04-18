@@ -1,4 +1,4 @@
-//! Cooperative shutdown — `brokkr kill` asks brokkr to wrap up a running
+//! Cooperative shutdown - `brokkr kill` asks brokkr to wrap up a running
 //! bench cleanly rather than letting the user SIGKILL it and leave scratch
 //! data behind.
 //!
@@ -6,7 +6,7 @@
 //!
 //! 1. `brokkr kill` reads the lockfile and sends `SIGTERM` to the brokkr PID.
 //! 2. A [`SigtermGuard`] is installed for the lifetime of each sidecar run.
-//!    Its handler sets [`SHUTDOWN_REQUESTED`] and nothing else — it must be
+//!    Its handler sets [`SHUTDOWN_REQUESTED`] and nothing else - it must be
 //!    async-signal-safe. Outside the sidecar window, `SIGTERM` falls through
 //!    to the default terminate action: killing brokkr mid-`cargo build` or
 //!    mid-`brokkr check` is what the user wants anyway (no child to reap,

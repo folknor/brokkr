@@ -1,4 +1,4 @@
-//! Verify: cat — pbfhogg cat vs osmium cat for each element type.
+//! Verify: cat - pbfhogg cat vs osmium cat for each element type.
 
 use std::path::Path;
 

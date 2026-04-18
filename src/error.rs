@@ -4,7 +4,7 @@ use std::io;
 
 /// Error type for the dev tool.
 ///
-/// No `Box` wrapping — this is a binary, not a library. Keeping it simple.
+/// No `Box` wrapping - this is a binary, not a library. Keeping it simple.
 #[derive(Debug)]
 pub enum DevError {
     /// An I/O error.

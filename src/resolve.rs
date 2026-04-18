@@ -6,7 +6,7 @@ use crate::error::DevError;
 use crate::preflight;
 
 // ---------------------------------------------------------------------------
-// FileEntry trait — unifies PBF, OSC, and PMTiles entry types
+// FileEntry trait - unifies PBF, OSC, and PMTiles entry types
 // ---------------------------------------------------------------------------
 
 pub(crate) trait FileEntry {
@@ -113,7 +113,7 @@ fn resolve_default_entry_path<E: FileEntry>(
         let mut keys: Vec<&str> = entries.keys().map(String::as_str).collect();
         keys.sort();
         return Err(DevError::Config(format!(
-            "dataset '{dataset}' has multiple {kind} entries — use {flag} to select (available: {})",
+            "dataset '{dataset}' has multiple {kind} entries - use {flag} to select (available: {})",
             keys.join(", ")
         )));
     }
@@ -143,7 +143,7 @@ fn get_dataset<'a>(
 /// A reference to a dataset snapshot used by `diff-snapshots` and any future
 /// command that takes snapshot pairs as input.
 ///
-/// `Base` refers to the dataset's legacy top-level `pbf`/`osc` data — the
+/// `Base` refers to the dataset's legacy top-level `pbf`/`osc` data - the
 /// "primary" snapshot. `Named(key)` refers to a snapshot registered under
 /// `[dataset.snapshot.<key>]` in `brokkr.toml`. The CLI string `"base"` parses
 /// to `Base`; any other string parses to `Named` (after key validation).
@@ -227,7 +227,7 @@ pub(crate) fn resolve_snapshot_pbf_path(
             // Custom missing-variant error: name the available variants and
             // suggest both a one-shot workaround (--variant <X>) and the
             // proper fix (re-download to auto-generate). This is the
-            // first-time-user papercut from TODO #5 — closing it inline
+            // first-time-user papercut from TODO #5 - closing it inline
             // instead of adding the per-side --variant-from / --variant-to
             // flags, since no concrete asymmetric use case has surfaced yet.
             let entry = snap.pbf.get(variant).ok_or_else(|| {
@@ -350,7 +350,7 @@ pub(crate) fn resolve_single_osc(
             SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
         };
         return Err(DevError::Config(format!(
-            "{where_clause} has multiple osc entries — use --osc-seq to select (available: {})",
+            "{where_clause} has multiple osc entries - use --osc-seq to select (available: {})",
             keys.join(", ")
         )));
     }
@@ -896,7 +896,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-20260411.osm.pbf"), "x").expect("write");
 
-        // Snapshot has only `raw` — user asks for `indexed`. The error should
+        // Snapshot has only `raw` - user asks for `indexed`. The error should
         // name `raw` as available and suggest both --variant raw and the
         // re-download path.
         let mut snap = Snapshot {

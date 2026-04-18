@@ -11,7 +11,7 @@ use crate::error::DevError;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default geocode test queries (Danish cities — used when no queries are specified).
+/// Default geocode test queries (Danish cities - used when no queries are specified).
 pub const GEOCODE_TEST_QUERIES: &[&str] = &["Kobenhavn", "Aarhus", "Odense"];
 
 /// Convert a brokkr.toml bbox (`lon_min,lat_min,lon_max,lat_max`) to a nidhogg

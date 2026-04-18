@@ -1,4 +1,4 @@
-//! Verify: getid — pbfhogg getid vs osmium getid, plus getid --invert complement test.
+//! Verify: getid - pbfhogg getid vs osmium getid, plus getid --invert complement test.
 
 use std::path::Path;
 

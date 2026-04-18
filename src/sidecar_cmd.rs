@@ -1,4 +1,4 @@
-//! Implementation of the `sidecar` command — per-phase summary, raw
+//! Implementation of the `sidecar` command - per-phase summary, raw
 //! sample/marker export, START/END durations, counters, single-field
 //! stats, and two-result phase compare. Each invocation picks exactly
 //! one view; clap enforces the mutual exclusion.

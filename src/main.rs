@@ -2,7 +2,7 @@
 // for library code but noisy in tests where `.unwrap()` on a fixture and
 // long table-driven test functions are idiomatic. The test-only allows live
 // as inner attributes on each `mod tests { }` block so they only silence
-// lints inside test code — production code still gets the strict lint set
+// lints inside test code - production code still gets the strict lint set
 // even when compiled under `cargo clippy --all-targets` (which sets
 // `cfg(test)` on the whole crate for the test-harness build).
 
@@ -138,7 +138,7 @@ fn main() {
         Ok(()) => {}
         Err(DevError::ExitCode(code)) => process::exit(code),
         Err(DevError::Interrupted) => {
-            output::lock_msg("interrupted — running scratch cleanup");
+            output::lock_msg("interrupted - running scratch cleanup");
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
             if let Ok((project, dev_config, project_root)) = project::detect()
@@ -897,7 +897,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 brokkr_args: &brokkr_args,
                 no_mem_check,
                 wait,
-                // Sluggrs hotpath uses Command::Hotpath, not ModeArgs — no
+                // Sluggrs hotpath uses Command::Hotpath, not ModeArgs - no
                 // dry-run or stop-marker surface to plumb from.
                 dry_run: false,
                 stop_marker: None,
@@ -1113,7 +1113,7 @@ fn cmd_run(
         duration_ms(build_start.elapsed())
     };
 
-    // Ensure scratch dir exists — binary commands often write output there.
+    // Ensure scratch dir exists - binary commands often write output there.
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     std::fs::create_dir_all(&paths.scratch_dir)?;
@@ -1161,7 +1161,7 @@ fn cmd_clean(
     // Clean scratch temp files.
     if paths.scratch_dir.exists() {
         if project == Project::Elivagar {
-            // Elivagar scratch is tilegen_tmp — remove all contents.
+            // Elivagar scratch is tilegen_tmp - remove all contents.
             std::fs::remove_dir_all(&paths.scratch_dir)?;
             std::fs::create_dir_all(&paths.scratch_dir)?;
             output::run_msg("cleaned tilegen_tmp");
@@ -1285,7 +1285,7 @@ fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
 }
 
 /// Ask the brokkr process holding the lock to shut down. Default sends
-/// SIGTERM (cooperative — brokkr handles cleanup itself). `--hard`
+/// SIGTERM (cooperative - brokkr handles cleanup itself). `--hard`
 /// sends SIGKILL to both brokkr and the recorded child PID.
 fn cmd_kill(hard: bool) -> Result<(), DevError> {
     let Some(info) = lockfile::status()? else {
@@ -1298,7 +1298,7 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
     }
 
     if hard {
-        // Kill the child first, then brokkr — otherwise there's a brief
+        // Kill the child first, then brokkr - otherwise there's a brief
         // window where brokkr is dead but the tool it was measuring is
         // still alive (and anyone peeking at `brokkr lock` sees stale
         // state pointing at a live child with no owner).
@@ -1327,7 +1327,7 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
         return Ok(());
     }
     output::lock_msg(&format!(
-        "SIGTERM sent to brokkr PID {} — cleanup in progress",
+        "SIGTERM sent to brokkr PID {} - cleanup in progress",
         info.pid,
     ));
     Ok(())

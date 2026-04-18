@@ -13,7 +13,7 @@ use crate::output;
 /// external baselines that go through entirely different build systems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CargoProfile {
-    /// Rust `cargo build --release` — the standard brokkr-built binary.
+    /// Rust `cargo build --release` - the standard brokkr-built binary.
     #[default]
     Release,
     /// External Java/Maven build (Planetiler baseline).
@@ -391,7 +391,7 @@ pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<Pat
         return Ok(exe);
     }
 
-    // No name to match — require exactly one executable to avoid
+    // No name to match - require exactly one executable to avoid
     // order-dependent behaviour (cargo doesn't guarantee JSON ordering).
     match last_exe {
         Some(exe) if all_exes.len() == 1 => Ok(exe),
@@ -406,7 +406,7 @@ pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<Pat
 
 /// Extract compiler diagnostics from `--message-format=json` stdout and print
 /// the rendered messages.  With JSON message format, cargo sends the actual
-/// error details (file, line, message) as JSON to stdout — stderr only contains
+/// error details (file, line, message) as JSON to stdout - stderr only contains
 /// the "Compiling…" progress lines and the final summary.
 fn dump_compiler_messages(stdout: &[u8]) {
     let text = String::from_utf8_lossy(stdout);

@@ -1,4 +1,4 @@
-//! Verify: diff --format osc — roundtrip validation via pbfhogg and osmium.
+//! Verify: diff --format osc - roundtrip validation via pbfhogg and osmium.
 
 use std::path::Path;
 
@@ -83,7 +83,7 @@ pub fn run(
         verify_msg(&format!("  osmium:  {} bytes", meta.len()));
     }
 
-    // Step 4: Roundtrip — apply each derived OSC back to old.
+    // Step 4: Roundtrip - apply each derived OSC back to old.
     let rt_pbfhogg = outdir.join("roundtrip-pbfhogg.osm.pbf");
     let rt_pbfhogg_str = rt_pbfhogg.display().to_string();
 

@@ -24,7 +24,7 @@ pub(crate) enum Command {
         display_order = 0,
         long_about = "\
 Run clippy first, then tests. Clippy warnings are denied by the project's
-Cargo.toml lints, so a clippy failure short-circuits — tests only run when
+Cargo.toml lints, so a clippy failure short-circuits - tests only run when
 clippy passes. Extra args after `--` are forwarded raw to `cargo test`
 (invoke `cargo test` directly if you want to skip clippy for a targeted
 test run).
@@ -150,12 +150,12 @@ Examples:
         clean: bool,
     },
     /// [pbfhogg] Tags filter. Orthogonal flags:
-    ///   `--filter EXPR` — pbfhogg filter expression (default
+    ///   `--filter EXPR` - pbfhogg filter expression (default
     ///     `w/highway=primary`). Examples: `amenity=restaurant`,
     ///     `highway=primary`, `w/building=yes`.
-    ///   `-R` / `--omit-referenced` — single-pass; drop referenced
+    ///   `-R` / `--omit-referenced` - single-pass; drop referenced
     ///     objects (default: two-pass with references).
-    ///   `--input-kind osc` — read an OSC diff instead of a PBF.
+    ///   `--input-kind osc` - read an OSC diff instead of a PBF.
     #[command(name = "tags-filter", display_order = 2)]
     TagsFilter {
         #[command(flatten)]
@@ -183,8 +183,8 @@ Examples:
         snapshot: Option<String>,
     },
     /// [pbfhogg] Get elements by hardcoded ID set. Flags:
-    ///   `--add-referenced` — also pull in referenced objects (two-pass);
-    ///   `--invert` — select everything NOT in the ID set.
+    ///   `--add-referenced` - also pull in referenced objects (two-pass);
+    ///   `--invert` - select everything NOT in the ID set.
     #[command(name = "getid", display_order = 2)]
     Getid {
         #[command(flatten)]
@@ -319,7 +319,7 @@ Examples:
         long_about = "\
 Diff two point-in-time snapshots of the same dataset.
 
-Unlike `brokkr diff`, neither side is derived from apply-changes — both PBFs
+Unlike `brokkr diff`, neither side is derived from apply-changes - both PBFs
 come from independent snapshot resolution. Use this to measure the cost of
 diffing two real weekly dumps where no blob-level byte equality is possible.
 
@@ -582,7 +582,7 @@ Examples:
         #[arg(long, default_value = "indexed")]
         variant: String,
     },
-    /// Build and run with passthrough args (deprecated — use `run` subcommands instead)
+    /// Build and run with passthrough args (deprecated - use `run` subcommands instead)
     #[command(name = "passthrough", display_order = 99, hide = true)]
     Passthrough {
         /// Cargo features to enable (e.g. linux-io-uring)
@@ -660,7 +660,7 @@ Examples:
         /// Filter by captured env var KEY=VALUE (multiple allowed, AND
         /// semantics). Keys are bare env var names (no `env.` prefix),
         /// e.g. `--env PBFHOGG_USE_NEW_PATH=1`. Rows without the key
-        /// are excluded — use an explicit baseline value (e.g. `=0`)
+        /// are excluded - use an explicit baseline value (e.g. `=0`)
         /// on the off runs rather than relying on absence.
         #[arg(long, value_parser = validate_meta_filter)]
         env: Vec<String>,
@@ -685,12 +685,12 @@ Examples:
         display_order = 4,
         long_about = "\
 Query sidecar data captured in .brokkr/sidecar.db during `--bench`,
-`--hotpath`, and `--alloc` runs. A UUID prefix is required — use
+`--hotpath`, and `--alloc` runs. A UUID prefix is required - use
 `brokkr results` to find one. `--run N|all` picks a specific run
 within the result (default: best run).
 
 The `dirty` pseudo-UUID resolves to the most recent forced or failed
-run — runs produced via `--force` (dirty tree) or that exited non-zero
+run - runs produced via `--force` (dirty tree) or that exited non-zero
 have no results.db row, but their sidecar data is still stored and
 reachable this way.
 
@@ -907,7 +907,7 @@ Examples:
         #[arg(value_name = "UUID", conflicts_with = "commit", required_unless_present = "commit")]
         uuid: Option<String>,
 
-        /// Commit hash prefix — invalidate every result rooted at matching commits
+        /// Commit hash prefix - invalidate every result rooted at matching commits
         #[arg(long)]
         commit: Option<String>,
 
@@ -1287,7 +1287,7 @@ pub(crate) struct PbfArgs {
 }
 
 /// Shared dataset/variant/direct_io args for pbfhogg verify subcommands.
-/// (Verify doesn't take `--io-uring` or `--compression` — different surface
+/// (Verify doesn't take `--io-uring` or `--compression` - different surface
 /// than `PbfArgs`, hence a separate struct.)
 #[derive(Args, Clone)]
 pub(crate) struct VerifyPbfArgs {
@@ -1547,7 +1547,7 @@ fn validate_since(s: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 //
 // `impl Command { fn as_pbfhogg(...) }` lives next to the pbfhogg command
-// definitions in `src/pbfhogg/cli_adapter.rs` — it's the bridge between
+// definitions in `src/pbfhogg/cli_adapter.rs` - it's the bridge between
 // the CLI shape and the typed `PbfhoggCommand`, and grouping it with the
 // target type keeps both surfaces easy to change together.
 

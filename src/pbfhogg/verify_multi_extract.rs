@@ -1,4 +1,4 @@
-//! Verify: multi-extract — compare single-pass multi-extract against
+//! Verify: multi-extract - compare single-pass multi-extract against
 //! N sequential single-region extracts.
 //!
 //! Generates N non-overlapping longitude strips from the dataset bbox,

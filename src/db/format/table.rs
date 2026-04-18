@@ -41,19 +41,19 @@ struct TableWidths {
     elapsed: usize,
     input: usize,
     args: usize,
-    /// Width of the `env` column. `0` means "elide the column entirely" —
+    /// Width of the `env` column. `0` means "elide the column entirely" -
     /// the common case, since captured_env is empty on almost every
     /// historical row and opt-in per brokkr.toml for new runs.
     env: usize,
 }
 
-/// Max width for the `args` column — anything longer gets truncated
+/// Max width for the `args` column - anything longer gets truncated
 /// with `…`. Picked to keep a full table row under ~120 columns on
 /// typical command shapes.
 const ARGS_MAX_WIDTH: usize = 40;
 
 /// Max width for the `env` column (appears only when any row has
-/// captured env vars). Narrower than `args` — env vars are typically
+/// captured env vars). Narrower than `args` - env vars are typically
 /// a handful of `KEY=VALUE` flags.
 const ENV_MAX_WIDTH: usize = 30;
 
@@ -123,7 +123,7 @@ fn format_args_summary(cli_args: &str) -> String {
     let mut tokens = cli_args.split_whitespace();
     // Drop the binary path.
     tokens.next();
-    // Drop the subcommand token unconditionally — preset rows
+    // Drop the subcommand token unconditionally - preset rows
     // (`write` → `bench-write`, `diff-osc` → `diff`, etc.) have a
     // different spelling than `command`, so matching on `command`
     // would leak the preset name into the args column.
@@ -132,7 +132,7 @@ fn format_args_summary(cli_args: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     let mut iter = tokens.peekable();
     while let Some(tok) = iter.next() {
-        // `-o <path>` — drop both tokens.
+        // `-o <path>` - drop both tokens.
         if tok == "-o" {
             iter.next();
             continue;
@@ -280,7 +280,7 @@ pub(super) fn format_elapsed(ms: i64) -> String {
 
 /// Format an input filename with size for compare tables
 /// (e.g. `europe (35262 MB)`). Uses `matcher` to produce the short
-/// dataset label — when configured dataset keys are available this
+/// dataset label - when configured dataset keys are available this
 /// preserves hyphenated names like `greater-london`; otherwise the
 /// fallback heuristic emits the first dash-separated component of the
 /// basename.
