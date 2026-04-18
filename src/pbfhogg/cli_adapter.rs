@@ -171,9 +171,11 @@ impl Command {
                 pbf,
                 osc_seq,
                 snapshot,
+                locations_on_ways,
             } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
+                    locations_on_ways: *locations_on_ways,
                     ..Default::default()
                 };
                 Some((

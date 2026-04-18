@@ -116,6 +116,7 @@ Top-level keys that aren't `project` are treated as hostname sections (unknown n
 - `--direct-io` - (pbfhogg only) enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature, `--direct-io` binary flag, `+direct-io` variant suffix.
 - `--io-uring` - (pbfhogg only) enable io_uring I/O. Adds `linux-io-uring` cargo feature, `--io-uring` binary flag, `+uring` variant suffix. Runs io_uring preflight checks before building. Only supported by `apply-changes`, `sort`, `cat-dedupe`, and `diff-osc`; brokkr rejects it for other commands before building.
 - `--compression <spec>` - (pbfhogg only) output compression passed through to the binary. Values: `zlib:N` (N=1-9), `zstd:N`, `none`. Adds `+zstd1`/`+zlib6`/`+nocompress` variant suffix. No cargo features required.
+- `--locations-on-ways` - (pbfhogg `apply-changes` only) passes `--locations-on-ways` through to the child pbfhogg invocation. No cargo features required.
 
 ## CLI model
 

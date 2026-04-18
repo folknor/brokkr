@@ -605,6 +605,9 @@ impl PbfhoggCommand {
                     ctx.pbf_str()?.into(),
                     osc.into(),
                 ];
+                if ctx.params.locations_on_ways {
+                    args.push("--locations-on-ways".into());
+                }
                 // Hotpath legacy: pre-unification build_hotpath_args always
                 // emitted --compression (default zlib) for apply-changes. The
                 // dispatch layer also appends --compression from CLI, so
@@ -932,6 +935,17 @@ mod tests {
         assert_eq!(args[1], "/data/denmark.osm.pbf");
         assert_eq!(args[2], "/data/denmark-4705.osc.gz");
         assert_eq!(args[3], "-o");
+        assert!(!args.iter().any(|a| a == "--locations-on-ways"));
+    }
+
+    #[test]
+    fn apply_changes_forwards_locations_on_ways() {
+        let mut ctx = test_ctx();
+        ctx.params.locations_on_ways = true;
+        let cmd = PbfhoggCommand::ApplyChanges;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert_eq!(args[0], "apply-changes");
+        assert!(args.iter().any(|a| a == "--locations-on-ways"));
     }
 
     #[test]

@@ -153,6 +153,8 @@ pub struct CommandParams {
     pub bbox: Option<String>,
     /// `--index-type <mode>` for `add-locations-to-ways`.
     pub index_type: Option<String>,
+    /// `--locations-on-ways` for `apply-changes`.
+    pub locations_on_ways: bool,
     /// `--snapshot <key>`.
     pub snapshot: Option<String>,
     /// `--from <key>` for DiffSnapshots.

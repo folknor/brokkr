@@ -258,6 +258,9 @@ Examples:
         /// under `[dataset.snapshot.<key>]` to read from a historical snapshot.
         #[arg(long)]
         snapshot: Option<String>,
+        /// Pass `--locations-on-ways` through to pbfhogg apply-changes.
+        #[arg(long)]
+        locations_on_ways: bool,
     },
     /// [pbfhogg] Add location data to ways
     #[command(name = "add-locations-to-ways", display_order = 2)]
