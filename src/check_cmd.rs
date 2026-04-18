@@ -24,7 +24,7 @@ pub(crate) fn cmd_check(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     run_gremlins(project_root, json, limit, all)?;
-    run_clippy(project_root, features, no_default_features, package, raw, json)?;
+    run_clippy(project_root, features, no_default_features, package, raw, json, limit, all)?;
     run_tests(
         project,
         project_root,
@@ -104,6 +104,7 @@ fn run_gremlins(
     Err(DevError::Build("gremlins found".into()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_clippy(
     project_root: &Path,
     features: &[String],
@@ -111,6 +112,8 @@ fn run_clippy(
     package: Option<&str>,
     raw: bool,
     json: bool,
+    limit: usize,
+    all: bool,
 ) -> Result<(), DevError> {
     let mut args = vec!["clippy", "--all-targets"];
     if no_default_features {
@@ -176,7 +179,7 @@ fn run_clippy(
         if raw {
             output::error(&stderr);
         } else {
-            output::error(&cargo_filter::filter_clippy(&stderr));
+            output::error(&format_clippy_capped(&stderr, project_root, limit, all));
         }
         return Err(DevError::Build("clippy failed".into()));
     }
@@ -186,13 +189,61 @@ fn run_clippy(
     } else if !raw {
         // Success path: surface any warnings the filter extracted so they
         // aren't silently dropped when the build passes.
-        let filtered = cargo_filter::filter_clippy(&stderr);
-        if filtered != "cargo clippy: no issues" {
-            output::warn(&filtered);
+        let parsed = cargo_filter::parse_clippy(&stderr);
+        if !parsed.diagnostics.is_empty() || parsed.parse_failed {
+            output::warn(&format_clippy_capped(&stderr, project_root, limit, all));
         }
     }
 
     Ok(())
+}
+
+/// Parse clippy text output, apply scope+limit, and format a header +
+/// capped body + trailer. Falls back to the raw output if parsing failed.
+fn format_clippy_capped(
+    stderr: &str,
+    project_root: &Path,
+    limit: usize,
+    all: bool,
+) -> String {
+    let parsed = cargo_filter::parse_clippy(stderr);
+    if parsed.parse_failed {
+        return stderr.to_string();
+    }
+    if parsed.diagnostics.is_empty() {
+        return "cargo clippy: no issues".into();
+    }
+
+    let total_errors = parsed.diagnostics.iter().filter(|d| d.is_error).count();
+    let total_warnings = parsed.diagnostics.len() - total_errors;
+
+    let refs: Vec<&cargo_filter::ClippyDiagnostic> = parsed.diagnostics.iter().collect();
+    let (displayed, trailer) = if all {
+        (refs, None)
+    } else {
+        let changed = scope::changed_files(project_root);
+        let part = scope::partition(
+            refs,
+            |d| d.path().unwrap_or_else(|| Path::new("")),
+            limit,
+            changed.as_ref(),
+        );
+        let trailer = scope::format_trailer(part.hidden_scoped, part.hidden_unscoped);
+        (part.displayed, trailer)
+    };
+
+    let mut out = format!("cargo clippy: {total_errors} errors, {total_warnings} warnings\n");
+    for d in &displayed {
+        out.push_str("  ");
+        out.push_str(&d.format_one());
+        out.push('\n');
+    }
+    if let Some(t) = trailer {
+        out.push_str("  ");
+        out.push_str(&t);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 #[allow(

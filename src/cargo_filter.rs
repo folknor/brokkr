@@ -7,19 +7,55 @@
 //! Test output parsing is split into a shared structured layer ([`parse_test_output`])
 //! so that both text and JSON modes can consume the same parsed results.
 
-/// Filter cargo clippy output into one line per diagnostic.
+use std::path::Path;
+
+/// One parsed clippy diagnostic. [`parse_clippy`] returns these so callers
+/// can filter/partition by source path before formatting.
+pub struct ClippyDiagnostic {
+    pub is_error: bool,
+    /// `error[E0308]` / `warning[unused_variables]` / bare `error` / bare `warning`.
+    pub header: String,
+    /// `file:line:col` (unformatted, as clippy prints it).
+    pub location: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+}
+
+impl ClippyDiagnostic {
+    /// Extract the file portion of `location` for scope matching.
+    pub fn path(&self) -> Option<&Path> {
+        let loc = self.location.as_deref()?;
+        let (file, _) = loc.split_once(':')?;
+        Some(Path::new(file))
+    }
+
+    /// Format as a single line, matching [`filter_clippy`]'s shape.
+    pub fn format_one(&self) -> String {
+        let base = match &self.location {
+            Some(loc) => format!("{} {} {}", self.header, loc, self.message),
+            None => format!("{} {}", self.header, self.message),
+        };
+        match &self.detail {
+            Some(d) => format!("{base} - {d}"),
+            None => base,
+        }
+    }
+}
+
+/// Parsed clippy output.
 ///
-/// Output format:
-/// ```text
-/// cargo clippy: 2 errors, 3 warnings
-///   error[E0308] src/foo.rs:10:5 mismatched types
-///   error[E0425] src/bar.rs:20:3 cannot find value `x` in this scope
-///   warning[unused_variables] src/a.rs:1:9 unused variable: `x`
-///   warning[clippy::needless_return] src/d.rs:4:5 this could be simplified
-/// ```
-pub fn filter_clippy(output: &str) -> String {
-    let mut errors: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
+/// Diagnostics are ordered errors-first, then warnings (stable within each).
+/// When cargo emitted `error:`/`warning:` markers but the parser extracted
+/// nothing, `parse_failed` is `true` and callers should print the raw output
+/// instead of the parsed list.
+pub struct ClippyParse {
+    pub diagnostics: Vec<ClippyDiagnostic>,
+    pub parse_failed: bool,
+}
+
+/// Parse cargo clippy text output into structured diagnostics.
+pub fn parse_clippy(output: &str) -> ClippyParse {
+    let mut diagnostics: Vec<ClippyDiagnostic> = Vec::new();
 
     let mut in_block = false;
     let mut current_block: Vec<String> = Vec::new();
@@ -34,17 +70,10 @@ pub fn filter_clippy(output: &str) -> String {
         let is_warning_start = line.starts_with("warning:") || line.starts_with("warning[");
 
         if is_error_start || is_warning_start {
-            // Flush previous block.
             if in_block && !current_block.is_empty() {
-                let diag = format_diagnostic(&current_block);
-                if current_is_error {
-                    errors.push(diag);
-                } else {
-                    warnings.push(diag);
-                }
+                diagnostics.push(parse_block(&current_block, current_is_error));
                 current_block.clear();
             }
-
             current_is_error = is_error_start;
             in_block = true;
             current_block.push(line.to_string());
@@ -53,47 +82,58 @@ pub fn filter_clippy(output: &str) -> String {
         }
     }
 
-    // Flush trailing block.
     if in_block && !current_block.is_empty() {
-        let diag = format_diagnostic(&current_block);
-        if current_is_error {
-            errors.push(diag);
-        } else {
-            warnings.push(diag);
-        }
+        diagnostics.push(parse_block(&current_block, current_is_error));
     }
 
-    if errors.is_empty() && warnings.is_empty() {
-        // If the output had lines that look like errors/warnings but we extracted
-        // nothing, the parser failed - fall back to raw output.
-        let has_error_lines = output
-            .lines()
-            .any(|l| l.starts_with("error:") || l.starts_with("error["));
-        let has_warning_lines = output.lines().any(|l| {
-            l.starts_with("warning:") || l.starts_with("warning[")
+    // Errors first, then warnings; each half keeps discovery order.
+    let (errors, warnings): (Vec<_>, Vec<_>) =
+        diagnostics.into_iter().partition(|d| d.is_error);
+    let mut sorted = errors;
+    sorted.extend(warnings);
+
+    let parse_failed = sorted.is_empty()
+        && output.lines().any(|l| {
+            l.starts_with("error:")
+                || l.starts_with("error[")
+                || l.starts_with("warning:")
+                || l.starts_with("warning[")
         });
-        if has_error_lines || has_warning_lines {
-            return output.to_string();
-        }
+
+    ClippyParse {
+        diagnostics: sorted,
+        parse_failed,
+    }
+}
+
+/// Filter cargo clippy output into one line per diagnostic.
+///
+/// Output format:
+/// ```text
+/// cargo clippy: 2 errors, 3 warnings
+///   error[E0308] src/foo.rs:10:5 mismatched types
+///   error[E0425] src/bar.rs:20:3 cannot find value `x` in this scope
+///   warning[unused_variables] src/a.rs:1:9 unused variable: `x`
+///   warning[clippy::needless_return] src/d.rs:4:5 this could be simplified
+/// ```
+pub fn filter_clippy(output: &str) -> String {
+    let parsed = parse_clippy(output);
+    if parsed.parse_failed {
+        return output.to_string();
+    }
+    if parsed.diagnostics.is_empty() {
         return "cargo clippy: no issues".into();
     }
 
-    let mut result = format!(
-        "cargo clippy: {} errors, {} warnings\n",
-        errors.len(),
-        warnings.len()
-    );
-    for line in &errors {
-        result.push_str("  ");
-        result.push_str(line);
-        result.push('\n');
-    }
-    for line in &warnings {
-        result.push_str("  ");
-        result.push_str(line);
-        result.push('\n');
-    }
+    let errors = parsed.diagnostics.iter().filter(|d| d.is_error).count();
+    let warnings = parsed.diagnostics.len() - errors;
 
+    let mut result = format!("cargo clippy: {errors} errors, {warnings} warnings\n");
+    for d in &parsed.diagnostics {
+        result.push_str("  ");
+        result.push_str(&d.format_one());
+        result.push('\n');
+    }
     result.trim_end().to_string()
 }
 
@@ -552,35 +592,29 @@ fn extract_detail(block: &[String]) -> Option<String> {
     None
 }
 
-/// Format a diagnostic block into a single line.
+/// Parse a diagnostic block into structured fields.
 ///
 /// `["error[E0425]: cannot find value ...", " --> src/foo.rs:10:5", ...]`
-/// → `"error[E0425] src/foo.rs:10:5 cannot find value ..."`
-///
-/// When the block contains "expected/found" detail, it is appended:
-/// `"error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"`
-fn format_diagnostic(block: &[String]) -> String {
-    let (mut prefix, message) = parse_header(&block[0]);
+/// → `ClippyDiagnostic { header: "error[E0425]", location: Some("src/foo.rs:10:5"), ... }`
+fn parse_block(block: &[String], is_error: bool) -> ClippyDiagnostic {
+    let (mut header, message) = parse_header(&block[0]);
     // If the header didn't carry a [rule], try to recover one from a
     // `= note: \`#[warn(rule)]\`` line in the block. Real cargo/clippy
     // emits the rule there, not in the header.
-    if (prefix == "warning" || prefix == "error")
+    if (header == "warning" || header == "error")
         && let Some(rule) = extract_rule_from_notes(block)
     {
-        prefix = format!("{prefix}[{rule}]");
+        header = format!("{header}[{rule}]");
     }
-    let location = extract_location(block).unwrap_or_default();
+    let location = extract_location(block);
     let detail = extract_detail(block);
 
-    let base = if location.is_empty() {
-        format!("{prefix} {message}")
-    } else {
-        format!("{prefix} {location} {message}")
-    };
-
-    match detail {
-        Some(d) => format!("{base} - {d}"),
-        None => base,
+    ClippyDiagnostic {
+        is_error,
+        header,
+        location,
+        message,
+        detail,
     }
 }
 
@@ -885,5 +919,74 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
     fn parse_duration_works() {
         let line = "test result: ok. 15 passed; finished in 0.45s";
         assert!((parse_duration(line).unwrap() - 0.45).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_clippy_returns_structured_diagnostics() {
+        let output = "\
+error[E0308]: mismatched types
+ --> src/foo.rs:20:5
+  |
+
+warning: unused variable: `x` [unused_variables]
+ --> src/main.rs:10:9
+  |
+";
+        let parsed = parse_clippy(output);
+        assert!(!parsed.parse_failed);
+        assert_eq!(parsed.diagnostics.len(), 2);
+        // Errors come first.
+        assert!(parsed.diagnostics[0].is_error);
+        assert_eq!(parsed.diagnostics[0].header, "error[E0308]");
+        assert_eq!(parsed.diagnostics[0].location.as_deref(), Some("src/foo.rs:20:5"));
+        assert_eq!(parsed.diagnostics[0].message, "mismatched types");
+        assert!(!parsed.diagnostics[1].is_error);
+        assert_eq!(parsed.diagnostics[1].header, "warning[unused_variables]");
+    }
+
+    #[test]
+    fn clippy_diagnostic_path_extracts_file() {
+        let d = ClippyDiagnostic {
+            is_error: true,
+            header: "error[E0308]".into(),
+            location: Some("src/foo.rs:20:5".into()),
+            message: "mismatched types".into(),
+            detail: None,
+        };
+        assert_eq!(d.path(), Some(Path::new("src/foo.rs")));
+    }
+
+    #[test]
+    fn clippy_diagnostic_path_none_without_location() {
+        let d = ClippyDiagnostic {
+            is_error: false,
+            header: "warning".into(),
+            location: None,
+            message: "something".into(),
+            detail: None,
+        };
+        assert!(d.path().is_none());
+    }
+
+    #[test]
+    fn clippy_diagnostic_format_one_matches_filter_output() {
+        let d = ClippyDiagnostic {
+            is_error: true,
+            header: "error[E0308]".into(),
+            location: Some("src/foo.rs:20:5".into()),
+            message: "mismatched types".into(),
+            detail: Some("expected `i32`, found `&str`".into()),
+        };
+        assert_eq!(
+            d.format_one(),
+            "error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"
+        );
+    }
+
+    #[test]
+    fn parse_clippy_empty_has_no_diagnostics() {
+        let parsed = parse_clippy("");
+        assert!(!parsed.parse_failed);
+        assert!(parsed.diagnostics.is_empty());
     }
 }
