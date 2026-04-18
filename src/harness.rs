@@ -135,7 +135,7 @@ impl BenchHarness {
 
         if !git.is_clean {
             if force {
-                output::error("WARNING: dirty tree — results will NOT be stored in database");
+                output::warn("dirty tree — results will NOT be stored in database");
             } else {
                 return Err(DevError::Preflight(vec![
                     "dirty tree — commit or stash changes before benchmarking".into(),
@@ -520,7 +520,6 @@ impl BenchHarness {
             // Dirty tree: no DB insert, no UUID. Always print result line
             // since the data can't be looked up later.
             force_emit_result_lines(config, result, &self.git);
-            output::error("NOT STORED — tree is dirty (commit or stash changes)");
             Ok(None)
         }
     }
