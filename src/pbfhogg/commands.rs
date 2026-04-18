@@ -609,14 +609,13 @@ impl PbfhoggCommand {
                     args.push("--locations-on-ways".into());
                 }
                 // Hotpath legacy: pre-unification build_hotpath_args always
-                // emitted --compression (default zlib) for apply-changes. The
-                // dispatch layer also appends --compression from CLI, so
-                // hotpath runs with an explicit --compression CLI flag end up
-                // with it twice (pbfhogg takes the last one).
-                if mode == ArgMode::Hotpath {
-                    let compression = ctx.params.compression.as_deref().unwrap_or("zlib");
+                // emitted --compression=zlib for apply-changes. Preserve that
+                // default only when the user didn't supply --compression; the
+                // dispatch layer appends the user's value itself, and pbfhogg
+                // rejects --compression given twice.
+                if mode == ArgMode::Hotpath && ctx.params.compression.is_none() {
                     args.push("--compression".into());
-                    args.push(compression.into());
+                    args.push("zlib".into());
                 }
                 args.push("-o".into());
                 args.push(path_to_string(&output)?);
