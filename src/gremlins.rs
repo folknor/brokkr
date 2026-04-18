@@ -40,23 +40,6 @@ pub fn format_one(g: &Gremlin) -> String {
     )
 }
 
-/// Format a multi-line summary for text mode.
-///
-/// ```text
-/// gremlins: 3 found
-///   src/foo.rs:10:5 U+200B ZERO WIDTH SPACE
-///   ...
-/// ```
-pub fn format_summary(gremlins: &[Gremlin]) -> String {
-    let mut out = format!("gremlins: {} found\n", gremlins.len());
-    for g in gremlins {
-        out.push_str("  ");
-        out.push_str(&format_one(g));
-        out.push('\n');
-    }
-    out.trim_end().to_string()
-}
-
 const GREMLINS: &[(char, &str)] = &[
     // Control chars that should never appear in source
     ('\u{0003}', "END OF TEXT"),
@@ -298,30 +281,6 @@ mod tests {
             name: "ZERO WIDTH SPACE",
         };
         assert_eq!(format_one(&g), "src/foo.rs:10:5 U+200B ZERO WIDTH SPACE");
-    }
-
-    #[test]
-    fn format_summary_multi() {
-        let gs = vec![
-            Gremlin {
-                path: PathBuf::from("a.rs"),
-                line: 1,
-                column: 1,
-                codepoint: 0x2014,
-                name: "EM DASH",
-            },
-            Gremlin {
-                path: PathBuf::from("b.md"),
-                line: 2,
-                column: 3,
-                codepoint: 0x201C,
-                name: "LEFT DOUBLE QUOTATION MARK",
-            },
-        ];
-        let s = format_summary(&gs);
-        assert!(s.starts_with("gremlins: 2 found\n"));
-        assert!(s.contains("a.rs:1:1 U+2014 EM DASH"));
-        assert!(s.contains("b.md:2:3 U+201C LEFT DOUBLE QUOTATION MARK"));
     }
 
     #[test]

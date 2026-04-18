@@ -60,6 +60,15 @@ Examples:
         #[arg(long, conflicts_with = "raw")]
         json: bool,
 
+        /// Maximum diagnostics printed per phase (gremlins, clippy). Ignored
+        /// with `--raw`, `--json`, or `--all`.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Show every diagnostic without capping or scoping to changed files.
+        #[arg(long)]
+        all: bool,
+
         /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

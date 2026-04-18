@@ -37,6 +37,7 @@ mod project;
 mod request;
 mod resolve;
 mod results_cmd;
+mod scope;
 mod shutdown;
 mod sidecar;
 mod sidecar_cmd;
@@ -199,6 +200,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
         package,
         raw,
         json,
+        limit,
+        all,
         args,
     } = cli.command
     {
@@ -214,6 +217,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             package.as_deref(),
             raw,
             json,
+            limit,
+            all,
             &args,
         );
     }

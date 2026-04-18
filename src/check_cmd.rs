@@ -8,6 +8,7 @@ use crate::error::DevError;
 use crate::gremlins;
 use crate::output;
 use crate::project::Project;
+use crate::scope;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_check(
@@ -18,9 +19,11 @@ pub(crate) fn cmd_check(
     package: Option<&str>,
     raw: bool,
     json: bool,
+    limit: usize,
+    all: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    run_gremlins(project_root, json)?;
+    run_gremlins(project_root, json, limit, all)?;
     run_clippy(project_root, features, no_default_features, package, raw, json)?;
     run_tests(
         project,
@@ -38,11 +41,12 @@ pub(crate) fn cmd_check(
     Ok(())
 }
 
-fn run_gremlins(project_root: &Path, json: bool) -> Result<(), DevError> {
-    if !json {
-        output::run_msg("gremlins: scanning tracked sources");
-    }
-
+fn run_gremlins(
+    project_root: &Path,
+    json: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
     let found = gremlins::scan(project_root)?;
 
     if json {
@@ -71,10 +75,32 @@ fn run_gremlins(project_root: &Path, json: bool) -> Result<(), DevError> {
     }
 
     if found.is_empty() {
+        output::run_msg("zero gremlins!");
         return Ok(());
     }
 
-    output::error(&gremlins::format_summary(&found));
+    let total = found.len();
+    let (displayed, trailer) = if all {
+        (found, None)
+    } else {
+        let changed = scope::changed_files(project_root);
+        let part = scope::partition(found, |g| g.path.as_path(), limit, changed.as_ref());
+        let trailer = scope::format_trailer(part.hidden_scoped, part.hidden_unscoped);
+        (part.displayed, trailer)
+    };
+
+    let mut msg = format!("gremlins: {total} found\n");
+    for g in &displayed {
+        msg.push_str("  ");
+        msg.push_str(&gremlins::format_one(g));
+        msg.push('\n');
+    }
+    if let Some(t) = trailer {
+        msg.push_str("  ");
+        msg.push_str(&t);
+        msg.push('\n');
+    }
+    output::error(msg.trim_end());
     Err(DevError::Build("gremlins found".into()))
 }
 

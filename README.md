@@ -74,6 +74,8 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 
 A gremlin scan runs before clippy and fails the check if any banned Unicode character is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files. Covers invisible/zero-width characters, non-breaking spaces, soft hyphen, line/paragraph separators, bidi marks/overrides/isolates, em/en dashes, typographic single and double quotes, plus `U+0003`, `U+000B`, and `U+FFFC`. Text mode prints one line per hit (`file:line:col U+XXXX NAME`); JSON mode emits `gremlin` / `gremlin_summary` events. See `src/gremlins.rs` for the full banned set.
 
+When many gremlins are found at once (e.g. picking the checker up on an existing codebase), text mode caps output at `--limit N` entries per phase (default 20) and prefers files changed on the current branch so the most actionable hits surface first. The trailer summarises what's hidden (`+N more in this branch, +M in unchanged files (--all to see)`). Use `--all` to see everything, or `--limit N` to override the cap. `--raw` and `--json` bypass the cap.
+
 `check` also works without a `brokkr.toml`, so you can drop it into any Rust+git repo and get the same clippy + tests + gremlins pipeline.
 
 ### pbfhogg
