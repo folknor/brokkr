@@ -212,6 +212,7 @@ pub enum PbfhoggCommand {
     ///   - `add_referenced` → `--add-referenced` (two-pass with
     ///     referenced-element collection).
     ///   - `invert` → `--invert` (select everything NOT matching).
+    ///
     /// The ID list is hardcoded (same fixed set used by all three
     /// previous presets) to keep the bench shape reproducible.
     Getid {

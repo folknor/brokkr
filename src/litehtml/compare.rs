@@ -52,6 +52,13 @@ impl fmt::Display for Status {
 
 const FUZZ_THRESHOLD: u8 = 13; // ~5% of 255
 
+// 5% of 255 = 12.75, threshold rounds up to 13.
+const _: () = {
+    assert!(12u8 <= FUZZ_THRESHOLD);
+    assert!(13u8 <= FUZZ_THRESHOLD);
+    assert!(14u8 > FUZZ_THRESHOLD);
+};
+
 struct DecodedPng {
     width: u32,
     height: u32,
@@ -522,11 +529,4 @@ mod tests {
         assert_eq!(rgba, vec![128, 128, 128, 255, 64, 64, 64, 255]);
     }
 
-    #[test]
-    fn fuzz_threshold_allows_small_diff() {
-        // 5% of 255 = 12.75, threshold is 13
-        assert!(12u8 <= FUZZ_THRESHOLD);
-        assert!(13u8 <= FUZZ_THRESHOLD);
-        assert!(14u8 > FUZZ_THRESHOLD);
-    }
 }

@@ -195,10 +195,10 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
                 if let Some(idx) = line.find("panicked at ") {
                     let rest = &line[idx + "panicked at ".len()..];
                     let rest = rest.trim_end_matches(':');
-                    if rest.starts_with('\'') {
-                        if let Some(end_quote) = rest[1..].find('\'') {
-                            current_panic_msg = rest[1..1 + end_quote].to_string();
-                            let after = rest[1 + end_quote + 1..].trim_start_matches(", ");
+                    if let Some(body) = rest.strip_prefix('\'') {
+                        if let Some(end_quote) = body.find('\'') {
+                            current_panic_msg = body[..end_quote].to_string();
+                            let after = body[end_quote + 1..].trim_start_matches(", ");
                             current_panic_loc = after.to_string();
                         }
                     } else {

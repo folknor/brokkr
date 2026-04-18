@@ -572,12 +572,11 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
             root = v.trim().to_owned();
         } else if let Some(v) = line.strip_prefix("child_pid=") {
             child_pid = v.trim().parse().ok();
-        } else if let Some(v) = line.strip_prefix("progress=") {
-            if let Some((r, t)) = v.trim().split_once('/') {
-                if let (Ok(r), Ok(t)) = (r.parse::<u32>(), t.parse::<u32>()) {
-                    progress = Some((r, t));
-                }
-            }
+        } else if let Some(v) = line.strip_prefix("progress=")
+            && let Some((r, t)) = v.trim().split_once('/')
+            && let (Ok(r), Ok(t)) = (r.parse::<u32>(), t.parse::<u32>())
+        {
+            progress = Some((r, t));
         }
     }
 

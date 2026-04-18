@@ -55,18 +55,12 @@ impl Command {
                 dedupe,
                 clean,
             } => {
-                let tf = match type_filter.as_deref() {
-                    Some(s) => match crate::pbfhogg::commands::CatTypeFilter::parse(s) {
-                        Ok(f) => Some(f),
-                        // Bubble the parse error up as `None` — the command
-                        // dispatch layer will surface it via the build-args
-                        // error path if the user types a nonsense value.
-                        // But clap should already catch most bad input via
-                        // the value_parser below; we keep this tolerant.
-                        Err(_) => None,
-                    },
-                    None => None,
-                };
+                // Parse errors become `None` — clap's value_parser catches
+                // most bad input upstream; dispatch will surface anything
+                // that slips through.
+                let tf = type_filter
+                    .as_deref()
+                    .and_then(|s| crate::pbfhogg::commands::CatTypeFilter::parse(s).ok());
                 Some((
                     mode,
                     pbf,
