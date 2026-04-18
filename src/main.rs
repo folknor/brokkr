@@ -142,7 +142,7 @@ fn main() {
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
             if let Ok((project, dev_config, project_root)) = project::detect()
-                && let Err(e) = cmd_clean(&dev_config, project, &project_root)
+                && let Err(e) = cmd_clean(&dev_config, project, &project_root, false)
             {
                 output::error(&format!("cleanup failed: {e}"));
             }
@@ -692,9 +692,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Invalidate { uuid, commit, force } => {
             invalidate_cmd::cmd_invalidate(&project_root, uuid.as_deref(), commit.as_deref(), force)
         }
-        Command::Clean => {
+        Command::Clean { worktrees } => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
-            cmd_clean(&dev_config, project, &project_root)
+            cmd_clean(&dev_config, project, &project_root, worktrees)
         }
         Command::Verify {
             verbose,
@@ -1146,6 +1146,7 @@ fn cmd_clean(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    worktrees: bool,
 ) -> Result<(), DevError> {
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -1211,6 +1212,11 @@ fn cmd_clean(
                 output::run_msg(&format!("removed {removed} scratch file(s)"));
             }
         }
+    }
+
+    if worktrees {
+        let removed = worktree::purge_all(project_root)?;
+        output::run_msg(&format!("removed {removed} worktree(s)"));
     }
 
     output::result_msg("clean done");

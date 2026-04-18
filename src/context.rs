@@ -203,9 +203,13 @@ impl BenchContext {
 
 /// Run a closure with an optional git worktree for retroactive benchmarking.
 ///
-/// When `commit` is `Some`, creates a worktree at that commit, passes
-/// `Some(&worktree_path)` as `build_root` to the closure, and cleans up
-/// afterwards (even on error).  When `None`, just calls `f(None)`.
+/// When `commit` is `Some`, creates (or reuses) a worktree at that commit and
+/// passes `Some(&worktree_path)` as `build_root` to the closure. When `None`,
+/// just calls `f(None)`.
+///
+/// Worktrees persist across runs so the cargo `target/` inside survives.
+/// Reuse is automatic when the same commit is requested again. Run
+/// `brokkr clean --worktrees` to garbage collect.
 pub(crate) fn with_worktree<F, T>(
     project_root: &Path,
     commit: Option<&str>,
@@ -221,11 +225,7 @@ where
                 "benchmarking commit {} ({})",
                 wt.commit, wt.subject,
             ));
-            let result = f(Some(&wt.path));
-            if let Err(e) = wt.remove() {
-                output::error(&format!("worktree cleanup failed: {e}"));
-            }
-            result
+            f(Some(&wt.path))
         }
         None => f(None),
     }

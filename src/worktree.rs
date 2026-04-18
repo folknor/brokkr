@@ -1,7 +1,9 @@
 //! Git worktree management for retroactive benchmarking.
 //!
-//! Creates a temporary worktree at a specific commit so we can build old code
-//! while keeping data paths and the results DB in the main tree.
+//! Creates a persistent worktree at a specific commit so we can build old
+//! code while keeping data paths and the results DB in the main tree.
+//! Worktrees are reused across runs (the cargo `target/` inside survives)
+//! and garbage-collected via `brokkr clean --worktrees`.
 //!
 //! The worktree is placed as a sibling to the project root (not inside it)
 //! so that relative path dependencies (e.g. `../pbfhogg`) still resolve.
@@ -12,7 +14,10 @@ use std::process::Command;
 use crate::error::DevError;
 use crate::output;
 
-/// A temporary git worktree checked out at a specific commit.
+/// A persistent git worktree checked out at a specific commit.
+///
+/// Created on demand by `Worktree::create` and reused on subsequent runs at
+/// the same commit. Use `brokkr clean --worktrees` to garbage collect.
 pub struct Worktree {
     /// Absolute path to the worktree directory.
     pub path: PathBuf,
@@ -20,8 +25,6 @@ pub struct Worktree {
     pub commit: String,
     /// First line of the commit message.
     pub subject: String,
-    /// Main tree root, needed for cleanup.
-    project_root: PathBuf,
 }
 
 impl Worktree {
@@ -30,10 +33,15 @@ impl Worktree {
     /// The worktree is placed at `<parent>/.brokkr-worktree-<project>-<short_hash>`
     /// as a sibling to the project root, so that relative path dependencies
     /// (e.g. `../pbfhogg`) resolve correctly.
+    ///
+    /// Worktrees are persistent across runs: if one already exists at the
+    /// computed path and its HEAD matches the requested commit, it is reused.
+    /// This preserves the cargo `target/` inside, so subsequent
+    /// `--bench`/`--hotpath`/`--alloc` runs at the same commit don't pay the
+    /// full rebuild cost. Use `brokkr clean --worktrees` to garbage collect.
     pub fn create(project_root: &Path, commit_ref: &str) -> Result<Self, DevError> {
-        // Validate the commit exists.
+        // Validate the commit exists and resolve to a full hash for comparison.
         let full_hash = run_git(project_root, &["rev-parse", "--verify", commit_ref])?;
-        let _ = full_hash; // just validating — we use short hash below
 
         let short = run_git(project_root, &["rev-parse", "--short", commit_ref])?;
         let subject = run_git(project_root, &["log", "-1", "--format=%s", commit_ref])?;
@@ -48,7 +56,21 @@ impl Worktree {
             .unwrap_or("project");
         let worktree_dir = parent.join(format!(".brokkr-worktree-{project_name}-{short}"));
 
-        // Clean up stale worktree at this path if it exists.
+        // Reuse path: if a worktree already exists at this path and its HEAD
+        // matches the requested commit, skip remove + re-add.
+        if worktree_dir.exists()
+            && let Ok(head) = run_git(&worktree_dir, &["rev-parse", "HEAD"])
+            && head == full_hash
+        {
+            output::run_msg(&format!("reusing worktree for {short} ({subject})"));
+            return Ok(Self {
+                path: worktree_dir,
+                commit: short,
+                subject,
+            });
+        }
+
+        // Stale (different commit, or git lost track of the dir): force-remove.
         if worktree_dir.exists() {
             output::run_msg(&format!(
                 "removing stale worktree at {}",
@@ -88,20 +110,57 @@ impl Worktree {
             path: worktree_dir,
             commit: short,
             subject,
-            project_root: project_root.to_owned(),
         })
     }
+}
 
-    /// Remove the worktree and clean up git bookkeeping.
-    pub fn remove(self) -> Result<(), DevError> {
-        output::run_msg(&format!("removing worktree for {}", self.commit));
-        let worktree_str = self.path.display().to_string();
-        run_git(
-            &self.project_root,
-            &["worktree", "remove", "--force", &worktree_str],
-        )?;
-        Ok(())
+/// Remove every persistent brokkr worktree sibling for the given project
+/// (matching `<parent>/.brokkr-worktree-<project>-*`) and prune git
+/// bookkeeping. Returns the number of worktrees removed.
+pub fn purge_all(project_root: &Path) -> Result<usize, DevError> {
+    let parent = project_root
+        .parent()
+        .ok_or_else(|| DevError::Config("project root has no parent directory".into()))?;
+    let project_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    let prefix = format!(".brokkr-worktree-{project_name}-");
+
+    let mut removed = 0usize;
+    let entries = match std::fs::read_dir(parent) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        output::run_msg(&format!("removing worktree {name}"));
+        drop(run_git(
+            project_root,
+            &["worktree", "remove", "--force", &path.display().to_string()],
+        ));
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(|e| {
+                DevError::Config(format!(
+                    "cannot remove worktree at {}: {e}",
+                    path.display()
+                ))
+            })?;
+        }
+        removed += 1;
     }
+
+    if removed > 0 {
+        drop(run_git(project_root, &["worktree", "prune"]));
+    }
+    Ok(removed)
 }
 
 /// Run a git command in the given directory and return trimmed stdout.

@@ -46,7 +46,7 @@ Single crate, single binary. No workspace.
 - `src/oom.rs` — OOM protection (`protect_child`, `check_memory`, `MemoryRisk`)
 - `src/preflight.rs` — Pre-benchmark system checks (`Check` enum framework)
 - `src/tools.rs` — External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config)
-- `src/worktree.rs` — Git worktree creation/cleanup for retroactive benchmarking
+- `src/worktree.rs` — Persistent git worktrees for retroactive benchmarking. `Worktree::create` reuses an existing worktree at `<parent>/.brokkr-worktree-<project>-<short>` if its HEAD already matches the requested commit, so cargo `target/` survives across runs. `purge_all` (used by `brokkr clean --worktrees`) removes all sibling worktree dirs and prunes git bookkeeping.
 - `src/history.rs` — `HistoryDb` — global command history at `$XDG_DATA_HOME/brokkr/history.db`
 
 ### Project-specific modules
@@ -138,7 +138,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `check` — clippy + tests (extra args forwarded to cargo test). Supports `--features`, `--no-default-features`, `--raw` (unfiltered cargo output), and `--json` (NDJSON diagnostics and summaries). `--raw` and `--json` are mutually exclusive (clap enforced). Default text mode: each diagnostic becomes one line, compilation noise stripped, passing tests aggregated. `--json` mode: uses cargo `--message-format=json` for full-fidelity structured diagnostics, emits one JSON object per line to stdout with no prefixed output. Always emits summary events even on success.
 - `env` — hostname, kernel, governor, memory, drives, tool versions, dataset status
 - `results` — query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`
-- `clean` — remove scratch/temp files
+- `clean [--worktrees]` — remove scratch/temp files. `--worktrees` also purges all persistent benchmark worktrees (sibling `.brokkr-worktree-<project>-*` dirs created by `--commit`).
 - `pmtiles-stats` — PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` — browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 - `kill` — cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM: brokkr catches it, SIGKILLs its child, flushes partial sidecar data under the `dirty` alias, releases the lock, and runs `brokkr clean`. `--hard` sends SIGKILL to brokkr + child (no cleanup; follow up with `brokkr clean`). Exits 130 on the graceful path.

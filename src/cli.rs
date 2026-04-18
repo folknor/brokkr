@@ -789,7 +789,12 @@ Examples:
     },
     /// Clean build artifacts and scratch data
     #[command(display_order = 5)]
-    Clean,
+    Clean {
+        /// Also remove all persistent benchmark worktrees
+        /// (sibling `.brokkr-worktree-<project>-*` dirs created by --commit).
+        #[arg(long)]
+        worktrees: bool,
+    },
     /// Show lock status (who holds the benchmark lock)
     #[command(display_order = 6)]
     Lock,
