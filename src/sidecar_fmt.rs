@@ -632,10 +632,10 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
 
     for s in summaries {
         if s.samples == 0 {
-            // Phase is shorter than the 100ms sampling interval (or landed
-            // entirely between two sample ticks). Still show the marker
-            // duration - zero samples is a real signal, not missing data.
-            println!("{:<24} {:>6}ms (no samples)", s.name, s.duration_ms);
+            // Phase is shorter than the 100ms sampling interval or landed
+            // between two sample ticks. No /proc data to show, so skip the
+            // row entirely - the JSONL form keeps the zero-sample record
+            // for tooling that wants it.
             continue;
         }
         let avg_cores = avg_cores_str(s.cpu_delta_jiffies, s.sample_span_us, clk_tck);
