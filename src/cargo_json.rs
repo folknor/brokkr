@@ -14,6 +14,8 @@ pub enum CheckEvent {
     TestFailure(TestFailureEvent),
     DiagnosticSummary(DiagnosticSummaryEvent),
     TestSummary(TestSummaryEvent),
+    Gremlin(GremlinEvent),
+    GremlinSummary(GremlinSummaryEvent),
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,21 @@ pub struct TestSummaryEvent {
     pub suites: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct GremlinEvent {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub codepoint: String,
+    pub name: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct GremlinSummaryEvent {
+    pub status: &'static str,
+    pub found: usize,
 }
 
 // --- Parsing ---
@@ -376,6 +393,34 @@ mod tests {
         });
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("duration_seconds"));
+    }
+
+    #[test]
+    fn gremlin_event_serialization() {
+        let event = CheckEvent::Gremlin(GremlinEvent {
+            file: "src/foo.rs".into(),
+            line: 10,
+            column: 5,
+            codepoint: "U+200B".into(),
+            name: "ZERO WIDTH SPACE",
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"gremlin""#));
+        assert!(json.contains(r#""file":"src/foo.rs""#));
+        assert!(json.contains(r#""codepoint":"U+200B""#));
+        assert!(json.contains(r#""name":"ZERO WIDTH SPACE""#));
+    }
+
+    #[test]
+    fn gremlin_summary_serialization() {
+        let event = CheckEvent::GremlinSummary(GremlinSummaryEvent {
+            status: "failed",
+            found: 3,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"gremlin_summary""#));
+        assert!(json.contains(r#""status":"failed""#));
+        assert!(json.contains(r#""found":3"#));
     }
 
     #[test]

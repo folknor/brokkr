@@ -18,6 +18,7 @@ mod elivagar;
 mod env;
 mod error;
 mod git;
+mod gremlins;
 mod harness;
 mod history;
 mod history_cmd;

@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::error::DevError;
+use crate::gremlins;
 use crate::output;
 use crate::project::Project;
 
@@ -19,6 +20,7 @@ pub(crate) fn cmd_check(
     json: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
+    run_gremlins(project_root, json)?;
     run_clippy(project_root, features, no_default_features, package, raw, json)?;
     run_tests(
         project,
@@ -34,6 +36,46 @@ pub(crate) fn cmd_check(
         output::result_msg("check passed");
     }
     Ok(())
+}
+
+fn run_gremlins(project_root: &Path, json: bool) -> Result<(), DevError> {
+    if !json {
+        output::run_msg("gremlins: scanning tracked sources");
+    }
+
+    let found = gremlins::scan(project_root)?;
+
+    if json {
+        for g in &found {
+            cargo_json::emit(&cargo_json::CheckEvent::Gremlin(
+                cargo_json::GremlinEvent {
+                    file: g.path.display().to_string(),
+                    line: g.line,
+                    column: g.column,
+                    codepoint: format!("U+{:04X}", g.codepoint),
+                    name: g.name,
+                },
+            ));
+        }
+        let status = if found.is_empty() { "ok" } else { "failed" };
+        cargo_json::emit(&cargo_json::CheckEvent::GremlinSummary(
+            cargo_json::GremlinSummaryEvent {
+                status,
+                found: found.len(),
+            },
+        ));
+        if !found.is_empty() {
+            return Err(DevError::Build("gremlins found".into()));
+        }
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        return Ok(());
+    }
+
+    output::error(&gremlins::format_summary(&found));
+    Err(DevError::Build("gremlins found".into()))
 }
 
 fn run_clippy(
