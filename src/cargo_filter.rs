@@ -446,6 +446,28 @@ fn extract_location(block: &[String]) -> Option<String> {
     None
 }
 
+/// Extract a lint rule name from a `= note: `#[warn(rule)]` on by default` or
+/// `= note: `#[deny(rule)]` ...` line. Real cargo/clippy puts warning rule
+/// names in these notes rather than in the header line.
+fn extract_rule_from_notes(block: &[String]) -> Option<String> {
+    for line in block.iter().skip(1) {
+        let trimmed = line.trim_start().trim_start_matches('=').trim_start();
+        let Some(rest) = trimmed.strip_prefix("note:").map(str::trim) else {
+            continue;
+        };
+        for tag in ["#[warn(", "#[deny("] {
+            let needle = format!("`{tag}");
+            if let Some(start) = rest.find(&needle)
+                && let Some(close) = rest[start + needle.len()..].find(")]`")
+            {
+                let begin = start + needle.len();
+                return Some(rest[begin..begin + close].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Parse a diagnostic header into (prefix, message).
 ///
 /// `"error[E0308]: mismatched types"` → `("error[E0308]", "mismatched types")`
@@ -538,7 +560,15 @@ fn extract_detail(block: &[String]) -> Option<String> {
 /// When the block contains "expected/found" detail, it is appended:
 /// `"error[E0308] src/foo.rs:20:5 mismatched types — expected `i32`, found `&str`"`
 fn format_diagnostic(block: &[String]) -> String {
-    let (prefix, message) = parse_header(&block[0]);
+    let (mut prefix, message) = parse_header(&block[0]);
+    // If the header didn't carry a [rule], try to recover one from a
+    // `= note: \`#[warn(rule)]\`` line in the block. Real cargo/clippy
+    // emits the rule there, not in the header.
+    if (prefix == "warning" || prefix == "error")
+        && let Some(rule) = extract_rule_from_notes(block)
+    {
+        prefix = format!("{prefix}[{rule}]");
+    }
     let location = extract_location(block).unwrap_or_default();
     let detail = extract_detail(block);
 
@@ -712,6 +742,35 @@ error: aborting due to 1 previous error
         // The inline expected/found line should be captured.
         assert!(
             result.contains("— expected `RenumberStats`, found `GetparentsStats`"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn clippy_warning_rule_from_note() {
+        // Real cargo/clippy emits the warning rule in a `= note` line,
+        // not in the header. The formatter should recover it.
+        let output = "\
+warning: unused imports: `QueryFilter` and `ResultsDb`
+ --> src/db/compare.rs:78:21
+  |
+78|     use crate::db::{QueryFilter, ResultsDb, RunRow};
+  |                     ^^^^^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: this `if` statement can be collapsed
+ --> src/lockfile.rs:575:16
+  |
+  = note: `#[warn(clippy::collapsible_if)]` on by default
+";
+        let result = filter_clippy(output);
+        assert!(
+            result.contains("warning[unused_imports] src/db/compare.rs:78:21 unused imports: `QueryFilter` and `ResultsDb`"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("warning[clippy::collapsible_if] src/lockfile.rs:575:16 this `if` statement can be collapsed"),
             "got: {result}"
         );
     }

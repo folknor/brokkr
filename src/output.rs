@@ -101,6 +101,14 @@ pub fn error(msg: &str) {
     }
 }
 
+/// Print a warning message. Multi-line messages get each line prefixed.
+/// Warnings are NEVER suppressed by quiet mode.
+pub fn warn(msg: &str) {
+    for line in msg.lines() {
+        println!("[warn]    {line}");
+    }
+}
+
 // --- Subprocess types ---
 
 /// Captured output from a subprocess.

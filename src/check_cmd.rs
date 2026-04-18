@@ -115,6 +115,13 @@ fn run_clippy(
 
     if raw && !stderr.is_empty() {
         print!("{stderr}");
+    } else if !raw {
+        // Success path: surface any warnings the filter extracted so they
+        // aren't silently dropped when the build passes.
+        let filtered = cargo_filter::filter_clippy(&stderr);
+        if filtered != "cargo clippy: no issues" {
+            output::warn(&filtered);
+        }
     }
 
     Ok(())
@@ -276,6 +283,16 @@ fn run_tests(
         }
         if !stdout.is_empty() {
             print!("{stdout}");
+        }
+    } else {
+        // Success path: surface any compile warnings from the test build
+        // (cargo test rebuilds with cfg(test), which can flag warnings the
+        // earlier clippy pass didn't see).
+        let filtered = cargo_filter::filter_clippy(&stderr);
+        if filtered != "cargo clippy: no issues" {
+            // Relabel so the [warn] line says "cargo test" not "cargo clippy".
+            let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
+            output::warn(&relabeled);
         }
     }
 
