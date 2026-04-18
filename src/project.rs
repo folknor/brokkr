@@ -69,6 +69,21 @@ pub fn detect() -> Result<(Project, DevConfig, PathBuf), DevError> {
     Ok((project, dev_config, cwd))
 }
 
+/// Like [`detect`] but returns `Ok(None)` when `./brokkr.toml` is absent.
+///
+/// Used by commands that work fine without brokkr-specific config (`check`).
+/// A malformed `brokkr.toml` still errors - we only swallow the file-not-found
+/// case.
+pub fn detect_optional() -> Result<Option<(Project, DevConfig, PathBuf)>, DevError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
+    if !cwd.join("brokkr.toml").exists() {
+        return Ok(None);
+    }
+    let (project, dev_config) = config::load(&cwd)?;
+    Ok(Some((project, dev_config, cwd)))
+}
+
 /// Require the current project matches the expected project.
 /// Returns an error with a helpful message if mismatched.
 pub fn require(current: Project, expected: Project, command: &str) -> Result<(), DevError> {

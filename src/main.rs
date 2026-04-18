@@ -193,6 +193,30 @@ fn run(cli: Cli) -> Result<(), DevError> {
             all,
         });
     }
+    if let Command::Check {
+        features,
+        no_default_features,
+        package,
+        raw,
+        json,
+        args,
+    } = cli.command
+    {
+        let (project, project_root) = match project::detect_optional()? {
+            Some((p, _cfg, root)) => (Some(p), root),
+            None => (None, std::env::current_dir()?),
+        };
+        return check_cmd::cmd_check(
+            project,
+            &project_root,
+            &features,
+            no_default_features,
+            package.as_deref(),
+            raw,
+            json,
+            &args,
+        );
+    }
 
     let (project, dev_config, project_root) = project::detect()?;
     let brokkr_args = capture_brokkr_args();
@@ -234,24 +258,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::MultiExtract { .. }
         | Command::TimeFilter { .. }
         | Command::Diff { .. }
-        | Command::BuildGeocodeIndex { .. } => unreachable!(),
-        Command::Check {
-            features,
-            no_default_features,
-            package,
-            raw,
-            json,
-            args,
-        } => check_cmd::cmd_check(
-            project,
-            &project_root,
-            &features,
-            no_default_features,
-            package.as_deref(),
-            raw,
-            json,
-            &args,
-        ),
+        | Command::BuildGeocodeIndex { .. }
+        | Command::Check { .. } => unreachable!(),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {
             mode,

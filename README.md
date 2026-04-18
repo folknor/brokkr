@@ -13,7 +13,7 @@ cargo install --path ~/Programs/brokkr
 
 ## How it works
 
-Run `brokkr` from any project root. It reads `./brokkr.toml` to detect which project you're in and resolves datasets, paths, and host-specific configuration. Commands are project-gated - running a pbfhogg command from elivagar's root produces a clear error.
+Run `brokkr` from any project root. It reads `./brokkr.toml` to detect which project you're in and resolves datasets, paths, and host-specific configuration. Commands are project-gated - running a pbfhogg command from elivagar's root produces a clear error. (`check` is the exception - it works in any Rust+git repo, with or without `brokkr.toml`.)
 
 ```
 cd ~/Programs/pbfhogg
@@ -60,7 +60,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 
 | Command | Description |
 |---------|-------------|
-| `check` | Run clippy + tests (extra args forwarded to `cargo test`) |
+| `check` | Run gremlin scan + clippy + tests (extra args forwarded to `cargo test`) |
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
@@ -71,6 +71,10 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `lock` | Show who holds the benchmark lock |
 
 `check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), failures become `FAILED name location message`. Use `--raw` for unfiltered cargo output, or `--json` for NDJSON with full-fidelity structured diagnostics (one JSON object per line). Falls back to raw output automatically if parsing fails.
+
+A gremlin scan runs before clippy and fails the check if any banned Unicode character is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files. Covers invisible/zero-width characters, non-breaking spaces, soft hyphen, line/paragraph separators, bidi marks/overrides/isolates, em/en dashes, typographic single and double quotes, plus `U+0003`, `U+000B`, and `U+FFFC`. Text mode prints one line per hit (`file:line:col U+XXXX NAME`); JSON mode emits `gremlin` / `gremlin_summary` events. See `src/gremlins.rs` for the full banned set.
+
+`check` also works without a `brokkr.toml`, so you can drop it into any Rust+git repo and get the same clippy + tests + gremlins pipeline.
 
 ### pbfhogg
 

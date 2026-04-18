@@ -11,7 +11,7 @@ use crate::project::Project;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_check(
-    project: Project,
+    project: Option<Project>,
     project_root: &Path,
     features: &[String],
     no_default_features: bool,
@@ -175,7 +175,7 @@ fn run_clippy(
     clippy::cognitive_complexity
 )]
 fn run_tests(
-    project: Project,
+    project: Option<Project>,
     project_root: &Path,
     features: &[String],
     no_default_features: bool,
@@ -213,7 +213,7 @@ fn run_tests(
 
     // Nidhogg tests need CARGO_TARGET_TMPDIR set.
     let env: Vec<(&str, &str)> = match project {
-        Project::Nidhogg => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
+        Some(Project::Nidhogg) => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
         _ => vec![],
     };
 
