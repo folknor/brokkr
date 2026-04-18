@@ -64,7 +64,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
-| `clean` | Remove scratch/temp files |
+| `clean [--worktrees]` | Remove scratch/temp files; `--worktrees` also purges persistent benchmark worktrees |
 | `pmtiles-stats` | PMTiles v3 file statistics |
 | `history` | Browse global command history |
 | `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
@@ -215,7 +215,7 @@ All benchmarks run through `BenchHarness`, which provides:
 - **Exclusive lock** — prevents parallel bench/verify/hotpath runs via lockfile
 - **SQLite storage** — results stored in `.brokkr/results.db` per project with git commit, hostname, and full environment snapshot
 - **Multiple timing modes** — in-process (N runs, best-of-N), subprocess (external binary), and distribution (min/p50/p95/max)
-- **Retroactive benchmarking** — `--commit <hash>` builds and benchmarks old commits via git worktree
+- **Retroactive benchmarking** — `--commit <hash>` builds and benchmarks old commits via a persistent git worktree (sibling `.brokkr-worktree-<project>-<short>/`). Reused on subsequent runs at the same commit so cargo `target/` survives. Run `brokkr clean --worktrees` to garbage collect.
 - **OOM protection** — memory availability checks before large-scale runs
 
 ## Sidecar profiler

@@ -99,6 +99,9 @@ impl Worktree {
         }
 
         output::run_msg(&format!("creating worktree for {short} ({subject})"));
+        output::run_msg(
+            "  worktree is persistent — run `brokkr clean --worktrees` to remove",
+        );
 
         let worktree_str = worktree_dir.display().to_string();
         run_git(
