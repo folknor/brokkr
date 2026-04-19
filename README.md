@@ -76,6 +76,8 @@ A gremlin scan runs before clippy and fails the check if any banned Unicode char
 
 When many diagnostics are found at once (e.g. picking the checker up on an existing codebase), text mode caps each phase at `--limit N` entries (default 20) and prefers files changed on the current branch so the most actionable hits surface first. The cap applies to both the gremlin phase and the clippy phase (independently), with a trailer summarising what's hidden (`+N more in this branch, +M in unchanged files (--all to see)`). Use `--all` to see everything, or `--limit N` to override the cap. `--raw` and `--json` bypass the cap.
 
+By default `check` runs clippy once with `--all-features`. Crates with proc macros that rewrite function bodies under specific features (e.g. `#[hotpath::measure]` swallowing the body when the `hotpath` feature is on) can silently mask real lint violations from this view, since the always-compiled body is never seen. Opt in to a second sweep by adding `[check] consumer_features = ["..."]` to `brokkr.toml` - the second invocation runs `cargo clippy --all-targets --no-default-features --features <consumer_features>`, representing what a downstream library consumer would build with. Diagnostics are deduped across sweeps and tagged in text mode (`[all-features]`, `[consumer]`, or `[both]`) and in JSON mode (`sweeps: [...]` field on each diagnostic, `sweep` field on the per-sweep summary). User-supplied `--features` / `--no-default-features` short-circuit to a single sweep with those exact flags. Cost is ~2x cold (cargo keeps separate `target/` per feature set); incremental is small.
+
 `check` also works without a `brokkr.toml`, so you can drop it into any Rust+git repo and get the same clippy + tests + gremlins pipeline.
 
 ### pbfhogg
@@ -403,6 +405,7 @@ nidhogg = "/home/folk/Programs/nidhogg"
 - `xxhash` - optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` - per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
 - `features` - cargo features appended to every build (all measurable commands, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top
+- `[check]` - top-level (not host-scoped). `consumer_features = ["..."]` opts `check` into a second clippy sweep with `--no-default-features --features <these>`, catching lints that feature-gated proc-macro rewrites mask in the default `--all-features` sweep
 
 ## License
 

@@ -15,10 +15,24 @@ pub struct DevConfig {
     pub hosts: HashMap<String, HostConfig>,
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
+    pub check: Option<CheckConfig>,
     /// Env var names / globs to capture into `run_kv` on every measured
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
     /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
     pub capture_env: Vec<String>,
+}
+
+/// `[check]` section. `consumer_features` is the cargo feature set a
+/// downstream library consumer would see - usually a small subset of
+/// what the in-tree dev build enables. When non-empty, `brokkr check`
+/// runs clippy a second time with `--no-default-features --features
+/// <consumer_features>` so feature-gated proc-macro expansions can't
+/// silently mask real lint violations.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckConfig {
+    #[serde(default)]
+    pub consumer_features: Vec<String>,
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
@@ -262,6 +276,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
 
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
+    let check = parse_check(table)?;
     let capture_env = parse_capture_env(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -272,6 +287,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             hosts,
             litehtml,
             sluggrs,
+            check,
             capture_env,
         },
     ))
@@ -348,6 +364,7 @@ fn parse_hosts(
         if key == "project"
             || key == "litehtml"
             || key == "sluggrs"
+            || key == "check"
             || key == "capture_env"
         {
             continue;
@@ -391,6 +408,20 @@ fn parse_sluggrs(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("sluggrs: {e}")))?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[check]` section from the root table.
+fn parse_check(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<CheckConfig>, DevError> {
+    let Some(value) = table.get("check") else {
+        return Ok(None);
+    };
+    let config: CheckConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("check: {e}")))?;
     Ok(Some(config))
 }
 
@@ -649,6 +680,7 @@ mod tests {
             hosts,
             litehtml: None,
             sluggrs: None,
+            check: None,
             capture_env: Vec::new(),
         }
     }

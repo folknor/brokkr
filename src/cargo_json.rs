@@ -21,6 +21,11 @@ pub enum CheckEvent {
 #[derive(Serialize)]
 pub struct DiagnosticEvent {
     pub tool: &'static str,
+    /// Which clippy feature sweeps this diagnostic appeared in
+    /// (e.g. `["all-features"]`, `["consumer"]`, or both). Empty for
+    /// non-clippy events and for single-sweep clippy runs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sweeps: Vec<&'static str>,
     pub level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -65,6 +70,10 @@ pub struct TestFailureEvent {
 #[derive(Serialize)]
 pub struct DiagnosticSummaryEvent {
     pub tool: &'static str,
+    /// Which clippy sweep this summary belongs to. `None` for non-clippy
+    /// tools or single-sweep clippy runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<&'static str>,
     pub status: &'static str,
     pub errors: usize,
     pub warnings: usize,
@@ -103,8 +112,16 @@ pub struct GremlinSummaryEvent {
 ///
 /// Each line is a JSON object from cargo. Only lines with
 /// `"reason": "compiler-message"` are extracted; everything else is skipped.
+///
+/// `sweep` tags every emitted Diagnostic with the clippy sweep label
+/// (e.g. `"all-features"`, `"consumer"`). `None` for non-clippy tools
+/// and single-sweep runs - the field stays empty in that case.
 #[allow(clippy::too_many_lines)] // JSON walk - splitting just shuffles match arms
-pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEvent> {
+pub fn parse_cargo_diagnostics(
+    stdout: &str,
+    tool: &'static str,
+    sweep: Option<&'static str>,
+) -> Vec<CheckEvent> {
     let mut events = Vec::new();
 
     for line in stdout.lines() {
@@ -207,6 +224,7 @@ pub fn parse_cargo_diagnostics(stdout: &str, tool: &'static str) -> Vec<CheckEve
 
         events.push(CheckEvent::Diagnostic(DiagnosticEvent {
             tool,
+            sweeps: sweep.map(|s| vec![s]).unwrap_or_default(),
             level,
             code,
             message,
@@ -252,6 +270,7 @@ pub fn emit_parse_error(tool: &'static str, stdout: &str, stderr: &str) {
 
     emit(&CheckEvent::Diagnostic(DiagnosticEvent {
         tool,
+        sweeps: Vec::new(),
         level: "error".into(),
         code: None,
         message,
@@ -295,7 +314,7 @@ mod tests {
     #[test]
     fn parse_single_error() {
         let input = sample_compiler_message("error", "E0425", "cannot find value", "src/main.rs", 10);
-        let events = parse_cargo_diagnostics(&input, "clippy");
+        let events = parse_cargo_diagnostics(&input, "clippy", None);
         assert_eq!(events.len(), 1);
         if let CheckEvent::Diagnostic(d) = &events[0] {
             assert_eq!(d.tool, "clippy");
@@ -316,14 +335,14 @@ mod tests {
     #[test]
     fn skips_non_compiler_messages() {
         let input = r#"{"reason":"compiler-artifact","target":{"name":"foo"}}"#;
-        let events = parse_cargo_diagnostics(input, "clippy");
+        let events = parse_cargo_diagnostics(input, "clippy", None);
         assert!(events.is_empty());
     }
 
     #[test]
     fn skips_aborting_errors() {
         let input = r#"{"reason":"compiler-message","message":{"level":"error","code":null,"message":"aborting due to 3 previous errors","spans":[],"children":[],"rendered":"error: aborting"}}"#;
-        let events = parse_cargo_diagnostics(input, "clippy");
+        let events = parse_cargo_diagnostics(input, "clippy", None);
         assert!(events.is_empty());
     }
 
@@ -332,14 +351,27 @@ mod tests {
         let mut input = sample_compiler_message("error", "E0308", "mismatched types", "src/a.rs", 1);
         input.push('\n');
         input.push_str(&sample_compiler_message("warning", "unused_variables", "unused var", "src/b.rs", 2));
-        let events = parse_cargo_diagnostics(&input, "test");
+        let events = parse_cargo_diagnostics(&input, "test", None);
         assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn parse_with_sweep_tags_diagnostics() {
+        let input = sample_compiler_message("warning", "needless_pass_by_value", "x", "src/a.rs", 1);
+        let events = parse_cargo_diagnostics(&input, "clippy", Some("consumer"));
+        assert_eq!(events.len(), 1);
+        if let CheckEvent::Diagnostic(d) = &events[0] {
+            assert_eq!(d.sweeps, vec!["consumer"]);
+        } else {
+            panic!("expected Diagnostic event");
+        }
     }
 
     #[test]
     fn emit_produces_valid_json() {
         let event = CheckEvent::DiagnosticSummary(DiagnosticSummaryEvent {
             tool: "clippy",
+            sweep: None,
             status: "failed",
             errors: 2,
             warnings: 3,
@@ -428,6 +460,7 @@ mod tests {
         // Test the fallback message construction when both streams are empty.
         let event = CheckEvent::Diagnostic(DiagnosticEvent {
             tool: "clippy",
+            sweeps: Vec::new(),
             level: "error".into(),
             code: None,
             message: "cargo exited with non-zero status but produced no output".into(),

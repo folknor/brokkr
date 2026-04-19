@@ -205,13 +205,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
         args,
     } = cli.command
     {
-        let (project, project_root) = match project::detect_optional()? {
-            Some((p, _cfg, root)) => (Some(p), root),
-            None => (None, std::env::current_dir()?),
+        let (project, check_cfg, project_root) = match project::detect_optional()? {
+            Some((p, cfg, root)) => (Some(p), cfg.check, root),
+            None => (None, None, std::env::current_dir()?),
         };
         return check_cmd::cmd_check(
             project,
             &project_root,
+            check_cfg.as_ref(),
             &features,
             no_default_features,
             package.as_deref(),

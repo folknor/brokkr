@@ -99,7 +99,18 @@ file = "denmark-elivagar.pmtiles"
 xxhash = "9a3b2c1d..."
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses `--all-features` by default (catches feature-gated code like hotpath/alloc), overridden by explicit `--features` or `--no-default-features`.
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses `--all-features` by default (catches feature-gated code like hotpath/alloc), overridden by explicit `--features` or `--no-default-features`. Reserved top-level keys (skipped by host parsing): `project`, `litehtml`, `sluggrs`, `check`, `capture_env`.
+
+### `[check]` section
+
+Optional. Single field today:
+
+```toml
+[check]
+consumer_features = ["commands"]
+```
+
+When `consumer_features` is non-empty, `brokkr check` runs clippy a second sweep with `--no-default-features --features <consumer_features>`. The first sweep is the existing `--all-features` run; the second represents what a downstream library consumer would build with. The point is to catch lints in always-compiled code that proc-macros (e.g. `#[hotpath::measure]`) silently mask by rewriting function bodies under feature gates. Diagnostics are deduped across sweeps and tagged in text mode (`[all-features]` / `[consumer]` / `[both]`) and in JSON mode (`sweeps: [...]` field). User-supplied `--features` / `--no-default-features` short-circuit the multi-sweep behavior - those flags mean "run exactly this one sweep". Absent `[check]` config = today's single `--all-features` sweep, no second build.
 
 ### Dataset structure
 
