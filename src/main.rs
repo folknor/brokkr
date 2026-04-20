@@ -77,7 +77,7 @@ where
     let mm = resolve_mode(mode)?;
     let features = resolve_features(dev_config, &mode.features);
     output::set_quiet(!mode.verbose);
-    context::with_worktree(project_root, mode.commit.as_deref(), |build_root| {
+    context::with_worktree(project_root, mode.commit.as_deref(), mode.dry_run, |build_root| {
         let req = measure::MeasureRequest {
             dev_config,
             project,
@@ -718,7 +718,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             let features = resolve_features(&dev_config, &[]);
             output::set_quiet(!verbose);
-            with_worktree(&project_root, commit.as_deref(), |build_root| {
+            with_worktree(&project_root, commit.as_deref(), false, |build_root| {
                 cmd_verify(
                     &dev_config,
                     project,
@@ -1232,6 +1232,14 @@ fn cmd_clean(
     if worktrees {
         let removed = worktree::purge_all(project_root)?;
         output::run_msg(&format!("removed {removed} worktree(s)"));
+    } else {
+        let existing = worktree::list(project_root)?;
+        if !existing.is_empty() {
+            output::run_msg(&format!(
+                "{} persistent worktree(s); run `brokkr clean --worktrees` to remove",
+                existing.len(),
+            ));
+        }
     }
 
     output::result_msg("clean done");

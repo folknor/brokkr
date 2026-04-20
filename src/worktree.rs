@@ -117,10 +117,9 @@ impl Worktree {
     }
 }
 
-/// Remove every persistent brokkr worktree sibling for the given project
-/// (matching `<parent>/.brokkr-worktree-<project>-*`) and prune git
-/// bookkeeping. Returns the number of worktrees removed.
-pub fn purge_all(project_root: &Path) -> Result<usize, DevError> {
+/// Collect every persistent brokkr worktree sibling for the given project
+/// (matching `<parent>/.brokkr-worktree-<project>-*`) without touching them.
+pub fn list(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
     let parent = project_root
         .parent()
         .ok_or_else(|| DevError::Config("project root has no parent directory".into()))?;
@@ -130,20 +129,35 @@ pub fn purge_all(project_root: &Path) -> Result<usize, DevError> {
         .unwrap_or("project");
     let prefix = format!(".brokkr-worktree-{project_name}-");
 
-    let mut removed = 0usize;
     let entries = match std::fs::read_dir(parent) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
+    let mut found = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.starts_with(&prefix) {
-            continue;
+        if name.starts_with(&prefix) {
+            found.push(path);
         }
+    }
+    Ok(found)
+}
+
+/// Remove every persistent brokkr worktree sibling for the given project
+/// (matching `<parent>/.brokkr-worktree-<project>-*`) and prune git
+/// bookkeeping. Returns the number of worktrees removed.
+pub fn purge_all(project_root: &Path) -> Result<usize, DevError> {
+    let paths = list(project_root)?;
+    let mut removed = 0usize;
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unnamed)");
         output::run_msg(&format!("removing worktree {name}"));
         drop(run_git(
             project_root,

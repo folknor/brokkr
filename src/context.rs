@@ -213,12 +213,19 @@ impl BenchContext {
 pub(crate) fn with_worktree<F, T>(
     project_root: &Path,
     commit: Option<&str>,
+    dry_run: bool,
     f: F,
 ) -> Result<T, DevError>
 where
     F: FnOnce(Option<&Path>) -> Result<T, DevError>,
 {
     match commit {
+        Some(hash) if dry_run => {
+            output::bench_msg(&format!(
+                "[dry-run] skipping worktree creation for {hash}"
+            ));
+            f(None)
+        }
         Some(hash) => {
             let wt = worktree::Worktree::create(project_root, hash)?;
             output::bench_msg(&format!(
