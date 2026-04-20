@@ -193,10 +193,12 @@ impl Command {
                 osc_seq,
                 keep_cache,
                 snapshot,
+                jobs,
             } => {
                 let params = CommandParams {
                     keep_cache: *keep_cache,
                     snapshot: snapshot.clone(),
+                    jobs: *jobs,
                     ..Default::default()
                 };
                 Some((

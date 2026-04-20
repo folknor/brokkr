@@ -330,6 +330,10 @@ Examples:
         /// from a historical snapshot.
         #[arg(long)]
         snapshot: Option<String>,
+        /// Parallel worker threads for pbfhogg diff. `0` = auto
+        /// (`available_parallelism()`); omit to use pbfhogg's default (1).
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// [pbfhogg] Diff two snapshots of the same dataset
     #[command(
@@ -372,6 +376,10 @@ Examples:
         /// written to scratch).
         #[arg(long, default_value_t, value_enum)]
         format: crate::pbfhogg::commands::DiffFormat,
+        /// Parallel worker threads for pbfhogg diff. `0` = auto
+        /// (`available_parallelism()`); omit to use pbfhogg's default (1).
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// [pbfhogg] Diff two PBFs (OSC output)
     /// [pbfhogg] Build geocode index

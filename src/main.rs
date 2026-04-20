@@ -276,10 +276,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             to,
             variant,
             format,
+            jobs,
         } => {
             let params = crate::measure::CommandParams {
                 from_snapshot: Some(from.clone()),
                 to_snapshot: Some(to.clone()),
+                jobs,
                 ..Default::default()
             };
             run_measured(

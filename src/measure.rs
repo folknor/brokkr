@@ -165,6 +165,11 @@ pub struct CommandParams {
     pub osc_range: Option<String>,
     /// `--keep-cache` (skip rebuilt merged-PBF cache invalidation).
     pub keep_cache: bool,
+    /// `-j/--jobs N` for `diff` / `diff-snapshots`. `0` means "auto"
+    /// (forwarded verbatim to pbfhogg, which resolves via
+    /// `available_parallelism()`). `None` means the flag wasn't passed,
+    /// so brokkr doesn't emit it and pbfhogg's own default (1) stands.
+    pub jobs: Option<usize>,
 
     // ----- Runtime observations (set during dispatch) -----
     /// Merged-PBF cache state: `"hit"` or `"miss"`. Observed when resolving

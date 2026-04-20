@@ -648,16 +648,16 @@ impl PbfhoggCommand {
             Self::Diff { format } => {
                 let merged = ctx.pbf_b_str()?;
                 let pbf = ctx.pbf_str()?;
-                match format {
-                    DiffFormat::Default => Ok(vec![
+                let mut args = match format {
+                    DiffFormat::Default => vec![
                         "diff".into(),
                         pbf.into(),
                         merged.into(),
                         "-c".into(),
-                    ]),
+                    ],
                     DiffFormat::Osc => {
                         let output = scratch_output_path(ctx, self, mode);
-                        Ok(vec![
+                        vec![
                             "diff".into(),
                             "--format".into(),
                             "osc".into(),
@@ -665,25 +665,30 @@ impl PbfhoggCommand {
                             merged.into(),
                             "-o".into(),
                             path_to_string(&output)?,
-                        ])
+                        ]
                     }
+                };
+                if let Some(j) = ctx.params.jobs {
+                    args.push("-j".into());
+                    args.push(j.to_string());
                 }
+                Ok(args)
             }
             Self::DiffSnapshots { format } => {
                 // Both PBFs come from snapshot resolution; pbf_path is the
                 // --from side, pbf_b_path is the --to side.
                 let from = ctx.pbf_str()?;
                 let to = ctx.pbf_b_str()?;
-                match format {
-                    DiffFormat::Default => Ok(vec![
+                let mut args = match format {
+                    DiffFormat::Default => vec![
                         "diff".into(),
                         from.into(),
                         to.into(),
                         "-c".into(),
-                    ]),
+                    ],
                     DiffFormat::Osc => {
                         let output = scratch_output_path(ctx, self, mode);
-                        Ok(vec![
+                        vec![
                             "diff".into(),
                             "--format".into(),
                             "osc".into(),
@@ -691,9 +696,14 @@ impl PbfhoggCommand {
                             to.into(),
                             "-o".into(),
                             path_to_string(&output)?,
-                        ])
+                        ]
                     }
+                };
+                if let Some(j) = ctx.params.jobs {
+                    args.push("-j".into());
+                    args.push(j.to_string());
                 }
+                Ok(args)
             }
 
             // -----------------------------------------------------------------
@@ -963,6 +973,30 @@ mod tests {
                 "-c",
             ]
         );
+    }
+
+    #[test]
+    fn diff_forwards_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(0);
+        let cmd = PbfhoggCommand::Diff {
+            format: DiffFormat::Default,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        assert_eq!(args[pos + 1], "0");
+    }
+
+    #[test]
+    fn diff_snapshots_forwards_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(8);
+        let cmd = PbfhoggCommand::DiffSnapshots {
+            format: DiffFormat::Osc,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        assert_eq!(args[pos + 1], "8");
     }
 
     #[test]
