@@ -69,6 +69,13 @@ Examples:
         #[arg(long)]
         all: bool,
 
+        /// Before checking, rewrite banned Unicode in tracked source files
+        /// with their ASCII equivalents (em/en dash -> `-`, smart quotes ->
+        /// straight, NBSP -> space, zero-width/bidi deleted). Writes files
+        /// in place.
+        #[arg(long)]
+        fix_gremlins: bool,
+
         /// Raw arguments forwarded to `cargo test`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

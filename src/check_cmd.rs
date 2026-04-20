@@ -41,9 +41,10 @@ pub(crate) fn cmd_check(
     json: bool,
     limit: usize,
     all: bool,
+    fix_gremlins: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    run_gremlins(project_root, json, limit, all)?;
+    run_gremlins(project_root, json, limit, all, fix_gremlins)?;
     run_clippy(
         project_root,
         check_cfg,
@@ -76,7 +77,26 @@ fn run_gremlins(
     json: bool,
     limit: usize,
     all: bool,
+    fix: bool,
 ) -> Result<(), DevError> {
+    if fix {
+        let fixed = gremlins::fix(project_root)?;
+        if !json {
+            let total: usize = fixed.iter().map(|f| f.count).sum();
+            if total == 0 {
+                output::run_msg("fix-gremlins: nothing to fix");
+            } else {
+                output::run_msg(&format!(
+                    "fix-gremlins: rewrote {total} char(s) across {} file(s)",
+                    fixed.len()
+                ));
+                for f in &fixed {
+                    output::run_msg(&format!("  {} ({})", f.path.display(), f.count));
+                }
+            }
+        }
+    }
+
     let found = gremlins::scan(project_root)?;
 
     if json {

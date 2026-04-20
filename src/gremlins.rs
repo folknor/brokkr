@@ -40,6 +40,81 @@ pub fn format_one(g: &Gremlin) -> String {
     )
 }
 
+/// Per-file summary of a `fix` operation.
+pub struct FixSummary {
+    pub path: PathBuf,
+    pub count: usize,
+}
+
+/// Mechanical replacement for a gremlin char. Empty string means delete.
+/// Returns `None` for non-gremlin chars.
+fn replacement(c: char) -> Option<&'static str> {
+    Some(match c {
+        // Zero-width / invisible / bidi / control noise → delete
+        '\u{0003}' | '\u{000B}' | '\u{200B}' | '\u{200C}' | '\u{200D}'
+        | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' | '\u{200E}' | '\u{200F}'
+        | '\u{202A}' | '\u{202B}' | '\u{202C}' | '\u{202D}' | '\u{202E}'
+        | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}' | '\u{FFFC}' => "",
+        // Non-breaking spaces → regular space
+        '\u{00A0}' | '\u{202F}' => " ",
+        // Line / paragraph separators → newline
+        '\u{2028}' | '\u{2029}' => "\n",
+        // Em / en dash → hyphen-minus
+        '\u{2013}' | '\u{2014}' => "-",
+        // Typographic single quotes → ASCII apostrophe
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => "'",
+        // Typographic double quotes → ASCII double quote
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => "\"",
+        _ => return None,
+    })
+}
+
+/// Rewrite every tracked scannable file, replacing gremlin chars with their
+/// ASCII equivalents (or deleting zero-width / bidi noise). Returns one
+/// summary entry per file that was actually modified.
+pub fn fix(project_root: &Path) -> Result<Vec<FixSummary>, DevError> {
+    let files = tracked_files(project_root)?;
+    let mut out = Vec::new();
+    for rel in &files {
+        if !is_scannable(rel) {
+            continue;
+        }
+        let abs = project_root.join(rel);
+        let Ok(content) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        let (fixed, count) = fix_content(&content);
+        if count > 0 {
+            std::fs::write(&abs, fixed).map_err(DevError::Io)?;
+            out.push(FixSummary {
+                path: rel.clone(),
+                count,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn fix_content(content: &str) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut count = 0usize;
+    for c in content.chars() {
+        // Fast path: printable ASCII and the usual whitespace never need fixing.
+        let cp = c as u32;
+        if (0x20..0x7F).contains(&cp) || cp == 0x09 || cp == 0x0A || cp == 0x0D {
+            out.push(c);
+            continue;
+        }
+        if let Some(r) = replacement(c) {
+            out.push_str(r);
+            count += 1;
+        } else {
+            out.push(c);
+        }
+    }
+    (out, count)
+}
+
 const GREMLINS: &[(char, &str)] = &[
     // Control chars that should never appear in source
     ('\u{0003}', "END OF TEXT"),
@@ -281,6 +356,29 @@ mod tests {
             name: "ZERO WIDTH SPACE",
         };
         assert_eq!(format_one(&g), "src/foo.rs:10:5 U+200B ZERO WIDTH SPACE");
+    }
+
+    #[test]
+    fn fix_content_rewrites_known_gremlins() {
+        let (fixed, count) = fix_content(
+            "x\u{2014}y \u{201C}hi\u{201D} \u{00A0}end\u{200B}\n",
+        );
+        assert_eq!(count, 5);
+        assert_eq!(fixed, "x-y \"hi\"  end\n");
+    }
+
+    #[test]
+    fn fix_content_is_noop_when_clean() {
+        let (fixed, count) = fix_content("fn main() {\n    println!(\"ok\");\n}\n");
+        assert_eq!(count, 0);
+        assert_eq!(fixed, "fn main() {\n    println!(\"ok\");\n}\n");
+    }
+
+    #[test]
+    fn fix_content_preserves_unrelated_unicode() {
+        let (fixed, count) = fix_content("// café\n");
+        assert_eq!(count, 0);
+        assert_eq!(fixed, "// café\n");
     }
 
     #[test]

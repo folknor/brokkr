@@ -202,6 +202,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         json,
         limit,
         all,
+        fix_gremlins,
         args,
     } = cli.command
     {
@@ -220,6 +221,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             json,
             limit,
             all,
+            fix_gremlins,
             &args,
         );
     }
