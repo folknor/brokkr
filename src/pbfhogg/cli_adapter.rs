@@ -30,17 +30,24 @@ impl Command {
                 nodes,
                 tags,
                 type_filter,
-            } => Some((
-                mode,
-                pbf,
-                PbfhoggCommand::Inspect {
-                    nodes: *nodes,
-                    tags: *tags,
-                    type_filter: type_filter.clone(),
-                },
-                None,
-                empty,
-            )),
+                jobs,
+            } => {
+                let params = CommandParams {
+                    jobs: *jobs,
+                    ..Default::default()
+                };
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::Inspect {
+                        nodes: *nodes,
+                        tags: *tags,
+                        type_filter: type_filter.clone(),
+                    },
+                    None,
+                    params,
+                ))
+            }
             Self::CheckRefs { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::CheckRefs, None, empty))
             }

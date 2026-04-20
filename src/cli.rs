@@ -109,6 +109,12 @@ Examples:
             requires = "tags",
         )]
         type_filter: Option<String>,
+        /// Parallel worker threads for pbfhogg inspect. Only applies to
+        /// `--nodes` / `--tags` modes (pbfhogg's default inspect doesn't
+        /// accept `-j`). `0` = auto (`available_parallelism()`); omit to
+        /// use pbfhogg's default (1).
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// [pbfhogg] Check referential integrity
     #[command(name = "check-refs", display_order = 2)]

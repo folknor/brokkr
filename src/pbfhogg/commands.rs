@@ -470,6 +470,14 @@ impl PbfhoggCommand {
                 } else {
                     args.push(ctx.pbf_str()?.into());
                 }
+                // pbfhogg's default inspect (metadata) doesn't accept -j;
+                // drop the flag silently rather than let pbfhogg reject.
+                if (*nodes || *tags)
+                    && let Some(j) = ctx.params.jobs
+                {
+                    args.push("-j".into());
+                    args.push(j.to_string());
+                }
                 Ok(args)
             }
             Self::CheckRefs => Ok(vec!["check".into(), "--refs".into(), ctx.pbf_str()?.into()]),
@@ -973,6 +981,47 @@ mod tests {
                 "-c",
             ]
         );
+    }
+
+    #[test]
+    fn inspect_nodes_forwards_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(4);
+        let cmd = PbfhoggCommand::Inspect {
+            nodes: true,
+            tags: false,
+            type_filter: None,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        assert_eq!(args[pos + 1], "4");
+    }
+
+    #[test]
+    fn inspect_tags_forwards_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(0);
+        let cmd = PbfhoggCommand::Inspect {
+            nodes: false,
+            tags: true,
+            type_filter: None,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        assert_eq!(args[pos + 1], "0");
+    }
+
+    #[test]
+    fn inspect_default_drops_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(4);
+        let cmd = PbfhoggCommand::Inspect {
+            nodes: false,
+            tags: false,
+            type_filter: None,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.iter().any(|a| a == "-j"));
     }
 
     #[test]
