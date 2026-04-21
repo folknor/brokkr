@@ -128,6 +128,7 @@ When `consumer_features` is non-empty, `brokkr check` runs clippy a second sweep
 - `--io-uring` - (pbfhogg only) enable io_uring I/O. Adds `linux-io-uring` cargo feature, `--io-uring` binary flag, `+uring` variant suffix. Runs io_uring preflight checks before building. Only supported by `apply-changes`, `sort`, `cat-dedupe`, and `diff-osc`; brokkr rejects it for other commands before building.
 - `--compression <spec>` - (pbfhogg only) output compression passed through to the binary. Values: `zlib:N` (N=1-9), `zstd:N`, `none`. Adds `+zstd1`/`+zlib6`/`+nocompress` variant suffix. No cargo features required.
 - `--locations-on-ways` - (pbfhogg `apply-changes` only) passes `--locations-on-ways` through to the child pbfhogg invocation. No cargo features required.
+- `--parallel-writer` - (pbfhogg `apply-changes` only) passes `--parallel-writer` through to the child pbfhogg invocation. No cargo features required.
 
 ## CLI model
 

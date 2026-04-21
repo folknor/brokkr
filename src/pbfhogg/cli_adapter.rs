@@ -179,10 +179,12 @@ impl Command {
                 osc_seq,
                 snapshot,
                 locations_on_ways,
+                parallel_writer,
             } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     locations_on_ways: *locations_on_ways,
+                    parallel_writer: *parallel_writer,
                     ..Default::default()
                 };
                 Some((

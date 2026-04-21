@@ -155,6 +155,8 @@ pub struct CommandParams {
     pub index_type: Option<String>,
     /// `--locations-on-ways` for `apply-changes`.
     pub locations_on_ways: bool,
+    /// `--parallel-writer` for `apply-changes`.
+    pub parallel_writer: bool,
     /// `--snapshot <key>`.
     pub snapshot: Option<String>,
     /// `--from <key>` for DiffSnapshots.

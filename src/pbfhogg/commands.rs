@@ -616,6 +616,9 @@ impl PbfhoggCommand {
                 if ctx.params.locations_on_ways {
                     args.push("--locations-on-ways".into());
                 }
+                if ctx.params.parallel_writer {
+                    args.push("--parallel-writer".into());
+                }
                 // Hotpath legacy: pre-unification build_hotpath_args always
                 // emitted --compression=zlib for apply-changes. Preserve that
                 // default only when the user didn't supply --compression; the
@@ -953,6 +956,7 @@ mod tests {
         assert_eq!(args[2], "/data/denmark-4705.osc.gz");
         assert_eq!(args[3], "-o");
         assert!(!args.iter().any(|a| a == "--locations-on-ways"));
+        assert!(!args.iter().any(|a| a == "--parallel-writer"));
     }
 
     #[test]
@@ -963,6 +967,16 @@ mod tests {
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args[0], "apply-changes");
         assert!(args.iter().any(|a| a == "--locations-on-ways"));
+    }
+
+    #[test]
+    fn apply_changes_forwards_parallel_writer() {
+        let mut ctx = test_ctx();
+        ctx.params.parallel_writer = true;
+        let cmd = PbfhoggCommand::ApplyChanges;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert_eq!(args[0], "apply-changes");
+        assert!(args.iter().any(|a| a == "--parallel-writer"));
     }
 
     #[test]
