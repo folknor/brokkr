@@ -274,9 +274,6 @@ Examples:
         /// Pass `--locations-on-ways` through to pbfhogg apply-changes.
         #[arg(long)]
         locations_on_ways: bool,
-        /// Pass `--parallel-writer` through to pbfhogg apply-changes.
-        #[arg(long)]
-        parallel_writer: bool,
     },
     /// [pbfhogg] Add location data to ways
     #[command(name = "add-locations-to-ways", display_order = 2)]
