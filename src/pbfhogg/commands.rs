@@ -176,6 +176,8 @@ pub enum PbfhoggCommand {
         nodes: bool,
         tags: bool,
         type_filter: Option<String>,
+        /// `--extended` for default inspect (no-op in `--nodes` / `--tags` modes).
+        extended: bool,
     },
     CheckRefs,
     /// `check --ids`. `full` adds `--full` - per-type duplicate-ID detection
@@ -201,11 +203,16 @@ pub enum PbfhoggCommand {
     ///     `w/highway=primary`.
     ///   - `omit_referenced` → `-R` (single-pass, matched objects only;
     ///     default off = two-pass, pull in referenced objects).
+    ///   - `invert_match` → `-i` (flip match sense).
+    ///   - `remove_tags` → `-t` (strip tags from referenced-but-unmatched
+    ///     objects; two-pass path only - no-op under `-R`).
     ///   - `input_kind_osc` → `--input-kind osc` (read an OSC diff
-    ///     instead of a PBF as input).
+    ///     instead of a PBF as input). Rejects `-R`, `-i`, `-t`.
     TagsFilter {
         filter: String,
         omit_referenced: bool,
+        invert_match: bool,
+        remove_tags: bool,
         input_kind_osc: bool,
     },
     /// Unified `getid`. Flags:
@@ -221,7 +228,12 @@ pub enum PbfhoggCommand {
     },
     Getparents,
     Renumber,
-    MergeChanges,
+    /// `merge-changes`. `simplify` → `--simplify` (BTreeMap dedupe path,
+    /// keeping only the last change per object). Off = default streaming
+    /// concat path.
+    MergeChanges {
+        simplify: bool,
+    },
     ApplyChanges,
     AddLocationsToWays,
     TimeFilter,
@@ -242,8 +254,14 @@ pub enum PbfhoggCommand {
     // -- Multi-variant benchmarks --
     Extract { strategy: ExtractStrategy },
 
-    /// Multi-extract: single-pass N-region extract benchmark.
-    MultiExtract { regions: usize },
+    /// Multi-extract: N-region extract benchmark. `strategy` picks the
+    /// pbfhogg extract strategy (`Simple` → `--simple`, `Smart` → `--smart`,
+    /// `Complete` → no flag) - the axis lets us measure multipolygon/
+    /// boundary-relation cost on the same region set.
+    MultiExtract {
+        regions: usize,
+        strategy: ExtractStrategy,
+    },
 }
 
 impl PbfhoggCommand {
@@ -259,7 +277,7 @@ impl PbfhoggCommand {
             Self::Getid { .. } => "getid",
             Self::Getparents => "getparents",
             Self::Renumber => "renumber",
-            Self::MergeChanges => "merge-changes",
+            Self::MergeChanges { .. } => "merge-changes",
             Self::ApplyChanges => "apply-changes",
             Self::AddLocationsToWays => "add-locations-to-ways",
             Self::TimeFilter => "time-filter",
@@ -275,7 +293,7 @@ impl PbfhoggCommand {
     pub fn input_kind(&self) -> InputKind {
         match self {
             Self::TagsFilter { input_kind_osc: true, .. } => InputKind::PbfAndOsc,
-            Self::MergeChanges => InputKind::OscOnly,
+            Self::MergeChanges { .. } => InputKind::OscOnly,
             Self::ApplyChanges => InputKind::PbfAndOsc,
             Self::Diff { .. } => InputKind::PbfAndMerged,
             Self::Extract { .. } | Self::MultiExtract { .. } => InputKind::PbfAndBbox,
@@ -299,7 +317,7 @@ impl PbfhoggCommand {
 
             // OSC output (includes OSC-format diff and diff-snapshots).
             Self::TagsFilter { input_kind_osc: true, .. }
-            | Self::MergeChanges
+            | Self::MergeChanges { .. }
             | Self::Diff { format: DiffFormat::Osc }
             | Self::DiffSnapshots { format: DiffFormat::Osc } => OutputKind::ScratchOsc,
 
@@ -448,6 +466,7 @@ impl PbfhoggCommand {
                 nodes,
                 tags,
                 type_filter,
+                extended,
             } => {
                 let mut args: Vec<String> = vec!["inspect".into()];
                 if *tags {
@@ -469,6 +488,11 @@ impl PbfhoggCommand {
                     args.push(ctx.pbf_str()?.into());
                 } else {
                     args.push(ctx.pbf_str()?.into());
+                    // --extended is only accepted in the default inspect
+                    // mode (pbfhogg rejects it alongside --nodes).
+                    if *extended {
+                        args.push("--extended".into());
+                    }
                 }
                 // pbfhogg's default inspect (metadata) doesn't accept -j;
                 // drop the flag silently rather than let pbfhogg reject.
@@ -533,6 +557,8 @@ impl PbfhoggCommand {
             Self::TagsFilter {
                 filter,
                 omit_referenced,
+                invert_match,
+                remove_tags,
                 input_kind_osc,
             } => {
                 let output = scratch_output_path(ctx, self, mode);
@@ -540,9 +566,19 @@ impl PbfhoggCommand {
                 if *input_kind_osc {
                     args.push("--input-kind".into());
                     args.push("osc".into());
-                }
-                if *omit_referenced {
-                    args.push("-R".into());
+                } else {
+                    // PBF-only axes. pbfhogg rejects these under
+                    // --input-kind osc; brokkr's CLI already enforces
+                    // that via conflicts_with, but we skip them defensively.
+                    if *omit_referenced {
+                        args.push("-R".into());
+                    }
+                    if *invert_match {
+                        args.push("-i".into());
+                    }
+                    if *remove_tags {
+                        args.push("-t".into());
+                    }
                 }
                 // Input: OSC file when --input-kind osc, otherwise PBF.
                 if *input_kind_osc {
@@ -553,6 +589,10 @@ impl PbfhoggCommand {
                 args.push(filter.clone());
                 args.push("-o".into());
                 args.push(path_to_string(&output)?);
+                if let Some(j) = ctx.params.jobs {
+                    args.push("-j".into());
+                    args.push(j.to_string());
+                }
                 Ok(args)
             }
             Self::Getid {
@@ -594,7 +634,7 @@ impl PbfhoggCommand {
                     path_to_string(&output)?,
                 ])
             }
-            Self::MergeChanges => {
+            Self::MergeChanges { simplify } => {
                 let output = scratch_output_path(ctx, self, mode);
                 let oscs = ctx.osc_strs()?;
                 let mut args = vec!["merge-changes".into()];
@@ -603,6 +643,9 @@ impl PbfhoggCommand {
                 }
                 args.push("-o".into());
                 args.push(path_to_string(&output)?);
+                if *simplify {
+                    args.push("--simplify".into());
+                }
                 Ok(args)
             }
             Self::ApplyChanges => {
@@ -615,6 +658,10 @@ impl PbfhoggCommand {
                 ];
                 if ctx.params.locations_on_ways {
                     args.push("--locations-on-ways".into());
+                }
+                if let Some(j) = ctx.params.jobs {
+                    args.push("-j".into());
+                    args.push(j.to_string());
                 }
                 // Hotpath legacy: pre-unification build_hotpath_args always
                 // emitted --compression=zlib for apply-changes. Preserve that
@@ -734,7 +781,7 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             // Multi-extract: single-pass N-region extract benchmark
             // -----------------------------------------------------------------
-            Self::MultiExtract { regions } => {
+            Self::MultiExtract { regions, strategy } => {
                 if *regions == 0 {
                     return Err(DevError::Config(
                         "multi-extract requires at least 1 region".into(),
@@ -784,13 +831,19 @@ impl PbfhoggCommand {
                 let config_path = ctx.scratch_dir.join("multi-extract-config.json");
                 std::fs::write(&config_path, &config_json)?;
 
-                Ok(vec![
+                let mut args: Vec<String> = vec![
                     "extract".into(),
                     ctx.pbf_str()?.into(),
                     "--config".into(),
                     path_to_string(&config_path)?,
-                    "--simple".into(),
-                ])
+                ];
+                match strategy {
+                    ExtractStrategy::Simple => args.push("--simple".into()),
+                    ExtractStrategy::Smart => args.push("--smart".into()),
+                    // Complete is pbfhogg's default path - no flag.
+                    ExtractStrategy::Complete => {}
+                }
+                Ok(args)
             }
 
             // -----------------------------------------------------------------
@@ -917,9 +970,36 @@ mod tests {
             nodes: false,
             tags: false,
             type_filter: None,
+            extended: false,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf"]);
+    }
+
+    #[test]
+    fn inspect_extended_appends_flag() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::Inspect {
+            nodes: false,
+            tags: false,
+            type_filter: None,
+            extended: true,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf", "--extended"]);
+    }
+
+    #[test]
+    fn inspect_extended_ignored_in_nodes_mode() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::Inspect {
+            nodes: true,
+            tags: false,
+            type_filter: None,
+            extended: true,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.iter().any(|a| a == "--extended"));
     }
 
     #[test]
@@ -929,6 +1009,7 @@ mod tests {
             nodes: false,
             tags: true,
             type_filter: None,
+            extended: false,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(
@@ -966,6 +1047,24 @@ mod tests {
     }
 
     #[test]
+    fn apply_changes_forwards_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(8);
+        let cmd = PbfhoggCommand::ApplyChanges;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        assert_eq!(args[pos + 1], "8");
+    }
+
+    #[test]
+    fn apply_changes_omits_jobs_when_unset() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::ApplyChanges;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.iter().any(|a| a == "-j"));
+    }
+
+    #[test]
     fn diff_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Diff {
@@ -991,6 +1090,7 @@ mod tests {
             nodes: true,
             tags: false,
             type_filter: None,
+            extended: false,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
@@ -1005,6 +1105,7 @@ mod tests {
             nodes: false,
             tags: true,
             type_filter: None,
+            extended: false,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
@@ -1019,6 +1120,7 @@ mod tests {
             nodes: false,
             tags: false,
             type_filter: None,
+            extended: false,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "-j"));
@@ -1096,7 +1198,8 @@ mod tests {
             PbfhoggCommand::Inspect {
                 nodes: false,
                 tags: false,
-                type_filter: None
+                type_filter: None,
+                extended: false,
             }
             .supports_hotpath()
         );
@@ -1110,6 +1213,8 @@ mod tests {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
             omit_referenced: false,
+            invert_match: false,
+            remove_tags: false,
             input_kind_osc: true,
         };
         assert!(cmd.needs_osc());
@@ -1121,6 +1226,8 @@ mod tests {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
             omit_referenced: true,
+            invert_match: false,
+            remove_tags: false,
             input_kind_osc: false,
         };
         assert!(!cmd.needs_osc());
@@ -1128,8 +1235,74 @@ mod tests {
     }
 
     #[test]
+    fn tags_filter_forwards_invert_and_remove_tags() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            omit_referenced: false,
+            invert_match: true,
+            remove_tags: true,
+            input_kind_osc: false,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(args.iter().any(|a| a == "-i"));
+        assert!(args.iter().any(|a| a == "-t"));
+        assert!(!args.iter().any(|a| a == "-R"));
+    }
+
+    #[test]
+    fn tags_filter_osc_mode_drops_pbf_only_flags() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::TagsFilter {
+            filter: "highway=primary".into(),
+            omit_referenced: true,
+            invert_match: true,
+            remove_tags: true,
+            input_kind_osc: true,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.iter().any(|a| a == "-R"));
+        assert!(!args.iter().any(|a| a == "-i"));
+        assert!(!args.iter().any(|a| a == "-t"));
+    }
+
+    #[test]
+    fn tags_filter_forwards_jobs_flag() {
+        let mut ctx = test_ctx();
+        ctx.params.jobs = Some(4);
+        let cmd = PbfhoggCommand::TagsFilter {
+            filter: "w/highway=primary".into(),
+            omit_referenced: true,
+            invert_match: false,
+            remove_tags: false,
+            input_kind_osc: false,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let pos = args.iter().position(|a| a == "-j").expect("-j present");
+        assert_eq!(args[pos + 1], "4");
+    }
+
+    #[test]
     fn merge_changes_uses_osc_only() {
-        let cmd = PbfhoggCommand::MergeChanges;
+        let cmd = PbfhoggCommand::MergeChanges { simplify: false };
         assert_eq!(cmd.input_kind(), InputKind::OscOnly);
+    }
+
+    #[test]
+    fn merge_changes_emits_simplify_when_set() {
+        let mut ctx = test_ctx();
+        ctx.osc_paths = vec![PathBuf::from("/data/denmark-4705.osc.gz")];
+        let cmd = PbfhoggCommand::MergeChanges { simplify: true };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(args.iter().any(|a| a == "--simplify"));
+    }
+
+    #[test]
+    fn merge_changes_omits_simplify_by_default() {
+        let mut ctx = test_ctx();
+        ctx.osc_paths = vec![PathBuf::from("/data/denmark-4705.osc.gz")];
+        let cmd = PbfhoggCommand::MergeChanges { simplify: false };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.iter().any(|a| a == "--simplify"));
     }
 }

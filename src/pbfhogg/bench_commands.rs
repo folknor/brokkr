@@ -55,27 +55,32 @@ const SUITE_EXTRACT_BBOX: &str = "12.4,55.6,12.7,55.8";
 /// This is the single place where preset names are interpreted - once we
 /// have a `PbfhoggCommand`, argv, metadata, input/output kind, and result
 /// labels all come from the enum itself.
+#[allow(clippy::too_many_lines)]
 fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
     Ok(match name {
         "inspect" => PbfhoggCommand::Inspect {
             nodes: false,
             tags: false,
             type_filter: None,
+            extended: false,
         },
         "inspect-nodes" => PbfhoggCommand::Inspect {
             nodes: true,
             tags: false,
             type_filter: None,
+            extended: false,
         },
         "inspect-tags" => PbfhoggCommand::Inspect {
             nodes: false,
             tags: true,
             type_filter: None,
+            extended: false,
         },
         "inspect-tags-way" => PbfhoggCommand::Inspect {
             nodes: false,
             tags: true,
             type_filter: Some("way".into()),
+            extended: false,
         },
         "check-refs" => PbfhoggCommand::CheckRefs,
         "check-ids" => PbfhoggCommand::CheckIds { full: false },
@@ -103,21 +108,29 @@ fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
         "tags-filter-way" => PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
             omit_referenced: true,
+            invert_match: false,
+            remove_tags: false,
             input_kind_osc: false,
         },
         "tags-filter-amenity" => PbfhoggCommand::TagsFilter {
             filter: "amenity=restaurant".into(),
             omit_referenced: true,
+            invert_match: false,
+            remove_tags: false,
             input_kind_osc: false,
         },
         "tags-filter-twopass" => PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
             omit_referenced: false,
+            invert_match: false,
+            remove_tags: false,
             input_kind_osc: false,
         },
         "tags-filter-osc" => PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
             omit_referenced: false,
+            invert_match: false,
+            remove_tags: false,
             input_kind_osc: true,
         },
         "getid" => PbfhoggCommand::Getid {
@@ -130,7 +143,7 @@ fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
             invert: true,
         },
         "renumber" => PbfhoggCommand::Renumber,
-        "merge-changes" => PbfhoggCommand::MergeChanges,
+        "merge-changes" => PbfhoggCommand::MergeChanges { simplify: false },
         "apply-changes" => PbfhoggCommand::ApplyChanges,
         "add-locations-to-ways" => PbfhoggCommand::AddLocationsToWays,
         "extract-simple" => PbfhoggCommand::Extract {

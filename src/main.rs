@@ -264,7 +264,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::MergeChanges { .. }
         | Command::ApplyChanges { .. }
         | Command::AddLocationsToWays { .. }
-        | Command::MultiExtract { .. }
         | Command::TimeFilter { .. }
         | Command::Diff { .. }
         | Command::BuildGeocodeIndex { .. }
@@ -328,6 +327,46 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     } else {
                         let strat = pbfhogg::commands::ExtractStrategy::parse(&strategy)?;
                         let cmd = pbfhogg::commands::PbfhoggCommand::Extract { strategy: strat };
+                        pbfhogg::dispatch::run_command_with_params(req, &cmd, None, &params)
+                    }
+                },
+            )
+        }
+        Command::MultiExtract {
+            mode,
+            pbf,
+            regions,
+            bbox,
+            strategy,
+        } => {
+            let params = crate::measure::CommandParams {
+                bbox: bbox.clone(),
+                ..Default::default()
+            };
+            run_measured(
+                &mode,
+                &dev_config,
+                project,
+                &project_root,
+                &pbf.dataset,
+                &pbf.variant,
+                &brokkr_args,
+                |req| {
+                    if strategy == "all" {
+                        for strat in pbfhogg::commands::ExtractStrategy::all() {
+                            let cmd = pbfhogg::commands::PbfhoggCommand::MultiExtract {
+                                regions,
+                                strategy: *strat,
+                            };
+                            pbfhogg::dispatch::run_command_with_params(req, &cmd, None, &params)?;
+                        }
+                        Ok(())
+                    } else {
+                        let strat = pbfhogg::commands::ExtractStrategy::parse(&strategy)?;
+                        let cmd = pbfhogg::commands::PbfhoggCommand::MultiExtract {
+                            regions,
+                            strategy: strat,
+                        };
                         pbfhogg::dispatch::run_command_with_params(req, &cmd, None, &params)
                     }
                 },

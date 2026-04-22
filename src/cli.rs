@@ -85,10 +85,13 @@ Examples:
     Env,
     // ----- pbfhogg tool CLI commands (display_order = 2) -----
     /// [pbfhogg] Inspect PBF. Flags select mode:
-    ///   no flag   → metadata (block count / bbox / stats)
-    ///   `--nodes` → node statistics
-    ///   `--tags`  → tag frequencies (optionally narrowed by
-    ///               `--type node|way|relation`)
+    ///   no flag       → metadata (block count / bbox / stats)
+    ///   `--nodes`     → node statistics
+    ///   `--tags`      → tag frequencies (optionally narrowed by
+    ///                   `--type node|way|relation`)
+    ///   `--extended`  → extended metadata scan (timestamp range, data
+    ///                   bbox, metadata coverage, ordering). Default-mode
+    ///                   only - rejected with `--nodes` / `--tags`.
     #[command(name = "inspect", display_order = 2)]
     Inspect {
         #[command(flatten)]
@@ -109,6 +112,11 @@ Examples:
             requires = "tags",
         )]
         type_filter: Option<String>,
+        /// Extended scan of default inspect (timestamp range, data bbox,
+        /// metadata coverage, ordering). Only valid in default mode -
+        /// clap rejects the combination with `--nodes` / `--tags`.
+        #[arg(long, conflicts_with_all = ["nodes", "tags"])]
+        extended: bool,
         /// Parallel worker threads for pbfhogg inspect. Only applies to
         /// `--nodes` / `--tags` modes (pbfhogg's default inspect doesn't
         /// accept `-j`). `0` = auto (`available_parallelism()`); omit to
@@ -177,6 +185,10 @@ Examples:
     ///     `highway=primary`, `w/building=yes`.
     ///   `-R` / `--omit-referenced` - single-pass; drop referenced
     ///     objects (default: two-pass with references).
+    ///   `-i` / `--invert-match` - flip match sense: keep non-matching,
+    ///     drop matching.
+    ///   `-t` / `--remove-tags` - strip tags from referenced-but-unmatched
+    ///     objects (meaningful only in the two-pass path, i.e. without `-R`).
     ///   `--input-kind osc` - read an OSC diff instead of a PBF.
     #[command(name = "tags-filter", display_order = 2)]
     TagsFilter {
@@ -191,6 +203,15 @@ Examples:
         /// Not valid with `--input-kind osc` (pbfhogg rejects it at runtime).
         #[arg(short = 'R', long = "omit-referenced", conflicts_with = "input_kind")]
         omit_referenced: bool,
+        /// Invert match sense: drop matching objects, keep non-matching.
+        /// Not valid with `--input-kind osc`.
+        #[arg(short = 'i', long = "invert-match", conflicts_with = "input_kind")]
+        invert_match: bool,
+        /// Remove tags from referenced-but-unmatched objects in the
+        /// two-pass path. No-op under `-R` (referenced objects are
+        /// dropped entirely). Not valid with `--input-kind osc`.
+        #[arg(short = 't', long = "remove-tags", conflicts_with = "input_kind")]
+        remove_tags: bool,
         /// Read an OSC diff as input instead of a PBF.
         #[arg(long = "input-kind", value_parser = ["pbf", "osc"])]
         input_kind: Option<String>,
@@ -203,6 +224,12 @@ Examples:
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<String>,
+        /// Parallel worker threads for pbfhogg tags-filter. `0` = auto
+        /// (`available_parallelism()`); omit to use pbfhogg's default.
+        /// Requires a pbfhogg build that exposes `-j` on tags-filter;
+        /// older builds will reject it.
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// [pbfhogg] Get elements by hardcoded ID set. Flags:
     ///   `--add-referenced` - also pull in referenced objects (two-pass);
@@ -237,7 +264,9 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
     },
-    /// [pbfhogg] Merge OSC changes
+    /// [pbfhogg] Merge OSC changes. `--simplify` picks the BTreeMap dedupe
+    /// path (keep only the last change per object) instead of the default
+    /// streaming concat path - a different code path worth measuring.
     #[command(name = "merge-changes", display_order = 2)]
     MergeChanges {
         #[command(flatten)]
@@ -255,6 +284,9 @@ Examples:
         /// from a historical snapshot's OSC table.
         #[arg(long)]
         snapshot: Option<String>,
+        /// Keep only the last change per (type, id) - BTreeMap dedupe path.
+        #[arg(long)]
+        simplify: bool,
     },
     /// [pbfhogg] Apply OSC changes to PBF
     #[command(name = "apply-changes", display_order = 2)]
@@ -274,6 +306,12 @@ Examples:
         /// Pass `--locations-on-ways` through to pbfhogg apply-changes.
         #[arg(long)]
         locations_on_ways: bool,
+        /// Parallel worker threads for pbfhogg apply-changes. `0` = auto
+        /// (`available_parallelism()`); omit to use pbfhogg's default
+        /// (nproc-2 at time of writing). Requires a pbfhogg build that
+        /// exposes `-j` on apply-changes; older builds will reject it.
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// [pbfhogg] Add location data to ways
     #[command(name = "add-locations-to-ways", display_order = 2)]
@@ -286,7 +324,9 @@ Examples:
         #[arg(long)]
         index_type: Option<String>,
     },
-    /// [pbfhogg] Multi-extract benchmark (single-pass N regions)
+    /// [pbfhogg] Multi-extract benchmark (N regions in one pbfhogg
+    /// invocation). `--strategy` picks pbfhogg's extract algorithm
+    /// (simple / smart / complete / all).
     #[command(name = "multi-extract", display_order = 2)]
     MultiExtract {
         #[command(flatten)]
@@ -300,6 +340,10 @@ Examples:
         /// Falls back to the dataset's configured bbox if omitted.
         #[arg(long)]
         bbox: Option<String>,
+        /// Extract strategy: simple, complete, smart, or all (runs all
+        /// three back-to-back, like `brokkr extract --strategy all`).
+        #[arg(long, default_value = "simple")]
+        strategy: String,
     },
     /// [pbfhogg] Filter by timestamp
     #[command(name = "time-filter", display_order = 2)]

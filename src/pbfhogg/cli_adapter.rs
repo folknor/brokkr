@@ -30,6 +30,7 @@ impl Command {
                 nodes,
                 tags,
                 type_filter,
+                extended,
                 jobs,
             } => {
                 let params = CommandParams {
@@ -43,6 +44,7 @@ impl Command {
                         nodes: *nodes,
                         tags: *tags,
                         type_filter: type_filter.clone(),
+                        extended: *extended,
                     },
                     None,
                     params,
@@ -85,13 +87,17 @@ impl Command {
                 pbf,
                 filter,
                 omit_referenced,
+                invert_match,
+                remove_tags,
                 input_kind,
                 osc_seq,
                 snapshot,
+                jobs,
             } => {
                 let input_kind_osc = input_kind.as_deref() == Some("osc");
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
+                    jobs: *jobs,
                     ..Default::default()
                 };
                 Some((
@@ -100,6 +106,8 @@ impl Command {
                     PbfhoggCommand::TagsFilter {
                         filter: filter.clone(),
                         omit_referenced: *omit_referenced,
+                        invert_match: *invert_match,
+                        remove_tags: *remove_tags,
                         input_kind_osc,
                     },
                     osc_seq.as_deref(),
@@ -127,24 +135,10 @@ impl Command {
             Self::Renumber { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::Renumber, None, empty))
             }
-            Self::MultiExtract {
-                mode,
-                pbf,
-                regions,
-                bbox,
-            } => {
-                let params = CommandParams {
-                    bbox: bbox.clone(),
-                    ..Default::default()
-                };
-                Some((
-                    mode,
-                    pbf,
-                    PbfhoggCommand::MultiExtract { regions: *regions },
-                    None,
-                    params,
-                ))
-            }
+            // MultiExtract carries a `--strategy` axis that may expand to
+            // three runs ("all"). The fan-out happens in `main.rs`, same as
+            // `extract --strategy all`, so this adapter no longer handles it.
+            Self::MultiExtract { .. } => None,
             Self::TimeFilter { mode, pbf } => {
                 Some((mode, pbf, PbfhoggCommand::TimeFilter, None, empty))
             }
@@ -159,6 +153,7 @@ impl Command {
                 osc_seq,
                 osc_range,
                 snapshot,
+                simplify,
             } => {
                 let params = CommandParams {
                     osc_range: osc_range.clone(),
@@ -168,7 +163,7 @@ impl Command {
                 Some((
                     mode,
                     pbf,
-                    PbfhoggCommand::MergeChanges,
+                    PbfhoggCommand::MergeChanges { simplify: *simplify },
                     osc_seq.as_deref(),
                     params,
                 ))
@@ -179,10 +174,12 @@ impl Command {
                 osc_seq,
                 snapshot,
                 locations_on_ways,
+                jobs,
             } => {
                 let params = CommandParams {
                     snapshot: snapshot.clone(),
                     locations_on_ways: *locations_on_ways,
+                    jobs: *jobs,
                     ..Default::default()
                 };
                 Some((
