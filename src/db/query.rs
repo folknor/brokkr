@@ -185,7 +185,11 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(d.clone());
         clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
     }
-    if let Some(ref g) = filter.grep {
+    // Each --grep term must match the row (AND). Each term separately can
+    // land in cli_args OR brokkr_args (substring). `--grep apply-changes
+    // --grep zstd:1` finds rows where *both* tokens appear somewhere across
+    // the two invocation columns.
+    for g in &filter.grep {
         params.push(g.clone());
         let i = params.len();
         params.push(g.clone());
@@ -645,7 +649,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![("format".into(), "osc".into())],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -659,7 +663,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![("format".into(), "default".into())],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -674,7 +678,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -734,7 +738,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -749,7 +753,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -764,7 +768,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -780,7 +784,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -800,7 +804,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -855,7 +859,7 @@ mod tests {
                 mode: Some(String::from("zlib")),
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -870,7 +874,7 @@ mod tests {
                 mode: Some(String::from("buffered")),
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -885,7 +889,7 @@ mod tests {
                 mode: Some(String::from("none")),
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -1007,6 +1011,129 @@ mod tests {
         // Thread summary should be populated from KV (not a separate load).
         assert_eq!(hp.thread_summary.len(), 1);
         assert_eq!(hp.thread_summary[0].key, "threads.rss_bytes");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    #[test]
+    fn query_grep_multi_term_and_semantics() {
+        let (dir, db_path) = test_db("query_grep_and");
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        let make_row = |cli: &str, brokkr: &str| RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("bench apply-changes"),
+            mode: Some(String::from("release")),
+            input_file: None,
+            input_mb: None,
+            elapsed_ms: 100,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: crate::build::CargoProfile::Release,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: Some(String::from(cli)),
+            brokkr_args: Some(String::from(brokkr)),
+            project: String::from("test"),
+            stop_marker: None,
+            kv: vec![],
+            distribution: None,
+            hotpath: None,
+        };
+
+        // Row 1: zstd + uring, matches both terms.
+        db.insert(&make_row(
+            "apply-changes --compression zstd:1",
+            "brokkr apply-changes --io-uring",
+        ))
+        .unwrap();
+        // Row 2: zstd only, misses `uring`.
+        db.insert(&make_row(
+            "apply-changes --compression zstd:3",
+            "brokkr apply-changes",
+        ))
+        .unwrap();
+        // Row 3: uring only, misses `zstd`.
+        db.insert(&make_row(
+            "apply-changes --direct-io",
+            "brokkr apply-changes --io-uring",
+        ))
+        .unwrap();
+
+        // Single term still works: `zstd` matches rows 1+2.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: vec!["zstd".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2, "single --grep zstd matches rows 1+2");
+
+        // AND: `zstd` + `uring` matches only row 1.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: vec!["zstd".into(), "uring".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "both --grep terms must match (AND) - only row 1 qualifies"
+        );
+        assert!(
+            rows[0].cli_args.contains("zstd:1"),
+            "should be the zstd:1 row"
+        );
+
+        // AND across columns: one term hits cli_args, the other hits
+        // brokkr_args. Row 1 has zstd only in cli_args and uring only in
+        // brokkr_args - AND still resolves.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: vec!["zstd:1".into(), "io-uring".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // No rows have both "direct-io" AND "zstd" - AND returns empty.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: vec!["direct-io".into(), "zstd".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert!(rows.is_empty(), "no row has both direct-io and zstd");
 
         drop(db);
         cleanup(&dir, &db_path);

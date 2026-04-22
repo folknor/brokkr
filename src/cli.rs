@@ -699,11 +699,12 @@ Examples:
         env: Vec<String>,
 
         /// Substring match against either the subprocess invocation
-        /// (`cli_args`) or the brokkr invocation (`brokkr_args`). Think
-        /// `git log --grep`: a single token that scans both
-        /// freeform-invocation columns. E.g. `--grep zstd:1`.
+        /// (`cli_args`) or the brokkr invocation (`brokkr_args`). Repeatable -
+        /// each `--grep` must match (AND). `git log --grep` style. E.g.
+        /// `--grep apply-changes --grep zstd:1 --grep uring` to find
+        /// apply-changes runs that used both zstd:1 and io_uring.
         #[arg(long)]
-        grep: Option<String>,
+        grep: Vec<String>,
 
         /// Maximum number of results to show
         #[arg(long, short = 'n', default_value = "20")]

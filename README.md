@@ -286,6 +286,7 @@ brokkr results --command read                       # last 20 matching 'read'
 brokkr results --commit a65a                        # filter by commit
 brokkr results --mode hotpath                       # filter by measurement mode
 brokkr results --grep pipelined                     # substring-match cli_args + brokkr_args
+brokkr results --grep apply-changes --grep uring --grep zstd:1   # stack --grep: AND across terms
 brokkr results --dataset europe                     # filter by dataset (substring on input file)
 brokkr results --command tags-filter --dataset eu   # combine filters
 brokkr results --meta merged_cache=miss             # filter by runtime-observation metadata key

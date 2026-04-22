@@ -14,8 +14,9 @@ pub(crate) struct ResultsQuery {
     /// excluded (no missing-as-0 coercion).
     pub(crate) env: Vec<String>,
     /// Substring match against the `cli_args` OR `brokkr_args` columns
-    /// (unified `--grep`, à la `git log --grep`).
-    pub(crate) grep: Option<String>,
+    /// (unified `--grep`, à la `git log --grep`). Multiple terms AND
+    /// together - each must match the row.
+    pub(crate) grep: Vec<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
 }

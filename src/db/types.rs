@@ -230,10 +230,11 @@ pub struct QueryFilter {
     /// with `meta.format = "osc"` in the run_kv table). Multiple filters AND
     /// together. Rows missing the key are silently excluded.
     pub meta: Vec<(String, String)>,
-    /// Substring match against `cli_args` OR `brokkr_args` (the two
-    /// literal-invocation columns). Like `git log --grep`: a single
-    /// pattern that scans the freeform-text columns for a token.
-    pub grep: Option<String>,
+    /// Substring matches against `cli_args` OR `brokkr_args` (the two
+    /// literal-invocation columns). Like `git log --grep`, repeatable:
+    /// each term must match the row (AND); within a term, either column
+    /// can supply the hit.
+    pub grep: Vec<String>,
     /// Captured-env filters as `(key, value)` pairs. The key is the bare
     /// env var name without the `env.` prefix (e.g. `("PBFHOGG_USE_NEW_PATH",
     /// "1")` matches rows where the captured var equals `"1"`). Multiple

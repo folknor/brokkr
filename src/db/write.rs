@@ -239,7 +239,7 @@ mod tests {
                 mode: None,
                 dataset: None,
                 meta: vec![],
-                grep: None,
+                grep: Vec::new(),
                 env: Vec::new(),
                 limit: 10,
             })
