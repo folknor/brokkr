@@ -31,7 +31,7 @@ brokkr serve                                       # start the nidhogg server
 brokkr api --dataset denmark --bench                # API query benchmark
 
 cd ~/Programs/litehtml-rs
-brokkr test --all                                   # visual reference tests
+brokkr visual --all                                 # visual reference tests
 ```
 
 ## Commands
@@ -61,6 +61,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 | Command | Description |
 |---------|-------------|
 | `check` | Run gremlin scan + clippy + tests (extra args forwarded to `cargo test`) |
+| `test <FILE> <NAME>` | Run one cargo test in release mode with `--include-ignored --nocapture --test-threads=1`; streams output, prints a `[test] PASS/FAIL` footer per run. `-N` repeats, `-j` passes through to cargo, `--raw` disables filtering. Gated off for litehtml/sluggrs (use `brokkr visual`). |
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
@@ -79,6 +80,8 @@ When many diagnostics are found at once (e.g. picking the checker up on an exist
 By default `check` runs clippy once with `--all-features`. Crates with proc macros that rewrite function bodies under specific features (e.g. `#[hotpath::measure]` swallowing the body when the `hotpath` feature is on) can silently mask real lint violations from this view, since the always-compiled body is never seen. Opt in to a second sweep by adding `[check] consumer_features = ["..."]` to `brokkr.toml` - the second invocation runs `cargo clippy --all-targets --no-default-features --features <consumer_features>`, representing what a downstream library consumer would build with. Diagnostics are deduped across sweeps and tagged in text mode (`[all-features]`, `[consumer]`, or `[both]`) and in JSON mode (`sweeps: [...]` field on each diagnostic, `sweep` field on the per-sweep summary). User-supplied `--features` / `--no-default-features` short-circuit to a single sweep with those exact flags. Cost is ~2x cold (cargo keeps separate `target/` per feature set); incremental is small.
 
 `check` also works without a `brokkr.toml`, so you can drop it into any Rust+git repo and get the same clippy + tests + gremlins pipeline.
+
+`test <FILE> <NAME>` is the narrow counterpart to `check` for drilling into one specific test. It always builds release, always adds `--include-ignored --nocapture --test-threads=1`, and uses the same feature sweeps as `check` (`--all-features`, plus a `consumer` sweep when `[check].consumer_features` is set). The test's own `println!`/`eprintln!` streams live; cargo compile progress, warning and error blocks, and the test harness framing (`running N tests`, `test foo ... ok`, `test result:`) are stripped. Each run ends with a single `[test]` line - `PASS` / `FAIL` / `BUILD FAILED` / `SKIP` - that includes wall time and, on failure, the panic message and location. `SKIP` means the name didn't match any test in that sweep (usually because the test is `#[cfg(feature = "...")]`-gated and the feature isn't enabled here); as long as at least one sweep saw a real match, brokkr exits `0`. Only when every sweep skips does the whole run exit non-zero with a "check the file/name" hint. `-N <n>` repeats the test per sweep (for flaky-test hunting), `-j <n>` sets `cargo -j N` for parallel compile, and `--raw` bypasses all filtering. Litehtml and sluggrs projects are rejected here - use `brokkr visual` for fixture tests there.
 
 ### pbfhogg
 
@@ -166,11 +169,11 @@ Calling plain `brokkr download <region>` against a dataset whose `pbf.raw` is al
 
 ### litehtml-rs
 
-Visual reference testing and fixture preprocessing. All commands are top-level (no `brokkr litehtml` namespace). Shared visual testing commands (`test`, `list`, `approve`, `report`, `visual-status`) dispatch to litehtml or sluggrs based on the detected project.
+Visual reference testing and fixture preprocessing. All commands are top-level (no `brokkr litehtml` namespace). Shared visual testing commands (`visual`, `list`, `approve`, `report`, `visual-status`) dispatch to litehtml or sluggrs based on the detected project. `visual` was formerly named `test`; that name is now owned by the generic cargo single-test runner in the Shared table above.
 
 | Subcommand | Description |
 |------------|-------------|
-| `test` | Run fixtures against Chrome reference artifacts (pixel diff + element comparison) |
+| `visual` | Run fixtures against Chrome reference artifacts (pixel diff + element comparison) |
 | `list` | Show fixtures, tags, and approval state |
 | `approve` | Record current divergence as accepted baseline |
 | `visual-status` | Dashboard of all fixtures vs approved baselines |
@@ -187,7 +190,7 @@ brokkr html-extract fixtures/email-prepared.html \
   --from "div:nth-of-type(2) > table > tbody > tr > td > div:nth-of-type(4) > div" \
   --to   "div:nth-of-type(2) > table > tbody > tr > td > div:nth-of-type(7) > div" \
   fixtures/creatine_products.html
-brokkr test creatine_products
+brokkr visual creatine_products
 ```
 
 `prepare` and `html-extract` shell out to a Node.js script (requires Node + pnpm; auto-installs dependencies on first use). Node is already required for Puppeteer-based Chrome capture.

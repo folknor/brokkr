@@ -28,6 +28,18 @@ struct Sweep {
     feature_args: Vec<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Pass,
+    Fail,
+    BuildFailed,
+    /// Cargo ran but no test matched the name. Could mean "wrong name" or
+    /// "feature-gated out of this sweep" - only distinguishable by checking
+    /// the other sweeps' outcomes. The aggregator in `run` decides how to
+    /// exit based on whether any sweep saw a Pass.
+    NoMatch,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     dev_config: &DevConfig,
@@ -48,7 +60,7 @@ pub fn run(
         _ => vec![],
     };
 
-    let mut overall_failed = false;
+    let mut outcomes: Vec<Outcome> = Vec::new();
 
     for sweep in &sweeps {
         if multi {
@@ -80,20 +92,29 @@ pub fn run(
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
 
-            let result = run_one(&arg_refs, project_root, &env, &tag, file, name, raw)?;
-            if !result {
-                overall_failed = true;
-                // Keep going - we want full signal across repeats/sweeps. The
-                // caller gets a non-zero exit from the final Err below.
-            }
+            let outcome = run_one(&arg_refs, project_root, &env, &tag, raw)?;
+            outcomes.push(outcome);
         }
     }
 
-    if overall_failed {
-        Err(DevError::Build("test failed".into()))
-    } else {
-        Ok(())
+    aggregate_exit(&outcomes, file, name)
+}
+
+fn aggregate_exit(outcomes: &[Outcome], file: &str, name: &str) -> Result<(), DevError> {
+    let any_fail = outcomes
+        .iter()
+        .any(|o| matches!(o, Outcome::Fail | Outcome::BuildFailed));
+    if any_fail {
+        return Err(DevError::Build("test failed".into()));
     }
+    let all_no_match = outcomes.iter().all(|o| *o == Outcome::NoMatch);
+    if all_no_match {
+        println!("[test]    no sweep matched `{file}::{name}` - check the file/name.");
+        return Err(DevError::Build("no matching test".into()));
+    }
+    // At least one sweep passed; NoMatch in other sweeps is informational
+    // (the test was feature-gated out of those sweeps).
+    Ok(())
 }
 
 fn decide_sweeps(check_cfg: Option<&CheckConfig>) -> Vec<Sweep> {
@@ -116,18 +137,15 @@ fn decide_sweeps(check_cfg: Option<&CheckConfig>) -> Vec<Sweep> {
     sweeps
 }
 
-/// Run one `cargo test` invocation. Returns Ok(true) if the test passed,
-/// Ok(false) if it failed (footer printed either way). Err only on spawn
-/// failure.
+/// Run one `cargo test` invocation. Prints the `[test]` footer and returns
+/// the outcome. Err only on spawn failure.
 fn run_one(
     args: &[&str],
     project_root: &Path,
     env: &[(&str, &str)],
     tag: &str,
-    file: &str,
-    name: &str,
     raw: bool,
-) -> Result<bool, DevError> {
+) -> Result<Outcome, DevError> {
     let start = Instant::now();
     let mut child = output::spawn_captured("cargo", args, project_root, env)?;
 
@@ -181,48 +199,59 @@ fn run_one(
                 output::error(&filtered);
             }
         }
-        output::error(&format!("[test] BUILD FAILED {tag} ({wall})"));
-        return Ok(false);
+        println!("[test]    BUILD FAILED {tag} ({wall})");
+        std::io::stdout().flush().ok();
+        return Ok(Outcome::BuildFailed);
     }
 
-    if parsed.passed == 0 && parsed.failed == 0 && parsed.filtered_out > 0 {
-        output::error(&format!(
-            "[test] NO MATCH {tag} - {} tests filtered out (check file: `{file}` / name: `{name}`)",
-            parsed.filtered_out
-        ));
-        return Ok(false);
+    // Zero tests ran: the name didn't match anything in this sweep. Print
+    // an informational SKIP; the caller decides whether this is a real
+    // error (all sweeps missed) or fine (feature-gated out of this one).
+    if parsed.passed == 0 && parsed.failed == 0 {
+        println!(
+            "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
+        );
+        std::io::stdout().flush().ok();
+        return Ok(Outcome::NoMatch);
     }
 
     if let Some(fail) = parsed.failures.first() {
         let msg = fail.message.as_deref().unwrap_or("<no panic message>");
         let loc = fail.location.as_deref().unwrap_or("<unknown location>");
-        output::error(&format!("[test] FAIL {tag} ({wall}) - {msg} @ {loc}"));
-        return Ok(false);
+        println!("[test]    FAIL {tag} ({wall}) - {msg} @ {loc}");
+        std::io::stdout().flush().ok();
+        return Ok(Outcome::Fail);
     }
 
     if !status.success() {
-        output::error(&format!(
-            "[test] FAIL {tag} ({wall}) - exit {:?}",
-            status.code()
-        ));
-        return Ok(false);
+        println!("[test]    FAIL {tag} ({wall}) - exit {:?}", status.code());
+        std::io::stdout().flush().ok();
+        return Ok(Outcome::Fail);
     }
 
-    // Use println! directly so PASS lines go to stdout without the
-    // "[error]" / "[run]" prefix machinery.
     println!("[test]    PASS {tag} ({wall})");
     std::io::stdout().flush().ok();
-    Ok(true)
+    Ok(Outcome::Pass)
 }
 
 fn drain_stdout(pipe: ChildStdout, raw: bool, buf: &Mutex<Vec<String>>) {
     let reader = BufReader::new(pipe);
     let mut out = std::io::stdout().lock();
+    // Suppress leading blanks and collapse runs of consecutive blanks into
+    // one. Starts `true` so any blank line before we print anything is eaten
+    // - that gets rid of the gap cargo leaves between "Finished ..." and the
+    // test output.
+    let mut prev_blank = true;
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        if raw || keep_stdout_line(&line) {
-            writeln!(out, "{line}").ok();
-            out.flush().ok();
+        let want = raw || keep_stdout_line(&line);
+        if want {
+            let is_blank = line.trim().is_empty();
+            if !(is_blank && prev_blank) {
+                writeln!(out, "{line}").ok();
+                out.flush().ok();
+                prev_blank = is_blank;
+            }
         }
         if let Ok(mut v) = buf.lock() {
             v.push(line);
@@ -239,9 +268,10 @@ fn drain_stderr(pipe: ChildStderr, raw: bool, buf: &Mutex<Vec<String>>) {
     // filter aggressively; after it, pass through (it's the test talking).
     let mut in_test_phase = false;
     let mut in_compile_block = false;
+    let mut prev_blank = true;
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        let should_print = if raw || in_test_phase {
+        let want = if raw || in_test_phase {
             true
         } else if line.trim_start().starts_with("Running ") {
             in_test_phase = true;
@@ -249,9 +279,13 @@ fn drain_stderr(pipe: ChildStderr, raw: bool, buf: &Mutex<Vec<String>>) {
         } else {
             keep_stderr_compile_line(&line, &mut in_compile_block)
         };
-        if should_print {
-            writeln!(err, "{line}").ok();
-            err.flush().ok();
+        if want {
+            let is_blank = line.trim().is_empty();
+            if !(is_blank && prev_blank) {
+                writeln!(err, "{line}").ok();
+                err.flush().ok();
+                prev_blank = is_blank;
+            }
         }
         if let Ok(mut v) = buf.lock() {
             v.push(line);
@@ -459,5 +493,37 @@ mod tests {
         };
         let sweeps = decide_sweeps(Some(&cfg));
         assert_eq!(sweeps.len(), 1);
+    }
+
+    #[test]
+    fn aggregate_exit_fails_on_any_fail() {
+        let outcomes = [Outcome::Pass, Outcome::Fail];
+        assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+    }
+
+    #[test]
+    fn aggregate_exit_fails_on_any_build_failed() {
+        let outcomes = [Outcome::Pass, Outcome::BuildFailed];
+        assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+    }
+
+    #[test]
+    fn aggregate_exit_fails_when_all_no_match() {
+        let outcomes = [Outcome::NoMatch, Outcome::NoMatch];
+        assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+    }
+
+    #[test]
+    fn aggregate_exit_passes_when_any_pass_with_no_match() {
+        // The important case: feature-gated test passes in one sweep, SKIPs
+        // in the consumer sweep. Exit code should be 0.
+        let outcomes = [Outcome::Pass, Outcome::NoMatch];
+        assert!(aggregate_exit(&outcomes, "f", "n").is_ok());
+    }
+
+    #[test]
+    fn aggregate_exit_passes_on_all_pass() {
+        let outcomes = [Outcome::Pass, Outcome::Pass];
+        assert!(aggregate_exit(&outcomes, "f", "n").is_ok());
     }
 }
