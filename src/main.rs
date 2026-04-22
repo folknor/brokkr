@@ -43,6 +43,7 @@ mod sidecar;
 mod sidecar_cmd;
 mod sidecar_fmt;
 mod sluggrs;
+mod test_cmd;
 mod tools;
 mod worktree;
 
@@ -809,7 +810,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             nidhogg::cmd::geocode(&dev_config, project, &project_root, &term)
         }
         // ----- visual testing commands (litehtml + sluggrs) -----
-        Command::Test { fixture, suite, all, recapture } => {
+        Command::Visual { fixture, suite, all, recapture } => {
             match project {
                 Project::Litehtml => {
                     let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
@@ -824,8 +825,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     sluggrs::cmd::test(project, &project_root, sluggrs_config, fixture.as_deref(), all)
                 }
                 other => Err(DevError::Config(format!(
-                    "'test' runs visual tests and is only available for litehtml/sluggrs projects (current: {other})"
+                    "'visual' runs visual tests and is only available for litehtml/sluggrs projects (current: {other})"
                 )))
+            }
+        }
+        // ----- cargo single-test runner -----
+        Command::Test { file, name, repeat, jobs, raw } => {
+            match project {
+                Project::Litehtml | Project::Sluggrs => Err(DevError::Config(
+                    "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
+                )),
+                _ => test_cmd::run(&dev_config, project, &project_root, &file, &name, repeat, jobs, raw),
             }
         }
         Command::List => {

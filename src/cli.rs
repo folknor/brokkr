@@ -1129,7 +1129,7 @@ Examples:
     // ----- visual testing commands (litehtml + sluggrs, display_order = 50) -----
     /// [litehtml/sluggrs] Run visual tests against reference artifacts
     #[command(display_order = 50)]
-    Test {
+    Visual {
         /// Fixture or snapshot ID (or unique prefix)
         #[arg(value_name = "ID")]
         fixture: Option<String>,
@@ -1145,6 +1145,35 @@ Examples:
         /// Force-regenerate Chrome reference artifacts before comparing (litehtml only)
         #[arg(long)]
         recapture: bool,
+    },
+    /// Run one specific cargo test in release mode
+    ///
+    /// Always: --release, --include-ignored, --nocapture, --test-threads=1.
+    /// Feature selection matches `brokkr check` - defaults to --all-features,
+    /// and runs a second sweep with [check].consumer_features if configured.
+    /// Streams the test's own stdout/stderr live and prints a [test]
+    /// PASS/FAIL footer with wall time per sweep. Use --raw for unfiltered
+    /// cargo output. Gated off for litehtml/sluggrs (use `brokkr visual`).
+    ///
+    /// Example:
+    ///   brokkr test merge merge_basic_create_modify_delete_uring
+    ///   brokkr test roundtrip roundtrip_uring_tiny_output -N 5
+    ///   brokkr test integration slow_test -j 16
+    #[command(display_order = 10)]
+    Test {
+        /// Integration test file (the `--test <FILE>` argument)
+        file: String,
+        /// Exact test name to run
+        name: String,
+        /// Repeat the test this many times per sweep (flaky-test hunting)
+        #[arg(short = 'N', long = "repeat", default_value = "1")]
+        repeat: u32,
+        /// Parallel cargo compile jobs (`cargo test -j N`)
+        #[arg(short = 'j', long = "jobs")]
+        jobs: Option<u32>,
+        /// Bypass filtering - print everything cargo emits
+        #[arg(long)]
+        raw: bool,
     },
     /// [litehtml/sluggrs] List fixtures/snapshots and approval state
     #[command(display_order = 50)]
