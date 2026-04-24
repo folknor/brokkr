@@ -45,8 +45,8 @@ pub fn run(
     dev_config: &DevConfig,
     project: Project,
     project_root: &Path,
-    file: &str,
     name: &str,
+    package: Option<&str>,
     repeat: u32,
     jobs: Option<u32>,
     raw: bool,
@@ -54,6 +54,8 @@ pub fn run(
     let repeat = repeat.max(1);
     let sweeps = decide_sweeps(dev_config.check.as_ref());
     let multi = sweeps.len() > 1;
+
+    let pkg = resolve_package(package, dev_config, project)?;
 
     let env: Vec<(&str, &str)> = match project {
         Project::Nidhogg => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
@@ -73,8 +75,8 @@ pub fn run(
                 args.push("-j".into());
                 args.push(j.to_string());
             }
-            args.push("--test".into());
-            args.push(file.into());
+            args.push("-p".into());
+            args.push(pkg.clone());
             args.push(name.into());
             args.push("--".into());
             args.push("--include-ignored".into());
@@ -83,10 +85,10 @@ pub fn run(
 
             let label = sweep.label;
             let tag = match (multi, repeat > 1) {
-                (true, true) => format!("{file}::{name} [{label}] run {n}/{repeat}"),
-                (true, false) => format!("{file}::{name} [{label}]"),
-                (false, true) => format!("{file}::{name} run {n}/{repeat}"),
-                (false, false) => format!("{file}::{name}"),
+                (true, true) => format!("{pkg}::{name} [{label}] run {n}/{repeat}"),
+                (true, false) => format!("{pkg}::{name} [{label}]"),
+                (false, true) => format!("{pkg}::{name} run {n}/{repeat}"),
+                (false, false) => format!("{pkg}::{name}"),
             };
 
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -97,10 +99,38 @@ pub fn run(
         }
     }
 
-    aggregate_exit(&outcomes, file, name)
+    aggregate_exit(&outcomes, &pkg, name)
 }
 
-fn aggregate_exit(outcomes: &[Outcome], file: &str, name: &str) -> Result<(), DevError> {
+/// Resolve the cargo package name in precedence order:
+///   1. Explicit `-p` on the CLI (most specific)
+///   2. `[test] default_package` in brokkr.toml (explicit config wins
+///      over implicit per-project heuristic)
+///   3. `Project::cli_package()` (built-in knowledge for pbfhogg/nidhogg)
+///   4. Error with a message pointing the user at options 1/2
+fn resolve_package(
+    cli_package: Option<&str>,
+    dev_config: &DevConfig,
+    project: Project,
+) -> Result<String, DevError> {
+    if let Some(p) = cli_package {
+        return Ok(p.to_owned());
+    }
+    if let Some(cfg) = &dev_config.test
+        && let Some(p) = &cfg.default_package
+    {
+        return Ok(p.clone());
+    }
+    if let Some(p) = project.cli_package() {
+        return Ok(p.to_owned());
+    }
+    Err(DevError::Config(format!(
+        "'brokkr test' needs a cargo package for '-p'. This project ({project}) has no built-in default. \
+         Pass `-p <pkg>` on the command line, or set `[test] default_package = \"...\"` in brokkr.toml."
+    )))
+}
+
+fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), DevError> {
     let any_fail = outcomes
         .iter()
         .any(|o| matches!(o, Outcome::Fail | Outcome::BuildFailed));
@@ -109,7 +139,7 @@ fn aggregate_exit(outcomes: &[Outcome], file: &str, name: &str) -> Result<(), De
     }
     let all_no_match = outcomes.iter().all(|o| *o == Outcome::NoMatch);
     if all_no_match {
-        println!("[test]    no sweep matched `{file}::{name}` - check the file/name.");
+        println!("[test]    no sweep matched `{pkg}::{name}` - check the package/name.");
         return Err(DevError::Build("no matching test".into()));
     }
     // At least one sweep passed; NoMatch in other sweeps is informational

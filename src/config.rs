@@ -16,6 +16,7 @@ pub struct DevConfig {
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
     pub check: Option<CheckConfig>,
+    pub test: Option<TestConfig>,
     /// Env var names / globs to capture into `run_kv` on every measured
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
     /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
@@ -33,6 +34,18 @@ pub struct DevConfig {
 pub struct CheckConfig {
     #[serde(default)]
     pub consumer_features: Vec<String>,
+}
+
+/// `[test]` section. `default_package` is the cargo package `brokkr test`
+/// should pass to `cargo test -p <pkg>` when the user doesn't supply `-p`.
+/// Required for multi-crate workspaces (e.g. ratatoskr) where there's no
+/// single "obvious" package; optional for single-crate projects that have
+/// a built-in default via `Project::cli_package()`. An explicit CLI `-p`
+/// always wins; TOML `default_package` wins over `cli_package()`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestConfig {
+    pub default_package: Option<String>,
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
@@ -277,6 +290,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
     let check = parse_check(table)?;
+    let test = parse_test(table)?;
     let capture_env = parse_capture_env(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -288,6 +302,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             litehtml,
             sluggrs,
             check,
+            test,
             capture_env,
         },
     ))
@@ -365,6 +380,7 @@ fn parse_hosts(
             || key == "litehtml"
             || key == "sluggrs"
             || key == "check"
+            || key == "test"
             || key == "capture_env"
         {
             continue;
@@ -422,6 +438,20 @@ fn parse_check(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("check: {e}")))?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[test]` section from the root table.
+fn parse_test(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<TestConfig>, DevError> {
+    let Some(value) = table.get("test") else {
+        return Ok(None);
+    };
+    let config: TestConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("test: {e}")))?;
     Ok(Some(config))
 }
 
@@ -681,6 +711,7 @@ mod tests {
             litehtml: None,
             sluggrs: None,
             check: None,
+            test: None,
             capture_env: Vec::new(),
         }
     }

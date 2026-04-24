@@ -1200,16 +1200,24 @@ Examples:
     /// PASS/FAIL footer with wall time per sweep. Use --raw for unfiltered
     /// cargo output. Gated off for litehtml/sluggrs (use `brokkr visual`).
     ///
+    /// The package passed to `cargo test -p` is resolved in order:
+    ///   1. `-p/--package` on the command line
+    ///   2. `[test] default_package` in brokkr.toml
+    ///   3. The project's built-in default (pbfhogg-cli, nidhogg)
+    /// Projects without any of these (e.g. a workspace) must pass -p.
+    ///
     /// Example:
-    ///   brokkr test merge merge_basic_create_modify_delete_uring
-    ///   brokkr test roundtrip roundtrip_uring_tiny_output -N 5
-    ///   brokkr test integration slow_test -j 16
+    ///   brokkr test merge_basic_create_modify_delete_uring
+    ///   brokkr test -p calendar extract_tag_value_flattens_nested_text
+    ///   brokkr test roundtrip_uring_tiny_output -N 5
     #[command(display_order = 10)]
     Test {
-        /// Integration test file (the `--test <FILE>` argument)
-        file: String,
-        /// Exact test name to run
+        /// Exact test name to run (substring filter, case-sensitive)
         name: String,
+        /// Cargo package to test (`cargo test -p <pkg>`). Overrides the
+        /// project default and any `[test] default_package` in brokkr.toml.
+        #[arg(short = 'p', long = "package")]
+        package: Option<String>,
         /// Repeat the test this many times per sweep (flaky-test hunting)
         #[arg(short = 'N', long = "repeat", default_value = "1")]
         repeat: u32,

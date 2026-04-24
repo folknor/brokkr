@@ -99,7 +99,7 @@ file = "denmark-elivagar.pmtiles"
 xxhash = "9a3b2c1d..."
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses `--all-features` by default (catches feature-gated code like hotpath/alloc), overridden by explicit `--features` or `--no-default-features`. Reserved top-level keys (skipped by host parsing): `project`, `litehtml`, `sluggrs`, `check`, `capture_env`.
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses `--all-features` by default (catches feature-gated code like hotpath/alloc), overridden by explicit `--features` or `--no-default-features`. Reserved top-level keys (skipped by host parsing): `project`, `litehtml`, `sluggrs`, `check`, `test`, `capture_env`.
 
 ### `[check]` section
 
@@ -111,6 +111,17 @@ consumer_features = ["commands"]
 ```
 
 When `consumer_features` is non-empty, `brokkr check` runs clippy a second sweep with `--no-default-features --features <consumer_features>`. The first sweep is the existing `--all-features` run; the second represents what a downstream library consumer would build with. The point is to catch lints in always-compiled code that proc-macros (e.g. `#[hotpath::measure]`) silently mask by rewriting function bodies under feature gates. Diagnostics are deduped across sweeps and tagged in text mode (`[all-features]` / `[consumer]` / `[both]`) and in JSON mode (`sweeps: [...]` field). User-supplied `--features` / `--no-default-features` short-circuit the multi-sweep behavior - those flags mean "run exactly this one sweep". Absent `[check]` config = today's single `--all-features` sweep, no second build.
+
+### `[test]` section
+
+Optional. Single field today:
+
+```toml
+[test]
+default_package = "cal"
+```
+
+`default_package` is the cargo package `brokkr test` passes to `cargo test -p` when no `-p/--package` is given on the command line. Needed for multi-crate workspaces where there's no single obvious package (e.g. ratatoskr); optional for single-crate projects that already have a built-in default via `Project::cli_package()` (pbfhogg-cli, nidhogg). Resolution order: explicit `-p` on CLI > `[test].default_package` > `Project::cli_package()` > error.
 
 ### Dataset structure
 
@@ -156,7 +167,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 - `kill` - cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM: brokkr catches it, SIGKILLs its child, flushes partial sidecar data under the `dirty` alias, releases the lock, and runs `brokkr clean`. `--hard` sends SIGKILL to brokkr + child (no cleanup; follow up with `brokkr clean`). Exits 130 on the graceful path.
-- `test <FILE> <NAME>` - (all cargo projects except litehtml/sluggrs) run one specific cargo test in release mode. Always adds `--include-ignored --nocapture --test-threads=1`. Feature selection mirrors `brokkr check`: first sweep is `--all-features`; a second `consumer` sweep runs when `[check].consumer_features` is configured in `brokkr.toml`. Streams the test's own stdout/stderr live (cargo/test-harness framing lines are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed with at least one `PASS` exits `0`. `-N <n>` repeats the test (per sweep) for flaky-test hunting; `-j <n>` sets `cargo -j N` for parallel compile; `--raw` disables all filtering. Litehtml and sluggrs projects are rejected with a pointer to `brokkr visual`.
+- `test [-p <PKG>] <NAME>` - (all cargo projects except litehtml/sluggrs) run one specific cargo test in release mode. Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and integration tests are matched by the name substring within the selected package. Package resolution: explicit `-p/--package` > `[test] default_package` in `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces (e.g. ratatoskr) must pass `-p` or set `default_package`. Always adds `--include-ignored --nocapture --test-threads=1`. Feature selection mirrors `brokkr check`: first sweep is `--all-features`; a second `consumer` sweep runs when `[check].consumer_features` is configured in `brokkr.toml`. Streams the test's own stdout/stderr live (cargo/test-harness framing lines are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed with at least one `PASS` exits `0`. `-N <n>` repeats the test (per sweep) for flaky-test hunting; `-j <n>` sets `cargo -j N` for parallel compile; `--raw` disables all filtering. Because `cargo test <name>` is a substring filter, identically-named tests in different modules of the same package all run; use a more qualified name (module path) to disambiguate. Litehtml and sluggrs projects are rejected with a pointer to `brokkr visual`.
 - `passthrough` - build and run with raw passthrough args (hidden, for ad-hoc use)
 - `download <region> [--osc-seq N]` - (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
 

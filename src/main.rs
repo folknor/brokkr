@@ -869,12 +869,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         }
         // ----- cargo single-test runner -----
-        Command::Test { file, name, repeat, jobs, raw } => {
+        Command::Test { name, package, repeat, jobs, raw } => {
             match project {
                 Project::Litehtml | Project::Sluggrs => Err(DevError::Config(
                     "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
                 )),
-                _ => test_cmd::run(&dev_config, project, &project_root, &file, &name, repeat, jobs, raw),
+                _ => test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw),
             }
         }
         Command::List => {
