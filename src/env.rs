@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use std::collections::HashMap;
@@ -15,8 +15,22 @@ pub struct EnvInfo {
     pub memory_available_mb: u64,
     pub io_uring_status: String,
     pub drives: Vec<(String, String)>,
+    pub storage: Vec<StorageInfo>,
     pub tools: Vec<(String, String)>,
     pub datasets: Vec<(String, DatasetStatus)>,
+}
+
+/// Probed details for a configured storage path.
+pub struct StorageInfo {
+    pub label: String,
+    pub mount_point: String,
+    pub device: String,
+    pub fstype: String,
+    pub options: String,
+    pub model: Option<String>,
+    pub rotational: Option<bool>,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
 }
 
 /// Whether a dataset PBF file exists on disk and passes hash verification.
@@ -45,6 +59,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         memory_available_mb: mem_avail,
         io_uring_status: read_io_uring_status(),
         drives: collect_drives(paths),
+        storage: collect_storage(paths),
         tools: collect_tools(project),
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
     }
@@ -54,6 +69,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
 pub fn print(info: &EnvInfo) {
     print_header(info);
     print_drives(info);
+    print_storage(info);
     print_tools(info);
     print_datasets(info);
 }
@@ -78,6 +94,57 @@ fn print_drives(info: &EnvInfo) {
         .map(|(label, dtype)| format!("{label}={dtype}"))
         .collect();
     println!("{:<12} {}", "drives:", parts.join("  "));
+}
+
+fn print_storage(info: &EnvInfo) {
+    if info.storage.is_empty() {
+        return;
+    }
+    let label_width = info
+        .storage
+        .iter()
+        .map(|s| s.label.len())
+        .max()
+        .unwrap_or(0);
+    let mut prev_key: Option<(String, String)> = None;
+    for (i, s) in info.storage.iter().enumerate() {
+        let header = if i == 0 { "storage:" } else { "" };
+        let key = (s.mount_point.clone(), s.device.clone());
+        let body = if prev_key.as_ref() == Some(&key) {
+            "(same mount)".to_owned()
+        } else {
+            format_storage_row(s)
+        };
+        println!(
+            "{:<12} {:<width$}  {}",
+            header,
+            format!("{}:", s.label),
+            body,
+            width = label_width + 1,
+        );
+        prev_key = Some(key);
+    }
+}
+
+fn format_storage_row(s: &StorageInfo) -> String {
+    let model = match (s.model.as_deref(), s.rotational) {
+        (Some(m), Some(false)) => format!("{m} (SSD)"),
+        (Some(m), Some(true)) => format!("{m} (HDD)"),
+        (Some(m), None) => m.to_owned(),
+        (None, Some(false)) => "SSD".to_owned(),
+        (None, Some(true)) => "HDD".to_owned(),
+        (None, None) => "unknown device".to_owned(),
+    };
+    format!(
+        "{}  {}  {} {}  {}  {} free / {}",
+        s.mount_point,
+        s.device,
+        s.fstype,
+        s.options,
+        model,
+        format_bytes(s.free_bytes),
+        format_bytes(s.total_bytes),
+    )
 }
 
 fn print_tools(info: &EnvInfo) {
@@ -250,6 +317,179 @@ fn collect_drives(paths: &ResolvedPaths) -> Vec<(String, String)> {
 fn push_drive(out: &mut Vec<(String, String)>, label: &str, value: Option<&str>) {
     let dtype = value.unwrap_or("unknown");
     out.push((label.to_owned(), dtype.to_owned()));
+}
+
+// ---------------------------------------------------------------------------
+// Storage probing
+// ---------------------------------------------------------------------------
+
+struct MountEntry {
+    device: String,
+    mount_point: String,
+    fstype: String,
+    options: String,
+}
+
+fn collect_storage(paths: &ResolvedPaths) -> Vec<StorageInfo> {
+    let mounts = read_mounts();
+    let candidates: [(&str, &Path); 3] = [
+        ("data", &paths.data_dir),
+        ("scratch", &paths.scratch_dir),
+        ("target", &paths.target_dir),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(label, path)| probe_storage(label, path, &mounts))
+        .collect()
+}
+
+fn probe_storage(label: &str, path: &Path, mounts: &[MountEntry]) -> Option<StorageInfo> {
+    let existing = existing_ancestor(path)?;
+    let canonical = std::fs::canonicalize(&existing).unwrap_or(existing);
+    let mount = find_mount_for(&canonical, mounts)?;
+    let (model, rotational) = block_device_info(&mount.device);
+    let (free, total) = statvfs_bytes(&canonical).unwrap_or((0, 0));
+    Some(StorageInfo {
+        label: label.to_owned(),
+        mount_point: mount.mount_point.clone(),
+        device: mount.device.clone(),
+        fstype: mount.fstype.clone(),
+        options: mount.options.clone(),
+        model,
+        rotational,
+        free_bytes: free,
+        total_bytes: total,
+    })
+}
+
+fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cur: &Path = path;
+    loop {
+        if cur.exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+}
+
+fn read_mounts() -> Vec<MountEntry> {
+    let content = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    content.lines().filter_map(parse_mount_line).collect()
+}
+
+fn parse_mount_line(line: &str) -> Option<MountEntry> {
+    let mut parts = line.split_whitespace();
+    let device = parts.next()?.to_owned();
+    let mount_point = unescape_mount_field(parts.next()?);
+    let fstype = parts.next()?.to_owned();
+    let options = parts.next()?.to_owned();
+    Some(MountEntry {
+        device,
+        mount_point,
+        fstype,
+        options,
+    })
+}
+
+/// `/proc/mounts` encodes spaces, tabs, newlines and backslashes as octal
+/// escapes (e.g. `\040` for space). Decode them so path matching works.
+fn unescape_mount_field(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let a = bytes[i + 1];
+            let b = bytes[i + 2];
+            let c = bytes[i + 3];
+            if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() {
+                let val = (a - b'0') * 64 + (b - b'0') * 8 + (c - b'0');
+                out.push(val as char);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn find_mount_for<'a>(path: &Path, mounts: &'a [MountEntry]) -> Option<&'a MountEntry> {
+    mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.mount_point))
+        .max_by_key(|m| m.mount_point.len())
+}
+
+fn statvfs_bytes(path: &Path) -> Option<(u64, u64)> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+    if ret != 0 {
+        return None;
+    }
+    let frsize = buf.f_frsize as u64;
+    let total = (buf.f_blocks as u64).saturating_mul(frsize);
+    let free = (buf.f_bavail as u64).saturating_mul(frsize);
+    Some((free, total))
+}
+
+fn block_device_info(device: &str) -> (Option<String>, Option<bool>) {
+    let Some(name) = device.strip_prefix("/dev/") else {
+        return (None, None);
+    };
+    let parent = parent_block_device(name);
+    let model = std::fs::read_to_string(format!("/sys/block/{parent}/device/model"))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let rotational = std::fs::read_to_string(format!("/sys/block/{parent}/queue/rotational"))
+        .ok()
+        .and_then(|s| match s.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        });
+    (model, rotational)
+}
+
+/// Strip a partition suffix to get the underlying block device name.
+/// `nvme0n1p1` -> `nvme0n1`, `mmcblk0p1` -> `mmcblk0`, `sda1` -> `sda`.
+fn parent_block_device(name: &str) -> String {
+    if let Some(idx) = name.rfind('p')
+        && idx > 0
+        && name[idx + 1..].chars().all(|c| c.is_ascii_digit())
+        && !name[idx + 1..].is_empty()
+    {
+        return name[..idx].to_owned();
+    }
+    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if trimmed.is_empty() {
+        name.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn format_bytes(b: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+    if b >= TB {
+        format!("{:.1}T", b as f64 / TB as f64)
+    } else if b >= GB {
+        format!("{}G", b / GB)
+    } else if b >= MB {
+        format!("{}M", b / MB)
+    } else if b >= KB {
+        format!("{}K", b / KB)
+    } else {
+        format!("{b}B")
+    }
 }
 
 // ---------------------------------------------------------------------------
