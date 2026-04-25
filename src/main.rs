@@ -29,10 +29,12 @@ mod lockfile;
 mod measure;
 mod nidhogg;
 mod oom;
+mod osc;
 mod output;
 mod pbfhogg;
 mod pmtiles;
 mod preflight;
+mod profile;
 mod project;
 mod request;
 mod resolve;
@@ -199,6 +201,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         features,
         no_default_features,
         package,
+        profile,
         raw,
         json,
         limit,
@@ -207,17 +210,19 @@ fn run(cli: Cli) -> Result<(), DevError> {
         args,
     } = cli.command
     {
-        let (project, check_cfg, project_root) = match project::detect_optional()? {
-            Some((p, cfg, root)) => (Some(p), cfg.check, root),
-            None => (None, None, std::env::current_dir()?),
+        let (project, check_cfg, test_cfg, project_root) = match project::detect_optional()? {
+            Some((p, cfg, root)) => (Some(p), cfg.check, cfg.test, root),
+            None => (None, None, None, std::env::current_dir()?),
         };
         return check_cmd::cmd_check(
             project,
             &project_root,
             check_cfg.as_ref(),
+            test_cfg.as_ref(),
             &features,
             no_default_features,
             package.as_deref(),
+            profile.as_deref(),
             raw,
             json,
             limit,

@@ -21,11 +21,12 @@ pub enum CheckEvent {
 #[derive(Serialize)]
 pub struct DiagnosticEvent {
     pub tool: &'static str,
-    /// Which clippy feature sweeps this diagnostic appeared in
-    /// (e.g. `["all-features"]`, `["consumer"]`, or both). Empty for
-    /// non-clippy events and for single-sweep clippy runs.
+    /// Which sweeps this diagnostic appeared in (e.g.
+    /// `["all-features"]`, `["consumer"]`, or both for clippy;
+    /// user-defined names like `["all", "consumer"]` for profile-driven
+    /// runs). Empty for single-sweep / unsweept events.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sweeps: Vec<&'static str>,
+    pub sweeps: Vec<String>,
     pub level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -70,10 +71,11 @@ pub struct TestFailureEvent {
 #[derive(Serialize)]
 pub struct DiagnosticSummaryEvent {
     pub tool: &'static str,
-    /// Which clippy sweep this summary belongs to. `None` for non-clippy
-    /// tools or single-sweep clippy runs.
+    /// Which sweep this summary belongs to. `None` for tools / runs with
+    /// no sweep distinction (single-sweep clippy, single-shot test).
+    /// Set for multi-sweep clippy and profile-driven tests.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sweep: Option<&'static str>,
+    pub sweep: Option<String>,
     pub status: &'static str,
     pub errors: usize,
     pub warnings: usize,
@@ -82,6 +84,10 @@ pub struct DiagnosticSummaryEvent {
 #[derive(Serialize)]
 pub struct TestSummaryEvent {
     pub status: &'static str,
+    /// Profile sweep label when running under `[test.profiles.*]`;
+    /// `None` for single-shot test runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<String>,
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
@@ -113,14 +119,15 @@ pub struct GremlinSummaryEvent {
 /// Each line is a JSON object from cargo. Only lines with
 /// `"reason": "compiler-message"` are extracted; everything else is skipped.
 ///
-/// `sweep` tags every emitted Diagnostic with the clippy sweep label
-/// (e.g. `"all-features"`, `"consumer"`). `None` for non-clippy tools
-/// and single-sweep runs - the field stays empty in that case.
+/// `sweep` tags every emitted Diagnostic with the sweep label (e.g.
+/// `"all-features"`, `"consumer"`, or a profile-defined sweep name).
+/// `None` for non-clippy tools and single-sweep runs - the field stays
+/// empty in that case.
 #[allow(clippy::too_many_lines)] // JSON walk - splitting just shuffles match arms
 pub fn parse_cargo_diagnostics(
     stdout: &str,
     tool: &'static str,
-    sweep: Option<&'static str>,
+    sweep: Option<&str>,
 ) -> Vec<CheckEvent> {
     let mut events = Vec::new();
 
@@ -224,7 +231,7 @@ pub fn parse_cargo_diagnostics(
 
         events.push(CheckEvent::Diagnostic(DiagnosticEvent {
             tool,
-            sweeps: sweep.map(|s| vec![s]).unwrap_or_default(),
+            sweeps: sweep.map(|s| vec![s.to_owned()]).unwrap_or_default(),
             level,
             code,
             message,
@@ -386,6 +393,7 @@ mod tests {
     fn test_summary_serialization() {
         let event = CheckEvent::TestSummary(TestSummaryEvent {
             status: "failed",
+            sweep: None,
             passed: 10,
             failed: 1,
             ignored: 0,
@@ -398,6 +406,22 @@ mod tests {
         assert!(json.contains(r#""passed":10"#));
         assert!(json.contains(r#""filtered_out":5"#));
         assert!(json.contains(r#""duration_seconds":1.45"#));
+    }
+
+    #[test]
+    fn test_summary_with_sweep_label() {
+        let event = CheckEvent::TestSummary(TestSummaryEvent {
+            status: "ok",
+            sweep: Some("consumer".into()),
+            passed: 1,
+            failed: 0,
+            ignored: 0,
+            filtered_out: 0,
+            suites: 1,
+            duration_seconds: None,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""sweep":"consumer""#));
     }
 
     #[test]
@@ -416,6 +440,7 @@ mod tests {
     fn test_summary_omits_none_duration() {
         let event = CheckEvent::TestSummary(TestSummaryEvent {
             status: "ok",
+            sweep: None,
             passed: 5,
             failed: 0,
             ignored: 0,
@@ -425,6 +450,7 @@ mod tests {
         });
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("duration_seconds"));
+        assert!(!json.contains("sweep"));
     }
 
     #[test]

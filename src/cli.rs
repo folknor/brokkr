@@ -52,6 +52,15 @@ Examples:
         #[arg(long, short)]
         package: Option<String>,
 
+        /// Validation profile from `[test.profiles]` in brokkr.toml.
+        /// Selects sweeps, libtest filters (--include-ignored, --skip,
+        /// --test-threads, etc.), and env vars for the test phase.
+        /// Falls back to `[test] default_profile` if unset, then to
+        /// today's single-sweep behaviour. Conflicts with `--features` /
+        /// `--no-default-features` (those override the sweep set).
+        #[arg(long, conflicts_with_all = ["features", "no_default_features"])]
+        profile: Option<String>,
+
         /// Show unfiltered cargo output
         #[arg(long, conflicts_with = "json")]
         raw: bool,
@@ -1404,14 +1413,26 @@ pub(crate) struct PbfArgs {
 /// Shared dataset/variant/direct_io args for pbfhogg verify subcommands.
 /// (Verify doesn't take `--io-uring` or `--compression` - different surface
 /// than `PbfArgs`, hence a separate struct.)
+///
+/// `--input <path>` is the escape hatch for handcrafted fixtures that no
+/// real-world dataset exercises (e.g. overlapping-blob PBFs from
+/// `pbfhogg/examples/`). When set, dataset / variant resolution is
+/// skipped and the path is used directly. Mutually exclusive with
+/// user-provided `--dataset` / `--variant` (their defaults still
+/// populate the struct, but clap's `conflicts_with` only triggers on
+/// user-supplied flags).
 #[derive(Args, Clone)]
 pub(crate) struct VerifyPbfArgs {
     /// Dataset name from brokkr.toml
-    #[arg(long, default_value = "denmark")]
+    #[arg(long, default_value = "denmark", conflicts_with = "input")]
     pub(crate) dataset: String,
     /// PBF variant to use (raw, indexed, locations)
-    #[arg(long, default_value = "indexed")]
+    #[arg(long, default_value = "indexed", conflicts_with = "input")]
     pub(crate) variant: String,
+    /// Path to a handcrafted input PBF (skips dataset resolution).
+    /// Mutually exclusive with `--dataset` / `--variant`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) input: Option<std::path::PathBuf>,
     /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
     #[arg(long)]
     pub(crate) direct_io: bool,
@@ -1496,10 +1517,13 @@ pub(crate) enum VerifyCommand {
     /// [pbfhogg] Cross-validate renumber against osmium renumber
     #[command(display_order = 9)]
     Renumber {
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = "denmark", conflicts_with = "input")]
         dataset: String,
-        #[arg(long, default_value = "indexed")]
+        #[arg(long, default_value = "indexed", conflicts_with = "input")]
         variant: String,
+        /// Path to a handcrafted input PBF (skips dataset resolution).
+        #[arg(long, value_name = "PATH")]
+        input: Option<std::path::PathBuf>,
         /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
         #[arg(long = "start-id", value_name = "IDS")]
         start_id: Option<String>,
@@ -1510,10 +1534,13 @@ pub(crate) enum VerifyCommand {
     /// [pbfhogg] Cross-validate diff summary against osmium diff
     #[command(display_order = 10)]
     Diff {
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = "denmark", conflicts_with = "input")]
         dataset: String,
-        #[arg(long, default_value = "indexed")]
+        #[arg(long, default_value = "indexed", conflicts_with = "input")]
         variant: String,
+        /// Path to a handcrafted input PBF (skips dataset resolution).
+        #[arg(long, value_name = "PATH")]
+        input: Option<std::path::PathBuf>,
         #[arg(long)]
         osc_seq: Option<String>,
     },
@@ -1691,6 +1718,113 @@ mod tests {
     fn results_compare_requires_two_commits() {
         let parsed = Cli::try_parse_from(["brokkr", "results", "--compare", "abc123"]);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn check_accepts_profile_flag() {
+        let parsed = Cli::try_parse_from(["brokkr", "check", "--profile", "tier1"])
+            .expect("parse");
+        let Command::Check { profile, .. } = parsed.command else {
+            panic!("expected Check");
+        };
+        assert_eq!(profile.as_deref(), Some("tier1"));
+    }
+
+    #[test]
+    fn check_profile_conflicts_with_features() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "check",
+            "--profile",
+            "tier1",
+            "--features",
+            "commands",
+        ]);
+        assert!(parsed.is_err(), "--profile + --features should conflict");
+    }
+
+    #[test]
+    fn check_profile_conflicts_with_no_default_features() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "check",
+            "--profile",
+            "tier1",
+            "--no-default-features",
+        ]);
+        assert!(
+            parsed.is_err(),
+            "--profile + --no-default-features should conflict"
+        );
+    }
+
+    #[test]
+    fn verify_sort_accepts_input_path() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "verify",
+            "sort",
+            "--input",
+            "fixtures/overlapping.osm.pbf",
+        ])
+        .expect("parse");
+        let Command::Verify { verify, .. } = parsed.command else {
+            panic!("expected Verify");
+        };
+        let VerifyCommand::Sort { pbf } = verify else {
+            panic!("expected Verify::Sort");
+        };
+        assert_eq!(
+            pbf.input.as_deref().map(std::path::Path::display).map(|d| d.to_string()),
+            Some("fixtures/overlapping.osm.pbf".to_owned())
+        );
+    }
+
+    #[test]
+    fn verify_sort_input_conflicts_with_dataset() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "verify",
+            "sort",
+            "--input",
+            "x.pbf",
+            "--dataset",
+            "denmark",
+        ]);
+        assert!(parsed.is_err(), "--input + --dataset should conflict");
+    }
+
+    #[test]
+    fn verify_sort_input_conflicts_with_variant() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "verify",
+            "sort",
+            "--input",
+            "x.pbf",
+            "--variant",
+            "raw",
+        ]);
+        assert!(parsed.is_err(), "--input + --variant should conflict");
+    }
+
+    #[test]
+    fn verify_renumber_accepts_input_path() {
+        let parsed = Cli::try_parse_from([
+            "brokkr",
+            "verify",
+            "renumber",
+            "--input",
+            "fixtures/x.pbf",
+        ])
+        .expect("parse");
+        let Command::Verify { verify, .. } = parsed.command else {
+            panic!("expected Verify");
+        };
+        let VerifyCommand::Renumber { input, .. } = verify else {
+            panic!("expected Verify::Renumber");
+        };
+        assert!(input.is_some());
     }
 
     #[test]

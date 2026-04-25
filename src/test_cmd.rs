@@ -18,14 +18,21 @@ use std::thread;
 use std::time::Instant;
 
 use crate::cargo_filter;
-use crate::config::{CheckConfig, DevConfig};
+use crate::config::{CheckConfig, DevConfig, TestConfig};
 use crate::error::DevError;
 use crate::output;
+use crate::profile;
 use crate::project::Project;
 
 struct Sweep {
-    label: &'static str,
+    label: String,
     feature_args: Vec<String>,
+    /// Cargo packages to rebuild with `feature_args` before running
+    /// tests. Empty for fallback (CheckConfig-only) sweeps; populated
+    /// for sweeps sourced from `[test.sweeps.*]` in brokkr.toml so
+    /// `tests/cli_*.rs` invocations get a binary built with matching
+    /// features (request 2).
+    build_packages: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -52,7 +59,7 @@ pub fn run(
     raw: bool,
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
-    let sweeps = decide_sweeps(dev_config.check.as_ref());
+    let sweeps = decide_sweeps(dev_config.test.as_ref(), dev_config.check.as_ref())?;
     let multi = sweeps.len() > 1;
 
     let pkg = resolve_package(package, dev_config, project)?;
@@ -68,6 +75,25 @@ pub fn run(
         if multi {
             println!("[test]    sweep: {}", sweep.label);
         }
+
+        // Pre-build any binary packages declared by this sweep. Skipped
+        // when build_packages is empty (fallback path). Failure here
+        // short-circuits the run with a BuildFailed outcome so the
+        // aggregator marks the sweep as failed.
+        let mut pre_build_failed = false;
+        for build_pkg in &sweep.build_packages {
+            if !run_pre_build(project_root, sweep, build_pkg, &env, raw)? {
+                pre_build_failed = true;
+                outcomes.push(Outcome::BuildFailed);
+                break;
+            }
+        }
+        if pre_build_failed {
+            // Skip the test phase for this sweep; the next sweep gets
+            // its own chance.
+            continue;
+        }
+
         for n in 1..=repeat {
             let mut args: Vec<String> = vec!["test".into(), "--release".into()];
             args.extend(sweep.feature_args.iter().cloned());
@@ -83,7 +109,7 @@ pub fn run(
             args.push("--nocapture".into());
             args.push("--test-threads=1".into());
 
-            let label = sweep.label;
+            let label = sweep.label.as_str();
             let tag = match (multi, repeat > 1) {
                 (true, true) => format!("{pkg}::{name} [{label}] run {n}/{repeat}"),
                 (true, false) => format!("{pkg}::{name} [{label}]"),
@@ -100,6 +126,52 @@ pub fn run(
     }
 
     aggregate_exit(&outcomes, &pkg, name)
+}
+
+/// Build one cargo package with the sweep's feature flags before
+/// running tests. Returns `Ok(true)` on build success, `Ok(false)` on
+/// build failure (already reported), `Err` on spawn failure.
+fn run_pre_build(
+    project_root: &Path,
+    sweep: &Sweep,
+    package: &str,
+    env: &[(&str, &str)],
+    raw: bool,
+) -> Result<bool, DevError> {
+    let mut args: Vec<String> = vec!["build".into(), "--release".into()];
+    args.extend(sweep.feature_args.iter().cloned());
+    args.push("--package".into());
+    args.push(package.into());
+
+    output::run_msg(&format!(
+        "cargo {} (sweep build: {})",
+        args.join(" "),
+        sweep.label
+    ));
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env)?;
+
+    if captured.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    if raw {
+        if !stderr.is_empty() {
+            output::error(&stderr);
+        }
+    } else {
+        let filtered = cargo_filter::filter_clippy(&stderr);
+        if !filtered.is_empty() {
+            output::error(&filtered);
+        }
+    }
+    println!(
+        "[test]    BUILD FAILED {package} (sweep: {})",
+        sweep.label
+    );
+    Ok(false)
 }
 
 /// Resolve the cargo package name in precedence order:
@@ -147,24 +219,67 @@ fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), Dev
     Ok(())
 }
 
-fn decide_sweeps(check_cfg: Option<&CheckConfig>) -> Vec<Sweep> {
+/// Decide which sweeps `brokkr test` runs.
+///
+/// Resolution order (first match wins):
+///   1. `[test] default_profile` is set in brokkr.toml: use that
+///      profile's resolved sweep list (filters/env are dropped - the
+///      user's name argument is the filter).
+///   2. `[test.sweeps.*]` is non-empty but no `default_profile`: run
+///      every defined sweep in name order.
+///   3. Fallback to today's behaviour: `--all-features`, plus a
+///      `consumer` sweep if `[check].consumer_features` is set.
+fn decide_sweeps(
+    test_cfg: Option<&TestConfig>,
+    check_cfg: Option<&CheckConfig>,
+) -> Result<Vec<Sweep>, DevError> {
+    if let Some(t) = test_cfg
+        && let Some(profile_name) = t.default_profile.as_deref()
+    {
+        let resolved = profile::resolve(t, profile_name)?;
+        return Ok(resolved
+            .into_iter()
+            .map(|r| Sweep {
+                label: r.label,
+                feature_args: r.cargo_feature_args,
+                build_packages: r.build_packages,
+            })
+            .collect());
+    }
+
+    if let Some(t) = test_cfg
+        && !t.sweeps.is_empty()
+    {
+        return Ok(t
+            .sweeps
+            .iter()
+            .map(|(name, def)| Sweep {
+                label: name.clone(),
+                feature_args: profile::sweep_feature_args(def),
+                build_packages: def.build_packages.clone(),
+            })
+            .collect());
+    }
+
     let mut sweeps = vec![Sweep {
-        label: "all-features",
+        label: "all-features".into(),
         feature_args: vec!["--all-features".into()],
+        build_packages: Vec::new(),
     }];
     if let Some(cfg) = check_cfg
         && !cfg.consumer_features.is_empty()
     {
         sweeps.push(Sweep {
-            label: "consumer",
+            label: "consumer".into(),
             feature_args: vec![
                 "--no-default-features".into(),
                 "--features".into(),
                 cfg.consumer_features.join(","),
             ],
+            build_packages: Vec::new(),
         });
     }
-    sweeps
+    Ok(sweeps)
 }
 
 /// Run one `cargo test` invocation. Prints the `[test]` footer and returns
@@ -376,6 +491,11 @@ fn keep_stderr_compile_line(line: &str, in_block: &mut bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
     use super::*;
 
     #[test]
@@ -495,10 +615,11 @@ mod tests {
 
     #[test]
     fn decide_sweeps_defaults_to_all_features() {
-        let sweeps = decide_sweeps(None);
+        let sweeps = decide_sweeps(None, None).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "all-features");
         assert_eq!(sweeps[0].feature_args, vec!["--all-features"]);
+        assert!(sweeps[0].build_packages.is_empty());
     }
 
     #[test]
@@ -506,7 +627,7 @@ mod tests {
         let cfg = CheckConfig {
             consumer_features: vec!["commands".into(), "foo".into()],
         };
-        let sweeps = decide_sweeps(Some(&cfg));
+        let sweeps = decide_sweeps(None, Some(&cfg)).unwrap();
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "all-features");
         assert_eq!(sweeps[1].label, "consumer");
@@ -521,8 +642,54 @@ mod tests {
         let cfg = CheckConfig {
             consumer_features: vec![],
         };
-        let sweeps = decide_sweeps(Some(&cfg));
+        let sweeps = decide_sweeps(None, Some(&cfg)).unwrap();
         assert_eq!(sweeps.len(), 1);
+    }
+
+    #[test]
+    fn decide_sweeps_uses_default_profile_when_set() {
+        let toml_text = r#"
+default_profile = "tier1"
+
+[sweeps.all]
+features = "all"
+build_packages = ["pbfhogg-cli"]
+
+[sweeps.consumer]
+no_default_features = true
+features = ["commands"]
+build_packages = ["pbfhogg-cli"]
+
+[profiles.tier1]
+sweeps = ["all", "consumer"]
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), None).unwrap();
+        assert_eq!(sweeps.len(), 2);
+        assert_eq!(sweeps[0].label, "all");
+        assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
+        assert_eq!(sweeps[1].label, "consumer");
+        assert_eq!(sweeps[1].build_packages, vec!["pbfhogg-cli"]);
+    }
+
+    #[test]
+    fn decide_sweeps_uses_all_sweeps_without_profile() {
+        // [test.sweeps] declared but no default_profile - run every
+        // sweep in name order.
+        let toml_text = r#"
+[sweeps.all]
+features = "all"
+
+[sweeps.consumer]
+no_default_features = true
+features = ["commands"]
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let sweeps = decide_sweeps(Some(&test_cfg), None).unwrap();
+        assert_eq!(sweeps.len(), 2);
+        // BTreeMap iteration is sorted, so 'all' comes before 'consumer'.
+        assert_eq!(sweeps[0].label, "all");
+        assert_eq!(sweeps[1].label, "consumer");
     }
 
     #[test]

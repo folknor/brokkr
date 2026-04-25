@@ -14,10 +14,11 @@ use std::path::Path;
 
 use crate::cargo_filter;
 use crate::cargo_json;
-use crate::config::CheckConfig;
+use crate::config::{CheckConfig, TestConfig};
 use crate::error::DevError;
 use crate::gremlins;
 use crate::output;
+use crate::profile;
 use crate::project::Project;
 use crate::scope;
 
@@ -34,9 +35,11 @@ pub(crate) fn cmd_check(
     project: Option<Project>,
     project_root: &Path,
     check_cfg: Option<&CheckConfig>,
+    test_cfg: Option<&TestConfig>,
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
+    profile_name: Option<&str>,
     raw: bool,
     json: bool,
     limit: usize,
@@ -44,6 +47,14 @@ pub(crate) fn cmd_check(
     fix_gremlins: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
+    // A `--profile` (or `default_profile`) takes the test phase down a
+    // different code path: instead of one cargo invocation with
+    // `--all-features` it fans out into one invocation per resolved sweep,
+    // each carrying its own libtest filters and pre-build packages
+    // (request 2). When neither is set, the test phase keeps today's
+    // single-sweep shape.
+    let resolved_profile = resolve_profile_arg(test_cfg, profile_name)?;
+
     run_gremlins(project_root, json, limit, all, fix_gremlins)?;
     run_clippy(
         project_root,
@@ -56,20 +67,72 @@ pub(crate) fn cmd_check(
         limit,
         all,
     )?;
-    run_tests(
-        project,
-        project_root,
-        features,
-        no_default_features,
-        package,
-        raw,
-        json,
-        extra_args,
-    )?;
+    if let Some((profile_label, sweeps)) = resolved_profile {
+        run_tests_with_profile(
+            project,
+            project_root,
+            &profile_label,
+            &sweeps,
+            package,
+            raw,
+            json,
+            extra_args,
+        )?;
+    } else {
+        run_tests(
+            project,
+            project_root,
+            features,
+            no_default_features,
+            package,
+            raw,
+            json,
+            extra_args,
+        )?;
+    }
     if !json {
         output::result_msg("check passed");
     }
     Ok(())
+}
+
+/// Decide whether to run the profile-driven test phase. Returns
+/// `Some((label, sweeps))` when profiles apply, `None` otherwise.
+///
+/// `--profile <name>` is explicit and errors loudly if no `[test]`
+/// section exists; `default_profile` from `[test]` only applies when
+/// no `--profile` is given.
+fn resolve_profile_arg(
+    test_cfg: Option<&TestConfig>,
+    profile_name: Option<&str>,
+) -> Result<Option<(String, Vec<profile::ResolvedSweep>)>, DevError> {
+    let cfg = match test_cfg {
+        Some(c) => c,
+        None => {
+            // Clap conflict-with already prevents `--profile` + `--features` /
+            // `--no-default-features`, but it doesn't know about brokkr.toml.
+            // If the user asked for a profile but there's no `[test]` section
+            // at all, fail loudly instead of silently falling back.
+            if let Some(name) = profile_name {
+                return Err(DevError::Config(format!(
+                    "--profile {name} requires `[test.profiles.{name}]` in \
+                     brokkr.toml; no `[test]` section is defined."
+                )));
+            }
+            return Ok(None);
+        }
+    };
+
+    let name = match profile_name {
+        Some(n) => n.to_owned(),
+        None => match cfg.default_profile.as_deref() {
+            Some(n) => n.to_owned(),
+            None => return Ok(None),
+        },
+    };
+
+    let sweeps = profile::resolve(cfg, &name)?;
+    Ok(Some((name, sweeps)))
 }
 
 fn run_gremlins(
@@ -313,7 +376,7 @@ struct SweepResult {
 /// One row of merged-across-sweep clippy output for the text formatter.
 struct MergedDiag<'a> {
     diag: &'a cargo_filter::ClippyDiagnostic,
-    sweeps: Vec<&'static str>,
+    sweeps: Vec<String>,
 }
 
 /// Merge clippy diagnostics across sweeps, deduplicating by
@@ -328,8 +391,8 @@ fn merge_clippy<'a>(
         for d in &parsed.diagnostics {
             let key = DiagKey::from(d);
             if let Some(existing) = by_key.get_mut(&key) {
-                if !existing.sweeps.contains(label) {
-                    existing.sweeps.push(label);
+                if !existing.sweeps.iter().any(|s| s == *label) {
+                    existing.sweeps.push((*label).to_owned());
                 }
             } else {
                 order.push(key.clone());
@@ -337,7 +400,7 @@ fn merge_clippy<'a>(
                     key,
                     MergedDiag {
                         diag: d,
-                        sweeps: vec![label],
+                        sweeps: vec![(*label).to_owned()],
                     },
                 );
             }
@@ -365,7 +428,7 @@ impl From<&cargo_filter::ClippyDiagnostic> for DiagKey {
     }
 }
 
-fn sweep_tag(sweeps: &[&'static str]) -> Option<String> {
+fn sweep_tag(sweeps: &[String]) -> Option<String> {
     match sweeps.len() {
         0 => None,
         1 => Some(format!("[{}]", sweeps[0])),
@@ -502,7 +565,7 @@ fn emit_json_clippy(results: &[SweepResult]) {
                 if let Some(existing) = by_key.get_mut(&key) {
                     for s in &d.sweeps {
                         if !existing.sweeps.contains(s) {
-                            existing.sweeps.push(s);
+                            existing.sweeps.push(s.clone());
                         }
                     }
                 } else {
@@ -528,7 +591,7 @@ fn emit_json_clippy(results: &[SweepResult]) {
         cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
             cargo_json::DiagnosticSummaryEvent {
                 tool: "clippy",
-                sweep: if multi { Some(label) } else { None },
+                sweep: if multi { Some(label.to_owned()) } else { None },
                 status,
                 errors,
                 warnings,
@@ -681,6 +744,7 @@ fn run_tests(
             cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
                 cargo_json::TestSummaryEvent {
                     status: test_status,
+                    sweep: None,
                     passed: parsed.passed,
                     failed: parsed.failed,
                     ignored: parsed.ignored,
@@ -731,6 +795,317 @@ fn run_tests(
     }
 
     Ok(())
+}
+
+/// Profile-driven test phase: run one cargo test invocation per
+/// resolved sweep, after pre-building each sweep's `build_packages`.
+/// Fails fast on the first sweep that fails (build or test).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::cognitive_complexity
+)]
+fn run_tests_with_profile(
+    project: Option<Project>,
+    project_root: &Path,
+    profile_label: &str,
+    sweeps: &[profile::ResolvedSweep],
+    package: Option<&str>,
+    raw: bool,
+    json: bool,
+    extra_args: &[String],
+) -> Result<(), DevError> {
+    let multi = sweeps.len() > 1;
+    let project_env = project_env_pairs(project);
+
+    if !json {
+        output::run_msg(&format!(
+            "[test] profile: {profile_label} ({} sweep{})",
+            sweeps.len(),
+            if multi { "s" } else { "" }
+        ));
+    }
+
+    for sweep in sweeps {
+        // Pre-build any binary packages declared by this sweep so the
+        // test crate's `CliInvoker` invokes a binary with the matching
+        // feature set (request 2). Skipped when build_packages is empty.
+        for pkg in &sweep.build_packages {
+            run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, json)?;
+        }
+
+        let result = run_one_test_sweep(
+            project_root,
+            sweep,
+            package,
+            extra_args,
+            &project_env,
+            raw,
+            json,
+        )?;
+        if !result {
+            return Err(DevError::Build("tests failed".into()));
+        }
+    }
+
+    Ok(())
+}
+
+fn project_env_pairs(project: Option<Project>) -> Vec<(&'static str, &'static str)> {
+    match project {
+        Some(Project::Nidhogg) => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
+        _ => Vec::new(),
+    }
+}
+
+/// Build one binary package with the sweep's feature flags. Errors
+/// surface the same way `run_tests` surfaces a compile failure: filter
+/// the stderr through `cargo_filter::filter_clippy` (or pass it through
+/// raw). JSON mode emits a `parse_error` synthetic Diagnostic.
+fn run_sweep_pre_build(
+    project_root: &Path,
+    sweep: &profile::ResolvedSweep,
+    package: &str,
+    project_env: &[(&'static str, &'static str)],
+    raw: bool,
+    json: bool,
+) -> Result<(), DevError> {
+    let mut args: Vec<String> = vec!["build".into()];
+    for f in &sweep.cargo_feature_args {
+        args.push(f.clone());
+    }
+    args.push("--package".into());
+    args.push(package.into());
+
+    if !json {
+        output::run_msg(&format!(
+            "cargo {} (sweep build: {})",
+            args.join(" "),
+            sweep.label
+        ));
+    }
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env_full = merged_env(&sweep.env, project_env);
+    let env_refs: Vec<(&str, &str)> = env_full
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
+
+    if captured.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    if json {
+        cargo_json::emit_parse_error("test-build", &stdout, &stderr);
+    } else if raw {
+        if !stderr.is_empty() {
+            output::error(&stderr);
+        }
+    } else {
+        output::error(&cargo_filter::filter_clippy(&stderr));
+    }
+    Err(DevError::Build(format!(
+        "build failed for package '{package}' in sweep '{}'",
+        sweep.label
+    )))
+}
+
+/// Run one cargo test invocation for the given sweep. Returns
+/// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
+/// `Err(...)` on subprocess spawn failure.
+#[allow(clippy::too_many_lines)]
+fn run_one_test_sweep(
+    project_root: &Path,
+    sweep: &profile::ResolvedSweep,
+    package: Option<&str>,
+    extra_args: &[String],
+    project_env: &[(&'static str, &'static str)],
+    raw: bool,
+    json: bool,
+) -> Result<bool, DevError> {
+    let mut args: Vec<String> = vec!["test".into()];
+    for f in &sweep.cargo_feature_args {
+        args.push(f.clone());
+    }
+    if let Some(pkg) = package {
+        args.push("--package".into());
+        args.push(pkg.into());
+    }
+    for f in &sweep.cargo_test_filters {
+        args.push(f.clone());
+    }
+    if json {
+        args.push("--message-format=json".into());
+    }
+
+    // Anything that has to land after `--` is libtest's. Pass-through
+    // `extra_args` go after libtest's flags so the user's last word
+    // wins (e.g. their own `--test-threads=N` overriding the profile).
+    let needs_separator = !sweep.libtest_args.is_empty()
+        || !sweep.name_filters.is_empty()
+        || !extra_args.is_empty();
+    if needs_separator {
+        args.push("--".into());
+        for s in &sweep.libtest_args {
+            args.push(s.clone());
+        }
+        for n in &sweep.name_filters {
+            args.push(n.clone());
+        }
+        for e in extra_args {
+            args.push(e.clone());
+        }
+    }
+
+    if !json {
+        output::run_msg(&format!("cargo {} (sweep: {})", args.join(" "), sweep.label));
+    }
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env_full = merged_env(&sweep.env, project_env);
+    let env_refs: Vec<(&str, &str)> = env_full
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
+
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+
+    if json {
+        emit_json_test_sweep(
+            &sweep.label,
+            &stdout,
+            &stderr,
+            captured.status.success(),
+        );
+        return Ok(captured.status.success());
+    }
+
+    if !captured.status.success() {
+        if raw {
+            if !stderr.is_empty() {
+                output::error(&stderr);
+            }
+            if !stdout.is_empty() {
+                output::error(&stdout);
+            }
+        } else {
+            output::error(&cargo_filter::filter_test(&stdout, &stderr));
+        }
+        return Ok(false);
+    }
+
+    if raw {
+        if !stderr.is_empty() {
+            print!("{stderr}");
+        }
+        if !stdout.is_empty() {
+            print!("{stdout}");
+        }
+    } else {
+        let filtered = cargo_filter::filter_clippy(&stderr);
+        if filtered != "cargo clippy: no issues" {
+            let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
+            output::warn(&relabeled);
+        }
+    }
+    Ok(true)
+}
+
+/// JSON path for a single profile sweep. Mirrors the `run_tests` JSON
+/// branch but tags `DiagnosticSummary` and `TestSummary` with the sweep
+/// label so a downstream consumer can split per-sweep counts.
+fn emit_json_test_sweep(sweep_label: &str, stdout: &str, stderr: &str, success: bool) {
+    let mut json_lines: Vec<&str> = Vec::new();
+    let mut test_lines: Vec<&str> = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with('{') {
+            json_lines.push(line);
+        } else {
+            test_lines.push(line);
+        }
+    }
+
+    let json_text = json_lines.join("\n");
+    let diag_events = cargo_json::parse_cargo_diagnostics(&json_text, "test", Some(sweep_label));
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    for event in &diag_events {
+        if let cargo_json::CheckEvent::Diagnostic(d) = event {
+            match d.level.as_str() {
+                "error" => errors += 1,
+                "warning" => warnings += 1,
+                _ => {}
+            }
+        }
+        cargo_json::emit(event);
+    }
+    if errors > 0 || warnings > 0 {
+        let diag_status = if errors > 0 { "failed" } else { "ok" };
+        cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
+            cargo_json::DiagnosticSummaryEvent {
+                tool: "test",
+                sweep: Some(sweep_label.to_owned()),
+                status: diag_status,
+                errors,
+                warnings,
+            },
+        ));
+    }
+
+    let parsed = cargo_filter::parse_test_output(&test_lines);
+    for f in &parsed.failures {
+        cargo_json::emit(&cargo_json::CheckEvent::TestFailure(
+            cargo_json::TestFailureEvent {
+                name: f.name.clone(),
+                location: f.location.clone(),
+                message: f.message.clone(),
+            },
+        ));
+    }
+
+    if parsed.failures.is_empty() && diag_events.is_empty() && !success {
+        cargo_json::emit_parse_error("test", stdout, stderr);
+    }
+
+    if parsed.suites > 0 {
+        let test_status = if parsed.failed > 0 { "failed" } else { "ok" };
+        cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
+            cargo_json::TestSummaryEvent {
+                status: test_status,
+                sweep: Some(sweep_label.to_owned()),
+                passed: parsed.passed,
+                failed: parsed.failed,
+                ignored: parsed.ignored,
+                filtered_out: parsed.filtered_out,
+                suites: parsed.suites,
+                duration_seconds: parsed.duration.map(|d| (d * 100.0).round() / 100.0),
+            },
+        ));
+    }
+}
+
+/// Combine the sweep's profile-defined env with the project's
+/// always-set vars (e.g. nidhogg's `CARGO_TARGET_TMPDIR`). Sweep
+/// values come first; project values append (so a sweep can shadow a
+/// project default if it really needs to).
+fn merged_env(
+    sweep_env: &std::collections::BTreeMap<String, String>,
+    project_env: &[(&'static str, &'static str)],
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> =
+        sweep_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for &(k, v) in project_env {
+        if !out.iter().any(|(ek, _)| ek == k) {
+            out.push((k.to_owned(), v.to_owned()));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -802,9 +1177,9 @@ mod tests {
     #[test]
     fn sweep_tag_formats() {
         assert_eq!(sweep_tag(&[]), None);
-        assert_eq!(sweep_tag(&["consumer"]), Some("[consumer]".into()));
+        assert_eq!(sweep_tag(&["consumer".into()]), Some("[consumer]".into()));
         assert_eq!(
-            sweep_tag(&["all-features", "consumer"]),
+            sweep_tag(&["all-features".into(), "consumer".into()]),
             Some("[both]".into())
         );
     }

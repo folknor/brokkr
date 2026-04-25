@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 
 use crate::error::DevError;
 use crate::project::Project;
@@ -36,16 +37,134 @@ pub struct CheckConfig {
     pub consumer_features: Vec<String>,
 }
 
-/// `[test]` section. `default_package` is the cargo package `brokkr test`
-/// should pass to `cargo test -p <pkg>` when the user doesn't supply `-p`.
-/// Required for multi-crate workspaces (e.g. ratatoskr) where there's no
-/// single "obvious" package; optional for single-crate projects that have
-/// a built-in default via `Project::cli_package()`. An explicit CLI `-p`
-/// always wins; TOML `default_package` wins over `cli_package()`.
-#[derive(Debug, Clone, Deserialize)]
+/// `[test]` section.
+///
+/// - `default_package` is the cargo package `brokkr test` should pass to
+///   `cargo test -p <pkg>` when the user doesn't supply `-p`. Required for
+///   multi-crate workspaces (e.g. ratatoskr) where there's no single
+///   "obvious" package; optional for single-crate projects that have a
+///   built-in default via `Project::cli_package()`. An explicit CLI `-p`
+///   always wins; TOML `default_package` wins over `cli_package()`.
+/// - `default_profile` is the named [`ProfileDef`] used by `brokkr check`
+///   when no `--profile` is passed. Falls back to today's behaviour
+///   (single `--all-features` test sweep, plus a consumer sweep when
+///   `[check].consumer_features` is configured) when neither this nor
+///   `--profile` is set.
+/// - `[test.sweeps.*]` declares named cargo invocation shapes (feature
+///   flags + binaries to rebuild) referenced by profiles.
+/// - `[test.profiles.*]` declares named test selections that compose
+///   sweeps with libtest-level filters (`only` / `skip` / `tests` /
+///   `include_ignored` / `test_threads` / `env`). Profiles can chain
+///   via `extends`.
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TestConfig {
     pub default_package: Option<String>,
+    pub default_profile: Option<String>,
+    #[serde(default)]
+    pub sweeps: BTreeMap<String, SweepDef>,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ProfileDef>,
+}
+
+/// A named cargo-invocation shape referenced by [`ProfileDef::sweeps`].
+///
+/// `features = "all"` translates to `--all-features`; an array translates
+/// to `--features a,b,c`. Combined with `no_default_features = true`,
+/// emits `--no-default-features --features a,b,c`. Setting both is
+/// allowed but unusual.
+///
+/// `build_packages` is the source of truth for request 2 (CLI binary
+/// feature parity): every listed cargo package is built with the sweep's
+/// feature selection before the test phase runs, so a `CliInvoker` in
+/// the test crate doesn't silently invoke a stale all-features binary.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SweepDef {
+    /// Either `"all"` (translates to `--all-features`) or an explicit
+    /// list of feature names. Optional - omit for "no feature flags".
+    #[serde(default)]
+    pub features: Option<FeaturesSpec>,
+    #[serde(default)]
+    pub no_default_features: bool,
+    /// Cargo packages to rebuild with the sweep's feature flags before
+    /// running the test phase. Required to keep `tests/cli_*.rs`
+    /// CliInvoker tests honest when the CLI is in a separate workspace
+    /// member that `cargo test -p <lib>` doesn't rebuild.
+    #[serde(default)]
+    pub build_packages: Vec<String>,
+}
+
+/// Either the literal string `"all"` (meaning `--all-features`) or a
+/// concrete list of feature names. Custom deserialiser so the TOML can
+/// stay readable (`features = "all"` vs `features = ["foo", "bar"]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeaturesSpec {
+    /// `--all-features`.
+    All,
+    /// `--features a,b,c`. May be empty (no `--features` flag emitted).
+    List(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for FeaturesSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            S(String),
+            V(Vec<String>),
+        }
+        match Helper::deserialize(d)? {
+            Helper::S(s) if s == "all" => Ok(FeaturesSpec::All),
+            Helper::S(s) => Err(D::Error::custom(format!(
+                "expected \"all\" or [list of feature names], got string {s:?}"
+            ))),
+            Helper::V(v) => Ok(FeaturesSpec::List(v)),
+        }
+    }
+}
+
+/// A named test selection layered onto one or more [`SweepDef`]s.
+///
+/// All collection fields are optional `Option<Vec<_>>` so `extends`
+/// merging can distinguish "child does not specify, inherit parent"
+/// (None) from "child explicitly empty, override parent" (Some(vec![])).
+///
+/// The `extends` field walks up to one parent profile; cycles are
+/// rejected at resolve time. Field merge semantics: child wins where
+/// `Some`, parent fills in where the child is `None`. Collections are
+/// **replaced**, not concatenated - this matches the hand-off doc's
+/// example where `sort` extends `tier1` but ships its own `skip` list.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileDef {
+    /// Human-readable description (parsed for completeness; brokkr does
+    /// not surface it today, but a future `brokkr profiles` listing
+    /// command will use it).
+    #[allow(dead_code)]
+    pub description: Option<String>,
+    pub extends: Option<String>,
+    /// Names of [`SweepDef`]s to execute. Each sweep is one cargo test
+    /// invocation. Empty / unset after `extends` resolution is an error.
+    pub sweeps: Option<Vec<String>>,
+    /// `--test <name>` for each entry. Limits cargo to specific test
+    /// binaries (the `tests/<name>.rs` files).
+    pub tests: Option<Vec<String>>,
+    /// Positional substring filter passed to libtest. Tests whose name
+    /// contains any of these strings run; everything else is filtered
+    /// out by libtest. Use module path prefixes (e.g. `tier2::`) to
+    /// match every test inside a module.
+    pub only: Option<Vec<String>>,
+    /// `--skip <substring>` for each entry. Cumulative with libtest's
+    /// own `--skip`.
+    pub skip: Option<Vec<String>>,
+    /// `--include-ignored` (run `#[ignore]`d tests too).
+    pub include_ignored: Option<bool>,
+    /// `--test-threads=N`. Required for serial-only tests that touch
+    /// process-global state (fault-injection hooks, etc.).
+    pub test_threads: Option<u32>,
+    /// Extra environment variables exported to the test process.
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
