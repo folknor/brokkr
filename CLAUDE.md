@@ -232,6 +232,12 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `passthrough` - build and run with raw passthrough args (hidden, for ad-hoc use)
 - `download <region> [--osc-seq N]` - (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
 
+### Env vars exported to `cargo test`
+
+Both `brokkr check` (test phase) and `brokkr test` set the following on every `cargo test` invocation, including sweeps with empty `build_packages`:
+
+- `BROKKR_TEST_BIN_DIR` - directory containing the just-rebuilt `build_packages` artefacts. `brokkr check` always sets it to `<target>/debug` (the test phase runs without `--release`); `brokkr test` always sets it to `<target>/release`. The profile is fixed per command - it does *not* track whatever profile cargo happens to compile the test harness with. `<target>` comes from `cargo metadata --no-deps`. Tests that spawn the rebuilt binary should read this var as the primary source of truth and fall back to `cfg!(debug_assertions)` only when it's unset (e.g. plain `cargo test` outside brokkr). The `cfg!(debug_assertions)` heuristic is unreliable because `[profile.test]` overrides can flip `debug-assertions = false` in the test binary even though the rebuilt binary lives under `debug/`.
+
 ## Litehtml commands
 
 Gated to `project = "litehtml-rs"`. Visual reference testing - renders HTML fixtures through a pipeline binary, compares against Chrome screenshots.

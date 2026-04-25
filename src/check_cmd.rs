@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{CheckEntry, TestConfig};
@@ -597,7 +598,21 @@ fn run_test_phase(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
-    let project_env = project_env_pairs(project);
+    // `brokkr check`'s test phase always runs `cargo test` without
+    // `--release`, so each sweep's `build_packages` artefacts land in
+    // `<target>/debug`. Tests that spawn the just-rebuilt binary read
+    // this var to skip the `cfg!(debug_assertions)` profile guess -
+    // which silently lies when a workspace pins `[profile.test]`
+    // overrides.
+    let bin_dir = build::project_info(Some(project_root))?
+        .target_dir
+        .join("debug");
+    let bin_dir_string = bin_dir.to_string_lossy().into_owned();
+    let mut project_env: Vec<(&str, &str)> = Vec::new();
+    for &(k, v) in &project_env_pairs(project) {
+        project_env.push((k, v));
+    }
+    project_env.push(("BROKKR_TEST_BIN_DIR", &bin_dir_string));
 
     for sweep in sweeps {
         for pkg in &sweep.build_packages {
@@ -637,7 +652,7 @@ fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
     package: &str,
-    project_env: &[(&'static str, &'static str)],
+    project_env: &[(&str, &str)],
     raw: bool,
     json: bool,
 ) -> Result<(), DevError> {
@@ -697,7 +712,7 @@ fn run_one_test_sweep(
     sweep: &ResolvedSweep,
     package: Option<&str>,
     extra_args: &[String],
-    project_env: &[(&'static str, &'static str)],
+    project_env: &[(&str, &str)],
     raw: bool,
     json: bool,
     multi: bool,
@@ -872,7 +887,7 @@ fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, s
 /// project default if it really needs to).
 fn merged_env(
     sweep_env: &std::collections::BTreeMap<String, String>,
-    project_env: &[(&'static str, &'static str)],
+    project_env: &[(&str, &str)],
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> =
         sweep_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

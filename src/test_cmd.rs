@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use crate::build;
 use crate::cargo_filter;
 use crate::config::{CheckEntry, DevConfig, TestConfig};
 use crate::error::DevError;
@@ -64,10 +65,20 @@ pub fn run(
 
     let pkg = resolve_package(package, dev_config, project)?;
 
-    let env: Vec<(&str, &str)> = match project {
+    // `brokkr test` always runs `cargo test --release`, so any
+    // `build_packages` artefacts land in `<target>/release`. Tests
+    // that spawn the just-rebuilt binary use this var to skip the
+    // `cfg!(debug_assertions)` profile guess (which silently lies
+    // when a workspace pins `[profile.test]` overrides).
+    let bin_dir = build::project_info(Some(project_root))?
+        .target_dir
+        .join("release");
+    let bin_dir_string = bin_dir.to_string_lossy().into_owned();
+    let mut env: Vec<(&str, &str)> = match project {
         Project::Nidhogg => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
         _ => vec![],
     };
+    env.push(("BROKKR_TEST_BIN_DIR", &bin_dir_string));
 
     let mut outcomes: Vec<Outcome> = Vec::new();
 
