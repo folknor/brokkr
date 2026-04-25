@@ -210,14 +210,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
         args,
     } = cli.command
     {
-        let (project, check_cfg, test_cfg, project_root) = match project::detect_optional()? {
+        let (project, check_entries, test_cfg, project_root) = match project::detect_optional()? {
             Some((p, cfg, root)) => (Some(p), cfg.check, cfg.test, root),
-            None => (None, None, None, std::env::current_dir()?),
+            None => (None, Vec::new(), None, std::env::current_dir()?),
         };
         return check_cmd::cmd_check(
             project,
             &project_root,
-            check_cfg.as_ref(),
+            &check_entries,
             test_cfg.as_ref(),
             &features,
             no_default_features,

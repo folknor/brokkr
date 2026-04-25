@@ -1,40 +1,40 @@
 //! Implementation of the `check` command (clippy + tests).
 //!
-//! Clippy is run as one or more "sweeps" - each sweep is a cargo invocation
-//! with a specific feature set. Default behavior on a project with no
-//! `[check]` config is a single `--all-features` sweep (today's behavior).
-//! When `[check] consumer_features = [...]` is set, a second sweep runs with
-//! `--no-default-features --features <consumer_features>` so feature-gated
-//! proc-macro expansions can't silently mask lints library consumers see.
-//! User-supplied `--features` / `--no-default-features` short-circuit to a
-//! single sweep with their flags.
+//! Both phases iterate the same list of "active sweeps" - each one a
+//! cargo invocation with a specific feature flag set, optional
+//! pre-built binary packages, and (for tests) optional libtest
+//! filters. The list is built once at the top of `cmd_check` from
+//! whichever of these inputs apply, in priority order:
+//!
+//! 1. CLI `--features` / `--no-default-features` flags → a single
+//!    ad-hoc sweep that ignores `[[check]]` and any profile.
+//! 2. CLI `--profile <name>` or `[test].default_profile` → the
+//!    profile's resolved sweeps (each backed by a `[[check]]` entry,
+//!    plus the profile's libtest filters).
+//! 3. `[[check]]` entries are configured but no profile applies →
+//!    every entry runs in declaration order with no libtest filters.
+//! 4. None of the above → a single `--all-features` sweep, matching
+//!    `brokkr check`'s pre-`[[check]]` behaviour for projects that
+//!    haven't migrated.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cargo_filter;
 use crate::cargo_json;
-use crate::config::{CheckConfig, TestConfig};
+use crate::config::{CheckEntry, TestConfig};
 use crate::error::DevError;
 use crate::gremlins;
 use crate::output;
-use crate::profile;
+use crate::profile::{self, ResolvedSweep};
 use crate::project::Project;
 use crate::scope;
-
-/// One clippy invocation. `label` is the sweep tag surfaced in text and JSON
-/// output (`"all-features"`, `"consumer"`, or `"default"` for single-sweep
-/// runs where no label is meaningful).
-struct Sweep {
-    label: &'static str,
-    feature_args: Vec<String>,
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_check(
     project: Option<Project>,
     project_root: &Path,
-    check_cfg: Option<&CheckConfig>,
+    check_entries: &[CheckEntry],
     test_cfg: Option<&TestConfig>,
     features: &[String],
     no_default_features: bool,
@@ -47,92 +47,101 @@ pub(crate) fn cmd_check(
     fix_gremlins: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    // A `--profile` (or `default_profile`) takes the test phase down a
-    // different code path: instead of one cargo invocation with
-    // `--all-features` it fans out into one invocation per resolved sweep,
-    // each carrying its own libtest filters and pre-build packages
-    // (request 2). When neither is set, the test phase keeps today's
-    // single-sweep shape.
-    let resolved_profile = resolve_profile_arg(test_cfg, profile_name)?;
+    let active_sweeps =
+        decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
 
     run_gremlins(project_root, json, limit, all, fix_gremlins)?;
-    run_clippy(
-        project_root,
-        check_cfg,
-        features,
-        no_default_features,
-        package,
-        raw,
-        json,
-        limit,
-        all,
-    )?;
-    if let Some((profile_label, sweeps)) = resolved_profile {
-        run_tests_with_profile(
-            project,
-            project_root,
-            &profile_label,
-            &sweeps,
-            package,
-            raw,
-            json,
-            extra_args,
-        )?;
-    } else {
-        run_tests(
-            project,
-            project_root,
-            features,
-            no_default_features,
-            package,
-            raw,
-            json,
-            extra_args,
-        )?;
-    }
+    run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
+    run_test_phase(project, project_root, &active_sweeps, package, raw, json, extra_args)?;
     if !json {
         output::result_msg("check passed");
     }
     Ok(())
 }
 
-/// Decide whether to run the profile-driven test phase. Returns
-/// `Some((label, sweeps))` when profiles apply, `None` otherwise.
+/// Build the list of sweeps both phases iterate, applying the
+/// priority ladder documented at the top of the file.
 ///
-/// `--profile <name>` is explicit and errors loudly if no `[test]`
-/// section exists; `default_profile` from `[test]` only applies when
-/// no `--profile` is given.
-fn resolve_profile_arg(
+/// Returns `Err` only when the user asked for a `--profile` that
+/// doesn't resolve. Every other branch always succeeds with at least
+/// one sweep.
+fn decide_active_sweeps(
+    check_entries: &[CheckEntry],
     test_cfg: Option<&TestConfig>,
     profile_name: Option<&str>,
-) -> Result<Option<(String, Vec<profile::ResolvedSweep>)>, DevError> {
-    let cfg = match test_cfg {
-        Some(c) => c,
-        None => {
-            // Clap conflict-with already prevents `--profile` + `--features` /
-            // `--no-default-features`, but it doesn't know about brokkr.toml.
-            // If the user asked for a profile but there's no `[test]` section
-            // at all, fail loudly instead of silently falling back.
-            if let Some(name) = profile_name {
-                return Err(DevError::Config(format!(
-                    "--profile {name} requires `[test.profiles.{name}]` in \
-                     brokkr.toml; no `[test]` section is defined."
-                )));
-            }
-            return Ok(None);
+    features: &[String],
+    no_default_features: bool,
+) -> Result<Vec<ResolvedSweep>, DevError> {
+    // 1. CLI override: ad-hoc one-off sweep. Skips `[[check]]` and any
+    //    profile entirely, and ships no `build_packages` (the user is
+    //    spot-checking; if they need a CLI rebuild they pass --package).
+    if !features.is_empty() || no_default_features {
+        let mut feature_args = Vec::new();
+        if no_default_features {
+            feature_args.push("--no-default-features".into());
         }
-    };
+        if !features.is_empty() {
+            feature_args.push("--features".into());
+            feature_args.push(features.join(","));
+        }
+        return Ok(vec![ResolvedSweep {
+            label: "default".into(),
+            cargo_feature_args: feature_args,
+            build_packages: Vec::new(),
+            libtest_args: Vec::new(),
+            cargo_test_filters: Vec::new(),
+            name_filters: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+        }]);
+    }
 
-    let name = match profile_name {
-        Some(n) => n.to_owned(),
-        None => match cfg.default_profile.as_deref() {
-            Some(n) => n.to_owned(),
-            None => return Ok(None),
-        },
-    };
+    // 2. Explicit --profile or default_profile from [test].
+    if let Some(name) = effective_profile_name(test_cfg, profile_name)? {
+        // Safe to unwrap: effective_profile_name returns Some only when
+        // test_cfg is Some.
+        let cfg = test_cfg.expect("test_cfg known present");
+        return profile::resolve(cfg, check_entries, &name);
+    }
 
-    let sweeps = profile::resolve(cfg, &name)?;
-    Ok(Some((name, sweeps)))
+    // 3. [[check]] entries with no profile - run every entry in order,
+    //    with no libtest filters.
+    if !check_entries.is_empty() {
+        return Ok(check_entries
+            .iter()
+            .map(profile::sweep_from_check_entry)
+            .collect());
+    }
+
+    // 4. Legacy fallback: `brokkr check` against a project with no
+    //    `[[check]]` and no profile config. One `--all-features`
+    //    invocation, matching pre-redesign behaviour.
+    Ok(vec![ResolvedSweep {
+        label: "default".into(),
+        cargo_feature_args: vec!["--all-features".into()],
+        build_packages: Vec::new(),
+        libtest_args: Vec::new(),
+        cargo_test_filters: Vec::new(),
+        name_filters: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+    }])
+}
+
+/// Return `Some(name)` if a profile should be resolved. Errors when
+/// the user passed `--profile <name>` but the project has no `[test]`
+/// section at all (loud failure beats silent fallback).
+fn effective_profile_name(
+    test_cfg: Option<&TestConfig>,
+    profile_name: Option<&str>,
+) -> Result<Option<String>, DevError> {
+    match (test_cfg, profile_name) {
+        (Some(_), Some(n)) => Ok(Some(n.to_owned())),
+        (Some(cfg), None) => Ok(cfg.default_profile.clone()),
+        (None, Some(n)) => Err(DevError::Config(format!(
+            "--profile {n} requires `[test.profiles.{n}]` in brokkr.toml; \
+             no `[test]` section is defined."
+        ))),
+        (None, None) => Ok(None),
+    }
 }
 
 fn run_gremlins(
@@ -217,72 +226,22 @@ fn run_gremlins(
     Err(DevError::Build("gremlins found".into()))
 }
 
-/// Decide which clippy sweeps to run.
-///
-/// - User-supplied `--features` or `--no-default-features` → single sweep
-///   with those flags (label `"default"` since the user is overriding).
-/// - Otherwise → `--all-features` sweep, plus a `consumer` sweep when
-///   `[check] consumer_features` is configured.
-fn decide_sweeps(
-    features: &[String],
-    no_default_features: bool,
-    check_cfg: Option<&CheckConfig>,
-) -> Vec<Sweep> {
-    if !features.is_empty() || no_default_features {
-        let mut feature_args = Vec::new();
-        if no_default_features {
-            feature_args.push("--no-default-features".to_string());
-        }
-        if !features.is_empty() {
-            feature_args.push("--features".to_string());
-            feature_args.push(features.join(","));
-        }
-        return vec![Sweep {
-            label: "default",
-            feature_args,
-        }];
-    }
-
-    let mut sweeps = vec![Sweep {
-        label: "all-features",
-        feature_args: vec!["--all-features".to_string()],
-    }];
-
-    if let Some(cfg) = check_cfg
-        && !cfg.consumer_features.is_empty()
-    {
-        sweeps.push(Sweep {
-            label: "consumer",
-            feature_args: vec![
-                "--no-default-features".to_string(),
-                "--features".to_string(),
-                cfg.consumer_features.join(","),
-            ],
-        });
-    }
-
-    sweeps
-}
-
 #[allow(clippy::too_many_arguments)]
-fn run_clippy(
+fn run_clippy_phase(
     project_root: &Path,
-    check_cfg: Option<&CheckConfig>,
-    features: &[String],
-    no_default_features: bool,
+    sweeps: &[ResolvedSweep],
     package: Option<&str>,
     raw: bool,
     json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
-    let sweeps = decide_sweeps(features, no_default_features, check_cfg);
     let multi = sweeps.len() > 1;
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
-    for sweep in &sweeps {
+    for sweep in sweeps {
         let mut args: Vec<String> = vec!["clippy".into(), "--all-targets".into()];
-        args.extend(sweep.feature_args.iter().cloned());
+        args.extend(sweep.cargo_feature_args.iter().cloned());
         if let Some(pkg) = package {
             args.push("--package".into());
             args.push(pkg.into());
@@ -298,7 +257,7 @@ fn run_clippy(
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let captured = output::run_captured("cargo", &arg_refs, project_root)?;
         results.push(SweepResult {
-            label: sweep.label,
+            label: sweep.label.clone(),
             stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
             success: captured.status.success(),
@@ -366,7 +325,7 @@ fn run_clippy(
 }
 
 struct SweepResult {
-    label: &'static str,
+    label: String,
     #[allow(dead_code)] // text path doesn't read stdout; JSON path does
     stdout: String,
     stderr: String,
@@ -380,9 +339,11 @@ struct MergedDiag<'a> {
 }
 
 /// Merge clippy diagnostics across sweeps, deduplicating by
-/// (header, location, message).
+/// (header, location, message). `parses` is `(label, parse_result)`
+/// pairs from each sweep; sweep labels are owned strings since
+/// `[[check]]` entry names are user-defined.
 fn merge_clippy<'a>(
-    parses: &'a [(SweepLabel, cargo_filter::ClippyParse)],
+    parses: &'a [(String, cargo_filter::ClippyParse)],
 ) -> Vec<MergedDiag<'a>> {
     let mut order: Vec<DiagKey> = Vec::new();
     let mut by_key: HashMap<DiagKey, MergedDiag<'a>> = HashMap::new();
@@ -391,8 +352,8 @@ fn merge_clippy<'a>(
         for d in &parsed.diagnostics {
             let key = DiagKey::from(d);
             if let Some(existing) = by_key.get_mut(&key) {
-                if !existing.sweeps.iter().any(|s| s == *label) {
-                    existing.sweeps.push((*label).to_owned());
+                if !existing.sweeps.contains(label) {
+                    existing.sweeps.push(label.clone());
                 }
             } else {
                 order.push(key.clone());
@@ -400,7 +361,7 @@ fn merge_clippy<'a>(
                     key,
                     MergedDiag {
                         diag: d,
-                        sweeps: vec![(*label).to_owned()],
+                        sweeps: vec![label.clone()],
                     },
                 );
             }
@@ -412,8 +373,6 @@ fn merge_clippy<'a>(
         .filter_map(|k| by_key.remove(&k))
         .collect()
 }
-
-type SweepLabel = &'static str;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DiagKey(String, String, String);
@@ -448,9 +407,9 @@ fn format_clippy_capped_multi(
     all: bool,
     multi: bool,
 ) -> String {
-    let parses: Vec<(SweepLabel, cargo_filter::ClippyParse)> = results
+    let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
-        .map(|r| (r.label, cargo_filter::parse_clippy(&r.stderr)))
+        .map(|r| (r.label.clone(), cargo_filter::parse_clippy(&r.stderr)))
         .collect();
 
     // Any sweep with parse_failed: fall back to raw aggregated stderr.
@@ -527,11 +486,11 @@ fn emit_json_clippy(results: &[SweepResult]) {
     // Per-sweep parse + sweep-tagged events, plus per-sweep counts.
     let multi = results.len() > 1;
     let mut all_events: Vec<cargo_json::CheckEvent> = Vec::new();
-    let mut per_sweep_counts: Vec<(SweepLabel, usize, usize, bool)> =
+    let mut per_sweep_counts: Vec<(String, usize, usize, bool)> =
         Vec::with_capacity(results.len());
 
     for r in results {
-        let label_for_tag = if multi { Some(r.label) } else { None };
+        let label_for_tag = if multi { Some(r.label.as_str()) } else { None };
         let events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", label_for_tag);
         let mut errors = 0usize;
         let mut warnings = 0usize;
@@ -548,7 +507,7 @@ fn emit_json_clippy(results: &[SweepResult]) {
             cargo_json::emit_parse_error("clippy", &r.stdout, &r.stderr);
             errors += 1;
         }
-        per_sweep_counts.push((r.label, errors, warnings, r.success));
+        per_sweep_counts.push((r.label.clone(), errors, warnings, r.success));
         all_events.extend(events);
     }
 
@@ -591,7 +550,7 @@ fn emit_json_clippy(results: &[SweepResult]) {
         cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
             cargo_json::DiagnosticSummaryEvent {
                 tool: "clippy",
-                sweep: if multi { Some(label.to_owned()) } else { None },
+                sweep: if multi { Some(label) } else { None },
                 status,
                 errors,
                 warnings,
@@ -623,193 +582,15 @@ impl From<&cargo_json::DiagnosticEvent> for JsonDiagKey {
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::cognitive_complexity
-)]
-fn run_tests(
+/// Iterate `sweeps`, pre-building each sweep's `build_packages` and
+/// then running `cargo test` for it. Fails fast on the first sweep
+/// that fails (build or test), mirroring how the clippy phase
+/// short-circuits on a non-zero status.
+#[allow(clippy::too_many_arguments)]
+fn run_test_phase(
     project: Option<Project>,
     project_root: &Path,
-    features: &[String],
-    no_default_features: bool,
-    package: Option<&str>,
-    raw: bool,
-    json: bool,
-    extra_args: &[String],
-) -> Result<(), DevError> {
-    let mut args = vec!["test"];
-    if no_default_features {
-        args.push("--no-default-features");
-    }
-    let joined = features.join(",");
-    if !features.is_empty() {
-        args.push("--features");
-        args.push(&joined);
-    } else if !no_default_features {
-        args.push("--all-features");
-    }
-    if let Some(pkg) = package {
-        args.push("--package");
-        args.push(pkg);
-    }
-    if json {
-        args.push("--message-format=json");
-    }
-    if !extra_args.is_empty() {
-        let extra_refs: Vec<&str> = extra_args.iter().map(String::as_str).collect();
-        args.extend_from_slice(&extra_refs);
-    }
-
-    if !json {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
-
-    // Nidhogg tests need CARGO_TARGET_TMPDIR set.
-    let env: Vec<(&str, &str)> = match project {
-        Some(Project::Nidhogg) => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
-        _ => vec![],
-    };
-
-    let captured = if env.is_empty() {
-        output::run_captured("cargo", &args, project_root)?
-    } else {
-        output::run_captured_with_env("cargo", &args, project_root, &env)?
-    };
-
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let stderr = String::from_utf8_lossy(&captured.stderr);
-
-    if json {
-        // Split stdout: JSON lines → compile diagnostics, non-JSON → test output.
-        let mut json_lines: Vec<&str> = Vec::new();
-        let mut test_lines: Vec<&str> = Vec::new();
-        for line in stdout.lines() {
-            if line.starts_with('{') {
-                json_lines.push(line);
-            } else {
-                test_lines.push(line);
-            }
-        }
-
-        // Emit compile diagnostics.
-        let json_text = json_lines.join("\n");
-        let diag_events = cargo_json::parse_cargo_diagnostics(&json_text, "test", None);
-        let mut errors = 0usize;
-        let mut warnings = 0usize;
-        for event in &diag_events {
-            if let cargo_json::CheckEvent::Diagnostic(d) = event {
-                match d.level.as_str() {
-                    "error" => errors += 1,
-                    "warning" => warnings += 1,
-                    _ => {}
-                }
-            }
-            cargo_json::emit(event);
-        }
-        if errors > 0 || warnings > 0 {
-            let diag_status = if errors > 0 { "failed" } else { "ok" };
-            cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
-                cargo_json::DiagnosticSummaryEvent {
-                    tool: "test",
-                    sweep: None,
-                    status: diag_status,
-                    errors,
-                    warnings,
-                },
-            ));
-        }
-
-        // Emit test results.
-        let parsed = cargo_filter::parse_test_output(&test_lines);
-        for f in &parsed.failures {
-            cargo_json::emit(&cargo_json::CheckEvent::TestFailure(
-                cargo_json::TestFailureEvent {
-                    name: f.name.clone(),
-                    location: f.location.clone(),
-                    message: f.message.clone(),
-                },
-            ));
-        }
-
-        if parsed.failures.is_empty() && diag_events.is_empty() && !captured.status.success() {
-            cargo_json::emit_parse_error("test", &stdout, &stderr);
-        }
-
-        // Only emit TestSummary when tests actually ran. On pure compile
-        // failures, suites == 0 and an all-zero summary would falsely imply
-        // an executed-but-empty test phase.
-        if parsed.suites > 0 {
-            let test_status = if parsed.failed > 0 { "failed" } else { "ok" };
-            cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
-                cargo_json::TestSummaryEvent {
-                    status: test_status,
-                    sweep: None,
-                    passed: parsed.passed,
-                    failed: parsed.failed,
-                    ignored: parsed.ignored,
-                    filtered_out: parsed.filtered_out,
-                    suites: parsed.suites,
-                    duration_seconds: parsed.duration.map(|d| (d * 100.0).round() / 100.0),
-                },
-            ));
-        }
-
-        if !captured.status.success() {
-            return Err(DevError::Build("tests failed".into()));
-        }
-        return Ok(());
-    }
-
-    if !captured.status.success() {
-        if raw {
-            if !stderr.is_empty() {
-                output::error(&stderr);
-            }
-            if !stdout.is_empty() {
-                output::error(&stdout);
-            }
-        } else {
-            output::error(&cargo_filter::filter_test(&stdout, &stderr));
-        }
-        return Err(DevError::Build("tests failed".into()));
-    }
-
-    if raw {
-        if !stderr.is_empty() {
-            print!("{stderr}");
-        }
-        if !stdout.is_empty() {
-            print!("{stdout}");
-        }
-    } else {
-        // Success path: surface any compile warnings from the test build
-        // (cargo test rebuilds with cfg(test), which can flag warnings the
-        // earlier clippy pass didn't see).
-        let filtered = cargo_filter::filter_clippy(&stderr);
-        if filtered != "cargo clippy: no issues" {
-            // Relabel so the [warn] line says "cargo test" not "cargo clippy".
-            let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
-            output::warn(&relabeled);
-        }
-    }
-
-    Ok(())
-}
-
-/// Profile-driven test phase: run one cargo test invocation per
-/// resolved sweep, after pre-building each sweep's `build_packages`.
-/// Fails fast on the first sweep that fails (build or test).
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::cognitive_complexity
-)]
-fn run_tests_with_profile(
-    project: Option<Project>,
-    project_root: &Path,
-    profile_label: &str,
-    sweeps: &[profile::ResolvedSweep],
+    sweeps: &[ResolvedSweep],
     package: Option<&str>,
     raw: bool,
     json: bool,
@@ -818,23 +599,12 @@ fn run_tests_with_profile(
     let multi = sweeps.len() > 1;
     let project_env = project_env_pairs(project);
 
-    if !json {
-        output::run_msg(&format!(
-            "[test] profile: {profile_label} ({} sweep{})",
-            sweeps.len(),
-            if multi { "s" } else { "" }
-        ));
-    }
-
     for sweep in sweeps {
-        // Pre-build any binary packages declared by this sweep so the
-        // test crate's `CliInvoker` invokes a binary with the matching
-        // feature set (request 2). Skipped when build_packages is empty.
         for pkg in &sweep.build_packages {
             run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, json)?;
         }
 
-        let result = run_one_test_sweep(
+        let success = run_one_test_sweep(
             project_root,
             sweep,
             package,
@@ -842,8 +612,9 @@ fn run_tests_with_profile(
             &project_env,
             raw,
             json,
+            multi,
         )?;
-        if !result {
+        if !success {
             return Err(DevError::Build("tests failed".into()));
         }
     }
@@ -859,12 +630,12 @@ fn project_env_pairs(project: Option<Project>) -> Vec<(&'static str, &'static st
 }
 
 /// Build one binary package with the sweep's feature flags. Errors
-/// surface the same way `run_tests` surfaces a compile failure: filter
-/// the stderr through `cargo_filter::filter_clippy` (or pass it through
-/// raw). JSON mode emits a `parse_error` synthetic Diagnostic.
+/// surface compile failures the same way the test phase does: filter
+/// the stderr through `cargo_filter::filter_clippy` (or pass it
+/// through raw). JSON mode emits a `parse_error` synthetic Diagnostic.
 fn run_sweep_pre_build(
     project_root: &Path,
-    sweep: &profile::ResolvedSweep,
+    sweep: &ResolvedSweep,
     package: &str,
     project_env: &[(&'static str, &'static str)],
     raw: bool,
@@ -916,16 +687,20 @@ fn run_sweep_pre_build(
 
 /// Run one cargo test invocation for the given sweep. Returns
 /// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
-/// `Err(...)` on subprocess spawn failure.
-#[allow(clippy::too_many_lines)]
+/// `Err(...)` on subprocess spawn failure. `multi` controls whether
+/// the `cargo ... (sweep: <label>)` log line carries the suffix - in
+/// single-sweep mode (legacy `--all-features` path or one [[check]]
+/// entry) the label noise is unhelpful.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run_one_test_sweep(
     project_root: &Path,
-    sweep: &profile::ResolvedSweep,
+    sweep: &ResolvedSweep,
     package: Option<&str>,
     extra_args: &[String],
     project_env: &[(&'static str, &'static str)],
     raw: bool,
     json: bool,
+    multi: bool,
 ) -> Result<bool, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
     for f in &sweep.cargo_feature_args {
@@ -962,7 +737,12 @@ fn run_one_test_sweep(
     }
 
     if !json {
-        output::run_msg(&format!("cargo {} (sweep: {})", args.join(" "), sweep.label));
+        let line = if multi {
+            format!("cargo {} (sweep: {})", args.join(" "), sweep.label)
+        } else {
+            format!("cargo {}", args.join(" "))
+        };
+        output::run_msg(&line);
     }
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -977,12 +757,8 @@ fn run_one_test_sweep(
     let stderr = String::from_utf8_lossy(&captured.stderr);
 
     if json {
-        emit_json_test_sweep(
-            &sweep.label,
-            &stdout,
-            &stderr,
-            captured.status.success(),
-        );
+        let label_for_tag = if multi { Some(sweep.label.as_str()) } else { None };
+        emit_json_test_sweep(label_for_tag, &stdout, &stderr, captured.status.success());
         return Ok(captured.status.success());
     }
 
@@ -1017,10 +793,10 @@ fn run_one_test_sweep(
     Ok(true)
 }
 
-/// JSON path for a single profile sweep. Mirrors the `run_tests` JSON
-/// branch but tags `DiagnosticSummary` and `TestSummary` with the sweep
-/// label so a downstream consumer can split per-sweep counts.
-fn emit_json_test_sweep(sweep_label: &str, stdout: &str, stderr: &str, success: bool) {
+/// JSON path for one test invocation. `sweep_label` is `Some(name)`
+/// in multi-sweep runs so downstream consumers can split per-sweep
+/// counts; `None` collapses to the legacy single-sweep shape.
+fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, success: bool) {
     let mut json_lines: Vec<&str> = Vec::new();
     let mut test_lines: Vec<&str> = Vec::new();
     for line in stdout.lines() {
@@ -1032,7 +808,7 @@ fn emit_json_test_sweep(sweep_label: &str, stdout: &str, stderr: &str, success: 
     }
 
     let json_text = json_lines.join("\n");
-    let diag_events = cargo_json::parse_cargo_diagnostics(&json_text, "test", Some(sweep_label));
+    let diag_events = cargo_json::parse_cargo_diagnostics(&json_text, "test", sweep_label);
     let mut errors = 0usize;
     let mut warnings = 0usize;
     for event in &diag_events {
@@ -1050,7 +826,7 @@ fn emit_json_test_sweep(sweep_label: &str, stdout: &str, stderr: &str, success: 
         cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
             cargo_json::DiagnosticSummaryEvent {
                 tool: "test",
-                sweep: Some(sweep_label.to_owned()),
+                sweep: sweep_label.map(str::to_owned),
                 status: diag_status,
                 errors,
                 warnings,
@@ -1078,7 +854,7 @@ fn emit_json_test_sweep(sweep_label: &str, stdout: &str, stderr: &str, success: 
         cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
             cargo_json::TestSummaryEvent {
                 status: test_status,
-                sweep: Some(sweep_label.to_owned()),
+                sweep: sweep_label.map(str::to_owned),
                 passed: parsed.passed,
                 failed: parsed.failed,
                 ignored: parsed.ignored,
@@ -1120,58 +896,140 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decide_sweeps_default_no_config_is_all_features_only() {
-        let sweeps = decide_sweeps(&[], false, None);
+    fn decide_active_sweeps_legacy_default_when_nothing_configured() {
+        let sweeps = decide_active_sweeps(&[], None, None, &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "all-features");
-        assert_eq!(sweeps[0].feature_args, vec!["--all-features"]);
+        assert_eq!(sweeps[0].label, "default");
+        assert_eq!(sweeps[0].cargo_feature_args, vec!["--all-features"]);
+        assert!(sweeps[0].build_packages.is_empty());
+        assert!(sweeps[0].libtest_args.is_empty());
     }
 
     #[test]
-    fn decide_sweeps_with_consumer_config_runs_two() {
-        let cfg = CheckConfig {
-            consumer_features: vec!["commands".into()],
-        };
-        let sweeps = decide_sweeps(&[], false, Some(&cfg));
+    fn decide_active_sweeps_cli_features_create_ad_hoc() {
+        // --features commands → single ad-hoc sweep, ignores `[[check]]`
+        // and any profile entirely.
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: vec!["pbfhogg-cli".into()],
+        }];
+        let sweeps = decide_active_sweeps(
+            &entries,
+            None,
+            None,
+            &["commands".to_owned()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].label, "default");
+        assert_eq!(sweeps[0].cargo_feature_args, vec!["--features", "commands"]);
+        // No build_packages on ad-hoc - the user is spot-checking.
+        assert!(sweeps[0].build_packages.is_empty());
+    }
+
+    #[test]
+    fn decide_active_sweeps_no_default_features_alone_is_ad_hoc() {
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+        }];
+        let sweeps = decide_active_sweeps(&entries, None, None, &[], true).unwrap();
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].label, "default");
+        assert_eq!(sweeps[0].cargo_feature_args, vec!["--no-default-features"]);
+    }
+
+    #[test]
+    fn decide_active_sweeps_check_entries_no_profile() {
+        let entries = vec![
+            CheckEntry {
+                name: "all".into(),
+                features: vec!["a".into(), "b".into()],
+                no_default_features: false,
+                build_packages: vec!["pbfhogg-cli".into()],
+            },
+            CheckEntry {
+                name: "consumer".into(),
+                features: vec!["commands".into()],
+                no_default_features: true,
+                build_packages: vec!["pbfhogg-cli".into()],
+            },
+        ];
+        let sweeps = decide_active_sweeps(&entries, None, None, &[], false).unwrap();
         assert_eq!(sweeps.len(), 2);
-        assert_eq!(sweeps[0].label, "all-features");
+        assert_eq!(sweeps[0].label, "all");
+        assert_eq!(sweeps[0].cargo_feature_args, vec!["--features", "a,b"]);
+        assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
+        assert!(sweeps[0].libtest_args.is_empty());
         assert_eq!(sweeps[1].label, "consumer");
-        assert_eq!(
-            sweeps[1].feature_args,
-            vec!["--no-default-features", "--features", "commands"]
-        );
     }
 
     #[test]
-    fn decide_sweeps_consumer_empty_falls_back_to_single() {
-        let cfg = CheckConfig {
-            consumer_features: Vec::new(),
-        };
-        let sweeps = decide_sweeps(&[], false, Some(&cfg));
+    fn decide_active_sweeps_default_profile_when_no_explicit() {
+        let toml_text = r#"
+default_profile = "tier1"
+
+[profiles.tier1]
+sweeps = ["all"]
+skip = ["tier2::"]
+include_ignored = false
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: vec!["pbfhogg-cli".into()],
+        }];
+        let sweeps =
+            decide_active_sweeps(&entries, Some(&test_cfg), None, &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "all-features");
+        assert_eq!(sweeps[0].label, "all");
+        assert_eq!(sweeps[0].libtest_args, vec!["--skip", "tier2::"]);
     }
 
     #[test]
-    fn decide_sweeps_user_features_override_short_circuits() {
-        let cfg = CheckConfig {
-            consumer_features: vec!["commands".into()],
-        };
-        let sweeps = decide_sweeps(&["foo".into(), "bar".into()], false, Some(&cfg));
+    fn decide_active_sweeps_explicit_profile_overrides_default() {
+        let toml_text = r#"
+default_profile = "tier1"
+
+[profiles.tier1]
+sweeps = ["all"]
+
+[profiles.full]
+sweeps = ["all"]
+include_ignored = true
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+        }];
+        let sweeps =
+            decide_active_sweeps(&entries, Some(&test_cfg), Some("full"), &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "default");
-        assert_eq!(sweeps[0].feature_args, vec!["--features", "foo,bar"]);
+        assert!(sweeps[0].libtest_args.contains(&"--include-ignored".into()));
     }
 
     #[test]
-    fn decide_sweeps_no_default_features_overrides() {
-        let cfg = CheckConfig {
-            consumer_features: vec!["commands".into()],
-        };
-        let sweeps = decide_sweeps(&[], true, Some(&cfg));
-        assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "default");
-        assert_eq!(sweeps[0].feature_args, vec!["--no-default-features"]);
+    fn decide_active_sweeps_profile_without_test_section_errors() {
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+        }];
+        let err = decide_active_sweeps(&entries, None, Some("tier1"), &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--profile tier1"), "got: {err}");
     }
 
     #[test]
@@ -1203,8 +1061,8 @@ warning: z [too_many_lines]
   |
 ";
         let parses = vec![
-            ("all-features", cargo_filter::parse_clippy(stderr_a)),
-            ("consumer", cargo_filter::parse_clippy(stderr_b)),
+            ("all-features".to_owned(), cargo_filter::parse_clippy(stderr_a)),
+            ("consumer".to_owned(), cargo_filter::parse_clippy(stderr_b)),
         ];
         let merged = merge_clippy(&parses);
         // 3 unique diagnostics: foo (both), bar (a), baz (b).

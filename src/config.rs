@@ -1,8 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::error::DevError;
 use crate::project::Project;
@@ -16,7 +15,13 @@ pub struct DevConfig {
     pub hosts: HashMap<String, HostConfig>,
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
-    pub check: Option<CheckConfig>,
+    /// Each `[[check]]` entry in `brokkr.toml`. One entry = one
+    /// (clippy + test) sweep with the entry's feature flags. Empty
+    /// when the file has no `[[check]]` arrays - in that case
+    /// `brokkr check` falls back to today's single
+    /// `--all-features` sweep for backward compatibility with
+    /// projects that haven't configured anything.
+    pub check: Vec<CheckEntry>,
     pub test: Option<TestConfig>,
     /// Env var names / globs to capture into `run_kv` on every measured
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
@@ -24,17 +29,47 @@ pub struct DevConfig {
     pub capture_env: Vec<String>,
 }
 
-/// `[check]` section. `consumer_features` is the cargo feature set a
-/// downstream library consumer would see - usually a small subset of
-/// what the in-tree dev build enables. When non-empty, `brokkr check`
-/// runs clippy a second time with `--no-default-features --features
-/// <consumer_features>` so feature-gated proc-macro expansions can't
-/// silently mask real lint violations.
+/// One `[[check]]` entry: a single named cargo invocation shape that
+/// both `cargo clippy` and `cargo test` execute against.
+///
+/// `features` is an explicit list - the previous `features = "all"`
+/// sentinel was removed because it silently broadens the test sweep
+/// every time a new feature lands in `Cargo.toml` (the bug class that
+/// motivated the explicit-list refactor). Enumerate features by name
+/// or use `--features` on the CLI for one-shot runs.
+///
+/// `build_packages` rebuilds each listed cargo package with the same
+/// feature flags before the test phase, so `tests/cli_*.rs`
+/// `CliInvoker` calls hit a binary built for the sweep's feature set
+/// (request 2: CLI binary feature parity).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CheckConfig {
+pub struct CheckEntry {
+    pub name: String,
     #[serde(default)]
-    pub consumer_features: Vec<String>,
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub no_default_features: bool,
+    #[serde(default)]
+    pub build_packages: Vec<String>,
+}
+
+impl CheckEntry {
+    /// Translate `features` / `no_default_features` into the cargo
+    /// argv fragment used by both `cargo clippy` and `cargo test`.
+    /// Skipped entirely when no flags are set so the cargo defaults
+    /// (the package's default feature set) apply.
+    pub fn cargo_feature_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.no_default_features {
+            args.push("--no-default-features".into());
+        }
+        if !self.features.is_empty() {
+            args.push("--features".into());
+            args.push(self.features.join(","));
+        }
+        args
+    }
 }
 
 /// `[test]` section.
@@ -46,85 +81,25 @@ pub struct CheckConfig {
 ///   built-in default via `Project::cli_package()`. An explicit CLI `-p`
 ///   always wins; TOML `default_package` wins over `cli_package()`.
 /// - `default_profile` is the named [`ProfileDef`] used by `brokkr check`
-///   when no `--profile` is passed. Falls back to today's behaviour
-///   (single `--all-features` test sweep, plus a consumer sweep when
-///   `[check].consumer_features` is configured) when neither this nor
-///   `--profile` is set.
-/// - `[test.sweeps.*]` declares named cargo invocation shapes (feature
-///   flags + binaries to rebuild) referenced by profiles.
-/// - `[test.profiles.*]` declares named test selections that compose
-///   sweeps with libtest-level filters (`only` / `skip` / `tests` /
-///   `include_ignored` / `test_threads` / `env`). Profiles can chain
-///   via `extends`.
+///   when no `--profile` is passed. Without it, bare `brokkr check` runs
+///   every `[[check]]` entry with no libtest filters; that's slow but
+///   predictable. With it, the inner-loop signal is whatever profile the
+///   project chose (typically a fast `tier1`).
+/// - `[test.profiles.*]` declares named test selections that layer
+///   libtest-level filters (`only` / `skip` / `tests` /
+///   `include_ignored` / `test_threads` / `env`) on top of one or more
+///   `[[check]]` entries (referenced by name in the profile's
+///   `sweeps` field). Profiles can chain via `extends`.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TestConfig {
     pub default_package: Option<String>,
     pub default_profile: Option<String>,
     #[serde(default)]
-    pub sweeps: BTreeMap<String, SweepDef>,
-    #[serde(default)]
     pub profiles: BTreeMap<String, ProfileDef>,
 }
 
-/// A named cargo-invocation shape referenced by [`ProfileDef::sweeps`].
-///
-/// `features = "all"` translates to `--all-features`; an array translates
-/// to `--features a,b,c`. Combined with `no_default_features = true`,
-/// emits `--no-default-features --features a,b,c`. Setting both is
-/// allowed but unusual.
-///
-/// `build_packages` is the source of truth for request 2 (CLI binary
-/// feature parity): every listed cargo package is built with the sweep's
-/// feature selection before the test phase runs, so a `CliInvoker` in
-/// the test crate doesn't silently invoke a stale all-features binary.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SweepDef {
-    /// Either `"all"` (translates to `--all-features`) or an explicit
-    /// list of feature names. Optional - omit for "no feature flags".
-    #[serde(default)]
-    pub features: Option<FeaturesSpec>,
-    #[serde(default)]
-    pub no_default_features: bool,
-    /// Cargo packages to rebuild with the sweep's feature flags before
-    /// running the test phase. Required to keep `tests/cli_*.rs`
-    /// CliInvoker tests honest when the CLI is in a separate workspace
-    /// member that `cargo test -p <lib>` doesn't rebuild.
-    #[serde(default)]
-    pub build_packages: Vec<String>,
-}
-
-/// Either the literal string `"all"` (meaning `--all-features`) or a
-/// concrete list of feature names. Custom deserialiser so the TOML can
-/// stay readable (`features = "all"` vs `features = ["foo", "bar"]`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FeaturesSpec {
-    /// `--all-features`.
-    All,
-    /// `--features a,b,c`. May be empty (no `--features` flag emitted).
-    List(Vec<String>),
-}
-
-impl<'de> Deserialize<'de> for FeaturesSpec {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Helper {
-            S(String),
-            V(Vec<String>),
-        }
-        match Helper::deserialize(d)? {
-            Helper::S(s) if s == "all" => Ok(FeaturesSpec::All),
-            Helper::S(s) => Err(D::Error::custom(format!(
-                "expected \"all\" or [list of feature names], got string {s:?}"
-            ))),
-            Helper::V(v) => Ok(FeaturesSpec::List(v)),
-        }
-    }
-}
-
-/// A named test selection layered onto one or more [`SweepDef`]s.
+/// A named test selection layered onto one or more `[[check]]` entries.
 ///
 /// All collection fields are optional `Option<Vec<_>>` so `extends`
 /// merging can distinguish "child does not specify, inherit parent"
@@ -144,8 +119,9 @@ pub struct ProfileDef {
     #[allow(dead_code)]
     pub description: Option<String>,
     pub extends: Option<String>,
-    /// Names of [`SweepDef`]s to execute. Each sweep is one cargo test
-    /// invocation. Empty / unset after `extends` resolution is an error.
+    /// Names of `[[check]]` entries to execute. Each is one cargo test
+    /// invocation with the entry's feature flags. Empty / unset after
+    /// `extends` resolution is an error.
     pub sweeps: Option<Vec<String>>,
     /// `--test <name>` for each entry. Limits cargo to specific test
     /// binaries (the `tests/<name>.rs` files).
@@ -410,6 +386,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let sluggrs = parse_sluggrs(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
+    validate_check_against_test(&check, test.as_ref())?;
     let capture_env = parse_capture_env(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -546,32 +523,117 @@ fn parse_sluggrs(
     Ok(Some(config))
 }
 
-/// Parse the optional `[check]` section from the root table.
+/// Parse the optional `[[check]]` array of tables.
+///
+/// Rejects:
+/// - the legacy `[check]` singular table form (with `consumer_features`),
+///   pointing the user at the migration path;
+/// - duplicate `name` values across entries;
+/// - empty `name` strings.
+///
+/// Returns an empty `Vec` when no `[[check]]` arrays are configured;
+/// callers fall back to today's single `--all-features` sweep in that
+/// case.
 fn parse_check(
     table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<CheckConfig>, DevError> {
+) -> Result<Vec<CheckEntry>, DevError> {
     let Some(value) = table.get("check") else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let config: CheckConfig = value
+
+    // [check] (singular table) is the old shape; reject loudly so a
+    // stale brokkr.toml doesn't silently fall through to "no [[check]]
+    // configured" behaviour and start running the wrong sweeps.
+    if value.is_table() {
+        return Err(DevError::Config(
+            "[check] (table form) is no longer supported. Migrate to \
+             one or more `[[check]]` array-of-table entries with \
+             `name`, `features`, optional `no_default_features`, and \
+             optional `build_packages`. See CLAUDE.md for examples."
+                .into(),
+        ));
+    }
+
+    let entries: Vec<CheckEntry> = value
         .clone()
         .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("check: {e}")))?;
-    Ok(Some(config))
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[check]]: {e}")))?;
+
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for entry in &entries {
+        if entry.name.trim().is_empty() {
+            return Err(DevError::Config(
+                "[[check]] entry has empty `name` - every entry needs a label \
+                 used by output and by `[test.profiles].sweeps` references."
+                    .into(),
+            ));
+        }
+        if !seen.insert(entry.name.as_str()) {
+            return Err(DevError::Config(format!(
+                "[[check]] has duplicate name '{}' - each entry must have a unique name.",
+                entry.name
+            )));
+        }
+    }
+    Ok(entries)
 }
 
 /// Parse the optional `[test]` section from the root table.
+///
+/// Also detects the previous `[test.sweeps.*]` shape (folded into
+/// `[[check]]` with this redesign) and `[check].consumer_features`
+/// fragments smuggled inside `[test]`, redirecting to the new shape.
 fn parse_test(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<TestConfig>, DevError> {
     let Some(value) = table.get("test") else {
         return Ok(None);
     };
+    if let Some(t) = value.as_table()
+        && t.contains_key("sweeps")
+    {
+        return Err(DevError::Config(
+            "[test.sweeps] is no longer supported. Sweeps are now declared \
+             as `[[check]]` array-of-table entries that profiles reference \
+             by name in `[test.profiles.<name>].sweeps`."
+                .into(),
+        ));
+    }
     let config: TestConfig = value
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("test: {e}")))?;
     Ok(Some(config))
+}
+
+/// Cross-check that every sweep name referenced by a profile resolves
+/// to a `[[check]]` entry. Catches typos at parse time instead of at
+/// `brokkr check --profile` time.
+fn validate_check_against_test(
+    check: &[CheckEntry],
+    test: Option<&TestConfig>,
+) -> Result<(), DevError> {
+    let Some(t) = test else {
+        return Ok(());
+    };
+    if t.profiles.is_empty() {
+        return Ok(());
+    }
+    let names: BTreeSet<&str> = check.iter().map(|e| e.name.as_str()).collect();
+    for (profile_name, def) in &t.profiles {
+        let Some(sweeps) = &def.sweeps else {
+            continue;
+        };
+        for sweep in sweeps {
+            if !names.contains(sweep.as_str()) {
+                return Err(DevError::Config(format!(
+                    "[test.profiles.{profile_name}] references sweep '{sweep}', \
+                     but no `[[check]]` entry with that name exists."
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate all datasets across all hosts for empty file names and snapshot
@@ -829,7 +891,7 @@ mod tests {
             hosts,
             litehtml: None,
             sluggrs: None,
-            check: None,
+            check: Vec::new(),
             test: None,
             capture_env: Vec::new(),
         }
@@ -1330,6 +1392,207 @@ sha256 = "ddd"
         assert_eq!(
             dk.pmtiles.get("elivagar").unwrap().xxhash.as_deref(),
             Some("ddd")
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // [[check]] parsing
+    // -------------------------------------------------------------------
+
+    fn root_table(text: &str) -> toml::map::Map<String, toml::Value> {
+        let v: toml::Value = toml::from_str(text).unwrap();
+        v.as_table().unwrap().clone()
+    }
+
+    #[test]
+    fn parse_check_returns_empty_when_absent() {
+        let table = root_table(r#"project = "pbfhogg""#);
+        let check = parse_check(&table).unwrap();
+        assert!(check.is_empty());
+    }
+
+    #[test]
+    fn parse_check_array_of_tables() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+
+[[check]]
+name = "all"
+features = ["test-hooks", "linux-direct-io"]
+
+[[check]]
+name = "consumer"
+no_default_features = true
+features = ["commands"]
+build_packages = ["pbfhogg-cli"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        assert_eq!(check.len(), 2);
+        assert_eq!(check[0].name, "all");
+        assert_eq!(check[0].features, vec!["test-hooks", "linux-direct-io"]);
+        assert!(!check[0].no_default_features);
+        assert!(check[0].build_packages.is_empty());
+
+        assert_eq!(check[1].name, "consumer");
+        assert_eq!(check[1].features, vec!["commands"]);
+        assert!(check[1].no_default_features);
+        assert_eq!(check[1].build_packages, vec!["pbfhogg-cli"]);
+    }
+
+    #[test]
+    fn parse_check_rejects_legacy_table_form() {
+        // The previous shape was `[check]\nconsumer_features = [...]`.
+        // Detect the singular table and error loudly so a stale config
+        // doesn't silently fall through.
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[check]
+consumer_features = ["commands"]
+"#,
+        );
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("[[check]]"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_duplicate_names() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+features = ["a"]
+[[check]]
+name = "all"
+features = ["b"]
+"#,
+        );
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("duplicate name 'all'"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_empty_name() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = ""
+features = ["a"]
+"#,
+        );
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("empty `name`"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_features_all_sentinel() {
+        // The `features = "all"` shorthand is gone - explicit lists only.
+        // serde rejects with a type-mismatch error, which is loud enough
+        // (the user sees "expected sequence" pointing at the offending line).
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "everything"
+features = "all"
+"#,
+        );
+        assert!(parse_check(&table).is_err());
+    }
+
+    #[test]
+    fn parse_test_rejects_legacy_sweeps_section() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+
+[test]
+
+[test.sweeps.all]
+features = ["a"]
+"#,
+        );
+        let err = parse_test(&table).unwrap_err().to_string();
+        assert!(err.contains("[test.sweeps]"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_check_against_test_catches_dangling_sweep_reference() {
+        let check = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+        }];
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "tier1".into(),
+            ProfileDef {
+                description: None,
+                extends: None,
+                sweeps: Some(vec!["all".into(), "consumer".into()]),
+                tests: None,
+                only: None,
+                skip: None,
+                include_ignored: None,
+                test_threads: None,
+                env: None,
+            },
+        );
+        let test = TestConfig {
+            default_package: None,
+            default_profile: None,
+            profiles,
+        };
+        let err = validate_check_against_test(&check, Some(&test))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'consumer'"), "got: {err}");
+    }
+
+    #[test]
+    fn check_entry_cargo_feature_args_shapes() {
+        // No flags → no args at all (use cargo defaults).
+        let bare = CheckEntry {
+            name: "bare".into(),
+            features: Vec::new(),
+            no_default_features: false,
+            build_packages: Vec::new(),
+        };
+        assert!(bare.cargo_feature_args().is_empty());
+
+        // --features only.
+        let feats = CheckEntry {
+            name: "f".into(),
+            features: vec!["a".into(), "b".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+        };
+        assert_eq!(feats.cargo_feature_args(), vec!["--features", "a,b"]);
+
+        // --no-default-features only.
+        let nd = CheckEntry {
+            name: "nd".into(),
+            features: Vec::new(),
+            no_default_features: true,
+            build_packages: Vec::new(),
+        };
+        assert_eq!(nd.cargo_feature_args(), vec!["--no-default-features"]);
+
+        // Both.
+        let consumer = CheckEntry {
+            name: "consumer".into(),
+            features: vec!["commands".into()],
+            no_default_features: true,
+            build_packages: vec!["pbfhogg-cli".into()],
+        };
+        assert_eq!(
+            consumer.cargo_feature_args(),
+            vec!["--no-default-features", "--features", "commands"]
         );
     }
 }

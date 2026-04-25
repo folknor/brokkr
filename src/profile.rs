@@ -1,43 +1,40 @@
-//! Profile and sweep resolution for `[test.profiles.*]` / `[test.sweeps.*]`.
+//! Profile resolution for `[test.profiles.*]`.
 //!
-//! Translates a named profile (with optional `extends` chain) plus the
-//! ambient `TestConfig` into a list of `ResolvedSweep`s ready for the
-//! test runner to execute. Each resolved sweep carries:
+//! Translates a named profile (with optional `extends` chain) into a
+//! list of `ResolvedSweep`s ready for `brokkr check` (and
+//! `brokkr test`) to execute. Each resolved sweep carries:
 //!
-//! - the cargo feature args for the sweep
-//! - the cargo packages to rebuild before running tests (request 2)
+//! - the `[[check]]` entry that supplies feature flags + build_packages
 //! - the libtest filter args derived from the merged profile fields
 //!   (`tests` / `only` / `skip` / `include_ignored` / `test_threads`)
 //! - any env vars the profile exports
 //!
 //! The resolver is intentionally pure-data: it does not run cargo, does
-//! not touch disk, and does not depend on `Project`. It is reused by
-//! both `brokkr check` (test phase) and `brokkr test` (single-name
-//! runner).
+//! not touch disk, and does not depend on `Project`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{FeaturesSpec, ProfileDef, SweepDef, TestConfig};
+use crate::config::{CheckEntry, ProfileDef, TestConfig};
 use crate::error::DevError;
 
-/// One sweep to execute, after all profile / sweep merging is done.
+/// One sweep to execute, after profile resolution + check-entry lookup.
 #[derive(Debug, Clone)]
 pub struct ResolvedSweep {
-    /// Sweep label surfaced in `[test]` log lines.
+    /// Display label - the `[[check]]` entry's `name`.
     pub label: String,
     /// `["--all-features"]`, `["--features", "a,b"]`, etc. Already
-    /// flattened in argv form.
+    /// flattened in argv form, derived from the entry's flags.
     pub cargo_feature_args: Vec<String>,
-    /// Packages to rebuild before running tests. Each is built with the
-    /// sweep's feature args via `cargo build --release -p <pkg> ...`.
+    /// Packages to rebuild before running tests, sourced from the
+    /// resolved `[[check]]` entry. `cargo build --release -p <pkg>`
+    /// with the same feature args.
     pub build_packages: Vec<String>,
     /// `--include-ignored`, `--test-threads=N`, `--skip` flags emitted
-    /// after `--` to libtest.
+    /// after `--` to libtest. Derived from the merged profile.
     pub libtest_args: Vec<String>,
     /// `--test <name>` flags emitted to cargo (before `--`).
     pub cargo_test_filters: Vec<String>,
-    /// Positional substring filters passed to libtest after `--`. Each
-    /// matches any test whose name contains that substring.
+    /// Positional substring filters passed to libtest after `--`.
     pub name_filters: Vec<String>,
     /// Env vars to export to the cargo subprocess.
     pub env: BTreeMap<String, String>,
@@ -45,7 +42,7 @@ pub struct ResolvedSweep {
 
 impl ResolvedSweep {
     /// Wall-clock-ordered argv for the libtest (post-`--`) section.
-    /// Helper for tests; the runner builds argv directly.
+    /// Helper for tests.
     #[cfg(test)]
     pub fn libtest_argv(&self) -> Vec<String> {
         let mut out = self.libtest_args.clone();
@@ -53,6 +50,21 @@ impl ResolvedSweep {
             out.push(n.clone());
         }
         out
+    }
+}
+
+/// Synthesize a `ResolvedSweep` from a `CheckEntry` alone, with no
+/// profile filters. Used by the bare `brokkr check` path when
+/// `[[check]]` is configured but no profile is selected.
+pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
+    ResolvedSweep {
+        label: entry.name.clone(),
+        cargo_feature_args: entry.cargo_feature_args(),
+        build_packages: entry.build_packages.clone(),
+        libtest_args: Vec::new(),
+        cargo_test_filters: Vec::new(),
+        name_filters: Vec::new(),
+        env: BTreeMap::new(),
     }
 }
 
@@ -76,9 +88,13 @@ struct ResolvedProfile {
 /// - `name` is not in `cfg.profiles`
 /// - `extends` chain refers to a missing profile
 /// - `extends` chain contains a cycle
-/// - resolved profile names a sweep that is not in `cfg.sweeps`
+/// - resolved profile names a sweep that is not in `checks`
 /// - resolved profile has zero sweeps
-pub fn resolve(cfg: &TestConfig, name: &str) -> Result<Vec<ResolvedSweep>, DevError> {
+pub fn resolve(
+    cfg: &TestConfig,
+    checks: &[CheckEntry],
+    name: &str,
+) -> Result<Vec<ResolvedSweep>, DevError> {
     let merged = resolve_profile_chain(&cfg.profiles, name)?;
 
     if merged.sweeps.is_empty() {
@@ -90,27 +106,29 @@ pub fn resolve(cfg: &TestConfig, name: &str) -> Result<Vec<ResolvedSweep>, DevEr
 
     let mut out = Vec::with_capacity(merged.sweeps.len());
     for sweep_name in &merged.sweeps {
-        let sweep_def = cfg.sweeps.get(sweep_name).ok_or_else(|| {
-            DevError::Config(format!(
-                "[test.profiles.{name}] references sweep '{sweep_name}', \
-                 but [test.sweeps.{sweep_name}] is not defined."
-            ))
-        })?;
-        out.push(build_resolved_sweep(sweep_name, sweep_def, &merged));
+        let entry = checks
+            .iter()
+            .find(|e| e.name == *sweep_name)
+            .ok_or_else(|| {
+                DevError::Config(format!(
+                    "[test.profiles.{name}] references sweep '{sweep_name}', \
+                     but no `[[check]]` entry with that name exists."
+                ))
+            })?;
+        out.push(build_resolved_sweep(entry, &merged));
     }
     Ok(out)
 }
 
-/// Walk `name` and its `extends` ancestors, merging in child-overrides-parent
-/// order. Detects missing parents and cycles up front.
+/// Walk `name` and its `extends` ancestors, merging in
+/// child-overrides-parent order. Detects missing parents and cycles
+/// up front.
 fn resolve_profile_chain(
     profiles: &BTreeMap<String, ProfileDef>,
     name: &str,
 ) -> Result<ResolvedProfile, DevError> {
     let chain = collect_extends_chain(profiles, name)?;
     let mut out = ResolvedProfile::default();
-    // chain is [child, parent, grandparent, ...]; merge from root down
-    // so each step overwrites with the closer-to-leaf values.
     for def in chain.iter().rev() {
         if let Some(v) = &def.sweeps {
             out.sweeps = v.clone();
@@ -131,9 +149,6 @@ fn resolve_profile_chain(
             out.test_threads = Some(v);
         }
         if let Some(v) = &def.env {
-            // env entries from descendants override ancestors key-by-key
-            // rather than wholesale-replacing, so a child can add a single
-            // var without re-stating the parent's full map.
             for (k, val) in v {
                 out.env.insert(k.clone(), val.clone());
             }
@@ -168,13 +183,7 @@ fn collect_extends_chain<'a>(
     }
 }
 
-fn build_resolved_sweep(
-    sweep_name: &str,
-    sweep: &SweepDef,
-    profile: &ResolvedProfile,
-) -> ResolvedSweep {
-    let cargo_feature_args = sweep_feature_args(sweep);
-
+fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> ResolvedSweep {
     let mut libtest_args: Vec<String> = Vec::new();
     if profile.include_ignored {
         libtest_args.push("--include-ignored".into());
@@ -194,34 +203,14 @@ fn build_resolved_sweep(
     }
 
     ResolvedSweep {
-        label: sweep_name.to_owned(),
-        cargo_feature_args,
-        build_packages: sweep.build_packages.clone(),
+        label: entry.name.clone(),
+        cargo_feature_args: entry.cargo_feature_args(),
+        build_packages: entry.build_packages.clone(),
         libtest_args,
         cargo_test_filters,
         name_filters: profile.only.clone(),
         env: profile.env.clone(),
     }
-}
-
-/// Translate a `SweepDef`'s feature/no_default_features into argv for
-/// either `cargo build` or `cargo test`. Shared helper so request 2's
-/// pre-build step and the test runner agree on the feature flags.
-pub fn sweep_feature_args(sweep: &SweepDef) -> Vec<String> {
-    let mut args = Vec::new();
-    if sweep.no_default_features {
-        args.push("--no-default-features".into());
-    }
-    match &sweep.features {
-        Some(FeaturesSpec::All) => args.push("--all-features".into()),
-        Some(FeaturesSpec::List(list)) if !list.is_empty() => {
-            args.push("--features".into());
-            args.push(list.join(","));
-        }
-        // Some(List) empty or None: emit nothing (cargo defaults apply).
-        _ => {}
-    }
-    args
 }
 
 #[cfg(test)]
@@ -234,64 +223,50 @@ mod tests {
     )]
     use super::*;
 
-    fn cfg_from_toml(text: &str) -> TestConfig {
-        let parsed: BTreeMap<String, toml::Value> = toml::from_str(text).unwrap();
-        let value = parsed
+    /// Parse the body of a fake `brokkr.toml`-shaped fragment into
+    /// `(checks, test_cfg)`. Keeps the test cases readable and avoids
+    /// hand-building TestConfig + Vec<CheckEntry> in every assertion.
+    fn parse_fragment(text: &str) -> (Vec<CheckEntry>, TestConfig) {
+        let v: toml::Value = toml::from_str(text).unwrap();
+        let table = v.as_table().unwrap();
+        let checks: Vec<CheckEntry> = table
+            .get("check")
+            .map(|c| c.clone().try_into().unwrap())
+            .unwrap_or_default();
+        let test_cfg: TestConfig = table
             .get("test")
-            .cloned()
-            .unwrap_or(toml::Value::Table(Default::default()));
-        value.try_into().unwrap()
+            .map(|t| t.clone().try_into().unwrap())
+            .unwrap_or_default();
+        (checks, test_cfg)
     }
 
     #[test]
-    fn sweep_feature_args_all() {
-        let s = SweepDef {
-            features: Some(FeaturesSpec::All),
-            no_default_features: false,
-            build_packages: Vec::new(),
-        };
-        assert_eq!(sweep_feature_args(&s), vec!["--all-features"]);
-    }
-
-    #[test]
-    fn sweep_feature_args_consumer_shape() {
-        let s = SweepDef {
-            features: Some(FeaturesSpec::List(vec!["commands".into()])),
+    fn sweep_from_check_entry_emits_feature_args() {
+        let entry = CheckEntry {
+            name: "consumer".into(),
+            features: vec!["commands".into()],
             no_default_features: true,
             build_packages: vec!["pbfhogg-cli".into()],
         };
+        let s = sweep_from_check_entry(&entry);
+        assert_eq!(s.label, "consumer");
         assert_eq!(
-            sweep_feature_args(&s),
+            s.cargo_feature_args,
             vec!["--no-default-features", "--features", "commands"]
         );
-    }
-
-    #[test]
-    fn sweep_feature_args_no_default_no_features() {
-        let s = SweepDef {
-            features: None,
-            no_default_features: true,
-            build_packages: Vec::new(),
-        };
-        assert_eq!(sweep_feature_args(&s), vec!["--no-default-features"]);
-    }
-
-    #[test]
-    fn sweep_feature_args_empty_list_emits_nothing() {
-        let s = SweepDef {
-            features: Some(FeaturesSpec::List(Vec::new())),
-            no_default_features: false,
-            build_packages: Vec::new(),
-        };
-        assert!(sweep_feature_args(&s).is_empty());
+        assert_eq!(s.build_packages, vec!["pbfhogg-cli"]);
+        assert!(s.libtest_args.is_empty());
+        assert!(s.cargo_test_filters.is_empty());
+        assert!(s.name_filters.is_empty());
     }
 
     #[test]
     fn resolve_simple_profile() {
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a", "b"]
 build_packages = ["pbfhogg-cli"]
 
 [test.profiles.tier1]
@@ -300,11 +275,11 @@ skip = ["tier2::", "platform::"]
 include_ignored = false
 "#,
         );
-        let resolved = resolve(&cfg, "tier1").unwrap();
+        let resolved = resolve(&cfg, &checks, "tier1").unwrap();
         assert_eq!(resolved.len(), 1);
         let s = &resolved[0];
         assert_eq!(s.label, "all");
-        assert_eq!(s.cargo_feature_args, vec!["--all-features"]);
+        assert_eq!(s.cargo_feature_args, vec!["--features", "a,b"]);
         assert_eq!(s.build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(
             s.libtest_args,
@@ -316,12 +291,14 @@ include_ignored = false
 
     #[test]
     fn resolve_extends_replaces_collections() {
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a"]
 
-[test.sweeps.consumer]
+[[check]]
+name = "consumer"
 no_default_features = true
 features = ["commands"]
 
@@ -338,13 +315,12 @@ tests = ["cli_sort"]
 skip = ["platform::", "serial::"]
 "#,
         );
-        let resolved = resolve(&cfg, "sort").unwrap();
+        let resolved = resolve(&cfg, &checks, "sort").unwrap();
         assert_eq!(resolved.len(), 2);
 
         let s0 = &resolved[0];
         assert_eq!(s0.label, "all");
-        assert_eq!(s0.cargo_feature_args, vec!["--all-features"]);
-        // tier2:: is gone; only platform:: + serial:: remain in skip.
+        assert_eq!(s0.cargo_feature_args, vec!["--features", "a"]);
         assert_eq!(
             s0.libtest_args,
             vec!["--skip", "platform::", "--skip", "serial::"]
@@ -361,10 +337,11 @@ skip = ["platform::", "serial::"]
 
     #[test]
     fn resolve_propagates_test_threads_and_env() {
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a"]
 
 [test.profiles.serial]
 sweeps = ["all"]
@@ -374,7 +351,7 @@ test_threads = 1
 env = { BROKKR_TEST_PLATFORM = "1" }
 "#,
         );
-        let r = resolve(&cfg, "serial").unwrap();
+        let r = resolve(&cfg, &checks, "serial").unwrap();
         assert_eq!(r[0].name_filters, vec!["serial::"]);
         assert!(
             r[0].libtest_args.contains(&"--include-ignored".into()),
@@ -391,36 +368,44 @@ env = { BROKKR_TEST_PLATFORM = "1" }
 
     #[test]
     fn resolve_unknown_profile_errors() {
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a"]
 "#,
         );
-        let err = resolve(&cfg, "nope").unwrap_err();
+        let err = resolve(&cfg, &checks, "nope").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("nope"), "got: {msg}");
     }
 
     #[test]
-    fn resolve_unknown_sweep_errors() {
-        let cfg = cfg_from_toml(
+    fn resolve_unknown_sweep_errors_at_resolve_time() {
+        // (Top-level config also catches this at parse time via
+        // `validate_check_against_test`, but the resolver is the
+        // last line of defence and shouldn't panic.)
+        let (checks, cfg) = parse_fragment(
             r#"
+[[check]]
+name = "all"
+features = ["a"]
+
 [test.profiles.tier1]
 sweeps = ["nope"]
 "#,
         );
-        let err = resolve(&cfg, "tier1").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("'nope'"), "got: {msg}");
+        let err = resolve(&cfg, &checks, "tier1").unwrap_err();
+        assert!(err.to_string().contains("'nope'"), "got: {err}");
     }
 
     #[test]
     fn resolve_extends_cycle_errors() {
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a"]
 
 [test.profiles.a]
 extends = "b"
@@ -431,34 +416,33 @@ extends = "a"
 sweeps = ["all"]
 "#,
         );
-        let err = resolve(&cfg, "a").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("cycle"), "got: {msg}");
+        let err = resolve(&cfg, &checks, "a").unwrap_err();
+        assert!(err.to_string().contains("cycle"), "got: {err}");
     }
 
     #[test]
     fn resolve_zero_sweeps_errors() {
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a"]
 
 [test.profiles.empty]
 description = "forgot to set sweeps"
 "#,
         );
-        let err = resolve(&cfg, "empty").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("zero sweeps"), "got: {msg}");
+        let err = resolve(&cfg, &checks, "empty").unwrap_err();
+        assert!(err.to_string().contains("zero sweeps"), "got: {err}");
     }
 
     #[test]
     fn resolve_extends_chain_three_levels() {
-        // grandparent -> parent -> child; each layer adds one piece.
-        let cfg = cfg_from_toml(
+        let (checks, cfg) = parse_fragment(
             r#"
-[test.sweeps.all]
-features = "all"
+[[check]]
+name = "all"
+features = ["a"]
 
 [test.profiles.gp]
 sweeps = ["all"]
@@ -473,11 +457,14 @@ extends = "par"
 tests = ["cli_x"]
 "#,
         );
-        let r = resolve(&cfg, "ch").unwrap();
+        let r = resolve(&cfg, &checks, "ch").unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].cargo_test_filters, vec!["--test", "cli_x"]);
         assert!(r[0].libtest_args.contains(&"--include-ignored".into()));
-        assert_eq!(r[0].libtest_args.iter().filter(|s| s.as_str() == "a::").count(), 1);
+        assert_eq!(
+            r[0].libtest_args.iter().filter(|s| s.as_str() == "a::").count(),
+            1
+        );
     }
 
     #[test]

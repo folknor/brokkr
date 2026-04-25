@@ -55,7 +55,7 @@ Single crate, single binary. No workspace.
 
 - `src/pbfhogg/` - `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (11 commands + all), download (Geofabrik region/OSC fetcher with auto-registration in `brokkr.toml`). Every verify subcommand that takes `--dataset` also accepts `--input <PATH>` to skip dataset resolution and use a handcrafted fixture; the two flags are mutually exclusive. `verify_merge` parses the input OSC's delete set via `osc::parse_osc_file` and runs a strict `pbfhogg diff --format osc` between pbfhogg's and osmium's outputs - osmium-only IDs that appear in the input OSC's delete set are exempt (osmium does version-based deletes; pbfhogg/osmosis/osmconvert delete unconditionally), everything else fails.
 - `src/osc.rs` - Minimal `.osc` / `.osc.gz` reader. Returns `OscDiff` with sorted ID sets per (`<create>` / `<modify>` / `<delete>`) section per element kind. Used by `verify_merge` for the delete-set carve-out. Hand-rolled tag-start scanner; tolerant of XML comments, processing instructions, self-closing elements, and single-quoted attributes. Element bodies (tags / refs / members / coords / metadata) are deliberately skipped - only IDs are needed.
-- `src/profile.rs` - Validation profile resolver for `[test.profiles.*]` / `[test.sweeps.*]`. `resolve(cfg, name)` walks the `extends` chain (cycles rejected) and returns a list of `ResolvedSweep`s ready for the test runner. Each resolved sweep carries cargo feature args, packages to pre-build, libtest filter args (`--include-ignored`, `--test-threads`, `--skip`), `--test <name>` cargo filters, positional name filters, and env vars. Pure data; reused by both `brokkr check` (test phase) and `brokkr test`.
+- `src/profile.rs` - Validation profile resolver for `[test.profiles.*]`. `resolve(cfg, checks, name)` walks the `extends` chain (cycles rejected), looks each profile sweep name up in the `[[check]]` array, and returns a list of `ResolvedSweep`s ready for the runner. Each resolved sweep carries cargo feature args, packages to pre-build, libtest filter args (`--include-ignored`, `--test-threads`, `--skip`), `--test <name>` cargo filters, positional name filters, and env vars. `sweep_from_check_entry(entry)` is the no-profile path - used when `[[check]]` is configured but no profile applies. Pure data; reused by both `brokkr check` (test phase) and `brokkr test`.
 - `src/elivagar/` - `commands.rs` (`ElivagarCommand` enum with `build_args()`, `build_config()`, `needs_pbf()`, `output_files()`, `metadata()`), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
 - `src/nidhogg/` - `commands.rs` (`NidhoggCommand` enum: Api/Ingest/Tiles with `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`, `metadata()`), server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode, readonly), hotpath. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
 - `src/litehtml/` - 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.
@@ -101,36 +101,40 @@ file = "denmark-elivagar.pmtiles"
 xxhash = "9a3b2c1d..."
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses `--all-features` by default (catches feature-gated code like hotpath/alloc), overridden by explicit `--features` or `--no-default-features`. Reserved top-level keys (skipped by host parsing): `project`, `litehtml`, `sluggrs`, `check`, `test`, `capture_env`.
+Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses one of: an ad-hoc sweep when CLI `--features` / `--no-default-features` is passed; the `default_profile`'s sweeps when configured; every `[[check]]` entry when configured but no profile applies; otherwise a single `--all-features` sweep matching pre-`[[check]]` behaviour. Reserved top-level keys (skipped by host parsing): `project`, `litehtml`, `sluggrs`, `check`, `test`, `capture_env`.
 
-### `[check]` section
+### `[[check]]` array
 
-Optional. Single field today:
+Optional. Each entry is one (clippy + test) sweep with the entry's feature flags. Profiles in `[test.profiles]` reference these by name.
 
 ```toml
-[check]
-consumer_features = ["commands"]
+[[check]]
+name = "all"
+features = ["test-hooks", "linux-direct-io", "linux-io-uring", "commands"]
+build_packages = ["pbfhogg-cli"]
+
+[[check]]
+name = "consumer"
+no_default_features = true
+features = ["commands"]
+build_packages = ["pbfhogg-cli"]
 ```
 
-When `consumer_features` is non-empty, `brokkr check` runs clippy a second sweep with `--no-default-features --features <consumer_features>`. The first sweep is the existing `--all-features` run; the second represents what a downstream library consumer would build with. The point is to catch lints in always-compiled code that proc-macros (e.g. `#[hotpath::measure]`) silently mask by rewriting function bodies under feature gates. Diagnostics are deduped across sweeps and tagged in text mode (`[all-features]` / `[consumer]` / `[both]`) and in JSON mode (`sweeps: [...]` field). User-supplied `--features` / `--no-default-features` short-circuit the multi-sweep behavior - those flags mean "run exactly this one sweep". Absent `[check]` config = today's single `--all-features` sweep, no second build.
+- `name` (required) - label surfaced in output and the key profiles use to reference this entry. Must be unique.
+- `features` (optional, default `[]`) - explicit list of cargo features. The `features = "all"` sentinel (which used to mean `--all-features`) is rejected; enumerate features explicitly so adding a new feature to `Cargo.toml` doesn't silently broaden the test sweep.
+- `no_default_features` (optional, default `false`) - emits `--no-default-features`.
+- `build_packages` (optional, default `[]`) - cargo packages rebuilt with the entry's feature flags before the test phase. Required when `tests/cli_*.rs` integration tests invoke a separate CLI workspace member, otherwise `cargo test -p <lib>` leaves the binary in whatever state it was last built and the consumer-sweep contract goes unverified.
+
+The legacy `[check]` table form (with `consumer_features`) is rejected at parse time with a migration message - move the flags into a `[[check]]` entry.
 
 ### `[test]` section
 
-Optional. Three things live here: a default cargo package, a default validation profile, and the named sweeps + profiles that profile-driven runs reference.
+Optional. Three things live here: a default cargo package, a default validation profile, and the named profiles that selectively reference `[[check]]` entries.
 
 ```toml
 [test]
 default_package = "pbfhogg"
 default_profile = "tier1"
-
-[test.sweeps.all]
-features = "all"
-build_packages = ["pbfhogg-cli"]
-
-[test.sweeps.consumer]
-no_default_features = true
-features = ["commands"]
-build_packages = ["pbfhogg-cli"]
 
 [test.profiles.tier1]
 description = "Fast edit loop used by brokkr check (tier 1)"
@@ -163,11 +167,22 @@ test_threads = 1
 ```
 
 - `default_package` is the cargo package `brokkr test` passes to `cargo test -p` when no `-p/--package` is given on the command line. Needed for multi-crate workspaces where there's no single obvious package (e.g. ratatoskr); optional for single-crate projects that already have a built-in default via `Project::cli_package()` (pbfhogg-cli, nidhogg). Resolution order: explicit `-p` on CLI > `[test].default_package` > `Project::cli_package()` > error.
-- `default_profile` is the validation profile `brokkr check` uses when no `--profile` is passed. With no profile config in `brokkr.toml`, both `brokkr check` and `brokkr test` keep today's behaviour (single `--all-features` sweep, plus a `consumer` sweep when `[check].consumer_features` is set).
-- `[test.sweeps.<name>]` declares one cargo invocation shape: `features = "all"` → `--all-features`, `features = ["a", "b"]` → `--features a,b`, `no_default_features = true` → `--no-default-features`. `build_packages` rebuilds each cargo package with the same feature flags before the test phase runs - the source of truth for `tests/cli_*.rs` invocations that need a CLI binary built with matching features (otherwise `cargo test -p <lib>` leaves the all-features binary in place and `CliInvoker` silently misses the consumer-sweep contract).
-- `[test.profiles.<name>]` declares a test selection layered onto one or more sweeps. Fields: `sweeps` (required), `tests` (`--test <name>`), `only` (positional substring filter), `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`. `extends = "<other>"` walks up at most one parent profile; collections are **replaced** (not concatenated), env merges key-by-key. Cycles are rejected at resolve time.
+- `default_profile` is the validation profile `brokkr check` uses when no `--profile` is passed. With no profile config in `brokkr.toml`, `brokkr check` runs every `[[check]]` entry without libtest filters; with no `[[check]]` either, it falls back to a single `--all-features` sweep so projects that haven't migrated keep today's behaviour exactly.
+- `[test.profiles.<name>]` declares a test selection layered onto one or more `[[check]]` entries. Fields: `sweeps` (required, list of `[[check]]` entry names), `tests` (`--test <name>`), `only` (positional substring filter), `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`. `extends = "<other>"` walks up at most one parent profile; collections are **replaced** (not concatenated), env merges key-by-key. Cycles are rejected at resolve time. Sweep names that don't resolve to a `[[check]]` entry are caught at parse time.
 - Profiles use Rust **module paths** as the annotation surface. Test-file authors declare `mod tier2 { ... }` / `mod platform { ... }` / `mod serial { ... }` to mark cost classes; the brokkr profile's `only` / `skip` lists translate directly into cargo's substring filter and `--skip` flag (which match module paths).
-- `brokkr check --profile <name>` selects a profile explicitly. `brokkr check` (no flag) uses `default_profile`, then today's behaviour. `brokkr test` honours `default_profile`'s sweep set so a single test runs against every configured feature shape; if no `default_profile` is set but `[test.sweeps.*]` is, every defined sweep runs in name order.
+- The legacy `[test.sweeps.*]` map is rejected at parse time. Sweeps now live in `[[check]]` entries; profiles reference them by name.
+
+#### `brokkr check` sweep selection
+
+| invocation | sweep set | libtest filters |
+|---|---|---|
+| no `[[check]]`, no flags | one `--all-features` sweep (legacy default) | none |
+| `[[check]]` configured, no `default_profile`, no flags | every `[[check]]` entry in declaration order | none |
+| `[[check]]` + `default_profile = "tier1"`, no flags | the entries `tier1.sweeps` references | tier1's filters |
+| `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
+| `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | none |
+
+`brokkr test <name>` follows the same ladder except: filters are dropped (the user's `<name>` argument is the filter), and there's no CLI ad-hoc path (the test runner doesn't accept `--features`).
 
 ### Dataset structure
 
@@ -213,7 +228,7 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
 - `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
 - `kill` - cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM: brokkr catches it, SIGKILLs its child, flushes partial sidecar data under the `dirty` alias, releases the lock, and runs `brokkr clean`. `--hard` sends SIGKILL to brokkr + child (no cleanup; follow up with `brokkr clean`). Exits 130 on the graceful path.
-- `test [-p <PKG>] <NAME>` - (all cargo projects except litehtml/sluggrs) run one specific cargo test in release mode. Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and integration tests are matched by the name substring within the selected package. Package resolution: explicit `-p/--package` > `[test] default_package` in `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces (e.g. ratatoskr) must pass `-p` or set `default_package`. Always adds `--include-ignored --nocapture --test-threads=1`. Sweep selection: if `[test].default_profile` is set, the test runs against every sweep that profile resolves to; else if `[test.sweeps.*]` is non-empty, every defined sweep runs in name order; else fall back to `--all-features` plus a `consumer` sweep when `[check].consumer_features` is set. Each sweep's `build_packages` are rebuilt with the matching feature flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary with the same feature set the test crate sees. Streams the test's own stdout/stderr live (cargo/test-harness framing lines are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed with at least one `PASS` exits `0`. `-N <n>` repeats the test (per sweep) for flaky-test hunting; `-j <n>` sets `cargo -j N` for parallel compile; `--raw` disables all filtering. Because `cargo test <name>` is a substring filter, identically-named tests in different modules of the same package all run; use a more qualified name (module path) to disambiguate. Litehtml and sluggrs projects are rejected with a pointer to `brokkr visual`.
+- `test [-p <PKG>] <NAME>` - (all cargo projects except litehtml/sluggrs) run one specific cargo test in release mode. Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and integration tests are matched by the name substring within the selected package. Package resolution: explicit `-p/--package` > `[test] default_package` in `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces (e.g. ratatoskr) must pass `-p` or set `default_package`. Always adds `--include-ignored --nocapture --test-threads=1`. Sweep selection: if `[test].default_profile` is set, the test runs against every `[[check]]` entry the profile references (profile filters are dropped - the user's `<NAME>` is the filter); else if `[[check]]` is non-empty, every entry runs in declaration order; else fall back to a single `--all-features` sweep. Each sweep's `build_packages` are rebuilt with the matching feature flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary with the same feature set the test crate sees. Streams the test's own stdout/stderr live (cargo/test-harness framing lines are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed with at least one `PASS` exits `0`. `-N <n>` repeats the test (per sweep) for flaky-test hunting; `-j <n>` sets `cargo -j N` for parallel compile; `--raw` disables all filtering. Because `cargo test <name>` is a substring filter, identically-named tests in different modules of the same package all run; use a more qualified name (module path) to disambiguate. Litehtml and sluggrs projects are rejected with a pointer to `brokkr visual`.
 - `passthrough` - build and run with raw passthrough args (hidden, for ad-hoc use)
 - `download <region> [--osc-seq N]` - (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
 
