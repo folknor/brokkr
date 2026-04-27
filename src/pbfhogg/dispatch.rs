@@ -9,7 +9,6 @@ use crate::context::BenchContext;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{CommandContext, CommandParams, MeasureMode, MeasureRequest};
-use crate::oom;
 use crate::output;
 use crate::pbfhogg::commands::{ArgMode, InputKind, OutputKind, PbfhoggCommand};
 use crate::project::{self, Project};
@@ -88,9 +87,9 @@ pub(crate) fn run_command_with_params(
 /// (pbf/osc/bbox/snapshot/merged-cache-key), arg-vector construction, and
 /// hotpath-arg-vector construction for commands that support it.
 /// Does NOT: cargo build, lock acquisition, ensure_merged_pbf apply-changes,
-/// preflight memory check, or process execution. Hash verification of the
-/// input PBF/OSC IS performed (cached in `.brokkr/hash_cache`), because it's
-/// part of "would this start up cleanly" and cache hits are fast.
+/// or process execution. Hash verification of the input PBF/OSC IS performed
+/// (cached in `.brokkr/hash_cache`), because it's part of "would this start
+/// up cleanly" and cache hits are fast.
 fn run_pbfhogg_dry_run(
     req: &MeasureRequest,
     command: &PbfhoggCommand,
@@ -375,17 +374,6 @@ fn run_pbfhogg_hotpath(
     // Read input file size from the resolved PBF in cmd_ctx - correct for both
     // legacy commands and DiffSnapshots (which resolves a snapshot's PBF).
     let file_mb = resolve::file_size_mb(&cmd_ctx.pbf_path)?;
-    let risk = if alloc {
-        oom::MemoryRisk::AllocTracking
-    } else {
-        oom::MemoryRisk::Normal
-    };
-    // Renumber has a flat ~3-4 GB RAM footprint independent of input size
-    // (radix-partitioned tuple files live on disk), so the input×multiplier
-    // heuristic over-rejects it on planet. Skip the check.
-    let skip_mem_check =
-        req.no_mem_check || matches!(command, PbfhoggCommand::Renumber);
-    oom::check_memory(file_mb, &risk, skip_mem_check)?;
 
     let mut hotpath_args = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
     for flag in &io_args {

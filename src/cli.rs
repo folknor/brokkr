@@ -1322,10 +1322,6 @@ Examples:
         #[arg(long)]
         force: bool,
 
-        /// Skip memory availability check
-        #[arg(long)]
-        no_mem_check: bool,
-
         /// Wait for the lock instead of failing immediately
         #[arg(long)]
         wait: bool,
@@ -1365,10 +1361,6 @@ pub(crate) struct ModeArgs {
     /// Run even if the git tree is dirty (results will not be stored)
     #[arg(long)]
     pub(crate) force: bool,
-
-    /// Skip memory availability check
-    #[arg(long)]
-    pub(crate) no_mem_check: bool,
 
     /// Wait for the lock instead of failing immediately
     #[arg(long)]

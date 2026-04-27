@@ -92,7 +92,6 @@ where
             force: mode.force,
             mode: mm,
             brokkr_args,
-            no_mem_check: mode.no_mem_check,
             wait: mode.wait,
             dry_run: mode.dry_run,
             stop_marker: mode.stop.as_deref(),
@@ -948,7 +947,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
         }
         // ----- sluggrs-only commands -----
-        Command::Hotpath { alloc, runs, target, verbose, force, no_mem_check, wait } => {
+        Command::Hotpath { alloc, runs, target, verbose, force, wait } => {
             project::require(project, Project::Sluggrs, "hotpath")?;
             let mm = if alloc {
                 measure::MeasureMode::Alloc { runs }
@@ -968,7 +967,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 force,
                 mode: mm,
                 brokkr_args: &brokkr_args,
-                no_mem_check,
                 wait,
                 // Sluggrs hotpath uses Command::Hotpath, not ModeArgs - no
                 // dry-run or stop-marker surface to plumb from.

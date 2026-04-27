@@ -45,7 +45,7 @@ Single crate, single binary. No workspace.
 - `src/output.rs` - Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners (`run_captured`, `spawn_captured`, `run_passthrough_timed`)
 - `src/error.rs` - `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
 - `src/lockfile.rs` - `LockGuard` (via `OwnedFd`) for exclusive access
-- `src/oom.rs` - OOM protection (`protect_child`, `check_memory`, `MemoryRisk`)
+- `src/oom.rs` - OOM protection (`protect_child`: marks the child as the kernel OOM killer's preferred target via `oom_score_adj`, so a runaway bench takes itself down instead of the desktop)
 - `src/preflight.rs` - Pre-benchmark system checks (`Check` enum framework)
 - `src/tools.rs` - External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config)
 - `src/worktree.rs` - Persistent git worktrees for retroactive benchmarking. `Worktree::create` reuses an existing worktree at `<parent>/.brokkr-worktree-<project>-<short>` if its HEAD already matches the requested commit, so cargo `target/` survives across runs. `purge_all` (used by `brokkr clean --worktrees`) removes all sibling worktree dirs and prunes git bookkeeping.

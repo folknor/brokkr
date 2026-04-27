@@ -72,8 +72,6 @@ pub struct MeasureRequest<'a> {
     /// actually typed, even when brokkr translates it into something
     /// different before handing off to the tool subprocess.
     pub brokkr_args: &'a str,
-    /// Skip the OOM memory check.
-    pub no_mem_check: bool,
     /// Wait for the lock instead of failing immediately.
     pub wait: bool,
     /// Dry-run: resolve paths and build the arg vector without building the

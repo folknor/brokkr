@@ -7,7 +7,6 @@ use crate::elivagar::commands::ElivagarCommand;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
-use crate::oom;
 use crate::output;
 use crate::project::{self, Project};
 use crate::resolve::resolve_pbf_with_size;
@@ -368,12 +367,6 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
             let (pbf_path, file_mb) =
                 resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-            let risk = if alloc {
-                oom::MemoryRisk::AllocTracking
-            } else {
-                oom::MemoryRisk::Normal
-            };
-            oom::check_memory(file_mb, &risk, req.no_mem_check)?;
 
             let pbf_str = pbf_path
                 .to_str()
