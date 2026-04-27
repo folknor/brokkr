@@ -51,6 +51,13 @@ pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
 
 /// Best-effort recording of command history. Warns once on failure.
 pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
+    // Sandboxes (and other minimal envs) may have neither XDG_DATA_HOME nor
+    // HOME set - there's nowhere to put history.db, and emitting a warning
+    // on every invocation is just noise.
+    if std::env::var_os("XDG_DATA_HOME").is_none() && std::env::var_os("HOME").is_none() {
+        return;
+    }
+
     let inner = || -> Result<(), error::DevError> {
         let db = history::HistoryDb::open()?;
 
