@@ -67,6 +67,12 @@ pub(crate) fn run_command_with_params(
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Pbfhogg, command.id())?;
 
+    // If `--as-snapshot KEY` is set, validate the key against existing
+    // brokkr.toml state before triggering the cargo build. Without this
+    // pre-flight, a 30s+ run can complete and then error at registration
+    // because the operator forgot `--replace-snapshot`.
+    preflight_as_snapshot(req, extra_params)?;
+
     if req.dry_run {
         return run_pbfhogg_dry_run(req, command, osc_seq, extra_params);
     }
@@ -78,6 +84,30 @@ pub(crate) fn run_command_with_params(
             run_pbfhogg_hotpath(req, command, osc_seq, extra_params)
         }
     }
+}
+
+/// Pre-flight validation for `--as-snapshot KEY`: bootstrap config (cheap;
+/// cargo metadata + brokkr.toml parse, no compile) and check that KEY is a
+/// valid snapshot key and either unused or `--replace-snapshot` was passed.
+/// No-op when `as_snapshot` is unset.
+fn preflight_as_snapshot(
+    req: &MeasureRequest,
+    extra_params: &CommandParams,
+) -> Result<(), DevError> {
+    let Some(snap_key) = extra_params.as_snapshot.as_deref() else {
+        return Ok(());
+    };
+
+    let pi = crate::context::bootstrap(req.build_root)?;
+    let paths =
+        crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+
+    crate::pbfhogg::download::preflight_snapshot_collision(
+        snap_key,
+        extra_params.replace_snapshot,
+        req.dataset,
+        paths.datasets.get(req.dataset),
+    )
 }
 
 /// Dry-run mode: validate argv, config, and path resolution without building

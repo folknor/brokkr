@@ -21,7 +21,6 @@ impl Command {
         Option<&str>,
         CommandParams,
     )> {
-        let empty = CommandParams::default();
         match self {
             // Simple commands: mode + pbf, no extras
             Self::Inspect {
@@ -32,9 +31,11 @@ impl Command {
                 type_filter,
                 extended,
                 jobs,
+                snapshot,
             } => {
                 let params = CommandParams {
                     jobs: *jobs,
+                    snapshot: snapshot.clone(),
                     ..Default::default()
                 };
                 Some((
@@ -50,19 +51,34 @@ impl Command {
                     params,
                 ))
             }
-            Self::CheckRefs { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::CheckRefs, None, empty))
+            Self::CheckRefs { mode, pbf, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::CheckRefs, None, params))
             }
-            Self::CheckIds { mode, pbf, full } => {
-                Some((mode, pbf, PbfhoggCommand::CheckIds { full: *full }, None, empty))
+            Self::CheckIds { mode, pbf, full, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::CheckIds { full: *full }, None, params))
             }
-            Self::Sort { mode, pbf } => Some((mode, pbf, PbfhoggCommand::Sort, None, empty)),
+            Self::Sort { mode, pbf, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::Sort, None, params))
+            }
             Self::Cat {
                 mode,
                 pbf,
                 type_filter,
                 dedupe,
                 clean,
+                snapshot,
             } => {
                 // Parse errors become `None` - clap's value_parser catches
                 // most bad input upstream; dispatch will surface anything
@@ -70,6 +86,10 @@ impl Command {
                 let tf = type_filter
                     .as_deref()
                     .and_then(|s| crate::pbfhogg::commands::CatTypeFilter::parse(s).ok());
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
                 Some((
                     mode,
                     pbf,
@@ -79,7 +99,7 @@ impl Command {
                         clean: *clean,
                     },
                     None,
-                    empty,
+                    params,
                 ))
             }
             Self::TagsFilter {
@@ -119,31 +139,54 @@ impl Command {
                 pbf,
                 add_referenced,
                 invert,
-            } => Some((
-                mode,
-                pbf,
-                PbfhoggCommand::Getid {
-                    add_referenced: *add_referenced,
-                    invert: *invert,
-                },
-                None,
-                empty,
-            )),
-            Self::Getparents { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::Getparents, None, empty))
+                snapshot,
+            } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::Getid {
+                        add_referenced: *add_referenced,
+                        invert: *invert,
+                    },
+                    None,
+                    params,
+                ))
             }
-            Self::Renumber { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::Renumber, None, empty))
+            Self::Getparents { mode, pbf, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::Getparents, None, params))
+            }
+            Self::Renumber { mode, pbf, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::Renumber, None, params))
             }
             // MultiExtract carries a `--strategy` axis that may expand to
             // three runs ("all"). The fan-out happens in `main.rs`, same as
             // `extract --strategy all`, so this adapter no longer handles it.
             Self::MultiExtract { .. } => None,
-            Self::TimeFilter { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::TimeFilter, None, empty))
+            Self::TimeFilter { mode, pbf, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::TimeFilter, None, params))
             }
-            Self::BuildGeocodeIndex { mode, pbf } => {
-                Some((mode, pbf, PbfhoggCommand::BuildGeocodeIndex, None, empty))
+            Self::BuildGeocodeIndex { mode, pbf, snapshot } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    ..Default::default()
+                };
+                Some((mode, pbf, PbfhoggCommand::BuildGeocodeIndex, None, params))
             }
 
             // Commands with OSC sequence
@@ -219,9 +262,11 @@ impl Command {
                 mode,
                 pbf,
                 index_type,
+                snapshot,
             } => {
                 let params = CommandParams {
                     index_type: index_type.clone(),
+                    snapshot: snapshot.clone(),
                     ..Default::default()
                 };
                 Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))

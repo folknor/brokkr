@@ -309,9 +309,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             pbf,
             strategy,
             bbox,
+            snapshot,
         } => {
             let params = crate::measure::CommandParams {
                 bbox: bbox.clone(),
+                snapshot: snapshot.clone(),
                 ..Default::default()
             };
             run_measured(
@@ -344,9 +346,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             regions,
             bbox,
             strategy,
+            snapshot,
         } => {
             let params = crate::measure::CommandParams {
                 bbox: bbox.clone(),
+                snapshot: snapshot.clone(),
                 ..Default::default()
             };
             run_measured(

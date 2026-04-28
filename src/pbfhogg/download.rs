@@ -532,6 +532,38 @@ fn append_dataset_header(
 // Snapshot promotion (used by `brokkr repack` / `brokkr degrade --as-snapshot`)
 // ---------------------------------------------------------------------------
 
+/// Validate `--as-snapshot KEY` arguments before the build/run kicks off.
+///
+/// Catches the common mistake of forgetting `--replace-snapshot` on an
+/// existing key: without this, the full pbfhogg run completes (potentially
+/// after minutes of work) and only then errors out at registration. The
+/// destructive replace path is still handled by `promote_snapshot` after the
+/// run succeeds; this helper is non-destructive.
+pub(crate) fn preflight_snapshot_collision(
+    snap_key: &str,
+    replace: bool,
+    dataset_key: &str,
+    dataset: Option<&Dataset>,
+) -> Result<(), DevError> {
+    crate::config::validate_snapshot_key(snap_key).map_err(DevError::Config)?;
+
+    let ds = dataset.ok_or_else(|| {
+        DevError::Config(format!(
+            "dataset '{dataset_key}' is not registered. Run `brokkr download {dataset_key}` first to create the primary entry, \
+             then re-run with `--as-snapshot {snap_key}`."
+        ))
+    })?;
+
+    if ds.snapshot.contains_key(snap_key) && !replace {
+        return Err(DevError::Config(format!(
+            "snapshot '{snap_key}' is already registered for dataset '{dataset_key}'. \
+             Pass `--replace-snapshot` to overwrite, or pick a different key."
+        )));
+    }
+
+    Ok(())
+}
+
 /// Promote a generated PBF artifact into the dataset's snapshot graph.
 ///
 /// Moves `scratch_pbf` into the dataset's `data_dir` under a stable filename,

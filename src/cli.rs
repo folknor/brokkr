@@ -132,6 +132,11 @@ Examples:
         /// use pbfhogg's default (1).
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Check referential integrity
     #[command(name = "check-refs", display_order = 2)]
@@ -140,6 +145,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Check ID ordering
     #[command(name = "check-ids", display_order = 2)]
@@ -153,6 +163,11 @@ Examples:
         /// default.
         #[arg(long)]
         full: bool,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Sort PBF
     #[command(name = "sort", display_order = 2)]
@@ -161,6 +176,12 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
+        /// produced by `brokkr degrade --unsort --as-snapshot ...`).
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Cat passthrough. Flags are orthogonal:
     ///   `--type way|relation` restricts output to one object kind;
@@ -187,6 +208,11 @@ Examples:
         /// Force the full-decode / re-frame Framed path (cat_filtered).
         #[arg(long)]
         clean: bool,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Tags filter. Orthogonal flags:
     ///   `--filter EXPR` - pbfhogg filter expression (default
@@ -228,8 +254,9 @@ Examples:
         /// `--input-kind osc`).
         #[arg(long)]
         osc_seq: Option<String>,
-        /// Snapshot key to read from (OSC input). Use `base` (or omit)
-        /// for the primary data; pass a key registered under
+        /// Snapshot key to read input from (PBF or OSC, depending on
+        /// `--input-kind`). Use `base` (or omit) for the dataset's
+        /// primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
         #[arg(long)]
         snapshot: Option<String>,
@@ -256,6 +283,11 @@ Examples:
         /// Select everything NOT in the hardcoded ID set.
         #[arg(long)]
         invert: bool,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Get parent elements
     #[command(name = "getparents", display_order = 2)]
@@ -264,6 +296,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Renumber element IDs
     #[command(name = "renumber", display_order = 2)]
@@ -272,6 +309,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Merge OSC changes. `--simplify` picks the BTreeMap dedupe
     /// path (keep only the last change per object) instead of the default
@@ -332,6 +374,12 @@ Examples:
         /// Index type (dense, sparse, external; default: hash)
         #[arg(long)]
         index_type: Option<String>,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
+        /// produced by `brokkr degrade --strip-locations --as-snapshot ...`).
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Re-encode a PBF with a configurable elements-per-blob cap.
     ///
@@ -429,6 +477,11 @@ Examples:
         /// three back-to-back, like `brokkr extract --strategy all`).
         #[arg(long, default_value = "simple")]
         strategy: String,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Filter by timestamp
     #[command(name = "time-filter", display_order = 2)]
@@ -437,6 +490,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Diff base PBF against the applied-changes merged PBF.
     /// `--format osc` switches output from summary (stdout) to an OSC
@@ -524,6 +582,11 @@ Examples:
         mode: ModeArgs,
         #[command(flatten)]
         pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Extract by bounding box (configurable strategy)
     #[command(name = "extract", display_order = 2)]
@@ -538,6 +601,11 @@ Examples:
         /// Bounding box (lon_min,lat_min,lon_max,lat_max)
         #[arg(long)]
         bbox: Option<String>,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Read benchmark
     #[command(name = "read", display_order = 2)]
