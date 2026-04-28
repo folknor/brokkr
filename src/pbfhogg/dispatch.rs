@@ -30,7 +30,7 @@ fn resolve_io_flags(
 
     if io_uring && !command.supports_io_uring() {
         return Err(DevError::Config(format!(
-            "--io-uring is not supported by '{}' (only apply-changes, sort, cat-dedupe, diff-osc)",
+            "--io-uring is not supported by '{}' (only apply-changes, sort, cat-dedupe, diff-osc, repack, degrade)",
             command.id(),
         )));
     }
@@ -204,11 +204,13 @@ fn run_pbfhogg_run(
 
     let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
 
-    cleanup_output(command, &cmd_ctx, ArgMode::Bench);
-
     if out.code != 0 && !command.ok_exit_codes().contains(&out.code) {
+        cleanup_output(command, &cmd_ctx, ArgMode::Bench);
         return Err(DevError::ExitCode(out.code));
     }
+
+    promote_artifact(command, &cmd_ctx, ArgMode::Bench, &ctx.paths, req.project_root)?;
+    cleanup_output(command, &cmd_ctx, ArgMode::Bench);
 
     let ms = crate::duration_ms(out.elapsed);
     output::run_msg(&format!("elapsed={ms}ms"));
@@ -256,15 +258,20 @@ fn run_pbfhogg_wallclock(
         req.runs(),
         req.project_root,
         true,
-    )
+    )?;
+
+    promote_artifact(command, &cmd_ctx, ArgMode::Bench, &ctx.paths, req.project_root)?;
+    cleanup_output(command, &cmd_ctx, ArgMode::Bench);
+    Ok(())
 }
 
 /// Run a single pbfhogg command via the wall-clock harness.
 ///
 /// Shared by `run_pbfhogg_wallclock` (individual `brokkr <cmd>` invocations)
 /// and the suite runner in `pbfhogg::bench_commands`. Both paths produce
-/// identical DB rows - argv construction, BenchConfig fields, and scratch
-/// cleanup are all centralised here.
+/// identical DB rows; argv construction and BenchConfig fields are centralised
+/// here. Cleanup is the caller's responsibility - top-level invocations may
+/// promote the artifact (`--as-snapshot`) before cleaning up the scratch file.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wallclock_core(
     harness: &harness::BenchHarness,
@@ -320,9 +327,6 @@ pub(crate) fn run_wallclock_core(
         project_root,
         command.ok_exit_codes(),
     )?;
-
-    cleanup_output(command, cmd_ctx, ArgMode::Bench);
-
     Ok(())
 }
 
@@ -436,6 +440,7 @@ fn run_pbfhogg_hotpath(
         Ok(result)
     })?;
 
+    promote_artifact(command, &cmd_ctx, ArgMode::Hotpath, &ctx.paths, req.project_root)?;
     cleanup_output(command, &cmd_ctx, ArgMode::Hotpath);
 
     Ok(())
@@ -676,7 +681,45 @@ fn build_diff_snapshots_context(
 }
 
 /// Clean up scratch output files after a benchmark run.
-fn cleanup_output(
+/// If `--as-snapshot KEY` was passed, move the scratch artifact into the
+/// dataset's data dir and append a `[..snapshot.<KEY>...]` block to
+/// `brokkr.toml`. Called after a successful measured/run completes; no-op
+/// when `as_snapshot` is unset.
+///
+/// Variant routing: `degrade --strip-indexdata` writes under `pbf.raw` (the
+/// output has no indexdata); everything else writes under `pbf.indexed`.
+fn promote_artifact(
+    command: &PbfhoggCommand,
+    ctx: &CommandContext,
+    mode: ArgMode,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let Some(snap_key) = ctx.params.as_snapshot.as_deref() else {
+        return Ok(());
+    };
+
+    let scratch_pbf = crate::pbfhogg::commands::scratch_output_path(ctx, command, mode);
+    let target_variant = match command {
+        PbfhoggCommand::Degrade { strip_indexdata: true, .. } => "raw",
+        _ => "indexed",
+    };
+    let dataset = paths.datasets.get(&ctx.dataset);
+
+    crate::pbfhogg::download::promote_snapshot(
+        project_root,
+        &paths.hostname,
+        &ctx.dataset,
+        snap_key,
+        ctx.params.replace_snapshot,
+        &scratch_pbf,
+        target_variant,
+        dataset,
+        &paths.data_dir,
+    )
+}
+
+pub(crate) fn cleanup_output(
     command: &PbfhoggCommand,
     ctx: &CommandContext,
     mode: ArgMode,

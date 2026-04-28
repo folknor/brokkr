@@ -330,7 +330,13 @@ pub fn run(
             runs,
             project_root,
             false,
-        )
+        )?;
+        crate::pbfhogg::dispatch::cleanup_output(
+            &cmd,
+            &ctx,
+            crate::pbfhogg::commands::ArgMode::Bench,
+        );
+        Ok(())
     })
 }
 

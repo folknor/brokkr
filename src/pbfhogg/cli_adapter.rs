@@ -227,6 +227,62 @@ impl Command {
                 Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))
             }
 
+            Self::Repack {
+                mode,
+                pbf,
+                snapshot,
+                elements_per_blob,
+                as_snapshot,
+                replace_snapshot,
+                force_repack,
+            } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    as_snapshot: as_snapshot.clone(),
+                    replace_snapshot: *replace_snapshot,
+                    ..Default::default()
+                };
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::Repack {
+                        elements_per_blob: *elements_per_blob,
+                        force: *force_repack,
+                    },
+                    None,
+                    params,
+                ))
+            }
+
+            Self::Degrade {
+                mode,
+                pbf,
+                snapshot,
+                unsort,
+                strip_locations,
+                strip_indexdata,
+                as_snapshot,
+                replace_snapshot,
+            } => {
+                let params = CommandParams {
+                    snapshot: snapshot.clone(),
+                    as_snapshot: as_snapshot.clone(),
+                    replace_snapshot: *replace_snapshot,
+                    ..Default::default()
+                };
+                Some((
+                    mode,
+                    pbf,
+                    PbfhoggCommand::Degrade {
+                        unsort: *unsort,
+                        strip_locations: *strip_locations,
+                        strip_indexdata: *strip_indexdata,
+                    },
+                    None,
+                    params,
+                ))
+            }
+
             _ => None,
         }
     }

@@ -529,6 +529,170 @@ fn append_dataset_header(
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot promotion (used by `brokkr repack` / `brokkr degrade --as-snapshot`)
+// ---------------------------------------------------------------------------
+
+/// Promote a generated PBF artifact into the dataset's snapshot graph.
+///
+/// Moves `scratch_pbf` into the dataset's `data_dir` under a stable filename,
+/// computes its xxh128, and appends a `[..snapshot.<key>]` header plus a
+/// `[..snapshot.<key>.pbf.<variant>]` entry to `brokkr.toml`. The `variant`
+/// parameter is `"raw"` for `degrade --strip-indexdata` outputs (which carry
+/// no indexdata) and `"indexed"` everywhere else.
+///
+/// Errors:
+/// - `"base"` is reserved (CLI sentinel for the legacy top-level data).
+/// - The dataset must already exist in `brokkr.toml`.
+/// - The snapshot key must not already be registered, unless `replace = true`.
+///   With `replace`, any existing snapshot blocks are stripped from the TOML
+///   and any per-pbf files under the dataset's data dir are unlinked first.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn promote_snapshot(
+    project_root: &Path,
+    hostname: &str,
+    dataset_key: &str,
+    snap_key: &str,
+    replace: bool,
+    scratch_pbf: &Path,
+    target_variant: &str,
+    dataset: Option<&Dataset>,
+    data_dir: &Path,
+) -> Result<(), DevError> {
+    crate::config::validate_snapshot_key(snap_key).map_err(DevError::Config)?;
+
+    let ds = dataset.ok_or_else(|| {
+        DevError::Config(format!(
+            "dataset '{dataset_key}' is not registered. Run `brokkr download {dataset_key}` first to create the primary entry, \
+             then re-run with `--as-snapshot {snap_key}`."
+        ))
+    })?;
+
+    if ds.snapshot.contains_key(snap_key) {
+        if replace {
+            for entry in ds.snapshot[snap_key].pbf.values() {
+                let p = data_dir.join(&entry.file);
+                std::fs::remove_file(&p).ok();
+            }
+            for entry in ds.snapshot[snap_key].osc.values() {
+                let p = data_dir.join(&entry.file);
+                std::fs::remove_file(&p).ok();
+            }
+            remove_snapshot_blocks(project_root, hostname, dataset_key, snap_key)?;
+        } else {
+            return Err(DevError::Config(format!(
+                "snapshot '{snap_key}' is already registered for dataset '{dataset_key}'. \
+                 Pass `--replace-snapshot` to overwrite, or pick a different key."
+            )));
+        }
+    }
+
+    if !scratch_pbf.exists() {
+        return Err(DevError::Config(format!(
+            "expected scratch artifact at {} but the file is missing - did the run complete?",
+            scratch_pbf.display(),
+        )));
+    }
+
+    std::fs::create_dir_all(data_dir)?;
+
+    let target_filename = match target_variant {
+        "indexed" => format!("{dataset_key}-{snap_key}-with-indexdata.osm.pbf"),
+        _ => format!("{dataset_key}-{snap_key}.osm.pbf"),
+    };
+    let target_path = data_dir.join(&target_filename);
+
+    output::download_msg(&format!(
+        "  promoting artifact -> {}",
+        target_path.display()
+    ));
+    if let Err(e) = std::fs::rename(scratch_pbf, &target_path) {
+        // rename() fails across filesystems with EXDEV; fall back to copy +
+        // remove. Use the raw OS code so we don't depend on the
+        // `ErrorKind::CrossesDevices` variant (recent stable only).
+        if e.raw_os_error() == Some(libc::EXDEV) {
+            std::fs::copy(scratch_pbf, &target_path)?;
+            std::fs::remove_file(scratch_pbf).ok();
+        } else {
+            return Err(DevError::Io(e));
+        }
+    }
+
+    let date = today();
+    let snapshot_download_date = snapshot_key_to_iso_date(snap_key)
+        .unwrap_or_else(|| iso_date_today(&date));
+    append_snapshot_header(
+        project_root,
+        hostname,
+        dataset_key,
+        snap_key,
+        &snapshot_download_date,
+    )?;
+
+    output::download_msg(&format!("  hashing {target_filename}..."));
+    let hash = preflight::cached_xxh128(&target_path, project_root)?;
+    append_snapshot_pbf_entry(
+        project_root,
+        hostname,
+        dataset_key,
+        snap_key,
+        target_variant,
+        &target_filename,
+        &hash,
+    )?;
+    Ok(())
+}
+
+/// Strip every `[<host>.datasets.<dataset>.snapshot.<key>...]` block from
+/// `brokkr.toml` (the snapshot header itself plus its pbf/osc sub-tables).
+///
+/// Line-based rewrite: drops every line inside a matched block until the
+/// next `[` header. Other dataset blocks are untouched. Same caveats as
+/// `rotate_dataset_to_snapshot` - works only on brokkr-generated TOML where
+/// each header sits on its own line.
+fn remove_snapshot_blocks(
+    project_root: &Path,
+    hostname: &str,
+    dataset_key: &str,
+    snap_key: &str,
+) -> Result<(), DevError> {
+    let toml_path = project_root.join("brokkr.toml");
+    let contents = std::fs::read_to_string(&toml_path)?;
+
+    let prefix = format!("[{hostname}.datasets.{dataset_key}.snapshot.{snap_key}");
+    let mut out = String::with_capacity(contents.len());
+    let mut dropping = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            // The match needs the next char after the prefix to be either
+            // `]` (the snapshot header itself) or `.` (a sub-table). This
+            // avoids accidentally matching an unrelated key whose name
+            // happens to start with `<snap_key>`.
+            if trimmed.starts_with(&prefix) {
+                let rest = &trimmed[prefix.len()..];
+                let starts_subblock = rest.starts_with(']') || rest.starts_with('.');
+                if starts_subblock {
+                    dropping = true;
+                    continue;
+                }
+            }
+            dropping = false;
+        }
+        if !dropping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    std::fs::write(&toml_path, out)?;
+    output::download_msg(&format!(
+        "  removed previous [{hostname}.datasets.{dataset_key}.snapshot.{snap_key}*] blocks from brokkr.toml"
+    ));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 

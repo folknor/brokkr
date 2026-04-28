@@ -333,6 +333,82 @@ Examples:
         #[arg(long)]
         index_type: Option<String>,
     },
+    /// [pbfhogg] Re-encode a PBF with a configurable elements-per-blob cap.
+    ///
+    /// Default writes to scratch and is overwritten on each `--bench`
+    /// iteration. Pass `--as-snapshot KEY` to promote the final iteration's
+    /// artifact into the dataset graph (registered under
+    /// `[<host>.datasets.<dataset>.snapshot.<KEY>.pbf.indexed]` in
+    /// brokkr.toml). `KEY=base` is reserved.
+    #[command(name = "repack", display_order = 2)]
+    Repack {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Cap on elements per output blob (passes through to pbfhogg).
+        /// Omit to use pbfhogg's default (8000).
+        #[arg(long, value_name = "N")]
+        elements_per_blob: Option<u32>,
+        /// Promote the final iteration's artifact to a snapshot under the
+        /// dataset (writes a [..snapshot.<KEY>.pbf.indexed] entry).
+        #[arg(long, value_name = "KEY")]
+        as_snapshot: Option<String>,
+        /// Overwrite an existing snapshot of the same key. Without this,
+        /// `--as-snapshot KEY` errors when KEY is already registered.
+        #[arg(long, requires = "as_snapshot")]
+        replace_snapshot: bool,
+        /// Pass `--force` through to pbfhogg repack (skips the indexdata
+        /// requirement).
+        #[arg(long)]
+        force_repack: bool,
+    },
+    /// [pbfhogg] Produce an adversarial PBF by stripping properties or
+    /// perturbing structure.
+    ///
+    /// Flags compose; pbfhogg requires at least one transformation flag and
+    /// brokkr defers to pbfhogg's own validation. Default writes to scratch
+    /// and is overwritten on each `--bench` iteration. With
+    /// `--as-snapshot KEY`, the final artifact is promoted into the dataset
+    /// graph - under `pbf.raw` when `--strip-indexdata` is set, otherwise
+    /// `pbf.indexed`.
+    #[command(name = "degrade", display_order = 2)]
+    Degrade {
+        #[command(flatten)]
+        mode: ModeArgs,
+        #[command(flatten)]
+        pbf: PbfArgs,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical snapshot.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Clear `Sort.Type_then_ID` and produce one adjacent same-kind blob
+        /// pair per kind with overlapping ID ranges.
+        #[arg(long)]
+        unsort: bool,
+        /// Drop `LocationsOnWays` (clears the header feature and re-encodes
+        /// ways without inline coordinates).
+        #[arg(long)]
+        strip_locations: bool,
+        /// Clear `BlobHeader.indexdata` on every OsmData blob.
+        #[arg(long)]
+        strip_indexdata: bool,
+        /// Promote the final iteration's artifact to a snapshot under the
+        /// dataset. Written under `pbf.raw` if `--strip-indexdata` is set,
+        /// otherwise `pbf.indexed`.
+        #[arg(long, value_name = "KEY")]
+        as_snapshot: Option<String>,
+        /// Overwrite an existing snapshot of the same key. Without this,
+        /// `--as-snapshot KEY` errors when KEY is already registered.
+        #[arg(long, requires = "as_snapshot")]
+        replace_snapshot: bool,
+    },
     /// [pbfhogg] Multi-extract benchmark (N regions in one pbfhogg
     /// invocation). `--strategy` picks pbfhogg's extract algorithm
     /// (simple / smart / complete / all).

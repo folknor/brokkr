@@ -54,7 +54,7 @@ All measured modes automatically attach a sidecar that samples `/proc` metrics a
 
 All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`, `--wait`.
 
-pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and show up in the `cli_args`/`brokkr_args` columns of the results DB (query via `brokkr results --grep direct-io`). `--direct-io` works with all commands. `--io-uring` is only supported by `apply-changes`, `sort`, `cat --dedupe`, and `diff --format osc` - brokkr rejects it for other commands before building. io_uring preflight checks run automatically.
+pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and show up in the `cli_args`/`brokkr_args` columns of the results DB (query via `brokkr results --grep direct-io`). `--direct-io` works with all commands. `--io-uring` is only supported by `apply-changes`, `sort`, `cat --dedupe`, `diff --format osc`, `repack`, and `degrade` - brokkr rejects it for other commands before building. io_uring preflight checks run automatically.
 
 ### Shared (all projects)
 
@@ -92,7 +92,7 @@ Each `[[check]]` entry declares `name`, optional `features = [...]` (explicit li
 
 ### pbfhogg
 
-Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect`, `check-refs`, `sort`, `cat`, `add-locations-to-ways`, `build-geocode-index`, `apply-changes`, `merge-changes`, `extract`, `tags-filter`, `getid`, `diff`, etc.
+Every pbfhogg CLI command is a top-level brokkr subcommand: `inspect`, `check-refs`, `sort`, `cat`, `add-locations-to-ways`, `build-geocode-index`, `apply-changes`, `merge-changes`, `extract`, `tags-filter`, `getid`, `diff`, `repack`, `degrade`, etc.
 
 Several commands are flag-driven umbrellas that previously had separate subcommand names:
 
@@ -104,6 +104,15 @@ Several commands are flag-driven umbrellas that previously had separate subcomma
 - `brokkr diff` - `--format default|osc` picks the output shape
 
 `add-locations-to-ways` accepts `--index-type` (dense, sparse, external; default: hash). Lands in `cli_args` verbatim.
+
+`repack` re-encodes a PBF with a configurable elements-per-blob cap (`--elements-per-blob N`, default 8000). `degrade` produces an adversarial PBF: `--unsort` (clear `Sort.Type_then_ID` and force one adjacent same-kind blob pair to overlap per kind), `--strip-locations` (drop `LocationsOnWays`), `--strip-indexdata` (clear per-blob indexdata). Flags compose; pbfhogg requires at least one transformation flag on `degrade`. Both write to scratch by default and overwrite each `--bench` iteration. Both also accept `--as-snapshot KEY` to promote the final iteration's artifact into the dataset graph - `repack` always writes under `pbf.indexed`; `degrade` writes under `pbf.raw` when `--strip-indexdata` is set, otherwise `pbf.indexed`. `KEY=base` is reserved (CLI sentinel for the dataset's primary data); existing keys are rejected unless `--replace-snapshot` is passed. Subsequent runs address the promoted artifact via `--snapshot KEY` on any snapshot-aware command (`apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, `diff`, `repack`, `degrade`, `diff-snapshots`). Closing measurement loops blocked on adversarial inputs:
+
+```
+brokkr repack --dataset planet --elements-per-blob 8000 --as-snapshot packed-8k
+brokkr getparents --dataset planet --snapshot packed-8k --bench
+brokkr degrade --dataset planet --unsort --as-snapshot unsorted
+brokkr sort --dataset planet --snapshot unsorted --bench 1
+```
 
 Multi-variant benchmarks: `read`, `write`, `merge`, `extract` (with `--strategy`, `--modes`, `--compressions` flags - `--compressions` is plural because the single-value `--compression` collides with pbfhogg's passthrough flag on `write` / `merge`).
 
@@ -146,7 +155,7 @@ Per run it renumbers the input PBF with both tools, runs `pbfhogg diff -s -c -v`
 
 `download <region> --refresh` rotates the dataset to a newer upstream snapshot. HEAD-checks upstream `Last-Modified` first; no-ops if not newer than the existing pbf.raw's mtime / `download_date` (use `--force` to rotate anyway). On rotation: archives the existing primary pbf/osc tables under a `[snapshot.<key>]` block (key derived from `download_date` or file mtime as `YYYYMMDD`), downloads the new PBF, generates the indexed PBF via `pbfhogg cat`, updates `download_date` to today, and resets the OSC chain. Errors with a clear message if the derived snapshot key collides with an existing snapshot block. After refresh, the archived state is reachable via `brokkr diff-snapshots --from <key> --to base` and `brokkr apply-changes --dataset <region> --snapshot <key> --osc-seq <N>`.
 
-`apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, and `diff` (including `--format osc`) all accept `--snapshot <key>` to read PBF and/or OSC data from a historical snapshot rather than the dataset's primary tables. `--snapshot base` (or omitting the flag) preserves the existing behavior - script-friendly when parameterizing over snapshot keys. The `--snapshot` flag lands verbatim in `cli_args`, so `brokkr results --grep 'snapshot 20260411'` (or just `--grep 20260411`) finds every command run against that snapshot.
+`apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, `diff` (including `--format osc`), `repack`, and `degrade` all accept `--snapshot <key>` to read PBF and/or OSC data from a historical snapshot rather than the dataset's primary tables. `--snapshot base` (or omitting the flag) preserves the existing behavior - script-friendly when parameterizing over snapshot keys. The `--snapshot` flag lands verbatim in `cli_args`, so `brokkr results --grep 'snapshot 20260411'` (or just `--grep 20260411`) finds every command run against that snapshot.
 
 Calling plain `brokkr download <region>` against a dataset whose `pbf.raw` is already configured is a SKIP (no auto-refresh), and prints a multi-line message naming both `--refresh` and `--as-snapshot` so the user knows the alternatives without having to read the source.
 
@@ -412,7 +421,7 @@ nidhogg = "/home/folk/Programs/nidhogg"
 
 - `project` - which project this is (`pbfhogg`, `elivagar`, `nidhogg`, or `litehtml-rs`)
 - `[hostname.datasets.*]` - named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
-- `[hostname.datasets.*.snapshot.<key>]` - additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots` and addressable via `--snapshot <key>` on `apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, and `diff` (including `--format osc`). Refresh-mode downloads (`brokkr download <region> --refresh`) populate snapshot blocks automatically by archiving the previous primary state
+- `[hostname.datasets.*.snapshot.<key>]` - additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots` and addressable via `--snapshot <key>` on `apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, `diff` (including `--format osc`), `repack`, and `degrade`. Refresh-mode downloads (`brokkr download <region> --refresh`) populate snapshot blocks automatically by archiving the previous primary state. Generative commands `brokkr repack --as-snapshot KEY` and `brokkr degrade --as-snapshot KEY` register newly-produced artifacts under this same shape
 - `xxhash` - optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` - per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
 - `features` - cargo features appended to every build (all measurable commands, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top

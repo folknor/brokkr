@@ -168,6 +168,13 @@ pub struct CommandParams {
     /// `available_parallelism()`). `None` means the flag wasn't passed,
     /// so brokkr doesn't emit it and pbfhogg's own default (1) stands.
     pub jobs: Option<usize>,
+    /// `--as-snapshot KEY` for `repack` / `degrade`. When set, the dispatch
+    /// layer skips scratch cleanup after a successful run and promotes the
+    /// final artifact into the dataset graph.
+    pub as_snapshot: Option<String>,
+    /// `--replace-snapshot` companion to `as_snapshot`. Allows overwriting
+    /// an existing `[..snapshot.KEY]` entry.
+    pub replace_snapshot: bool,
 
     // ----- Runtime observations (set during dispatch) -----
     /// Merged-PBF cache state: `"hit"` or `"miss"`. Observed when resolving

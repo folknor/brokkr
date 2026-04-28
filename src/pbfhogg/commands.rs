@@ -248,6 +248,24 @@ pub enum PbfhoggCommand {
     /// The format flag selects between summary diff and OSC-format diff.
     DiffSnapshots { format: DiffFormat },
 
+    /// `repack` - re-encode a PBF with a configurable elements-per-blob
+    /// cap. `elements_per_blob = None` defers to pbfhogg's default (8000);
+    /// `Some(N)` emits `--elements-per-blob N`. `force` adds `--force`,
+    /// skipping pbfhogg's indexdata requirement.
+    Repack {
+        elements_per_blob: Option<u32>,
+        force: bool,
+    },
+    /// `degrade` - emit an adversarial PBF. At least one of the three
+    /// transformation flags is required (pbfhogg enforces this; brokkr
+    /// forwards as-is). `strip_indexdata` is the only flag that affects
+    /// snapshot-promotion routing (produces `pbf.raw`, not `pbf.indexed`).
+    Degrade {
+        unsort: bool,
+        strip_locations: bool,
+        strip_indexdata: bool,
+    },
+
     // -- Standalone commands --
     BuildGeocodeIndex,
 
@@ -286,6 +304,8 @@ impl PbfhoggCommand {
             Self::Extract { .. } => "extract",
             Self::MultiExtract { .. } => "multi-extract",
             Self::DiffSnapshots { .. } => "diff-snapshots",
+            Self::Repack { .. } => "repack",
+            Self::Degrade { .. } => "degrade",
         }
     }
 
@@ -347,6 +367,8 @@ impl PbfhoggCommand {
                 | Self::Sort
                 | Self::Diff { format: DiffFormat::Osc }
                 | Self::Cat { dedupe: true, .. }
+                | Self::Repack { .. }
+                | Self::Degrade { .. }
         )
     }
 
@@ -757,6 +779,50 @@ impl PbfhoggCommand {
                 if let Some(j) = ctx.params.jobs {
                     args.push("-j".into());
                     args.push(j.to_string());
+                }
+                Ok(args)
+            }
+
+            Self::Repack {
+                elements_per_blob,
+                force,
+            } => {
+                let output = scratch_output_path(ctx, self, mode);
+                let mut args = vec![
+                    "repack".into(),
+                    ctx.pbf_str()?.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
+                ];
+                if let Some(n) = elements_per_blob {
+                    args.push("--elements-per-blob".into());
+                    args.push(n.to_string());
+                }
+                if *force {
+                    args.push("--force".into());
+                }
+                Ok(args)
+            }
+            Self::Degrade {
+                unsort,
+                strip_locations,
+                strip_indexdata,
+            } => {
+                let output = scratch_output_path(ctx, self, mode);
+                let mut args = vec![
+                    "degrade".into(),
+                    ctx.pbf_str()?.into(),
+                    "-o".into(),
+                    path_to_string(&output)?,
+                ];
+                if *unsort {
+                    args.push("--unsort".into());
+                }
+                if *strip_locations {
+                    args.push("--strip-locations".into());
+                }
+                if *strip_indexdata {
+                    args.push("--strip-indexdata".into());
                 }
                 Ok(args)
             }
