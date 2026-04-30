@@ -208,7 +208,7 @@ fn run_gremlins(
     } else {
         let changed = scope::changed_files(project_root);
         let part = scope::partition(found, |g| g.path.as_path(), limit, changed.as_ref());
-        let trailer = scope::format_trailer(part.hidden_scoped, part.hidden_unscoped);
+        let trailer = scope::format_trailer(part.hidden_unscoped);
         (part.displayed, trailer)
     };
 
@@ -511,7 +511,7 @@ fn format_clippy_capped_multi(
             limit,
             changed.as_ref(),
         );
-        let trailer = scope::format_trailer(part.hidden_scoped, part.hidden_unscoped);
+        let trailer = scope::format_trailer(part.hidden_unscoped);
         (part.displayed, trailer)
     };
 

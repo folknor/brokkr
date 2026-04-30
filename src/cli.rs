@@ -1392,6 +1392,7 @@ Examples:
     ///   1. `-p/--package` on the command line
     ///   2. `[test] default_package` in brokkr.toml
     ///   3. The project's built-in default (pbfhogg-cli, nidhogg)
+    ///
     /// Projects without any of these (e.g. a workspace) must pass -p.
     ///
     /// Example:

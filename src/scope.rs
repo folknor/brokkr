@@ -2,9 +2,9 @@
 //!
 //! When a phase produces a large pile of diagnostics, dumping all of them
 //! at once is useless. This module computes the set of files changed on
-//! the current branch and partitions diagnostics so that the user sees,
-//! at most, `limit` entries with scoped (branch-touched) hits preferred.
-//! The unused scoped / unscoped counts are rolled up into a trailer.
+//! the current branch and partitions diagnostics so that every hit in a
+//! branch-touched file is shown in full and only unscoped hits get capped
+//! at `limit`. The unscoped overflow count is rolled up into a trailer.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -92,15 +92,15 @@ fn run_git(project_root: &Path, args: &[&str]) -> Option<String> {
 /// Result of partitioning a diagnostic list into displayed vs hidden.
 pub struct Partition<T> {
     pub displayed: Vec<T>,
-    pub hidden_scoped: usize,
     pub hidden_unscoped: usize,
 }
 
-/// Partition `items` so scoped hits come first, then unscoped, then cap
-/// at `limit`. Both halves retain their input order.
+/// Partition `items` so every scoped (branch-touched) hit is shown in
+/// full, followed by up to `limit` unscoped hits. Both halves retain
+/// their input order.
 ///
 /// `scope` = `None` means "no scope available" (all hits are treated as
-/// unscoped); `Some(set)` uses [`HashSet`] membership.
+/// unscoped and the cap applies); `Some(set)` uses [`HashSet`] membership.
 pub fn partition<T, F>(
     items: Vec<T>,
     get_path: F,
@@ -115,45 +115,28 @@ where
         None => (Vec::new(), items),
     };
 
-    let mut displayed: Vec<T> = Vec::with_capacity(limit.min(scoped.len() + unscoped.len()));
-    let total_scoped = scoped.len();
+    let mut displayed: Vec<T> = Vec::with_capacity(scoped.len() + limit.min(unscoped.len()));
+    displayed.extend(scoped);
 
-    let mut scoped_iter = scoped.into_iter();
     let mut unscoped_iter = unscoped.into_iter();
-
-    let take_scoped = total_scoped.min(limit);
-    for item in scoped_iter.by_ref().take(take_scoped) {
+    for item in unscoped_iter.by_ref().take(limit) {
         displayed.push(item);
     }
-    let remaining = limit.saturating_sub(take_scoped);
-    for item in unscoped_iter.by_ref().take(remaining) {
-        displayed.push(item);
-    }
-
-    let hidden_scoped = scoped_iter.count();
     let hidden_unscoped = unscoped_iter.count();
 
     Partition {
         displayed,
-        hidden_scoped,
         hidden_unscoped,
     }
 }
 
-/// Build the trailer line summarising hidden hits. `None` when nothing
-/// is hidden.
-pub fn format_trailer(hidden_scoped: usize, hidden_unscoped: usize) -> Option<String> {
-    if hidden_scoped == 0 && hidden_unscoped == 0 {
+/// Build the trailer line summarising hidden unscoped hits. `None` when
+/// nothing is hidden.
+pub fn format_trailer(hidden_unscoped: usize) -> Option<String> {
+    if hidden_unscoped == 0 {
         return None;
     }
-    let mut parts = Vec::new();
-    if hidden_scoped > 0 {
-        parts.push(format!("+{hidden_scoped} more in this branch"));
-    }
-    if hidden_unscoped > 0 {
-        parts.push(format!("+{hidden_unscoped} in unchanged files"));
-    }
-    Some(format!("{} (--all to see)", parts.join(", ")))
+    Some(format!("+{hidden_unscoped} in unchanged files (--all to see)"))
 }
 
 #[cfg(test)]
@@ -174,7 +157,6 @@ mod tests {
         let items = vec![item("a"), item("b"), item("c"), item("d")];
         let part = partition(items, |t| t.0.as_path(), 2, None);
         assert_eq!(part.displayed.len(), 2);
-        assert_eq!(part.hidden_scoped, 0);
         assert_eq!(part.hidden_unscoped, 2);
     }
 
@@ -183,22 +165,33 @@ mod tests {
         let scope: HashSet<PathBuf> = ["b", "d"].iter().map(|s| p(s)).collect();
         let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
         let part = partition(items, |t| t.0.as_path(), 3, Some(&scope));
-        // 2 scoped (b, d) + 1 unscoped (a).
-        assert_eq!(part.displayed.len(), 3);
+        // 2 scoped (b, d) + 3 unscoped (a, c, e), limit only caps unscoped.
+        assert_eq!(part.displayed.len(), 5);
         let displayed_paths: Vec<&str> = part.displayed.iter().map(|t| t.1).collect();
-        assert_eq!(displayed_paths, vec!["b", "d", "a"]);
-        assert_eq!(part.hidden_scoped, 0);
-        assert_eq!(part.hidden_unscoped, 2);
+        assert_eq!(displayed_paths, vec!["b", "d", "a", "c", "e"]);
+        assert_eq!(part.hidden_unscoped, 0);
     }
 
     #[test]
-    fn more_scoped_than_limit() {
+    fn scoped_always_shown_in_full() {
         let scope: HashSet<PathBuf> = ["a", "b", "c", "d"].iter().map(|s| p(s)).collect();
         let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
         let part = partition(items, |t| t.0.as_path(), 2, Some(&scope));
-        assert_eq!(part.displayed.len(), 2);
-        assert_eq!(part.hidden_scoped, 2);
-        assert_eq!(part.hidden_unscoped, 1);
+        // All 4 scoped show in full; the 1 unscoped fits within limit=2.
+        assert_eq!(part.displayed.len(), 5);
+        assert_eq!(part.hidden_unscoped, 0);
+    }
+
+    #[test]
+    fn limit_caps_unscoped_only() {
+        let scope: HashSet<PathBuf> = ["a"].iter().map(|s| p(s)).collect();
+        let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
+        let part = partition(items, |t| t.0.as_path(), 2, Some(&scope));
+        // 1 scoped + 2 unscoped (b, c); d, e hidden.
+        assert_eq!(part.displayed.len(), 3);
+        let displayed_paths: Vec<&str> = part.displayed.iter().map(|t| t.1).collect();
+        assert_eq!(displayed_paths, vec!["a", "b", "c"]);
+        assert_eq!(part.hidden_unscoped, 2);
     }
 
     #[test]
@@ -206,30 +199,17 @@ mod tests {
         let items = vec![item("a"), item("b")];
         let part = partition(items, |t| t.0.as_path(), 10, None);
         assert_eq!(part.displayed.len(), 2);
-        assert_eq!(part.hidden_scoped, 0);
         assert_eq!(part.hidden_unscoped, 0);
     }
 
     #[test]
-    fn trailer_both_halves() {
-        let s = format_trailer(3, 4).unwrap();
-        assert_eq!(s, "+3 more in this branch, +4 in unchanged files (--all to see)");
-    }
-
-    #[test]
-    fn trailer_scoped_only() {
-        let s = format_trailer(5, 0).unwrap();
-        assert_eq!(s, "+5 more in this branch (--all to see)");
-    }
-
-    #[test]
     fn trailer_unscoped_only() {
-        let s = format_trailer(0, 7).unwrap();
+        let s = format_trailer(7).unwrap();
         assert_eq!(s, "+7 in unchanged files (--all to see)");
     }
 
     #[test]
     fn trailer_none_when_nothing_hidden() {
-        assert!(format_trailer(0, 0).is_none());
+        assert!(format_trailer(0).is_none());
     }
 }
