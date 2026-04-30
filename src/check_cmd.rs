@@ -495,7 +495,13 @@ fn format_clippy_capped_multi(
     let total_warnings = merged.len() - total_errors;
 
     let (displayed, trailer) = if all {
-        (merged.iter().collect::<Vec<_>>(), None)
+        // `--all` is the bulk-triage view: sort so every hit of a single
+        // lint clumps together. Errors first (more urgent), then within
+        // each level by lint code, file, line, column. Cached keys keep
+        // the location parsing to one pass per diagnostic.
+        let mut refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
+        refs.sort_by_cached_key(|m| clippy_sort_key(m.diag));
+        (refs, None)
     } else {
         let changed = scope::changed_files(project_root);
         let refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
@@ -616,6 +622,46 @@ fn extract_detail_from_event(d: &cargo_json::DiagnosticEvent) -> Option<String> 
 
 fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Sort key for `--all` bulk triage: errors before warnings, then by
+/// lint code (so every hit of a rule clumps together), then file and
+/// line for stable in-rule ordering. Bare `error` / `warning` headers
+/// (no code) sort to the end of their level since the lint code is
+/// the empty string for those.
+fn clippy_sort_key(d: &cargo_filter::ClippyDiagnostic) -> (u8, String, String, u64, u64) {
+    let level = if d.is_error { 0u8 } else { 1u8 };
+    let lint = extract_lint_code(&d.header);
+    // Push bare-level diagnostics to the end of their level by giving
+    // them a key that sorts after any real code.
+    let lint_key = if lint.is_empty() {
+        "\u{10FFFF}".to_string()
+    } else {
+        lint.to_string()
+    };
+    let (file, line, col) = parse_location(d.location.as_deref());
+    (level, lint_key, file, line, col)
+}
+
+fn extract_lint_code(header: &str) -> &str {
+    if let Some(start) = header.find('[')
+        && let Some(end) = header.find(']')
+        && start < end
+    {
+        return &header[start + 1..end];
+    }
+    ""
+}
+
+fn parse_location(location: Option<&str>) -> (String, u64, u64) {
+    let Some(loc) = location else {
+        return (String::new(), 0, 0);
+    };
+    let mut parts = loc.rsplitn(3, ':');
+    let col = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let line = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let file = parts.next().unwrap_or(loc).to_string();
+    (file, line, col)
 }
 
 /// JSON path: parse each sweep, dedup events across sweeps merging the
@@ -1043,7 +1089,8 @@ mod tests {
         clippy::expect_used,
         clippy::panic,
         clippy::too_many_lines,
-        clippy::cognitive_complexity
+        clippy::cognitive_complexity,
+        clippy::useless_vec
     )]
     use super::*;
 
@@ -1370,5 +1417,89 @@ warning: z [too_many_lines]
         let parsed = parse_clippy_from_json("", false);
         assert!(!parsed.parse_failed);
         assert!(parsed.diagnostics.is_empty());
+    }
+
+    fn diag(header: &str, location: &str) -> cargo_filter::ClippyDiagnostic {
+        cargo_filter::ClippyDiagnostic {
+            is_error: header.starts_with("error"),
+            header: header.to_string(),
+            location: Some(location.to_string()),
+            message: "msg".to_string(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn clippy_sort_key_orders_errors_before_warnings() {
+        let warn = diag("warning[clippy::aaaa]", "src/a.rs:1:1");
+        let err = diag("error[E0308]", "src/z.rs:99:99");
+        assert!(clippy_sort_key(&err) < clippy_sort_key(&warn));
+    }
+
+    #[test]
+    fn clippy_sort_key_groups_same_lint_together() {
+        // Three warnings - two with the same lint code on different files,
+        // one with a different code in between alphabetically. After sort,
+        // the same-lint pair should be adjacent.
+        let mut diags = vec![
+            diag("warning[clippy::collapsible_if]", "src/b.rs:1:1"),
+            diag("warning[clippy::needless_return]", "src/a.rs:1:1"),
+            diag("warning[clippy::collapsible_if]", "src/a.rs:1:1"),
+        ];
+        diags.sort_by_cached_key(clippy_sort_key);
+        assert_eq!(diags[0].header, "warning[clippy::collapsible_if]");
+        assert_eq!(diags[1].header, "warning[clippy::collapsible_if]");
+        assert_eq!(diags[2].header, "warning[clippy::needless_return]");
+        // Within the same lint, file order kicks in: a.rs before b.rs.
+        assert_eq!(diags[0].location.as_deref(), Some("src/a.rs:1:1"));
+        assert_eq!(diags[1].location.as_deref(), Some("src/b.rs:1:1"));
+    }
+
+    #[test]
+    fn clippy_sort_key_orders_lines_numerically() {
+        // Same lint, same file: line 9 before line 100 (lexical sort
+        // would put 100 first - check we're parsing the integer).
+        let mut diags = vec![
+            diag("warning[clippy::xxx]", "src/a.rs:100:1"),
+            diag("warning[clippy::xxx]", "src/a.rs:9:1"),
+        ];
+        diags.sort_by_cached_key(clippy_sort_key);
+        assert_eq!(diags[0].location.as_deref(), Some("src/a.rs:9:1"));
+        assert_eq!(diags[1].location.as_deref(), Some("src/a.rs:100:1"));
+    }
+
+    #[test]
+    fn clippy_sort_key_pushes_bare_level_to_end() {
+        // A bare `warning` (no code) should sort after every coded
+        // warning, since there's no useful key to group it with.
+        let mut diags = vec![
+            diag("warning", "src/a.rs:1:1"),
+            diag("warning[clippy::zzz]", "src/b.rs:1:1"),
+            diag("warning[clippy::aaa]", "src/c.rs:1:1"),
+        ];
+        diags.sort_by_cached_key(clippy_sort_key);
+        assert_eq!(diags[0].header, "warning[clippy::aaa]");
+        assert_eq!(diags[1].header, "warning[clippy::zzz]");
+        assert_eq!(diags[2].header, "warning");
+    }
+
+    #[test]
+    fn parse_location_handles_normal_path_line_col() {
+        assert_eq!(
+            parse_location(Some("src/foo.rs:10:5")),
+            ("src/foo.rs".to_string(), 10, 5)
+        );
+    }
+
+    #[test]
+    fn parse_location_handles_none() {
+        assert_eq!(parse_location(None), (String::new(), 0, 0));
+    }
+
+    #[test]
+    fn extract_lint_code_pulls_bracketed_name() {
+        assert_eq!(extract_lint_code("warning[clippy::foo]"), "clippy::foo");
+        assert_eq!(extract_lint_code("error[E0308]"), "E0308");
+        assert_eq!(extract_lint_code("warning"), "");
     }
 }

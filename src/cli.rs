@@ -19,25 +19,55 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Run clippy + tests
+    /// Run gremlins + clippy + tests
     #[command(
         display_order = 0,
         long_about = "\
-Run clippy first, then tests. Clippy warnings are denied by the project's
-Cargo.toml lints, so a clippy failure short-circuits - tests only run when
-clippy passes. Extra args after `--` are forwarded raw to `cargo test`
-(invoke `cargo test` directly if you want to skip clippy for a targeted
-test run).
+Three phases in order: gremlin scan, clippy, then tests. Each phase
+short-circuits the next - gremlins fail the run before clippy starts,
+clippy warnings are denied by the project's Cargo.toml lints so a
+clippy failure short-circuits before tests run. Extra args after `--`
+are forwarded raw to `cargo test` (invoke `cargo test` directly to skip
+clippy for a targeted test run).
+
+Output (default text mode, no flags):
+  - Gremlins: one line per banned-Unicode hit. `--fix-gremlins`
+    rewrites them in place before the scan.
+  - Clippy: one line per diagnostic in the form
+    `error[CODE] file:line:col message` /
+    `warning[rule] file:line:col message`. Cargo runs with
+    `--message-format=json` so every warning carries its lint code,
+    not just the first occurrence per rule.
+  - Tests: one line per failure on failure, compact summary on pass.
+
+Capping and scoping (clippy + gremlins):
+  Output is capped at `--limit N` (default 20). When the cap kicks in,
+  diagnostics in files changed on the current branch (vs upstream /
+  origin/master / origin/main) are surfaced first, and a trailer
+  summarises what's hidden.
+  - `--all` shows everything, sorted by (level, lint code, file, line)
+    so every hit of a single rule clumps together for bulk triage.
+
+Output mode flags (mutually exclusive):
+  - `--raw`: reconstruct cargo's terminal-style output by concatenating
+    each diagnostic's `rendered` field (full source annotations and
+    help suggestions). One cargo invocation, no separate non-JSON pass.
+  - `--json`: emit NDJSON diagnostic and summary events on stdout, no
+    prefixed log output.
 
 Examples:
-  brokkr check                                     # clippy + all tests
+  brokkr check                                     # gremlins + clippy + all tests
+  brokkr check --all                               # bulk-triage view, sorted by lint
+  brokkr check --fix-gremlins                      # rewrite banned chars before checking
+  brokkr check --raw                               # full terminal-style cargo output
+  brokkr check --json                              # NDJSON for downstream tooling
   brokkr check -- --test read_paths                # run one test file
   brokkr check -- -- --ignored                     # run ignored tests
   brokkr check -- --test read_paths -- --ignored   # one file, ignored only
   brokkr check --no-default-features               # check without default features
-  brokkr check --features commands                  # check with specific features
-  brokkr check --package pbfhogg-cli                # check only the CLI crate
-  brokkr check --package pbfhogg-cli -- --test cli  # one test file in the CLI crate"
+  brokkr check --features commands                 # check with specific features
+  brokkr check --package pbfhogg-cli               # check only the CLI crate
+  brokkr check --package pbfhogg-cli -- --test cli # one test file in the CLI crate"
     )]
     Check {
         /// Cargo features to enable
@@ -61,11 +91,14 @@ Examples:
         #[arg(long, conflicts_with_all = ["features", "no_default_features"])]
         profile: Option<String>,
 
-        /// Show unfiltered cargo output
+        /// Reconstruct cargo's terminal-style output (full source
+        /// annotations, help suggestions) by concatenating each
+        /// diagnostic's `rendered` field. One cargo invocation, no
+        /// separate non-JSON pass.
         #[arg(long, conflicts_with = "json")]
         raw: bool,
 
-        /// Emit NDJSON diagnostics and summaries
+        /// Emit NDJSON diagnostics and summaries on stdout
         #[arg(long, conflicts_with = "raw")]
         json: bool,
 
@@ -74,7 +107,9 @@ Examples:
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
-        /// Show every diagnostic without capping or scoping to changed files.
+        /// Show every diagnostic without capping or scoping to changed
+        /// files. Sorted by (level, lint code, file, line) so every hit
+        /// of a single rule clumps together for bulk triage.
         #[arg(long)]
         all: bool,
 
