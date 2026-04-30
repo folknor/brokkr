@@ -223,6 +223,7 @@ fn run_gremlins(
         msg.push_str(&t);
         msg.push('\n');
     }
+    msg.push_str("  hint: rerun with `brokkr check --fix-gremlins` to rewrite all banned chars in place\n");
     output::error(msg.trim_end());
     Err(DevError::Build("gremlins found".into()))
 }
