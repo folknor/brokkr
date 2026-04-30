@@ -241,14 +241,20 @@ fn run_clippy_phase(
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
     for sweep in sweeps {
-        let mut args: Vec<String> = vec!["clippy".into(), "--all-targets".into()];
+        // Always run with --message-format=json so the lint code
+        // (`message.code.code`) is populated on every diagnostic. cargo's
+        // pretty-printed stderr only includes the `= note: #[warn(rule)]`
+        // annotation on the first occurrence of each lint per crate,
+        // which made bulk triage by rule impossible in text mode.
+        let mut args: Vec<String> = vec![
+            "clippy".into(),
+            "--all-targets".into(),
+            "--message-format=json".into(),
+        ];
         args.extend(sweep.cargo_feature_args.iter().cloned());
         if let Some(pkg) = package {
             args.push("--package".into());
             args.push(pkg.into());
-        }
-        if json {
-            args.push("--message-format=json".into());
         }
 
         if !json {
@@ -281,7 +287,7 @@ fn run_clippy_phase(
                 if multi {
                     output::error(&format!("[{}]", r.label));
                 }
-                output::error(&r.stderr);
+                output::error(&raw_clippy_text(r));
             }
         } else {
             output::error(&format_clippy_capped_multi(
@@ -297,11 +303,12 @@ fn run_clippy_phase(
 
     if raw {
         for r in &results {
-            if !r.stderr.is_empty() {
+            let text = raw_clippy_text(r);
+            if !text.is_empty() {
                 if multi {
                     println!("[{}]", r.label);
                 }
-                print!("{}", r.stderr);
+                print!("{text}");
             }
         }
         return Ok(());
@@ -309,8 +316,10 @@ fn run_clippy_phase(
 
     // Success path: surface any warnings the parser extracted across all sweeps.
     let any_diag_or_failed = results.iter().any(|r| {
-        let p = cargo_filter::parse_clippy(&r.stderr);
-        !p.diagnostics.is_empty() || p.parse_failed
+        let events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", None);
+        let has_diag = events.iter().any(|e| matches!(e, cargo_json::CheckEvent::Diagnostic(_)));
+        let parse_failed = !r.success && events.is_empty();
+        has_diag || parse_failed
     });
     if any_diag_or_failed {
         output::warn(&format_clippy_capped_multi(
@@ -323,6 +332,48 @@ fn run_clippy_phase(
     }
 
     Ok(())
+}
+
+/// Reconstruct cargo's terminal-style output for `--raw` mode.
+///
+/// With `--message-format=json` cargo no longer prints rendered
+/// diagnostics to stderr - it emits them as the `rendered` field of
+/// each compiler-message JSON event. `--raw` still wants the
+/// terminal-style text, so concatenate the rendered fields and tack on
+/// any cargo status messages on stderr (Compiling/Finished/etc).
+/// Falls back to the raw streams when the parser found nothing - that's
+/// the "cargo crashed and emitted non-JSON" case where the stderr / stdout
+/// dump is the only useful thing left.
+fn raw_clippy_text(r: &SweepResult) -> String {
+    let events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", None);
+    let rendered: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            cargo_json::CheckEvent::Diagnostic(d) => d.rendered.as_deref(),
+            _ => None,
+        })
+        .collect();
+
+    if rendered.is_empty() {
+        let mut out = String::new();
+        out.push_str(&r.stderr);
+        if !r.stdout.is_empty() {
+            out.push_str(&r.stdout);
+        }
+        return out;
+    }
+
+    let mut out = String::new();
+    for r in rendered {
+        out.push_str(r);
+        if !r.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    if !r.stderr.is_empty() {
+        out.push_str(&r.stderr);
+    }
+    out
 }
 
 struct SweepResult {
@@ -397,10 +448,11 @@ fn sweep_tag(sweeps: &[String]) -> Option<String> {
     }
 }
 
-/// Multi-sweep version of the text formatter: parses each sweep's stderr,
-/// merges + dedups diagnostics, applies scope+limit, and tags each line
-/// with its sweep label when `multi` is true. Falls back to per-sweep raw
-/// stderr when any sweep's parse failed.
+/// Multi-sweep version of the text formatter: parses each sweep's stdout
+/// JSON, merges + dedups diagnostics, applies scope+limit, and tags each
+/// line with its sweep label when `multi` is true. Falls back to per-sweep
+/// raw streams when cargo failed but emitted no compiler-message events
+/// (e.g. cargo itself crashed before reaching the diagnostic phase).
 fn format_clippy_capped_multi(
     results: &[SweepResult],
     project_root: &Path,
@@ -410,10 +462,13 @@ fn format_clippy_capped_multi(
 ) -> String {
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
-        .map(|r| (r.label.clone(), cargo_filter::parse_clippy(&r.stderr)))
+        .map(|r| {
+            let parse = parse_clippy_from_json(&r.stdout, !r.success);
+            (r.label.clone(), parse)
+        })
         .collect();
 
-    // Any sweep with parse_failed: fall back to raw aggregated stderr.
+    // Any sweep with parse_failed: fall back to raw aggregated streams.
     if parses.iter().any(|(_, p)| p.parse_failed) {
         let mut out = String::new();
         for r in results {
@@ -424,6 +479,7 @@ fn format_clippy_capped_multi(
                 out.push_str(&format!("[{}]\n", r.label));
             }
             out.push_str(&r.stderr);
+            out.push_str(&r.stdout);
         }
         return out;
     }
@@ -479,6 +535,86 @@ fn format_clippy_capped_multi(
         out.push('\n');
     }
     out.trim_end().to_string()
+}
+
+/// Parse cargo's `--message-format=json` stdout into a [`ClippyParse`].
+///
+/// Walks each compiler-message JSON event and maps it to the formatter
+/// primitive used by `merge_clippy` and `format_one()`. Diagnostics are
+/// ordered errors-first, then warnings (stable within each). When cargo
+/// failed and emitted no compiler-message events, sets `parse_failed` so
+/// callers can fall back to dumping the raw streams.
+fn parse_clippy_from_json(stdout: &str, sweep_failed: bool) -> cargo_filter::ClippyParse {
+    let events = cargo_json::parse_cargo_diagnostics(stdout, "clippy", None);
+    let mut diagnostics: Vec<cargo_filter::ClippyDiagnostic> = events
+        .iter()
+        .filter_map(|e| match e {
+            cargo_json::CheckEvent::Diagnostic(d) => Some(event_to_clippy(d)),
+            _ => None,
+        })
+        .collect();
+
+    // Errors first, then warnings; each half keeps discovery order.
+    let (errors, warnings): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut diagnostics).into_iter().partition(|d| d.is_error);
+    let mut sorted = errors;
+    sorted.extend(warnings);
+
+    let parse_failed = sweep_failed && sorted.is_empty();
+
+    cargo_filter::ClippyParse {
+        diagnostics: sorted,
+        parse_failed,
+    }
+}
+
+/// Convert a cargo JSON diagnostic event into the formatter primitive.
+///
+/// `header` always carries the lint code when cargo populated it (every
+/// diagnostic, not just first-of-kind), so bulk triage by rule works in
+/// text mode. `detail` is recovered from the primary span's inline
+/// label first ("expected `i32`, found `&str`"), then from a child note
+/// that mentions both "expected" and "found" - matching the two shapes
+/// the old text scraper handled.
+fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagnostic {
+    let is_error = d.level == "error";
+    let header = match &d.code {
+        Some(c) => format!("{}[{}]", d.level, c),
+        None => d.level.clone(),
+    };
+    let location = match (&d.file, d.line, d.column) {
+        (Some(f), Some(l), Some(c)) => Some(format!("{f}:{l}:{c}")),
+        _ => None,
+    };
+    let detail = extract_detail_from_event(d);
+    cargo_filter::ClippyDiagnostic {
+        is_error,
+        header,
+        location,
+        message: d.message.clone(),
+        detail,
+    }
+}
+
+/// Pull a one-line "expected X, found Y" detail out of the primary
+/// span label or a child note. Returns `None` if neither shape applies.
+fn extract_detail_from_event(d: &cargo_json::DiagnosticEvent) -> Option<String> {
+    if let Some(label) = &d.primary_label
+        && label.contains("expected")
+        && label.contains("found")
+    {
+        return Some(collapse_whitespace(label));
+    }
+    for child in &d.children {
+        if child.message.contains("expected") && child.message.contains("found") {
+            return Some(collapse_whitespace(&child.message.replace('\n', ", ")));
+        }
+    }
+    None
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// JSON path: parse each sweep, dedup events across sweeps merging the
@@ -1097,5 +1233,141 @@ warning: z [too_many_lines]
             .find(|m| m.diag.path().unwrap().to_string_lossy().contains("baz.rs"))
             .unwrap();
         assert_eq!(baz.sweeps, vec!["consumer"]);
+    }
+
+    fn json_compiler_message(
+        level: &str,
+        code: Option<&str>,
+        message: &str,
+        file: &str,
+        line: u64,
+        col: u64,
+    ) -> String {
+        let code_field = match code {
+            Some(c) => format!(r#""code":{{"code":"{c}"}},"#),
+            None => "\"code\":null,".to_string(),
+        };
+        format!(
+            r#"{{"reason":"compiler-message","message":{{{code_field}"level":"{level}","message":"{message}","spans":[{{"file_name":"{file}","line_start":{line},"column_start":{col},"line_end":{line},"column_end":{col},"is_primary":true}}],"children":[],"rendered":"rendered"}}}}"#
+        )
+    }
+
+    #[test]
+    fn json_to_clippy_uses_code_for_every_occurrence() {
+        // Regression: in cargo's pretty-printed text, only the first
+        // occurrence of each lint per crate carries a `= note: #[warn(rule)]`
+        // line, so the old text scraper left subsequent warnings as bare
+        // `warning`. With JSON ingestion every diagnostic carries
+        // `message.code.code`, so they all keep the rule in the header.
+        let mut input = json_compiler_message(
+            "warning",
+            Some("clippy::collapsible_if"),
+            "this `if` statement can be collapsed",
+            "src/compose.rs",
+            219,
+            9,
+        );
+        input.push('\n');
+        input.push_str(&json_compiler_message(
+            "warning",
+            Some("clippy::collapsible_if"),
+            "this `if` statement can be collapsed",
+            "src/compose.rs",
+            228,
+            9,
+        ));
+
+        let parsed = parse_clippy_from_json(&input, false);
+        assert!(!parsed.parse_failed);
+        assert_eq!(parsed.diagnostics.len(), 2);
+        for d in &parsed.diagnostics {
+            assert_eq!(d.header, "warning[clippy::collapsible_if]");
+        }
+    }
+
+    #[test]
+    fn json_to_clippy_uses_primary_label_for_detail() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/foo.rs","line_start":20,"column_start":5,"line_end":20,"column_end":10,"is_primary":true,"label":"expected `i32`, found `&str`"}],"children":[],"rendered":"rendered"}}"#;
+        let parsed = parse_clippy_from_json(input, false);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        let d = &parsed.diagnostics[0];
+        assert_eq!(d.header, "error[E0308]");
+        assert_eq!(
+            d.format_one(),
+            "error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"
+        );
+    }
+
+    #[test]
+    fn json_to_clippy_falls_back_to_child_note_for_detail() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/lib.rs","line_start":42,"column_start":12,"line_end":42,"column_end":15,"is_primary":true,"label":"arguments to this function are incorrect"}],"children":[{"level":"note","message":"expected reference `&Vec<u8>`\n   found reference `&Vec<i32>`","spans":[]}],"rendered":"rendered"}}"#;
+        let parsed = parse_clippy_from_json(input, false);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        let d = &parsed.diagnostics[0];
+        assert!(
+            d.format_one()
+                .contains("- expected reference `&Vec<u8>`, found reference `&Vec<i32>`"),
+            "got: {}",
+            d.format_one()
+        );
+    }
+
+    #[test]
+    fn json_to_clippy_no_code_falls_back_to_bare_level() {
+        // Some diagnostics lack a code (e.g. cargo-emitted notes). The
+        // header degrades gracefully to bare `warning` / `error`.
+        let input = json_compiler_message(
+            "warning",
+            None,
+            "something happened",
+            "src/foo.rs",
+            10,
+            5,
+        );
+        let parsed = parse_clippy_from_json(&input, false);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(parsed.diagnostics[0].header, "warning");
+    }
+
+    #[test]
+    fn json_to_clippy_orders_errors_before_warnings() {
+        let mut input = json_compiler_message(
+            "warning",
+            Some("clippy::redundant_closure"),
+            "redundant closure",
+            "src/a.rs",
+            1,
+            1,
+        );
+        input.push('\n');
+        input.push_str(&json_compiler_message(
+            "error",
+            Some("E0308"),
+            "mismatched types",
+            "src/b.rs",
+            2,
+            2,
+        ));
+        let parsed = parse_clippy_from_json(&input, false);
+        assert_eq!(parsed.diagnostics.len(), 2);
+        assert!(parsed.diagnostics[0].is_error);
+        assert!(!parsed.diagnostics[1].is_error);
+    }
+
+    #[test]
+    fn json_to_clippy_sets_parse_failed_when_sweep_failed_with_no_events() {
+        // cargo crashed before producing any compiler-message events.
+        let parsed = parse_clippy_from_json("", true);
+        assert!(parsed.parse_failed);
+        assert!(parsed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn json_to_clippy_no_parse_failed_when_sweep_succeeded() {
+        // Empty stdout but successful exit (clean compile). Not a parse
+        // failure - just nothing to report.
+        let parsed = parse_clippy_from_json("", false);
+        assert!(!parsed.parse_failed);
+        assert!(parsed.diagnostics.is_empty());
     }
 }

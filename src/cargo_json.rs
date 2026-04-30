@@ -41,6 +41,12 @@ pub struct DiagnosticEvent {
     pub end_line: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_column: Option<u64>,
+    /// Inline label on the primary span, e.g. "expected `i32`, found `&str`".
+    /// Captured from cargo's JSON `spans[].label` so the text renderer can
+    /// surface the same one-line detail it used to scrape from the rendered
+    /// source annotation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_label: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ChildDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,15 +183,19 @@ pub fn parse_cargo_diagnostics(
             .and_then(|s| s.as_array())
             .and_then(|spans| spans.iter().find(|s| s.get("is_primary") == Some(&serde_json::Value::Bool(true))));
 
-        let (file, line_start, col_start, line_end, col_end) = match primary_span {
+        let (file, line_start, col_start, line_end, col_end, primary_label) = match primary_span {
             Some(span) => (
                 span.get("file_name").and_then(|v| v.as_str()).map(std::string::ToString::to_string),
                 span.get("line_start").and_then(serde_json::Value::as_u64),
                 span.get("column_start").and_then(serde_json::Value::as_u64),
                 span.get("line_end").and_then(serde_json::Value::as_u64),
                 span.get("column_end").and_then(serde_json::Value::as_u64),
+                span.get("label")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(std::string::ToString::to_string),
             ),
-            None => (None, None, None, None, None),
+            None => (None, None, None, None, None, None),
         };
 
         // Child diagnostics.
@@ -240,6 +250,7 @@ pub fn parse_cargo_diagnostics(
             column: col_start,
             end_line: line_end,
             end_column: col_end,
+            primary_label,
             children,
             rendered,
         }));
@@ -286,6 +297,7 @@ pub fn emit_parse_error(tool: &'static str, stdout: &str, stderr: &str) {
         column: None,
         end_line: None,
         end_column: None,
+        primary_label: None,
         children: Vec::new(),
         rendered: None,
     }));
@@ -316,6 +328,27 @@ mod tests {
         format!(
             r#"{{"reason":"compiler-message","message":{{"rendered":"rendered text","level":"{level}","code":{{"code":"{code}"}},"message":"{message}","spans":[{{"file_name":"{file}","line_start":{line},"column_start":5,"line_end":{line},"column_end":10,"is_primary":true}}],"children":[{{"level":"help","message":"try this","spans":[]}}]}}}}"#
         )
+    }
+
+    #[test]
+    fn parse_captures_primary_span_label() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/foo.rs","line_start":20,"column_start":5,"line_end":20,"column_end":10,"is_primary":true,"label":"expected `i32`, found `&str`"}],"children":[],"rendered":"rendered"}}"#;
+        let events = parse_cargo_diagnostics(input, "clippy", None);
+        assert_eq!(events.len(), 1);
+        let CheckEvent::Diagnostic(d) = &events[0] else {
+            panic!("expected Diagnostic event");
+        };
+        assert_eq!(d.primary_label.as_deref(), Some("expected `i32`, found `&str`"));
+    }
+
+    #[test]
+    fn parse_omits_empty_primary_label() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":{"code":"unused_variables"},"message":"unused","spans":[{"file_name":"src/a.rs","line_start":1,"column_start":1,"line_end":1,"column_end":2,"is_primary":true,"label":""}],"children":[],"rendered":"rendered"}}"#;
+        let events = parse_cargo_diagnostics(input, "clippy", None);
+        let CheckEvent::Diagnostic(d) = &events[0] else {
+            panic!("expected Diagnostic event");
+        };
+        assert!(d.primary_label.is_none());
     }
 
     #[test]
@@ -495,6 +528,7 @@ mod tests {
             column: None,
             end_line: None,
             end_column: None,
+            primary_label: None,
             children: Vec::new(),
             rendered: None,
         });
