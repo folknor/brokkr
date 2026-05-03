@@ -1379,9 +1379,10 @@ Examples:
         #[arg(long)]
         recapture: bool,
     },
-    /// Run one specific cargo test in release mode
+    /// Run one specific cargo test (release by default; --debug for dev)
     ///
-    /// Always: --release, --include-ignored, --nocapture, --test-threads=1.
+    /// Always: --include-ignored, --nocapture, --test-threads=1.
+    /// Adds --release unless --debug is passed.
     /// Feature selection matches `brokkr check` - defaults to --all-features,
     /// and runs a second sweep with [check].consumer_features if configured.
     /// Streams the test's own stdout/stderr live and prints a [test]
@@ -1399,6 +1400,7 @@ Examples:
     ///   brokkr test merge_basic_create_modify_delete_uring
     ///   brokkr test -p calendar extract_tag_value_flattens_nested_text
     ///   brokkr test roundtrip_uring_tiny_output -N 5
+    ///   brokkr test some_unit_test --debug
     #[command(display_order = 10)]
     Test {
         /// Exact test name to run (substring filter, case-sensitive)
@@ -1416,6 +1418,10 @@ Examples:
         /// Bypass filtering - print everything cargo emits
         #[arg(long)]
         raw: bool,
+        /// Build and run the test in dev profile instead of release.
+        /// BROKKR_TEST_BIN_DIR points at <target>/debug accordingly.
+        #[arg(long)]
+        debug: bool,
     },
     /// [litehtml/sluggrs] List fixtures/snapshots and approval state
     #[command(display_order = 50)]

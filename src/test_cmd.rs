@@ -1,7 +1,8 @@
 //! `brokkr test <FILE> <NAME>` - single-test cargo runner.
 //!
-//! Runs exactly one named cargo test with release + host/check features,
-//! `--include-ignored --nocapture --test-threads=1`. Streams the test's own
+//! Runs exactly one named cargo test with the host/check features and
+//! `--include-ignored --nocapture --test-threads=1`. Defaults to release;
+//! `--debug` switches to the dev profile. Streams the test's own
 //! stdout/stderr live (filtering out cargo/test-harness framing noise), then
 //! prints a `[test]` PASS/FAIL footer per sweep with wall time.
 //!
@@ -58,6 +59,7 @@ pub fn run(
     repeat: u32,
     jobs: Option<u32>,
     raw: bool,
+    debug: bool,
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
     let sweeps = decide_sweeps(dev_config.test.as_ref(), &dev_config.check)?;
@@ -65,14 +67,16 @@ pub fn run(
 
     let pkg = resolve_package(package, dev_config, project)?;
 
-    // `brokkr test` always runs `cargo test --release`, so any
-    // `build_packages` artefacts land in `<target>/release`. Tests
-    // that spawn the just-rebuilt binary use this var to skip the
-    // `cfg!(debug_assertions)` profile guess (which silently lies
-    // when a workspace pins `[profile.test]` overrides).
+    // `brokkr test` defaults to `cargo test --release` (debug=false ->
+    // <target>/release); `--debug` flips both the cargo invocation and
+    // BROKKR_TEST_BIN_DIR over to <target>/debug. Tests that spawn the
+    // just-rebuilt binary read this var to skip the
+    // `cfg!(debug_assertions)` profile guess (which silently lies when
+    // a workspace pins `[profile.test]` overrides).
+    let profile_dir = if debug { "debug" } else { "release" };
     let bin_dir = build::project_info(Some(project_root))?
         .target_dir
-        .join("release");
+        .join(profile_dir);
     let bin_dir_string = bin_dir.to_string_lossy().into_owned();
     let mut env: Vec<(&str, &str)> = match project {
         Project::Nidhogg => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
@@ -93,7 +97,7 @@ pub fn run(
         // aggregator marks the sweep as failed.
         let mut pre_build_failed = false;
         for build_pkg in &sweep.build_packages {
-            if !run_pre_build(project_root, sweep, build_pkg, &env, raw)? {
+            if !run_pre_build(project_root, sweep, build_pkg, &env, raw, debug)? {
                 pre_build_failed = true;
                 outcomes.push(Outcome::BuildFailed);
                 break;
@@ -106,7 +110,10 @@ pub fn run(
         }
 
         for n in 1..=repeat {
-            let mut args: Vec<String> = vec!["test".into(), "--release".into()];
+            let mut args: Vec<String> = vec!["test".into()];
+            if !debug {
+                args.push("--release".into());
+            }
             args.extend(sweep.feature_args.iter().cloned());
             if let Some(j) = jobs {
                 args.push("-j".into());
@@ -148,8 +155,12 @@ fn run_pre_build(
     package: &str,
     env: &[(&str, &str)],
     raw: bool,
+    debug: bool,
 ) -> Result<bool, DevError> {
-    let mut args: Vec<String> = vec!["build".into(), "--release".into()];
+    let mut args: Vec<String> = vec!["build".into()];
+    if !debug {
+        args.push("--release".into());
+    }
     args.extend(sweep.feature_args.iter().cloned());
     args.push("--package".into());
     args.push(package.into());
