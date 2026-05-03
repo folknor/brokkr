@@ -1396,6 +1396,13 @@ Examples:
     ///
     /// Projects without any of these (e.g. a workspace) must pass -p.
     ///
+    /// Env vars exported to the test process:
+    ///   BROKKR_TEST_BIN_DIR=<target>/{release,debug} - directory of any
+    ///     `build_packages` artefacts rebuilt for this sweep. Tests that
+    ///     spawn the just-rebuilt binary should read this rather than
+    ///     guessing via `cfg!(debug_assertions)` (which lies under
+    ///     `[profile.test]` overrides). Tracks --debug.
+    ///
     /// Example:
     ///   brokkr test merge_basic_create_modify_delete_uring
     ///   brokkr test -p calendar extract_tag_value_flattens_nested_text
