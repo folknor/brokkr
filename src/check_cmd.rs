@@ -30,6 +30,7 @@ use crate::output;
 use crate::profile::{self, ResolvedSweep};
 use crate::project::Project;
 use crate::scope;
+use crate::test_runner::{self, LibtestOutcome};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_check(
@@ -915,22 +916,34 @@ fn run_one_test_sweep(
         args.push("--message-format=json".into());
     }
 
-    // Anything that has to land after `--` is libtest's. Pass-through
-    // `extra_args` go after libtest's flags so the user's last word
-    // wins (e.g. their own `--test-threads=N` overriding the profile).
-    let needs_separator = !sweep.libtest_args.is_empty()
-        || !sweep.name_filters.is_empty()
-        || !extra_args.is_empty();
+    // Anything that has to land after `--` is libtest's. The watchdog
+    // requires sequential libtest output, so `--test-threads=1` is the
+    // default unless the profile already set it. Pass-through `extra_args`
+    // stay last; overriding test threads to anything but 1 is rejected.
+    let mut libtest_args = Vec::new();
+    for s in &sweep.libtest_args {
+        libtest_args.push(s.clone());
+    }
+    for n in &sweep.name_filters {
+        libtest_args.push(n.clone());
+    }
+    if test_runner::effective_test_threads(&libtest_args)?.is_none() {
+        libtest_args.push("--test-threads=1".into());
+    }
+    for e in extra_args {
+        libtest_args.push(e.clone());
+    }
+    if test_runner::effective_test_threads(&libtest_args)? != Some(1) {
+        return Err(DevError::Config(
+            "brokkr check watchdog requires --test-threads=1; remove the override or run the test outside brokkr check".into(),
+        ));
+    }
+
+    let needs_separator = !libtest_args.is_empty();
     if needs_separator {
         args.push("--".into());
-        for s in &sweep.libtest_args {
-            args.push(s.clone());
-        }
-        for n in &sweep.name_filters {
-            args.push(n.clone());
-        }
-        for e in extra_args {
-            args.push(e.clone());
+        for arg in &libtest_args {
+            args.push(arg.clone());
         }
     }
 
@@ -949,13 +962,29 @@ fn run_one_test_sweep(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
+    let run = test_runner::streaming_run_libtest(
+        &arg_refs,
+        project_root,
+        &env_refs,
+        |_| {},
+        |_| {},
+    )?;
+    let captured = run.captured;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
+    let label_for_tag = if multi { Some(sweep.label.as_str()) } else { None };
+
+    if let LibtestOutcome::HungTest(hung) = run.outcome {
+        if json {
+            emit_json_test_hung(label_for_tag, &hung);
+        } else {
+            output::error(&test_runner::format_hung_test(&hung, project_root));
+        }
+        return Ok(false);
+    }
 
     if json {
-        let label_for_tag = if multi { Some(sweep.label.as_str()) } else { None };
         emit_json_test_sweep(label_for_tag, &stdout, &stderr, captured.status.success());
         return Ok(captured.status.success());
     }
@@ -1062,6 +1091,23 @@ fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, s
             },
         ));
     }
+}
+
+fn emit_json_test_hung(sweep_label: Option<&str>, hung: &test_runner::HungTest) {
+    cargo_json::emit(&cargo_json::CheckEvent::TestHung(
+        cargo_json::TestHungEvent {
+            sweep: sweep_label.map(str::to_owned),
+            name: hung.test.clone(),
+            elapsed_seconds: (hung.elapsed.as_secs_f64() * 10.0).round() / 10.0,
+            snapshot_dir: hung.snapshot_dir.display().to_string(),
+            cargo_pid: hung.cargo_pid,
+            test_pids: hung.test_pids.clone(),
+            snapshot_pid: hung.snapshot_pid,
+            wchan: hung.wchan.clone(),
+            stack: hung.stack.clone(),
+            snapshot_error: hung.snapshot_error.clone(),
+        },
+    ));
 }
 
 /// Combine the sweep's profile-defined env with the project's

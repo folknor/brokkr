@@ -11,12 +11,8 @@
 //! `brokkr.toml`, a second sweep runs with
 //! `--no-default-features --features <consumer_features>`.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
-use std::process::{ChildStderr, ChildStdout};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Instant;
 
 use crate::build;
 use crate::cargo_filter;
@@ -25,6 +21,7 @@ use crate::error::DevError;
 use crate::output;
 use crate::profile;
 use crate::project::Project;
+use crate::test_runner::{self, LibtestOutcome};
 
 struct Sweep {
     label: String,
@@ -303,42 +300,19 @@ fn run_one(
     tag: &str,
     raw: bool,
 ) -> Result<Outcome, DevError> {
-    let start = Instant::now();
-    let mut child = output::spawn_captured("cargo", args, project_root, env)?;
+    let run = test_runner::streaming_run_libtest(
+        args,
+        project_root,
+        env,
+        make_stdout_forwarder(raw),
+        make_stderr_forwarder(raw),
+    )?;
 
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
-
-    let stdout_buf = Arc::new(Mutex::new(Vec::<String>::new()));
-    let stderr_buf = Arc::new(Mutex::new(Vec::<String>::new()));
-
-    let stdout_buf_t = Arc::clone(&stdout_buf);
-    let stdout_thread = thread::spawn(move || drain_stdout(stdout_pipe, raw, &stdout_buf_t));
-    let stderr_buf_t = Arc::clone(&stderr_buf);
-    let stderr_thread = thread::spawn(move || drain_stderr(stderr_pipe, raw, &stderr_buf_t));
-
-    let status = child.wait().map_err(|e| DevError::Subprocess {
-        program: "cargo".into(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-
-    // Drain threads finish when pipes close at child exit.
-    stdout_thread.join().ok();
-    stderr_thread.join().ok();
-    let elapsed = start.elapsed();
-
-    let stdout_lines = Arc::try_unwrap(stdout_buf)
-        .map_err(|_| DevError::Build("stdout buffer still held".into()))?
-        .into_inner()
-        .map_err(|_| DevError::Build("stdout buffer poisoned".into()))?;
-    let stderr_lines = Arc::try_unwrap(stderr_buf)
-        .map_err(|_| DevError::Build("stderr buffer still held".into()))?
-        .into_inner()
-        .map_err(|_| DevError::Build("stderr buffer poisoned".into()))?;
-
-    let line_refs: Vec<&str> = stdout_lines.iter().map(String::as_str).collect();
-    let parsed = cargo_filter::parse_test_output(&line_refs);
+    let stdout_text = String::from_utf8_lossy(&run.captured.stdout);
+    let stderr_text = String::from_utf8_lossy(&run.captured.stderr);
+    let stdout_lines: Vec<&str> = stdout_text.lines().collect();
+    let stderr_lines: Vec<&str> = stderr_text.lines().collect();
+    let parsed = cargo_filter::parse_test_output(&stdout_lines);
 
     let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
     let has_compile_error = stderr_lines.iter().any(|l| {
@@ -346,12 +320,18 @@ fn run_one(
         t.starts_with("error[") || (t.starts_with("error:") && !t.contains("test run failed"))
     });
 
-    let wall = format!("{:.2}s", elapsed.as_secs_f64());
+    let wall = format!("{:.2}s", run.captured.elapsed.as_secs_f64());
+
+    if let LibtestOutcome::HungTest(hung) = &run.outcome {
+        output::error(&test_runner::format_hung_test(hung, project_root));
+        println!("[test]    FAIL {tag} ({wall}) - hung test exceeded 20s");
+        std::io::stdout().flush().ok();
+        return Ok(Outcome::Fail);
+    }
 
     if !has_test_result && has_compile_error {
         if !raw {
-            let stderr_joined = stderr_lines.join("\n");
-            let filtered = cargo_filter::filter_clippy(&stderr_joined);
+            let filtered = cargo_filter::filter_clippy(stderr_text.as_ref());
             if !filtered.is_empty() {
                 output::error(&filtered);
             }
@@ -380,8 +360,11 @@ fn run_one(
         return Ok(Outcome::Fail);
     }
 
-    if !status.success() {
-        println!("[test]    FAIL {tag} ({wall}) - exit {:?}", status.code());
+    if !run.captured.status.success() {
+        println!(
+            "[test]    FAIL {tag} ({wall}) - exit {:?}",
+            run.captured.status.code()
+        );
         std::io::stdout().flush().ok();
         return Ok(Outcome::Fail);
     }
@@ -391,34 +374,27 @@ fn run_one(
     Ok(Outcome::Pass)
 }
 
-fn drain_stdout(pipe: ChildStdout, raw: bool, buf: &Mutex<Vec<String>>) {
-    let reader = BufReader::new(pipe);
-    let mut out = std::io::stdout().lock();
+fn make_stdout_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
     // Suppress leading blanks and collapse runs of consecutive blanks into
     // one. Starts `true` so any blank line before we print anything is eaten
     // - that gets rid of the gap cargo leaves between "Finished ..." and the
     // test output.
     let mut prev_blank = true;
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        let want = raw || keep_stdout_line(&line);
+    move |line| {
+        let want = raw || keep_stdout_line(line);
         if want {
             let is_blank = line.trim().is_empty();
             if !(is_blank && prev_blank) {
+                let mut out = std::io::stdout().lock();
                 writeln!(out, "{line}").ok();
                 out.flush().ok();
                 prev_blank = is_blank;
             }
         }
-        if let Ok(mut v) = buf.lock() {
-            v.push(line);
-        }
     }
 }
 
-fn drain_stderr(pipe: ChildStderr, raw: bool, buf: &Mutex<Vec<String>>) {
-    let reader = BufReader::new(pipe);
-    let mut err = std::io::stderr().lock();
+fn make_stderr_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
     // Cargo emits compile noise (warnings, errors, progress) on stderr before
     // launching the test binary. The test's own eprintln! also lands here
     // once the binary runs. Split on the "Running tests/..." line: before it,
@@ -426,26 +402,23 @@ fn drain_stderr(pipe: ChildStderr, raw: bool, buf: &Mutex<Vec<String>>) {
     let mut in_test_phase = false;
     let mut in_compile_block = false;
     let mut prev_blank = true;
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
+    move |line| {
         let want = if raw || in_test_phase {
             true
         } else if line.trim_start().starts_with("Running ") {
             in_test_phase = true;
             false
         } else {
-            keep_stderr_compile_line(&line, &mut in_compile_block)
+            keep_stderr_compile_line(line, &mut in_compile_block)
         };
         if want {
             let is_blank = line.trim().is_empty();
             if !(is_blank && prev_blank) {
+                let mut err = std::io::stderr().lock();
                 writeln!(err, "{line}").ok();
                 err.flush().ok();
                 prev_blank = is_blank;
             }
-        }
-        if let Ok(mut v) = buf.lock() {
-            v.push(line);
         }
     }
 }

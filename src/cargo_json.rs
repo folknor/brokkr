@@ -12,6 +12,7 @@ use serde::Serialize;
 pub enum CheckEvent {
     Diagnostic(DiagnosticEvent),
     TestFailure(TestFailureEvent),
+    TestHung(TestHungEvent),
     DiagnosticSummary(DiagnosticSummaryEvent),
     TestSummary(TestSummaryEvent),
     Gremlin(GremlinEvent),
@@ -72,6 +73,26 @@ pub struct TestFailureEvent {
     pub location: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TestHungEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<String>,
+    pub name: String,
+    pub elapsed_seconds: f64,
+    pub snapshot_dir: String,
+    pub cargo_pid: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub test_pids: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wchan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_error: Option<String>,
 }
 
 #[derive(Serialize)]
