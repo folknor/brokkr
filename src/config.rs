@@ -15,6 +15,7 @@ pub struct DevConfig {
     pub hosts: HashMap<String, HostConfig>,
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
+    pub ratatoskr: Option<RatatoskrConfig>,
     /// Each `[[check]]` entry in `brokkr.toml`. One entry = one
     /// (clippy + test) sweep with the entry's feature flags. Empty
     /// when the file has no `[[check]]` arrays - in that case
@@ -337,6 +338,36 @@ impl SluggrsConfig {
     }
 }
 
+/// Ratatoskr-specific configuration from `[ratatoskr]` in brokkr.toml.
+///
+/// Currently a single nested table - the harness build orchestration -
+/// but the wrapper exists so additional ratatoskr-only knobs can land
+/// later without further restructuring (e.g. script discovery roots,
+/// suite filters).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RatatoskrConfig {
+    pub harness: Option<HarnessConfig>,
+}
+
+/// `[ratatoskr.harness]` - which `[[check]]` sweep `brokkr service-test`
+/// builds against, and which package's binary is the primary spawn
+/// target. Both fields are required when the table is present;
+/// validation against the rest of the config (sweep exists, binary in
+/// that sweep's `build_packages`) runs at parse time so a typo errors
+/// out before the cargo build kicks off.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessConfig {
+    /// Name of the `[[check]]` entry whose features apply to harness
+    /// builds. Must reference an existing entry.
+    pub sweep: String,
+
+    /// Name of the cargo package whose binary the harness spawns.
+    /// Must appear in `[[check]].build_packages` of the named sweep.
+    pub binary: String,
+}
+
 #[allow(dead_code)]
 pub struct ResolvedPaths {
     pub hostname: String,
@@ -385,9 +416,11 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
 
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
+    let ratatoskr = parse_ratatoskr(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
     validate_check_against_test(&check, test.as_ref())?;
+    validate_ratatoskr_against_check(ratatoskr.as_ref(), &check)?;
     let capture_env = parse_capture_env(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -398,6 +431,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             hosts,
             litehtml,
             sluggrs,
+            ratatoskr,
             check,
             test,
             capture_env,
@@ -476,6 +510,7 @@ fn parse_hosts(
         if key == "project"
             || key == "litehtml"
             || key == "sluggrs"
+            || key == "ratatoskr"
             || key == "check"
             || key == "test"
             || key == "capture_env"
@@ -521,6 +556,20 @@ fn parse_sluggrs(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("sluggrs: {e}")))?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[ratatoskr]` section from the root table.
+fn parse_ratatoskr(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<RatatoskrConfig>, DevError> {
+    let Some(value) = table.get("ratatoskr") else {
+        return Ok(None);
+    };
+    let config: RatatoskrConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("ratatoskr: {e}")))?;
     Ok(Some(config))
 }
 
@@ -633,6 +682,49 @@ fn validate_check_against_test(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Cross-check `[ratatoskr.harness]` against `[[check]]`: the named
+/// sweep must exist, and the named binary must appear in that sweep's
+/// `build_packages`. Both rules catch a typo at parse time before the
+/// cargo build kicks off, so a fresh checkout sees the helpful error
+/// instead of a confused cargo failure.
+fn validate_ratatoskr_against_check(
+    ratatoskr: Option<&RatatoskrConfig>,
+    check: &[CheckEntry],
+) -> Result<(), DevError> {
+    let Some(r) = ratatoskr else {
+        return Ok(());
+    };
+    let Some(harness) = &r.harness else {
+        return Ok(());
+    };
+    let entry = check.iter().find(|e| e.name == harness.sweep).ok_or_else(|| {
+        let known: Vec<&str> = check.iter().map(|e| e.name.as_str()).collect();
+        let known = if known.is_empty() {
+            "no `[[check]]` entries are configured".to_owned()
+        } else {
+            format!("known sweeps: {}", known.join(", "))
+        };
+        DevError::Config(format!(
+            "[ratatoskr.harness].sweep references '{}', but no `[[check]]` \
+             entry with that name exists ({known}).",
+            harness.sweep
+        ))
+    })?;
+    if !entry.build_packages.iter().any(|p| p == &harness.binary) {
+        let pkgs = if entry.build_packages.is_empty() {
+            "the sweep declares no `build_packages`".to_owned()
+        } else {
+            format!("declared: {}", entry.build_packages.join(", "))
+        };
+        return Err(DevError::Config(format!(
+            "[ratatoskr.harness].binary = '{}' does not appear in \
+             [[check]].build_packages of sweep '{}' ({pkgs}).",
+            harness.binary, harness.sweep
+        )));
     }
     Ok(())
 }
@@ -892,6 +984,7 @@ mod tests {
             hosts,
             litehtml: None,
             sluggrs: None,
+            ratatoskr: None,
             check: Vec::new(),
             test: None,
             capture_env: Vec::new(),
@@ -1553,6 +1646,70 @@ features = ["a"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("'consumer'"), "got: {err}");
+    }
+
+    #[test]
+    fn ratatoskr_harness_accepts_valid_pair() {
+        let check = vec![CheckEntry {
+            name: "harness".into(),
+            features: vec!["test-helpers".into()],
+            no_default_features: false,
+            build_packages: vec!["app".into(), "parent_death_helper".into()],
+        }];
+        let r = RatatoskrConfig {
+            harness: Some(HarnessConfig {
+                sweep: "harness".into(),
+                binary: "app".into(),
+            }),
+        };
+        validate_ratatoskr_against_check(Some(&r), &check).unwrap();
+    }
+
+    #[test]
+    fn ratatoskr_harness_rejects_unknown_sweep() {
+        let check = vec![CheckEntry {
+            name: "all".into(),
+            features: Vec::new(),
+            no_default_features: false,
+            build_packages: vec!["app".into()],
+        }];
+        let r = RatatoskrConfig {
+            harness: Some(HarnessConfig {
+                sweep: "nope".into(),
+                binary: "app".into(),
+            }),
+        };
+        let err = validate_ratatoskr_against_check(Some(&r), &check)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'nope'"), "got: {err}");
+        assert!(err.contains("known sweeps"), "got: {err}");
+    }
+
+    #[test]
+    fn ratatoskr_harness_rejects_binary_not_in_build_packages() {
+        let check = vec![CheckEntry {
+            name: "harness".into(),
+            features: Vec::new(),
+            no_default_features: false,
+            build_packages: vec!["app".into()],
+        }];
+        let r = RatatoskrConfig {
+            harness: Some(HarnessConfig {
+                sweep: "harness".into(),
+                binary: "service".into(),
+            }),
+        };
+        let err = validate_ratatoskr_against_check(Some(&r), &check)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'service'"), "got: {err}");
+        assert!(err.contains("declared: app"), "got: {err}");
+    }
+
+    #[test]
+    fn ratatoskr_harness_no_op_without_section() {
+        validate_ratatoskr_against_check(None, &[]).unwrap();
     }
 
     #[test]

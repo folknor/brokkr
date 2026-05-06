@@ -574,10 +574,23 @@ Brokkr-side, in tree:
   in `brokkr.toml` resolves to it; `[ratatoskr]`-tagged commands
   show up grouped in `brokkr --help`; `project::require()` gates
   cleanly with the conventional error message.
-- `brokkr service-test <SCRIPT>` is a skeleton: project-gated,
-  validates the script path, exits non-zero with a "harness
-  pending" message that points at this note. No build, no spawn,
-  no artefact dir wired yet.
+- `brokkr service-test <SCRIPT>` is a partial skeleton:
+  project-gated, validates the script path, runs the sweep-aware
+  build (see below), then exits non-zero with a "harness pending"
+  message naming the freshly-built binary path. No spawn yet.
+  `--debug` flips the build to the dev profile; default is
+  release.
+- Sweep-aware harness build (`src/ratatoskr/build.rs`). Reads
+  `[ratatoskr.harness] sweep / binary` out of `brokkr.toml`,
+  matches `sweep` against `[[check]]`, builds every
+  `build_packages` entry through `crate::build::cargo_build` with
+  the sweep's feature flags, returns the path to the
+  `binary`-package executable plus the bin dir for sibling
+  helpers. Same feature contract `brokkr check` enforces - a
+  script can never run against a feature combination the rest of
+  the toolchain has not validated. Cross-checks at parse time:
+  unknown `sweep` and binary-not-in-`build_packages` both error
+  before cargo runs.
 - `brokkr service-list` discovers `crates/app/tests/service-harness/
   *.lua` under the project root, parses a top-of-file
   `-- key: value` frontmatter (`description`, `expected =
@@ -619,11 +632,9 @@ Deferred (ratatoskr-side):
 Brokkr-side, not yet started but unblocked by the architecture
 decision:
 
-- Build orchestration: invoke `[[check]]` sweep machinery from
-  `service-test` so the spawned binary matches `brokkr check`'s
-  feature matrix.
 - Lockfile + history-DB integration on the `service-test` path.
 - Soak (`-N`), suite (`--filter`), JSON output for `service-list`.
+- `service-list --json` for machine consumption.
 
 ## Suggested implementation order
 
@@ -646,10 +657,12 @@ decision:
 6. **Wait combinator.** *(deferred - same. The simplest form
    (`wait_for_sentinel`) is in tree as a building block; the
    ServiceClient-aware variant follows once the VM is sited.)*
-7. **CLI: `brokkr service-test <SCRIPT>`.** *(skeleton landed -
-   project-gated, validates script path, exits non-zero with
-   "harness pending" pointing at this note. Wiring to actually run
-   a script is deferred behind the architecture decision.)*
+7. **CLI: `brokkr service-test <SCRIPT>`.** *(partial - landed
+   the project gate + script validation + sweep-aware build via
+   `[ratatoskr.harness]` + `--debug` profile flag, then exits
+   non-zero with "harness pending" naming the built binary.
+   Spawn / Lua run / artefact-dir population deferred behind the
+   architecture decision.)*
 8. **Wedge.** *(deferred.)*
 9. **Phase-8 ratatoskr-side additions.** *(deferred -
    ratatoskr-side work, untouched.)*

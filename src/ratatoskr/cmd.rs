@@ -2,23 +2,29 @@
 
 use std::path::Path;
 
+use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::output;
+use crate::ratatoskr::build;
 use crate::ratatoskr::discover::{self, ScriptInfo, SCRIPT_DIR};
 
 /// Skeleton implementation of `brokkr service-test <SCRIPT>`.
 ///
-/// Validates the script path, then errors with a "harness pending"
-/// message. The full implementation (build the ratatoskr binary against
-/// a `[[check]]` sweep, spawn `app --test-harness <script>` with an
-/// artefact-dir env var, capture exit, preserve the artefact dir on
-/// failure, record the run in brokkr's history DB) lands once the
-/// brokkr/ratatoskr split is wired through. See
+/// Validates the script path, builds the configured `[[check]]` sweep
+/// via `[ratatoskr.harness]`, then errors with a "harness pending"
+/// message. The build step is the live half of the contract: the same
+/// feature flags `brokkr check` enforces are applied here, and the
+/// resulting binary path is the one the harness will eventually spawn.
+/// The actual spawn (and Lua VM, ServiceClient bindings, wait
+/// combinator, artefact-dir population, history-DB recording) lands
+/// once the brokkr/ratatoskr architecture decision is settled. See
 /// `notes/ratatoskr-service-harness.md`.
 pub fn service_test(
-    _project_root: &Path,
+    project_root: &Path,
+    dev_config: &DevConfig,
     script: &str,
     _keep_artefacts: bool,
+    debug: bool,
 ) -> Result<(), DevError> {
     let script_path = Path::new(script);
     if !script_path.exists() {
@@ -31,9 +37,32 @@ pub fn service_test(
             "service-test: script path is not a regular file: {script}"
         )));
     }
+
+    let harness_cfg = dev_config
+        .ratatoskr
+        .as_ref()
+        .and_then(|r| r.harness.as_ref())
+        .ok_or_else(|| {
+            DevError::Config(
+                "service-test: no [ratatoskr.harness] section in brokkr.toml. \
+                 Add a [[check]] entry naming the harness sweep, then \
+                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\". \
+                 See notes/ratatoskr-service-harness.md."
+                    .into(),
+            )
+        })?;
+
+    let built = build::build_for_harness(project_root, &dev_config.check, harness_cfg, debug)?;
+    output::ratatoskr_msg(&format!(
+        "harness build ok (sweep={}, binary={})",
+        built.sweep_label,
+        built.binary.display(),
+    ));
+
     Err(DevError::Config(format!(
-        "service-test harness not yet implemented (script {script} validated). \
-         See notes/ratatoskr-service-harness.md for the plan."
+        "service-test harness not yet implemented (script {script} validated, \
+         binary built at {}). See notes/ratatoskr-service-harness.md for the plan.",
+        built.binary.display()
     )))
 }
 

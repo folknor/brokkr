@@ -983,9 +983,19 @@ fn run(cli: Cli) -> Result<(), DevError> {
             sluggrs::hotpath::cmd(&req, &target)
         }
         // ----- ratatoskr-only commands -----
-        Command::ServiceTest { script, keep_artefacts } => {
+        Command::ServiceTest {
+            script,
+            keep_artefacts,
+            debug,
+        } => {
             project::require(project, Project::Ratatoskr, "service-test")?;
-            ratatoskr::cmd::service_test(&project_root, &script, keep_artefacts)
+            ratatoskr::cmd::service_test(
+                &project_root,
+                &dev_config,
+                &script,
+                keep_artefacts,
+                debug,
+            )
         }
         Command::ServiceList => {
             project::require(project, Project::Ratatoskr, "service-list")?;

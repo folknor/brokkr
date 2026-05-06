@@ -233,6 +233,8 @@ Dataset paths resolve from `brokkr.toml` automatically. All flags go after the c
 - `test [-p <PKG>] <NAME>` - (all cargo projects except litehtml/sluggrs) run one specific cargo test. Defaults to release; pass `--debug` to run the dev profile instead (faster compile, useful when the failing test isn't profile-sensitive). Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and integration tests are matched by the name substring within the selected package. Package resolution: explicit `-p/--package` > `[test] default_package` in `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces (e.g. ratatoskr) must pass `-p` or set `default_package`. Always adds `--include-ignored --nocapture --test-threads=1`. Sweep selection: if `[test].default_profile` is set, the test runs against every `[[check]]` entry the profile references (profile filters are dropped - the user's `<NAME>` is the filter); else if `[[check]]` is non-empty, every entry runs in declaration order; else fall back to a single `--all-features` sweep. Each sweep's `build_packages` are rebuilt with the matching feature flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary with the same feature set the test crate sees. Streams the test's own stdout/stderr live (cargo/test-harness framing lines are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed with at least one `PASS` exits `0`. `-N <n>` repeats the test (per sweep) for flaky-test hunting; `-j <n>` sets `cargo -j N` for parallel compile; `--raw` disables all filtering. Because `cargo test <name>` is a substring filter, identically-named tests in different modules of the same package all run; use a more qualified name (module path) to disambiguate. Litehtml and sluggrs projects are rejected with a pointer to `brokkr visual`.
 - `passthrough` - build and run with raw passthrough args (hidden, for ad-hoc use)
 - `download <region> [--osc-seq N]` - (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
+- `service-test <SCRIPT>` - (ratatoskr, scaffolding) run a Service-subprocess test script. Today: project gating, script-path validation, sweep-aware build via `[ratatoskr.harness]` (same feature contract as `brokkr check`); exits non-zero with "harness pending" once the build succeeds. The Lua VM, ServiceClient bindings, wait combinator, and artefact-dir population land once the brokkr/ratatoskr architecture decision is settled. `--debug` flips the build to dev profile (default release). See `notes/ratatoskr-service-harness.md`.
+- `service-list` - (ratatoskr) list discovered service-test scripts. Walks `crates/app/tests/service-harness/*.lua` under the project root, parses a `-- key: value` frontmatter (`description`, `expected = pass|ignored`), prints a sorted table. Empty-state output names the expected directory.
 
 ### Env vars exported to `cargo test`
 
@@ -271,6 +273,21 @@ path = "fixtures/creatine_hero/creatine_hero.html"
 tags = ["creatine"]
 expected = "pass"
 ```
+
+### Ratatoskr config in brokkr.toml
+
+```toml
+[[check]]
+name = "harness"
+features = ["test-helpers"]
+build_packages = ["app", "parent_death_helper"]
+
+[ratatoskr.harness]
+sweep = "harness"  # name of the [[check]] entry to build against
+binary = "app"     # cargo package whose binary `service-test` spawns
+```
+
+`[ratatoskr.harness]` is the link between brokkr's `[[check]]` machinery and `brokkr service-test`. `sweep` must reference an existing `[[check]]` entry; `binary` must appear in that sweep's `build_packages`. Both rules are enforced at config-parse time so a typo errors before the cargo build kicks off. The same feature flags `brokkr check` enforces are applied to harness builds, so a script can never run against a feature combination the rest of the toolchain hasn't validated. The `[ratatoskr]` table is reserved for ratatoskr-only knobs; today only `harness` is defined.
 
 ## Benchmark harness
 

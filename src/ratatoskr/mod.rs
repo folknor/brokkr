@@ -10,6 +10,7 @@
 //! See `notes/ratatoskr-service-harness.md` for the cross-cutting plan.
 
 pub mod artefacts;
+pub mod build;
 pub mod cmd;
 pub mod discover;
 pub mod process;

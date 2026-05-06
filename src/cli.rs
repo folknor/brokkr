@@ -1523,13 +1523,14 @@ Examples:
     // ----- ratatoskr-only commands (display_order = 60) -----
     /// [ratatoskr] Run a Service-subprocess test script (deterministic harness)
     ///
-    /// Skeleton. The harness itself (Lua VM via dellingr, ServiceClient
-    /// bindings, wait combinator that races a predicate against
-    /// `observe_child_exit`, artefact-dir writer with frames.jsonl /
-    /// events.jsonl / /proc snapshot / data-dir copy) is in flight; for
-    /// now this command validates the script path and exits with a
-    /// "harness pending" message. See notes/ratatoskr-service-harness.md
-    /// for the design.
+    /// In tree: project gating, script-path validation, and a sweep-aware
+    /// build via `[ratatoskr.harness]` in brokkr.toml (same feature
+    /// contract `brokkr check` enforces). Pending: the Lua VM via
+    /// dellingr, ServiceClient bindings, wait combinator that races a
+    /// predicate against `observe_child_exit`, artefact-dir writer with
+    /// frames.jsonl / events.jsonl / /proc snapshot / data-dir copy.
+    /// Today the command exits non-zero with "harness pending" once the
+    /// build succeeds. See notes/ratatoskr-service-harness.md.
     #[command(name = "service-test", display_order = 60)]
     ServiceTest {
         /// Path to the Lua test script
@@ -1538,6 +1539,12 @@ Examples:
         /// Preserve the artefact directory even on success
         #[arg(long)]
         keep_artefacts: bool,
+
+        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Default is release for parity with `brokkr test` and to match
+        /// what users will run in production.
+        #[arg(long)]
+        debug: bool,
     },
 
     /// [ratatoskr] List discovered service-test scripts with descriptions
