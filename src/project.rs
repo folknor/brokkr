@@ -13,6 +13,7 @@ pub enum Project {
     Brokkr,
     Litehtml,
     Sluggrs,
+    Ratatoskr,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
     /// The `&'static str` is leaked once at startup from the TOML value.
@@ -28,17 +29,26 @@ impl Project {
             Self::Brokkr => "brokkr",
             Self::Litehtml => "litehtml-rs",
             Self::Sluggrs => "sluggrs",
+            Self::Ratatoskr => "ratatoskr",
             Self::Other(s) => s,
         }
     }
 
     /// The cargo package name for the project's primary binary.
     /// `None` means single-crate project (no `-p` flag needed).
+    /// Ratatoskr is a multi-crate workspace; it returns `None` and relies
+    /// on `[test] default_package` in `brokkr.toml` to point `brokkr test`
+    /// at the right cargo package.
     pub fn cli_package(self) -> Option<&'static str> {
         match self {
             Self::Pbfhogg => Some("pbfhogg-cli"),
             Self::Nidhogg => Some("nidhogg"),
-            Self::Elivagar | Self::Brokkr | Self::Litehtml | Self::Sluggrs | Self::Other(_) => None,
+            Self::Elivagar
+            | Self::Brokkr
+            | Self::Litehtml
+            | Self::Sluggrs
+            | Self::Ratatoskr
+            | Self::Other(_) => None,
         }
     }
 

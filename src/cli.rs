@@ -1519,6 +1519,35 @@ Examples:
         #[arg(long)]
         wait: bool,
     },
+
+    // ----- ratatoskr-only commands (display_order = 60) -----
+    /// [ratatoskr] Run a Service-subprocess test script (deterministic harness)
+    ///
+    /// Skeleton. The harness itself (Lua VM via dellingr, ServiceClient
+    /// bindings, wait combinator that races a predicate against
+    /// `observe_child_exit`, artefact-dir writer with frames.jsonl /
+    /// events.jsonl / /proc snapshot / data-dir copy) is in flight; for
+    /// now this command validates the script path and exits with a
+    /// "harness pending" message. See notes/ratatoskr-service-harness.md
+    /// for the design.
+    #[command(name = "service-test", display_order = 60)]
+    ServiceTest {
+        /// Path to the Lua test script
+        script: String,
+
+        /// Preserve the artefact directory even on success
+        #[arg(long)]
+        keep_artefacts: bool,
+    },
+
+    /// [ratatoskr] List discovered service-test scripts with descriptions
+    ///
+    /// Scans `crates/app/tests/service-harness/*.lua` under the project
+    /// root, parses a top-of-file `-- key: value` frontmatter for
+    /// `description` and `expected` (`pass` / `ignored`), and prints a
+    /// table. Empty-state output points at the expected directory.
+    #[command(name = "service-list", display_order = 61)]
+    ServiceList,
 }
 
 // ---------------------------------------------------------------------------

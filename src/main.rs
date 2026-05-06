@@ -36,6 +36,7 @@ mod pmtiles;
 mod preflight;
 mod profile;
 mod project;
+mod ratatoskr;
 mod request;
 mod resolve;
 mod results_cmd;
@@ -980,6 +981,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 stop_marker: None,
             };
             sluggrs::hotpath::cmd(&req, &target)
+        }
+        // ----- ratatoskr-only commands -----
+        Command::ServiceTest { script, keep_artefacts } => {
+            project::require(project, Project::Ratatoskr, "service-test")?;
+            ratatoskr::cmd::service_test(&project_root, &script, keep_artefacts)
+        }
+        Command::ServiceList => {
+            project::require(project, Project::Ratatoskr, "service-list")?;
+            ratatoskr::cmd::service_list(&project_root)
         }
     }
 }

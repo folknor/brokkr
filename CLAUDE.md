@@ -1,6 +1,6 @@
 # brokkr
 
-Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, and sluggrs. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
+Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs, and ratatoskr. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
 
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
@@ -35,7 +35,7 @@ Single crate, single binary. No workspace.
 - `src/elivagar/commands.rs` - `ElivagarCommand` enum (Tilegen, PmtilesWriter, NodeStore, Planetiler, Tilemaker)
 - `src/context.rs` - `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
 - `src/resolve.rs` - Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
-- `src/project.rs` - `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs), `detect()` (delegates to `config::load()`), `require()` gating
+- `src/project.rs` - `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs/Ratatoskr), `detect()` (delegates to `config::load()`), `require()` gating
 - `src/config.rs` - `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
 - `src/build.rs` - `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` - `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`

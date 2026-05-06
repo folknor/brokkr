@@ -93,6 +93,10 @@ pub fn sluggrs_msg(msg: &str) {
     println!("[sluggrs] {msg}");
 }
 
+pub fn ratatoskr_msg(msg: &str) {
+    println!("[ratatoskr] {msg}");
+}
+
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
