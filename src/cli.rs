@@ -1531,6 +1531,9 @@ Examples:
     /// the env. Captures stdout/stderr into the artefact dir alongside
     /// `run.toml` and a copy of the script. Preserves the dir on
     /// failure; deletes it on success unless `--keep-artefacts` is set.
+    /// `-N <count>` repeats the run for flaky-test hunting; defaults to
+    /// stop-on-first-failure unless `--keep-going` is set, in which case
+    /// every iteration runs and a summary lists the failed iters.
     /// The harness binary itself (Lua VM via dellingr, ServiceClient
     /// userdata, wait combinator, frame-log tap, /proc snapshot writer)
     /// lives in ratatoskr's `app` crate and lands in Phase 8; until
@@ -1550,6 +1553,17 @@ Examples:
         /// what users will run in production.
         #[arg(long)]
         debug: bool,
+
+        /// Repeat the run this many times (flaky-test hunting). Build is
+        /// shared across iterations; each iteration gets its own
+        /// `run-N/` artefact dir.
+        #[arg(short = 'N', long = "repeat", default_value = "1", value_name = "COUNT")]
+        repeat: u32,
+
+        /// Keep going after a failed iteration. Default is to stop on
+        /// the first failure so the artefact dir lands fast for triage.
+        #[arg(long)]
+        keep_going: bool,
     },
 
     /// [ratatoskr] List discovered service-test scripts with descriptions

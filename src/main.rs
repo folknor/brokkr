@@ -987,6 +987,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             script,
             keep_artefacts,
             debug,
+            repeat,
+            keep_going,
         } => {
             project::require(project, Project::Ratatoskr, "service-test")?;
             ratatoskr::cmd::service_test(
@@ -995,6 +997,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &script,
                 keep_artefacts,
                 debug,
+                repeat,
+                keep_going,
             )
         }
         Command::ServiceList => {

@@ -18,15 +18,22 @@ use crate::ratatoskr::discover::{self, ScriptInfo, SCRIPT_DIR};
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
 const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr";
 
-/// Run one service-test script through the harness binary built via
-/// `[ratatoskr.harness]`.
+/// Run one or more service-test iterations through the harness binary
+/// built via `[ratatoskr.harness]`.
 ///
 /// Acquires the global lockfile, builds the configured `[[check]]`
-/// sweep, allocates a per-run artefact dir, spawns
+/// sweep once, then for each of `repeat` iterations allocates a fresh
+/// `<artefact_parent>/<test_id>/run-N/`, spawns
 /// `<binary> --test-harness <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR`
 /// and `BROKKR_TEST_BIN_DIR` set, captures stdout/stderr, writes them
 /// alongside a `run.toml` and a copy of the script, then preserves or
 /// drops the artefact dir based on outcome.
+///
+/// `repeat = 1` is the default and prints the existing single-shot
+/// PASS/FAIL line. `repeat > 1` switches to soak mode: per-iteration
+/// status line, optional bail on first failure (`!keep_going`),
+/// summary at the end. The exit code is non-zero if any iteration
+/// failed.
 ///
 /// The harness binary itself - the Lua VM, `ServiceClient` userdata,
 /// wait combinator, frame-log tap, `/proc` snapshot writer - lives in
@@ -34,12 +41,15 @@ const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr";
 /// in Phase 8. Until it does, `app --test-harness` errors out with
 /// "unknown flag" and brokkr captures that into the artefact dir
 /// faithfully; the plumbing here is structurally complete.
+#[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
 pub fn service_test(
     project_root: &Path,
     dev_config: &DevConfig,
     script: &str,
     keep_artefacts: bool,
     debug: bool,
+    repeat: u32,
+    keep_going: bool,
 ) -> Result<(), DevError> {
     let script_path = Path::new(script);
     if !script_path.exists() {
@@ -96,27 +106,128 @@ pub fn service_test(
     ));
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
-    let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_artefacts)?;
+    let repeat = repeat.max(1);
+    if repeat == 1 {
+        run_single(
+            &artefact_parent,
+            &test_id,
+            &built,
+            &script_abs,
+            project_root,
+            keep_artefacts,
+        )
+    } else {
+        run_soak(
+            &artefact_parent,
+            &test_id,
+            &built,
+            &script_abs,
+            project_root,
+            keep_artefacts,
+            repeat,
+            keep_going,
+        )
+    }
+}
 
+/// Outcome of one harness-binary invocation.
+///
+/// `artefact_path` is `Some` when the run dir is preserved on disk -
+/// always for failures, and for successes only when `--keep-artefacts`
+/// was set. `exit_label` is the human-readable exit summary
+/// (`exit=N`, `signal=N`, or `unknown exit`).
+struct RunResult {
+    succeeded: bool,
+    elapsed_ms: u128,
+    exit_label: String,
+    artefact_path: Option<PathBuf>,
+}
+
+/// Single-run dispatch (`repeat == 1`). Mirrors the pre-soak output
+/// shape exactly: one "running ..." line, one PASS/FAIL line.
+fn run_single(
+    artefact_parent: &Path,
+    test_id: &str,
+    built: &HarnessBuild,
+    script_abs: &Path,
+    project_root: &Path,
+    keep_artefacts: bool,
+) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {test_id} against {}",
         built.binary.display()
     ));
-
-    spawn_and_finalize(artefacts, &built, &script_abs, project_root)
+    let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_artefacts)?;
+    let result = spawn_and_capture(artefacts, built, script_abs, project_root)?;
+    if result.succeeded {
+        output::ratatoskr_msg(&format!("PASS in {}ms", result.elapsed_ms));
+        Ok(())
+    } else {
+        let dir = result
+            .artefact_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<missing>".to_owned());
+        output::ratatoskr_msg(&format!(
+            "FAIL {} in {}ms (artefacts: {dir})",
+            result.exit_label, result.elapsed_ms
+        ));
+        Err(DevError::ExitCode(1))
+    }
 }
 
-/// Spawn the harness binary against `script_abs`, capture its output
-/// into `artefacts`, then finalize the dir per the run's exit status.
-/// Split out of [`service_test`] purely to keep that function within
-/// the project's line-count lint; the artefact-dir is consumed here so
-/// the lifecycle ends in one place.
-fn spawn_and_finalize(
+/// Soak dispatch (`repeat > 1`). Emits a per-iteration status line and
+/// a summary. With `keep_going = false` (default), bails on the first
+/// failed iteration; the summary then reports "stopped at iter X/Y".
+#[allow(clippy::too_many_arguments)] // mirrors the entry point's plumbing
+fn run_soak(
+    artefact_parent: &Path,
+    test_id: &str,
+    built: &HarnessBuild,
+    script_abs: &Path,
+    project_root: &Path,
+    keep_artefacts: bool,
+    repeat: u32,
+    keep_going: bool,
+) -> Result<(), DevError> {
+    output::ratatoskr_msg(&format!(
+        "running {test_id} against {} (-N {repeat}{})",
+        built.binary.display(),
+        if keep_going { ", --keep-going" } else { "" }
+    ));
+
+    let mut results: Vec<(u32, RunResult)> = Vec::new();
+    for iter in 1..=repeat {
+        let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_artefacts)?;
+        let result = spawn_and_capture(artefacts, built, script_abs, project_root)?;
+        output::ratatoskr_msg(&format_iter_line(iter, repeat, &result));
+        let stop = !result.succeeded && !keep_going;
+        results.push((iter, result));
+        if stop {
+            break;
+        }
+    }
+
+    output::ratatoskr_msg(&format_soak_summary(&results, repeat));
+
+    if results.iter().any(|(_, r)| !r.succeeded) {
+        Err(DevError::ExitCode(1))
+    } else {
+        Ok(())
+    }
+}
+
+/// Spawn the harness binary against `script_abs`, write its outputs +
+/// metadata into the supplied artefact dir, then finalize the dir per
+/// the binary's exit status. Returns a [`RunResult`] describing the
+/// outcome; spawn-level failures (binary missing, etc.) propagate as
+/// `Err` after dropping a `spawn-error.txt` breadcrumb in the dir.
+fn spawn_and_capture(
     artefacts: ArtefactDir,
     built: &HarnessBuild,
     script_abs: &Path,
     project_root: &Path,
-) -> Result<(), DevError> {
+) -> Result<RunResult, DevError> {
     let binary_str = built.binary.display().to_string();
     let script_str = script_abs.display().to_string();
     let artefact_path_str = artefacts.path().display().to_string();
@@ -133,9 +244,6 @@ fn spawn_and_finalize(
     ) {
         Ok(c) => c,
         Err(e) => {
-            // Spawn itself failed (binary missing, exec error). Leave a
-            // breadcrumb in the artefact dir so the empty dir isn't a
-            // mystery, then preserve it via finalize_failure.
             fs::write(
                 artefacts.path().join("spawn-error.txt"),
                 format!("failed to spawn {}: {e}\n", built.binary.display()),
@@ -149,22 +257,95 @@ fn spawn_and_finalize(
     write_artefacts(artefacts.path(), script_abs, built, &captured, project_root)?;
 
     let elapsed_ms = captured.elapsed.as_millis();
+    let exit_label = match (captured.status.code(), captured.status.signal()) {
+        (Some(code), _) => format!("exit={code}"),
+        (None, Some(sig)) => format!("signal={sig}"),
+        (None, None) => "unknown exit".to_owned(),
+    };
+
     if captured.status.success() {
-        output::ratatoskr_msg(&format!("PASS in {elapsed_ms}ms"));
+        let path = artefacts.path().to_path_buf();
         artefacts.finalize_success()?;
-        Ok(())
+        // finalize_success deletes the dir unless `keep_on_success` was
+        // set at allocation time; check disk for the truth.
+        let preserved = path.exists();
+        Ok(RunResult {
+            succeeded: true,
+            elapsed_ms,
+            exit_label,
+            artefact_path: preserved.then_some(path),
+        })
     } else {
-        let artefact_dir_str = artefacts.path().display().to_string();
-        let outcome = match (captured.status.code(), captured.status.signal()) {
-            (Some(code), _) => format!("exit={code}"),
-            (None, Some(sig)) => format!("signal={sig}"),
-            (None, None) => "unknown exit".to_owned(),
-        };
-        output::ratatoskr_msg(&format!(
-            "FAIL {outcome} in {elapsed_ms}ms (artefacts: {artefact_dir_str})"
-        ));
+        let path = artefacts.path().to_path_buf();
         artefacts.finalize_failure();
-        Err(DevError::ExitCode(1))
+        Ok(RunResult {
+            succeeded: false,
+            elapsed_ms,
+            exit_label,
+            artefact_path: Some(path),
+        })
+    }
+}
+
+/// Format one soak iteration's status line. Pure for testability.
+fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> String {
+    if result.succeeded {
+        format!("iter {iter}/{total}: PASS in {}ms", result.elapsed_ms)
+    } else {
+        let dir = result
+            .artefact_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<missing>".to_owned());
+        format!(
+            "iter {iter}/{total}: FAIL {} in {}ms (artefacts: {dir})",
+            result.exit_label, result.elapsed_ms
+        )
+    }
+}
+
+/// Format the trailing soak summary. Pure for testability.
+///
+/// All-passed shape: `soak: N/total passed (min Xms, max Yms, avg Zms)`.
+/// Stopped-early shape: `soak: stopped at iter F/total (P passed, 1 failed)`.
+/// Keep-going shape: `soak: P/total passed, F failed (iters i, j, k)`.
+fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> String {
+    let pass_times: Vec<u128> = results
+        .iter()
+        .filter_map(|(_, r)| r.succeeded.then_some(r.elapsed_ms))
+        .collect();
+    let fail_iters: Vec<u32> = results
+        .iter()
+        .filter_map(|(i, r)| (!r.succeeded).then_some(*i))
+        .collect();
+    let pass_count = pass_times.len();
+    let fail_count = fail_iters.len();
+    let ran = u32::try_from(results.len()).unwrap_or(u32::MAX);
+    let stopped_early = ran < total;
+
+    if fail_iters.is_empty() {
+        let min = pass_times.iter().min().copied().unwrap_or(0);
+        let max = pass_times.iter().max().copied().unwrap_or(0);
+        let avg = if pass_times.is_empty() {
+            0
+        } else {
+            pass_times.iter().sum::<u128>() / pass_times.len() as u128
+        };
+        format!("soak: {pass_count}/{total} passed (min {min}ms, max {max}ms, avg {avg}ms)")
+    } else if stopped_early {
+        // keep_going = false path: by construction there's exactly one
+        // failed iter and the loop bailed immediately after it.
+        let first_fail = fail_iters[0];
+        format!(
+            "soak: stopped at iter {first_fail}/{total} ({pass_count} passed, {fail_count} failed)"
+        )
+    } else {
+        let fail_str = fail_iters
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("soak: {pass_count}/{total} passed, {fail_count} failed (iters {fail_str})")
     }
 }
 
@@ -411,5 +592,102 @@ mod tests {
         let cap = Command::new("/bin/false").output().unwrap();
         assert!(!cap.status.success());
         assert_eq!(cap.status.code(), Some(1));
+    }
+
+    // ---- soak format helpers ------------------------------------------
+
+    fn pass(elapsed_ms: u128) -> RunResult {
+        RunResult {
+            succeeded: true,
+            elapsed_ms,
+            exit_label: "exit=0".into(),
+            artefact_path: None,
+        }
+    }
+
+    fn fail(elapsed_ms: u128, exit_label: &str, dir: &str) -> RunResult {
+        RunResult {
+            succeeded: false,
+            elapsed_ms,
+            exit_label: exit_label.into(),
+            artefact_path: Some(PathBuf::from(dir)),
+        }
+    }
+
+    #[test]
+    fn iter_line_pass_includes_progress_and_elapsed() {
+        let line = format_iter_line(7, 200, &pass(412));
+        assert_eq!(line, "iter 7/200: PASS in 412ms");
+    }
+
+    #[test]
+    fn iter_line_fail_includes_exit_label_and_dir() {
+        let line = format_iter_line(12, 200, &fail(380, "exit=1", "/tmp/run-12"));
+        assert_eq!(
+            line,
+            "iter 12/200: FAIL exit=1 in 380ms (artefacts: /tmp/run-12)"
+        );
+    }
+
+    #[test]
+    fn iter_line_fail_signal() {
+        let line = format_iter_line(3, 5, &fail(450, "signal=11", "/tmp/run-3"));
+        assert_eq!(
+            line,
+            "iter 3/5: FAIL signal=11 in 450ms (artefacts: /tmp/run-3)"
+        );
+    }
+
+    #[test]
+    fn summary_all_passed_reports_min_max_avg() {
+        let results = vec![(1, pass(400)), (2, pass(500)), (3, pass(600))];
+        let summary = format_soak_summary(&results, 3);
+        assert_eq!(
+            summary,
+            "soak: 3/3 passed (min 400ms, max 600ms, avg 500ms)"
+        );
+    }
+
+    #[test]
+    fn summary_stopped_early_names_failing_iter() {
+        // Three iterations ran; iter 3 failed; total was 10. This is
+        // the bail-on-first-failure (default) shape.
+        let results = vec![
+            (1, pass(400)),
+            (2, pass(420)),
+            (3, fail(380, "exit=1", "/tmp/run-3")),
+        ];
+        let summary = format_soak_summary(&results, 10);
+        assert_eq!(
+            summary,
+            "soak: stopped at iter 3/10 (2 passed, 1 failed)"
+        );
+    }
+
+    #[test]
+    fn summary_keep_going_lists_all_failed_iters() {
+        let results = vec![
+            (1, pass(400)),
+            (2, fail(380, "exit=1", "/tmp/run-2")),
+            (3, pass(410)),
+            (4, fail(420, "signal=11", "/tmp/run-4")),
+            (5, pass(415)),
+        ];
+        let summary = format_soak_summary(&results, 5);
+        assert_eq!(summary, "soak: 3/5 passed, 2 failed (iters 2, 4)");
+    }
+
+    #[test]
+    fn summary_zero_passes_handles_average() {
+        // Edge case: every iteration failed in keep_going mode.
+        // Min/max/avg should not divide by zero on the success-stats
+        // path because that path only fires when there are no
+        // failures, but check the failure-list path renders sanely.
+        let results = vec![
+            (1, fail(400, "exit=1", "/tmp/run-1")),
+            (2, fail(450, "exit=1", "/tmp/run-2")),
+        ];
+        let summary = format_soak_summary(&results, 2);
+        assert_eq!(summary, "soak: 0/2 passed, 2 failed (iters 1, 2)");
     }
 }

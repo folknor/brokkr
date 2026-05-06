@@ -680,6 +680,16 @@ Brokkr-side, in tree:
   out with "unknown flag" and the artefact dir captures that
   faithfully - the brokkr side is structurally ready for the
   wedge tests the moment the ratatoskr-side runtime lands.
+- Soak via `brokkr service-test <SCRIPT> -N <COUNT>`. Builds once,
+  loops `COUNT` iterations with one fresh artefact dir per iteration
+  (`run-1/`, `run-2/`, ...). Default bails on the first failed
+  iteration so the artefact dir for triage lands fast; `--keep-going`
+  runs every iteration regardless. Per-iter status line
+  (`iter N/total: PASS in Xms` / `iter N/total: FAIL exit=Y in Zms
+  (artefacts: ...)`) plus a trailing summary: all-passed reports
+  min/max/avg elapsed; bail reports "stopped at iter F/total";
+  keep-going lists every failed iteration index. Exit code is
+  non-zero if any iteration failed.
 - Sweep-aware harness build (`src/ratatoskr/build.rs`). Reads
   `[ratatoskr.harness] sweep / binary` out of `brokkr.toml`,
   matches `sweep` against `[[check]]`, builds every
@@ -731,7 +741,7 @@ Deferred (ratatoskr-side, post Phase 8 start):
 
 Brokkr-side, not yet started but unblocked:
 
-- Soak (`-N`), suite (`--filter`).
+- Suite (`--filter`).
 - `service-list --json` for machine consumption.
 
 ## Suggested implementation order
@@ -773,10 +783,13 @@ Brokkr-side, not yet started but unblocked:
 9. **Phase-8 ratatoskr-side additions.** *(deferred - ratatoskr
    roadmap.)*
 10. **Cohort.** *(deferred - lands incrementally inside Phase 8.)*
-11. **Soak / suite / list commands.** *(`service-list` landed
-    early - it has no architecture dependency, just walks the
-    filesystem. Soak / suite still deferred until the single-script
-    spawn-and-capture path lands on the brokkr side.)*
+11. **Soak / suite / list commands.** *(`service-list` and soak
+    (`brokkr service-test <SCRIPT> -N <COUNT> [--keep-going]`) both
+    landed - the former walks the filesystem, the latter loops the
+    spawn-and-capture path with per-iter status + summary. Suite
+    (`--filter`) still deferred until a script cohort exists; it
+    needs little more than a `service-list`-style walk plus the soak
+    loop applied per script.)*
 12. **Sidecar integration.** *(deferred; not required for v1.)*
 
 ## Open questions
