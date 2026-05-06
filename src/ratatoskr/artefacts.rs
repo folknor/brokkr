@@ -31,7 +31,6 @@ use crate::error::DevError;
 /// `parent` is supplied by the caller. The harness convention is
 /// `<project_root>/.brokkr/ratatoskr`, but nothing in this module
 /// depends on that.
-#[allow(dead_code)] // wired in once the harness invokes it from cmd.rs
 #[derive(Debug)]
 pub struct ArtefactDir {
     path: PathBuf,
@@ -41,7 +40,6 @@ pub struct ArtefactDir {
     armed: bool,
 }
 
-#[allow(dead_code)]
 impl ArtefactDir {
     /// Allocate `<parent>/<test_id>/run-N/`.
     ///

@@ -1523,14 +1523,19 @@ Examples:
     // ----- ratatoskr-only commands (display_order = 60) -----
     /// [ratatoskr] Run a Service-subprocess test script (deterministic harness)
     ///
-    /// In tree: project gating, script-path validation, and a sweep-aware
-    /// build via `[ratatoskr.harness]` in brokkr.toml (same feature
-    /// contract `brokkr check` enforces). Pending: the Lua VM via
-    /// dellingr, ServiceClient bindings, wait combinator that races a
-    /// predicate against `observe_child_exit`, artefact-dir writer with
-    /// frames.jsonl / events.jsonl / /proc snapshot / data-dir copy.
-    /// Today the command exits non-zero with "harness pending" once the
-    /// build succeeds. See notes/ratatoskr-service-harness.md.
+    /// Builds the configured `[[check]]` sweep via `[ratatoskr.harness]`
+    /// (same feature contract `brokkr check` enforces), allocates a
+    /// per-run artefact dir at `.brokkr/ratatoskr/<test>/run-N/`, then
+    /// spawns `<binary> --test-harness <SCRIPT>` with
+    /// `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set in
+    /// the env. Captures stdout/stderr into the artefact dir alongside
+    /// `run.toml` and a copy of the script. Preserves the dir on
+    /// failure; deletes it on success unless `--keep-artefacts` is set.
+    /// The harness binary itself (Lua VM via dellingr, ServiceClient
+    /// userdata, wait combinator, frame-log tap, /proc snapshot writer)
+    /// lives in ratatoskr's `app` crate and lands in Phase 8; until
+    /// then `app --test-harness` errors out and brokkr captures that
+    /// faithfully. See notes/ratatoskr-service-harness.md.
     #[command(name = "service-test", display_order = 60)]
     ServiceTest {
         /// Path to the Lua test script

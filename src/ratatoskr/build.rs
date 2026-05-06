@@ -21,7 +21,6 @@ use crate::error::DevError;
 use crate::output;
 
 /// Result of a successful harness build.
-#[allow(dead_code)] // bin_dir + sweep_label consumed once spawn lands.
 #[derive(Debug)]
 pub struct HarnessBuild {
     /// Path to the binary the harness will spawn (per
@@ -45,7 +44,6 @@ pub struct HarnessBuild {
 /// sweep label. Build failures surface as [`DevError::Build`] with
 /// cargo's filtered diagnostic output already printed by
 /// [`crate::build::cargo_build`].
-#[allow(dead_code)] // wired in once service_test threads dev_config through.
 pub fn build_for_harness(
     project_root: &Path,
     check_entries: &[CheckEntry],
