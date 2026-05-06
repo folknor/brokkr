@@ -35,6 +35,7 @@ pub(crate) enum LibtestOutcome {
 pub(crate) struct HungTest {
     pub(crate) test: String,
     pub(crate) elapsed: Duration,
+    pub(crate) ceiling: Duration,
     pub(crate) snapshot_dir: PathBuf,
     pub(crate) cargo_pid: u32,
     pub(crate) test_pids: Vec<u32>,
@@ -348,7 +349,7 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        let hung_test = capture_hung_test(&cwd, cargo_pid, &test, elapsed);
+        let hung_test = capture_hung_test(&cwd, cargo_pid, &test, elapsed, timeout);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
         }
@@ -357,7 +358,13 @@ fn watchdog_loop_with_timing(
     }
 }
 
-fn capture_hung_test(cwd: &Path, cargo_pid: u32, test: &str, elapsed: Duration) -> HungTest {
+fn capture_hung_test(
+    cwd: &Path,
+    cargo_pid: u32,
+    test: &str,
+    elapsed: Duration,
+    ceiling: Duration,
+) -> HungTest {
     let test_pids = direct_child_pids(cargo_pid);
     let snapshot_pid = test_pids.first().copied().or(Some(cargo_pid));
     let snapshot_dir = cwd
@@ -391,6 +398,7 @@ fn capture_hung_test(cwd: &Path, cargo_pid: u32, test: &str, elapsed: Duration) 
     HungTest {
         test: test.to_owned(),
         elapsed,
+        ceiling,
         snapshot_dir,
         cargo_pid,
         test_pids,
@@ -531,9 +539,9 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
     };
 
     format!(
-        "test {} exceeded {}s ceiling ({:.1}s elapsed)\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
+        "test {} exceeded {:?} ceiling ({:.1}s elapsed)\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
         hung.test,
-        TEST_TIMEOUT.as_secs(),
+        hung.ceiling,
         hung.elapsed.as_secs_f64(),
         hung.cargo_pid,
         child_text,
@@ -550,12 +558,15 @@ pub(crate) fn effective_test_threads(args: &[String]) -> Result<Option<u32>, Dev
 }
 
 fn enforce_single_threaded(args: &[&str]) -> Result<(), DevError> {
-    if effective_test_threads_from(args)? == Some(1) {
-        return Ok(());
+    match effective_test_threads_from(args)? {
+        Some(1) => Ok(()),
+        Some(n) => Err(DevError::Config(format!(
+            "libtest watchdog requires --test-threads=1, got --test-threads={n}"
+        ))),
+        None => Err(DevError::Config(
+            "libtest watchdog requires --test-threads=1, but no --test-threads flag was passed".into(),
+        )),
     }
-    Err(DevError::Config(
-        "libtest watchdog requires --test-threads=1".into(),
-    ))
 }
 
 fn effective_test_threads_from<T: AsRef<str>>(args: &[T]) -> Result<Option<u32>, DevError> {
@@ -644,6 +655,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn watchdog_kills_process_group_and_writes_snapshot() {
         use std::os::unix::process::CommandExt;
