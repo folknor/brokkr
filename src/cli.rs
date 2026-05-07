@@ -120,7 +120,12 @@ Examples:
         #[arg(long)]
         fix_gremlins: bool,
 
-        /// Raw arguments forwarded to `cargo test`
+        /// Raw arguments forwarded to the test phase. Tokens before a
+        /// literal `--` are passed to `cargo test` (before cargo's own
+        /// `--`); tokens after the second `--` are passed to libtest
+        /// (after brokkr's enforced `--test-threads=1`). Examples:
+        /// `brokkr check -- --test read_paths` (cargo-level filter),
+        /// `brokkr check -- -- --ignored` (libtest-level flag).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

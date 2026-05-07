@@ -67,7 +67,7 @@ pub(crate) fn cmd_check(
 /// Returns `Err` only when the user asked for a `--profile` that
 /// doesn't resolve. Every other branch always succeeds with at least
 /// one sweep.
-fn decide_active_sweeps(
+pub(crate) fn decide_active_sweeps(
     check_entries: &[CheckEntry],
     test_cfg: Option<&TestConfig>,
     profile_name: Option<&str>,
@@ -441,11 +441,19 @@ impl From<&cargo_filter::ClippyDiagnostic> for DiagKey {
     }
 }
 
-fn sweep_tag(sweeps: &[String]) -> Option<String> {
+/// Render the per-diagnostic sweep tag.
+///
+/// `active_sweep_count` is the number of sweeps `brokkr check`
+/// actually ran for this invocation. The `[both]` shorthand is only
+/// honest when the diagnostic appeared in *every* active sweep and
+/// there are exactly two of them; with three+ active sweeps,
+/// `[both]` would hide which two produced the hit. In that case fall
+/// through to the explicit `[a+b]` form.
+fn sweep_tag(sweeps: &[String], active_sweep_count: usize) -> Option<String> {
     match sweeps.len() {
         0 => None,
         1 => Some(format!("[{}]", sweeps[0])),
-        2 => Some("[both]".to_string()),
+        2 if active_sweep_count == 2 => Some("[both]".to_string()),
         _ => Some(format!("[{}]", sweeps.join("+"))),
     }
 }
@@ -529,7 +537,7 @@ fn format_clippy_capped_multi(
     for m in &displayed {
         out.push_str("  ");
         if multi
-            && let Some(tag) = sweep_tag(&m.sweeps)
+            && let Some(tag) = sweep_tag(&m.sweeps, results.len())
         {
             out.push_str(&tag);
             out.push(' ');
@@ -767,6 +775,22 @@ impl From<&cargo_json::DiagnosticEvent> for JsonDiagKey {
     }
 }
 
+/// Split `brokkr check`'s trailing args into a cargo-level slice and a
+/// libtest-level slice on the first literal `--`. With no separator,
+/// every token is cargo-level. Documented shapes:
+/// - `brokkr check -- --test read_paths` -> cargo: `[--test, read_paths]`,
+///   libtest: `[]`.
+/// - `brokkr check -- -- --ignored` -> cargo: `[]`,
+///   libtest: `[--ignored]`.
+/// - `brokkr check -- --test cli -- --ignored` -> cargo: `[--test, cli]`,
+///   libtest: `[--ignored]`.
+fn split_extra_args(extra: &[String]) -> (&[String], &[String]) {
+    match extra.iter().position(|a| a == "--") {
+        Some(i) => (&extra[..i], &extra[i + 1..]),
+        None => (extra, &[][..]),
+    }
+}
+
 /// Iterate `sweeps`, pre-building each sweep's `build_packages` and
 /// then running `cargo test` for it. Fails fast on the first sweep
 /// that fails (build or test), mirroring how the clippy phase
@@ -785,18 +809,11 @@ fn run_test_phase(
     // `brokkr check`'s test phase always runs `cargo test` without
     // `--release`, so each sweep's `build_packages` artefacts land in
     // `<target>/debug`. Tests that spawn the just-rebuilt binary read
-    // this var to skip the `cfg!(debug_assertions)` profile guess -
-    // which silently lies when a workspace pins `[profile.test]`
-    // overrides.
-    let bin_dir = build::project_info(Some(project_root))?
-        .target_dir
-        .join("debug");
-    let bin_dir_string = bin_dir.to_string_lossy().into_owned();
-    let mut project_env: Vec<(&str, &str)> = Vec::new();
-    for &(k, v) in &project_env_pairs(project) {
-        project_env.push((k, v));
-    }
-    project_env.push(("BROKKR_TEST_BIN_DIR", &bin_dir_string));
+    // BROKKR_TEST_BIN_DIR to skip the `cfg!(debug_assertions)` profile
+    // guess (which silently lies when a workspace pins
+    // `[profile.test]` overrides).
+    let target_dir = build::project_info(Some(project_root))?.target_dir;
+    let project_env = build_test_env(project, &target_dir, "debug");
 
     for sweep in sweeps {
         for pkg in &sweep.build_packages {
@@ -821,11 +838,38 @@ fn run_test_phase(
     Ok(())
 }
 
-fn project_env_pairs(project: Option<Project>) -> Vec<(&'static str, &'static str)> {
-    match project {
-        Some(Project::Nidhogg) => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
-        _ => Vec::new(),
+/// Project + profile-aware env vars set on every cargo test/build
+/// subprocess. Owned `String`s (B7: avoids borrow-from-local traps the
+/// previous `Vec<(&str, &str)>` shape allowed) and absolute paths
+/// (B8: `CARGO_TARGET_TMPDIR` was relative `target/tmp`, fragile if
+/// the cargo subprocess ever ran with a different cwd).
+///
+/// `target_dir` is cargo's resolved `target_directory` (from
+/// `cargo metadata --no-deps`) - workspaces can place it outside the
+/// project root, so the caller passes it in rather than us assuming
+/// `<project_root>/target`. `profile_dir` is the profile name as it
+/// appears under that target: `"debug"` for `brokkr check` (which
+/// always tests in the dev profile) and `brokkr test --debug`,
+/// `"release"` for the default `brokkr test` invocation.
+pub(crate) fn build_test_env(
+    project: Option<Project>,
+    target_dir: &Path,
+    profile_dir: &str,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    if matches!(project, Some(Project::Nidhogg)) {
+        let tmp = target_dir.join("tmp");
+        out.push((
+            "CARGO_TARGET_TMPDIR".into(),
+            tmp.to_string_lossy().into_owned(),
+        ));
     }
+    let bin_dir = target_dir.join(profile_dir);
+    out.push((
+        "BROKKR_TEST_BIN_DIR".into(),
+        bin_dir.to_string_lossy().into_owned(),
+    ));
+    out
 }
 
 /// Build one binary package with the sweep's feature flags. Errors
@@ -836,7 +880,7 @@ fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
     package: &str,
-    project_env: &[(&str, &str)],
+    project_env: &[(String, String)],
     raw: bool,
     json: bool,
 ) -> Result<(), DevError> {
@@ -896,11 +940,13 @@ fn run_one_test_sweep(
     sweep: &ResolvedSweep,
     package: Option<&str>,
     extra_args: &[String],
-    project_env: &[(&str, &str)],
+    project_env: &[(String, String)],
     raw: bool,
     json: bool,
     multi: bool,
 ) -> Result<bool, DevError> {
+    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+
     let mut args: Vec<String> = vec!["test".into()];
     for f in &sweep.cargo_feature_args {
         args.push(f.clone());
@@ -912,14 +958,18 @@ fn run_one_test_sweep(
     for f in &sweep.cargo_test_filters {
         args.push(f.clone());
     }
+    for c in cargo_extra {
+        args.push(c.clone());
+    }
     if json {
         args.push("--message-format=json".into());
     }
 
     // Anything that has to land after `--` is libtest's. The watchdog
     // requires sequential libtest output, so `--test-threads=1` is the
-    // default unless the profile already set it. Pass-through `extra_args`
-    // stay last; overriding test threads to anything but 1 is rejected.
+    // default unless the profile already set it. Libtest pass-through
+    // (post `-- --` tokens) stays after the enforced thread setting;
+    // overriding test threads to anything but 1 is rejected.
     let mut libtest_args = Vec::new();
     for s in &sweep.libtest_args {
         libtest_args.push(s.clone());
@@ -930,7 +980,7 @@ fn run_one_test_sweep(
     if test_runner::effective_test_threads(&libtest_args)?.is_none() {
         libtest_args.push("--test-threads=1".into());
     }
-    for e in extra_args {
+    for e in libtest_extra {
         libtest_args.push(e.clone());
     }
     if test_runner::effective_test_threads(&libtest_args)? != Some(1) {
@@ -995,7 +1045,14 @@ fn run_one_test_sweep(
 
     if json {
         emit_json_test_sweep(label_for_tag, &stdout, &stderr, captured.status.success());
-        return Ok(captured.status.success());
+        if !captured.status.success() {
+            return Ok(false);
+        }
+        // JSON consumers can read the TestSummary event, but `brokkr check`
+        // still owns the exit code - and a zero-test run must be non-zero.
+        let stdout_lines: Vec<&str> = stdout.lines().collect();
+        let parsed = cargo_filter::parse_test_output(&stdout_lines);
+        return Ok(!zero_test_run(&parsed));
     }
 
     if !captured.status.success() {
@@ -1026,7 +1083,63 @@ fn run_one_test_sweep(
             output::warn(&relabeled);
         }
     }
+
+    // Successful exit, but a profile/filter combo could still have
+    // collected zero tests - cargo exits 0 with `0 passed; 0 failed`
+    // and the user thinks `brokkr check` validated something. Fail
+    // loudly when at least one suite ran but every test was filtered
+    // out, since that's the silent-wrong-run shape. Suites = 0 (parse
+    // failure) is also fatal: we can't tell what cargo did.
+    let stdout_lines: Vec<&str> = stdout.lines().collect();
+    let parsed = cargo_filter::parse_test_output(&stdout_lines);
+    if zero_test_run(&parsed) {
+        let label = if multi {
+            format!(" (sweep: {})", sweep.label)
+        } else {
+            String::new()
+        };
+        output::error(&format!(
+            "cargo test: zero tests ran{label} ({} suite(s), {} filtered out) - \
+             a profile/filter combo collected no work; treat as a wrong-run.",
+            parsed.suites, parsed.filtered_out,
+        ));
+        return Ok(false);
+    }
     Ok(true)
+}
+
+/// True if a line looks like cargo's `--message-format=json` output.
+///
+/// Cargo's JSON events always begin with `{"reason":"..."`. A test
+/// that writes a brace-leading line (`println!("{...}")`, panics with
+/// a message starting in `{`) used to be misrouted into the JSON
+/// parser by a bare `line.starts_with('{')` check, where it failed
+/// to deserialize and was silently dropped.
+fn is_cargo_json_line(line: &str) -> bool {
+    line.starts_with("{\"reason\":")
+}
+
+/// True when a successful `cargo test` run actually validated nothing.
+///
+/// Two distinct shapes:
+/// - `suites == 0`: parser found no `test result:` line at all (cargo
+///   succeeded but emitted unexpected output, or all suites were
+///   filtered out by `--test cli_x` matching nothing). Treat as fatal:
+///   we can't tell what ran.
+/// - `passed + failed + ignored == 0` while at least one suite ran and
+///   `filtered_out > 0`: every test in the matched suites was excluded
+///   by the libtest filter (`--skip` / positional name). The user
+///   thinks they tested something; they didn't.
+///
+/// A suite that legitimately defines zero tests (`#[cfg(test)] mod`
+/// with no `#[test]`s) prints `running 0 tests` + `0 filtered out` and
+/// is *not* flagged - that's a real, if empty, run.
+fn zero_test_run(p: &cargo_filter::ParsedTestResults) -> bool {
+    if p.suites == 0 {
+        return true;
+    }
+    let total = p.passed + p.failed + p.ignored;
+    total == 0 && p.filtered_out > 0
 }
 
 /// JSON path for one test invocation. `sweep_label` is `Some(name)`
@@ -1036,7 +1149,11 @@ fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, s
     let mut json_lines: Vec<&str> = Vec::new();
     let mut test_lines: Vec<&str> = Vec::new();
     for line in stdout.lines() {
-        if line.starts_with('{') {
+        // B6: a test that does `println!("{...}")` (or panics with a
+        // brace-prefixed message) produces a line that starts with `{`
+        // but isn't cargo JSON. Match the cargo-emitted shape exactly
+        // (`{"reason":"..."`) so test output stays in `test_lines`.
+        if is_cargo_json_line(line) {
             json_lines.push(line);
         } else {
             test_lines.push(line);
@@ -1123,15 +1240,15 @@ fn emit_json_test_hung(sweep_label: Option<&str>, hung: &test_runner::HungTest) 
 /// always-set vars (e.g. nidhogg's `CARGO_TARGET_TMPDIR`). Sweep
 /// values come first; project values append (so a sweep can shadow a
 /// project default if it really needs to).
-fn merged_env(
+pub(crate) fn merged_env(
     sweep_env: &std::collections::BTreeMap<String, String>,
-    project_env: &[(&str, &str)],
+    project_env: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> =
         sweep_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    for &(k, v) in project_env {
+    for (k, v) in project_env {
         if !out.iter().any(|(ek, _)| ek == k) {
-            out.push((k.to_owned(), v.to_owned()));
+            out.push((k.clone(), v.clone()));
         }
     }
     out
@@ -1288,11 +1405,23 @@ include_ignored = true
 
     #[test]
     fn sweep_tag_formats() {
-        assert_eq!(sweep_tag(&[]), None);
-        assert_eq!(sweep_tag(&["consumer".into()]), Some("[consumer]".into()));
+        assert_eq!(sweep_tag(&[], 1), None);
+        assert_eq!(sweep_tag(&["consumer".into()], 2), Some("[consumer]".into()));
+        // Hit in both of two active sweeps -> `[both]` is honest.
         assert_eq!(
-            sweep_tag(&["all-features".into(), "consumer".into()]),
+            sweep_tag(&["all-features".into(), "consumer".into()], 2),
             Some("[both]".into())
+        );
+    }
+
+    #[test]
+    fn sweep_tag_avoids_both_when_more_than_two_sweeps_active() {
+        // B5: `[both]` with three active sweeps would hide which two
+        // actually triggered the hit. Fall through to the explicit
+        // joined form so the reader sees the real pair.
+        assert_eq!(
+            sweep_tag(&["a".into(), "b".into()], 3),
+            Some("[a+b]".into())
         );
     }
 
@@ -1556,5 +1685,152 @@ warning: z [too_many_lines]
         assert_eq!(extract_lint_code("warning[clippy::foo]"), "clippy::foo");
         assert_eq!(extract_lint_code("error[E0308]"), "E0308");
         assert_eq!(extract_lint_code("warning"), "");
+    }
+
+    fn s(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn split_extra_args_no_separator_all_cargo_level() {
+        // `brokkr check -- --test read_paths` (clap consumed the leading
+        // `--`, leaving us with the two tokens). Cargo gets `--test
+        // read_paths`; nothing crosses to libtest.
+        let extra = s(&["--test", "read_paths"]);
+        let (cargo, libtest) = split_extra_args(&extra);
+        assert_eq!(cargo, &["--test", "read_paths"]);
+        assert!(libtest.is_empty());
+    }
+
+    #[test]
+    fn split_extra_args_double_dash_routes_to_libtest() {
+        // `brokkr check -- -- --ignored`: clap consumed the first `--`,
+        // we see `["--", "--ignored"]`. The literal `--` we observe is
+        // the *cargo/libtest* boundary - everything after it is libtest.
+        let extra = s(&["--", "--ignored"]);
+        let (cargo, libtest) = split_extra_args(&extra);
+        assert!(cargo.is_empty());
+        assert_eq!(libtest, &["--ignored"]);
+    }
+
+    #[test]
+    fn split_extra_args_mixed_form_routes_each_side() {
+        // `brokkr check -- --test cli -- --ignored --nocapture`: cargo
+        // gets the test filter, libtest gets the runtime flags.
+        let extra = s(&["--test", "cli", "--", "--ignored", "--nocapture"]);
+        let (cargo, libtest) = split_extra_args(&extra);
+        assert_eq!(cargo, &["--test", "cli"]);
+        assert_eq!(libtest, &["--ignored", "--nocapture"]);
+    }
+
+    #[test]
+    fn split_extra_args_empty_input() {
+        let extra: Vec<String> = Vec::new();
+        let (cargo, libtest) = split_extra_args(&extra);
+        assert!(cargo.is_empty());
+        assert!(libtest.is_empty());
+    }
+
+    #[test]
+    fn is_cargo_json_line_matches_cargo_shape_only() {
+        // The real cargo wrapper.
+        assert!(is_cargo_json_line(
+            r#"{"reason":"compiler-message","package_id":"x"}"#
+        ));
+        // A test's println!("{}", val) - looks like JSON but isn't.
+        assert!(!is_cargo_json_line(r#"{name: "foo"}"#));
+        // A panic message starting with `{`.
+        assert!(!is_cargo_json_line("{some-debug-output}"));
+        // Plain text.
+        assert!(!is_cargo_json_line("running 1 test"));
+    }
+
+    #[test]
+    fn build_test_env_emits_absolute_paths() {
+        // B8: CARGO_TARGET_TMPDIR used to be the literal string
+        // "target/tmp", which only resolves correctly when the cargo
+        // subprocess inherits cwd=project_root. Make sure the helper
+        // emits an absolute path joined onto the cargo-resolved
+        // target_dir.
+        let target = Path::new("/home/u/proj/target");
+        let env = build_test_env(Some(Project::Nidhogg), target, "debug");
+        let tmp = env
+            .iter()
+            .find(|(k, _)| k == "CARGO_TARGET_TMPDIR")
+            .map(|(_, v)| v.as_str())
+            .expect("CARGO_TARGET_TMPDIR set for nidhogg");
+        assert_eq!(tmp, "/home/u/proj/target/tmp");
+        let bin = env
+            .iter()
+            .find(|(k, _)| k == "BROKKR_TEST_BIN_DIR")
+            .map(|(_, v)| v.as_str())
+            .expect("BROKKR_TEST_BIN_DIR set");
+        assert_eq!(bin, "/home/u/proj/target/debug");
+    }
+
+    #[test]
+    fn build_test_env_no_tmpdir_for_non_nidhogg() {
+        let env = build_test_env(Some(Project::Pbfhogg), Path::new("/x/target"), "release");
+        assert!(env.iter().all(|(k, _)| k != "CARGO_TARGET_TMPDIR"));
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "BROKKR_TEST_BIN_DIR")
+                .map(|(_, v)| v.as_str()),
+            Some("/x/target/release"),
+        );
+    }
+
+    fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> cargo_filter::ParsedTestResults {
+        cargo_filter::ParsedTestResults {
+            failures: Vec::new(),
+            passed,
+            failed,
+            ignored,
+            filtered_out,
+            suites,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn zero_test_run_flags_zero_suites() {
+        // Cargo exited 0 but the parser never saw a `test result:` line.
+        // Either parse failure or `--test cli_x` matched no test crate.
+        assert!(zero_test_run(&parsed(0, 0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn zero_test_run_flags_all_filtered_out() {
+        // The classic silent-wrong-run shape: `--skip` or the positional
+        // name filter excluded every test in the matched suite(s).
+        assert!(zero_test_run(&parsed(0, 0, 0, 5, 1)));
+    }
+
+    #[test]
+    fn zero_test_run_does_not_flag_empty_suite() {
+        // A package that legitimately defines no tests reports
+        // `0 passed; 0 filtered out` over one suite. Not a wrong run.
+        assert!(!zero_test_run(&parsed(0, 0, 0, 0, 1)));
+    }
+
+    #[test]
+    fn zero_test_run_does_not_flag_normal_pass() {
+        assert!(!zero_test_run(&parsed(12, 0, 0, 3, 1)));
+    }
+
+    #[test]
+    fn zero_test_run_does_not_flag_only_ignored() {
+        // `#[ignore]` tests still count - the user opted in.
+        assert!(!zero_test_run(&parsed(0, 0, 4, 0, 1)));
+    }
+
+    #[test]
+    fn split_extra_args_only_dashes_separator() {
+        // Just `-- --` after the brokkr `--`. First `--` is consumed by
+        // clap, the second is our split point: both sides empty.
+        let extra = s(&["--"]);
+        let (cargo, libtest) = split_extra_args(&extra);
+        assert!(cargo.is_empty());
+        assert!(libtest.is_empty());
     }
 }

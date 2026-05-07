@@ -1,4 +1,4 @@
-//! `brokkr test <FILE> <NAME>` - single-test cargo runner.
+//! `brokkr test <NAME>` - single-test cargo runner.
 //!
 //! Runs exactly one named cargo test with the host/check features and
 //! `--include-ignored --nocapture --test-threads=1`. Defaults to release;
@@ -6,33 +6,26 @@
 //! stdout/stderr live (filtering out cargo/test-harness framing noise), then
 //! prints a `[test]` PASS/FAIL footer per sweep with wall time.
 //!
-//! Feature selection mirrors `brokkr check`: the default sweep is
-//! `--all-features`; if `[check].consumer_features` is configured in
-//! `brokkr.toml`, a second sweep runs with
-//! `--no-default-features --features <consumer_features>`.
+//! Feature selection follows the same priority ladder as
+//! `brokkr check`'s test phase, with two intentional differences:
+//! profile libtest filters (`only` / `skip` / `tests`) are dropped
+//! (the user's `<NAME>` is the filter), and CLI `--features` is not
+//! accepted. Profile-declared `env` vars *are* propagated, so a
+//! profile that gates platform tests behind `BROKKR_TEST_PLATFORM=1`
+//! still works under `brokkr test`.
 
 use std::io::Write;
 use std::path::Path;
 
 use crate::build;
 use crate::cargo_filter;
-use crate::config::{CheckEntry, DevConfig, TestConfig};
+use crate::check_cmd;
+use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::output;
-use crate::profile;
+use crate::profile::ResolvedSweep;
 use crate::project::Project;
 use crate::test_runner::{self, LibtestOutcome};
-
-struct Sweep {
-    label: String,
-    feature_args: Vec<String>,
-    /// Cargo packages to rebuild with `feature_args` before running
-    /// tests. Sourced from the matching `[[check]]` entry's
-    /// `build_packages` field so `tests/cli_*.rs` invocations get a
-    /// binary built with the sweep's exact feature set (request 2).
-    /// Empty for the no-config fallback path.
-    build_packages: Vec<String>,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -71,15 +64,8 @@ pub fn run(
     // `cfg!(debug_assertions)` profile guess (which silently lies when
     // a workspace pins `[profile.test]` overrides).
     let profile_dir = if debug { "debug" } else { "release" };
-    let bin_dir = build::project_info(Some(project_root))?
-        .target_dir
-        .join(profile_dir);
-    let bin_dir_string = bin_dir.to_string_lossy().into_owned();
-    let mut env: Vec<(&str, &str)> = match project {
-        Project::Nidhogg => vec![("CARGO_TARGET_TMPDIR", "target/tmp")],
-        _ => vec![],
-    };
-    env.push(("BROKKR_TEST_BIN_DIR", &bin_dir_string));
+    let target_dir = build::project_info(Some(project_root))?.target_dir;
+    let project_env = check_cmd::build_test_env(Some(project), &target_dir, profile_dir);
 
     let mut outcomes: Vec<Outcome> = Vec::new();
 
@@ -88,13 +74,23 @@ pub fn run(
             println!("[test]    sweep: {}", sweep.label);
         }
 
+        // Merge profile-declared env onto the project's always-set vars.
+        // Profile env wins on collision so a profile can shadow defaults
+        // when it really needs to (request 3 / B3: brokkr test was
+        // dropping this and a `default_profile` env didn't apply).
+        let env_owned = check_cmd::merged_env(&sweep.env, project_env.as_slice());
+        let env_refs: Vec<(&str, &str)> = env_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
         // Pre-build any binary packages declared by this sweep. Skipped
         // when build_packages is empty (fallback path). Failure here
         // short-circuits the run with a BuildFailed outcome so the
         // aggregator marks the sweep as failed.
         let mut pre_build_failed = false;
         for build_pkg in &sweep.build_packages {
-            if !run_pre_build(project_root, sweep, build_pkg, &env, raw, debug)? {
+            if !run_pre_build(project_root, sweep, build_pkg, &env_refs, raw, debug)? {
                 pre_build_failed = true;
                 outcomes.push(Outcome::BuildFailed);
                 break;
@@ -111,7 +107,7 @@ pub fn run(
             if !debug {
                 args.push("--release".into());
             }
-            args.extend(sweep.feature_args.iter().cloned());
+            args.extend(sweep.cargo_feature_args.iter().cloned());
             if let Some(j) = jobs {
                 args.push("-j".into());
                 args.push(j.to_string());
@@ -135,7 +131,7 @@ pub fn run(
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
 
-            let outcome = run_one(&arg_refs, project_root, &env, &tag, raw)?;
+            let outcome = run_one(&arg_refs, project_root, &env_refs, &tag, raw)?;
             outcomes.push(outcome);
         }
     }
@@ -148,7 +144,7 @@ pub fn run(
 /// build failure (already reported), `Err` on spawn failure.
 fn run_pre_build(
     project_root: &Path,
-    sweep: &Sweep,
+    sweep: &ResolvedSweep,
     package: &str,
     env: &[(&str, &str)],
     raw: bool,
@@ -158,7 +154,7 @@ fn run_pre_build(
     if !debug {
         args.push("--release".into());
     }
-    args.extend(sweep.feature_args.iter().cloned());
+    args.extend(sweep.cargo_feature_args.iter().cloned());
     args.push("--package".into());
     args.push(package.into());
 
@@ -240,55 +236,36 @@ fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), Dev
 
 /// Decide which sweeps `brokkr test` runs.
 ///
-/// Mirrors the priority ladder used by `brokkr check`'s
-/// `decide_active_sweeps`, except:
-///   - `brokkr test <name>` always treats `<name>` as the filter, so
-///     profile-level `only` / `skip` / `tests` are dropped (mixing
-///     them with the name argument was the UX trap that motivated the
-///     no-filter rule).
-///   - There's no CLI-flags ad-hoc path: the test runner doesn't
-///     accept `--features` / `--no-default-features` itself.
-///
-/// Resolution order:
-///   1. `[test] default_profile` is set: use that profile's resolved
-///      sweep list (only `cargo_feature_args` and `build_packages` -
-///      filters/env are stripped per above).
-///   2. `[[check]]` is non-empty: run every entry in declaration order.
-///   3. No config at all: legacy `--all-features` single sweep.
+/// Reuses `check_cmd::decide_active_sweeps` (no CLI features, no
+/// `--profile` override - resolution falls through to
+/// `[test] default_profile` -> `[[check]]` entries -> legacy
+/// `--all-features`), then drops the libtest filters that would
+/// fight with the user's `<name>` argument. `env` is preserved (B3:
+/// silent profile-env drop fixed by this consolidation).
 fn decide_sweeps(
-    test_cfg: Option<&TestConfig>,
-    check_entries: &[CheckEntry],
-) -> Result<Vec<Sweep>, DevError> {
-    if let Some(t) = test_cfg
-        && let Some(profile_name) = t.default_profile.as_deref()
+    test_cfg: Option<&crate::config::TestConfig>,
+    check_entries: &[crate::config::CheckEntry],
+) -> Result<Vec<ResolvedSweep>, DevError> {
+    let mut sweeps = check_cmd::decide_active_sweeps(check_entries, test_cfg, None, &[], false)?;
+    for s in &mut sweeps {
+        // The user's `<name>` is the libtest filter. Profile-level
+        // `only` / `skip` / `tests` would either narrow it further (rare,
+        // surprising) or cause silent zero-match failures; drop them.
+        s.libtest_args.clear();
+        s.cargo_test_filters.clear();
+        s.name_filters.clear();
+    }
+    // `decide_active_sweeps` labels its legacy fallback "default"; the
+    // pre-consolidation `brokkr test` code labelled it "all-features"
+    // for symmetry with the cargo flag. Keep the existing label so the
+    // `[test]    sweep: ...` lines and snapshots don't churn.
+    if sweeps.len() == 1
+        && sweeps[0].label == "default"
+        && sweeps[0].cargo_feature_args == vec!["--all-features"]
     {
-        let resolved = profile::resolve(t, check_entries, profile_name)?;
-        return Ok(resolved
-            .into_iter()
-            .map(|r| Sweep {
-                label: r.label,
-                feature_args: r.cargo_feature_args,
-                build_packages: r.build_packages,
-            })
-            .collect());
+        sweeps[0].label = "all-features".into();
     }
-
-    if !check_entries.is_empty() {
-        return Ok(check_entries
-            .iter()
-            .map(|e| Sweep {
-                label: e.name.clone(),
-                feature_args: e.cargo_feature_args(),
-                build_packages: e.build_packages.clone(),
-            })
-            .collect());
-    }
-
-    Ok(vec![Sweep {
-        label: "all-features".into(),
-        feature_args: vec!["--all-features".into()],
-        build_packages: Vec::new(),
-    }])
+    Ok(sweeps)
 }
 
 /// Run one `cargo test` invocation. Prints the `[test]` footer and returns
@@ -494,6 +471,7 @@ mod tests {
         clippy::panic
     )]
     use super::*;
+    use crate::config::{CheckEntry, TestConfig};
 
     #[test]
     fn stdout_filter_strips_test_framing() {
@@ -617,7 +595,7 @@ mod tests {
         let sweeps = decide_sweeps(None, &[]).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "all-features");
-        assert_eq!(sweeps[0].feature_args, vec!["--all-features"]);
+        assert_eq!(sweeps[0].cargo_feature_args, vec!["--all-features"]);
         assert!(sweeps[0].build_packages.is_empty());
     }
 
@@ -643,13 +621,13 @@ mod tests {
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "all");
         assert_eq!(
-            sweeps[0].feature_args,
+            sweeps[0].cargo_feature_args,
             vec!["--features", "test-hooks,linux-direct-io"]
         );
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(sweeps[1].label, "consumer");
         assert_eq!(
-            sweeps[1].feature_args,
+            sweeps[1].cargo_feature_args,
             vec!["--no-default-features", "--features", "commands"]
         );
     }
@@ -683,6 +661,40 @@ sweeps = ["all", "consumer"]
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(sweeps[1].label, "consumer");
         assert_eq!(sweeps[1].build_packages, vec!["pbfhogg-cli"]);
+    }
+
+    #[test]
+    fn decide_sweeps_carries_profile_env_through() {
+        // B3 regression: a profile that exports `env = { FOO = "1" }`
+        // used to round-trip through `brokkr check` but get silently
+        // dropped on `brokkr test`. After consolidation, both paths
+        // share decide_active_sweeps and env is preserved.
+        let toml_text = r#"
+default_profile = "platform"
+
+[profiles.platform]
+sweeps = ["all"]
+include_ignored = true
+env = { BROKKR_TEST_PLATFORM = "1", FOO = "bar" }
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+        }];
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(
+            sweeps[0].env.get("BROKKR_TEST_PLATFORM").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(sweeps[0].env.get("FOO").map(String::as_str), Some("bar"));
+        // libtest filters dropped (per `brokkr test` design).
+        assert!(sweeps[0].libtest_args.is_empty());
+        assert!(sweeps[0].cargo_test_filters.is_empty());
+        assert!(sweeps[0].name_filters.is_empty());
     }
 
     #[test]

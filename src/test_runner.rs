@@ -212,6 +212,47 @@ fn clone_hung(hung: &Arc<Mutex<Option<HungTest>>>) -> Result<Option<HungTest>, D
         .map_err(|_| DevError::Build("hung-test state poisoned".into()))
 }
 
+/// State of partial-marker tracking under `--nocapture --test-threads=1`.
+///
+/// Libtest writes `test NAME ... ` (no newline, flushed) before running
+/// each test, then the test's own stdout glues onto that partial line,
+/// then libtest writes the bare status (`ok\n`/`FAILED\n`/`ignored\n`,
+/// optionally with a `<X.Xs>` suffix when `--report-time` is set).
+/// We strip the partial marker and track which name is still running
+/// so the watchdog can age it; the trailing bare-status line, when
+/// it arrives unambiguously (no preceding test output), is consumed
+/// as the terminator.
+///
+/// The earlier implementation gated partial-marker detection on
+/// "no pending test" and cleared pending unconditionally on the first
+/// bare-status-shaped line. Two failure modes:
+/// - `print!("hi")` glues with libtest's `ok\n` -> arrives as `hiok`,
+///   not bare status; pending never cleared; the *next* test's partial
+///   marker is then ignored (gated out), and the watchdog blames the
+///   wrong test.
+/// - `println!("ok")` arrives as a real bare-status line *before*
+///   libtest's terminator; pending cleared early, real hang in same
+///   test goes unnoticed.
+///
+/// The state machine here fixes Trigger A (the next-start-marker case)
+/// and narrows Trigger B (`intermediate_output_seen` suppresses the
+/// bare-status shortcut once any non-status output has flowed).
+#[derive(Default)]
+enum PartialState {
+    #[default]
+    Idle,
+    AwaitingTerminator {
+        name: String,
+        /// True once a non-blank, non-status-shaped line has been
+        /// forwarded for this pending test. Suppresses the
+        /// bare-status terminator shortcut: at that point the next
+        /// `ok`/`FAILED`/`ignored` line is more likely test output
+        /// than libtest framing, so we wait for the *next* partial
+        /// start marker (or `test result:` summary) to clear instead.
+        intermediate_output_seen: bool,
+    },
+}
+
 fn drain_stdout<F>(
     mut pipe: ChildStdout,
     buf: &Mutex<Vec<u8>>,
@@ -222,13 +263,7 @@ fn drain_stdout<F>(
 {
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
-    // Under `--nocapture`, libtest writes `test NAME ... ` (no newline,
-    // flushed) before running the test. The test's own stdout then glues
-    // onto that partial line, and the trailing `ok\n` arrives as a bare
-    // line afterwards. When we detect the partial-marker shape we strip
-    // it so the test's output starts fresh, and remember the name so the
-    // bare status line that follows can be matched and dropped.
-    let mut pending_name: Option<String> = None;
+    let mut state = PartialState::Idle;
 
     while let Ok(n) = pipe.read(&mut read_buf) {
         if n == 0 {
@@ -242,26 +277,33 @@ fn drain_stdout<F>(
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                handle_stdout_line(
-                    &line,
-                    tracker,
-                    &mut forward_line,
-                    true,
-                    &mut pending_name,
-                );
+                handle_stdout_line(&line, tracker, &mut forward_line, true, &mut state);
                 line.clear();
             } else {
                 line.push(byte);
+                // Detect the partial `test NAME ... ` start marker before
+                // the newline arrives, so the watchdog can age the test
+                // even if it never produces output. Note: no `Idle`-only
+                // gate - a new start marker while a previous test is
+                // pending is the strongest signal that the previous test
+                // ended without an explicit terminator (Trigger A).
                 if byte == b' '
                     && line.len() >= "test x ... ".len()
-                    && pending_name.is_none()
                     && let Ok(text) = std::str::from_utf8(&line)
                     && let Some(name) = parse_start_marker(text)
                 {
+                    if let PartialState::AwaitingTerminator { name: prev, .. } = &state
+                        && let Ok(mut t) = tracker.lock()
+                    {
+                        t.observe_result(prev);
+                    }
                     if let Ok(mut t) = tracker.lock() {
                         t.observe_start(name.clone());
                     }
-                    pending_name = Some(name);
+                    state = PartialState::AwaitingTerminator {
+                        name,
+                        intermediate_output_seen: false,
+                    };
                     line.clear();
                 }
             }
@@ -269,7 +311,7 @@ fn drain_stdout<F>(
     }
 
     if !line.is_empty() {
-        handle_stdout_line(&line, tracker, &mut forward_line, false, &mut pending_name);
+        handle_stdout_line(&line, tracker, &mut forward_line, false, &mut state);
     }
 }
 
@@ -328,22 +370,42 @@ fn handle_stdout_line<F>(
     tracker: &Mutex<TestTracker>,
     forward_line: &mut F,
     terminated: bool,
-    pending_name: &mut Option<String>,
+    state: &mut PartialState,
 ) where
     F: FnMut(&str),
 {
     let text = String::from_utf8_lossy(line).into_owned();
 
-    // After we strip a partial `test NAME ... ` start marker, libtest's
-    // trailing status arrives as a bare line. Drop it and record the
-    // result for the watchdog tracker.
-    if pending_name.is_some() && is_bare_status_line(&text) {
-        if let Some(name) = pending_name.take()
-            && let Ok(mut t) = tracker.lock()
-        {
-            t.observe_result(&name);
+    // `test result: ok. ...` is libtest's per-suite summary - it always
+    // means the previously-running test reached a terminator (the
+    // suite's last test must have finished for the summary to print).
+    // Use it as a universal pending-clear so a single-test suite
+    // followed by no further partial markers doesn't leak.
+    if text.trim_start().starts_with("test result:")
+        && let PartialState::AwaitingTerminator { name, .. } = state
+    {
+        if let Ok(mut t) = tracker.lock() {
+            t.observe_result(name);
         }
-        return;
+        *state = PartialState::Idle;
+    }
+
+    if let PartialState::AwaitingTerminator { name, intermediate_output_seen } = state {
+        if !*intermediate_output_seen && is_bare_status_line(&text) {
+            // No test output has been seen for this pending test, and
+            // the line is shaped like libtest's terminator. Consume it
+            // (drop) and clear pending. False-negatives still possible
+            // when a test's *first* println! is exactly "ok" / "FAILED"
+            // / "ignored" with no other output - documented limitation.
+            if let Ok(mut t) = tracker.lock() {
+                t.observe_result(name);
+            }
+            *state = PartialState::Idle;
+            return;
+        }
+        if !text.trim().is_empty() {
+            *intermediate_output_seen = true;
+        }
     }
 
     if let Some(name) = parse_result_marker(&text)
@@ -695,6 +757,170 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+
+    /// Drive `drain_stdout` against a synthetic libtest stream and
+    /// return (forwarded_lines, names_observed_finished).
+    /// The stream is the concatenation of the byte slices the libtest
+    /// stdout pipe would have produced, in chunk order. The tracker
+    /// records `observe_start` / `observe_result` calls so we can
+    /// inspect which tests the watchdog still believes are running.
+    fn drive_drain(chunks: &[&[u8]]) -> (Vec<String>, Vec<String>) {
+        use std::io::Write;
+        // Build a real pipe: one end gets the chunks, the other is fed
+        // to drain_stdout. This exercises the same byte-by-byte path as
+        // production and avoids forking the loop under test.
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+        let mut stdin = child.stdin.take().expect("cat stdin");
+        let stdout = child.stdout.take().expect("cat stdout");
+
+        let chunks_owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
+        let writer = std::thread::spawn(move || {
+            for c in &chunks_owned {
+                stdin.write_all(c).ok();
+            }
+            drop(stdin);
+        });
+
+        let buf = Mutex::new(Vec::<u8>::new());
+        let tracker = Mutex::new(TestTracker::default());
+        let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let forwarded_t = Arc::clone(&forwarded);
+
+        drain_stdout(stdout, &buf, &tracker, move |line: &str| {
+            forwarded_t.lock().unwrap().push(line.to_owned());
+        });
+
+        writer.join().ok();
+        child.wait().ok();
+
+        // Names still in the tracker are tests the watchdog believes
+        // are running. Names absent from the tracker had observe_result
+        // called - they're "finished" from the watchdog's view.
+        let still_running: Vec<String> =
+            tracker.lock().unwrap().current.keys().cloned().collect();
+        let forwarded = forwarded.lock().unwrap().clone();
+        (forwarded, still_running)
+    }
+
+    #[test]
+    fn watchdog_clears_when_test_prints_without_newline() {
+        // Trigger A from the review: `print!("hello")` glues with the
+        // libtest `ok\n` -> arrives as `hellook\n`. The next test's
+        // partial marker must clear the previous pending; otherwise
+        // the watchdog times the wrong test.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"hellook\n",
+            b"test bar ... ",
+            b"ok\n",
+            b"\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (forwarded, still_running) = drive_drain(&stream);
+        // "hellook" should have been forwarded as test output (intermediate).
+        assert!(forwarded.iter().any(|l| l == "hellook"), "got: {forwarded:?}");
+        // After the result summary, no test should still be pending.
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
+
+    #[test]
+    fn watchdog_clears_when_test_prints_ok_literal() {
+        // Trigger B fixture: test calls `println!("ok")` and the
+        // bare-status shortcut clears pending early. With the state
+        // machine, the eventual `test result:` line still clears
+        // pending so the suite-level state stays clean. (False-negative
+        // hang is a documented narrow tradeoff for this fixture.)
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"ok\n",
+            b"ok\n",
+            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
+
+    #[test]
+    fn watchdog_clears_when_test_prints_failed_literal() {
+        // Symmetric to the `ok` case: `println!("FAILED")` is a literal
+        // bare status and gets consumed early. The test result summary
+        // still clears any leftover pending state.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"FAILED\n",
+            b"FAILED\n",
+            b"\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
+
+    #[test]
+    fn watchdog_clears_silent_test_via_bare_status() {
+        // No test output: stream is `test foo ... ok\n`. The partial
+        // marker is stripped, then the bare `ok` line is the unambiguous
+        // libtest terminator (intermediate_output_seen still false).
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"ok\n",
+            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
+
+    #[test]
+    fn watchdog_clears_after_panic_message() {
+        // A failing test usually prints panic info on stdout/stderr
+        // before libtest writes `FAILED\n`. The state machine must
+        // eventually clear pending; the `test result:` summary is the
+        // last-resort terminator after intermediate output suppressed
+        // the bare-status shortcut.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"thread 'foo' panicked at tests/x.rs:1:1:\n",
+            b"assertion failed\n",
+            b"FAILED\n",
+            b"\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (forwarded, still_running) = drive_drain(&stream);
+        assert!(
+            forwarded.iter().any(|l| l.contains("panicked")),
+            "forwarded: {forwarded:?}"
+        );
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
+
+    #[test]
+    fn watchdog_clears_with_report_time_suffix() {
+        // libtest with `--report-time` emits `ok <0.001s>\n`. The
+        // is_bare_status_line check accepts the `<X.Xs>` suffix, so
+        // pending should clear normally even when timing is enabled.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"ok <0.001s>\n",
+            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
+
+    #[test]
+    fn watchdog_full_form_marker_clears_pending() {
+        // When `--nocapture` is off, libtest writes the full
+        // `test foo ... ok\n` line atomically. parse_result_marker
+        // catches it; pending stays empty.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ok\n",
+            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert!(still_running.is_empty(), "still running: {still_running:?}");
+    }
 
     #[test]
     fn start_marker_allows_spaces_in_doctest_names() {

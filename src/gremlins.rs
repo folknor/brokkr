@@ -191,6 +191,14 @@ fn scan_content(rel: &Path, content: &str, out: &mut Vec<Gremlin>) {
             col = 1;
             continue;
         }
+        // CRLF: editors show columns starting fresh at the next line, so
+        // treating `\r` as a column character makes reported columns one
+        // off on Windows-newline files. `\r` itself isn't on the gremlin
+        // list (LF/CR/Tab are explicitly allowed in `gremlin_name`), so
+        // skipping the increment is safe.
+        if c == '\r' {
+            continue;
+        }
         if let Some(name) = gremlin_name(c) {
             out.push(Gremlin {
                 path: rel.to_path_buf(),
@@ -273,6 +281,17 @@ mod tests {
     fn clean_ascii_finds_nothing() {
         let out = scan_str("fn main() {\n    println!(\"ok\");\n}\n");
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn crlf_does_not_inflate_column() {
+        // B9: a `\r` before LF used to count as a column character,
+        // so a gremlin on a CRLF line was reported with column = N+1
+        // compared to what every editor shows. Now `\r` is skipped.
+        let out = scan_str("ok \u{2014}\r\nnext\r\n");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].line, 1);
+        assert_eq!(out[0].column, 4);
     }
 
     #[test]
