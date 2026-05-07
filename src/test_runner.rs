@@ -376,31 +376,37 @@ fn handle_stdout_line<F>(
 {
     let text = String::from_utf8_lossy(line).into_owned();
 
-    // `test result: ok. ...` is libtest's per-suite summary - it always
-    // means the previously-running test reached a terminator (the
-    // suite's last test must have finished for the summary to print).
-    // Use it as a universal pending-clear so a single-test suite
-    // followed by no further partial markers doesn't leak.
-    if text.trim_start().starts_with("test result:")
-        && let PartialState::AwaitingTerminator { name, .. } = state
-    {
-        if let Ok(mut t) = tracker.lock() {
+    // libtest's per-suite summary is the universal pending-clear:
+    // `test result: ok. ...` or `test result: FAILED. ...`. Match
+    // both verb forms specifically so a test that does
+    // `println!("test result:")` doesn't accidentally clear pending
+    // and leave the watchdog blind to a subsequent hang.
+    if is_libtest_result_summary(&text) {
+        if let PartialState::AwaitingTerminator { name, .. } = state
+            && let Ok(mut t) = tracker.lock()
+        {
             t.observe_result(name);
         }
         *state = PartialState::Idle;
     }
 
-    if let PartialState::AwaitingTerminator { name, intermediate_output_seen } = state {
+    if let PartialState::AwaitingTerminator { name: _, intermediate_output_seen } = state {
         if !*intermediate_output_seen && is_bare_status_line(&text) {
-            // No test output has been seen for this pending test, and
-            // the line is shaped like libtest's terminator. Consume it
-            // (drop) and clear pending. False-negatives still possible
-            // when a test's *first* println! is exactly "ok" / "FAILED"
-            // / "ignored" with no other output - documented limitation.
-            if let Ok(mut t) = tracker.lock() {
-                t.observe_result(name);
-            }
-            *state = PartialState::Idle;
+            // No test output has been seen yet, and the line looks like
+            // libtest's terminator (`ok` / `FAILED` / `ignored`,
+            // optionally `<X.Xs>`). Two real shapes match here:
+            //
+            // 1. The legitimate libtest terminator for a silent test.
+            // 2. A test whose *first* println! was literally one of
+            //    those words - the watchdog can't tell which.
+            //
+            // Drop the line from display either way (so we don't print
+            // a stray `ok` next to libtest's real one), but DO NOT
+            // call observe_result. If the test then hangs after
+            // `println!("ok")`, the watchdog must still fire. Pending
+            // is cleared by either the next `test NAME ... ` start
+            // marker or by the `test result:` summary - both happen
+            // well inside the watchdog timeout for a normal completion.
             return;
         }
         if !text.trim().is_empty() {
@@ -417,6 +423,20 @@ fn handle_stdout_line<F>(
     if terminated || parse_start_marker(&text).is_none() {
         forward_line(&text);
     }
+}
+
+/// True for libtest's per-suite summary line.
+///
+/// Libtest emits exactly one of:
+/// - `test result: ok. N passed; M failed; ...`
+/// - `test result: FAILED. N passed; M failed; ...`
+///
+/// Match both verbs explicitly so a user `println!("test result:")`
+/// in test output cannot accidentally clear the watchdog's pending
+/// state - which would silently let a subsequent hang go undetected.
+fn is_libtest_result_summary(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("test result: ok.") || t.starts_with("test result: FAILED.")
 }
 
 /// True for libtest's standalone status lines (`ok`, `FAILED`, `ignored`,
@@ -828,12 +848,64 @@ mod tests {
     }
 
     #[test]
+    fn is_libtest_result_summary_matches_real_shapes_only() {
+        // Exact libtest summary forms (with leading whitespace tolerated).
+        assert!(is_libtest_result_summary(
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        ));
+        assert!(is_libtest_result_summary(
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out"
+        ));
+        // A user `println!("test result:")` with no verb is NOT a
+        // summary - reviewer flagged that the prefix-only check let
+        // tests accidentally clear watchdog pending state.
+        assert!(!is_libtest_result_summary("test result:"));
+        assert!(!is_libtest_result_summary("test result: foo"));
+        assert!(!is_libtest_result_summary("test result: ok bar"));
+    }
+
+    #[test]
+    fn watchdog_keeps_pending_when_test_prints_test_result_prefix_then_hangs() {
+        // Item 4 from the second review: a test that prints
+        // `println!("test result:")` and then hangs must NOT have
+        // pending cleared by the summary detector.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"test result: maybe later\n",
+            // ... and then the test hangs.
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert_eq!(still_running, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn watchdog_keeps_pending_when_test_prints_ok_then_hangs() {
+        // Reviewer-flagged regression: a test whose *first* output is
+        // `println!("ok")` and which then hangs forever must NOT be
+        // declared finished by the bare-status shortcut. Previously
+        // the watchdog cleared pending on that line and the timeout
+        // never fired. With the deferred-observe fix the test stays
+        // pending; the real watchdog timer (20s in production, not
+        // simulated here) will eventually trigger.
+        let stream: Vec<&[u8]> = vec![
+            b"test foo ... ",
+            b"ok\n",
+            // ... and then nothing. EOF here stands in for "the test
+            // is still running / hung when the pipe closes".
+        ];
+        let (_forwarded, still_running) = drive_drain(&stream);
+        assert_eq!(still_running, vec!["foo".to_string()]);
+    }
+
+    #[test]
     fn watchdog_clears_when_test_prints_ok_literal() {
-        // Trigger B fixture: test calls `println!("ok")` and the
-        // bare-status shortcut clears pending early. With the state
-        // machine, the eventual `test result:` line still clears
-        // pending so the suite-level state stays clean. (False-negative
-        // hang is a documented narrow tradeoff for this fixture.)
+        // Trigger B fixture: the test calls `println!("ok")` then
+        // completes normally. Both the test's `ok` and libtest's
+        // own `ok\n` look like bare-status terminators with no
+        // intermediate output - the deferred-observe path drops
+        // both from display but does *not* clear pending. The
+        // `test result:` summary line at the end is what actually
+        // clears the watchdog tracker.
         let stream: Vec<&[u8]> = vec![
             b"test foo ... ",
             b"ok\n",
@@ -846,9 +918,11 @@ mod tests {
 
     #[test]
     fn watchdog_clears_when_test_prints_failed_literal() {
-        // Symmetric to the `ok` case: `println!("FAILED")` is a literal
-        // bare status and gets consumed early. The test result summary
-        // still clears any leftover pending state.
+        // Symmetric to the `ok` case: `println!("FAILED")` followed
+        // by libtest's own `FAILED\n`. Both bare-status lines are
+        // dropped from display without observing a result; the
+        // `test result:` summary at the end is the actual
+        // pending-clear event.
         let stream: Vec<&[u8]> = vec![
             b"test foo ... ",
             b"FAILED\n",
@@ -862,8 +936,10 @@ mod tests {
     #[test]
     fn watchdog_clears_silent_test_via_bare_status() {
         // No test output: stream is `test foo ... ok\n`. The partial
-        // marker is stripped, then the bare `ok` line is the unambiguous
-        // libtest terminator (intermediate_output_seen still false).
+        // start marker is stripped; the bare `ok` line is dropped from
+        // display (deferred-observe: we can't tell it from a test's
+        // own `println!("ok")`) without clearing pending. The
+        // `test result:` summary is what clears the watchdog tracker.
         let stream: Vec<&[u8]> = vec![
             b"test foo ... ",
             b"ok\n",

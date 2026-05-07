@@ -116,9 +116,11 @@ pub(crate) fn decide_active_sweeps(
 
     // 4. Legacy fallback: `brokkr check` against a project with no
     //    `[[check]]` and no profile config. One `--all-features`
-    //    invocation, matching pre-redesign behaviour.
+    //    invocation, matching pre-redesign behaviour. Label tracks
+    //    the cargo flag so callers (e.g. `brokkr test`) don't have
+    //    to special-case-detect this branch by feature-arg shape.
     Ok(vec![ResolvedSweep {
-        label: "default".into(),
+        label: "all-features".into(),
         cargo_feature_args: vec!["--all-features".into()],
         build_packages: Vec::new(),
         libtest_args: Vec::new(),
@@ -1119,6 +1121,23 @@ fn is_cargo_json_line(line: &str) -> bool {
     line.starts_with("{\"reason\":")
 }
 
+/// Status string for a `TestSummary` JSON event.
+///
+/// Classifies as `"failed"` when there were real test failures *or*
+/// when `zero_test_run` is true (every test filtered out, parse
+/// failure). The latter used to emit `"ok"` while the brokkr process
+/// itself exited non-zero, leaving JSON consumers unable to trust the
+/// status field - reading the counts (`passed+failed+ignored == 0`
+/// with `filtered_out > 0`) still distinguishes a zero-run from a
+/// genuine test failure.
+fn json_test_status(parsed: &cargo_filter::ParsedTestResults) -> &'static str {
+    if parsed.failed > 0 || zero_test_run(parsed) {
+        "failed"
+    } else {
+        "ok"
+    }
+}
+
 /// True when a successful `cargo test` run actually validated nothing.
 ///
 /// Two distinct shapes:
@@ -1203,7 +1222,7 @@ fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, s
     }
 
     if parsed.suites > 0 {
-        let test_status = if parsed.failed > 0 { "failed" } else { "ok" };
+        let test_status = json_test_status(&parsed);
         cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
             cargo_json::TestSummaryEvent {
                 status: test_status,
@@ -1270,7 +1289,11 @@ mod tests {
     fn decide_active_sweeps_legacy_default_when_nothing_configured() {
         let sweeps = decide_active_sweeps(&[], None, None, &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "default");
+        // The legacy-fallback label tracks the cargo flag so callers
+        // that need to recognize this branch don't have to compare
+        // feature-arg vectors. Don't change without updating
+        // `brokkr test` (it relied on this distinction pre-fix).
+        assert_eq!(sweeps[0].label, "all-features");
         assert_eq!(sweeps[0].cargo_feature_args, vec!["--all-features"]);
         assert!(sweeps[0].build_packages.is_empty());
         assert!(sweeps[0].libtest_args.is_empty());
@@ -1816,6 +1839,31 @@ warning: z [too_many_lines]
     #[test]
     fn zero_test_run_does_not_flag_normal_pass() {
         assert!(!zero_test_run(&parsed(12, 0, 0, 3, 1)));
+    }
+
+    #[test]
+    fn json_test_status_failed_on_zero_run() {
+        // Reviewer-flagged: an all-filtered-out sweep used to emit
+        // `"status":"ok"` here while the brokkr process exited
+        // non-zero. Both conditions now agree on `"failed"`.
+        assert_eq!(json_test_status(&parsed(0, 0, 0, 5, 1)), "failed");
+    }
+
+    #[test]
+    fn json_test_status_failed_on_real_failure() {
+        assert_eq!(json_test_status(&parsed(2, 1, 0, 0, 1)), "failed");
+    }
+
+    #[test]
+    fn json_test_status_ok_on_normal_pass() {
+        assert_eq!(json_test_status(&parsed(12, 0, 0, 3, 1)), "ok");
+    }
+
+    #[test]
+    fn json_test_status_ok_on_empty_suite() {
+        // Package with no tests defined -> `0 passed; 0 filtered out`.
+        // Not a wrong run, status stays `ok`.
+        assert_eq!(json_test_status(&parsed(0, 0, 0, 0, 1)), "ok");
     }
 
     #[test]

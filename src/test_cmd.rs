@@ -255,16 +255,6 @@ fn decide_sweeps(
         s.cargo_test_filters.clear();
         s.name_filters.clear();
     }
-    // `decide_active_sweeps` labels its legacy fallback "default"; the
-    // pre-consolidation `brokkr test` code labelled it "all-features"
-    // for symmetry with the cargo flag. Keep the existing label so the
-    // `[test]    sweep: ...` lines and snapshots don't churn.
-    if sweeps.len() == 1
-        && sweeps[0].label == "default"
-        && sweeps[0].cargo_feature_args == vec!["--all-features"]
-    {
-        sweeps[0].label = "all-features".into();
-    }
     Ok(sweeps)
 }
 
