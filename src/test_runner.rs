@@ -24,6 +24,10 @@ const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 pub(crate) struct LibtestRun {
     pub(crate) captured: CapturedOutput,
     pub(crate) outcome: LibtestOutcome,
+    /// Time from cargo spawn to the `Finished` stderr line (build phase).
+    /// `None` if cargo never emitted `Finished` (build failed or no rebuild
+    /// happened - though cargo emits `Finished` even on cache hits).
+    pub(crate) build_elapsed: Option<Duration>,
 }
 
 pub(crate) enum LibtestOutcome {
@@ -110,13 +114,20 @@ where
     });
 
     let stderr_buf_t = Arc::clone(&stderr_buf);
+    let build_elapsed = Arc::new(Mutex::new(None::<Duration>));
+    let build_elapsed_t = Arc::clone(&build_elapsed);
     let stderr_thread = thread::spawn(move || {
         drain_stderr(
             stderr_pipe,
             &stderr_buf_t,
             forward_stderr_line,
             start,
-            on_build_finished,
+            move |elapsed| {
+                if let Ok(mut slot) = build_elapsed_t.lock() {
+                    *slot = Some(elapsed);
+                }
+                on_build_finished(elapsed);
+            },
         );
     });
 
@@ -143,6 +154,10 @@ where
     let stdout = clone_buffer(&stdout_buf, "stdout")?;
     let stderr = clone_buffer(&stderr_buf, "stderr")?;
     let hung_outcome = clone_hung(&hung)?;
+    let build_elapsed = build_elapsed
+        .lock()
+        .map_err(|_| DevError::Build("build_elapsed mutex poisoned".into()))?
+        .take();
 
     Ok(LibtestRun {
         captured: CapturedOutput {
@@ -155,6 +170,7 @@ where
             Some(h) => LibtestOutcome::HungTest(h),
             None => LibtestOutcome::Completed,
         },
+        build_elapsed,
     })
 }
 
@@ -206,6 +222,13 @@ fn drain_stdout<F>(
 {
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
+    // Under `--nocapture`, libtest writes `test NAME ... ` (no newline,
+    // flushed) before running the test. The test's own stdout then glues
+    // onto that partial line, and the trailing `ok\n` arrives as a bare
+    // line afterwards. When we detect the partial-marker shape we strip
+    // it so the test's output starts fresh, and remember the name so the
+    // bare status line that follows can be matched and dropped.
+    let mut pending_name: Option<String> = None;
 
     while let Ok(n) = pipe.read(&mut read_buf) {
         if n == 0 {
@@ -219,19 +242,34 @@ fn drain_stdout<F>(
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                handle_stdout_line(&line, tracker, &mut forward_line, true);
+                handle_stdout_line(
+                    &line,
+                    tracker,
+                    &mut forward_line,
+                    true,
+                    &mut pending_name,
+                );
                 line.clear();
             } else {
                 line.push(byte);
-                if byte == b' ' && line.len() >= "test x ... ".len() {
-                    observe_partial_start(&line, tracker);
+                if byte == b' '
+                    && line.len() >= "test x ... ".len()
+                    && pending_name.is_none()
+                    && let Ok(text) = std::str::from_utf8(&line)
+                    && let Some(name) = parse_start_marker(text)
+                {
+                    if let Ok(mut t) = tracker.lock() {
+                        t.observe_start(name.clone());
+                    }
+                    pending_name = Some(name);
+                    line.clear();
                 }
             }
         }
     }
 
     if !line.is_empty() {
-        handle_stdout_line(&line, tracker, &mut forward_line, false);
+        handle_stdout_line(&line, tracker, &mut forward_line, false, &mut pending_name);
     }
 }
 
@@ -285,27 +323,29 @@ fn is_cargo_finished_line(line: &str) -> bool {
     line.trim_start().starts_with("Finished ")
 }
 
-fn observe_partial_start(line: &[u8], tracker: &Mutex<TestTracker>) {
-    let Ok(text) = std::str::from_utf8(line) else {
-        return;
-    };
-    let Some(name) = parse_start_marker(text) else {
-        return;
-    };
-    if let Ok(mut t) = tracker.lock() {
-        t.observe_start(name);
-    }
-}
-
 fn handle_stdout_line<F>(
     line: &[u8],
     tracker: &Mutex<TestTracker>,
     forward_line: &mut F,
     terminated: bool,
+    pending_name: &mut Option<String>,
 ) where
     F: FnMut(&str),
 {
     let text = String::from_utf8_lossy(line).into_owned();
+
+    // After we strip a partial `test NAME ... ` start marker, libtest's
+    // trailing status arrives as a bare line. Drop it and record the
+    // result for the watchdog tracker.
+    if pending_name.is_some() && is_bare_status_line(&text) {
+        if let Some(name) = pending_name.take()
+            && let Ok(mut t) = tracker.lock()
+        {
+            t.observe_result(&name);
+        }
+        return;
+    }
+
     if let Some(name) = parse_result_marker(&text)
         && let Ok(mut t) = tracker.lock()
     {
@@ -314,6 +354,28 @@ fn handle_stdout_line<F>(
 
     if terminated || parse_start_marker(&text).is_none() {
         forward_line(&text);
+    }
+}
+
+/// True for libtest's standalone status lines (`ok`, `FAILED`, `ignored`,
+/// optionally followed by ` <X.Xs>` when `--report-time` is enabled).
+fn is_bare_status_line(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(head) = parts.next() else {
+        return false;
+    };
+    if !matches!(head, "ok" | "FAILED" | "ignored") {
+        return false;
+    }
+    // Allow at most one trailing token, and only if it looks like a
+    // libtest timing suffix: `<0.001s>`.
+    match parts.next() {
+        None => true,
+        Some(tail) => {
+            parts.next().is_none()
+                && tail.starts_with('<')
+                && tail.ends_with("s>")
+        }
     }
 }
 

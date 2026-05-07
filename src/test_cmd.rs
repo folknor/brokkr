@@ -326,7 +326,13 @@ fn run_one(
         t.starts_with("error[") || (t.starts_with("error:") && !t.contains("test run failed"))
     });
 
-    let wall = format!("{:.2}s", run.captured.elapsed.as_secs_f64());
+    // Display the test-runtime wall: total minus the cargo build phase
+    // (which the `[test] test binaries built in ...s` line already
+    // surfaces). Falls back to total if cargo never reported `Finished`.
+    let test_wall = run
+        .build_elapsed
+        .map_or(run.captured.elapsed, |b| run.captured.elapsed.saturating_sub(b));
+    let wall = format!("{:.2}s", test_wall.as_secs_f64());
 
     if let LibtestOutcome::HungTest(hung) = &run.outcome {
         output::error(&test_runner::format_hung_test(hung, project_root));
