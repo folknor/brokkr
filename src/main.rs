@@ -198,6 +198,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
             all,
         });
     }
+    if let Command::Fmt { args } = &cli.command {
+        return cmd_fmt(args);
+    }
     if let Command::Check {
         features,
         no_default_features,
@@ -275,7 +278,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::TimeFilter { .. }
         | Command::Diff { .. }
         | Command::BuildGeocodeIndex { .. }
-        | Command::Check { .. } => unreachable!(),
+        | Command::Check { .. }
+        | Command::Fmt { .. } => unreachable!(),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {
             mode,
@@ -1385,6 +1389,35 @@ fn cmd_lock() -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command as ProcCommand;
+
+    let mut cmd = ProcCommand::new("cargo");
+    cmd.arg("fmt");
+    cmd.args(args);
+    let status = cmd.status().map_err(|e| DevError::Subprocess {
+        program: "cargo".into(),
+        code: None,
+        stderr: e.to_string(),
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+    match status.code() {
+        Some(code) => Err(DevError::Subprocess {
+            program: "cargo fmt".into(),
+            code: Some(code),
+            stderr: String::new(),
+        }),
+        None => Err(DevError::Subprocess {
+            program: "cargo fmt".into(),
+            code: None,
+            stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
+        }),
+    }
 }
 
 fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {

@@ -124,6 +124,13 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run `cargo fmt`. All arguments are forwarded raw.
+    #[command(display_order = 0)]
+    Fmt {
+        /// Raw arguments forwarded to `cargo fmt`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Show environment information
     #[command(display_order = 1)]
     Env,
