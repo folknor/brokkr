@@ -135,10 +135,8 @@ fn parse_frontmatter(body: &str) -> (Option<String>, Option<Expected>) {
         };
         let value = value.trim();
         match key.trim() {
-            "description" => {
-                if description.is_none() && !value.is_empty() {
-                    description = Some(value.to_owned());
-                }
+            "description" if description.is_none() && !value.is_empty() => {
+                description = Some(value.to_owned());
             }
             "expected" => {
                 if expected.is_none()

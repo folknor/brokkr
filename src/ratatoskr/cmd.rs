@@ -558,9 +558,14 @@ mod tests {
     #[test]
     fn write_artefacts_omits_git_keys_when_collection_fails() {
         // Pass a non-git dir as project_root - git::collect returns Err
-        // and the optional git_* fields elide.
+        // and the optional git_* fields elide. The tmpdir lives under
+        // brokkr's `target/test-tmp/`, which is itself inside brokkr's
+        // git repo - `git rev-parse` would walk upward and succeed.
+        // Drop a malformed `.git` *file* (gitlink shape) in the dir so
+        // git stops the walk there and returns non-zero.
         let parent = tmpdir("write_no_git");
         let project = tmpdir("write_no_git_project");
+        fs::write(project.join(".git"), "gitdir: /nonexistent-by-design\n").unwrap();
         let script = parent.join("gamma.lua");
         fs::write(&script, "").unwrap();
         let bin_dir = parent.join("bin");
@@ -571,8 +576,8 @@ mod tests {
 
         write_artefacts(&artefact_dir, &script, &built, &cap, &project).unwrap();
         let toml_body = fs::read_to_string(artefact_dir.join("run.toml")).unwrap();
-        assert!(!toml_body.contains("git_commit"));
-        assert!(!toml_body.contains("git_clean"));
+        assert!(!toml_body.contains("git_commit"), "got: {toml_body}");
+        assert!(!toml_body.contains("git_clean"), "got: {toml_body}");
     }
 
     /// End-to-end shape: stand-in "harness binary" via `/bin/true` and
