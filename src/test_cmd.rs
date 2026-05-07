@@ -306,6 +306,12 @@ fn run_one(
         env,
         make_stdout_forwarder(raw),
         make_stderr_forwarder(raw),
+        |elapsed| {
+            println!(
+                "[test]    test binaries built in {:.1}s; running tests",
+                elapsed.as_secs_f64()
+            );
+        },
     )?;
 
     let stdout_text = String::from_utf8_lossy(&run.captured.stdout);

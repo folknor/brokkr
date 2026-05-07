@@ -71,16 +71,18 @@ impl TestTracker {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn streaming_run_libtest<Out, Err>(
+pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
     forward_stdout_line: Out,
     forward_stderr_line: Err,
+    on_build_finished: Fin,
 ) -> Result<LibtestRun, DevError>
 where
     Out: FnMut(&str) + Send + 'static,
     Err: FnMut(&str) + Send + 'static,
+    Fin: FnOnce(Duration) + Send + 'static,
 {
     enforce_single_threaded(args)?;
 
@@ -109,7 +111,13 @@ where
 
     let stderr_buf_t = Arc::clone(&stderr_buf);
     let stderr_thread = thread::spawn(move || {
-        drain_stderr(stderr_pipe, &stderr_buf_t, forward_stderr_line);
+        drain_stderr(
+            stderr_pipe,
+            &stderr_buf_t,
+            forward_stderr_line,
+            start,
+            on_build_finished,
+        );
     });
 
     let cwd_t = cwd.to_path_buf();
@@ -227,10 +235,17 @@ fn drain_stdout<F>(
     }
 }
 
-fn drain_stderr<F>(mut pipe: ChildStderr, buf: &Mutex<Vec<u8>>, mut forward_line: F)
-where
+fn drain_stderr<F, G>(
+    mut pipe: ChildStderr,
+    buf: &Mutex<Vec<u8>>,
+    mut forward_line: F,
+    start: Instant,
+    on_build_finished: G,
+) where
     F: FnMut(&str),
+    G: FnOnce(Duration),
 {
+    let mut on_build_finished = Some(on_build_finished);
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
 
@@ -247,6 +262,11 @@ where
                     line.pop();
                 }
                 let text = String::from_utf8_lossy(&line).into_owned();
+                if on_build_finished.is_some() && is_cargo_finished_line(&text)
+                    && let Some(cb) = on_build_finished.take()
+                {
+                    cb(start.elapsed());
+                }
                 forward_line(&text);
                 line.clear();
             } else {
@@ -259,6 +279,10 @@ where
         let text = String::from_utf8_lossy(&line).into_owned();
         forward_line(&text);
     }
+}
+
+fn is_cargo_finished_line(line: &str) -> bool {
+    line.trim_start().starts_with("Finished ")
 }
 
 fn observe_partial_start(line: &[u8], tracker: &Mutex<TestTracker>) {
@@ -539,10 +563,9 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
     };
 
     format!(
-        "test {} exceeded {:?} ceiling ({:.1}s elapsed)\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
+        "test {} did not finish within {}s after libtest started it\n  per-test timeout: cargo build time excluded\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
         hung.test,
-        hung.ceiling,
-        hung.elapsed.as_secs_f64(),
+        hung.ceiling.as_secs(),
         hung.cargo_pid,
         child_text,
         proc_pid,

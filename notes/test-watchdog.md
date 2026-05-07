@@ -228,25 +228,32 @@ alongside the existing `Build`, `Subprocess`, etc.
 ### Output shape on hang
 
 ```
-[error]   test foo::bar exceeded 20s ceiling (32s elapsed)
-[error]     killed cargo (pid 12345) and test child (pid 12389)
+[test]    test binaries built in 130.5s; running tests
+[error]   test foo::bar did not finish within 20s after libtest started it
+[error]     per-test timeout: cargo build time excluded
+[error]     killed cargo process group (pgid 12345) and test child (pid 12389)
 [error]     /proc/12389/wchan: futex_wait_queue_me
 [error]     /proc/12389/stack: [first frame, e.g. __futex_abstimed_wait_common]
 [error]     full snapshot: .brokkr/test-hung/20260506-143022-foo__bar/
 ```
 
-Five lines. Same `[error]` prefix as every other failure block.
-`/proc/wchan` and `/proc/stack`'s first frame are inlined for the
-common case where the watcher just needs to know "futex wait" vs
-"closed pipe" vs something else; the full files live under
-`.brokkr/test-hung/...` for deeper inspection.
+The first line is always emitted (text mode only) when cargo's
+`Finished` line appears on stderr - it pins the compile/run boundary
+so readers can't mistake the per-test 20s ceiling for a cargo
+wallclock timeout. The remaining lines are the failure block, with
+the same `[error]` prefix as every other failure. `/proc/wchan` and
+`/proc/stack`'s first frame are inlined for the common case; the full
+files live under `.brokkr/test-hung/...` for deeper inspection.
 
-### Healthy-run output preserved exactly
+### Healthy-run output
 
-`brokkr check` output stays at five lines for a clean run. `brokkr
-test` output stays at one line per run (`PASS|FAIL|BUILD FAILED|SKIP`)
-plus whatever the test itself wrote to stdout/stderr live. The
-watchdog only emits when it fires; otherwise it is invisible.
+`brokkr check` adds one `[test]    test binaries built in X.Xs; running
+tests` line per sweep, then stays silent until the post-mortem summary
+prints (or the watchdog fires). `brokkr test` adds the same line per
+sweep, then prints `PASS|FAIL|BUILD FAILED|SKIP` when each run ends -
+plus whatever the test itself wrote to stdout/stderr live. JSON mode
+suppresses the build-finished line so the output stream stays
+machine-parseable.
 
 ## Suggested implementation order
 

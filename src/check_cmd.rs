@@ -962,12 +962,21 @@ fn run_one_test_sweep(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
+    let json_mode = json;
     let run = test_runner::streaming_run_libtest(
         &arg_refs,
         project_root,
         &env_refs,
         |_| {},
         |_| {},
+        move |elapsed| {
+            if !json_mode {
+                println!(
+                    "[test]    test binaries built in {:.1}s; running tests",
+                    elapsed.as_secs_f64()
+                );
+            }
+        },
     )?;
     let captured = run.captured;
 
