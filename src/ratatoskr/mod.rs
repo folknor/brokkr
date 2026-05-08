@@ -14,3 +14,4 @@ pub mod build;
 pub mod cmd;
 pub mod discover;
 pub mod process;
+pub mod saehrimnir;

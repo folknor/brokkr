@@ -1010,6 +1010,22 @@ fn run(cli: Cli) -> Result<(), DevError> {
             project::require(project, Project::Ratatoskr, "service-list")?;
             ratatoskr::cmd::service_list(&project_root)
         }
+        Command::MockServe { fixture } => {
+            project::require(project, Project::Ratatoskr, "mock-serve")?;
+            let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
+                DevError::Config(
+                    "mock-serve: no [ratatoskr] section in brokkr.toml. \
+                     Set mock_server_binary and fixtures_dir to point at \
+                     sæhrimnir's checkout."
+                        .into(),
+                )
+            })?;
+            ratatoskr::saehrimnir::run_mock_serve(&ratatoskr::saehrimnir::MockServeRequest {
+                project_root: &project_root,
+                config: cfg,
+                fixture: &fixture,
+            })
+        }
         Command::ServiceSuite {
             filter,
             keep_artefacts,

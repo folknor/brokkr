@@ -1641,6 +1641,26 @@ Examples:
         #[arg(short = 'N', long = "repeat", default_value = "1", value_name = "COUNT")]
         repeat: u32,
     },
+
+    /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C
+    ///
+    /// Manual-exploration tool for plan 3. Resolves
+    /// `[ratatoskr] mock_server_binary` and `[ratatoskr] fixtures_dir`
+    /// from `brokkr.toml` (both required), spawns sæhrimnir with
+    /// `--fixture <PATH> --readiness-file <PATH>`, waits for the
+    /// readiness sentinel, prints the per-protocol listening
+    /// endpoints, and runs until SIGINT/SIGTERM. SIGTERMs sæhrimnir
+    /// with a 1.5s budget on shutdown before escalating to SIGKILL.
+    /// Auto-build of sæhrimnir is not yet wired - the binary must
+    /// already exist at `mock_server_binary`.
+    #[command(name = "mock-serve", display_order = 65)]
+    MockServe {
+        /// Fixture name. Resolves to `<fixtures_dir>/<NAME>.toml` or
+        /// `<fixtures_dir>/<NAME>.lua` (whichever exists; both is an
+        /// error).
+        #[arg(long, value_name = "NAME")]
+        fixture: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
