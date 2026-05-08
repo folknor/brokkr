@@ -3,6 +3,7 @@
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -12,7 +13,7 @@ use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::artefacts::ArtefactDir;
 use crate::ratatoskr::build::{self, HarnessBuild};
-use crate::ratatoskr::discover::{self, ScriptInfo, SCRIPT_DIR};
+use crate::ratatoskr::discover::{self, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
 
 /// Where per-test artefact directories live, relative to the project
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
@@ -77,6 +78,17 @@ pub fn service_test(
         })?
         .to_owned();
 
+    // Parse the script's frontmatter once: the ceiling and the
+    // preserve-data-dir override apply to every iteration of a soak.
+    let parsed = discover::parse_script(&script_abs, &test_id).map_err(|e| {
+        DevError::Config(format!(
+            "service-test: failed to read script {script}: {e}"
+        ))
+    })?;
+    let ceiling = parsed.ceiling;
+    let keep_on_success =
+        keep_artefacts || parsed.preserve_data_dir == PreserveDataDir::OnSuccessToo;
+
     let harness_cfg = dev_config
         .ratatoskr
         .as_ref()
@@ -114,7 +126,8 @@ pub fn service_test(
             &built,
             &script_abs,
             project_root,
-            keep_artefacts,
+            keep_on_success,
+            ceiling,
         )
     } else {
         run_soak(
@@ -123,7 +136,8 @@ pub fn service_test(
             &built,
             &script_abs,
             project_root,
-            keep_artefacts,
+            keep_on_success,
+            ceiling,
             repeat,
             keep_going,
         )
@@ -145,20 +159,22 @@ struct RunResult {
 
 /// Single-run dispatch (`repeat == 1`). Mirrors the pre-soak output
 /// shape exactly: one "running ..." line, one PASS/FAIL line.
+#[allow(clippy::too_many_arguments)] // passes through the ceiling + keep flags from the entry point
 fn run_single(
     artefact_parent: &Path,
     test_id: &str,
     built: &HarnessBuild,
     script_abs: &Path,
     project_root: &Path,
-    keep_artefacts: bool,
+    keep_on_success: bool,
+    ceiling: Duration,
 ) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {test_id} against {}",
         built.binary.display()
     ));
-    let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_artefacts)?;
-    let result = spawn_and_capture(artefacts, built, script_abs, project_root)?;
+    let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
+    let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling)?;
     if result.succeeded {
         output::ratatoskr_msg(&format!("PASS in {}ms", result.elapsed_ms));
         Ok(())
@@ -186,7 +202,8 @@ fn run_soak(
     built: &HarnessBuild,
     script_abs: &Path,
     project_root: &Path,
-    keep_artefacts: bool,
+    keep_on_success: bool,
+    ceiling: Duration,
     repeat: u32,
     keep_going: bool,
 ) -> Result<(), DevError> {
@@ -198,8 +215,8 @@ fn run_soak(
 
     let mut results: Vec<(u32, RunResult)> = Vec::new();
     for iter in 1..=repeat {
-        let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_artefacts)?;
-        let result = spawn_and_capture(artefacts, built, script_abs, project_root)?;
+        let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
+        let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling)?;
         output::ratatoskr_msg(&format_iter_line(iter, repeat, &result));
         let stop = !result.succeeded && !keep_going;
         results.push((iter, result));
@@ -222,18 +239,23 @@ fn run_soak(
 /// the binary's exit status. Returns a [`RunResult`] describing the
 /// outcome; spawn-level failures (binary missing, etc.) propagate as
 /// `Err` after dropping a `spawn-error.txt` breadcrumb in the dir.
+///
+/// `ceiling` bounds the wall-clock the harness binary may run for - if
+/// it exceeds the budget brokkr SIGKILLs the child and reports the run
+/// as `ceiling=<ceiling>` so the failure surface is unambiguous.
 fn spawn_and_capture(
     artefacts: ArtefactDir,
     built: &HarnessBuild,
     script_abs: &Path,
     project_root: &Path,
+    ceiling: Duration,
 ) -> Result<RunResult, DevError> {
     let binary_str = built.binary.display().to_string();
     let script_str = script_abs.display().to_string();
     let artefact_path_str = artefacts.path().display().to_string();
     let bin_dir_str = built.bin_dir.display().to_string();
 
-    let captured = match output::run_captured_with_env(
+    let deadline_capture = match output::run_captured_with_env_and_deadline(
         &binary_str,
         &["--test-harness", &script_str],
         project_root,
@@ -241,6 +263,7 @@ fn spawn_and_capture(
             ("BROKKR_HARNESS_ARTEFACT_DIR", &artefact_path_str),
             ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
         ],
+        ceiling,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -254,16 +277,24 @@ fn spawn_and_capture(
         }
     };
 
+    let killed_on_deadline = deadline_capture.killed_on_deadline;
+    let captured = deadline_capture.captured;
+
     write_artefacts(artefacts.path(), script_abs, built, &captured, project_root)?;
 
     let elapsed_ms = captured.elapsed.as_millis();
-    let exit_label = match (captured.status.code(), captured.status.signal()) {
-        (Some(code), _) => format!("exit={code}"),
-        (None, Some(sig)) => format!("signal={sig}"),
-        (None, None) => "unknown exit".to_owned(),
+    let exit_label = if killed_on_deadline {
+        format!("ceiling={}", format_duration(ceiling))
+    } else {
+        match (captured.status.code(), captured.status.signal()) {
+            (Some(code), _) => format!("exit={code}"),
+            (None, Some(sig)) => format!("signal={sig}"),
+            (None, None) => "unknown exit".to_owned(),
+        }
     };
 
-    if captured.status.success() {
+    let succeeded = !killed_on_deadline && captured.status.success();
+    if succeeded {
         let path = artefacts.path().to_path_buf();
         artefacts.finalize_success()?;
         // finalize_success deletes the dir unless `keep_on_success` was
@@ -285,6 +316,26 @@ fn spawn_and_capture(
             artefact_path: Some(path),
         })
     }
+}
+
+/// Render a `Duration` in the `<n>{ms,s,m,h}` shape `discover.rs` accepts.
+/// Used for `ceiling=` exit labels so the failure surface mirrors the
+/// frontmatter spelling.
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs == 0 {
+        return format!("{}ms", d.subsec_millis());
+    }
+    if d.subsec_millis() != 0 {
+        return format!("{}ms", d.as_millis());
+    }
+    if secs.is_multiple_of(3600) {
+        return format!("{}h", secs / 3600);
+    }
+    if secs.is_multiple_of(60) {
+        return format!("{}m", secs / 60);
+    }
+    format!("{secs}s")
 }
 
 /// Format one soak iteration's status line. Pure for testability.

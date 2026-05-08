@@ -739,24 +739,32 @@ Brokkr-side, in tree:
   show up grouped in `brokkr --help`; `project::require()` gates
   cleanly with the conventional error message.
 - `brokkr service-test <SCRIPT>` is wired end-to-end on the brokkr
-  side: project-gated, validates the script path, acquires the
-  global lockfile, runs the sweep-aware build (see below), allocates
-  a per-run artefact dir, then spawns
+  side: project-gated, validates the script path, parses the
+  script's frontmatter once (so `ceiling` and `preserve_data_dir`
+  apply uniformly across soak iterations), acquires the global
+  lockfile, runs the sweep-aware build (see below), allocates a
+  per-run artefact dir, then spawns
   `<binary> --test-harness <SCRIPT>` with
   `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set in
-  the env. Captured stdout/stderr land in `binary-stdout.log` /
-  `binary-stderr.log` next to a copy of the script and a
-  `run.toml` (brokkr version, sweep label, exit code or signal,
-  elapsed_ms, git commit/dirty when collectable). Success deletes
-  the artefact dir unless `--keep-artefacts` is set; failure
-  preserves it. Spawn errors (binary missing) drop a
-  `spawn-error.txt` breadcrumb and preserve the dir. History-DB
-  recording is automatic via `main()`'s `record_history`. `--debug`
-  flips the build to the dev profile; default is release. Until
-  ratatoskr ships the harness module, `app --test-harness` errors
-  out with "unknown flag" and the artefact dir captures that
-  faithfully - the brokkr side is structurally ready for the
-  wedge tests the moment the ratatoskr-side runtime lands.
+  the env. Stdout/stderr drain in background threads while a
+  50ms-cadence poll loop watches `Child::try_wait` and the
+  ceiling deadline. The captured streams land in
+  `binary-stdout.log` / `binary-stderr.log` next to a copy of the
+  script and a `run.toml` (brokkr version, sweep label, exit code
+  or signal, elapsed_ms, git commit/dirty when collectable). When
+  the ceiling fires brokkr SIGKILLs the child and labels the run
+  `ceiling=<spelling>`; otherwise the label tracks the child's
+  own exit. Success deletes the artefact dir unless
+  `--keep-artefacts` is set or the script's frontmatter has
+  `preserve_data_dir = on_success_too`; failure preserves it.
+  Spawn errors (binary missing) drop a `spawn-error.txt`
+  breadcrumb and preserve the dir. History-DB recording is
+  automatic via `main()`'s `record_history`. `--debug` flips the
+  build to the dev profile; default is release. Until ratatoskr
+  ships the harness module, `app --test-harness` errors out with
+  "unknown flag" and the artefact dir captures that faithfully -
+  the brokkr side is structurally ready for the wedge tests the
+  moment the ratatoskr-side runtime lands.
 - Soak via `brokkr service-test <SCRIPT> -N <COUNT>`. Builds once,
   loops `COUNT` iterations with one fresh artefact dir per iteration
   (`run-1/`, `run-2/`, ...). Default bails on the first failed
@@ -778,12 +786,17 @@ Brokkr-side, in tree:
   the toolchain has not validated. Cross-checks at parse time:
   unknown `sweep` and binary-not-in-`build_packages` both error
   before cargo runs.
-- `brokkr service-list` discovers `crates/app/tests/service-harness/
-  *.lua` under the project root, parses a top-of-file
-  `-- key: value` frontmatter (`description`, `expected =
-  pass|ignored`), prints a sorted table. Empty-state message names
-  the expected directory so a fresh checkout (no harness module
-  yet in ratatoskr) gets a useful response.
+- `brokkr service-list` discovers
+  `crates/app/tests/service-harness/**/*.lua` recursively under the
+  project root, parses a top-of-file `-- key: value` frontmatter,
+  prints a sorted table. Recognized fields: `description`,
+  `expected = pass | ignored`, `ceiling = 60s` (wall-clock backstop
+  with `ms` / `s` / `m` / `h` suffixes; bare numbers are seconds),
+  `preserve_data_dir = on_success_too`. Unknown fields are ignored.
+  Display name is the path relative to the script root, minus
+  `.lua` (e.g. `t1/journal_replays_after_respawn`). Empty-state
+  message names the expected directory so a fresh checkout gets a
+  useful response.
 - `ratatoskr::artefacts::ArtefactDir` allocates
   `<parent>/<test>/run-N/` with collision-incrementing N,
   finalize-success drops the dir unless `keep_on_success` was set,
@@ -818,14 +831,6 @@ Deferred (ratatoskr-side, post Phase 8 start):
 
 Brokkr-side, not yet started but unblocked:
 
-- Recursive `service-harness/**/*.lua` discovery (today's discovery
-  is top-level only; needed before the M4 / M5 cohorts land under
-  `t1/` / `extract/`).
-- Frontmatter parsing for `ceiling = 60s` (per-script wall-clock
-  backstop, enforced by brokkr around the whole run) and
-  `preserve_data_dir = on_success_too` (artefact-dir retention
-  policy override). Today's parser only reads `description` and
-  `expected`; both new fields are brokkr-side semantics.
 - Suite (`--filter`).
 - `service-list --json` for machine consumption.
 

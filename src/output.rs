@@ -201,6 +201,121 @@ pub fn run_captured_with_env(
     })
 }
 
+/// Captured output plus a flag indicating whether the deadline fired.
+///
+/// Returned by [`run_captured_with_env_and_deadline`] only - the regular
+/// captured-output paths cannot trigger a deadline kill, so they keep
+/// their plain [`CapturedOutput`] return type.
+pub struct DeadlineCapture {
+    pub captured: CapturedOutput,
+    /// `true` when the child was SIGKILL'd because `deadline` elapsed
+    /// before it exited on its own. The captured `status` will reflect
+    /// the SIGKILL (signal=9 on Linux); this flag is what callers should
+    /// branch on to surface "ceiling exceeded" in user output.
+    pub killed_on_deadline: bool,
+}
+
+/// How often to poll `Child::try_wait` while waiting for a deadline-bounded
+/// run. Matches `ServiceClient::observe_child_exit`'s 50 ms cadence so the
+/// brokkr-side and runtime-side loops have the same scheduling granularity.
+const DEADLINE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Spawn a subprocess with captured stdio and a wall-clock deadline.
+///
+/// Drains stdout and stderr in background threads (otherwise a child
+/// that prints more than the pipe buffer holds - ~64 KiB - would block
+/// while we're polling for exit). Polls `Child::try_wait` at the
+/// [`DEADLINE_POLL_INTERVAL`] cadence and SIGKILLs the child if `deadline`
+/// elapses first.
+///
+/// The captured `status` reflects whatever the kernel actually reaped:
+/// the child's own exit code/signal if it finished within the deadline,
+/// or signal=9 if brokkr killed it. Callers should branch on
+/// `killed_on_deadline` (not the status alone) to distinguish a child
+/// that died on its own from one we killed.
+pub fn run_captured_with_env_and_deadline(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    deadline: Duration,
+) -> Result<DeadlineCapture, DevError> {
+    use std::io::Read;
+
+    let start = Instant::now();
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for &(key, value) in env {
+        cmd.env(key, value);
+    }
+    crate::oom::protect_child(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| DevError::Subprocess {
+        program: program.to_owned(),
+        code: None,
+        stderr: e.to_string(),
+    })?;
+
+    fn drain(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut reader = pipe;
+            drop(reader.read_to_end(&mut buf));
+            buf
+        })
+    }
+
+    let stdout_thread = child.stdout.take().map(drain);
+    let stderr_thread = child.stderr.take().map(drain);
+
+    let mut killed_on_deadline = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    drop(child.kill());
+                    killed_on_deadline = true;
+                    break child.wait().map_err(|e| DevError::Subprocess {
+                        program: program.to_owned(),
+                        code: None,
+                        stderr: e.to_string(),
+                    })?;
+                }
+                std::thread::sleep(DEADLINE_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(DevError::Subprocess {
+                    program: program.to_owned(),
+                    code: None,
+                    stderr: e.to_string(),
+                });
+            }
+        }
+    };
+
+    let stdout = stdout_thread
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_thread
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let elapsed = start.elapsed();
+
+    Ok(DeadlineCapture {
+        captured: CapturedOutput {
+            status,
+            stdout,
+            stderr,
+            elapsed,
+        },
+        killed_on_deadline,
+    })
+}
+
 /// Spawn a subprocess with captured stdio, returning the `Child` handle.
 ///
 /// The caller is responsible for waiting on the child and collecting output.
@@ -266,5 +381,71 @@ pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<Passthrough
                 stderr: format!("killed by signal {signal}{signal_name}"),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn cwd() -> &'static Path {
+        Path::new(".")
+    }
+
+    #[test]
+    fn deadline_lets_short_runs_finish_normally() {
+        let result =
+            run_captured_with_env_and_deadline("/bin/true", &[], cwd(), &[], Duration::from_secs(5))
+                .unwrap();
+        assert!(!result.killed_on_deadline);
+        assert!(result.captured.status.success());
+        assert_eq!(result.captured.status.code(), Some(0));
+    }
+
+    #[test]
+    fn deadline_kills_runaway_child() {
+        // /bin/sleep 30 will outlive a 250 ms deadline by orders of
+        // magnitude; brokkr should reap it quickly.
+        let start = std::time::Instant::now();
+        let result = run_captured_with_env_and_deadline(
+            "/bin/sleep",
+            &["30"],
+            cwd(),
+            &[],
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+        assert!(result.killed_on_deadline);
+        // SIGKILL on Linux is signal 9; status.code() is None for
+        // signal-killed children.
+        assert_eq!(result.captured.status.signal(), Some(9));
+        assert!(result.captured.status.code().is_none());
+        // Should finish well inside one poll interval after the deadline,
+        // plus a healthy slack budget for slow CI hardware.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline kill took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn deadline_captures_stdout_from_short_run() {
+        let result = run_captured_with_env_and_deadline(
+            "/bin/echo",
+            &["hello", "world"],
+            cwd(),
+            &[],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!result.killed_on_deadline);
+        assert_eq!(result.captured.stdout, b"hello world\n");
     }
 }
