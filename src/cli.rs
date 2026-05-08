@@ -1683,6 +1683,44 @@ Examples:
         debug: bool,
     },
 
+    /// [ratatoskr] Bench a sync-test script against sæhrimnir (plan 3)
+    ///
+    /// Same spawn shape as `sync-smoke`, measured. Spawns sæhrimnir
+    /// once and reuses it across iterations; spawns the harness binary
+    /// `--bench` times with `BROKKR_MARKER_FIFO` set so the script can
+    /// emit `SYNC_START` / `SYNC_END` markers around the measured
+    /// region. Best-of-N is selected on that marker span (falls back
+    /// to wall-clock elapsed when the script doesn't emit those
+    /// markers); the best iteration's `summary.json` (if the script
+    /// writes one into `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as
+    /// `meta.<key>` rows alongside the result. Stored in
+    /// `.brokkr/results.db` via the standard `BenchHarness` so
+    /// `brokkr results --compare` works.
+    #[command(name = "sync-bench", display_order = 68)]
+    SyncBench {
+        /// Path to the sync-test `.lua` script (frontmatter must
+        /// declare `-- fixture: <NAME>`).
+        script: String,
+
+        /// Number of measured iterations. Default 3.
+        #[arg(long, default_value = "3", value_name = "COUNT")]
+        bench: usize,
+
+        /// Allow recording on a dirty git tree (results land under the
+        /// `dirty` alias instead of being skipped).
+        #[arg(long)]
+        force: bool,
+
+        /// Preserve the artefact directory even on success
+        #[arg(long)]
+        keep_artefacts: bool,
+
+        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Default is release for parity with what users will run.
+        #[arg(long)]
+        debug: bool,
+    },
+
     /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C
     ///
     /// Manual-exploration tool for plan 3. Resolves

@@ -135,6 +135,134 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
 }
 
 // ---------------------------------------------------------------------------
+// MockServer: spawn sæhrimnir, wait for the readiness sentinel, hand
+// the caller back a handle that owns the child process and the parsed
+// endpoints. Used by both `sync-smoke` and `sync-bench` (and indirectly
+// by `mock-serve`, which has its own foreground signal-loop layered
+// on top).
+// ---------------------------------------------------------------------------
+
+/// A spawned sæhrimnir process plus its parsed endpoints. The handle
+/// is `Drop`-safe: a panic between spawn and `shutdown` SIGKILLs the
+/// child rather than leaking it. The graceful path is
+/// [`MockServer::shutdown`] which SIGTERMs first with the standard
+/// [`SHUTDOWN_BUDGET`].
+pub struct MockServer {
+    child: Option<std::process::Child>,
+    pid: u32,
+    endpoints: Endpoints,
+}
+
+/// Diagnostic outcome of [`MockServer::shutdown`]. None of these fields
+/// gate caller success - they're recorded into `run.toml` for triage.
+pub struct MockOutcome {
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub killed_after_budget: bool,
+}
+
+impl MockServer {
+    /// Spawn sæhrimnir against `fixture_path`, write the readiness
+    /// sentinel into `mock_dir/readiness`, and capture stderr to
+    /// `mock_dir/stderr.log`. Blocks until the sentinel parses or the
+    /// child exits / the readiness budget expires; on those failure
+    /// paths, the child is reaped before the error returns so the
+    /// caller never sees a zombie.
+    pub fn spawn(
+        binary: &Path,
+        fixture_path: &Path,
+        mock_dir: &Path,
+    ) -> Result<Self, DevError> {
+        let readiness = mock_dir.join("readiness");
+        if readiness.exists() {
+            std::fs::remove_file(&readiness).map_err(DevError::Io)?;
+        }
+        let stderr_log =
+            std::fs::File::create(mock_dir.join("stderr.log")).map_err(DevError::Io)?;
+
+        let fixture_str = fixture_path.display().to_string();
+        let readiness_str = readiness.display().to_string();
+        let mut child = Command::new(binary)
+            .args([
+                "--fixture",
+                &fixture_str,
+                "--readiness-file",
+                &readiness_str,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(stderr_log)
+            .spawn()
+            .map_err(|e| DevError::Subprocess {
+                program: binary.display().to_string(),
+                code: None,
+                stderr: format!("failed to spawn: {e}"),
+            })?;
+        let pid = child.id();
+
+        let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
+            Ok(ep) => ep,
+            Err(e) => {
+                let _term = proc_helpers::send_signal(pid, libc::SIGTERM);
+                let _reaped = child.wait();
+                return Err(e);
+            }
+        };
+
+        Ok(Self {
+            child: Some(child),
+            pid,
+            endpoints,
+        })
+    }
+
+    pub fn endpoints(&self) -> &Endpoints {
+        &self.endpoints
+    }
+
+    /// SIGTERM the child, grant [`SHUTDOWN_BUDGET`], escalate to SIGKILL
+    /// on timeout. Always reaps. Consumes the handle so the Drop fallback
+    /// can't double-fire.
+    pub fn shutdown(mut self) -> MockOutcome {
+        use std::os::unix::process::ExitStatusExt;
+
+        let Some(mut child) = self.child.take() else {
+            return MockOutcome {
+                exit_code: None,
+                signal: None,
+                killed_after_budget: false,
+            };
+        };
+        let _term = proc_helpers::send_signal(self.pid, libc::SIGTERM);
+        match wait_with_deadline(&mut child, self.pid, SHUTDOWN_BUDGET) {
+            Ok(status) => MockOutcome {
+                exit_code: status.code(),
+                signal: status.signal(),
+                killed_after_budget: matches!(status.signal(), Some(s) if s == libc::SIGKILL),
+            },
+            Err(_) => MockOutcome {
+                exit_code: None,
+                signal: None,
+                killed_after_budget: true,
+            },
+        }
+    }
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        // Only fires when the caller didn't go through `shutdown` -
+        // typically a panic mid-orchestration. Hard-kill rather than
+        // leak the child; nothing graceful to wait for if we're
+        // unwinding.
+        if let Some(mut child) = self.child.take() {
+            let _kill = proc_helpers::send_signal(self.pid, libc::SIGKILL);
+            let _reaped = child.wait();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `brokkr mock-serve`: foreground spawn of sæhrimnir, print endpoints,
 // run until ctrl-C.
 // ---------------------------------------------------------------------------

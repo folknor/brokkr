@@ -1010,6 +1010,25 @@ fn run(cli: Cli) -> Result<(), DevError> {
             project::require(project, Project::Ratatoskr, "service-list")?;
             ratatoskr::cmd::service_list(&project_root)
         }
+        Command::SyncBench {
+            script,
+            bench,
+            force,
+            keep_artefacts,
+            debug,
+        } => {
+            project::require(project, Project::Ratatoskr, "sync-bench")?;
+            ratatoskr::sync::run_sync_bench(&ratatoskr::sync::SyncBenchRequest {
+                project_root: &project_root,
+                dev_config: &dev_config,
+                script: &script,
+                bench,
+                force,
+                keep_artefacts,
+                debug,
+                brokkr_args: brokkr_args.clone(),
+            })
+        }
         Command::SyncList => {
             project::require(project, Project::Ratatoskr, "sync-list")?;
             ratatoskr::sync::run_sync_list(&project_root, &dev_config)
