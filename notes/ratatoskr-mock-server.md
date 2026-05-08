@@ -16,8 +16,10 @@ authoritative docs are inside the sæhrimnir repo - `README.md`,
 for the brokkr/sæhrimnir contract from the other side, and the
 per-protocol surface notes for the wire shapes).
 
-Companion to `notes/ratatoskr-service-harness.md` (plan 1) and
-`notes/ratatoskr-sync-orchestration.md` (plan 3). This is plan 2.
+Companion to `notes/ratatoskr-sync-orchestration.md` (plan 3). This is
+plan 2. Plan 1 (the Service-test harness) is no longer in this notes
+tree - the brokkr-side scaffolding shipped and the cross-cutting design
+lives at `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
 
 ## Background for reviewers
 
@@ -55,7 +57,7 @@ to test ratatoskr's sync code splits into three independent pieces:
 
 | | Owns |
 | --- | --- |
-| Plan 1 (split: ratatoskr `app` crate + brokkr) | Deterministic Service-test harness. Ratatoskr's `app` crate hosts the Lua VM (`dellingr`), `ServiceClient` userdata bindings, the wait combinator, the frame-log tap, and the artefact-dir writers - exposed via `app --test-harness <script.lua>`. Brokkr provides build orchestration, the artefact-dir lifecycle, and low-level primitives (signal, pid_is_alive, sentinel watch, /proc snapshot). Brokkr does not depend on ratatoskr or embed dellingr. See `notes/ratatoskr-service-harness.md`. |
+| Plan 1 (split: ratatoskr `app` crate + brokkr) | Deterministic Service-test harness. Ratatoskr's `app` crate hosts the Lua VM (`dellingr`), `ServiceClient` userdata bindings, the wait combinator, the frame-log tap, and the artefact-dir writers - exposed via `app --test-harness <script.lua>`. Brokkr provides build orchestration, the artefact-dir lifecycle, and low-level primitives (signal, pid_is_alive, sentinel watch, /proc snapshot). Brokkr does not depend on ratatoskr or embed dellingr. Cross-cutting design at `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`. |
 | Plan 2 (this note; sæhrimnir) | The mock email-protocol server: protocol implementations, fixture model, deterministic responses, scenario-control surface. Independent of brokkr and ratatoskr at the source level. |
 | Plan 3 (in brokkr) | Commands that spawn sæhrimnir and ratatoskr's harness binary together, drive a workload, collect metrics, store results. Ratatoskr's headless-sync surface (`TestStartSync` / `TestQueryDbState` `RequestParams` variants on the Service, driven from a Lua script via plan 1's `--test-harness`) is a plan-3 implementation detail; from sæhrimnir's perspective it just sees protocol traffic on its bound ports. |
 

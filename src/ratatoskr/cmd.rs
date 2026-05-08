@@ -117,8 +117,7 @@ pub fn service_test(
             DevError::Config(
                 "service-test: no [ratatoskr.harness] section in brokkr.toml. \
                  Add a [[check]] entry naming the harness sweep, then \
-                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\". \
-                 See notes/ratatoskr-service-harness.md."
+                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\"."
                     .into(),
             )
         })?;
@@ -506,8 +505,7 @@ pub fn service_suite(
             DevError::Config(
                 "service-suite: no [ratatoskr.harness] section in brokkr.toml. \
                  Add a [[check]] entry naming the harness sweep, then \
-                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\". \
-                 See notes/ratatoskr-service-harness.md."
+                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\"."
                     .into(),
             )
         })?;

@@ -5,9 +5,9 @@
 //! brokkr's orchestration responsibilities: project gating, build
 //! coordination via `[[check]]` sweeps, lockfile, artefact-dir
 //! lifecycle, history recording. The Lua VM and the `ServiceClient`
-//! Lua bindings live in ratatoskr.
-//!
-//! See `notes/ratatoskr-service-harness.md` for the cross-cutting plan.
+//! Lua bindings live in ratatoskr (in the `app` crate, behind the
+//! `test-helpers` feature). The cross-cutting design lives at
+//! `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
 
 pub mod artefacts;
 pub mod build;

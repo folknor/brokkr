@@ -2,8 +2,11 @@
 
 Status: **planning, post-option-B reconciliation.** Brokkr-side
 commands for driving sync workloads against sæhrimnir (plan 2).
-Companion to `notes/ratatoskr-service-harness.md` (plan 1) and
-`notes/ratatoskr-mock-server.md` (plan 2). Depends on sæhrimnir,
+Companion to `notes/ratatoskr-mock-server.md` (plan 2). Plan 1 (the
+Service-test harness) is no longer in this notes tree - the brokkr-side
+scaffolding shipped and the cross-cutting design lives at
+`<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
+Depends on sæhrimnir,
 already bootstrapped at `/home/folk/Programs/sæhrimnir/` and
 shipping all five protocols (JMAP, IMAP, SMTP, Microsoft Graph,
 Gmail) for v0; the gating dependency for plan-3 commands like
@@ -53,7 +56,7 @@ to test ratatoskr's sync code splits into three independent pieces:
 
 | | Owns |
 | --- | --- |
-| Plan 1 (`notes/ratatoskr-service-harness.md`, split across brokkr + ratatoskr) | Deterministic subprocess test harness. Ratatoskr's `app` crate hosts the Lua VM + `ServiceClient` userdata + wait combinator + frame-log tap + artefact writers, exposed via `app --test-harness <script.lua>`. Brokkr provides build orchestration + artefact-dir lifecycle + low-level primitives (signal, pid_is_alive, sentinel watch, /proc snapshot). Brokkr does not depend on ratatoskr or embed dellingr. See `notes/ratatoskr-service-harness.md` for full design. |
+| Plan 1 (split across brokkr + ratatoskr) | Deterministic subprocess test harness. Ratatoskr's `app` crate hosts the Lua VM + `ServiceClient` userdata + wait combinator + frame-log tap + artefact writers, exposed via `app --test-harness <script.lua>`. Brokkr provides build orchestration + artefact-dir lifecycle + low-level primitives (signal, pid_is_alive, sentinel watch, /proc snapshot). Brokkr does not depend on ratatoskr or embed dellingr. Cross-cutting design at `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`. |
 | Plan 2 (`notes/ratatoskr-mock-server.md`; sæhrimnir, bootstrapped) | A deterministic mock peer for all five email protocols ratatoskr's sync code talks to (JMAP, IMAP read-path, SMTP submission, Microsoft Graph mail-sync, Gmail mail-sync). One fixture in (TOML or Lua), five wire shapes out, byte-stable. Reactive `on(...)` callbacks across all five protocols plus `wait` / `mock_done` / `mock_fail` script controls. Independent of brokkr and ratatoskr. |
 | Plan 3 (this note, in brokkr) | Commands that spawn sæhrimnir and ratatoskr's harness binary (`app --test-harness <sync_script.lua>`) together, drive a sync workload via the script, collect metrics, store results. The Lua script speaks JSON-RPC to the Service via plan 1's `ServiceClient` userdata; brokkr never touches the wire. |
 

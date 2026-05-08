@@ -198,6 +198,16 @@ Currently `find_executable` infers the expected binary name from `BuildConfig.bi
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper - probably not worth the complexity.
 
+### Sidecar `/proc` profiling for `service-test` / `service-suite`
+
+Brokkr's sidecar samples `/proc/<pid>/{stat,io,status}` at 100ms for measured
+commands. The ratatoskr service-test runs spawn a child the same way but go
+through `run_captured_with_env_and_deadline` instead of `harness::run_external`,
+so the sidecar never attaches. Wiring it in would give per-run RSS / IO / state
+samples next to `binary-stdout.log` for soak diagnosis. Explicitly deferred in
+the original harness plan ("step 12, not required for v1"). Low priority until a
+soak failure actually needs it.
+
 ### `--mem` systemd-run wrapping
 
 Pre-rewrite elivagar invocations had `--mem 8G` support via systemd-run
