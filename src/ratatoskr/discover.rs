@@ -95,7 +95,7 @@ impl PreserveDataDir {
 
 #[derive(Debug, Clone)]
 pub struct ScriptInfo {
-    /// Display name relative to `SCRIPT_DIR`, without the `.lua`
+    /// Display name relative to the discovery root, without the `.lua`
     /// extension. Top-level scripts: just the file stem (e.g.
     /// `ping_and_shutdown`). Nested: `t1/journal_replays_after_respawn`.
     pub name: String,
@@ -108,6 +108,13 @@ pub struct ScriptInfo {
     /// Effective ceiling: either parsed from frontmatter or the default.
     pub ceiling: Duration,
     pub preserve_data_dir: PreserveDataDir,
+    /// Sync-script frontmatter only; service scripts leave it `None`.
+    /// Names a fixture in `[ratatoskr] fixtures_dir`.
+    pub fixture: Option<String>,
+    /// Sync-script frontmatter only; service scripts leave it `None`.
+    /// Informational - tells `sync-list` which protocol the script
+    /// primarily exercises. Sæhrimnir always binds all five regardless.
+    pub protocol: Option<String>,
 }
 
 /// Discover all service-test scripts under `<project_root>/<SCRIPT_DIR>/`,
@@ -119,13 +126,22 @@ pub struct ScriptInfo {
 /// walk surface as `DevError::Io`. Scripts are returned sorted by name
 /// for stable output.
 pub fn discover(project_root: &Path) -> Result<Vec<ScriptInfo>, DevError> {
-    let dir = project_root.join(SCRIPT_DIR);
-    if !dir.exists() {
+    discover_at(&project_root.join(SCRIPT_DIR))
+}
+
+/// Discover all `.lua` scripts under `<root>/`, recursively. Returns an
+/// empty list (without error) when `root` doesn't exist - callers can
+/// distinguish "fresh checkout, harness module not landed" from "filter
+/// excluded everything" without a special probe. Scripts are sorted by
+/// display name for stable output. Frontmatter is parsed via the same
+/// keys [`discover`] uses; sync-only fields (`fixture`, `protocol`)
+/// surface as `None` for service scripts and vice versa.
+pub fn discover_at(root: &Path) -> Result<Vec<ScriptInfo>, DevError> {
+    if !root.exists() {
         return Ok(Vec::new());
     }
-
     let mut out = Vec::new();
-    walk(&dir, &dir, &mut out)?;
+    walk(root, root, &mut out)?;
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -200,6 +216,8 @@ fn build_info(name: &str, path: PathBuf, body: &str) -> ScriptInfo {
         expected: parsed.expected.unwrap_or(Expected::Pass),
         ceiling: parsed.ceiling.unwrap_or(DEFAULT_CEILING),
         preserve_data_dir: parsed.preserve_data_dir.unwrap_or_default(),
+        fixture: parsed.fixture,
+        protocol: parsed.protocol,
     }
 }
 
@@ -209,6 +227,8 @@ struct ParsedFrontmatter {
     expected: Option<Expected>,
     ceiling: Option<Duration>,
     preserve_data_dir: Option<PreserveDataDir>,
+    fixture: Option<String>,
+    protocol: Option<String>,
 }
 
 /// Parse a leading block of `-- key: value` line comments. Stops at the
@@ -250,6 +270,12 @@ fn parse_frontmatter(body: &str) -> ParsedFrontmatter {
                 if let Some(parsed) = PreserveDataDir::parse(value) {
                     out.preserve_data_dir = Some(parsed);
                 }
+            }
+            "fixture" if out.fixture.is_none() && !value.is_empty() => {
+                out.fixture = Some(value.to_owned());
+            }
+            "protocol" if out.protocol.is_none() && !value.is_empty() => {
+                out.protocol = Some(value.to_owned());
             }
             _ => {}
         }
@@ -499,6 +525,45 @@ mod tests {
         assert_eq!(by_name("soaky"), PreserveDataDir::OnSuccessToo);
         assert_eq!(by_name("default"), PreserveDataDir::OnFailureOnly);
         assert_eq!(by_name("weird"), PreserveDataDir::OnFailureOnly);
+    }
+
+    #[test]
+    fn parses_fixture_and_protocol_frontmatter() {
+        let root = tmpdir("sync_frontmatter");
+        write_script(
+            &root,
+            "jmap_initial",
+            "-- description: cold initial sync\n\
+             -- fixture: jmap-small\n\
+             -- protocol: jmap\n",
+        );
+        let scripts = discover(&root).unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].fixture.as_deref(), Some("jmap-small"));
+        assert_eq!(scripts[0].protocol.as_deref(), Some("jmap"));
+    }
+
+    #[test]
+    fn fixture_and_protocol_default_to_none() {
+        let root = tmpdir("sync_no_frontmatter");
+        write_script(&root, "ping_only", "-- description: no fixture needed\n");
+        let scripts = discover(&root).unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts[0].fixture.is_none());
+        assert!(scripts[0].protocol.is_none());
+    }
+
+    #[test]
+    fn discover_at_uses_arbitrary_root() {
+        // Plan 3's sync-list passes its own root, not SCRIPT_DIR.
+        let root = tmpdir("discover_at");
+        let custom = root.join("custom-harness");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("alpha.lua"), "-- description: foo\n").unwrap();
+        std::fs::write(custom.join("beta.lua"), "-- expected: ignored\n").unwrap();
+        let scripts = discover_at(&custom).unwrap();
+        let names: Vec<&str> = scripts.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
     }
 
     #[test]

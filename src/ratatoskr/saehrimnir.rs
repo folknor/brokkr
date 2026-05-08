@@ -139,21 +139,22 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
 // run until ctrl-C.
 // ---------------------------------------------------------------------------
 
-/// Where the readiness sentinel lives, relative to the project root.
-/// Stable across runs so `brokkr clean` / manual inspection both have a
-/// known path.
+/// Where the readiness sentinel lives for `mock-serve`, relative to the
+/// project root. Stable across runs so `brokkr clean` / manual
+/// inspection both have a known path. `sync-smoke` puts its sentinel
+/// inside the per-run artefact dir instead.
 const MOCK_DIR: &str = ".brokkr/ratatoskr/mock";
 
 /// Wall-clock budget for sæhrimnir to bind all five listeners and write
 /// the readiness sentinel. Generous - sæhrimnir's cold-start is sub-100ms
 /// in practice, but the budget needs to absorb a debug-build startup or
 /// a CPU-pinned host without spurious failures.
-const READINESS_BUDGET: Duration = Duration::from_secs(10);
+pub const READINESS_BUDGET: Duration = Duration::from_secs(10);
 
 /// Wall-clock budget for sæhrimnir to honour SIGTERM. Plan 2 promises
 /// "clean shutdown within 1s"; we give it 1.5 to absorb scheduler jitter
 /// before escalating to SIGKILL.
-const SHUTDOWN_BUDGET: Duration = Duration::from_millis(1500);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_millis(1500);
 
 /// Resolved inputs for `brokkr mock-serve`. Pulled out of the
 /// CLI-dispatch shell so the spawn-and-loop body can be unit-tested
@@ -266,7 +267,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
 /// Resolve an `Option<PathBuf>` config field that's required for this
 /// command, joining relative paths against `<project_root>` so the
 /// caller's cwd doesn't matter.
-fn require_path(
+pub fn require_path(
     value: &Option<PathBuf>,
     project_root: &Path,
     field_name: &str,
@@ -289,7 +290,7 @@ fn require_path(
 /// If both exist with the same stem the user almost certainly has a
 /// stale copy in the wrong format - refuse rather than silently picking
 /// one.
-fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevError> {
+pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevError> {
     let toml_path = fixtures_dir.join(format!("{name}.toml"));
     let lua_path = fixtures_dir.join(format!("{name}.lua"));
     match (toml_path.exists(), lua_path.exists()) {
@@ -312,7 +313,7 @@ fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevError>
 /// Returns the parsed [`Endpoints`] on success; errors if the child
 /// exits before writing the sentinel (covers fixture-validation errors,
 /// port-in-use, etc.) or if the budget expires.
-fn wait_for_endpoints(
+pub fn wait_for_endpoints(
     child: &mut std::process::Child,
     readiness: &Path,
     budget: Duration,
@@ -376,7 +377,7 @@ fn wait_with_signals(
 /// After SIGTERM, give the child up to `budget` to exit; SIGKILL if it
 /// outlives that. SIGKILL still requires a final `wait` to reap, which
 /// we always perform so the caller never sees a zombie PID.
-fn wait_with_deadline(
+pub fn wait_with_deadline(
     child: &mut std::process::Child,
     pid: u32,
     budget: Duration,

@@ -1201,6 +1201,8 @@ mod tests {
             expected,
             ceiling: Duration::from_secs(60),
             preserve_data_dir: PreserveDataDir::OnFailureOnly,
+            fixture: None,
+            protocol: None,
         }
     }
 

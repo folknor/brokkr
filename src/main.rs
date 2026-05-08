@@ -1010,6 +1010,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
             project::require(project, Project::Ratatoskr, "service-list")?;
             ratatoskr::cmd::service_list(&project_root)
         }
+        Command::SyncList => {
+            project::require(project, Project::Ratatoskr, "sync-list")?;
+            ratatoskr::sync::run_sync_list(&project_root, &dev_config)
+        }
+        Command::SyncSmoke {
+            script,
+            keep_artefacts,
+            debug,
+        } => {
+            project::require(project, Project::Ratatoskr, "sync-smoke")?;
+            ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
+                project_root: &project_root,
+                dev_config: &dev_config,
+                script: &script,
+                keep_artefacts,
+                debug,
+            })
+        }
         Command::MockServe { fixture } => {
             project::require(project, Project::Ratatoskr, "mock-serve")?;
             let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {

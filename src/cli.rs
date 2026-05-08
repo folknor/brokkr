@@ -1642,6 +1642,47 @@ Examples:
         repeat: u32,
     },
 
+    /// [ratatoskr] List discovered sync-test scripts (plan 3)
+    ///
+    /// Walks `[ratatoskr] sync_script_dir` (default
+    /// `crates/app/tests/sync-harness`), parses top-of-file frontmatter
+    /// (`description`, `expected`, `fixture`, `protocol`, `ceiling`),
+    /// prints a sorted table. Empty-state output names the expected
+    /// directory so a fresh checkout (no harness module yet) gets a
+    /// useful response.
+    #[command(name = "sync-list", display_order = 66)]
+    SyncList,
+
+    /// [ratatoskr] Run a sync-test script against sæhrimnir (plan 3)
+    ///
+    /// Builds the harness sweep declared by `[ratatoskr.harness]`,
+    /// spawns sæhrimnir against the script's `-- fixture: <NAME>`
+    /// frontmatter, parses the per-protocol ports out of the readiness
+    /// sentinel, then spawns `<harness binary> --test-harness <SCRIPT>`
+    /// with `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set
+    /// plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT` per protocol whose
+    /// env-var spelling is configured under `[ratatoskr]`. Tears
+    /// sæhrimnir down with a 1.5s SIGTERM budget after the harness
+    /// exits. PASS/FAIL on the harness binary's exit code; on FAIL the
+    /// per-run dir at `.brokkr/ratatoskr/sync/<test>/run-N/` is
+    /// preserved with `harness/`, `mock/`, and `run.toml` for triage.
+    #[command(name = "sync-smoke", display_order = 67)]
+    SyncSmoke {
+        /// Path to the sync-test `.lua` script. Frontmatter must declare
+        /// `-- fixture: <NAME>` so brokkr can resolve which fixture to
+        /// load into sæhrimnir.
+        script: String,
+
+        /// Preserve the artefact directory even on success
+        #[arg(long)]
+        keep_artefacts: bool,
+
+        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Default is release.
+        #[arg(long)]
+        debug: bool,
+    },
+
     /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C
     ///
     /// Manual-exploration tool for plan 3. Resolves
