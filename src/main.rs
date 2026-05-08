@@ -1016,6 +1016,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             debug,
             keep_going,
             include_ignored,
+            repeat,
         } => {
             project::require(project, Project::Ratatoskr, "service-suite")?;
             ratatoskr::cmd::service_suite(
@@ -1026,6 +1027,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 debug,
                 keep_going,
                 include_ignored,
+                repeat,
             )
         }
     }

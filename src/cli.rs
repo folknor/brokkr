@@ -1597,7 +1597,8 @@ Examples:
     /// frontmatter are skipped unless `--include-ignored` is set. Default
     /// is stop-on-first-failure; `--keep-going` runs every selected script
     /// and reports a summary listing the failed names. Exits non-zero if
-    /// any selected script failed.
+    /// any selected script failed. `-N <count>` runs the whole cohort
+    /// `<count>` times in order (50 cycles over 11 scripts = 550 runs).
     #[command(name = "service-suite", display_order = 62)]
     ServiceSuite {
         /// Substring filter against the script's relative name (e.g.
@@ -1625,6 +1626,11 @@ Examples:
         /// Service behaviour and would block clean suite runs).
         #[arg(long)]
         include_ignored: bool,
+
+        /// Run the cohort this many times in order. Each cycle invokes
+        /// every selected script once. Default 1.
+        #[arg(short = 'N', long = "repeat", default_value = "1", value_name = "COUNT")]
+        repeat: u32,
     },
 }
 

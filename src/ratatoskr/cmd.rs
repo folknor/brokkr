@@ -58,6 +58,26 @@ pub fn service_test(
             "service-test: script not found: {script}"
         )));
     }
+    if script_path.is_dir() {
+        // Directory form: sugar for `service-suite --filter <rel>` scoped
+        // to the cohort under `<dir>`. Same code path, same artefact
+        // layout, same per-script ceiling. `-N` becomes cycles over the
+        // cohort; `--keep-going` and `--keep-artefacts` flow through.
+        // `include_ignored` is left at the suite default (false); a user
+        // who wants to soak ignored scripts goes through `service-suite`
+        // directly.
+        let filter = directory_filter(project_root, script_path)?;
+        return service_suite(
+            project_root,
+            dev_config,
+            Some(&filter),
+            keep_artefacts,
+            debug,
+            keep_going,
+            false,
+            repeat,
+        );
+    }
     if !script_path.is_file() {
         return Err(DevError::Config(format!(
             "service-test: script path is not a regular file: {script}"
@@ -457,7 +477,9 @@ pub fn service_suite(
     debug: bool,
     keep_going: bool,
     include_ignored: bool,
+    repeat: u32,
 ) -> Result<(), DevError> {
+    let cycles = repeat.max(1);
     let all = discover::discover(project_root)?;
     let total_discovered = all.len();
     let SuiteSelection {
@@ -508,55 +530,113 @@ pub fn service_suite(
         skipped_ignored,
         filtered_out,
         filter,
+        cycles,
     ));
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let total = runnable.len();
-    let mut results: Vec<(String, RunResult)> = Vec::with_capacity(total);
+    let mut results: Vec<CycleRun> = Vec::with_capacity(total * cycles as usize);
     let mut bailed = false;
-    for (idx, script) in runnable.iter().enumerate() {
-        let pos = idx + 1;
-        // ArtefactDir test_id rejects `/` in the name; nested scripts
-        // like `t1/journal_replays` collapse to the file stem for the
-        // artefact dir while keeping the full relative name in output.
-        // Two scripts with the same stem under different parents would
-        // share an artefact-dir prefix and just allocate run-(N+1)/ -
-        // not ideal, but mirrors how `service-test` handles arbitrary
-        // script paths today.
-        let test_id = script
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&script.name)
-            .to_owned();
-        let keep_on_success =
-            keep_artefacts || script.preserve_data_dir == PreserveDataDir::OnSuccessToo;
+    'cycles: for cycle in 1..=cycles {
+        for (idx, script) in runnable.iter().enumerate() {
+            let pos = idx + 1;
+            // ArtefactDir test_id rejects `/` in the name; nested scripts
+            // like `t1/journal_replays` collapse to the file stem for the
+            // artefact dir while keeping the full relative name in output.
+            // Two scripts with the same stem under different parents would
+            // share an artefact-dir prefix and just allocate run-(N+1)/ -
+            // not ideal, but mirrors how `service-test` handles arbitrary
+            // script paths today.
+            let test_id = script
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&script.name)
+                .to_owned();
+            let keep_on_success =
+                keep_artefacts || script.preserve_data_dir == PreserveDataDir::OnSuccessToo;
 
-        output::ratatoskr_msg(&format!("[{pos}/{total}] running {}", script.name));
-        let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
-        let result = spawn_and_capture(
-            artefacts,
-            &built,
-            &script.path,
-            project_root,
-            script.ceiling,
-        )?;
-        output::ratatoskr_msg(&format_suite_iter_line(pos, total, &script.name, &result));
-        let stop = !result.succeeded && !keep_going;
-        results.push((script.name.clone(), result));
-        if stop {
-            bailed = true;
-            break;
+            output::ratatoskr_msg(&format_suite_running_line(
+                cycle,
+                cycles,
+                pos,
+                total,
+                &script.name,
+            ));
+            let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
+            let result = spawn_and_capture(
+                artefacts,
+                &built,
+                &script.path,
+                project_root,
+                script.ceiling,
+            )?;
+            output::ratatoskr_msg(&format_suite_iter_line(
+                cycle, cycles, pos, total, &script.name, &result,
+            ));
+            let stop = !result.succeeded && !keep_going;
+            results.push(CycleRun {
+                cycle,
+                name: script.name.clone(),
+                result,
+            });
+            if stop {
+                bailed = true;
+                break 'cycles;
+            }
         }
     }
 
-    output::ratatoskr_msg(&format_suite_summary(&results, total, bailed));
+    output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
 
-    if results.iter().any(|(_, r)| !r.succeeded) {
+    if results.iter().any(|r| !r.result.succeeded) {
         Err(DevError::ExitCode(1))
     } else {
         Ok(())
     }
+}
+
+/// One entry in the suite's flat run log. `cycle` is 1-based and only
+/// meaningful when `cycles > 1`; the summary formatters use it to
+/// compute per-script totals across the cohort soak.
+struct CycleRun {
+    cycle: u32,
+    name: String,
+    result: RunResult,
+}
+
+/// Resolve a directory under `<project_root>/<SCRIPT_DIR>/` to a
+/// substring filter the suite path can consume. Returns the relative
+/// path with a trailing slash so `t1` cannot match `t1abc`. Returns an
+/// empty string when the directory IS the script root - the suite
+/// treats `Some("")` as "match everything", same as `None`.
+fn directory_filter(project_root: &Path, dir: &Path) -> Result<String, DevError> {
+    let canon = dir.canonicalize().map_err(|e| {
+        DevError::Config(format!(
+            "service-test: failed to canonicalize directory {}: {e}",
+            dir.display()
+        ))
+    })?;
+    let script_root = project_root.join(SCRIPT_DIR);
+    let script_root_canon = script_root.canonicalize().map_err(|e| {
+        DevError::Config(format!(
+            "service-test: failed to canonicalize script root {}: {e}. \
+             Is the harness directory present?",
+            script_root.display()
+        ))
+    })?;
+    let rel = canon.strip_prefix(&script_root_canon).map_err(|_| {
+        DevError::Config(format!(
+            "service-test: directory {} is not under {}",
+            dir.display(),
+            script_root.display()
+        ))
+    })?;
+    let mut filter = rel.to_string_lossy().into_owned();
+    if !filter.is_empty() && !filter.ends_with('/') {
+        filter.push('/');
+    }
+    Ok(filter)
 }
 
 /// Outcome of [`select_suite`]: the scripts to run, plus counters for
@@ -606,8 +686,14 @@ fn format_suite_header(
     skipped_ignored: usize,
     filtered_out: usize,
     filter: Option<&str>,
+    cycles: u32,
 ) -> String {
-    let mut parts = vec![format!("suite: {runnable} script{}", if runnable == 1 { "" } else { "s" })];
+    let mut head = format!("suite: {runnable} script{}", if runnable == 1 { "" } else { "s" });
+    if cycles > 1 {
+        let total_runs = runnable as u64 * cycles as u64;
+        head = format!("{head} \u{00d7} {cycles} cycles ({total_runs} runs)");
+    }
+    let mut parts = vec![head];
     if let Some(f) = filter {
         parts.push(format!("filter=\"{f}\""));
     }
@@ -618,6 +704,23 @@ fn format_suite_header(
         parts.push(format!("{filtered_out} filtered out"));
     }
     parts.join(", ")
+}
+
+/// "running" line emitted before each spawn. For single-cycle runs we
+/// keep the existing `[N/total]` shape; soak runs gain a `[cycle c/C]`
+/// prefix so the log is greppable per-cycle.
+fn format_suite_running_line(
+    cycle: u32,
+    cycles: u32,
+    pos: usize,
+    total: usize,
+    name: &str,
+) -> String {
+    if cycles > 1 {
+        format!("[cycle {cycle}/{cycles}][{pos}/{total}] running {name}")
+    } else {
+        format!("[{pos}/{total}] running {name}")
+    }
 }
 
 /// Empty-state message when no scripts are runnable. Distinguishes
@@ -658,10 +761,22 @@ fn format_empty_suite(
 }
 
 /// Per-script status line, shape `[N/total] PASS|FAIL <name> ...`.
-/// Pure for testability.
-fn format_suite_iter_line(pos: usize, total: usize, name: &str, result: &RunResult) -> String {
+/// Pure for testability. Soak runs (`cycles > 1`) prefix `[cycle c/C]`.
+fn format_suite_iter_line(
+    cycle: u32,
+    cycles: u32,
+    pos: usize,
+    total: usize,
+    name: &str,
+    result: &RunResult,
+) -> String {
+    let prefix = if cycles > 1 {
+        format!("[cycle {cycle}/{cycles}][{pos}/{total}]")
+    } else {
+        format!("[{pos}/{total}]")
+    };
     if result.succeeded {
-        format!("[{pos}/{total}] PASS {name} in {}ms", result.elapsed_ms)
+        format!("{prefix} PASS {name} in {}ms", result.elapsed_ms)
     } else {
         let dir = result
             .artefact_path
@@ -669,7 +784,7 @@ fn format_suite_iter_line(pos: usize, total: usize, name: &str, result: &RunResu
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<missing>".to_owned());
         format!(
-            "[{pos}/{total}] FAIL {name} {} in {}ms (artefacts: {dir})",
+            "{prefix} FAIL {name} {} in {}ms (artefacts: {dir})",
             result.exit_label, result.elapsed_ms
         )
     }
@@ -677,17 +792,88 @@ fn format_suite_iter_line(pos: usize, total: usize, name: &str, result: &RunResu
 
 /// Trailing summary for the suite. Pure for testability.
 ///
-/// Stopped-early shape names the script that broke things; keep-going
-/// shape lists every failing script. All-passed reports the elapsed
-/// envelope so a fast suite reads as fast in the log.
-fn format_suite_summary(results: &[(String, RunResult)], total: usize, bailed: bool) -> String {
+/// Single-cycle (`cycles == 1`) keeps the existing one-liner shapes so
+/// `service-suite` logs don't churn for the common case. Soak mode
+/// (`cycles > 1`) emits a cohort-level header line followed by an
+/// indented per-script `pass/total` table so the user can see which
+/// script broke without scrolling through 500 status lines.
+fn format_suite_summary(
+    results: &[CycleRun],
+    total: usize,
+    cycles: u32,
+    bailed: bool,
+) -> String {
+    if cycles <= 1 {
+        return format_single_cycle_summary(results, total, bailed);
+    }
+
+    let pass_count = results.iter().filter(|r| r.result.succeeded).count();
+    let fail_count = results.len() - pass_count;
+    let cohort_total = total as u64 * cycles as u64;
+
+    let mut head = if fail_count == 0 {
+        let pass_times: Vec<u128> = results.iter().map(|r| r.result.elapsed_ms).collect();
+        let min = pass_times.iter().min().copied().unwrap_or(0);
+        let max = pass_times.iter().max().copied().unwrap_or(0);
+        let avg = if pass_times.is_empty() {
+            0
+        } else {
+            pass_times.iter().sum::<u128>() / pass_times.len() as u128
+        };
+        format!(
+            "soak: {pass_count}/{cohort_total} cohort runs passed across {cycles} cycles \
+             (min {min}ms, max {max}ms, avg {avg}ms)"
+        )
+    } else if bailed {
+        // First failure stops the cohort; report the cycle and script.
+        let first_fail = results.iter().find(|r| !r.result.succeeded).expect("bailed implies a failure");
+        format!(
+            "soak: stopped at cycle {}/{cycles} {} ({pass_count} passed, {fail_count} failed)",
+            first_fail.cycle, first_fail.name
+        )
+    } else {
+        format!(
+            "soak: {pass_count}/{cohort_total} cohort runs passed, {fail_count} failed across {cycles} cycles"
+        )
+    };
+
+    // Per-script totals: pass/run count for each script, in the order
+    // the cohort first encountered them. A user re-running with `-N 50`
+    // most cares about which scripts didn't hit 50/50; sorting by name
+    // would scatter the failing ones, so we keep cohort order.
+    let mut order: Vec<String> = Vec::new();
+    let mut stats: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+    for r in results {
+        let entry = stats.entry(r.name.clone()).or_insert_with(|| {
+            order.push(r.name.clone());
+            (0, 0)
+        });
+        entry.1 += 1;
+        if r.result.succeeded {
+            entry.0 += 1;
+        }
+    }
+    let name_width = order.iter().map(String::len).max().unwrap_or(0);
+    head.push_str("\n  per-script totals:");
+    for name in &order {
+        let (pass, runs) = stats[name];
+        let marker = if pass == runs { " " } else { "!" };
+        head.push_str(&format!("\n    {marker} {name:<name_width$}  {pass}/{runs}"));
+    }
+    head
+}
+
+/// Pre-existing single-cycle summary. Pulled into a helper so the
+/// soak-mode formatter can reuse the cycles=1 shape without growing
+/// branches. Logic is identical to the old `format_suite_summary`.
+fn format_single_cycle_summary(results: &[CycleRun], total: usize, bailed: bool) -> String {
     let pass_times: Vec<u128> = results
         .iter()
-        .filter_map(|(_, r)| r.succeeded.then_some(r.elapsed_ms))
+        .filter_map(|r| r.result.succeeded.then_some(r.result.elapsed_ms))
         .collect();
     let fail_names: Vec<&str> = results
         .iter()
-        .filter_map(|(name, r)| (!r.succeeded).then_some(name.as_str()))
+        .filter_map(|r| (!r.result.succeeded).then_some(r.name.as_str()))
         .collect();
     let pass_count = pass_times.len();
     let fail_count = fail_names.len();
@@ -1096,31 +1282,49 @@ mod tests {
         );
     }
 
+    fn cycle_run(cycle: u32, name: &str, result: RunResult) -> CycleRun {
+        CycleRun {
+            cycle,
+            name: name.to_owned(),
+            result,
+        }
+    }
+
     #[test]
     fn suite_header_includes_filter_and_counters() {
         assert_eq!(
-            format_suite_header(3, 0, 0, None),
+            format_suite_header(3, 0, 0, None, 1),
             "suite: 3 scripts".to_owned()
         );
         assert_eq!(
-            format_suite_header(1, 0, 0, None),
+            format_suite_header(1, 0, 0, None, 1),
             "suite: 1 script".to_owned()
         );
         assert_eq!(
-            format_suite_header(2, 1, 5, Some("t1/")),
+            format_suite_header(2, 1, 5, Some("t1/"), 1),
             "suite: 2 scripts, filter=\"t1/\", 1 ignored, 5 filtered out".to_owned()
         );
     }
 
     #[test]
+    fn suite_header_with_cycles_reports_total_runs() {
+        assert_eq!(
+            format_suite_header(11, 0, 0, Some("t1/"), 50),
+            "suite: 11 scripts \u{00d7} 50 cycles (550 runs), filter=\"t1/\"".to_owned()
+        );
+    }
+
+    #[test]
     fn suite_iter_line_pass() {
-        let line = format_suite_iter_line(2, 7, "t1/journal", &pass(412));
+        let line = format_suite_iter_line(1, 1, 2, 7, "t1/journal", &pass(412));
         assert_eq!(line, "[2/7] PASS t1/journal in 412ms");
     }
 
     #[test]
     fn suite_iter_line_fail() {
         let line = format_suite_iter_line(
+            1,
+            1,
             3,
             7,
             "boot/ping",
@@ -1133,13 +1337,31 @@ mod tests {
     }
 
     #[test]
+    fn suite_iter_line_includes_cycle_in_soak() {
+        let line = format_suite_iter_line(7, 50, 2, 11, "t1/journal", &pass(412));
+        assert_eq!(line, "[cycle 7/50][2/11] PASS t1/journal in 412ms");
+    }
+
+    #[test]
+    fn suite_running_line_single_vs_soak() {
+        assert_eq!(
+            format_suite_running_line(1, 1, 2, 7, "t1/journal"),
+            "[2/7] running t1/journal"
+        );
+        assert_eq!(
+            format_suite_running_line(7, 50, 2, 11, "t1/journal"),
+            "[cycle 7/50][2/11] running t1/journal"
+        );
+    }
+
+    #[test]
     fn suite_summary_all_passed() {
         let results = vec![
-            ("alpha".to_owned(), pass(400)),
-            ("beta".to_owned(), pass(500)),
-            ("gamma".to_owned(), pass(600)),
+            cycle_run(1, "alpha", pass(400)),
+            cycle_run(1, "beta", pass(500)),
+            cycle_run(1, "gamma", pass(600)),
         ];
-        let summary = format_suite_summary(&results, 3, false);
+        let summary = format_suite_summary(&results, 3, 1, false);
         assert_eq!(
             summary,
             "suite: 3/3 passed (min 400ms, max 600ms, avg 500ms)"
@@ -1149,26 +1371,90 @@ mod tests {
     #[test]
     fn suite_summary_stopped_at_named_script() {
         let results = vec![
-            ("alpha".to_owned(), pass(400)),
-            ("beta".to_owned(), fail(380, "exit=1", "/tmp/r")),
+            cycle_run(1, "alpha", pass(400)),
+            cycle_run(1, "beta", fail(380, "exit=1", "/tmp/r")),
         ];
-        let summary = format_suite_summary(&results, 5, true);
+        let summary = format_suite_summary(&results, 5, 1, true);
         assert_eq!(summary, "suite: stopped at beta (1 passed, 1 failed)");
     }
 
     #[test]
     fn suite_summary_keep_going_lists_failed_names() {
         let results = vec![
-            ("alpha".to_owned(), pass(400)),
-            ("beta".to_owned(), fail(380, "exit=1", "/tmp/r1")),
-            ("gamma".to_owned(), pass(410)),
-            ("delta".to_owned(), fail(420, "signal=11", "/tmp/r2")),
+            cycle_run(1, "alpha", pass(400)),
+            cycle_run(1, "beta", fail(380, "exit=1", "/tmp/r1")),
+            cycle_run(1, "gamma", pass(410)),
+            cycle_run(1, "delta", fail(420, "signal=11", "/tmp/r2")),
         ];
-        let summary = format_suite_summary(&results, 4, false);
+        let summary = format_suite_summary(&results, 4, 1, false);
         assert_eq!(
             summary,
             "suite: 2/4 passed, 2 failed (beta, delta)".to_owned()
         );
+    }
+
+    #[test]
+    fn suite_summary_soak_all_passed_lists_per_script_totals() {
+        // 2 scripts × 3 cycles, all pass.
+        let results = vec![
+            cycle_run(1, "alpha", pass(400)),
+            cycle_run(1, "beta", pass(500)),
+            cycle_run(2, "alpha", pass(410)),
+            cycle_run(2, "beta", pass(510)),
+            cycle_run(3, "alpha", pass(420)),
+            cycle_run(3, "beta", pass(520)),
+        ];
+        let summary = format_suite_summary(&results, 2, 3, false);
+        assert!(
+            summary.starts_with("soak: 6/6 cohort runs passed across 3 cycles "),
+            "got: {summary}"
+        );
+        assert!(summary.contains("\n  per-script totals:"), "got: {summary}");
+        assert!(summary.contains("\n      alpha  3/3"), "got: {summary}");
+        assert!(summary.contains("\n      beta   3/3"), "got: {summary}");
+    }
+
+    #[test]
+    fn suite_summary_soak_stopped_names_cycle_and_script() {
+        // 2 scripts × 50 cycles. alpha passes cycle 1+2; beta passes cycle 1, fails cycle 2.
+        let results = vec![
+            cycle_run(1, "alpha", pass(400)),
+            cycle_run(1, "beta", pass(500)),
+            cycle_run(2, "alpha", pass(410)),
+            cycle_run(2, "beta", fail(380, "exit=1", "/tmp/r")),
+        ];
+        let summary = format_suite_summary(&results, 2, 50, true);
+        assert!(
+            summary.starts_with(
+                "soak: stopped at cycle 2/50 beta (3 passed, 1 failed)"
+            ),
+            "got: {summary}"
+        );
+        // Per-script totals show alpha 2/2 (pass marker) and beta 1/2 (fail marker).
+        assert!(summary.contains("\n      alpha  2/2"), "got: {summary}");
+        assert!(summary.contains("\n    ! beta   1/2"), "got: {summary}");
+    }
+
+    #[test]
+    fn suite_summary_soak_keep_going_reports_failures() {
+        // alpha passes 3/3, beta fails cycle 2, passes 1+3.
+        let results = vec![
+            cycle_run(1, "alpha", pass(400)),
+            cycle_run(1, "beta", pass(500)),
+            cycle_run(2, "alpha", pass(410)),
+            cycle_run(2, "beta", fail(380, "exit=1", "/tmp/r")),
+            cycle_run(3, "alpha", pass(420)),
+            cycle_run(3, "beta", pass(520)),
+        ];
+        let summary = format_suite_summary(&results, 2, 3, false);
+        assert!(
+            summary.starts_with(
+                "soak: 5/6 cohort runs passed, 1 failed across 3 cycles"
+            ),
+            "got: {summary}"
+        );
+        assert!(summary.contains("\n      alpha  3/3"), "got: {summary}");
+        assert!(summary.contains("\n    ! beta   2/3"), "got: {summary}");
     }
 
     #[test]
