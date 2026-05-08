@@ -1010,6 +1010,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
             project::require(project, Project::Ratatoskr, "service-list")?;
             ratatoskr::cmd::service_list(&project_root)
         }
+        Command::ServiceSuite {
+            filter,
+            keep_artefacts,
+            debug,
+            keep_going,
+            include_ignored,
+        } => {
+            project::require(project, Project::Ratatoskr, "service-suite")?;
+            ratatoskr::cmd::service_suite(
+                &project_root,
+                &dev_config,
+                filter.as_deref(),
+                keep_artefacts,
+                debug,
+                keep_going,
+                include_ignored,
+            )
+        }
     }
 }
 

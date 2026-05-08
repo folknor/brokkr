@@ -13,7 +13,7 @@ use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::artefacts::ArtefactDir;
 use crate::ratatoskr::build::{self, HarnessBuild};
-use crate::ratatoskr::discover::{self, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
+use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
 
 /// Where per-test artefact directories live, relative to the project
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
@@ -438,6 +438,280 @@ pub fn service_list(project_root: &Path) -> Result<(), DevError> {
     Ok(())
 }
 
+/// `brokkr service-suite` - run every discovered script (optionally
+/// filtered) against a single shared harness build.
+///
+/// Discovery + filter happens first so we can bail with a useful message
+/// when nothing matches before paying the cargo build cost. `expected =
+/// ignored` scripts are skipped by default; `--include-ignored` opts
+/// them in. Each script runs through the same `spawn_and_capture` path
+/// `service-test` uses, so artefact-dir lifecycle and ceiling semantics
+/// are identical. The summary at the end lists failed scripts by name -
+/// not iter index, since each script ran exactly once.
+#[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
+pub fn service_suite(
+    project_root: &Path,
+    dev_config: &DevConfig,
+    filter: Option<&str>,
+    keep_artefacts: bool,
+    debug: bool,
+    keep_going: bool,
+    include_ignored: bool,
+) -> Result<(), DevError> {
+    let all = discover::discover(project_root)?;
+    let total_discovered = all.len();
+    let SuiteSelection {
+        runnable,
+        skipped_ignored,
+        filtered_out,
+    } = select_suite(all, filter, include_ignored);
+
+    if runnable.is_empty() {
+        output::ratatoskr_msg(&format_empty_suite(
+            total_discovered,
+            filtered_out,
+            skipped_ignored,
+            filter,
+        ));
+        return Ok(());
+    }
+
+    let harness_cfg = dev_config
+        .ratatoskr
+        .as_ref()
+        .and_then(|r| r.harness.as_ref())
+        .ok_or_else(|| {
+            DevError::Config(
+                "service-suite: no [ratatoskr.harness] section in brokkr.toml. \
+                 Add a [[check]] entry naming the harness sweep, then \
+                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\". \
+                 See notes/ratatoskr-service-harness.md."
+                    .into(),
+            )
+        })?;
+
+    let project_root_str = project_root.display().to_string();
+    let _lock = lockfile::acquire(&LockContext {
+        project: "ratatoskr",
+        command: "service-suite",
+        project_root: &project_root_str,
+    })?;
+
+    let built = build::build_for_harness(project_root, &dev_config.check, harness_cfg, debug)?;
+    output::ratatoskr_msg(&format!(
+        "harness build ok (sweep={}, binary={})",
+        built.sweep_label,
+        built.binary.display(),
+    ));
+    output::ratatoskr_msg(&format_suite_header(
+        runnable.len(),
+        skipped_ignored,
+        filtered_out,
+        filter,
+    ));
+
+    let artefact_parent = project_root.join(ARTEFACT_PARENT);
+    let total = runnable.len();
+    let mut results: Vec<(String, RunResult)> = Vec::with_capacity(total);
+    let mut bailed = false;
+    for (idx, script) in runnable.iter().enumerate() {
+        let pos = idx + 1;
+        // ArtefactDir test_id rejects `/` in the name; nested scripts
+        // like `t1/journal_replays` collapse to the file stem for the
+        // artefact dir while keeping the full relative name in output.
+        // Two scripts with the same stem under different parents would
+        // share an artefact-dir prefix and just allocate run-(N+1)/ -
+        // not ideal, but mirrors how `service-test` handles arbitrary
+        // script paths today.
+        let test_id = script
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&script.name)
+            .to_owned();
+        let keep_on_success =
+            keep_artefacts || script.preserve_data_dir == PreserveDataDir::OnSuccessToo;
+
+        output::ratatoskr_msg(&format!("[{pos}/{total}] running {}", script.name));
+        let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
+        let result = spawn_and_capture(
+            artefacts,
+            &built,
+            &script.path,
+            project_root,
+            script.ceiling,
+        )?;
+        output::ratatoskr_msg(&format_suite_iter_line(pos, total, &script.name, &result));
+        let stop = !result.succeeded && !keep_going;
+        results.push((script.name.clone(), result));
+        if stop {
+            bailed = true;
+            break;
+        }
+    }
+
+    output::ratatoskr_msg(&format_suite_summary(&results, total, bailed));
+
+    if results.iter().any(|(_, r)| !r.succeeded) {
+        Err(DevError::ExitCode(1))
+    } else {
+        Ok(())
+    }
+}
+
+/// Outcome of [`select_suite`]: the scripts to run, plus counters for
+/// the header / empty-state messages.
+struct SuiteSelection {
+    runnable: Vec<ScriptInfo>,
+    /// Scripts that matched the filter (or all, if none) but were
+    /// skipped because `expected = ignored` and `--include-ignored` was
+    /// not set.
+    skipped_ignored: usize,
+    /// Scripts excluded by the filter.
+    filtered_out: usize,
+}
+
+/// Apply the filter and ignored-skip policy. Pulled out for direct
+/// unit-testing without touching disk or the harness build.
+fn select_suite(
+    scripts: Vec<ScriptInfo>,
+    filter: Option<&str>,
+    include_ignored: bool,
+) -> SuiteSelection {
+    let mut runnable = Vec::new();
+    let mut skipped_ignored = 0usize;
+    let mut filtered_out = 0usize;
+    for script in scripts {
+        let matches = filter.is_none_or(|f| script.name.contains(f));
+        if !matches {
+            filtered_out += 1;
+            continue;
+        }
+        if !include_ignored && script.expected == Expected::Ignored {
+            skipped_ignored += 1;
+            continue;
+        }
+        runnable.push(script);
+    }
+    SuiteSelection {
+        runnable,
+        skipped_ignored,
+        filtered_out,
+    }
+}
+
+/// Header line printed once the runnable set is non-empty.
+fn format_suite_header(
+    runnable: usize,
+    skipped_ignored: usize,
+    filtered_out: usize,
+    filter: Option<&str>,
+) -> String {
+    let mut parts = vec![format!("suite: {runnable} script{}", if runnable == 1 { "" } else { "s" })];
+    if let Some(f) = filter {
+        parts.push(format!("filter=\"{f}\""));
+    }
+    if skipped_ignored > 0 {
+        parts.push(format!("{skipped_ignored} ignored"));
+    }
+    if filtered_out > 0 && filter.is_some() {
+        parts.push(format!("{filtered_out} filtered out"));
+    }
+    parts.join(", ")
+}
+
+/// Empty-state message when no scripts are runnable. Distinguishes
+/// "nothing discovered" from "filter matched nothing" from "everything
+/// was skipped as ignored" so a fresh checkout vs a typo'd filter vs an
+/// all-broken cohort each get a useful response.
+fn format_empty_suite(
+    total_discovered: usize,
+    filtered_out: usize,
+    skipped_ignored: usize,
+    filter: Option<&str>,
+) -> String {
+    if total_discovered == 0 {
+        return format!("no service-test scripts found under {SCRIPT_DIR}/");
+    }
+    if let Some(f) = filter {
+        if filtered_out == total_discovered {
+            return format!(
+                "filter \"{f}\" matched no scripts ({total_discovered} discovered)"
+            );
+        }
+        if skipped_ignored > 0 {
+            return format!(
+                "filter \"{f}\" matched {skipped_ignored} script{} but all are ignored \
+                 (use --include-ignored to run them)",
+                if skipped_ignored == 1 { "" } else { "s" }
+            );
+        }
+    }
+    if skipped_ignored == total_discovered {
+        return format!(
+            "all {total_discovered} discovered script{} are ignored \
+             (use --include-ignored to run them)",
+            if total_discovered == 1 { "" } else { "s" }
+        );
+    }
+    "no scripts to run".to_owned()
+}
+
+/// Per-script status line, shape `[N/total] PASS|FAIL <name> ...`.
+/// Pure for testability.
+fn format_suite_iter_line(pos: usize, total: usize, name: &str, result: &RunResult) -> String {
+    if result.succeeded {
+        format!("[{pos}/{total}] PASS {name} in {}ms", result.elapsed_ms)
+    } else {
+        let dir = result
+            .artefact_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<missing>".to_owned());
+        format!(
+            "[{pos}/{total}] FAIL {name} {} in {}ms (artefacts: {dir})",
+            result.exit_label, result.elapsed_ms
+        )
+    }
+}
+
+/// Trailing summary for the suite. Pure for testability.
+///
+/// Stopped-early shape names the script that broke things; keep-going
+/// shape lists every failing script. All-passed reports the elapsed
+/// envelope so a fast suite reads as fast in the log.
+fn format_suite_summary(results: &[(String, RunResult)], total: usize, bailed: bool) -> String {
+    let pass_times: Vec<u128> = results
+        .iter()
+        .filter_map(|(_, r)| r.succeeded.then_some(r.elapsed_ms))
+        .collect();
+    let fail_names: Vec<&str> = results
+        .iter()
+        .filter_map(|(name, r)| (!r.succeeded).then_some(name.as_str()))
+        .collect();
+    let pass_count = pass_times.len();
+    let fail_count = fail_names.len();
+
+    if fail_names.is_empty() {
+        let min = pass_times.iter().min().copied().unwrap_or(0);
+        let max = pass_times.iter().max().copied().unwrap_or(0);
+        let avg = if pass_times.is_empty() {
+            0
+        } else {
+            pass_times.iter().sum::<u128>() / pass_times.len() as u128
+        };
+        format!("suite: {pass_count}/{total} passed (min {min}ms, max {max}ms, avg {avg}ms)")
+    } else if bailed {
+        let first_fail = fail_names[0];
+        format!(
+            "suite: stopped at {first_fail} ({pass_count} passed, {fail_count} failed)"
+        )
+    } else {
+        let names = fail_names.join(", ");
+        format!("suite: {pass_count}/{total} passed, {fail_count} failed ({names})")
+    }
+}
+
 /// Reproducibility metadata serialized as `run.toml` next to the
 /// captured logs. Optional fields elide cleanly when unavailable so a
 /// failed git query (e.g. detached worktree) does not poison the file.
@@ -731,6 +1005,170 @@ mod tests {
         ];
         let summary = format_soak_summary(&results, 5);
         assert_eq!(summary, "soak: 3/5 passed, 2 failed (iters 2, 4)");
+    }
+
+    // ---- suite helpers ------------------------------------------------
+
+    fn info(name: &str, expected: Expected) -> ScriptInfo {
+        ScriptInfo {
+            name: name.to_owned(),
+            path: PathBuf::from(format!("{name}.lua")),
+            description: None,
+            expected,
+            ceiling: Duration::from_secs(60),
+            preserve_data_dir: PreserveDataDir::OnFailureOnly,
+        }
+    }
+
+    #[test]
+    fn select_suite_no_filter_skips_ignored_by_default() {
+        let scripts = vec![
+            info("alpha", Expected::Pass),
+            info("wedge", Expected::Ignored),
+            info("beta", Expected::Pass),
+        ];
+        let sel = select_suite(scripts, None, false);
+        let names: Vec<&str> = sel.runnable.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(sel.skipped_ignored, 1);
+        assert_eq!(sel.filtered_out, 0);
+    }
+
+    #[test]
+    fn select_suite_include_ignored_keeps_them() {
+        let scripts = vec![
+            info("alpha", Expected::Pass),
+            info("wedge", Expected::Ignored),
+        ];
+        let sel = select_suite(scripts, None, true);
+        assert_eq!(sel.runnable.len(), 2);
+        assert_eq!(sel.skipped_ignored, 0);
+    }
+
+    #[test]
+    fn select_suite_filter_matches_substring() {
+        let scripts = vec![
+            info("t1/journal", Expected::Pass),
+            info("t1/replay", Expected::Pass),
+            info("boot/ping", Expected::Pass),
+        ];
+        let sel = select_suite(scripts, Some("t1/"), false);
+        let names: Vec<&str> = sel.runnable.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["t1/journal", "t1/replay"]);
+        assert_eq!(sel.filtered_out, 1);
+    }
+
+    #[test]
+    fn select_suite_filter_then_skip_ignored() {
+        let scripts = vec![
+            info("t1/journal", Expected::Pass),
+            info("t1/wedge", Expected::Ignored),
+            info("boot/ping", Expected::Pass),
+        ];
+        let sel = select_suite(scripts, Some("t1/"), false);
+        let names: Vec<&str> = sel.runnable.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["t1/journal"]);
+        assert_eq!(sel.skipped_ignored, 1);
+        assert_eq!(sel.filtered_out, 1);
+    }
+
+    #[test]
+    fn empty_suite_msg_distinguishes_states() {
+        assert_eq!(
+            format_empty_suite(0, 0, 0, None),
+            format!("no service-test scripts found under {SCRIPT_DIR}/")
+        );
+        assert_eq!(
+            format_empty_suite(5, 5, 0, Some("nope")),
+            "filter \"nope\" matched no scripts (5 discovered)".to_owned()
+        );
+        assert_eq!(
+            format_empty_suite(3, 1, 2, Some("t1/")),
+            "filter \"t1/\" matched 2 scripts but all are ignored \
+             (use --include-ignored to run them)"
+                .to_owned()
+        );
+        assert_eq!(
+            format_empty_suite(4, 0, 4, None),
+            "all 4 discovered scripts are ignored \
+             (use --include-ignored to run them)"
+                .to_owned()
+        );
+    }
+
+    #[test]
+    fn suite_header_includes_filter_and_counters() {
+        assert_eq!(
+            format_suite_header(3, 0, 0, None),
+            "suite: 3 scripts".to_owned()
+        );
+        assert_eq!(
+            format_suite_header(1, 0, 0, None),
+            "suite: 1 script".to_owned()
+        );
+        assert_eq!(
+            format_suite_header(2, 1, 5, Some("t1/")),
+            "suite: 2 scripts, filter=\"t1/\", 1 ignored, 5 filtered out".to_owned()
+        );
+    }
+
+    #[test]
+    fn suite_iter_line_pass() {
+        let line = format_suite_iter_line(2, 7, "t1/journal", &pass(412));
+        assert_eq!(line, "[2/7] PASS t1/journal in 412ms");
+    }
+
+    #[test]
+    fn suite_iter_line_fail() {
+        let line = format_suite_iter_line(
+            3,
+            7,
+            "boot/ping",
+            &fail(380, "exit=1", "/tmp/run-1"),
+        );
+        assert_eq!(
+            line,
+            "[3/7] FAIL boot/ping exit=1 in 380ms (artefacts: /tmp/run-1)"
+        );
+    }
+
+    #[test]
+    fn suite_summary_all_passed() {
+        let results = vec![
+            ("alpha".to_owned(), pass(400)),
+            ("beta".to_owned(), pass(500)),
+            ("gamma".to_owned(), pass(600)),
+        ];
+        let summary = format_suite_summary(&results, 3, false);
+        assert_eq!(
+            summary,
+            "suite: 3/3 passed (min 400ms, max 600ms, avg 500ms)"
+        );
+    }
+
+    #[test]
+    fn suite_summary_stopped_at_named_script() {
+        let results = vec![
+            ("alpha".to_owned(), pass(400)),
+            ("beta".to_owned(), fail(380, "exit=1", "/tmp/r")),
+        ];
+        let summary = format_suite_summary(&results, 5, true);
+        assert_eq!(summary, "suite: stopped at beta (1 passed, 1 failed)");
+    }
+
+    #[test]
+    fn suite_summary_keep_going_lists_failed_names() {
+        let results = vec![
+            ("alpha".to_owned(), pass(400)),
+            ("beta".to_owned(), fail(380, "exit=1", "/tmp/r1")),
+            ("gamma".to_owned(), pass(410)),
+            ("delta".to_owned(), fail(420, "signal=11", "/tmp/r2")),
+        ];
+        let summary = format_suite_summary(&results, 4, false);
+        assert_eq!(
+            summary,
+            "suite: 2/4 passed, 2 failed (beta, delta)".to_owned()
+        );
     }
 
     #[test]

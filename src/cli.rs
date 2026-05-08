@@ -1586,6 +1586,46 @@ Examples:
     /// table. Empty-state output points at the expected directory.
     #[command(name = "service-list", display_order = 61)]
     ServiceList,
+
+    /// [ratatoskr] Run every discovered service-test script in sequence
+    ///
+    /// Discovers `crates/app/tests/service-harness/**/*.lua`, optionally
+    /// filters by substring against the script's relative name, builds the
+    /// harness sweep once, then runs each script through the same path
+    /// `service-test` uses (per-script artefact dir, ceiling-bounded spawn,
+    /// preserve-on-failure). Scripts marked `expected = ignored` in the
+    /// frontmatter are skipped unless `--include-ignored` is set. Default
+    /// is stop-on-first-failure; `--keep-going` runs every selected script
+    /// and reports a summary listing the failed names. Exits non-zero if
+    /// any selected script failed.
+    #[command(name = "service-suite", display_order = 62)]
+    ServiceSuite {
+        /// Substring filter against the script's relative name (e.g.
+        /// `t1/` to run only the T1 cohort, `boot` for boot-related tests).
+        /// Matches scripts whose name *contains* the substring.
+        #[arg(long, value_name = "SUBSTRING")]
+        filter: Option<String>,
+
+        /// Preserve each script's artefact directory even on success
+        #[arg(long)]
+        keep_artefacts: bool,
+
+        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Default is release.
+        #[arg(long)]
+        debug: bool,
+
+        /// Keep going after a failed script. Default is to stop on the
+        /// first failure so the artefact dir lands fast for triage.
+        #[arg(long)]
+        keep_going: bool,
+
+        /// Include scripts marked `expected = ignored` in the frontmatter.
+        /// By default these are skipped (they reproduce known-broken
+        /// Service behaviour and would block clean suite runs).
+        #[arg(long)]
+        include_ignored: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

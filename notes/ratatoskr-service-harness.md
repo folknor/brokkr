@@ -21,9 +21,10 @@ is authoritative for the brokkr side; the two stay in sync).
   history-DB recording, and the orchestrator-side process /
   sentinel / artefact primitives. See "Implementation status" for
   the per-item breakdown.
-- **Next on the brokkr side:** `brokkr service-suite [--filter X]`
-  and `brokkr service-list --json`. M7 polish - unblocked but not
-  Phase-8-blocking.
+- **Next on the brokkr side:** `brokkr service-list --json`. M7
+  polish - unblocked but not Phase-8-blocking.
+  (`brokkr service-suite [--filter X]` landed - see
+  "Implementation status".)
 - **Waiting on ratatoskr (Phase 8 / harness-roadmap M1):** the `app`
   crate's harness module (Lua VM bootstrap, `ServiceClient`
   userdata, `wait_for` / `expect_quiet` combinators, registry-backed
@@ -818,6 +819,22 @@ Brokkr-side, in tree:
   the toolchain has not validated. Cross-checks at parse time:
   unknown `sweep` and binary-not-in-`build_packages` both error
   before cargo runs.
+- `brokkr service-suite [--filter X]` runs every discovered script in
+  sequence against a single shared harness build. Discovery + filter
+  (substring match against the relative name) happens before the build
+  so an empty selection bails with a useful message - "no scripts
+  found", "filter matched none", "all matches are ignored", etc. -
+  before paying the cargo cost. `expected = ignored` scripts are
+  skipped by default; `--include-ignored` opts them in. Each script
+  reuses the same `spawn_and_capture` path `service-test` uses, so
+  per-script artefact-dir lifecycle, ceiling, and `preserve_data_dir`
+  semantics are identical. Default is stop-on-first-failure (the
+  failing script's artefacts land fast for triage); `--keep-going`
+  runs every selected script and the trailing summary lists the
+  failing names. `--keep-artefacts` and `--debug` mirror
+  `service-test`. Exit code is non-zero if any selected script
+  failed. `--filter` is a substring match (no glob), keeping the CLI
+  surface deliberately small until a use case justifies more.
 - `brokkr service-list` discovers
   `crates/app/tests/service-harness/**/*.lua` recursively under the
   project root, parses a top-of-file `-- key: value` frontmatter,
@@ -863,7 +880,6 @@ Deferred (ratatoskr-side, post Phase 8 start):
 
 Brokkr-side, not yet started but unblocked:
 
-- Suite (`--filter`).
 - `service-list --json` for machine consumption.
 
 ## Suggested implementation order
@@ -913,16 +929,20 @@ Brokkr-side, not yet started but unblocked:
 9. **Phase-8 ratatoskr-side additions.** *(deferred - ratatoskr
    roadmap.)*
 10. **Cohort.** *(deferred - lands incrementally inside Phase 8.)*
-11. **Soak / suite / list commands.** *(`service-list` and soak
-    (`brokkr service-test <SCRIPT> -N <COUNT> [--keep-going]`) both
-    landed. `service-list` walks `service-harness/**/*.lua`
-    recursively (so M4 / M5 cohorts under `t1/` and `extract/` pick
-    up automatically) and parses the `description`, `expected`,
-    `ceiling`, and `preserve_data_dir` frontmatter fields; the soak
-    loop reuses the same per-script frontmatter so the ceiling and
-    artefact-dir policy apply uniformly across iterations. Suite
-    (`--filter`) and `service-list --json` still deferred (M7
-    polish); both unblocked, neither Phase-8-blocking.)*
+11. **Soak / suite / list commands.** *(`service-list`, soak
+    (`brokkr service-test <SCRIPT> -N <COUNT> [--keep-going]`), and
+    suite (`brokkr service-suite [--filter X]`) all landed.
+    `service-list` walks `service-harness/**/*.lua` recursively (so
+    M4 / M5 cohorts under `t1/` and `extract/` pick up automatically)
+    and parses the `description`, `expected`, `ceiling`, and
+    `preserve_data_dir` frontmatter fields; the soak loop reuses the
+    same per-script frontmatter so the ceiling and artefact-dir
+    policy apply uniformly across iterations; `service-suite` reuses
+    the same `spawn_and_capture` path so artefact lifecycle is
+    identical, with substring `--filter`, default-skip-ignored
+    (override via `--include-ignored`), and stop-on-first-failure
+    bail (override via `--keep-going`). `service-list --json` still
+    deferred (M7 polish); unblocked, not Phase-8-blocking.)*
 12. **Sidecar integration.** *(deferred; not required for v1.)*
 
 ## Open questions
