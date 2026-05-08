@@ -1,11 +1,14 @@
 # Ratatoskr sync orchestration - planning note
 
 Status: **planning, post-option-B reconciliation.** Brokkr-side
-commands for driving sync workloads against the mock-server project.
+commands for driving sync workloads against sæhrimnir (plan 2).
 Companion to `notes/ratatoskr-service-harness.md` (plan 1) and
-`notes/ratatoskr-mock-server.md` (plan 2). Depends on the
-not-yet-bootstrapped mock-server project (plan 2; lives in its own
-repo, Norse-mythology name TBD). This rev assumes plan 1's option-B
+`notes/ratatoskr-mock-server.md` (plan 2). Depends on sæhrimnir,
+already bootstrapped at `/home/folk/Programs/sæhrimnir/` and
+shipping all five protocols (JMAP, IMAP, SMTP, Microsoft Graph,
+Gmail) for v0; the gating dependency for plan-3 commands like
+`sync-smoke` and `sync-bench` is plan 1's ratatoskr-side runtime
+landing during Phase 8. This rev assumes plan 1's option-B
 architecture: ratatoskr's `app` crate hosts the Lua VM + ServiceClient
 userdata + wait combinator + frame-log tap + artefact writers; brokkr
 provides build orchestration + artefact-dir lifecycle + low-level
@@ -33,14 +36,17 @@ spin up children, capture metrics, store rows in
 processes: an `iced` UI and a child Service worker that owns all
 writes (sync, action execution, DB writes, body/inline/blob stores,
 Tantivy indexing, push receivers). Ratatoskr's Service runs sync
-workloads against IMAP and JMAP providers; correctness and
-performance of those workloads are the target of this plan.
+workloads against five providers (JMAP, IMAP, SMTP, Microsoft Graph,
+Gmail); correctness and performance of those workloads are the
+target of this plan.
 
-**JMAP** (RFC 8620 + RFC 8621) is a JSON-over-HTTP mail protocol;
-ratatoskr drives it via reqwest and a local fork of `jmap-client` at
-`/home/folk/Programs/jmap-client`. **IMAP** is the legacy stateful
-mail protocol; ratatoskr's IMAP support lives in
-`<ratatoskr>/crates/imap/`.
+**Sæhrimnir** (`/home/folk/Programs/sæhrimnir/`, plan 2) is the mock
+peer ratatoskr's Service talks to under test. Single binary, single
+process; binds one TCP port per protocol; one fixture in (TOML or
+Lua), five wire shapes out, byte-stable across runs. See
+`notes/ratatoskr-mock-server.md` for the brokkr-side view of the
+contract; sæhrimnir's own `README.md` / `CLAUDE.md` / `notes/` are
+authoritative for internals.
 
 **Three-plan architecture this note lives inside.** The work needed
 to test ratatoskr's sync code splits into three independent pieces:
@@ -48,14 +54,14 @@ to test ratatoskr's sync code splits into three independent pieces:
 | | Owns |
 | --- | --- |
 | Plan 1 (`notes/ratatoskr-service-harness.md`, split across brokkr + ratatoskr) | Deterministic subprocess test harness. Ratatoskr's `app` crate hosts the Lua VM + `ServiceClient` userdata + wait combinator + frame-log tap + artefact writers, exposed via `app --test-harness <script.lua>`. Brokkr provides build orchestration + artefact-dir lifecycle + low-level primitives (signal, pid_is_alive, sentinel watch, /proc snapshot). Brokkr does not depend on ratatoskr or embed dellingr. See `notes/ratatoskr-service-harness.md` for full design. |
-| Plan 2 (`notes/ratatoskr-mock-server.md`, eventually a standalone repo) | A small mock JMAP/IMAP server: protocol, fixture model, deterministic responses. Independent of brokkr and ratatoskr. |
-| Plan 3 (this note, in brokkr) | Commands that spawn plan 2's binary and ratatoskr's harness binary (`app --test-harness <sync_script.lua>`) together, drive a sync workload via the script, collect metrics, store results. The Lua script speaks JSON-RPC to the Service via plan 1's `ServiceClient` userdata; brokkr never touches the wire. |
+| Plan 2 (`notes/ratatoskr-mock-server.md`; sæhrimnir, bootstrapped) | A deterministic mock peer for all five email protocols ratatoskr's sync code talks to (JMAP, IMAP read-path, SMTP submission, Microsoft Graph mail-sync, Gmail mail-sync). One fixture in (TOML or Lua), five wire shapes out, byte-stable. Reactive `on(...)` callbacks across all five protocols plus `wait` / `mock_done` / `mock_fail` script controls. Independent of brokkr and ratatoskr. |
+| Plan 3 (this note, in brokkr) | Commands that spawn sæhrimnir and ratatoskr's harness binary (`app --test-harness <sync_script.lua>`) together, drive a sync workload via the script, collect metrics, store results. The Lua script speaks JSON-RPC to the Service via plan 1's `ServiceClient` userdata; brokkr never touches the wire. |
 
-The three plans are independent in source - plan 2 is a separate Rust
-project with its own crate; plans 1 and 3 are subcommands inside
+The three plans are independent in source - sæhrimnir is a separate
+Rust project with its own crate; plans 1 and 3 are subcommands inside
 brokkr; ratatoskr depends on none of them. Brokkr depends on neither
-ratatoskr nor plan 2 at the source level - it spawns binaries and
-talks line-delimited JSON / HTTP only.
+ratatoskr nor sæhrimnir at the source level - it spawns binaries and
+talks line-delimited HTTP / TCP only.
 
 ## Problem
 
@@ -81,26 +87,28 @@ the table at the top of this note for the cross-plan ownership view.
 | | Owns |
 | --- | --- |
 | Plan 1 | Harness binary. Ratatoskr-side: Lua VM, `ServiceClient` userdata, wait combinator, frame-log tap, artefact writers, `app --test-harness` CLI flag. Brokkr-side: artefact-dir lifecycle, sentinel watch, /proc snapshot, signal / pid_is_alive primitives. |
-| Plan 2 (standalone repo) | Mock IMAP/JMAP server: protocol implementations, fixture model, failure-injection knobs. Independent of brokkr and ratatoskr. |
-| Plan 3 (this note, in brokkr) | Commands that build + spawn plan 2's binary alongside plan 1's harness binary, thread the mock endpoint into the harness via env var, let the script drive sync, collect wall-clock + sidecar metrics, store results. |
+| Plan 2 (sæhrimnir) | Mock JMAP / IMAP / SMTP / Graph / Gmail server: protocol implementations, fixture model, deterministic responses, scenario-control surface (override callbacks, `wait`, `mock_done`, `mock_fail`). Independent of brokkr and ratatoskr. |
+| Plan 3 (this note, in brokkr) | Commands that build + spawn sæhrimnir alongside plan 1's harness binary, thread the per-protocol mock endpoints into the harness via env vars, let the script drive sync, collect wall-clock + sidecar metrics, store results. |
 
 Boundary rules:
 
-- Mock-server project owns protocol code, fixture loading, port
-  binding, failure-injection knobs.
+- Sæhrimnir owns protocol code, fixture loading, port binding,
+  scenario-control / override callbacks. Brokkr does not parse
+  fixture files; it just passes the path on the command line.
 - Ratatoskr owns sync code, correctness assertions, the test-only
   `RequestParams` surface used to drive sync workloads
   (`TestStartSync`, `TestQueryDbState`, etc., named at Phase 8 design
   time), and the `.lua` scripts that exercise them.
-- Brokkr owns spawn/teardown of both children, port allocation,
-  env-var threading, wall-clock timing of the harness binary's
-  lifetime, artefact-dir aggregation, results storage. Backstop
-  timing inside the script lives in plan 1's harness module, not in
-  brokkr.
+- Brokkr owns spawn/teardown of both children, sentinel-driven port
+  discovery, env-var threading, wall-clock timing of the harness
+  binary's lifetime, artefact-dir aggregation, results storage.
+  Backstop timing inside the script lives in plan 1's harness
+  module, not in brokkr.
 
 Plan 3 contains no protocol code, no fixture content, no sync
 correctness logic, no JSON-RPC client. If something feels like one of
-those, it belongs in plan 2, in ratatoskr, or inside the Lua script.
+those, it belongs in sæhrimnir, in ratatoskr, or inside the Lua
+script.
 
 ## Reuse from plan 1
 
@@ -111,13 +119,18 @@ Brokkr-side primitives carried over verbatim (already in tree per
 plan 1's "implementation status"):
 
 - Process spawn + signal + `pid_is_alive` (now driving two children -
-  the mock server and the harness binary).
-- Sentinel-file watch (`wait_for_sentinel`) - the mock server writes a
-  "listening on port X" sentinel before sync starts.
-- `/proc` snapshot - applied to both children's PIDs at failure.
+  sæhrimnir and the harness binary).
+- Sentinel-file watch (`wait_for_sentinel`) - sæhrimnir writes its
+  per-protocol port table before sync starts.
+- `/proc` snapshot - applied to both children's PIDs at failure;
+  writes the four-file `proc-{status,wchan,syscall,stack}.txt` set.
 - Artefact-dir lifecycle (`ArtefactDir`) - the same allocator, just
   pointed at `.brokkr/ratatoskr/sync/<test>/run-N/` instead of the
   service-test root.
+- Deadline-bounded spawn
+  (`output::run_captured_with_env_and_deadline`) - usable for
+  bounding the harness binary's wall-clock the same way `service-test`
+  does, when `sync-bench` lands.
 
 Ratatoskr-side machinery (in `app`'s harness module, lands during
 Phase 8 alongside the rest of the harness work):
@@ -138,27 +151,37 @@ cannot land before the harness module exists.
 
 ## New primitives
 
-- **Port allocation.** Multiple TCP ports per run, threaded to the
-  mock server and through to the harness binary's env. Today's
-  `[host].port` field is a single int and insufficient. Small
-  port-pool helper expected.
-- **Multi-child orchestration.** Mock server first (with readiness
-  sentinel), harness binary second (inheriting the mock's endpoint
-  via env var). Tear down in reverse on success or failure. The
-  workload-driver process is the harness binary itself; no third
-  child.
+- **Sentinel-driven port discovery.** Sæhrimnir always binds five
+  listeners (one per protocol) and writes a multi-line readiness
+  sentinel with `<NAME> <port>` per protocol. Brokkr's existing
+  `wait_for_sentinel` waits for presence; a new helper parses the
+  file content and returns a `{ jmap: u16, imap: u16, smtp: u16,
+  graph: u16, gmail: u16 }`-shaped struct. No port-pool allocator
+  is needed for v0 because every port is ephemeral and chosen by
+  the kernel.
+- **Multi-child orchestration.** Sæhrimnir first (with readiness
+  sentinel), harness binary second (inheriting the per-protocol
+  endpoints via env vars). Tear down in reverse on success or
+  failure. The workload-driver process is the harness binary
+  itself; no third child.
 - **Endpoint injection.** The harness binary (and through it, the
-  Service it spawns) is told the mock endpoints via env var (likely a
-  `RATATOSKR_TEST_*_ENDPOINT` family read under the existing
-  `test-helpers` feature gate). Brokkr only sets the var; ratatoskr
-  decides what reads it.
-- **Bench timing via marker FIFO.** For `sync-bench`, the Lua script
-  emits `SYNC_START` and `SYNC_END` markers via brokkr's existing
-  `BROKKR_MARKER_FIFO` protocol (already used by the sidecar). The
-  sidecar picks up wall-clock spans for those markers without needing
-  to peek at JSON-RPC. The script also writes a small JSON summary
-  (e.g. `summary.json`) into `BROKKR_HARNESS_ARTEFACT_DIR` for richer
-  metrics (`provider_request_count`, `final_db_size_bytes`,
+  Service it spawns) is told the mock endpoints via the
+  `RATATOSKR_TEST_{JMAP,IMAP,SMTP,GRAPH,GMAIL}_ENDPOINT` env-var
+  family, read under ratatoskr's existing `test-helpers` feature
+  gate. The exact spellings are configurable from ratatoskr's
+  `brokkr.toml` via `[ratatoskr] test_endpoint_env_<proto>` so
+  brokkr does not hardcode them. URL shapes - HTTP origins for
+  JMAP / Graph / Gmail (e.g. `http://127.0.0.1:<port>`), `host:port`
+  for IMAP / SMTP - mirror what ratatoskr's existing client code
+  expects.
+- **Bench timing via marker FIFO.** For `sync-bench`, the Lua
+  script emits `SYNC_START` and `SYNC_END` markers via brokkr's
+  existing `BROKKR_MARKER_FIFO` protocol (already used by the
+  sidecar). The sidecar picks up wall-clock spans for those markers
+  without needing to peek at JSON-RPC. The script also writes a
+  small JSON summary (e.g. `summary.json`) into
+  `BROKKR_HARNESS_ARTEFACT_DIR` for richer metrics
+  (`provider_request_count`, `final_db_size_bytes`,
   `messages_synced`); brokkr reads it post-exit and joins it with
   the marker spans + sidecar samples in the results DB.
 
@@ -167,23 +190,27 @@ cannot land before the harness module exists.
 Top-level commands tagged `[ratatoskr]`, project-gated to
 `Project::Ratatoskr`. Flat namespace, matching pbfhogg/elivagar/nidhogg.
 
-- `brokkr mock-serve [--imap] [--jmap] --fixture <NAME>` - spawn the
-  mock server(s) standalone, print listening endpoints, run until
-  ctrl-C. Manual-exploration tool, not a test command. Does not
-  touch the harness binary. Tears down cleanly on signal.
-- `brokkr sync-smoke <SCRIPT>` - build mock + harness binary, spawn
-  mock first (waiting for readiness sentinel), spawn `app
-  --test-harness <SCRIPT>` second with mock endpoints injected via
-  env, wait for the harness binary to exit. PASS/FAIL based on the
-  harness binary's exit code; assertions live inside the Lua script.
-  No metrics storage. The sync analogue of plan 1's single-script
-  run.
+- `brokkr mock-serve --fixture <NAME>` - spawn sæhrimnir standalone,
+  print listening endpoints (one per protocol), run until ctrl-C.
+  Manual-exploration tool, not a test command. Does not touch the
+  harness binary. Tears down cleanly on signal. Sæhrimnir always
+  binds all five listeners; no per-protocol opt-in / opt-out flag
+  is needed at the brokkr level.
+- `brokkr sync-smoke <SCRIPT>` - build sæhrimnir + harness binary,
+  spawn sæhrimnir first (waiting for readiness sentinel), parse the
+  per-protocol ports out of the sentinel content, spawn `app
+  --test-harness <SCRIPT>` second with the
+  `RATATOSKR_TEST_*_ENDPOINT` env-var family injected, wait for the
+  harness binary to exit. PASS/FAIL based on the harness binary's
+  exit code; assertions live inside the Lua script. No metrics
+  storage. The sync analogue of plan 1's single-script run.
 - `brokkr sync-bench <SCRIPT> [--bench N]` - same spawn shape as
   sync-smoke, measured. Wall-clock spans come from `SYNC_START` /
   `SYNC_END` markers the script emits via `BROKKR_MARKER_FIFO`;
   richer metrics come from a `summary.json` the script writes into
-  the artefact dir. Best-of-N stored in `.brokkr/results.db` via the
-  existing `BenchHarness`. Comparable via `brokkr results --compare`.
+  `BROKKR_HARNESS_ARTEFACT_DIR`. Best-of-N stored in
+  `.brokkr/results.db` via the existing `BenchHarness`. Comparable
+  via `brokkr results --compare`.
 - `brokkr sync-list` - discover sync-test scripts (analogous to
   `service-list`).
 
@@ -205,10 +232,12 @@ brokkr. Recommended fields:
 ```
 
 `fixture` resolves against `[ratatoskr] fixtures_dir` and points
-brokkr at the mock-server fixture file. `protocol` selects which
-mock-server flavour (`--imap` / `--jmap`) brokkr spawns. Scripts
-themselves use plan 1's `ServiceClient` userdata to drive sync and
-assert; brokkr only sets endpoint env vars and watches exit codes.
+brokkr at sæhrimnir's fixture file. `protocol` is informational
+(used to select which `RATATOSKR_TEST_*_ENDPOINT` env var the script
+will read most heavily); sæhrimnir always binds all five listeners
+regardless. Scripts themselves use plan 1's `ServiceClient` userdata
+to drive sync and assert; brokkr only sets endpoint env vars and
+watches exit codes.
 
 `brokkr sync-list` walks the directory, parses the frontmatter, prints
 a sorted table. Empty-state message names the expected directory so a
@@ -223,10 +252,13 @@ defined today).
 
 ```toml
 [ratatoskr]
-mock_server_binary = "../<mock-project>/target/release/mock-mail"
-fixtures_dir = "../<mock-project>/fixtures"
-test_endpoint_env_imap = "RATATOSKR_TEST_IMAP_ENDPOINT"
+mock_server_binary = "../sæhrimnir/target/release/saehrimnir"
+fixtures_dir = "../sæhrimnir/fixtures"
 test_endpoint_env_jmap = "RATATOSKR_TEST_JMAP_ENDPOINT"
+test_endpoint_env_imap = "RATATOSKR_TEST_IMAP_ENDPOINT"
+test_endpoint_env_smtp = "RATATOSKR_TEST_SMTP_ENDPOINT"
+test_endpoint_env_graph = "RATATOSKR_TEST_GRAPH_ENDPOINT"
+test_endpoint_env_gmail = "RATATOSKR_TEST_GMAIL_ENDPOINT"
 sync_script_dir = "crates/app/tests/sync-harness"  # optional override
 
 [ratatoskr.harness]
@@ -235,17 +267,19 @@ binary = "app"      # already declared by plan 1
 ```
 
 Fixture names referenced by sync-test script frontmatter resolve
-relative to `fixtures_dir`. The mock-server binary path resolves
-relative to `brokkr.toml`. Endpoint env-var names are configurable so
-brokkr doesn't hardcode ratatoskr's test-only flag spelling.
-`sync_script_dir` defaults to `crates/app/tests/sync-harness`; override
-only if the layout changes.
+relative to `fixtures_dir`. The sæhrimnir binary path resolves
+relative to `brokkr.toml`. The five endpoint env-var names are each
+configurable so brokkr doesn't hardcode ratatoskr's test-only flag
+spelling - missing fields are treated as "this protocol is not
+exposed to scripts in this checkout." `sync_script_dir` defaults to
+`crates/app/tests/sync-harness`; override only if the layout
+changes.
 
 Plan 3 reuses plan 1's `[ratatoskr.harness]` to know which harness
-binary to spawn - no separate plan-3 harness binary entry. The mock
-server is built on demand from `mock_server_binary`'s parent project
-via `crate::build::cargo_build`, same model as `brokkr serve` for
-nidhogg.
+binary to spawn - no separate plan-3 harness binary entry.
+Sæhrimnir is built on demand from `mock_server_binary`'s parent
+project via `crate::build::cargo_build`, same model as `brokkr serve`
+for nidhogg.
 
 ## Determinism
 
@@ -268,29 +302,41 @@ samples carry peak RSS / IO / scheduler stats.
 
 The harness binary writes its own artefact dir
 (`BROKKR_HARNESS_ARTEFACT_DIR`, populated by ratatoskr's harness
-module). Plan 3 adds a parallel artefact dir for the mock server and
-points the harness at a sub-directory underneath the run dir.
+module). Plan 3 places that dir as a `harness/` subdirectory under
+the run dir and adds a parallel `mock/` subdirectory for sæhrimnir's
+artefacts; symmetric layout, no top-level filename collisions.
 
 `.brokkr/ratatoskr/sync/<test>/run-N/`:
 
-- `harness/` - the harness binary's artefact dir, written by
-  ratatoskr's harness module per plan 1. Contains the standard plan-1
-  payload: `frames.jsonl` (UI <-> Service JSON-RPC), `events.jsonl`,
-  `steps.jsonl`, `service.stderr`, `proc-at-failure.txt`, `data-dir/`,
-  `exit.txt`, `run.toml`. For sync-bench runs, also `summary.json` -
-  the per-run metrics dump (`provider_request_count`,
-  `messages_synced`, `final_db_size_bytes`, etc.) the script writes.
-- `mock-server.stderr` - mock server logs.
-- `proc-at-failure-mock.txt` - `/proc` snapshot of the mock at
-  failure-declaration time, taken by brokkr's `snapshot_proc`.
-- `exit-mock.txt` - mock-server exit code, signal, wait time.
-- `run.toml` - plan-3 metadata: fixture name, protocol, brokkr
-  version, mock-server version, ratatoskr commit, sync-script path.
+- `run.toml` - plan-3 metadata (brokkr-written): fixture name,
+  protocol, brokkr version, sæhrimnir commit, ratatoskr commit,
+  sync-script path, harness exit summary, mock exit summary.
+- `harness/` - `BROKKR_HARNESS_ARTEFACT_DIR`. Plan-1 contract:
+  brokkr writes `run.toml`, `binary-stdout.log`, `binary-stderr.log`,
+  the copied script, and `spawn-error.txt` on spawn failure;
+  ratatoskr's harness module writes `frames.jsonl` (UI <-> Service
+  JSON-RPC), `events.jsonl`, `steps.jsonl`, `service.stderr`,
+  `proc-{status,wchan,syscall,stack}.txt`, `data-dir/`, and
+  `runtime-outcome.json`. For sync-bench runs the harness module
+  also writes `summary.json` - the per-run metrics dump
+  (`provider_request_count`, `messages_synced`, `final_db_size_bytes`,
+  etc.) - which brokkr reads post-exit and joins with the marker
+  spans + sidecar samples in the results DB.
+- `mock/` - sæhrimnir-side dump (brokkr-written). Sæhrimnir does
+  not see this dir; brokkr captures everything from outside.
+  - `stderr.log` - sæhrimnir's stderr verbatim (its primary log
+    channel).
+  - `outcome.toml` - exit code, signal, wait time, fixture name.
+    Brokkr writes this on teardown.
+  - `proc-{status,wchan,syscall,stack}.txt` - `/proc` snapshot
+    taken by brokkr's `snapshot_proc` at failure-declaration time.
+    Same four-file shape plan 1's harness side uses, just rooted in
+    a different subdir so the two PIDs' snapshots don't collide.
 
-Sync-protocol traffic between Service and mock is over TCP. Capturing
-it is plan 2's concern (the mock can write request/response logs to
-its stderr or to a configured file); plan 3 just preserves whatever
-the mock writes.
+Sync-protocol traffic between Service and sæhrimnir is over TCP.
+Capturing it is plan 2's concern (sæhrimnir can write request /
+response logs to its stderr or to a configured file via
+`--log-file`); plan 3 just preserves whatever sæhrimnir writes.
 
 ## Results storage
 
@@ -310,64 +356,81 @@ gating waits until there's enough data to pick thresholds.
 
 ## Acceptance for v1
 
-1. `brokkr mock-serve --jmap --fixture small` starts the mock server,
-   prints its endpoint, runs until ctrl-C. Tears down cleanly. No
-   harness binary involved.
+1. `brokkr mock-serve --fixture small` starts sæhrimnir, prints all
+   five listening endpoints, runs until ctrl-C. Tears down cleanly.
+   No harness binary involved.
 2. `brokkr sync-smoke crates/app/tests/sync-harness/jmap-initial.lua`
-   builds mock + harness, spawns mock with the script's declared
-   fixture, spawns `app --test-harness` with the mock endpoint
-   injected, the script drives an initial sync via
-   `client:request("TestStartSync", ...)` and asserts the resulting
-   DB state via `client:request("TestQueryDbState", ...)`, exits 0.
+   builds sæhrimnir + harness, spawns sæhrimnir with the script's
+   declared fixture, parses the per-protocol ports out of the
+   readiness sentinel, spawns `app --test-harness` with the
+   `RATATOSKR_TEST_*_ENDPOINT` family injected, the script drives an
+   initial sync via `client:request("TestStartSync", ...)` and
+   asserts the resulting DB state via
+   `client:request("TestQueryDbState", ...)`, exits 0.
 3. `brokkr sync-bench <script> --bench 5` does the same five times,
-   reads each run's `SYNC_START`/`SYNC_END` markers and `summary.json`,
-   stores rows in `.brokkr/results.db`, prints best-of-5 summary.
+   reads each run's `SYNC_START`/`SYNC_END` markers and
+   `summary.json`, stores rows in `.brokkr/results.db`, prints
+   best-of-5 summary.
 4. `brokkr sync-list` discovers all `.lua` scripts under
    `[ratatoskr] sync_script_dir` and prints them with frontmatter.
-5. IMAP path lands once plan 2 supports it and ratatoskr's IMAP sync
-   is in scope (Phase 5+).
+5. IMAP / SMTP / Graph / Gmail scripts work the same way as JMAP -
+   the orchestration is protocol-agnostic; only the env-var the
+   script reads and the per-protocol assertions inside the script
+   change. Sæhrimnir is already complete for v0 across all five
+   protocols.
 
 ## Out of scope
 
-- Mock-server protocol implementation, fixture authorship, failure
-  injection knobs - plan 2.
-- Ratatoskr's sync correctness assertions and test-helper RPC surface
-  - ratatoskr.
+- Sæhrimnir's protocol implementations, fixture authorship,
+  scenario-control surface - plan 2.
+- Ratatoskr's sync correctness assertions and test-helper RPC
+  surface - ratatoskr.
 - Threshold-based regression gating. Add once threshold data exists.
 - Sanitized real-world protocol traces as fixtures - plan 2.
 - Multi-account workloads. v1 is single-account; multi-account is a
-  fixture and orchestration extension for later.
+  fixture and orchestration extension for later (sæhrimnir's
+  fixture format already accommodates multi-account, but the
+  protocol projection layers don't surface it yet).
 
 ## Suggested implementation order
 
-The order separates work that can land before plan 1's harness module
-exists from work that requires it.
+The order separates work that can land before plan 1's harness
+module exists from work that requires it.
 
 Independent of plan 1's harness module:
 
-1. Plan 2 bootstraps with at least one fixture and a basic JMAP
-   listener that writes a readiness sentinel.
-2. `Project::Ratatoskr` enum variant + plan-3 `[ratatoskr]`
-   brokkr.toml field parsing (plan 1 already landed the variant +
-   `[ratatoskr.harness]`; plan 3 adds the `mock_server_binary` /
-   `fixtures_dir` / `*_endpoint_env_*` / `sync_script_dir` fields).
-3. Port-pool helper.
-4. `brokkr mock-serve` - simplest case, one child, foreground. Uses
-   plan 2's binary directly; no harness binary involved.
+1. **Sæhrimnir bootstrap** *(done - `/home/folk/Programs/sæhrimnir/`,
+   all five protocols complete for v0; see plan 2)*.
+2. `Project::Saehrimnir` enum variant in brokkr's `src/project.rs`
+   so sæhrimnir's own `brokkr.toml` parses cleanly. Sæhrimnir's
+   `TODO.md` already tracks this; needed before plan 3 commands run
+   from inside sæhrimnir's tree.
+3. Plan-3 `[ratatoskr]` brokkr.toml field parsing - extend
+   `src/config.rs` to read `mock_server_binary`, `fixtures_dir`,
+   the five `test_endpoint_env_<proto>` fields, and
+   `sync_script_dir`.
+4. Sentinel-content parser - small helper that reads sæhrimnir's
+   multi-line readiness file and returns the per-protocol ports.
+5. `brokkr mock-serve` - simplest case, one child, foreground.
+   Spawns sæhrimnir with `--fixture <PATH>` + `--readiness-file`,
+   prints the resolved per-protocol endpoints, waits for ctrl-C.
+   No harness binary involved.
 
 Requires plan 1's harness module (Phase 8 ratatoskr-side):
 
-5. `brokkr sync-list` - walks `sync_script_dir`, parses frontmatter,
+6. `brokkr sync-list` - walks `sync_script_dir`, parses frontmatter,
    prints sorted table. Can land before scripts exist (empty-state
    message); useful early.
-6. `brokkr sync-smoke <SCRIPT>` - spawns mock + harness binary,
-   threads endpoints, waits for exit. The first script + first
-   `RequestParams::TestStartSync` / `TestQueryDbState` variants on the
-   ratatoskr side land together as the wedge.
-7. `brokkr sync-bench <SCRIPT>` - wraps sync-smoke in `BenchHarness`,
+7. `brokkr sync-smoke <SCRIPT>` - spawns sæhrimnir + harness binary,
+   threads the five endpoint env vars, waits for exit. The first
+   script + first `RequestParams::TestStartSync` /
+   `TestQueryDbState` variants on the ratatoskr side land together
+   as the wedge.
+8. `brokkr sync-bench <SCRIPT>` - wraps sync-smoke in `BenchHarness`,
    adds marker-FIFO span collection and `summary.json` ingestion.
-8. IMAP follows when plan 2 supports it and ratatoskr's IMAP sync is
-   in scope.
+9. Per-protocol scripts grow as ratatoskr's sync coverage extends
+   beyond JMAP - the orchestration stays unchanged; only the env
+   var the script reads + the assertions change.
 
 ## Open questions
 
@@ -387,28 +450,31 @@ Resolved (kept here for review-history clarity):
   wall-clock spans, `summary.json` in the artefact dir for richer
   per-run metrics. Both, not either-or.
 
+- ~~**Fixture format / naming.**~~ Resolved: sæhrimnir owns the
+  fixture format (TOML or Lua); brokkr passes a path on the command
+  line. Script frontmatter says `fixture: <name>` and brokkr resolves
+  to `<fixtures_dir>/<name>.<toml|lua>` (extension picked by which
+  file exists; see sæhrimnir's `notes/fixture-format.md`).
+- ~~**Mock-server CLI shape.**~~ Resolved: sæhrimnir's argv is fixed
+  (see plan 2). No port-pool flags needed - all five listeners
+  default to ephemeral and the sentinel reports the chosen ports.
+- ~~**Build orchestration for sæhrimnir.**~~ Resolved: same model as
+  `brokkr serve` (nidhogg) - cargo build on demand from
+  `mock_server_binary`'s parent project via
+  `crate::build::cargo_build`. Implementation when plan 3 commands
+  land.
+- ~~**Mock-server stderr capture vs streaming.**~~ Resolved: capture
+  verbatim into `mock/stderr.log` under the run dir; no live stream.
+  Mirrors plan 1's `service.stderr` shape.
+
 Still open:
 
-- **Fixture format / naming.** Plan 2's concern, but brokkr needs to
-  know how fixtures are referenced from script frontmatter. Coordinate
-  at integration time.
-- **Mock-server CLI shape.** Plan 2 defines its argv; plan 3 defines
-  how brokkr's per-fixture / port-pool flags compile down. Coordinate
-  at integration time.
-- **Build orchestration for plan 2's binary.** Same model as
-  `brokkr serve` (nidhogg) - cargo build on demand from a known
-  project root via `crate::build::cargo_build`. The
-  `mock_server_binary` config field documents the expected artefact
-  path. Implementation detail; resolves when plan 2 is in tree.
-- **`RequestParams` surface for sync triggering / assertion.** Phase 8
-  ratatoskr-side design. Names like `TestStartSync`, `TestQueryDbState`
-  used in this note are placeholders. The harness Lua binding picks
-  them up automatically once they exist (no harness module recompile,
-  per plan 1).
+- **`RequestParams` surface for sync triggering / assertion.** Phase
+  8 ratatoskr-side design. Names like `TestStartSync`,
+  `TestQueryDbState` used in this note are placeholders. The harness
+  Lua binding picks them up automatically once they exist (no
+  harness module recompile, per plan 1).
 - **Per-script vs per-fixture run dirs.** Today's
   `.brokkr/ratatoskr/sync/<test>/run-N/` keys on script name. If a
   script runs against multiple fixtures (sync-bench across a sweep)
   the path needs a fixture component. Defer until that shape lands.
-- **Mock-server stderr capture vs streaming.** Mirror plan 1's
-  service.stderr handling - capture verbatim per run into the
-  artefact dir, no live stream.

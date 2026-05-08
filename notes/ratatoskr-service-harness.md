@@ -1,14 +1,45 @@
 # Ratatoskr Service test harness - planning note
 
 Status: **architecture decided (option B); brokkr-side scaffolding
-landed.** Replaces `notes/ratatoskr-support.md` for everything related
-to Service-subprocess tests. Provider mocks and sync benchmarks move
-to sibling notes (`notes/ratatoskr-mock-server.md`,
-`notes/ratatoskr-sync-orchestration.md`). See "Implementation status"
-below for what's currently in tree. Matching ratatoskr-side documents:
+complete through harness-roadmap M5.** Replaces `notes/ratatoskr-support.md`
+for everything related to Service-subprocess tests. Provider mocks
+and sync benchmarks move to sibling notes
+(`notes/ratatoskr-mock-server.md`, `notes/ratatoskr-sync-orchestration.md`).
+See "Current state" immediately below for the tight version, or
+"Implementation status" further down for the full breakdown. Matching
+ratatoskr-side documents:
 `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`
 (`architecture.md` is authoritative for the ratatoskr side; this note
 is authoritative for the brokkr side; the two stay in sync).
+
+## Current state
+
+- **Done on the brokkr side:** Project gating, sweep-aware build,
+  `service-test` (single-shot + soak) end-to-end with
+  deadline-bounded spawn, `ceiling` / `preserve_data_dir`
+  frontmatter, recursive `service-harness/**/*.lua` discovery,
+  history-DB recording, and the orchestrator-side process /
+  sentinel / artefact primitives. See "Implementation status" for
+  the per-item breakdown.
+- **Next on the brokkr side:** `brokkr service-suite [--filter X]`
+  and `brokkr service-list --json`. M7 polish - unblocked but not
+  Phase-8-blocking.
+- **Waiting on ratatoskr (Phase 8 / harness-roadmap M1):** the `app`
+  crate's harness module (Lua VM bootstrap, `ServiceClient`
+  userdata, `wait_for` / `expect_quiet` combinators, registry-backed
+  request binding, frame-log tap, runtime-owned artefact writers),
+  the `app --test-harness <script.lua>` CLI flag gated behind
+  `test-helpers`, the `[[check]] name = "harness"` and
+  `[ratatoskr.harness]` blocks in ratatoskr's `brokkr.toml`, and the
+  wedge cohort under `crates/app/tests/service-harness/`.
+  `dellingr 0.2.0` is published on crates.io; pulling it in is one
+  workspace-dep line.
+- **Phase 8 close-out gate (M2 of the harness roadmap):** the two
+  wedge scripts (`ping_and_shutdown.lua` and
+  `terminal_on_missing_key.lua`) passing under
+  `brokkr service-test <script>` plus a 200-iteration soak. Brokkr
+  is structurally ready - the gate is the ratatoskr-side runtime
+  shipping.
 
 ## Background for reviewers
 
@@ -357,7 +388,7 @@ firing is a test-design bug, not a flake.
 ### Test scripts
 
 Tests are Lua scripts. Ratatoskr's `app` crate embeds the
-`dellingr` Lua VM (`0.1.0` on crates.io) and exposes its existing
+`dellingr` Lua VM (`0.2.0` on crates.io) and exposes its existing
 `crates/app/src/service_client.rs` API as Lua userdata in the
 harness module. Brokkr never embeds dellingr; it spawns the
 ratatoskr-side runtime via `app --test-harness <script.lua>`.
@@ -656,7 +687,8 @@ What needs to be newly built on the ratatoskr side:
   log tap). See "What ratatoskr provides" above.
 - The `--test-harness <script.lua>` CLI flag (gated behind the
   existing `test-helpers` feature).
-- A `dellingr` workspace dep at `0.1.0`.
+- A `dellingr` workspace dep at `0.2.0` (already on crates.io;
+  pulling it in is one Cargo.toml line, not an upstream wait).
 - The `crates/app/tests/service-harness/` directory plus the first
   cohort of `.lua` scripts.
 - The Phase-8 `RequestParams` / argv additions named above, as the
@@ -821,7 +853,7 @@ Deferred (ratatoskr-side, post Phase 8 start):
   writers).
 - `app --test-harness <script.lua>` CLI flag, gated behind the
   existing `test-helpers` feature.
-- `dellingr 0.1.0` workspace dep.
+- `dellingr 0.2.0` workspace dep.
 - `--test-fake-schema=N`, `TestSeedAccount`, fault-injection /
   counter-probe `RequestParams` variants.
 - The wedge tests, T1 cohort, manual-matrix items 4 / 5 expressed
@@ -842,14 +874,17 @@ Brokkr-side, not yet started but unblocked:
    not depend on brokkr; ratatoskr depends on `dellingr` directly.
    See "Dependency direction" above.)*
 2. **`Project::Ratatoskr` enum variant + project gating.** *(done.)*
-3. **Process / sentinel / artefact primitives.** *(partial -
-   process primitives, sentinel watcher, /proc snapshot, artefact
-   directory lifecycle helper all landed in
-   `src/ratatoskr/{process,artefacts}.rs`. Frame-log tap is
-   ratatoskr-side - lives in the harness module since brokkr never
-   sees the wire.)*
+3. **Process / sentinel / artefact primitives.** *(done on the
+   brokkr side - process primitives, sentinel watcher, /proc
+   snapshot, artefact directory lifecycle helper all landed in
+   `src/ratatoskr/{process,artefacts}.rs`. The deadline-bounded
+   spawn primitive (`run_captured_with_env_and_deadline` in
+   `src/output.rs`) is also in tree - drains stdout/stderr in
+   threads, polls `Child::try_wait` at 50 ms cadence, SIGKILLs on
+   ceiling expiry. Frame-log tap is ratatoskr-side - lives in the
+   harness module since brokkr never sees the wire.)*
 4. **Lua VM embedding.** *(ratatoskr-side, deferred until Phase 8 -
-   `dellingr 0.1.0` pulled in by `app`'s Cargo.toml. Brokkr does
+   `dellingr 0.2.0` pulled in by `app`'s Cargo.toml. Brokkr does
    not embed dellingr.)*
 5. **Lua binding for `ServiceClient` and friends.** *(ratatoskr-side,
    deferred until Phase 8 - in the harness module.)*
@@ -861,15 +896,18 @@ Brokkr-side, not yet started but unblocked:
    assertions) live in the harness module alongside the userdata
    bindings.)*
 7. **CLI: `brokkr service-test <SCRIPT>`.** *(done on the brokkr
-   side - project gate + script validation + sweep-aware build via
-   `[ratatoskr.harness]` + `--debug` profile flag + lockfile + per-run
-   artefact dir + sync `std::process::Command` spawn + captured
-   stdout/stderr/exit/signal + `run.toml` + script-copy + outcome
-   reporting + finalize-on-success-or-failure. History-DB recording
-   is automatic via `main()`. Until ratatoskr ships
-   `app --test-harness`, the spawn faithfully captures the
-   unknown-flag failure - the wedge tests work the moment the
-   ratatoskr-side runtime lands.)*
+   side - project gate + script validation + frontmatter parse
+   (`ceiling`, `preserve_data_dir`) + sweep-aware build via
+   `[ratatoskr.harness]` + `--debug` profile flag + lockfile +
+   per-run artefact dir + deadline-bounded spawn that drains
+   stdout/stderr in threads and SIGKILLs on ceiling expiry +
+   `run.toml` + script-copy + outcome reporting (with a
+   `ceiling=<spelling>` exit label when the deadline fires) +
+   finalize-on-success-or-failure (with `preserve_data_dir`
+   honoured). History-DB recording is automatic via `main()`.
+   Until ratatoskr ships `app --test-harness`, the spawn faithfully
+   captures the unknown-flag failure - the wedge tests work the
+   moment the ratatoskr-side runtime lands.)*
 8. **Wedge.** *(ratatoskr-side - re-express the two ignored tests
    as `.lua` scripts. Deferred until the harness module lands.)*
 9. **Phase-8 ratatoskr-side additions.** *(deferred - ratatoskr
@@ -877,11 +915,14 @@ Brokkr-side, not yet started but unblocked:
 10. **Cohort.** *(deferred - lands incrementally inside Phase 8.)*
 11. **Soak / suite / list commands.** *(`service-list` and soak
     (`brokkr service-test <SCRIPT> -N <COUNT> [--keep-going]`) both
-    landed - the former walks the filesystem, the latter loops the
-    spawn-and-capture path with per-iter status + summary. Suite
-    (`--filter`) still deferred until a script cohort exists; it
-    needs little more than a `service-list`-style walk plus the soak
-    loop applied per script.)*
+    landed. `service-list` walks `service-harness/**/*.lua`
+    recursively (so M4 / M5 cohorts under `t1/` and `extract/` pick
+    up automatically) and parses the `description`, `expected`,
+    `ceiling`, and `preserve_data_dir` frontmatter fields; the soak
+    loop reuses the same per-script frontmatter so the ceiling and
+    artefact-dir policy apply uniformly across iterations. Suite
+    (`--filter`) and `service-list --json` still deferred (M7
+    polish); both unblocked, neither Phase-8-blocking.)*
 12. **Sidecar integration.** *(deferred; not required for v1.)*
 
 ## Open questions
@@ -895,7 +936,7 @@ Resolved (kept here for review-history clarity):
 - ~~**Test discovery.**~~ Resolved:
   `<ratatoskr>/crates/app/tests/service-harness/*.lua`. `brokkr
   service-list` walks it and parses a `-- key: value` frontmatter.
-- ~~**`dellingr` dep timing.**~~ Resolved: published as `0.1.0`
+- ~~**`dellingr` dep timing.**~~ Resolved: published as `0.2.0`
   on crates.io; ratatoskr's `app` crate takes the workspace dep
   when the harness module lands. Brokkr never depends on
   dellingr.
