@@ -1,13 +1,16 @@
 # Ratatoskr sync orchestration - planning note
 
 Status: **planning, post-option-B reconciliation.** Brokkr-side
-commands for driving sync workloads against sæhrimnir (plan 2).
-Companion to `notes/ratatoskr-mock-server.md` (plan 2). Plan 1 (the
-Service-test harness) is no longer in this notes tree - the brokkr-side
-scaffolding shipped and the cross-cutting design lives at
-`<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
-Depends on sæhrimnir,
-already bootstrapped at `/home/folk/Programs/sæhrimnir/` and
+commands for driving sync workloads against sæhrimnir. Plan 1 (the
+Service-test harness) and plan 2 (sæhrimnir itself) are no longer in
+this notes tree - plan 1's brokkr-side scaffolding shipped and its
+cross-cutting design lives at
+`<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`;
+plan 2 shipped on the sæhrimnir side and its repo
+(`/home/folk/Programs/sæhrimnir/`) is authoritative for protocol
+surface, fixture model, reactive callbacks, sentinel/argv contract,
+and signal handling. Depends on sæhrimnir, already bootstrapped at
+`/home/folk/Programs/sæhrimnir/` and
 shipping all five protocols (JMAP, IMAP, SMTP, Microsoft Graph,
 Gmail) for v0; the gating dependency for plan-3 commands like
 `sync-smoke` and `sync-bench` is plan 1's ratatoskr-side runtime
@@ -46,10 +49,11 @@ target of this plan.
 **Sæhrimnir** (`/home/folk/Programs/sæhrimnir/`, plan 2) is the mock
 peer ratatoskr's Service talks to under test. Single binary, single
 process; binds one TCP port per protocol; one fixture in (TOML or
-Lua), five wire shapes out, byte-stable across runs. See
-`notes/ratatoskr-mock-server.md` for the brokkr-side view of the
-contract; sæhrimnir's own `README.md` / `CLAUDE.md` / `notes/` are
-authoritative for internals.
+Lua), five wire shapes out, byte-stable across runs. Sæhrimnir's own
+`README.md` / `CLAUDE.md` / `notes/` are authoritative for internals;
+the brokkr-side cross-process contract (argv, sentinel format, env
+vars, SIGTERM budget) is captured in this note's "Cross-process
+contract" section below.
 
 **Three-plan architecture this note lives inside.** The work needed
 to test ratatoskr's sync code splits into three independent pieces:
@@ -57,7 +61,7 @@ to test ratatoskr's sync code splits into three independent pieces:
 | | Owns |
 | --- | --- |
 | Plan 1 (split across brokkr + ratatoskr) | Deterministic subprocess test harness. Ratatoskr's `app` crate hosts the Lua VM + `ServiceClient` userdata + wait combinator + frame-log tap + artefact writers, exposed via `app --test-harness <script.lua>`. Brokkr provides build orchestration + artefact-dir lifecycle + low-level primitives (signal, pid_is_alive, sentinel watch, /proc snapshot). Brokkr does not depend on ratatoskr or embed dellingr. Cross-cutting design at `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`. |
-| Plan 2 (`notes/ratatoskr-mock-server.md`; sæhrimnir, bootstrapped) | A deterministic mock peer for all five email protocols ratatoskr's sync code talks to (JMAP, IMAP read-path, SMTP submission, Microsoft Graph mail-sync, Gmail mail-sync). One fixture in (TOML or Lua), five wire shapes out, byte-stable. Reactive `on(...)` callbacks across all five protocols plus `wait` / `mock_done` / `mock_fail` script controls. Independent of brokkr and ratatoskr. |
+| Plan 2 (sæhrimnir, bootstrapped at `/home/folk/Programs/sæhrimnir/`) | A deterministic mock peer for all five email protocols ratatoskr's sync code talks to (JMAP, IMAP read-path, SMTP submission, Microsoft Graph mail-sync, Gmail mail-sync). One fixture in (TOML or Lua), five wire shapes out, byte-stable. Reactive `on(...)` callbacks across all five protocols plus `wait` / `mock_done` / `mock_fail` script controls. Independent of brokkr and ratatoskr. The sæhrimnir repo is authoritative for protocol surface and fixture model. |
 | Plan 3 (this note, in brokkr) | Commands that spawn sæhrimnir and ratatoskr's harness binary (`app --test-harness <sync_script.lua>`) together, drive a sync workload via the script, collect metrics, store results. The Lua script speaks JSON-RPC to the Service via plan 1's `ServiceClient` userdata; brokkr never touches the wire. |
 
 The three plans are independent in source - sæhrimnir is a separate

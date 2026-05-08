@@ -411,6 +411,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "litehtml-rs" => Project::Litehtml,
         "sluggrs" => Project::Sluggrs,
         "ratatoskr" => Project::Ratatoskr,
+        "saehrimnir" => Project::Saehrimnir,
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 

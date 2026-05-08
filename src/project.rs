@@ -14,6 +14,7 @@ pub enum Project {
     Litehtml,
     Sluggrs,
     Ratatoskr,
+    Saehrimnir,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
     /// The `&'static str` is leaked once at startup from the TOML value.
@@ -30,6 +31,7 @@ impl Project {
             Self::Litehtml => "litehtml-rs",
             Self::Sluggrs => "sluggrs",
             Self::Ratatoskr => "ratatoskr",
+            Self::Saehrimnir => "saehrimnir",
             Self::Other(s) => s,
         }
     }
@@ -48,6 +50,7 @@ impl Project {
             | Self::Litehtml
             | Self::Sluggrs
             | Self::Ratatoskr
+            | Self::Saehrimnir
             | Self::Other(_) => None,
         }
     }
