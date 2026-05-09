@@ -51,6 +51,14 @@ plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT` per protocol whose env-var spelling
 is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail,
 `host:port` for imap/smtp).
 
+During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
+goes into the auxiliary `mock_pid` slot, the harness binary into `child_pid`
+- so `brokkr lock` from another shell shows live RSS/CPU for both, and
+`brokkr kill --hard` SIGKILLs both. `brokkr kill` (cooperative SIGTERM) is
+caught by a guard installed for the post-build window; the captured runner
+forwards SIGTERM to the harness child with a 1.5s budget, then mock-teardown
+drains sæhrimnir, then brokkr exits with `DevError::Interrupted`.
+
 After the harness exits, brokkr SIGTERMs sæhrimnir with the standard 1.5s
 budget then escalates to SIGKILL. PASS/FAIL on the harness exit code; FAIL
 preserves the artefact dir with `run.toml` (top-level metadata: brokkr

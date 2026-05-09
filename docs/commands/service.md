@@ -96,6 +96,15 @@ Mock artefacts (`stderr.log`, `readiness`) land under
 `.brokkr/ratatoskr/<test>/mock/<fixture-name>/` for `service-test` and
 `.brokkr/ratatoskr/mock/<fixture-name>/` for `service-suite`.
 
+`brokkr lock` from another shell shows the live harness PID (and progress
+`run R/T,` for soak / suite cycles), plus the mock PID under a separate
+`mock PID …` line. `brokkr kill --hard` SIGKILLs both children alongside
+brokkr; `brokkr kill` (SIGTERM) is caught by a guard installed for the
+post-build window - the captured runner forwards SIGTERM to the harness
+child with a 1.5s budget, the orchestrator then drains the mock with the
+same budget, and `service-suite`'s loop catches `DevError::Interrupted` so
+the post-loop mock-teardown still runs gracefully.
+
 `service-test`: the mock spawns once before the soak begins and is
 reused across all `-N` iterations of the same script. Scripts without a
 `fixture` line skip the spawn entirely; no `[ratatoskr]` mock config is

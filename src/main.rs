@@ -1448,6 +1448,14 @@ fn cmd_lock() -> Result<(), DevError> {
         output::lock_msg(&format!("{prefix}child PID {child_pid} {summary}"));
     }
 
+    // Line 3b: auxiliary mock-server stats, if a long-running mock is up
+    // alongside the workload child (sync-smoke / service-test / service-suite).
+    if let Some(mock_pid) = info.mock_pid
+        && let Some(summary) = lockfile::process_summary(mock_pid)
+    {
+        output::lock_msg(&format!("mock PID {mock_pid} {summary}"));
+    }
+
     // Line 4: most recent sidecar marker, if any.
     if info.pid > 0 {
         let status_path = std::path::Path::new(&info.project_root)
@@ -1523,6 +1531,13 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
             output::lock_msg(&format!(
                 "SIGKILL child PID {child_pid}: {}",
                 if child_sent { "sent" } else { "not running" },
+            ));
+        }
+        if let Some(mock_pid) = info.mock_pid {
+            let mock_sent = send_signal(mock_pid, libc::SIGKILL);
+            output::lock_msg(&format!(
+                "SIGKILL mock PID {mock_pid}: {}",
+                if mock_sent { "sent" } else { "not running" },
             ));
         }
         let brokkr_sent = send_signal(info.pid, libc::SIGKILL);

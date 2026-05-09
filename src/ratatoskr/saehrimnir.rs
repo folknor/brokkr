@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::RatatoskrConfig;
 use crate::error::DevError;
+use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::process as proc_helpers;
 
@@ -225,6 +226,12 @@ impl MockServer {
         &self.endpoints
     }
 
+    /// PID of the spawned sæhrimnir child. Stable across the lifetime of
+    /// the handle (until `shutdown` consumes it).
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// Wall-clock time from spawning sæhrimnir to parsing its readiness
     /// sentinel. Surfaced in the per-phase summary printed by sync-smoke
     /// / sync-bench so a slow cold-start is visible.
@@ -329,6 +336,13 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     )?;
     let fixture_path = resolve_fixture(&fixtures_dir, req.fixture)?;
 
+    let project_root_str = req.project_root.display().to_string();
+    let _lock = lockfile::acquire(&LockContext {
+        project: "ratatoskr",
+        command: "mock-serve",
+        project_root: &project_root_str,
+    })?;
+
     if !binary.exists() {
         return Err(DevError::Config(format!(
             "mock-serve: sæhrimnir binary not found at {}. \
@@ -367,6 +381,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
             stderr: format!("failed to spawn: {e}"),
         })?;
     let child_pid = child.id();
+    _lock.set_child_pid(child_pid);
 
     let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
         Ok(ep) => ep,

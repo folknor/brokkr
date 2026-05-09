@@ -233,12 +233,17 @@ const DEADLINE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// or signal=9 if brokkr killed it. Callers should branch on
 /// `killed_on_deadline` (not the status alone) to distinguish a child
 /// that died on its own from one we killed.
+/// `on_spawn` is invoked with the child's PID immediately after
+/// `Command::spawn` returns. Callers can use it to publish the live PID
+/// into the lockfile so concurrent `brokkr lock` invocations can see what
+/// is currently running.
 pub fn run_captured_with_env_and_deadline(
     program: &str,
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
     deadline: Duration,
+    on_spawn: Option<&dyn Fn(u32)>,
 ) -> Result<DeadlineCapture, DevError> {
     use std::io::Read;
 
@@ -258,6 +263,9 @@ pub fn run_captured_with_env_and_deadline(
         code: None,
         stderr: e.to_string(),
     })?;
+    if let Some(cb) = on_spawn {
+        cb(child.id());
+    }
 
     fn drain(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
@@ -272,10 +280,25 @@ pub fn run_captured_with_env_and_deadline(
     let stderr_thread = child.stderr.take().map(drain);
 
     let mut killed_on_deadline = false;
+    let mut interrupted = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                if crate::shutdown::is_shutdown_requested() {
+                    // `brokkr kill` (SIGTERM) reached us. Forward SIGTERM
+                    // to the child, give it a brief budget to clean up,
+                    // then SIGKILL. The Err propagates as Interrupted so
+                    // the orchestrator can run its mock-teardown path
+                    // before main's scratch-cleanup.
+                    forward_sigterm_then_kill(&mut child);
+                    interrupted = true;
+                    break child.wait().map_err(|e| DevError::Subprocess {
+                        program: program.to_owned(),
+                        code: None,
+                        stderr: e.to_string(),
+                    })?;
+                }
                 if start.elapsed() >= deadline {
                     drop(child.kill());
                     killed_on_deadline = true;
@@ -296,6 +319,12 @@ pub fn run_captured_with_env_and_deadline(
             }
         }
     };
+    if interrupted {
+        // Drain pipes so the threads exit cleanly before we return.
+        drop(stdout_thread.and_then(|h| h.join().ok()));
+        drop(stderr_thread.and_then(|h| h.join().ok()));
+        return Err(DevError::Interrupted);
+    }
 
     let stdout = stdout_thread
         .and_then(|h| h.join().ok())
@@ -315,6 +344,33 @@ pub fn run_captured_with_env_and_deadline(
         killed_on_deadline,
     })
 }
+
+/// Forward SIGTERM to the child, give it [`SIGTERM_FORWARD_BUDGET`] to
+/// honour it, then escalate to SIGKILL. Used by
+/// [`run_captured_with_env_and_deadline`] when `brokkr kill` reaches us
+/// mid-orchestration.
+fn forward_sigterm_then_kill(child: &mut std::process::Child) {
+    let pid = child.id();
+    // SAFETY: signalling our own child by PID; ESRCH if it already exited
+    // is benign (handled by the subsequent wait loop).
+    unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
+    let term_sent = Instant::now();
+    while term_sent.elapsed() < SIGTERM_FORWARD_BUDGET {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(DEADLINE_POLL_INTERVAL),
+            Err(_) => break,
+        }
+    }
+    drop(child.kill());
+}
+
+/// How long to give a captured child to honour SIGTERM after `brokkr kill`
+/// before we escalate to SIGKILL. Matches sæhrimnir's
+/// [`crate::ratatoskr::saehrimnir::SHUTDOWN_BUDGET`] in spirit: long enough
+/// for cooperative cleanup, short enough that the user doesn't think
+/// `brokkr kill` hung.
+const SIGTERM_FORWARD_BUDGET: Duration = Duration::from_millis(1500);
 
 /// Spawn a subprocess with captured stdio, returning the `Child` handle.
 ///
@@ -401,7 +457,7 @@ mod tests {
     #[test]
     fn deadline_lets_short_runs_finish_normally() {
         let result =
-            run_captured_with_env_and_deadline("/bin/true", &[], cwd(), &[], Duration::from_secs(5))
+            run_captured_with_env_and_deadline("/bin/true", &[], cwd(), &[], Duration::from_secs(5), None)
                 .unwrap();
         assert!(!result.killed_on_deadline);
         assert!(result.captured.status.success());
@@ -419,6 +475,7 @@ mod tests {
             cwd(),
             &[],
             Duration::from_millis(250),
+            None,
         )
         .unwrap();
         let elapsed = start.elapsed();
@@ -443,6 +500,7 @@ mod tests {
             cwd(),
             &[],
             Duration::from_secs(5),
+            None,
         )
         .unwrap();
         assert!(!result.killed_on_deadline);

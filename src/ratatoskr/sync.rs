@@ -139,6 +139,7 @@ pub struct SyncSmokeRequest<'a> {
 /// 10. PASS/FAIL on the harness binary's exit code; sæhrimnir's outcome
 ///     is logged but not gating (a script may legitimately tear it down
 ///     early in scenarios).
+#[allow(clippy::too_many_lines)] // linear orchestration: validate, build, allocate artefacts, run, finalize
 pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
         DevError::Config(
@@ -198,6 +199,11 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         command: "sync-smoke",
         project_root: &project_root_str,
     })?;
+    // Cooperative SIGTERM for `brokkr kill`. Installed after lock so a
+    // user who SIGTERMed during `lockfile::acquire`'s wait already exited;
+    // dropped at function end so the captured runner's flag-poll path
+    // sees the guard the whole time we own a workload child.
+    let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let built = build::build_for_harness(
         req.project_root,
@@ -231,6 +237,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         &harness_dir,
         &mock_dir,
         &mut timings,
+        &_lock,
     );
 
     let summary = timings.summary();
@@ -307,8 +314,14 @@ fn orchestrate(
     harness_dir: &Path,
     mock_dir: &Path,
     timings: &mut PhaseTimings,
+    lock: &lockfile::LockGuard,
 ) -> Result<(), DevError> {
     let mock = MockServer::spawn(mock_binary, fixture_path, mock_dir)?;
+    // Track the mock under the auxiliary slot so `brokkr kill --hard`
+    // takes both processes down even after the harness child overwrites
+    // `child_pid`.
+    lock.set_mock_pid(mock.pid());
+    lock.set_child_pid(mock.pid());
     timings.mock_ready = Some(mock.ready_elapsed());
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
 
@@ -337,6 +350,7 @@ fn orchestrate(
         req.project_root,
         &env_pairs,
         ceiling,
+        Some(&|pid| lock.set_child_pid(pid)),
     );
 
     // Capture harness elapsed before tearing down sæhrimnir so a
@@ -348,6 +362,7 @@ fn orchestrate(
 
     // Whatever the harness did, sæhrimnir gets torn down next.
     let mock_outcome = mock.shutdown();
+    lock.clear_mock_pid();
     timings.mock_shutdown = Some(mock_outcome.shutdown_elapsed);
 
     let dc = deadline_capture?;

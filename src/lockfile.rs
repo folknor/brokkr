@@ -17,6 +17,10 @@ struct LockState {
     /// PID of the most recent child process brokkr spawned under the lock.
     /// Updated by the harness each iteration of a bench run.
     child_pid: Option<u32>,
+    /// Auxiliary long-running child PID - e.g. a mock-server (sæhrimnir)
+    /// that lives across many `child_pid` rotations. `brokkr kill --hard`
+    /// SIGKILLs this in addition to `child_pid` so neither leaks.
+    mock_pid: Option<u32>,
     /// Current bench-run progress as `(run, total)` (1-based).
     progress: Option<(u32, u32)>,
 }
@@ -44,6 +48,25 @@ impl LockGuard {
     pub fn set_child_pid(&self, pid: u32) {
         if let Ok(mut state) = self.state.lock() {
             state.child_pid = Some(pid);
+            rewrite_from_state(self.fd.as_raw_fd(), &state);
+        }
+    }
+
+    /// Record an auxiliary mock-server PID (a child that outlives any one
+    /// `child_pid` rotation). `brokkr kill --hard` SIGKILLs it alongside
+    /// `child_pid` so a mock-server doesn't leak when the workload child
+    /// is the one written to `child_pid`.
+    pub fn set_mock_pid(&self, pid: u32) {
+        if let Ok(mut state) = self.state.lock() {
+            state.mock_pid = Some(pid);
+            rewrite_from_state(self.fd.as_raw_fd(), &state);
+        }
+    }
+
+    /// Clear the mock-server PID slot (e.g. after a graceful drain).
+    pub fn clear_mock_pid(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.mock_pid = None;
             rewrite_from_state(self.fd.as_raw_fd(), &state);
         }
     }
@@ -77,6 +100,7 @@ pub struct LockInfo {
     pub args: String,
     pub project_root: String,
     pub child_pid: Option<u32>,
+    pub mock_pid: Option<u32>,
     pub progress: Option<(u32, u32)>,
 }
 
@@ -228,6 +252,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             args: String::new(),
             project_root: "unknown".into(),
             child_pid: None,
+            mock_pid: None,
             progress: None,
         }));
     };
@@ -447,6 +472,7 @@ fn build_state(ctx: &LockContext<'_>) -> LockState {
         args: current_invocation_args(),
         project_root: ctx.project_root.to_owned(),
         child_pid: None,
+        mock_pid: None,
         progress: None,
     }
 }
@@ -469,6 +495,9 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) {
     );
     if let Some(pid) = state.child_pid {
         contents.push_str(&format!("child_pid={pid}\n"));
+    }
+    if let Some(pid) = state.mock_pid {
+        contents.push_str(&format!("mock_pid={pid}\n"));
     }
     if let Some((run, total)) = state.progress {
         contents.push_str(&format!("progress={run}/{total}\n"));
@@ -557,6 +586,7 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
     let mut args = String::new();
     let mut root = String::new();
     let mut child_pid: Option<u32> = None;
+    let mut mock_pid: Option<u32> = None;
     let mut progress: Option<(u32, u32)> = None;
 
     for line in text.lines() {
@@ -572,6 +602,8 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
             root = v.trim().to_owned();
         } else if let Some(v) = line.strip_prefix("child_pid=") {
             child_pid = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("mock_pid=") {
+            mock_pid = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("progress=")
             && let Some((r, t)) = v.trim().split_once('/')
             && let (Ok(r), Ok(t)) = (r.parse::<u32>(), t.parse::<u32>())
@@ -591,6 +623,7 @@ fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
         args,
         project_root: root,
         child_pid,
+        mock_pid,
         progress,
     })
 }

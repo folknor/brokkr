@@ -132,6 +132,8 @@ pub fn service_test(
         command: "service-test",
         project_root: &project_root_str,
     })?;
+    // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
+    let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let built = build::build_for_harness(project_root, &dev_config.check, harness_cfg, debug)?;
     output::ratatoskr_msg(&format!(
@@ -154,6 +156,7 @@ pub fn service_test(
             &test_id,
             fixture_name,
             &artefact_parent,
+            &_lock,
         )?)
     } else {
         None
@@ -173,6 +176,7 @@ pub fn service_test(
             keep_on_success,
             ceiling,
             &env_pairs,
+            &_lock,
         )
     } else {
         run_soak(
@@ -186,11 +190,12 @@ pub fn service_test(
             repeat,
             keep_going,
             &env_pairs,
+            &_lock,
         )
     };
 
     if let Some(session) = mock_session {
-        session.shutdown();
+        session.shutdown(&_lock);
     }
     outcome
 }
@@ -220,13 +225,14 @@ fn run_single(
     keep_on_success: bool,
     ceiling: Duration,
     extra_env: &[(&str, &str)],
+    lock: &lockfile::LockGuard,
 ) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {test_id} against {}",
         built.binary.display()
     ));
     let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
-    let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env)?;
+    let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env, lock)?;
     if result.succeeded {
         output::ratatoskr_msg(&format!("PASS in {}ms", result.elapsed_ms));
         Ok(())
@@ -259,6 +265,7 @@ fn run_soak(
     repeat: u32,
     keep_going: bool,
     extra_env: &[(&str, &str)],
+    lock: &lockfile::LockGuard,
 ) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {test_id} against {} (-N {repeat}{})",
@@ -268,8 +275,9 @@ fn run_soak(
 
     let mut results: Vec<(u32, RunResult)> = Vec::new();
     for iter in 1..=repeat {
+        lock.set_progress(iter, repeat);
         let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
-        let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env)?;
+        let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env, lock)?;
         output::ratatoskr_msg(&format_iter_line(iter, repeat, &result));
         let stop = !result.succeeded && !keep_going;
         results.push((iter, result));
@@ -303,6 +311,7 @@ fn spawn_and_capture(
     project_root: &Path,
     ceiling: Duration,
     extra_env: &[(&str, &str)],
+    lock: &lockfile::LockGuard,
 ) -> Result<RunResult, DevError> {
     let binary_str = built.binary.display().to_string();
     let script_str = script_abs.display().to_string();
@@ -321,6 +330,7 @@ fn spawn_and_capture(
         project_root,
         &env_pairs,
         ceiling,
+        Some(&|pid| lock.set_child_pid(pid)),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -574,6 +584,8 @@ pub fn service_suite(
         command: "service-suite",
         project_root: &project_root_str,
     })?;
+    // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
+    let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let built = build::build_for_harness(project_root, &dev_config.check, harness_cfg, debug)?;
     output::ratatoskr_msg(&format!(
@@ -591,6 +603,7 @@ pub fn service_suite(
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let total = runnable.len();
+    let total_runs = u32::try_from(total).unwrap_or(u32::MAX).saturating_mul(cycles);
     let mut results: Vec<CycleRun> = Vec::with_capacity(total * cycles as usize);
     let mut bailed = false;
     // Keyed by fixture name; transitions into a different fixture (or no
@@ -598,6 +611,7 @@ pub fn service_suite(
     // Discover yields scripts in stable alphabetical order, so cohorts
     // grouped by parent directory naturally cluster on the same fixture.
     let mut current_mock: Option<FixtureSession> = None;
+    let mut interrupted = false;
     'cycles: for cycle in 1..=cycles {
         for (idx, script) in runnable.iter().enumerate() {
             let pos = idx + 1;
@@ -613,7 +627,7 @@ pub fn service_suite(
             };
             if !same {
                 if let Some(prev) = current_mock.take() {
-                    prev.shutdown();
+                    prev.shutdown(&_lock);
                 }
                 if let Some(fixture_name) = needed {
                     current_mock = Some(FixtureSession::start(
@@ -622,6 +636,7 @@ pub fn service_suite(
                         &script.name,
                         fixture_name,
                         &artefact_parent,
+                        &_lock,
                     )?);
                 }
             }
@@ -649,16 +664,31 @@ pub fn service_suite(
                 total,
                 &script.name,
             ));
+            let run_index = (cycle - 1)
+                .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX))
+                .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
+            _lock.set_progress(run_index, total_runs);
             let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
             let env_pairs = current_env_pairs(&current_mock);
-            let result = spawn_and_capture(
+            // Catch Interrupted so the loop can break cleanly and the
+            // post-loop mock-teardown still drains sæhrimnir gracefully.
+            // Other errors propagate as before.
+            let result = match spawn_and_capture(
                 artefacts,
                 &built,
                 &script.path,
                 project_root,
                 script.ceiling,
                 &env_pairs,
-            )?;
+                &_lock,
+            ) {
+                Ok(r) => r,
+                Err(DevError::Interrupted) => {
+                    interrupted = true;
+                    break 'cycles;
+                }
+                Err(e) => return Err(e),
+            };
             output::ratatoskr_msg(&format_suite_iter_line(
                 cycle, cycles, pos, total, &script.name, &result,
             ));
@@ -676,7 +706,11 @@ pub fn service_suite(
     }
 
     if let Some(prev) = current_mock.take() {
-        prev.shutdown();
+        prev.shutdown(&_lock);
+    }
+
+    if interrupted {
+        return Err(DevError::Interrupted);
     }
 
     output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
@@ -1077,6 +1111,7 @@ impl FixtureSession {
         owner_label: &str,
         fixture_name: &str,
         artefact_parent: &Path,
+        lock: &lockfile::LockGuard,
     ) -> Result<Self, DevError> {
         let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
             DevError::Config(format!(
@@ -1100,6 +1135,7 @@ impl FixtureSession {
         std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
         let mock = MockServer::spawn(&binary, &fixture_path, &mock_dir)?;
+        lock.set_mock_pid(mock.pid());
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();
         output::ratatoskr_msg(&format!(
@@ -1130,8 +1166,9 @@ impl FixtureSession {
     /// SIGTERM sæhrimnir and reap (with the standard 1.5s budget then
     /// SIGKILL escalation). Logs only if the shutdown went forceful so
     /// the happy path stays quiet.
-    fn shutdown(self) {
+    fn shutdown(self, lock: &lockfile::LockGuard) {
         let outcome = self.mock.shutdown();
+        lock.clear_mock_pid();
         if outcome.killed_after_budget {
             output::ratatoskr_msg(&format!(
                 "mock-server SIGKILLed (fixture={}, drain budget exceeded)",
