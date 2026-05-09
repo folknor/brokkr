@@ -250,15 +250,23 @@ pub fn run_captured_with_env_and_deadline(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
-    // Each captured child becomes its own process-group leader. Lets
-    // `--hard` / deadline kill / cooperative SIGTERM target the WHOLE
-    // group via `kill(-pgid, ...)`, sweeping up cargo's rustc, build.rs
-    // helpers, sæhrimnir's child workers, etc. Terminal Ctrl-C still
-    // reaches the captured child indirectly: brokkr's SigtermGuard
-    // catches SIGINT, sets `SHUTDOWN_REQUESTED`, the wait loop polls
-    // and forwards SIGTERM to the child PG.
+    // Only put the child in its own process group when the caller is
+    // actually tracking it (`on_spawn = Some`). Untracked subprocesses
+    // (e.g. `cargo metadata`, `cargo clippy`, test-sweep builds) need
+    // to stay in brokkr's PG so terminal Ctrl-C reaches them - if we
+    // detached them without publishing a PID in the lockfile and
+    // without a SigtermGuard polling the flag, ctrl-C would orphan
+    // them and `--hard` couldn't see them either. For TRACKED children,
+    // PG isolation lets `--hard` / deadline kill / cooperative SIGTERM
+    // target the whole group via `kill(-pgid, ...)`, sweeping cargo's
+    // rustc / sæhrimnir's child workers / etc.; terminal Ctrl-C
+    // bridges via SigtermGuard's SIGINT handler + the wait-loop's
+    // flag-poll forwarding SIGTERM to the child PG.
     use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
+    let tracked = on_spawn.is_some();
+    if tracked {
+        cmd.process_group(0);
+    }
 
     let mut child = cmd.spawn().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),
@@ -293,7 +301,7 @@ pub fn run_captured_with_env_and_deadline(
                     // then SIGKILL. The Err propagates as Interrupted so
                     // the orchestrator can run its mock-teardown path
                     // before main's scratch-cleanup.
-                    forward_sigterm_then_kill(&mut child);
+                    forward_sigterm_then_kill(&mut child, tracked);
                     interrupted = true;
                     break child.wait().map_err(|e| DevError::Subprocess {
                         program: program.to_owned(),
@@ -302,11 +310,16 @@ pub fn run_captured_with_env_and_deadline(
                     })?;
                 }
                 if start.elapsed() >= deadline {
-                    // SIGKILL the whole process group (child is its own
-                    // PG leader) so descendants (rustc / sæhrimnir
-                    // helpers / harness subprocesses) don't outlive the
-                    // deadline kill.
-                    crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+                    // SIGKILL: tracked children get a `kill(-pgid, ...)`
+                    // sweep so descendants (rustc / sæhrimnir helpers
+                    // / harness subprocesses) don't outlive the
+                    // deadline; untracked children share brokkr's PG,
+                    // so `child.kill()` (single-PID SIGKILL) is the
+                    // right hammer - sending to -pid would also signal
+                    // brokkr itself.
+                    if tracked {
+                        crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+                    }
                     drop(child.kill());
                     killed_on_deadline = true;
                     break child.wait().map_err(|e| DevError::Subprocess {
@@ -356,12 +369,21 @@ pub fn run_captured_with_env_and_deadline(
 /// honour it, then escalate to SIGKILL. Used by
 /// [`run_captured_with_env_and_deadline`] when `brokkr kill` reaches us
 /// mid-orchestration.
-fn forward_sigterm_then_kill(child: &mut std::process::Child) {
+fn forward_sigterm_then_kill(child: &mut std::process::Child, tracked: bool) {
     let pid = child.id();
-    // SIGTERM the whole process group (child is its own PG leader) so
-    // sæhrimnir / cargo / rustc helpers all get the cooperative
-    // shutdown signal. ESRCH if the group has already exited is benign.
-    crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
+    // Tracked children are PG-isolated: SIGTERM the group so sæhrimnir /
+    // cargo / rustc helpers get the cooperative shutdown too. Untracked
+    // children share brokkr's PG (so the same `kill -<pgid>` would also
+    // signal brokkr) - SIGTERM only the leader; if the user is doing
+    // ctrl-C from the terminal, the child already received SIGINT via
+    // the foreground PG anyway.
+    if tracked {
+        crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
+    } else {
+        // SAFETY: sending SIGTERM to our own child by PID; ESRCH is
+        // benign (handled by the wait loop below).
+        unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
+    }
     let term_sent = Instant::now();
     while term_sent.elapsed() < SIGTERM_FORWARD_BUDGET {
         match child.try_wait() {
@@ -370,9 +392,10 @@ fn forward_sigterm_then_kill(child: &mut std::process::Child) {
             Err(_) => break,
         }
     }
-    // Escalate to SIGKILL on the group; `child.kill()` only signals
-    // the leader.
-    crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGKILL).ok();
+    // SIGKILL escalation: PG for tracked, single-PID for untracked.
+    if tracked {
+        crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGKILL).ok();
+    }
     drop(child.kill());
 }
 
