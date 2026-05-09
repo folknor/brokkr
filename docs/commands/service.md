@@ -97,15 +97,17 @@ Mock artefacts (`stderr.log`, `readiness`) land under
 `.brokkr/ratatoskr/mock/<fixture-name>/` for `service-suite`.
 
 `brokkr lock` from another shell shows the live harness PID (and progress
-`run R/T,` for soak / suite cycles), plus the mock PID under a separate
-`mock PID …` line. `brokkr kill --hard` SIGKILLs both children alongside
-brokkr; `brokkr kill` (SIGTERM) is caught by a guard installed right
-after the lockfile and held through build + run + teardown - the captured
-runner (used for both `cargo build` and the harness binary) forwards
-SIGTERM to whichever child is current with a 1.5s budget, the orchestrator
-then drains the mock with the same budget, and `service-suite`'s loop
-catches `DevError::Interrupted` so the post-loop mock-teardown still runs
-gracefully.
+`run R/T,` when the run set has more than one entry - soak with `--repeat
+> 1`, or any `service-suite` invocation that runs multiple scripts /
+cycles), plus one `mock PID …` line per live sæhrimnir. `brokkr kill --hard`
+SIGKILLs every recorded child + mock alongside brokkr; `brokkr kill`
+(SIGTERM) is caught by a guard installed right after the lockfile and
+held through build + run + teardown - the captured runner (used for both
+`cargo build` and the harness binary) forwards SIGTERM to whichever child
+is current with a 1.5s budget, the orchestrator then drains all mocks
+with the same budget, and any error mid-loop (not just `Interrupted`)
+takes the same drain path before propagating, so a failing suite never
+falls through to `MockServer::Drop`'s SIGKILL fast-path.
 
 `service-test`: the mock spawns once before the soak begins and is
 reused across all `-N` iterations of the same script. Scripts without a
@@ -113,14 +115,22 @@ reused across all `-N` iterations of the same script. Scripts without a
 required for those.
 
 `service-suite`: scripts are run in discovery order (alphabetical, which
-naturally clusters cohorts under shared parent dirs), and a single
-sæhrimnir spawn is reused across consecutive scripts that share the same
-fixture string. Transitions between fixtures (or to a no-fixture script)
-shut the previous mock down with the standard graceful drain before
-spawning the next; the mock is also drained at end-of-cycle and on bail.
-The suite validates `[ratatoskr] mock_server_binary` and `fixtures_dir`
-up front when any selected script needs a fixture, so a missing config
-fails before the cargo build starts.
+naturally clusters cohorts under shared parent dirs). Fixture lifecycle
+is **suite-scoped**: each distinct fixture string spawns sæhrimnir at
+most once, lazily on first use, and the mock stays alive for every
+remaining script and cycle that shares that fixture - including
+no-fixture scripts running in the middle. Endpoint env vars
+(`RATATOSKR_TEST_*_ENDPOINT`) are injected only into scripts that
+declare that fixture; no-fixture scripts run as if no mock exists, even
+when other mocks are alive in the background. Fixture isolation is the
+script's responsibility (e.g. hitting the mock's `/test/<protocol>/reset`
+or `DELETE /test/.../submissions` at start-of-test); brokkr does not
+recycle the process between scripts. Every spawned mock is drained
+gracefully at suite end (SIGTERM with the standard 1.5s budget per mock
+before SIGKILL escalation), regardless of whether the loop succeeded or
+errored. The suite validates `[ratatoskr] mock_server_binary` and
+`fixtures_dir` up front when any selected script needs a fixture, so a
+missing config fails before the cargo build starts.
 
 ## `service-list`
 

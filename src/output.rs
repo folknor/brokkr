@@ -163,6 +163,20 @@ pub fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<Captured
     run_captured_with_env(program, args, cwd, &[])
 }
 
+/// As [`run_captured`], but invokes `on_spawn` with the child's PID
+/// immediately after `Command::spawn` returns. Lets callers (notably
+/// `cargo_build_observed`) publish the live PID into the lockfile so
+/// `brokkr kill --hard` during a long cargo build can SIGKILL cargo too.
+pub fn run_captured_observed(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    on_spawn: Option<&dyn Fn(u32)>,
+) -> Result<CapturedOutput, DevError> {
+    let dc = run_captured_with_env_and_deadline(program, args, cwd, &[], Duration::MAX, on_spawn)?;
+    Ok(dc.captured)
+}
+
 /// Run a subprocess with extra environment variables, capturing stdout and stderr.
 ///
 /// Variables are added on top of the inherited environment.

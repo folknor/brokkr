@@ -198,6 +198,41 @@ Currently `find_executable` infers the expected binary name from `BuildConfig.bi
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper - probably not worth the complexity.
 
+### Hung-script diagnostics on ceiling-kill (ratatoskr orchestration)
+
+When a ratatoskr orchestration command (`sync-smoke`, `sync-bench`,
+`service-test`, `service-suite`) hits its per-script `ceiling`, the
+captured runner SIGKILLs the harness child and reports `ceiling=<dur>`
+- and that's all. `brokkr check`'s `test_runner::capture_hung_test`
+(`src/test_runner.rs:520`) does considerably more: snapshots
+`/proc/<pid>/wchan`, `/proc/<pid>/stack`, walks the cargo process group
+to enumerate descendants, and emits a structured `TestHung` JSON event
+with the offending test name + elapsed + PIDs.
+
+Mirror that for the ratatoskr ceiling-kill path: before the deadline
+branch's `child.kill()`, snapshot wchan/stack for the harness PID and
+its descendants and write them under the artefacts dir (alongside
+`binary-stdout.log`). Cheap, brokkr-only, no upstream changes needed.
+~1 day. Open this when the next ratatoskr soak hangs in the wild and
+the artefacts dir gives us nothing to chase.
+
+### Per-test watchdog inside ratatoskr lua scripts (upstream)
+
+`brokkr check`'s 20s watchdog in `src/test_runner.rs:21` is per-libtest-
+test, not per-binary: libtest emits `test X started` markers, the
+watchdog resets the budget on each, and a single hung test is named
+explicitly. Ratatoskr's ceiling is per-script, so a 10-test lua script
+hanging on test 3 of 10 fails as the whole script with no clue which
+test stalled.
+
+Equivalent for ratatoskr would need the lua harness on the ratatoskr
+side to emit `BROKKR_TEST_BEGIN <name>` / `BROKKR_TEST_END` markers on
+stderr (or a sidechannel FIFO matching the marker FIFO already used by
+`measure`). Brokkr's orchestrator would then run a watchdog thread
+that resets its per-test budget on each marker. Requires changes in
+ratatoskr itself; track here so we don't lose the design when an
+upstream PR slot opens up.
+
 ### Sidecar `/proc` profiling for `service-test` / `service-suite`
 
 Brokkr's sidecar samples `/proc/<pid>/{stat,io,status}` at 100ms for measured

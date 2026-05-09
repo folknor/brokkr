@@ -66,5 +66,11 @@ impl SigtermGuard {
 impl Drop for SigtermGuard {
     fn drop(&mut self) {
         set_sigterm(libc::SIG_DFL);
+        // Reset the flag so a captured subprocess invoked AFTER this
+        // guard's scope (e.g. in main's cleanup path) doesn't see a
+        // sticky `true` left over from a SIGTERM that already fired and
+        // was handled. Without this, `output::run_captured_with_env`'s
+        // flag-poll loop would spuriously SIGTERM unrelated children.
+        SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
     }
 }

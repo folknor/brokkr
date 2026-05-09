@@ -1448,12 +1448,14 @@ fn cmd_lock() -> Result<(), DevError> {
         output::lock_msg(&format!("{prefix}child PID {child_pid} {summary}"));
     }
 
-    // Line 3b: auxiliary mock-server stats, if a long-running mock is up
-    // alongside the workload child (sync-smoke / service-test / service-suite).
-    if let Some(mock_pid) = info.mock_pid
-        && let Some(summary) = lockfile::process_summary(mock_pid)
-    {
-        output::lock_msg(&format!("mock PID {mock_pid} {summary}"));
+    // Lines 3b...: one per auxiliary mock-server (service-suite keeps
+    // one mock per distinct fixture alive for the whole suite, so this
+    // can be more than one line; sync-smoke / sync-bench / service-test
+    // emit at most one).
+    for mock_pid in &info.mock_pids {
+        if let Some(summary) = lockfile::process_summary(*mock_pid) {
+            output::lock_msg(&format!("mock PID {mock_pid} {summary}"));
+        }
     }
 
     // Line 4: most recent sidecar marker, if any.
@@ -1533,8 +1535,8 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
                 if child_sent { "sent" } else { "not running" },
             ));
         }
-        if let Some(mock_pid) = info.mock_pid {
-            let mock_sent = send_signal(mock_pid, libc::SIGKILL);
+        for mock_pid in &info.mock_pids {
+            let mock_sent = send_signal(*mock_pid, libc::SIGKILL);
             output::lock_msg(&format!(
                 "SIGKILL mock PID {mock_pid}: {}",
                 if mock_sent { "sent" } else { "not running" },

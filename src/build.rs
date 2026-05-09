@@ -166,13 +166,26 @@ fn extract_string<'a>(val: &'a serde_json::Value, key: &str) -> Result<&'a str, 
 ///
 /// Parses `--message-format=json` output to find the `"executable"` field.
 pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<PathBuf, DevError> {
+    cargo_build_observed(config, project_root, None)
+}
+
+/// As [`cargo_build`], but takes an `on_spawn` callback that fires with
+/// the cargo PID. Used by ratatoskr orchestration to publish the cargo
+/// PID into the lockfile so `brokkr kill --hard` during the build phase
+/// SIGKILLs cargo alongside brokkr; non-orchestration callers use the
+/// simpler [`cargo_build`] wrapper.
+pub fn cargo_build_observed(
+    config: &BuildConfig,
+    project_root: &Path,
+    on_spawn: Option<&dyn Fn(u32)>,
+) -> Result<PathBuf, DevError> {
     let args = build_args(config);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::build_msg(&format!("cargo {}", arg_refs.join(" ")));
 
     let start = Instant::now();
-    let captured = output::run_captured("cargo", &arg_refs, project_root)?;
+    let captured = output::run_captured_observed("cargo", &arg_refs, project_root, on_spawn)?;
     let elapsed = start.elapsed();
 
     if !captured.status.success() {

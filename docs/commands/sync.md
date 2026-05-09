@@ -26,6 +26,11 @@ the child, grant 1.5s, escalate to SIGKILL. If sæhrimnir exits before writing
 the sentinel (fixture-validation error, port-in-use, etc.) the spawn-side
 error surfaces with the captured stderr already on the user's terminal.
 
+The signal handler is installed BEFORE sæhrimnir spawns (not after readiness
+returns), and the readiness wait polls the same flag, so a `brokkr kill`
+arriving during the readiness window aborts cleanly with the child reaped
+- it can't orphan sæhrimnir.
+
 Auto-build of sæhrimnir is not yet wired - the binary must already exist at
 `mock_server_binary`.
 
@@ -52,9 +57,11 @@ is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail,
 `host:port` for imap/smtp).
 
 During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
-goes into the auxiliary `mock_pid` slot, the harness binary into `child_pid`
-- so `brokkr lock` from another shell shows live RSS/CPU for both, and
-`brokkr kill --hard` SIGKILLs both. `brokkr kill` (cooperative SIGTERM) is
+joins the auxiliary `mock_pids` set, the harness binary lands in
+`child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
+both, and `brokkr kill --hard` SIGKILLs every entry. After the harness
+exits, `child_pid` is cleared so a stale PID can't be SIGKILLed by
+`--hard` once the kernel has recycled it. `brokkr kill` (cooperative SIGTERM) is
 caught by a guard installed right after the lockfile and held through
 build + run + teardown; the captured runner (used for both `cargo build`
 and the harness binary) polls the shutdown flag every 50ms, forwards
@@ -92,3 +99,15 @@ are skipped. Storage is via the standard `BenchHarness`, so `brokkr results
 sidecar provenance (RunInfo) is omitted in v0 because the helper that builds
 it is private to BenchHarness today. `--force` allows recording on a dirty
 git tree (rows land under the `dirty` alias).
+
+Lockfile / kill semantics: sæhrimnir joins the auxiliary `mock_pids` set
+for the lifetime of the bench, and each iteration's harness PID rotates
+through `child_pid` (cleared between iterations so PID-recycling can't
+trip `--hard`), so `brokkr lock` shows both and `brokkr kill --hard`
+SIGKILLs every entry. Cooperative `brokkr kill` (SIGTERM) is handled only by the
+sidecar's own `SigtermGuard` around each measured iteration - no outer
+guard is installed at sync-bench entry because nesting would clobber the
+sidecar's `Drop`. SIGTERM during cargo build, sæhrimnir spawn, or the gap
+between iterations therefore falls through to the default terminate
+action (brokkr dies; mock and any in-flight harness child are reaped via
+their `Drop` impls).

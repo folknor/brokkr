@@ -1,5 +1,6 @@
 //! Top-level `[ratatoskr]` brokkr commands.
 
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -135,7 +136,14 @@ pub fn service_test(
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
-    let built = build::build_for_harness(project_root, &dev_config.check, harness_cfg, debug)?;
+    let built = build::build_for_harness(
+        project_root,
+        &dev_config.check,
+        harness_cfg,
+        debug,
+        Some(&|pid| _lock.set_child_pid(pid)),
+    )?;
+    _lock.clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -333,6 +341,14 @@ fn spawn_and_capture(
         Some(&|pid| lock.set_child_pid(pid)),
     ) {
         Ok(c) => c,
+        // `Interrupted` means the child spawned and ran fine until
+        // `brokkr kill` reached us - no breadcrumb to write, just clear
+        // the live PID and propagate.
+        Err(DevError::Interrupted) => {
+            lock.clear_child_pid();
+            artefacts.finalize_failure();
+            return Err(DevError::Interrupted);
+        }
         Err(e) => {
             fs::write(
                 artefacts.path().join("spawn-error.txt"),
@@ -343,6 +359,10 @@ fn spawn_and_capture(
             return Err(e);
         }
     };
+    // The child has reaped; clear the recorded PID so `brokkr kill --hard`
+    // arriving in the gap before the next iteration doesn't SIGKILL a
+    // PID-recycled-to-something-else.
+    lock.clear_child_pid();
 
     let killed_on_deadline = deadline_capture.killed_on_deadline;
     let captured = deadline_capture.captured;
@@ -587,7 +607,14 @@ pub fn service_suite(
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
-    let built = build::build_for_harness(project_root, &dev_config.check, harness_cfg, debug)?;
+    let built = build::build_for_harness(
+        project_root,
+        &dev_config.check,
+        harness_cfg,
+        debug,
+        Some(&|pid| _lock.set_child_pid(pid)),
+    )?;
+    _lock.clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -606,112 +633,115 @@ pub fn service_suite(
     let total_runs = u32::try_from(total).unwrap_or(u32::MAX).saturating_mul(cycles);
     let mut results: Vec<CycleRun> = Vec::with_capacity(total * cycles as usize);
     let mut bailed = false;
-    // Keyed by fixture name; transitions into a different fixture (or no
-    // fixture) shut the previous mock down before spawning the next.
-    // Discover yields scripts in stable alphabetical order, so cohorts
-    // grouped by parent directory naturally cluster on the same fixture.
-    let mut current_mock: Option<FixtureSession> = None;
-    let mut interrupted = false;
-    'cycles: for cycle in 1..=cycles {
-        for (idx, script) in runnable.iter().enumerate() {
-            let pos = idx + 1;
+    // Suite-scoped fixture reuse: one sæhrimnir per distinct fixture
+    // declared by any selected script, kept alive for every cycle. A
+    // no-fixture script in the middle of a fixture-X run leaves the
+    // fixture-X mock alone but receives NO endpoint env vars (its
+    // contract is "act as if no fixture exists"). Fixture isolation is
+    // a per-script concern - scripts wanting a clean slate hit their
+    // own /test/<protocol>/reset endpoint at start-of-test.
+    let mut mocks: HashMap<String, FixtureSession> = HashMap::new();
 
-            // Fixture transition: if the next script needs a different
-            // mock (or none), drain the running one first. The new
-            // fixture (if any) gets spawned right after.
-            let needed = script.fixture.as_deref();
-            let same = match (&current_mock, needed) {
-                (Some(s), Some(n)) => s.fixture_name() == n,
-                (None, None) => true,
-                _ => false,
-            };
-            if !same {
-                if let Some(prev) = current_mock.take() {
-                    prev.shutdown(&_lock);
-                }
-                if let Some(fixture_name) = needed {
-                    current_mock = Some(FixtureSession::start(
+    // Drives the inner loop's exit shape: Ok runs to completion, Err
+    // breaks out and gets propagated AFTER mocks are drained gracefully.
+    // Without this, a non-Interrupted error from spawn_and_capture would
+    // skip the post-loop drain, leaving FixtureSession::Drop to take
+    // MockServer's hard SIGKILL path - contrary to the graceful contract.
+    let loop_result: Result<(), DevError> = (|| {
+        'cycles: for cycle in 1..=cycles {
+            for (idx, script) in runnable.iter().enumerate() {
+                let pos = idx + 1;
+
+                // Lazy-spawn the fixture for this script if it declares
+                // one and we don't already have it. Mocks live until the
+                // end of the suite.
+                if let Some(fixture_name) = script.fixture.as_deref()
+                    && !mocks.contains_key(fixture_name)
+                {
+                    let session = FixtureSession::start(
                         project_root,
                         dev_config,
                         &script.name,
                         fixture_name,
                         &artefact_parent,
                         &_lock,
-                    )?);
+                    )?;
+                    mocks.insert(fixture_name.to_owned(), session);
                 }
-            }
 
-            // ArtefactDir test_id rejects `/` in the name; nested scripts
-            // like `t1/journal_replays` collapse to the file stem for the
-            // artefact dir while keeping the full relative name in output.
-            // Two scripts with the same stem under different parents would
-            // share an artefact-dir prefix and just allocate run-(N+1)/ -
-            // not ideal, but mirrors how `service-test` handles arbitrary
-            // script paths today.
-            let test_id = script
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&script.name)
-                .to_owned();
-            let keep_on_success =
-                keep_artefacts || script.preserve_data_dir == PreserveDataDir::OnSuccessToo;
+                // ArtefactDir test_id rejects `/` in the name; nested scripts
+                // like `t1/journal_replays` collapse to the file stem for the
+                // artefact dir while keeping the full relative name in output.
+                // Two scripts with the same stem under different parents would
+                // share an artefact-dir prefix and just allocate run-(N+1)/ -
+                // not ideal, but mirrors how `service-test` handles arbitrary
+                // script paths today.
+                let test_id = script
+                    .path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&script.name)
+                    .to_owned();
+                let keep_on_success =
+                    keep_artefacts || script.preserve_data_dir == PreserveDataDir::OnSuccessToo;
 
-            output::ratatoskr_msg(&format_suite_running_line(
-                cycle,
-                cycles,
-                pos,
-                total,
-                &script.name,
-            ));
-            let run_index = (cycle - 1)
-                .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX))
-                .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
-            _lock.set_progress(run_index, total_runs);
-            let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
-            let env_pairs = current_env_pairs(&current_mock);
-            // Catch Interrupted so the loop can break cleanly and the
-            // post-loop mock-teardown still drains sæhrimnir gracefully.
-            // Other errors propagate as before.
-            let result = match spawn_and_capture(
-                artefacts,
-                &built,
-                &script.path,
-                project_root,
-                script.ceiling,
-                &env_pairs,
-                &_lock,
-            ) {
-                Ok(r) => r,
-                Err(DevError::Interrupted) => {
-                    interrupted = true;
+                output::ratatoskr_msg(&format_suite_running_line(
+                    cycle, cycles, pos, total, &script.name,
+                ));
+                let run_index = (cycle - 1)
+                    .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX))
+                    .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
+                _lock.set_progress(run_index, total_runs);
+                let artefacts =
+                    ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
+                // Inject endpoint env vars only if THIS script declares a
+                // fixture. No-fixture scripts run as if no mock exists,
+                // even when other scripts in the suite have mocks alive.
+                let env_pairs = script
+                    .fixture
+                    .as_deref()
+                    .and_then(|name| mocks.get(name))
+                    .map(FixtureSession::env_pair_refs)
+                    .unwrap_or_default();
+                let result = spawn_and_capture(
+                    artefacts,
+                    &built,
+                    &script.path,
+                    project_root,
+                    script.ceiling,
+                    &env_pairs,
+                    &_lock,
+                )?;
+                output::ratatoskr_msg(&format_suite_iter_line(
+                    cycle, cycles, pos, total, &script.name, &result,
+                ));
+                let stop = !result.succeeded && !keep_going;
+                results.push(CycleRun {
+                    cycle,
+                    name: script.name.clone(),
+                    result,
+                });
+                if stop {
+                    bailed = true;
                     break 'cycles;
                 }
-                Err(e) => return Err(e),
-            };
-            output::ratatoskr_msg(&format_suite_iter_line(
-                cycle, cycles, pos, total, &script.name, &result,
-            ));
-            let stop = !result.succeeded && !keep_going;
-            results.push(CycleRun {
-                cycle,
-                name: script.name.clone(),
-                result,
-            });
-            if stop {
-                bailed = true;
-                break 'cycles;
             }
         }
-    }
+        Ok(())
+    })();
 
-    if let Some(prev) = current_mock.take() {
-        prev.shutdown(&_lock);
+    // Drain every fixture gracefully, regardless of whether the loop
+    // succeeded or errored. Each `shutdown` SIGTERMs sæhrimnir with the
+    // standard 1.5s budget; the alternative (FixtureSession::Drop on
+    // error unwind) is the SIGKILL fast-path. We do this BEFORE
+    // propagating the error so a failing suite doesn't leave the user
+    // with an SIGKILLed mock and uninformative artefacts.
+    for (_, session) in mocks.drain() {
+        session.shutdown(&_lock);
     }
+    _lock.clear_mock_pids();
 
-    if interrupted {
-        return Err(DevError::Interrupted);
-    }
+    loop_result?;
 
     output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
 
@@ -1135,7 +1165,7 @@ impl FixtureSession {
         std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
         let mock = MockServer::spawn(&binary, &fixture_path, &mock_dir)?;
-        lock.set_mock_pid(mock.pid());
+        lock.add_mock_pid(mock.pid());
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();
         output::ratatoskr_msg(&format!(
@@ -1159,16 +1189,13 @@ impl FixtureSession {
             .collect()
     }
 
-    fn fixture_name(&self) -> &str {
-        &self.fixture_name
-    }
-
     /// SIGTERM sæhrimnir and reap (with the standard 1.5s budget then
     /// SIGKILL escalation). Logs only if the shutdown went forceful so
     /// the happy path stays quiet.
     fn shutdown(self, lock: &lockfile::LockGuard) {
+        let pid = self.mock.pid();
         let outcome = self.mock.shutdown();
-        lock.clear_mock_pid();
+        lock.remove_mock_pid(pid);
         if outcome.killed_after_budget {
             output::ratatoskr_msg(&format!(
                 "mock-server SIGKILLed (fixture={}, drain budget exceeded)",
@@ -1192,16 +1219,6 @@ fn safe_dir_name(s: &str) -> String {
             }
         })
         .collect()
-}
-
-/// Borrowed env-pair view over an `Option<&FixtureSession>`. Used by the
-/// `service_suite` loop where the active mock changes from script to
-/// script.
-fn current_env_pairs(slot: &Option<FixtureSession>) -> Vec<(&str, &str)> {
-    match slot {
-        Some(s) => s.env_pair_refs(),
-        None => Vec::new(),
-    }
 }
 
 #[cfg(test)]

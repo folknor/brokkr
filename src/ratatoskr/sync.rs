@@ -199,9 +199,12 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         command: "sync-smoke",
         project_root: &project_root_str,
     })?;
-    // Cooperative SIGTERM for `brokkr kill`. Installed before the cargo
-    // build so the captured runner's flag-poll covers the build phase
-    // too, then stays in scope through orchestrate + mock teardown.
+    // Cooperative SIGTERM for `brokkr kill`. Installed right after the
+    // lock so every captured subprocess from here on - cargo build,
+    // sæhrimnir spawn (no flag-poll, but Drop will hard-kill on unwind),
+    // the harness binary - sees the flag-poll path in
+    // `output::run_captured_with_env_and_deadline`. Drops at function
+    // end, before `_lock`.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let built = build::build_for_harness(
@@ -209,7 +212,9 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         &req.dev_config.check,
         harness_cfg,
         req.debug,
+        Some(&|pid| _lock.set_child_pid(pid)),
     )?;
+    _lock.clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -319,8 +324,12 @@ fn orchestrate(
     // Track the mock under the auxiliary slot so `brokkr kill --hard`
     // takes both processes down even after the harness child overwrites
     // `child_pid`.
-    lock.set_mock_pid(mock.pid());
-    lock.set_child_pid(mock.pid());
+    lock.add_mock_pid(mock.pid());
+    // Don't seed `child_pid` with the mock's PID - the captured runner's
+    // `on_spawn` callback will publish the harness PID seconds from now,
+    // and a transient `child_pid == mock_pid` window means a `--hard`
+    // landing in that gap would SIGKILL the mock twice (once via
+    // `mock_pid`, once via `child_pid`) and the harness not at all.
     timings.mock_ready = Some(mock.ready_elapsed());
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
 
@@ -361,7 +370,10 @@ fn orchestrate(
 
     // Whatever the harness did, sæhrimnir gets torn down next.
     let mock_outcome = mock.shutdown();
-    lock.clear_mock_pid();
+    // sync-smoke has at most one mock alive at a time; clear all is the
+    // honest call after that single mock drains.
+    lock.clear_mock_pids();
+    lock.clear_child_pid();
     timings.mock_shutdown = Some(mock_outcome.shutdown_elapsed);
 
     let dc = deadline_capture?;
@@ -567,7 +579,9 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         &req.dev_config.check,
         harness_cfg,
         req.debug,
+        Some(&|pid| harness.lock().set_child_pid(pid)),
     )?;
+    harness.lock().clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -647,6 +661,15 @@ fn bench_loop(
     fixture_name: &str,
 ) -> Result<(), DevError> {
     let mock = MockServer::spawn(mock_binary, fixture_path, mock_dir)?;
+    // Track sæhrimnir under the auxiliary slot so `brokkr kill --hard`
+    // takes both processes down (the inner sidecar rotates `child_pid`
+    // through harness PIDs each iteration). No outer `SigtermGuard` here
+    // because BenchHarness's sidecar installs its own around the measured
+    // window - a nested install would clobber the outer's `Drop` and
+    // restore SIG_DFL early. Cooperative SIGTERM during build / mock
+    // spawn / between iterations therefore still falls through to the
+    // default terminate action; see TODO.md if we ever extend coverage.
+    harness.lock().add_mock_pid(mock.pid());
     output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
 
@@ -695,6 +718,9 @@ fn bench_loop(
             harness.lock().set_child_pid(pid);
 
             let result = sidecar::run_sidecar(child, &mut fifo, i, start, None);
+            // Iteration's child has reaped; clear so a stale PID can't
+            // be SIGKILLed by `--hard` in the gap before the next iter.
+            harness.lock().clear_child_pid();
 
             // Persist each iter's stdout/stderr so a later FAIL can
             // be reproduced without re-running. summary.json is
@@ -758,6 +784,7 @@ fn bench_loop(
 
     drop(fifo);
     let mock_outcome = mock.shutdown();
+    harness.lock().clear_mock_pids();
     output::ratatoskr_msg(&format!(
         "mock shutdown in {}",
         format_secs(mock_outcome.shutdown_elapsed)

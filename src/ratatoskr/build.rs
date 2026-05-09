@@ -49,6 +49,7 @@ pub fn build_for_harness(
     check_entries: &[CheckEntry],
     harness_cfg: &HarnessConfig,
     debug: bool,
+    on_spawn: Option<&dyn Fn(u32)>,
 ) -> Result<HarnessBuild, DevError> {
     // The cross-check in src/config.rs already verified that the named
     // sweep exists and that `binary` is in its `build_packages`. The
@@ -82,7 +83,7 @@ pub fn build_for_harness(
             default_features: !entry.no_default_features,
             profile: profile_name,
         };
-        let path = build::cargo_build(&cfg, project_root)?;
+        let path = build::cargo_build_observed(&cfg, project_root, on_spawn)?;
         if pkg == &harness_cfg.binary {
             binary_path = Some(path);
         }
@@ -179,7 +180,7 @@ mod tests {
             sweep: "missing".into(),
             binary: "app".into(),
         };
-        let err = build_for_harness(Path::new("/"), &checks, &harness, false)
+        let err = build_for_harness(Path::new("/"), &checks, &harness, false, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("'missing'"), "got: {err}");
