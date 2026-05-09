@@ -402,7 +402,7 @@ pub fn require_path(
 ) -> Result<PathBuf, DevError> {
     let raw = value.as_ref().ok_or_else(|| {
         DevError::Config(format!(
-            "mock-serve: [ratatoskr] {field_name} is not set in brokkr.toml. \
+            "[ratatoskr] {field_name} is not set in brokkr.toml. \
              Required to locate sæhrimnir's binary and fixtures."
         ))
     })?;
@@ -415,22 +415,37 @@ pub fn require_path(
 
 /// Pick the right file for a fixture name. `.toml` and `.lua` are both
 /// valid sæhrimnir fixture formats; the loader dispatches by extension.
-/// If both exist with the same stem the user almost certainly has a
-/// stale copy in the wrong format - refuse rather than silently picking
-/// one.
+/// If the name already carries one of those extensions, take it
+/// literally - that's the disambiguation hatch when both
+/// `<stem>.toml` and `<stem>.lua` coexist. Bare stems pick whichever
+/// file exists, and refuse if both do (the user almost certainly has a
+/// stale copy in the wrong format).
 pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevError> {
+    if name.ends_with(".toml") || name.ends_with(".lua") {
+        let path = fixtures_dir.join(name);
+        return if path.exists() {
+            Ok(path)
+        } else {
+            Err(DevError::Config(format!(
+                "fixture {name:?} not found - looked for {}.",
+                path.display()
+            )))
+        };
+    }
     let toml_path = fixtures_dir.join(format!("{name}.toml"));
     let lua_path = fixtures_dir.join(format!("{name}.lua"));
     match (toml_path.exists(), lua_path.exists()) {
         (true, true) => Err(DevError::Config(format!(
-            "mock-serve: fixture {name:?} ambiguous - both {} and {} exist.",
+            "fixture {name:?} ambiguous - both {} and {} exist. \
+             Disambiguate by writing the fixture name with its extension \
+             (e.g. {name:?}.toml or {name:?}.lua).",
             toml_path.display(),
             lua_path.display()
         ))),
         (true, false) => Ok(toml_path),
         (false, true) => Ok(lua_path),
         (false, false) => Err(DevError::Config(format!(
-            "mock-serve: fixture {name:?} not found - looked for {} and {}.",
+            "fixture {name:?} not found - looked for {} and {}.",
             toml_path.display(),
             lua_path.display()
         ))),
@@ -683,6 +698,31 @@ mod tests {
         std::fs::write(dir.join("gamma.lua"), "").unwrap();
         let err = resolve_fixture(&dir, "gamma").unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_fixture_explicit_extension_disambiguates() {
+        let dir = fixture_tmpdir("explicit_ext");
+        std::fs::write(dir.join("delta.toml"), "").unwrap();
+        std::fs::write(dir.join("delta.lua"), "").unwrap();
+        assert_eq!(
+            resolve_fixture(&dir, "delta.toml").unwrap(),
+            dir.join("delta.toml")
+        );
+        assert_eq!(
+            resolve_fixture(&dir, "delta.lua").unwrap(),
+            dir.join("delta.lua")
+        );
+    }
+
+    #[test]
+    fn resolve_fixture_explicit_extension_missing_errors() {
+        let dir = fixture_tmpdir("explicit_ext_missing");
+        std::fs::write(dir.join("epsilon.toml"), "").unwrap();
+        let err = resolve_fixture(&dir, "epsilon.lua").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not found"), "got: {msg}");
+        assert!(msg.contains("epsilon.lua"), "got: {msg}");
     }
 
     #[test]

@@ -1736,7 +1736,8 @@ Examples:
     MockServe {
         /// Fixture name. Resolves to `<fixtures_dir>/<NAME>.toml` or
         /// `<fixtures_dir>/<NAME>.lua` (whichever exists; both is an
-        /// error).
+        /// error). To disambiguate when both exist, pass the name with
+        /// its extension (e.g. `--fixture jmap-small.lua`).
         #[arg(long, value_name = "NAME")]
         fixture: String,
     },
