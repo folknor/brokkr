@@ -213,8 +213,8 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         harness_cfg,
         req.debug,
         Some(&|pid| _lock.set_child_pid(pid)),
+        Some(&|| _lock.clear_child_pid()),
     )?;
-    _lock.clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -320,11 +320,16 @@ fn orchestrate(
     timings: &mut PhaseTimings,
     lock: &lockfile::LockGuard,
 ) -> Result<(), DevError> {
-    let mock = MockServer::spawn(mock_binary, fixture_path, mock_dir)?;
-    // Track the mock under the auxiliary slot so `brokkr kill --hard`
-    // takes both processes down even after the harness child overwrites
-    // `child_pid`.
-    lock.add_mock_pid(mock.pid());
+    // Publish the mock PID from INSIDE spawn_observed - before the
+    // readiness wait - so a `brokkr kill --hard` landing during
+    // sæhrimnir startup finds the mock and SIGKILLs it instead of
+    // orphaning it.
+    let mock = MockServer::spawn_observed(
+        mock_binary,
+        fixture_path,
+        mock_dir,
+        Some(&|pid| lock.add_mock_pid(pid)),
+    )?;
     // Don't seed `child_pid` with the mock's PID - the captured runner's
     // `on_spawn` callback will publish the harness PID seconds from now,
     // and a transient `child_pid == mock_pid` window means a `--hard`
@@ -580,8 +585,8 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         harness_cfg,
         req.debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
+        Some(&|| harness.lock().clear_child_pid()),
     )?;
-    harness.lock().clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -660,16 +665,20 @@ fn bench_loop(
     harness: &BenchHarness,
     fixture_name: &str,
 ) -> Result<(), DevError> {
-    let mock = MockServer::spawn(mock_binary, fixture_path, mock_dir)?;
-    // Track sæhrimnir under the auxiliary slot so `brokkr kill --hard`
-    // takes both processes down (the inner sidecar rotates `child_pid`
-    // through harness PIDs each iteration). No outer `SigtermGuard` here
-    // because BenchHarness's sidecar installs its own around the measured
-    // window - a nested install would clobber the outer's `Drop` and
-    // restore SIG_DFL early. Cooperative SIGTERM during build / mock
-    // spawn / between iterations therefore still falls through to the
-    // default terminate action; see TODO.md if we ever extend coverage.
-    harness.lock().add_mock_pid(mock.pid());
+    // PID published from inside spawn_observed - before readiness wait
+    // - so a `brokkr kill --hard` arriving during startup finds it.
+    // No outer `SigtermGuard` here because BenchHarness's sidecar
+    // installs its own around the measured window - a nested install
+    // would clobber the outer's `Drop` and restore SIG_DFL early.
+    // Cooperative SIGTERM during build / between iterations therefore
+    // still falls through to the default terminate action; see TODO.md
+    // if we ever extend coverage.
+    let mock = MockServer::spawn_observed(
+        mock_binary,
+        fixture_path,
+        mock_dir,
+        Some(&|pid| harness.lock().add_mock_pid(pid)),
+    )?;
     output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
 

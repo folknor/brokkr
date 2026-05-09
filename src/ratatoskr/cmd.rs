@@ -142,8 +142,8 @@ pub fn service_test(
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
+        Some(&|| _lock.clear_child_pid()),
     )?;
-    _lock.clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -613,8 +613,8 @@ pub fn service_suite(
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
+        Some(&|| _lock.clear_child_pid()),
     )?;
-    _lock.clear_child_pid();
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
         built.sweep_label,
@@ -1164,8 +1164,14 @@ impl FixtureSession {
         let mock_dir = artefact_parent.join("mock").join(safe_dir_name(fixture_name));
         std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
-        let mock = MockServer::spawn(&binary, &fixture_path, &mock_dir)?;
-        lock.add_mock_pid(mock.pid());
+        // PID published from inside spawn_observed - before readiness
+        // wait - so a `--hard` landing during sæhrimnir startup finds it.
+        let mock = MockServer::spawn_observed(
+            &binary,
+            &fixture_path,
+            &mock_dir,
+            Some(&|pid| lock.add_mock_pid(pid)),
+        )?;
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();
         output::ratatoskr_msg(&format!(

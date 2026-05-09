@@ -172,10 +172,17 @@ impl MockServer {
     /// child exits / the readiness budget expires; on those failure
     /// paths, the child is reaped before the error returns so the
     /// caller never sees a zombie.
-    pub fn spawn(
+    ///
+    /// `on_spawn` is invoked with the child's PID immediately after
+    /// `Command::spawn` returns - BEFORE the readiness wait. Lets the
+    /// orchestrator publish the mock PID into the lockfile in time for
+    /// `brokkr kill --hard` arriving during the readiness window to
+    /// find it.
+    pub fn spawn_observed(
         binary: &Path,
         fixture_path: &Path,
         mock_dir: &Path,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<Self, DevError> {
         let readiness = mock_dir.join("readiness");
         if readiness.exists() {
@@ -204,12 +211,18 @@ impl MockServer {
                 stderr: format!("failed to spawn: {e}"),
             })?;
         let pid = child.id();
+        if let Some(cb) = on_spawn {
+            cb(pid);
+        }
 
         let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
             Ok(ep) => ep,
             Err(e) => {
+                // Bounded shutdown: SIGTERM, give SHUTDOWN_BUDGET, then
+                // SIGKILL. A wedged sæhrimnir that ignores SIGTERM can't
+                // make the readiness-failure path hang forever.
                 let _term = proc_helpers::send_signal(pid, libc::SIGTERM);
-                let _reaped = child.wait();
+                let _outcome = wait_with_deadline(&mut child, pid, SHUTDOWN_BUDGET);
                 return Err(e);
             }
         };
@@ -395,10 +408,12 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     {
         Ok(ep) => ep,
         Err(e) => {
-            // Best-effort cleanup if sæhrimnir spawned but never wrote
-            // the sentinel - don't leave it running in the background.
+            // Bounded cleanup if sæhrimnir spawned but never wrote the
+            // sentinel - don't leave it running, and don't let a wedged
+            // child make `brokkr kill` hang here either. SIGTERM, give
+            // SHUTDOWN_BUDGET, then SIGKILL via wait_with_deadline.
             let _term = proc_helpers::send_signal(child_pid, libc::SIGTERM);
-            let _reaped = child.wait();
+            let _outcome = wait_with_deadline(&mut child, child_pid, SHUTDOWN_BUDGET);
             return Err(e);
         }
     };

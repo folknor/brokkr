@@ -50,6 +50,7 @@ pub fn build_for_harness(
     harness_cfg: &HarnessConfig,
     debug: bool,
     on_spawn: Option<&dyn Fn(u32)>,
+    on_done: Option<&dyn Fn()>,
 ) -> Result<HarnessBuild, DevError> {
     // The cross-check in src/config.rs already verified that the named
     // sweep exists and that `binary` is in its `build_packages`. The
@@ -83,7 +84,17 @@ pub fn build_for_harness(
             default_features: !entry.no_default_features,
             profile: profile_name,
         };
-        let path = build::cargo_build_observed(&cfg, project_root, on_spawn)?;
+        // Fire on_done after EACH cargo invocation - both success and
+        // failure - so the orchestrator's `child_pid` slot doesn't keep
+        // pointing at a now-reaped cargo PID between package builds (or
+        // after a build error). Without this, a multi-package sweep
+        // leaves a stale PID for `brokkr kill --hard` to potentially
+        // SIGKILL after the kernel recycles it.
+        let result = build::cargo_build_observed(&cfg, project_root, on_spawn);
+        if let Some(cb) = on_done {
+            cb();
+        }
+        let path = result?;
         if pkg == &harness_cfg.binary {
             binary_path = Some(path);
         }
@@ -180,7 +191,7 @@ mod tests {
             sweep: "missing".into(),
             binary: "app".into(),
         };
-        let err = build_for_harness(Path::new("/"), &checks, &harness, false, None)
+        let err = build_for_harness(Path::new("/"), &checks, &harness, false, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("'missing'"), "got: {err}");
