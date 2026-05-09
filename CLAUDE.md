@@ -11,11 +11,30 @@ Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs,
 - Never read or write from /tmp. All data lives in the project.
 - Prefer `brokkr check` over `cargo build` / `cargo clippy` / `cargo test`.
 
+## Subagents
+Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
+
 ## How it works
 
-Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
+Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
 
 Install: `cargo install --path ~/Programs/brokkr`
+
+## Detailed docs
+
+These files are not auto-loaded - read them on demand based on what the user asks. All `./docs/*` files must be 200 lines or less. Don't `wc` them before reading - just Read them.
+
+- `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, datasets, `[[check]]`, `[test]` profiles, `[litehtml]`, or `[ratatoskr]` blocks. Also covers CLI flags that select between configured variants/seqs/snapshots (`--variant`, `--osc-seq`, `--tiles`, `--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`, `--compression`, `--locations-on-ways`).
+- `docs/commands/check.md` - **read when** working on `brokkr check` or `brokkr test`, the gremlins/clippy/test pipeline, sweep selection, profile resolution, libtest filters, or the `BROKKR_TEST_BIN_DIR` contract.
+- `docs/commands/visual.md` - **read when** the project is litehtml-rs or sluggrs and the user asks about `visual`, `list`, `approve`, `report`, `visual-status`, `prepare`, `html-extract`, or `outline`.
+- `docs/commands/sync.md` - **read when** the project is ratatoskr and the user asks about `mock-serve`, `sync-list`, `sync-smoke`, or `sync-bench`. Covers sæhrimnir orchestration, readiness sentinel parsing, endpoint env-var export, marker FIFO usage.
+- `docs/commands/service.md` - **read when** the project is ratatoskr and the user asks about `service-test`, `service-suite`, or `service-list`. Covers lua VM, frontmatter, ceiling, artefact layout.
+- `docs/commands/measure.md` - **read when** the user asks about `--bench`, `--hotpath`, `--alloc`, `--stop`, the sidecar profiler, the marker FIFO, `BenchHarness`, hotpath JSON contract, or `brokkr sidecar` queries.
+- `docs/projects/pbfhogg.md` - **read when** working on pbfhogg-specific commands, verify subcommands, snapshot graph, OSC parser, io_uring/direct-io constraints, or the download command.
+- `docs/projects/elivagar.md` - **read when** working on elivagar-specific commands.
+- `docs/projects/nidhogg.md` - **read when** working on nidhogg-specific commands, server lifecycle, or the API client.
+- `docs/projects/litehtml.md` - **read when** working on litehtml/sluggrs internals (modules, fixture preprocessing, Node.js scripts).
+- `docs/projects/ratatoskr.md` - **read when** working on the ratatoskr harness model, sæhrimnir contract, fixture resolution, lua test runtime, or artefact layout.
 
 ## Architecture
 
@@ -25,328 +44,63 @@ Single crate, single binary. No workspace.
 
 - `src/main.rs` - `main()`, command dispatch, `run_measured()`, `resolve_mode()`
 - `src/cli.rs` - CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`. All commands are top-level - no subcommand enums for litehtml/sluggrs
-- `src/cargo_filter.rs` - Formatter primitives (`ClippyDiagnostic`, `ClippyParse`) plus legacy text-output parsers. Each diagnostic exposes `path()` for scope matching and `format_one()` for the `error[CODE] file:line:col message` / `warning[rule] file:line:col message` shape. The clippy text path used to ingest cargo's pretty-printed stderr via `parse_clippy()` - that worked but lost the lint code on every warning past the first per-rule (cargo only emits `= note: #[warn(rule)]` once per crate compilation). The clippy phase in `src/check_cmd.rs` now ingests JSON instead and uses these structs only as the formatter target. `parse_clippy()` and `filter_clippy()` remain because the test phase (`run_test_phase` in check_cmd.rs) still falls back to `filter_clippy` when a `cargo test` build emits compile errors on stderr. `filter_test()` formats test results via shared `parse_test_output()`. Bypassed with `--raw`
-- `src/cargo_json.rs` - JSON event model and parser for `check`. `CheckEvent` enum (Diagnostic, TestFailure, TestHung, DiagnosticSummary, TestSummary, Gremlin, GremlinSummary) serialized as NDJSON. `parse_cargo_diagnostics()` parses cargo `--message-format=json` stdout - used by both the JSON emit mode (for NDJSON output) and the human-format renderer (for text mode), so every clippy warning carries `message.code.code` regardless of output mode. `DiagnosticEvent.primary_label` captures the inline span label (e.g. "expected `i32`, found `&str`") so the text formatter can surface the same one-line detail it used to scrape from rendered source annotations. `emit()` writes one JSON line to stdout. `emit_parse_error()` fallback preserves both stdout and stderr
-- `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files (`git ls-files`) for invisible/deceptive Unicode (zero-width, NBSP, soft hyphen, bidi marks/overrides/isolates, line/paragraph separators, em/en dashes, typographic single and double quotes). `scan()` returns `Vec<Gremlin>` with file/line/col/codepoint/name; `format_one()` produces a cargo_filter-style one-liner
-- `src/scope.rs` - Scope + limit helpers for `brokkr check`. `changed_files()` computes files modified on the current branch via `git merge-base HEAD <upstream>` (falls back to `origin/master` / `origin/main` / local base) plus uncommitted working-tree changes. `partition()` sorts diagnostics scoped-first then caps at `limit`; `format_trailer()` builds the `+N more in this branch, +M in unchanged files (--all to see)` summary. Returns `None` when no base ref resolves, in which case callers fall back to pure capping.
+- `src/cargo_filter.rs` - Formatter primitives (`ClippyDiagnostic`, `ClippyParse`) plus the legacy text-output parser still used as a fallback by the test-phase build-error path. See the module header for why the JSON path replaced text scraping
+- `src/cargo_json.rs` - JSON event model and parser for `check`. `CheckEvent` enum (Diagnostic, TestFailure, TestHung, DiagnosticSummary, TestSummary, Gremlin, GremlinSummary) serialized as NDJSON
+- `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files for invisible/deceptive Unicode
+- `src/scope.rs` - Scope + limit helpers. `changed_files()` computes files modified on the current branch via git merge-base; `partition()` sorts diagnostics scoped-first; `format_trailer()` builds the overflow summary
 - `src/measure.rs` - `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
-- `src/{pbfhogg,elivagar,nidhogg}/dispatch.rs` - Per-project dispatch (split from the old unified `src/dispatch.rs` in 0313f74). Pbfhogg exposes `run_command_with_params()`; elivagar and nidhogg expose `run_command()`. Each routes through run/bench/hotpath/alloc based on command enum + mode. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions due to divergent lifecycles
-- `src/pbfhogg/commands.rs` - `PbfhoggCommand` enum with `build_args()`, `build_hotpath_args()`, `result_command()`, `result_variant()`, `metadata()` - single source of truth for all pbfhogg command argument construction
+- `src/{pbfhogg,elivagar,nidhogg}/dispatch.rs` - Per-project dispatch (split from the old unified `src/dispatch.rs` in 0313f74). Pbfhogg exposes `run_command_with_params()`; elivagar and nidhogg expose `run_command()`. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions
+- `src/pbfhogg/commands.rs` - `PbfhoggCommand` enum, single source of truth for argument construction
 - `src/elivagar/commands.rs` - `ElivagarCommand` enum (Tilegen, PmtilesWriter, NodeStore, Planetiler, Tilemaker)
 - `src/context.rs` - `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
 - `src/resolve.rs` - Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
-- `src/project.rs` - `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs/Ratatoskr), `detect()` (delegates to `config::load()`), `require()` gating
-- `src/config.rs` - `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `ResolvedPaths`, TOML parsing (single parse returns `(Project, DevConfig)`), hostname via libc
+- `src/project.rs` - `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs/Ratatoskr), `detect()`, `require()` gating
+- `src/config.rs` - `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `RatatoskrConfig`, `HarnessConfig`, `ResolvedPaths`, TOML parsing, hostname via libc
 - `src/build.rs` - `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` - `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
-- `src/request.rs` - `ResultsQuery` / `SidecarQuery` structs for the results and sidecar commands
+- `src/request.rs` - `ResultsQuery` / `SidecarQuery` structs
 - `src/db/` - ResultsDb, SidecarDb, schema, migrations, queries, formatting, comparison
-- `src/sidecar.rs` - Monitoring sidecar: `/proc` sampling, FIFO marker protocol, `run_sidecar()`, `SidecarFifo`, `SidecarRunResult`. Always-on for all measured modes
-- `src/output.rs` - Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners (`run_captured`, `spawn_captured`, `run_passthrough_timed`)
+- `src/sidecar.rs` - Monitoring sidecar: `/proc` sampling, FIFO marker protocol. Always-on for measured modes
+- `src/output.rs` - Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners
 - `src/error.rs` - `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
-- `src/lockfile.rs` - `LockGuard` (via `OwnedFd`) for exclusive access
-- `src/oom.rs` - OOM protection (`protect_child`: marks the child as the kernel OOM killer's preferred target via `oom_score_adj`, so a runaway bench takes itself down instead of the desktop)
-- `src/preflight.rs` - Pre-benchmark system checks (`Check` enum framework)
+- `src/lockfile.rs` - `LockGuard` (via `OwnedFd`)
+- `src/oom.rs` - OOM protection (`protect_child` marks child as the kernel OOM killer's preferred target)
+- `src/preflight.rs` - Pre-benchmark system checks
 - `src/tools.rs` - External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config)
-- `src/worktree.rs` - Persistent git worktrees for retroactive benchmarking. `Worktree::create` reuses an existing worktree at `<parent>/.brokkr-worktree-<project>-<short>` if its HEAD already matches the requested commit, so cargo `target/` survives across runs. `purge_all` (used by `brokkr clean --worktrees`) removes all sibling worktree dirs and prunes git bookkeeping.
+- `src/worktree.rs` - Persistent git worktrees for retroactive benchmarking
 - `src/history.rs` - `HistoryDb` - global command history at `$XDG_DATA_HOME/brokkr/history.db`
 
 ### Project-specific modules
 
-- `src/pbfhogg/` - `commands.rs` (command registry), benchmarks (read, write, merge, commands, extract, allocator, blob-filter, planetiler, all), verify (11 commands + all), download (Geofabrik region/OSC fetcher with auto-registration in `brokkr.toml`). Every verify subcommand that takes `--dataset` also accepts `--input <PATH>` to skip dataset resolution and use a handcrafted fixture; the two flags are mutually exclusive. `verify_merge` parses the input OSC's delete set via `osc::parse_osc_file` and runs a strict `pbfhogg diff --format osc` between pbfhogg's and osmium's outputs - osmium-only IDs that appear in the input OSC's delete set are exempt (osmium does version-based deletes; pbfhogg/osmosis/osmconvert delete unconditionally), everything else fails.
-- `src/osc.rs` - Minimal `.osc` / `.osc.gz` reader. Returns `OscDiff` with sorted ID sets per (`<create>` / `<modify>` / `<delete>`) section per element kind. Used by `verify_merge` for the delete-set carve-out. Hand-rolled tag-start scanner; tolerant of XML comments, processing instructions, self-closing elements, and single-quoted attributes. Element bodies (tags / refs / members / coords / metadata) are deliberately skipped - only IDs are needed.
-- `src/profile.rs` - Validation profile resolver for `[test.profiles.*]`. `resolve(cfg, checks, name)` walks the `extends` chain (cycles rejected), looks each profile sweep name up in the `[[check]]` array, and returns a list of `ResolvedSweep`s ready for the runner. Each resolved sweep carries cargo feature args, packages to pre-build, libtest filter args (`--include-ignored`, `--test-threads`, `--skip`), `--test <name>` cargo filters, positional name filters, and env vars. `sweep_from_check_entry(entry)` is the no-profile path - used when `[[check]]` is configured but no profile applies. Pure data; reused by both `brokkr check` (test phase) and `brokkr test`.
-- `src/elivagar/` - `commands.rs` (`ElivagarCommand` enum with `build_args()`, `build_config()`, `needs_pbf()`, `output_files()`, `metadata()`), benchmarks (self, node-store, pmtiles, planetiler, tilemaker, all), verify, compare-tiles, download-ocean, hotpath
-- `src/nidhogg/` - `commands.rs` (`NidhoggCommand` enum: Api/Ingest/Tiles with `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`, `metadata()`), server lifecycle (serve/stop/status), ingest, update, query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode, readonly), hotpath. `client.rs` has query/bbox helpers that derive API queries from dataset bbox.
-- `src/litehtml/` - 4 modules: visual reference testing (`cmd.rs` command dispatch, `db.rs` MechanicalDb, `compare.rs` pixel/element comparison, `mod.rs` UUID generation). `cmd.rs` also handles `prepare`/`extract`/`outline` by shelling out to Node.js script.
-- `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio + pngjs). `prepare.js` handles `prepare`, `extract`, and `outline` subcommands. Dependencies managed via pnpm (`package.json`, `pnpm-lock.yaml`).
+- `src/pbfhogg/` - benchmarks, verify (11 commands + all), download. See `docs/projects/pbfhogg.md`.
+- `src/osc.rs` - Minimal `.osc` / `.osc.gz` reader for verify-side delta analysis. See module header and `docs/projects/pbfhogg.md`.
+- `src/profile.rs` - Validation profile resolver for `[test.profiles.*]`. See module header and `docs/commands/check.md`.
+- `src/elivagar/` - benchmarks, verify, compare-tiles, download-ocean, hotpath. See `docs/projects/elivagar.md`.
+- `src/nidhogg/` - server lifecycle, ingest, update, query, geocode, benchmarks, verify. See `docs/projects/nidhogg.md`.
+- `src/litehtml/` - 4 modules: visual reference testing. See `docs/projects/litehtml.md`.
+- `src/ratatoskr/` - harness orchestration (`saehrimnir.rs`, `sync.rs`, `cmd.rs`, `discover.rs`). See `docs/projects/ratatoskr.md`.
+- `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio + pngjs).
 
-## brokkr.toml format
+## Shared commands quick reference
 
-Each project has a `brokkr.toml` in its root:
+For details, read the linked docs.
 
-```toml
-project = "pbfhogg"
+- `check` / `test` - validation pipeline. See `docs/commands/check.md`.
+- `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status.
+- `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`.
+- `clean [--worktrees]` - remove scratch/temp files. `--worktrees` also purges all persistent benchmark worktrees.
+- `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression).
+- `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`.
+- `kill [--hard]` - cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM (graceful: SIGKILLs child, flushes partial sidecar data under `dirty` alias, releases lock, runs `brokkr clean`). `--hard` sends SIGKILL to brokkr + child. Exits 130 on graceful path.
+- `sidecar <uuid>` - query sidecar profiler data. See `docs/commands/measure.md`.
+- `passthrough` - build and run with raw passthrough args (hidden, for ad-hoc use).
+- Measurement modes (`--bench`, `--hotpath`, `--alloc`, `--stop`) - see `docs/commands/measure.md`.
 
-[plantasjen]
-data = "data"
-scratch = "data/scratch"
-target = "target"
-port = 3033
-drives.source = "nvme"
-drives.data = "ssd"
-features = ["linux-direct-io", "linux-io-uring"]
-
-[plantasjen.datasets.denmark]
-origin = "Geofabrik"
-download_date = "2026-02-20"
-bbox = "12.4,55.6,12.7,55.8"
-data_dir = "denmark-data"          # nidhogg only
-
-[plantasjen.datasets.denmark.pbf.indexed]
-file = "denmark-with-indexdata.osm.pbf"
-xxhash = "3f1977fd..."
-seq = 4704
-
-[plantasjen.datasets.denmark.pbf.raw]
-file = "denmark-raw.osm.pbf"
-seq = 4704
-
-[plantasjen.datasets.denmark.osc.4705]
-file = "denmark-4705.osc.gz"
-xxhash = "fa581f7b..."
-
-[plantasjen.datasets.denmark.pmtiles.elivagar]
-file = "denmark-elivagar.pmtiles"
-xxhash = "9a3b2c1d..."
-```
-
-Top-level keys that aren't `project` are treated as hostname sections (unknown non-table keys are rejected). Datasets are host-scoped (no global `[datasets]` section). Path resolution: host config → defaults (`data/`, `data/scratch/`, cargo target dir). Host `features` are cargo features appended to every build command (all measurable commands, `verify`, `serve`, `ingest`, `update`). CLI `--features` are additive on top of host features (deduped). `check` uses one of: an ad-hoc sweep when CLI `--features` / `--no-default-features` is passed; the `default_profile`'s sweeps when configured; every `[[check]]` entry when configured but no profile applies; otherwise a single `--all-features` sweep matching pre-`[[check]]` behaviour. Reserved top-level keys (skipped by host parsing): `project`, `litehtml`, `sluggrs`, `check`, `test`, `capture_env`.
-
-### `[[check]]` array
-
-Optional. Each entry is one (clippy + test) sweep with the entry's feature flags. Profiles in `[test.profiles]` reference these by name.
-
-```toml
-[[check]]
-name = "all"
-features = ["test-hooks", "linux-direct-io", "linux-io-uring", "commands"]
-build_packages = ["pbfhogg-cli"]
-
-[[check]]
-name = "consumer"
-no_default_features = true
-features = ["commands"]
-build_packages = ["pbfhogg-cli"]
-```
-
-- `name` (required) - label surfaced in output and the key profiles use to reference this entry. Must be unique.
-- `features` (optional, default `[]`) - explicit list of cargo features. The `features = "all"` sentinel (which used to mean `--all-features`) is rejected; enumerate features explicitly so adding a new feature to `Cargo.toml` doesn't silently broaden the test sweep.
-- `no_default_features` (optional, default `false`) - emits `--no-default-features`.
-- `build_packages` (optional, default `[]`) - cargo packages rebuilt with the entry's feature flags before the test phase. Required when `tests/cli_*.rs` integration tests invoke a separate CLI workspace member, otherwise `cargo test -p <lib>` leaves the binary in whatever state it was last built and the consumer-sweep contract goes unverified.
-
-The legacy `[check]` table form (with `consumer_features`) is rejected at parse time with a migration message - move the flags into a `[[check]]` entry.
-
-### `[test]` section
-
-Optional. Three things live here: a default cargo package, a default validation profile, and the named profiles that selectively reference `[[check]]` entries.
-
-```toml
-[test]
-default_package = "pbfhogg"
-default_profile = "tier1"
-
-[test.profiles.tier1]
-description = "Fast edit loop used by brokkr check (tier 1)"
-sweeps = ["all", "consumer"]
-skip = ["tier2::", "tier3::", "platform::", "serial::"]
-include_ignored = false
-
-[test.profiles.sort]
-description = "Tier 2: expanded sort command tests"
-extends = "tier1"
-tests = ["cli_sort"]
-skip = ["platform::", "serial::"]
-
-[test.profiles.full]
-sweeps = ["all"]
-skip = ["platform::"]
-include_ignored = true
-
-[test.profiles.platform]
-sweeps = ["all"]
-only = ["platform::"]
-include_ignored = true
-env = { BROKKR_TEST_PLATFORM = "1" }
-
-[test.profiles.serial]
-sweeps = ["all"]
-only = ["serial::"]
-include_ignored = true
-test_threads = 1
-```
-
-- `default_package` is the cargo package `brokkr test` passes to `cargo test -p` when no `-p/--package` is given on the command line. Needed for multi-crate workspaces where there's no single obvious package (e.g. ratatoskr); optional for single-crate projects that already have a built-in default via `Project::cli_package()` (pbfhogg-cli, nidhogg). Resolution order: explicit `-p` on CLI > `[test].default_package` > `Project::cli_package()` > error.
-- `default_profile` is the validation profile `brokkr check` uses when no `--profile` is passed. With no profile config in `brokkr.toml`, `brokkr check` runs every `[[check]]` entry without libtest filters; with no `[[check]]` either, it falls back to a single `--all-features` sweep so projects that haven't migrated keep today's behaviour exactly.
-- `[test.profiles.<name>]` declares a test selection layered onto one or more `[[check]]` entries. Fields: `sweeps` (required, list of `[[check]]` entry names), `tests` (`--test <name>`), `only` (positional substring filter), `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`. `extends = "<other>"` walks the chain to the root with cycle detection (parents-of-parents resolve too); collections are **replaced** (not concatenated, child wins), env merges key-by-key. Cycles are rejected at resolve time. Sweep names that don't resolve to a `[[check]]` entry are caught at parse time.
-- Profiles use Rust **module paths** as the annotation surface. Test-file authors declare `mod tier2 { ... }` / `mod platform { ... }` / `mod serial { ... }` to mark cost classes; the brokkr profile's `only` / `skip` lists translate directly into cargo's substring filter and `--skip` flag (which match module paths).
-- The legacy `[test.sweeps.*]` map is rejected at parse time. Sweeps now live in `[[check]]` entries; profiles reference them by name.
-
-#### `brokkr check` sweep selection
-
-| invocation | sweep set | libtest filters |
-|---|---|---|
-| no `[[check]]`, no flags | one `--all-features` sweep (legacy default) | none |
-| `[[check]]` configured, no `default_profile`, no flags | every `[[check]]` entry in declaration order | none |
-| `[[check]]` + `default_profile = "tier1"`, no flags | the entries `tier1.sweeps` references | tier1's filters |
-| `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
-| `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | none |
-
-`brokkr test <name>` follows the same ladder except: filters are dropped (the user's `<name>` argument is the filter), and there's no CLI ad-hoc path (the test runner doesn't accept `--features`).
-
-### Dataset structure
-
-- `pbf.<variant>` - PBF file entries keyed by variant name (e.g. `raw`, `indexed`, `locations`). Each has `file`, optional `xxhash` (XXH128), optional `seq`. `sha256` is accepted as an alias during migration.
-- `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has `file`, optional `xxhash`. `sha256` accepted as alias.
-- `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g. `elivagar`). Each has `file`, optional `xxhash`. `sha256` accepted as alias. Used by nidhogg `serve` and `bench tiles`.
-- Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir` (nidhogg only).
-
-### CLI flags for variant/seq selection
-
-- `--variant <name>` - selects from `pbf.<name>` in config. Default: `indexed` (pbfhogg), `raw` (elivagar/nidhogg).
-- `--osc-seq <seq>` - selects from `osc.<seq>` in config. Auto-selects if exactly one OSC is configured.
-- `--tiles <variant>` - selects from `pmtiles.<variant>` in config. Auto-selects if exactly one PMTiles entry is configured.
-- `--snapshot <key>` - (pbfhogg only) selects which snapshot's `pbf`/`osc` tables the resolver reads from. `base` (or omitting the flag) reads from the legacy top-level data. Any other key reads from `[..datasets.<dataset>.snapshot.<key>]`. Accepted by every measurable pbfhogg command - the resolver in `build_pbfhogg_context` (`src/pbfhogg/dispatch.rs`) calls `resolve_snapshot_pbf_path` regardless of which command is dispatching, so wiring a new pbfhogg command into the snapshot graph is just a matter of adding the field to its CLI variant in `src/cli.rs` and propagating it to `CommandParams.snapshot` in `src/pbfhogg/cli_adapter.rs`.
-- `--as-snapshot <key>` / `--replace-snapshot` - (pbfhogg `repack` and `degrade` only) promote the final iteration's scratch artifact into the dataset graph as a new snapshot. `--replace-snapshot` allows overwriting an existing key; without it, an existing key errors out. Both flags are validated up-front via `download::preflight_snapshot_collision` (called from the top of `run_command_with_params`), so a forgotten `--replace-snapshot` errors before the cargo build kicks off, not after the run.
-- `--direct-io` - (pbfhogg only) enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature, `--direct-io` binary flag, `+direct-io` variant suffix.
-- `--io-uring` - (pbfhogg only) enable io_uring I/O. Adds `linux-io-uring` cargo feature, `--io-uring` binary flag, `+uring` variant suffix. Runs io_uring preflight checks before building. Only supported by `apply-changes`, `sort`, `cat-dedupe`, `diff-osc`, `repack`, and `degrade`; brokkr rejects it for other commands before building.
-- `--compression <spec>` - (pbfhogg only) output compression passed through to the binary. Values: `zlib:N` (N=1-9), `zstd:N`, `none`. Adds `+zstd1`/`+zlib6`/`+nocompress` variant suffix. No cargo features required.
-- `--locations-on-ways` - (pbfhogg `apply-changes` only) passes `--locations-on-ways` through to the child pbfhogg invocation. No cargo features required.
-
-## CLI model
-
-Every measurable command is a top-level brokkr subcommand. Measurement mode is a flag:
-
-```
-brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
-```
-
-- No flag - build, run once, print timing. Acquires lockfile, no DB storage.
-- `--bench` - full benchmark: lockfile, 3 runs (or N), best-of-N stored in DB.
-- `--hotpath` - function-level timing via hotpath feature. 1 run (or N).
-- `--alloc` - per-function allocation tracking via hotpath-alloc feature. 1 run (or N).
-- `--stop <marker>` - kill the child when this FIFO marker is emitted. Allows benchmarking a specific phase in isolation. The SIGKILL exit is treated as success.
-
-All measured modes automatically run a sidecar that samples `/proc` metrics at 100ms and provides `BROKKR_MARKER_FIFO` for phase markers. Sidecar data is stored in `.brokkr/sidecar.db` (gitignored). Sidecar data is preserved even when the child is OOM-killed.
-
-Dataset paths resolve from `brokkr.toml` automatically. All flags go after the command name.
-
-### Shared commands (all projects)
-
-- `check` - gremlins + clippy + tests. Trailing args after `brokkr check --` are split on a literal `--`: tokens before it go to `cargo test` (e.g. `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go to libtest after the enforced `--test-threads=1` (e.g. `brokkr check -- -- --ignored`). With no separator, every token is cargo-level. The test phase also fails on a successful `cargo test` that ran zero tests (suites=0, or filters excluded everything) so a too-narrow profile/filter combo can't silently green-light a check. Works without a `brokkr.toml` - usable in any Rust+git repo. When a `brokkr.toml` is present its host config still applies (e.g. Nidhogg's `CARGO_TARGET_TMPDIR`); when absent, cwd is the project root. Supports `--features`, `--no-default-features`, `--profile <NAME>` (selects a `[test.profiles]` entry; conflicts with `--features` / `--no-default-features`), `--raw` (unfiltered cargo output), `--json` (NDJSON diagnostics and summaries), `--limit N` (max diagnostics shown per phase, default 20), and `--all` (show everything, no cap). `--raw` and `--json` are mutually exclusive (clap enforced); both bypass the cap. Default text mode: each diagnostic becomes one line, compilation noise stripped, passing tests aggregated. `--json` mode: emits one JSON object per line to stdout with no prefixed output. Always emits summary events even on success. The clippy phase always invokes cargo with `--message-format=json` and ingests via `cargo_json::parse_cargo_diagnostics` regardless of output mode - the text formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every warning keeps its lint code in the header, even for repeats of the same rule (cargo's pretty-printed text only annotates the first occurrence per crate, which is why the JSON ingestion path was needed). `--raw` reconstructs cargo's terminal-style output by concatenating each diagnostic's `rendered` field plus the cargo status messages on stderr - one cargo invocation, no separate non-JSON pass. Gremlin phase runs first and fails the check if any banned Unicode character is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files - see `src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking spaces, bidi overrides, em/en dashes, typographic quotes). `--fix-gremlins` rewrites every banned char in place with its ASCII equivalent (or deletes it for zero-width/bidi noise) before the scan runs, so the subsequent check finds zero and passes. When hits exceed `--limit`, both the gremlin and clippy phases prefer files changed on the current branch (computed via git merge-base against `@{upstream}` / `origin/master` / `origin/main`) and append a trailer summarising what's hidden; see `src/scope.rs`.
-- `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status
-- `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`
-- `clean [--worktrees]` - remove scratch/temp files. `--worktrees` also purges all persistent benchmark worktrees (sibling `.brokkr-worktree-<project>-*` dirs created by `--commit`).
-- `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression)
-- `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`
-- `kill` - cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM: brokkr catches it, SIGKILLs its child, flushes partial sidecar data under the `dirty` alias, releases the lock, and runs `brokkr clean`. `--hard` sends SIGKILL to brokkr + child (no cleanup; follow up with `brokkr clean`). Exits 130 on the graceful path.
-- `test [-p <PKG>] <NAME>` - (all cargo projects except litehtml/sluggrs) run one specific cargo test. Defaults to release; pass `--debug` to run the dev profile instead (faster compile, useful when the failing test isn't profile-sensitive). Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and integration tests are matched by the name substring within the selected package. Package resolution: explicit `-p/--package` > `[test] default_package` in `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces (e.g. ratatoskr) must pass `-p` or set `default_package`. Always adds `--include-ignored --nocapture --test-threads=1`. Sweep selection: if `[test].default_profile` is set, the test runs against every `[[check]]` entry the profile references (profile filters are dropped - the user's `<NAME>` is the filter); else if `[[check]]` is non-empty, every entry runs in declaration order; else fall back to a single `--all-features` sweep. Each sweep's `build_packages` are rebuilt with the matching feature flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary with the same feature set the test crate sees. Streams the test's own stdout/stderr live (cargo/test-harness framing lines are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed with at least one `PASS` exits `0`. `-N <n>` repeats the test (per sweep) for flaky-test hunting; `-j <n>` sets `cargo -j N` for parallel compile; `--raw` disables all filtering. Because `cargo test <name>` is a substring filter, identically-named tests in different modules of the same package all run; use a more qualified name (module path) to disambiguate. Litehtml and sluggrs projects are rejected with a pointer to `brokkr visual`.
-- `passthrough` - build and run with raw passthrough args (hidden, for ad-hoc use)
-- `download <region> [--osc-seq N]` - (pbfhogg) download PBF + OSC from Geofabrik. Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component. Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N` downloads all missing diffs from `last_configured_seq + 1` through N. After downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`, `{key}-{YYYYMMDD}.osm.pbf`.
-- `service-test <SCRIPT_OR_DIR>` - (ratatoskr) run a Service-subprocess test script. When the path is a directory under `crates/app/tests/service-harness/`, this is sugar for `service-suite --filter <rel>/` scoped to that cohort - same code path, same artefact layout, `-N` becomes cohort cycles. End-to-end on the brokkr side: project gating, script-path validation, frontmatter parse (`ceiling`, `preserve_data_dir`), lockfile, sweep-aware build via `[ratatoskr.harness]` (same feature contract as `brokkr check`), per-run artefact-dir allocation under `.brokkr/ratatoskr/<test>/run-N/`, sync `std::process::Command` spawn of `<binary> --test-harness <script>` with `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` exported, stdout/stderr drained to `binary-stdout.log` / `binary-stderr.log` while a 50ms-cadence poll loop watches for child exit or for the wall-clock ceiling to expire (default 60s, override via `-- ceiling: 60s` frontmatter). When the ceiling fires brokkr SIGKILLs the child and labels the run `ceiling=<spelling>`; otherwise the label tracks the child's exit code/signal. `run.toml` is written with reproducibility metadata; on success the artefact dir is deleted unless `--keep-artefacts` is passed or the script's frontmatter sets `preserve_data_dir = on_success_too`; failures always preserve; history-DB records every run. The Lua VM, `ServiceClient` userdata bindings, wait combinators, and runtime-owned artefact writers (`frames.jsonl`, `events.jsonl`, `steps.jsonl`, `service.stderr`, `runtime-outcome.json`, `proc-{status,wchan,syscall,stack}.txt`, `data-dir/`) live in ratatoskr's `app` crate behind `app --test-harness`, gated by the `test-helpers` feature - that side lands during ratatoskr Phase 8 (M1 of the harness roadmap). `-N <COUNT>` on a single script repeats that script with per-iter status, per-iter artefact dir, `--keep-going`, exit-code aggregation; on a directory it runs the cohort `<COUNT>` times in order via the `service-suite` code path. `--debug` flips the build to dev profile (default release). Cross-cutting design lives at `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
-- `service-suite [--filter SUBSTR] [-N COUNT] [--keep-going] [--include-ignored] [--keep-artefacts] [--debug]` - (ratatoskr) run every discovered service-test script in sequence against a single shared harness build. `-N` runs the whole cohort `<count>` times in order (e.g. 50 cycles over 11 t1/ scripts = 550 runs); the trailing summary reports cohort totals plus a per-script `pass/total` table. Discovers `crates/app/tests/service-harness/**/*.lua`, optionally filters by substring against the relative name, then runs each script through the same `spawn_and_capture` path `service-test` uses (per-script artefact dir, ceiling, `preserve_data_dir`). Scripts marked `expected = ignored` in the frontmatter are skipped unless `--include-ignored` is passed. Default is stop-on-first-failure so the failing script's artefacts land fast for triage; `--keep-going` runs every selected script and the trailing summary lists the failing names. Empty-state messages distinguish "nothing discovered" / "filter matched none" / "all matches ignored" so the user gets a directly actionable response. Exit code is non-zero if any selected script failed.
-- `service-list` - (ratatoskr) list discovered service-test scripts. Walks `crates/app/tests/service-harness/**/*.lua` recursively under the project root, parses a `-- key: value` frontmatter at the top of each script, prints a sorted table. Recognized fields: `description` (free text), `expected = pass | ignored`, `ceiling = 60s` (per-script wall-clock backstop, with unit suffixes `ms`/`s`/`m`/`h`; bare numbers are seconds; default 60s when omitted), `preserve_data_dir = on_success_too` (keeps the artefact dir even on success; failures always preserve). Unknown fields are ignored so scripts can carry their own annotations. Empty-state output names the expected directory. Nested cohort dirs (`t1/`, `extract/`, etc.) are picked up automatically; the displayed name is the path relative to the script root, minus `.lua`.
-- `sync-list` - (ratatoskr, plan 3) walk `[ratatoskr] sync_script_dir` (default `crates/app/tests/sync-harness`), parse top-of-file frontmatter (`description`, `expected`, `fixture`, `protocol`, `ceiling`, `preserve_data_dir`), print a sorted table. Empty-state output names the expected directory and notes that the cohort may not have landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
-- `sync-smoke <SCRIPT> [--keep-artefacts] [--debug]` - (ratatoskr, plan 3) two-child orchestration. Validates `[ratatoskr.harness]`, `[ratatoskr] mock_server_binary`, and `[ratatoskr] fixtures_dir`, parses the script's `-- fixture: <NAME>` frontmatter, acquires the lockfile, builds the harness sweep, allocates `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and `mock/` subdirs, spawns sæhrimnir with `--fixture <PATH> --readiness-file mock/readiness` (its stderr piped to `mock/stderr.log`), parses the readiness sentinel for per-protocol ports, then spawns `<harness binary> --test-harness <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT` per protocol whose env-var spelling is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail, `host:port` for imap/smtp). After the harness exits, brokkr SIGTERMs sæhrimnir with the standard 1.5s budget then escalates to SIGKILL. PASS/FAIL on the harness exit code; FAIL preserves the artefact dir with `run.toml` (top-level metadata: brokkr version, sweep, harness exit code/elapsed, mock outcome) plus the harness's own artefacts and the captured mock stderr. Helpers live in `src/ratatoskr/sync.rs`.
-- `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug]` - (ratatoskr, plan 3) measured variant of sync-smoke. Same two-child shape, but sæhrimnir is spawned once and reused across `--bench` iterations (default 3), and the harness binary runs N times with `BROKKR_MARKER_FIFO` set. Each iteration gets its own `iter-K/harness/` subdir under the run dir; the script emits `SYNC_START` and `SYNC_END` markers via the FIFO around the measured region (last `SYNC_START` wins, first `SYNC_END` after it ends the span - so a warmup loop under the same name is fine). Best-of-N selection: marker span if both markers fired, else wall-clock elapsed. The best iteration's `summary.json` (if the script writes one into `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` KvPair rows: numeric values become Int/Real, strings become Text, nested objects/bools/null are skipped. Storage is via the standard `BenchHarness`, so `brokkr results --compare` and the sidecar DB work the same as for pbfhogg/elivagar benches; sidecar provenance (RunInfo) is omitted in v0 because the helper that builds it is private to BenchHarness today. `--force` allows recording on a dirty git tree (rows land under the `dirty` alias). Helpers live in `src/ratatoskr/sync.rs`.
-- `mock-serve --fixture <NAME>` - (ratatoskr) plan-3 manual-exploration tool. Reads `[ratatoskr] mock_server_binary` and `[ratatoskr] fixtures_dir` from `brokkr.toml` (both required), resolves the fixture to `<fixtures_dir>/<NAME>.toml` or `<fixtures_dir>/<NAME>.lua` (whichever exists; both is an error), spawns sæhrimnir with `--fixture <PATH> --readiness-file .brokkr/ratatoskr/mock/readiness` and stdio inherited so logs land live, polls (50ms cadence, 10s budget) for the readiness sentinel, parses the five-line `<NAME> <port>` content via `parse_sentinel`, prints the per-protocol HTTP/host:port endpoints, then loops until SIGINT/SIGTERM. On signal: SIGTERM the child, grant 1.5s, escalate to SIGKILL. If sæhrimnir exits before writing the sentinel (fixture-validation error, port-in-use, etc.) the spawn-side error surfaces with the captured stderr already on the user's terminal. Auto-build of sæhrimnir is not yet wired - the binary must already exist at `mock_server_binary`. Helpers live in `src/ratatoskr/saehrimnir.rs`.
-
-### Env vars exported to `cargo test`
-
-Both `brokkr check` (test phase) and `brokkr test` set the following on every `cargo test` invocation, including sweeps with empty `build_packages`:
-
-- `BROKKR_TEST_BIN_DIR` - directory containing the just-rebuilt `build_packages` artefacts. `brokkr check` always sets it to `<target>/debug` (the test phase runs without `--release`); `brokkr test` sets it to `<target>/release` by default and `<target>/debug` when `--debug` is passed. The profile tracks the cargo invocation 1:1 - it does *not* track whatever profile cargo happens to compile the test harness with. `<target>` comes from `cargo metadata --no-deps`. Tests that spawn the rebuilt binary should read this var as the primary source of truth and fall back to `cfg!(debug_assertions)` only when it's unset (e.g. plain `cargo test` outside brokkr). The `cfg!(debug_assertions)` heuristic is unreliable because `[profile.test]` overrides can flip `debug-assertions = false` in the test binary even though the rebuilt binary lives under `debug/`.
-
-## Litehtml commands
-
-Gated to `project = "litehtml-rs"`. Visual reference testing - renders HTML fixtures through a pipeline binary, compares against Chrome screenshots.
-
-All litehtml and sluggrs commands are top-level (no `brokkr litehtml` or `brokkr sluggrs` namespace). Shared visual testing commands (`visual`, `list`, `approve`, `report`, `visual-status`) dispatch to litehtml or sluggrs based on the detected project. `visual` was formerly named `test`; that name is now owned by the generic cargo single-test runner (see above).
-
-- `visual [ID] [--suite S] [--all] [--recapture]` - run fixtures against Chrome reference artifacts. Builds pipeline binary, produces pixel diff + element match comparison. `--suite` and `--recapture` are litehtml-only.
-- `list` - show configured fixtures with tags, expected outcome, and approval state
-- `approve <ID>` - record current divergence as accepted baseline (requires clean git tree)
-- `report <run_id>` - show results table for a past test run
-- `visual-status` - dashboard: all fixtures with approved baseline vs last run, delta, improvements
-- `prepare <input.html> <output.html>` - normalize raw email HTML into self-contained fixture (replaces images with correctly-sized gray PNGs, strips background-image/external CSS, injects Ahem font, pretty-prints). Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`.
-- `html-extract <input.html> [--selector S | --from S --to S] <output.html>` - extract sub-fixture from prepared HTML. `--selector` for single element, `--from`/`--to` for sibling range. Preserves ancestor context and table cell stubs.
-- `outline <input.html> [--depth N] [--full] [--selectors]` - structural overview of prepared HTML showing sections, image dimensions, text previews, and suggested CSS selectors for extract.
-
-### Litehtml config in brokkr.toml
-
-```toml
-[litehtml]
-viewport_width = 800
-mode = "ahem"
-pixel_diff_threshold = 0.5
-element_match_threshold = 95.0
-fallback_aspect_ratio = 2.0  # optional, for prepare command
-
-[[litehtml.fixture]]
-id = "creatine_hero"
-path = "fixtures/creatine_hero/creatine_hero.html"
-tags = ["creatine"]
-expected = "pass"
-```
-
-### Ratatoskr config in brokkr.toml
-
-```toml
-[[check]]
-name = "harness"
-features = ["test-helpers"]
-build_packages = ["app"]
-
-[ratatoskr.harness]
-sweep = "harness"  # name of the [[check]] entry to build against
-binary = "app"     # cargo package whose binary `service-test` spawns
-
-[ratatoskr]
-# plan-3 fields - all optional, all consumed by mock-serve / sync-* commands
-mock_server_binary = "../sæhrimnir/target/release/saehrimnir"
-fixtures_dir = "../sæhrimnir/fixtures"
-test_endpoint_env_jmap = "RATATOSKR_TEST_JMAP_ENDPOINT"
-test_endpoint_env_imap = "RATATOSKR_TEST_IMAP_ENDPOINT"
-test_endpoint_env_smtp = "RATATOSKR_TEST_SMTP_ENDPOINT"
-test_endpoint_env_graph = "RATATOSKR_TEST_GRAPH_ENDPOINT"
-test_endpoint_env_gmail = "RATATOSKR_TEST_GMAIL_ENDPOINT"
-sync_script_dir = "crates/app/tests/sync-harness"
-```
-
-`[ratatoskr.harness]` is the link between brokkr's `[[check]]` machinery and `brokkr service-test`. `sweep` must reference an existing `[[check]]` entry; `binary` must appear in that sweep's `build_packages`. Both rules are enforced at config-parse time so a typo errors before the cargo build kicks off. The same feature flags `brokkr check` enforces are applied to harness builds, so a script can never run against a feature combination the rest of the toolchain hasn't validated. `parent_death_helper` is a bin target inside the `app` package (`crates/app/src/bin/parent_death_helper.rs`), not a separate cargo package - `cargo build -p app` builds it as a side effect, and `BROKKR_TEST_BIN_DIR` (exported when `service-test` spawns the harness binary) points at the directory containing both binaries.
-
-The flat `[ratatoskr]` fields drive plan-3 sync orchestration. `mock_server_binary` and `fixtures_dir` are consumed today by `mock-serve` (relative paths resolve against `brokkr.toml`'s directory). The `test_endpoint_env_<proto>` fields and `sync_script_dir` are reserved for `sync-smoke` / `sync-bench` / `sync-list` (plan 3 follow-up gated on ratatoskr Phase 8); the parser accepts them today so a brokkr.toml that's already fully configured doesn't error.
-
-## Benchmark harness
-
-`BenchHarness` provides:
-- Exclusive lockfile (prevents parallel bench/verify/hotpath runs)
-- SQLite result storage with git commit, hostname, env snapshot
-- `run_internal(config, closure)` - in-process timing (N runs, min/avg/max)
-- `run_external(config, binary, args)` - subprocess timing
-- `run_distribution(config, closure)` - distribution timing (min/p50/p95/max)
-
-Results in `.brokkr/results.db` per project (gitignored).
+Project-specific commands are documented under `docs/commands/` and `docs/projects/`.
 
 ## Conventions
 
-- Same clippy lints as pbfhogg (see `[lints.clippy]` in Cargo.toml)
 - All output prefixed: `[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[error]`
 - `DevError` variants for structured error handling (no `.unwrap()`)
 - Project gating via `project::require()` - wrong-project commands fail with helpful message
-- Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly (avoids picking e.g. `nidhogg-update` instead of `nidhogg` when a package produces multiple binaries). When no expected name is provided, requires exactly one executable - errors if multiple are found.
-
-## Hotpath JSON contract
-
-Brokkr does not depend on the `hotpath` crate directly - it parses the JSON report that hotpath-instrumented binaries write to `HOTPATH_OUTPUT_PATH`. The parser (`src/db/hotpath.rs`), DB schema (`hotpath_functions` table), and formatter (`src/hotpath_fmt.rs`) all hardcode three percentile columns: `p50`, `p95`, `p99`. Projects using hotpath must keep their percentile config at `[50.0, 95.0, 99.0]` (the default). Custom float percentiles like `p99.9` (added in hotpath 0.15) will be silently dropped by brokkr's parser. Generalizing to dynamic percentile columns requires a DB migration and parser/formatter changes in brokkr first.
-
-Env vars brokkr sets on hotpath child processes: `HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json`, `HOTPATH_OUTPUT_PATH=<scratch>/hotpath-report.json`.
-
-## Sidecar profiler
-
-The sidecar is always-on for all measured modes. It samples `/proc/{pid}/stat`, `/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and reads phase markers from a FIFO. All data is buffered in memory during the run and bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits. Results DB (`.brokkr/results.db`) stays small and git-tracked.
-
-Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`, `run_external_with_kv`, `run_hotpath_capture` - all sidecar-enabled), `src/db/sidecar.rs` (`SidecarDb`).
-
-The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer deadlock. Child exit is detected via `try_wait()` and the exact exit time is recorded for wall-clock measurement. Sidecar data is stored even when the child fails (OOM, signal, non-zero exit).
-
-Query sidecar data with `brokkr sidecar <uuid>` - bare form is the per-phase JSONL summary (pass `--human` for a table). View selectors are mutually exclusive: `--samples` (raw JSONL /proc samples), `--markers` (raw JSONL marker events), `--durations` (START/END pair timings), `--counters` (application counters), `--stat <field>` (min/max/avg/p50/p95), `--compare <a> <b>` (phase-aligned). Filter flags `--phase`, `--range`, `--where` compose with `--samples` and `--stat`; `--fields`/`--every`/`--head`/`--tail` only with `--samples`. A UUID is required except for `--compare`; the `dirty` pseudo-UUID resolves to the most recent failed/dirty-tree run.
-
-## Removed features
-
-- `--profile` flag and `Command::Profile` removed in b17a219. Previously did two-pass hotpath (pbfhogg) or sampling profiler via perf/samply (elivagar). Restore from that commit if elivagar needs sampling profiler support again.
-- `Command::Bench`, `Command::Hotpath`, `BenchCommand` enum removed in 893e3fd. Replaced by top-level measured commands with `--bench`/`--hotpath`/`--alloc` flags.
-- `src/profiler.rs` (perf/samply integration) removed in 6c8d846. Restore from that commit if needed.
-
-## Subagents
-Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
+- Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly. When no expected name is provided, requires exactly one executable - errors if multiple are found.

@@ -1,4 +1,24 @@
 //! Hotpath JSON report parsing.
+//!
+//! brokkr does not depend on the `hotpath` crate directly - it parses the
+//! JSON report that hotpath-instrumented binaries write to
+//! `HOTPATH_OUTPUT_PATH`. The env vars brokkr sets on the child are
+//! `HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json`, and
+//! `HOTPATH_OUTPUT_PATH=<scratch>/hotpath-report.json` - see
+//! `harness::run_hotpath_capture`.
+//!
+//! # Hardcoded percentile columns
+//!
+//! This parser, the `hotpath_functions` DB schema (`p50`/`p95`/`p99`
+//! columns in `src/db/schema.rs`), and the formatter in
+//! `src/hotpath_fmt.rs` all hardcode three percentile names: `p50`,
+//! `p95`, `p99`. Projects using hotpath must keep their percentile
+//! config at `[50.0, 95.0, 99.0]` (the crate's default). Custom float
+//! percentiles like `p99.9` (added in hotpath 0.15) are silently
+//! dropped by this parser.
+//!
+//! Generalising to dynamic percentile columns means a DB migration plus
+//! parser/schema/formatter changes - it's a real project, not a tweak.
 
 use super::{HotpathData, HotpathFunction, HotpathThread, KvPair};
 

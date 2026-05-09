@@ -6,6 +6,26 @@
 //!
 //! Test output parsing is split into a shared structured layer ([`parse_test_output`])
 //! so that both text and JSON modes can consume the same parsed results.
+//!
+//! # Why two clippy paths exist
+//!
+//! [`parse_clippy`] (text-mode parser) used to be the primary clippy
+//! ingestion path: it scraped cargo's pretty-printed stderr. That worked
+//! but lost the lint code on every warning past the first per-rule -
+//! cargo only emits `= note: #[warn(rule)]` once per crate compilation,
+//! so repeats of the same lint came through as bare `warning` headers.
+//!
+//! The clippy phase in `src/check_cmd.rs` now ingests cargo's
+//! `--message-format=json` output via [`crate::cargo_json`] instead and
+//! converts each [`crate::cargo_json::DiagnosticEvent`] into a
+//! [`ClippyDiagnostic`] for formatting - so every warning keeps its lint
+//! code in the header regardless of repeat count.
+//!
+//! [`parse_clippy`] and [`filter_clippy`] are kept because the test
+//! phase (`run_test_phase` in check_cmd.rs) still falls back to
+//! [`filter_clippy`] when a `cargo test` build emits compile errors on
+//! stderr - it's not worth a second JSON pass for the rare build-error
+//! case.
 
 use std::path::Path;
 

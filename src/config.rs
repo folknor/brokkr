@@ -356,33 +356,31 @@ pub struct RatatoskrConfig {
     /// today the binary must already exist at this path.
     pub mock_server_binary: Option<PathBuf>,
 
-    /// Directory holding sæhrimnir fixture files (plan 3). Resolved
-    /// relative to `brokkr.toml`. Sync-test script frontmatter
-    /// references fixtures by name; the file extension (`.toml`/`.lua`)
-    /// is picked by which file exists in this directory.
+    /// Directory holding sæhrimnir fixture files. Resolved relative to
+    /// `brokkr.toml`. Sync-test script frontmatter (and `mock-serve
+    /// --fixture`) references fixtures by name; resolution prefers the
+    /// `.toml` or `.lua` file with the matching stem and refuses if
+    /// both exist for the same stem. The hatch when both legitimately
+    /// coexist is to write the name with its extension - see
+    /// `crate::ratatoskr::saehrimnir::resolve_fixture`.
     pub fixtures_dir: Option<PathBuf>,
 
     /// Env-var names ratatoskr's `test-helpers` reads to pick up the
-    /// per-protocol mock endpoints (plan 3). Brokkr does not hardcode
-    /// the spellings so they stay in sync with whatever ratatoskr's
-    /// account-config code expects. Missing field = "not exposed in
-    /// this checkout." Consumed by `sync-smoke`/`sync-bench` once those
-    /// land - `mock-serve` doesn't need them.
-    #[allow(dead_code)] // wired for sync-smoke/sync-bench (plan 3 follow-up)
+    /// per-protocol mock endpoints. Consumed by `sync-smoke` /
+    /// `sync-bench` when exporting endpoints to the harness binary -
+    /// `mock-serve` doesn't need them. Brokkr does not hardcode the
+    /// spellings so they stay in sync with whatever ratatoskr's
+    /// account-config code expects; missing field = "not exposed in
+    /// this checkout."
     pub test_endpoint_env_jmap: Option<String>,
-    #[allow(dead_code)]
     pub test_endpoint_env_imap: Option<String>,
-    #[allow(dead_code)]
     pub test_endpoint_env_smtp: Option<String>,
-    #[allow(dead_code)]
     pub test_endpoint_env_graph: Option<String>,
-    #[allow(dead_code)]
     pub test_endpoint_env_gmail: Option<String>,
 
-    /// Where sync-test scripts live (plan 3). Defaults to
+    /// Where sync-test scripts live. Defaults to
     /// `crates/app/tests/sync-harness` when unset. Consumed by
-    /// `sync-list` (plan 3 follow-up).
-    #[allow(dead_code)]
+    /// `sync-list`, `sync-smoke`, and `sync-bench`.
     pub sync_script_dir: Option<PathBuf>,
 }
 
