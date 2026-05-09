@@ -15,11 +15,14 @@ Run a Service-subprocess test script. When the path is a directory under
 becomes cohort cycles.
 
 End-to-end on the brokkr side: project gating, script-path validation,
-frontmatter parse (`ceiling`, `preserve_data_dir`), lockfile, sweep-aware
-build via `[ratatoskr.harness]` (same feature contract as `brokkr check`),
-per-run artefact-dir allocation under `.brokkr/ratatoskr/<test>/run-N/`, sync
-`std::process::Command` spawn of `<binary> --test-harness <script>` with
-`BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` exported, stdout/
+frontmatter parse (`ceiling`, `preserve_data_dir`, `fixture`), lockfile,
+sweep-aware build via `[ratatoskr.harness]` (same feature contract as
+`brokkr check`), optional sæhrimnir spawn for fixture-bearing scripts (see
+"Fixture frontmatter" below), per-run artefact-dir allocation under
+`.brokkr/ratatoskr/<test>/run-N/`, sync `std::process::Command` spawn of
+`<binary> --test-harness <script>` with `BROKKR_HARNESS_ARTEFACT_DIR` and
+`BROKKR_TEST_BIN_DIR` exported (plus the `RATATOSKR_TEST_*_ENDPOINT` family
+when a fixture is bound), stdout/
 stderr drained to `binary-stdout.log` / `binary-stderr.log` while a 50ms-
 cadence poll loop watches for child exit or for the wall-clock ceiling to
 expire (default 60s, override via `-- ceiling: 60s` frontmatter).
@@ -66,6 +69,48 @@ discovered" / "filter matched none" / "all matches ignored" so the user gets
 a directly actionable response. Exit code is non-zero if any selected script
 failed.
 
+## Fixture frontmatter
+
+A service-harness script that needs a mock email-protocol server declares
+the dependency in frontmatter:
+
+```
+-- fixture: jmap-small.toml
+-- protocol: jmap
+```
+
+When `service-test` or `service-suite` sees `-- fixture: <NAME>` on a
+selected script, brokkr resolves `<NAME>` against `[ratatoskr]
+fixtures_dir` (the verbatim string is passed through, so the explicit
+`.toml` / `.lua` extension form disambiguates when both files exist),
+spawns sæhrimnir via `[ratatoskr] mock_server_binary` with
+`--fixture <PATH> --readiness-file <mock_dir>/readiness`, parses the
+five-line readiness sentinel for per-protocol ports, then injects the
+configured `RATATOSKR_TEST_*_ENDPOINT` env vars into the harness
+process (HTTP origins for jmap/graph/gmail, `host:port` for imap/smtp -
+same shape as `sync-smoke` / `sync-bench`). After every dependent run,
+sæhrimnir is SIGTERM'd with the standard 1.5s drain budget then
+escalated to SIGKILL if it overruns.
+
+Mock artefacts (`stderr.log`, `readiness`) land under
+`.brokkr/ratatoskr/<test>/mock/<fixture-name>/` for `service-test` and
+`.brokkr/ratatoskr/mock/<fixture-name>/` for `service-suite`.
+
+`service-test`: the mock spawns once before the soak begins and is
+reused across all `-N` iterations of the same script. Scripts without a
+`fixture` line skip the spawn entirely; no `[ratatoskr]` mock config is
+required for those.
+
+`service-suite`: scripts are run in discovery order (alphabetical, which
+naturally clusters cohorts under shared parent dirs), and a single
+sæhrimnir spawn is reused across consecutive scripts that share the same
+fixture string. Transitions between fixtures (or to a no-fixture script)
+shut the previous mock down with the standard graceful drain before
+spawning the next; the mock is also drained at end-of-cycle and on bail.
+The suite validates `[ratatoskr] mock_server_binary` and `fixtures_dir`
+up front when any selected script needs a fixture, so a missing config
+fails before the cargo build starts.
+
 ## `service-list`
 
 List discovered service-test scripts. Walks
@@ -80,6 +125,12 @@ Recognised fields:
   `ms`/`s`/`m`/`h`; bare numbers are seconds; default 60s when omitted.
 - `preserve_data_dir = on_success_too` - keeps the artefact dir even on
   success; failures always preserve.
+- `fixture` - name of a sæhrimnir fixture under `[ratatoskr] fixtures_dir`.
+  Triggers mock-server spawn + endpoint env-var injection at run time
+  (see "Fixture frontmatter" above). Pass with `.toml` / `.lua`
+  extension to disambiguate when both files exist.
+- `protocol` - informational; sæhrimnir binds all five protocol
+  listeners regardless of this value.
 
 Unknown fields are ignored so scripts can carry their own annotations.
 Empty-state output names the expected directory. Nested cohort dirs (`t1/`,

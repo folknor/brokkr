@@ -14,6 +14,9 @@ use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::artefacts::ArtefactDir;
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
+use crate::ratatoskr::saehrimnir::{
+    endpoint_env_pairs, require_path, resolve_fixture, MockServer,
+};
 
 /// Where per-test artefact directories live, relative to the project
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
@@ -43,6 +46,7 @@ const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr";
 /// "unknown flag" and brokkr captures that into the artefact dir
 /// faithfully; the plumbing here is structurally complete.
 #[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
+#[allow(clippy::too_many_lines)] // linear orchestration: parse, build, mock-up, run, mock-down
 pub fn service_test(
     project_root: &Path,
     dev_config: &DevConfig,
@@ -138,7 +142,28 @@ pub fn service_test(
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let repeat = repeat.max(1);
-    if repeat == 1 {
+
+    // If the script's frontmatter declares a fixture, spawn sæhrimnir
+    // once before iteration starts and inject the per-protocol endpoint
+    // env vars. The mock is reused across all soak iterations and torn
+    // down after the run finishes (success, failure, or error).
+    let mock_session = if let Some(fixture_name) = parsed.fixture.as_deref() {
+        Some(FixtureSession::start(
+            project_root,
+            dev_config,
+            &test_id,
+            fixture_name,
+            &artefact_parent,
+        )?)
+    } else {
+        None
+    };
+    let env_pairs: Vec<(&str, &str)> = mock_session
+        .as_ref()
+        .map(|s| s.env_pair_refs())
+        .unwrap_or_default();
+
+    let outcome = if repeat == 1 {
         run_single(
             &artefact_parent,
             &test_id,
@@ -147,6 +172,7 @@ pub fn service_test(
             project_root,
             keep_on_success,
             ceiling,
+            &env_pairs,
         )
     } else {
         run_soak(
@@ -159,8 +185,14 @@ pub fn service_test(
             ceiling,
             repeat,
             keep_going,
+            &env_pairs,
         )
+    };
+
+    if let Some(session) = mock_session {
+        session.shutdown();
     }
+    outcome
 }
 
 /// Outcome of one harness-binary invocation.
@@ -187,13 +219,14 @@ fn run_single(
     project_root: &Path,
     keep_on_success: bool,
     ceiling: Duration,
+    extra_env: &[(&str, &str)],
 ) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {test_id} against {}",
         built.binary.display()
     ));
     let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
-    let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling)?;
+    let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env)?;
     if result.succeeded {
         output::ratatoskr_msg(&format!("PASS in {}ms", result.elapsed_ms));
         Ok(())
@@ -225,6 +258,7 @@ fn run_soak(
     ceiling: Duration,
     repeat: u32,
     keep_going: bool,
+    extra_env: &[(&str, &str)],
 ) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "running {test_id} against {} (-N {repeat}{})",
@@ -235,7 +269,7 @@ fn run_soak(
     let mut results: Vec<(u32, RunResult)> = Vec::new();
     for iter in 1..=repeat {
         let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
-        let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling)?;
+        let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env)?;
         output::ratatoskr_msg(&format_iter_line(iter, repeat, &result));
         let stop = !result.succeeded && !keep_going;
         results.push((iter, result));
@@ -268,20 +302,24 @@ fn spawn_and_capture(
     script_abs: &Path,
     project_root: &Path,
     ceiling: Duration,
+    extra_env: &[(&str, &str)],
 ) -> Result<RunResult, DevError> {
     let binary_str = built.binary.display().to_string();
     let script_str = script_abs.display().to_string();
     let artefact_path_str = artefacts.path().display().to_string();
     let bin_dir_str = built.bin_dir.display().to_string();
 
+    let mut env_pairs: Vec<(&str, &str)> = vec![
+        ("BROKKR_HARNESS_ARTEFACT_DIR", &artefact_path_str),
+        ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
+    ];
+    env_pairs.extend_from_slice(extra_env);
+
     let deadline_capture = match output::run_captured_with_env_and_deadline(
         &binary_str,
         &["--test-harness", &script_str],
         project_root,
-        &[
-            ("BROKKR_HARNESS_ARTEFACT_DIR", &artefact_path_str),
-            ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
-        ],
+        &env_pairs,
         ceiling,
     ) {
         Ok(c) => c,
@@ -468,6 +506,7 @@ pub fn service_list(project_root: &Path) -> Result<(), DevError> {
 /// are identical. The summary at the end lists failed scripts by name -
 /// not iter index, since each script ran exactly once.
 #[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
+#[allow(clippy::too_many_lines)] // linear orchestration: discover, validate, build, run with fixture grouping, summarize
 pub fn service_suite(
     project_root: &Path,
     dev_config: &DevConfig,
@@ -510,6 +549,25 @@ pub fn service_suite(
             )
         })?;
 
+    // Fail fast if any selected script needs a fixture but the
+    // [ratatoskr] mock-server config isn't populated. Spawn-time would
+    // catch this too but reporting it before the build wastes nothing.
+    if let Some(needy) = runnable.iter().find(|s| s.fixture.is_some()) {
+        let cfg = dev_config.ratatoskr.as_ref().expect("checked above");
+        require_path(&cfg.mock_server_binary, project_root, "mock_server_binary").map_err(|e| {
+            DevError::Config(format!(
+                "service-suite: script {} needs a mock fixture but {e}",
+                needy.name
+            ))
+        })?;
+        require_path(&cfg.fixtures_dir, project_root, "fixtures_dir").map_err(|e| {
+            DevError::Config(format!(
+                "service-suite: script {} needs a mock fixture but {e}",
+                needy.name
+            ))
+        })?;
+    }
+
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "ratatoskr",
@@ -535,9 +593,39 @@ pub fn service_suite(
     let total = runnable.len();
     let mut results: Vec<CycleRun> = Vec::with_capacity(total * cycles as usize);
     let mut bailed = false;
+    // Keyed by fixture name; transitions into a different fixture (or no
+    // fixture) shut the previous mock down before spawning the next.
+    // Discover yields scripts in stable alphabetical order, so cohorts
+    // grouped by parent directory naturally cluster on the same fixture.
+    let mut current_mock: Option<FixtureSession> = None;
     'cycles: for cycle in 1..=cycles {
         for (idx, script) in runnable.iter().enumerate() {
             let pos = idx + 1;
+
+            // Fixture transition: if the next script needs a different
+            // mock (or none), drain the running one first. The new
+            // fixture (if any) gets spawned right after.
+            let needed = script.fixture.as_deref();
+            let same = match (&current_mock, needed) {
+                (Some(s), Some(n)) => s.fixture_name() == n,
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                if let Some(prev) = current_mock.take() {
+                    prev.shutdown();
+                }
+                if let Some(fixture_name) = needed {
+                    current_mock = Some(FixtureSession::start(
+                        project_root,
+                        dev_config,
+                        &script.name,
+                        fixture_name,
+                        &artefact_parent,
+                    )?);
+                }
+            }
+
             // ArtefactDir test_id rejects `/` in the name; nested scripts
             // like `t1/journal_replays` collapse to the file stem for the
             // artefact dir while keeping the full relative name in output.
@@ -562,12 +650,14 @@ pub fn service_suite(
                 &script.name,
             ));
             let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
+            let env_pairs = current_env_pairs(&current_mock);
             let result = spawn_and_capture(
                 artefacts,
                 &built,
                 &script.path,
                 project_root,
                 script.ceiling,
+                &env_pairs,
             )?;
             output::ratatoskr_msg(&format_suite_iter_line(
                 cycle, cycles, pos, total, &script.name, &result,
@@ -583,6 +673,10 @@ pub fn service_suite(
                 break 'cycles;
             }
         }
+    }
+
+    if let Some(prev) = current_mock.take() {
+        prev.shutdown();
     }
 
     output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
@@ -955,6 +1049,122 @@ fn write_artefacts(
     })?;
     fs::write(artefact_dir.join("run.toml"), serialized)?;
     Ok(())
+}
+
+/// Owns a running sæhrimnir process plus the per-protocol endpoint env
+/// pairs that should be injected into the harness binary. Created when a
+/// service-harness script declares a `-- fixture:` line; dropped (or
+/// gracefully `shutdown`) once every dependent harness invocation has
+/// returned.
+///
+/// `service-test` creates one before iteration and drains it after.
+/// `service-suite` creates one per fixture-group transition (see
+/// [`SuiteFixtureSlot`]).
+struct FixtureSession {
+    fixture_name: String,
+    mock: MockServer,
+    env_owned: Vec<(String, String)>,
+}
+
+impl FixtureSession {
+    /// Validate `[ratatoskr]` config, resolve the fixture, spawn
+    /// sæhrimnir, parse endpoints, and emit a one-line "mock-server up"
+    /// status. Errors out with the same shape `mock-serve` uses when
+    /// config is missing or the binary isn't built.
+    fn start(
+        project_root: &Path,
+        dev_config: &crate::config::DevConfig,
+        owner_label: &str,
+        fixture_name: &str,
+        artefact_parent: &Path,
+    ) -> Result<Self, DevError> {
+        let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
+            DevError::Config(format!(
+                "service-test: script {owner_label} declares `-- fixture: {fixture_name}` \
+                 but no [ratatoskr] section exists in brokkr.toml. \
+                 Set mock_server_binary and fixtures_dir to point at sæhrimnir's checkout."
+            ))
+        })?;
+        let binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")?;
+        let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
+        if !binary.exists() {
+            return Err(DevError::Config(format!(
+                "service-test: sæhrimnir binary not found at {}. \
+                 Build it first: `cargo build --release` in sæhrimnir's repo.",
+                binary.display()
+            )));
+        }
+        let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
+
+        let mock_dir = artefact_parent.join("mock").join(safe_dir_name(fixture_name));
+        std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
+
+        let mock = MockServer::spawn(&binary, &fixture_path, &mock_dir)?;
+        let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
+        let ep = mock.endpoints();
+        output::ratatoskr_msg(&format!(
+            "mock-server up: fixture={fixture_name} jmap={} imap={} smtp={} graph={} gmail={}",
+            ep.jmap, ep.imap, ep.smtp, ep.graph, ep.gmail
+        ));
+        Ok(Self {
+            fixture_name: fixture_name.to_owned(),
+            mock,
+            env_owned,
+        })
+    }
+
+    /// Borrowed `&str` view over the owned env strings, ready to hand to
+    /// `output::run_captured_with_env_and_deadline` via
+    /// `spawn_and_capture`'s `extra_env` parameter.
+    fn env_pair_refs(&self) -> Vec<(&str, &str)> {
+        self.env_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    fn fixture_name(&self) -> &str {
+        &self.fixture_name
+    }
+
+    /// SIGTERM sæhrimnir and reap (with the standard 1.5s budget then
+    /// SIGKILL escalation). Logs only if the shutdown went forceful so
+    /// the happy path stays quiet.
+    fn shutdown(self) {
+        let outcome = self.mock.shutdown();
+        if outcome.killed_after_budget {
+            output::ratatoskr_msg(&format!(
+                "mock-server SIGKILLed (fixture={}, drain budget exceeded)",
+                self.fixture_name
+            ));
+        }
+    }
+}
+
+/// Sanitize a fixture string for use as a directory name. Fixture names
+/// don't contain `/` today, but the explicit-extension form
+/// (`jmap-small.toml`) does carry a `.` we want to keep readable on
+/// disk. Replace anything outside `[A-Za-z0-9._-]` with `_` to be safe.
+fn safe_dir_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Borrowed env-pair view over an `Option<&FixtureSession>`. Used by the
+/// `service_suite` loop where the active mock changes from script to
+/// script.
+fn current_env_pairs(slot: &Option<FixtureSession>) -> Vec<(&str, &str)> {
+    match slot {
+        Some(s) => s.env_pair_refs(),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]

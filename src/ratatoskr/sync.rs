@@ -31,7 +31,7 @@ use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, ScriptInfo};
 use crate::sidecar;
 use crate::ratatoskr::saehrimnir::{
-    require_path, resolve_fixture, Endpoints, MockOutcome, MockServer,
+    endpoint_env_pairs, require_path, resolve_fixture, MockOutcome, MockServer,
 };
 
 /// Default location for sync-test scripts inside ratatoskr's tree, used
@@ -263,7 +263,7 @@ struct PhaseTimings {
 
 impl PhaseTimings {
     /// Render the trailing summary `(...)` clause for the PASS/FAIL line.
-    /// Returns an empty string when no phases recorded — keeps the
+    /// Returns an empty string when no phases recorded - keeps the
     /// pre-spawn config-error path tidy.
     fn summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -380,34 +380,6 @@ fn parsed_ceiling(script: &Path) -> Result<Duration, DevError> {
     let info = discover::parse_script(script, stem)
         .map_err(|e| DevError::Config(format!("sync-smoke: re-parse ceiling: {e}")))?;
     Ok(info.ceiling)
-}
-
-/// Build a list of `(env_var_name, value)` pairs for the protocols whose
-/// `test_endpoint_env_<proto>` field is set in `[ratatoskr]`. Owned
-/// strings so the caller can hand `&str` views into
-/// `run_captured_with_env_and_deadline` without lifetime gymnastics.
-///
-/// URL shapes match what ratatoskr's existing client code expects:
-/// HTTP origins for the JSON-over-HTTP protocols, `host:port` for the
-/// stream protocols.
-fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if let Some(name) = &cfg.test_endpoint_env_jmap {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.jmap)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_imap {
-        out.push((name.clone(), format!("127.0.0.1:{}", endpoints.imap)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_smtp {
-        out.push((name.clone(), format!("127.0.0.1:{}", endpoints.smtp)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_graph {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.graph)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_gmail {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.gmail)));
-    }
-    out
 }
 
 /// Write top-level `run.toml` with reproducibility metadata. Mock and
@@ -924,6 +896,7 @@ mod tests {
 
     use super::*;
     use crate::config::HarnessConfig;
+    use crate::ratatoskr::saehrimnir::Endpoints;
     use std::path::Path;
 
     fn cfg_with_endpoints() -> RatatoskrConfig {

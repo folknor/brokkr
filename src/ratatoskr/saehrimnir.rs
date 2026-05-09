@@ -429,6 +429,37 @@ pub fn require_path(
     })
 }
 
+/// Build a list of `(env_var_name, value)` pairs for the protocols whose
+/// `test_endpoint_env_<proto>` field is set in `[ratatoskr]`. Owned
+/// strings so the caller can hand `&str` views into
+/// `run_captured_with_env_and_deadline` without lifetime gymnastics.
+///
+/// URL shapes match what ratatoskr's existing client code expects:
+/// HTTP origins for the JSON-over-HTTP protocols, `host:port` for the
+/// stream protocols.
+///
+/// Shared by sync-smoke / sync-bench (where it originated) and the
+/// fixture-aware service-test / service-suite paths.
+pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(name) = &cfg.test_endpoint_env_jmap {
+        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.jmap)));
+    }
+    if let Some(name) = &cfg.test_endpoint_env_imap {
+        out.push((name.clone(), format!("127.0.0.1:{}", endpoints.imap)));
+    }
+    if let Some(name) = &cfg.test_endpoint_env_smtp {
+        out.push((name.clone(), format!("127.0.0.1:{}", endpoints.smtp)));
+    }
+    if let Some(name) = &cfg.test_endpoint_env_graph {
+        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.graph)));
+    }
+    if let Some(name) = &cfg.test_endpoint_env_gmail {
+        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.gmail)));
+    }
+    out
+}
+
 /// Pick the right file for a fixture name. `.toml` and `.lua` are both
 /// valid sæhrimnir fixture formats; the loader dispatches by extension.
 /// If the name already carries one of those extensions, take it
