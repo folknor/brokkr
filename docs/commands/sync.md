@@ -59,15 +59,21 @@ is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail,
 During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
 joins the auxiliary `mock_pids` set, the harness binary lands in
 `child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
-both. Tracked children (those whose PIDs are published in the lockfile via
-`on_spawn`) are spawned in their own process groups; every intentional
-kill (`--hard`, deadline expiry, cooperative SIGTERM,
-`MockServer::shutdown`) targets the whole group via `kill(-pgid, ...)`,
-so descendants (sæhrimnir's protocol listeners, harness helpers, the
-ratatoskr build's rustc) go down with the leader. Untracked
-subprocesses (`cargo metadata`, ad-hoc `cargo clippy` from `brokkr
-check`, etc.) stay in brokkr's foreground PG so terminal Ctrl-C reaches
-them through the kernel without our help. Terminal Ctrl-C is bridged: the
+both. PG isolation is opt-in per spawn site: callers pass `isolate_pg = true`
+only when a `SigtermGuard` is active for the spawn's lifetime. Sync-smoke,
+service-test, service-suite, mock-serve, and BenchHarness's sidecar
+window all qualify - their tracked children spawn with `process_group(0)`
+and every intentional kill (`--hard`, deadline expiry, cooperative
+SIGTERM, `MockServer::shutdown`) targets the whole group via
+`kill(-pgid, ...)`, so descendants (sæhrimnir's protocol listeners,
+harness helpers, the ratatoskr build's rustc) go down with the leader.
+Sync-bench's pre-bench-loop spawns (cargo build, sæhrimnir mock) and
+nidhogg's tile-server lifecycle stay in brokkr's foreground PG instead -
+they're tracked in the lockfile so `brokkr lock` shows them, but
+`--hard` falls back to a single-PID kill that may leave brief helper
+orphans. Untracked subprocesses (`cargo metadata`, ad-hoc `cargo clippy`
+from `brokkr check`, etc.) also stay in brokkr's PG so terminal Ctrl-C
+reaches them through the kernel without our help. Terminal Ctrl-C is bridged: the
 captured runner installs SIGINT alongside SIGTERM, both setting the
 shutdown flag, and the wait-loop forwards SIGTERM to the child PG.
 After the harness exits, `child_pid` is cleared so a stale PID can't be

@@ -143,6 +143,7 @@ pub fn service_test(
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
+        true, // isolate_pg: outer SigtermGuard active
     )?;
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
@@ -339,6 +340,7 @@ fn spawn_and_capture(
         &env_pairs,
         ceiling,
         Some(&|pid| lock.set_child_pid(pid)),
+        true, // isolate_pg: caller's SigtermGuard active
     ) {
         Ok(c) => c,
         // `Interrupted` means the child spawned and ran fine until
@@ -614,6 +616,7 @@ pub fn service_suite(
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
+        true, // isolate_pg: outer SigtermGuard active
     )?;
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
@@ -1172,6 +1175,7 @@ impl FixtureSession {
             &mock_dir,
             Some(&|pid| lock.add_mock_pid(pid)),
             Some(&|pid| lock.remove_mock_pid(pid)),
+            true, // isolate_pg: caller (service-test/-suite) has SigtermGuard
         )?;
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();

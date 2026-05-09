@@ -53,10 +53,11 @@ impl<'a> ChildGuard<'a> {
 impl<'a> Drop for ChildGuard<'a> {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            // SIGKILL the whole process group (server is its own PG
-            // leader). Plain `child.kill()` would only target the
-            // leader and leave any worker subprocesses running.
-            crate::ratatoskr::process::send_signal_pgrp(self.pid, libc::SIGKILL).ok();
+            // Single-PID kill: server shares brokkr's PG (no PG
+            // isolation), so a `kill(-pgid, ...)` would also signal
+            // brokkr itself. Workers reparented to PID 1 will be
+            // cleaned up by their own SIGINT/SIGTERM handling or via
+            // brokkr's exit cascade.
             child.kill().ok();
             child.wait().ok();
             self.lock.remove_mock_pid(self.pid);
@@ -284,9 +285,8 @@ fn run_lifecycle(
         .ok_or_else(|| DevError::Config("child process already consumed".into()))?;
     output::bench_msg("sending SIGTERM");
     let pid = child.id();
-    // SIGTERM the whole process group (server is its own PG leader)
-    // so any worker subprocesses drain along with the leader.
-    crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
+    // Single-PID SIGTERM (server shares brokkr's PG, no isolation).
+    crate::ratatoskr::process::send_signal(pid, libc::SIGTERM).ok();
 
     // 6. Wait for process exit, then join reader to get remaining stderr.
     let status = child.wait().map_err(DevError::Io)?;
@@ -337,10 +337,13 @@ fn spawn_server(
 ) -> Result<std::process::Child, DevError> {
     let port_str = port.to_string();
 
-    // Own process group so `--hard` / panic-Drop / kill paths can take
-    // the whole tile-server tree down via `kill(-pgid, ...)` instead of
-    // just signalling the leader.
-    use std::os::unix::process::CommandExt;
+    // No PG isolation: we're inside `harness.run_internal` which has
+    // no SigtermGuard, so detaching would orphan the server on
+    // terminal Ctrl-C. The child shares brokkr's PG; SIGINT from the
+    // terminal reaches both naturally. `--hard` / Drop kill the
+    // server's PID directly (single-PID, may leave helper threads but
+    // those are part of the same PG-as-brokkr and will be reaped on
+    // brokkr exit).
     Command::new(binary)
         .args(["serve", "--data-dir", data_dir, "--tiles", tiles])
         .env("PORT", &port_str)
@@ -348,7 +351,6 @@ fn spawn_server(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
-        .process_group(0)
         .spawn()
         .map_err(|e| DevError::Subprocess {
             program: binary.display().to_string(),

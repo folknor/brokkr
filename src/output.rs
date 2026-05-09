@@ -172,8 +172,17 @@ pub fn run_captured_observed(
     args: &[&str],
     cwd: &Path,
     on_spawn: Option<&dyn Fn(u32)>,
+    isolate_pg: bool,
 ) -> Result<CapturedOutput, DevError> {
-    let dc = run_captured_with_env_and_deadline(program, args, cwd, &[], Duration::MAX, on_spawn)?;
+    let dc = run_captured_with_env_and_deadline(
+        program,
+        args,
+        cwd,
+        &[],
+        Duration::MAX,
+        on_spawn,
+        isolate_pg,
+    )?;
     Ok(dc.captured)
 }
 
@@ -190,7 +199,15 @@ pub fn run_captured_with_env(
     // poll covers cargo build / cargo metadata too. `Duration::MAX`
     // disables the deadline branch in practice (kernel pid lifetime is
     // measured in hours, this in eons).
-    let dc = run_captured_with_env_and_deadline(program, args, cwd, env, Duration::MAX, None)?;
+    let dc = run_captured_with_env_and_deadline(
+        program,
+        args,
+        cwd,
+        env,
+        Duration::MAX,
+        None,
+        false,
+    )?;
     Ok(dc.captured)
 }
 
@@ -230,6 +247,14 @@ const DEADLINE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// `Command::spawn` returns. Callers can use it to publish the live PID
 /// into the lockfile so concurrent `brokkr lock` invocations can see what
 /// is currently running.
+///
+/// `isolate_pg` puts the child in its own process group via
+/// `process_group(0)` and switches the deadline / cooperative-SIGTERM
+/// kill paths to `kill(-pgid, ...)` so descendants (rustc, sæhrimnir
+/// listeners, harness helpers, etc.) go down with the leader. Only set
+/// to `true` when the caller has a `SigtermGuard` (or equivalent)
+/// active for the lifetime of the spawn - otherwise terminal Ctrl-C
+/// kills brokkr but leaves the PG-detached child orphaned.
 pub fn run_captured_with_env_and_deadline(
     program: &str,
     args: &[&str],
@@ -237,6 +262,7 @@ pub fn run_captured_with_env_and_deadline(
     env: &[(&str, &str)],
     deadline: Duration,
     on_spawn: Option<&dyn Fn(u32)>,
+    isolate_pg: bool,
 ) -> Result<DeadlineCapture, DevError> {
     use std::io::Read;
 
@@ -250,21 +276,14 @@ pub fn run_captured_with_env_and_deadline(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
-    // Only put the child in its own process group when the caller is
-    // actually tracking it (`on_spawn = Some`). Untracked subprocesses
-    // (e.g. `cargo metadata`, `cargo clippy`, test-sweep builds) need
-    // to stay in brokkr's PG so terminal Ctrl-C reaches them - if we
-    // detached them without publishing a PID in the lockfile and
-    // without a SigtermGuard polling the flag, ctrl-C would orphan
-    // them and `--hard` couldn't see them either. For TRACKED children,
-    // PG isolation lets `--hard` / deadline kill / cooperative SIGTERM
-    // target the whole group via `kill(-pgid, ...)`, sweeping cargo's
-    // rustc / sæhrimnir's child workers / etc.; terminal Ctrl-C
-    // bridges via SigtermGuard's SIGINT handler + the wait-loop's
-    // flag-poll forwarding SIGTERM to the child PG.
+    // PG isolation is opt-in: the caller asserts a SigtermGuard (or
+    // equivalent) is active so terminal Ctrl-C bridges to the PG via
+    // the wait-loop's flag-poll. Without that bridge, isolating the
+    // child would orphan it on ctrl-C; without a SigtermGuard tracking
+    // children alone (PID published, no PG) keeps them in brokkr's PG
+    // so ctrl-C reaches them naturally.
     use std::os::unix::process::CommandExt;
-    let tracked = on_spawn.is_some();
-    if tracked {
+    if isolate_pg {
         cmd.process_group(0);
     }
 
@@ -301,7 +320,7 @@ pub fn run_captured_with_env_and_deadline(
                     // then SIGKILL. The Err propagates as Interrupted so
                     // the orchestrator can run its mock-teardown path
                     // before main's scratch-cleanup.
-                    forward_sigterm_then_kill(&mut child, tracked);
+                    forward_sigterm_then_kill(&mut child, isolate_pg);
                     interrupted = true;
                     break child.wait().map_err(|e| DevError::Subprocess {
                         program: program.to_owned(),
@@ -310,14 +329,13 @@ pub fn run_captured_with_env_and_deadline(
                     })?;
                 }
                 if start.elapsed() >= deadline {
-                    // SIGKILL: tracked children get a `kill(-pgid, ...)`
-                    // sweep so descendants (rustc / sæhrimnir helpers
-                    // / harness subprocesses) don't outlive the
-                    // deadline; untracked children share brokkr's PG,
-                    // so `child.kill()` (single-PID SIGKILL) is the
-                    // right hammer - sending to -pid would also signal
-                    // brokkr itself.
-                    if tracked {
+                    // SIGKILL: PG-isolated children get a `kill(-pgid,
+                    // ...)` sweep so descendants don't outlive the
+                    // deadline; non-isolated children share brokkr's
+                    // PG, so `child.kill()` (single-PID SIGKILL) is
+                    // the right hammer - sending to -pid would also
+                    // signal brokkr itself.
+                    if isolate_pg {
                         crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
                     }
                     drop(child.kill());
@@ -369,15 +387,15 @@ pub fn run_captured_with_env_and_deadline(
 /// honour it, then escalate to SIGKILL. Used by
 /// [`run_captured_with_env_and_deadline`] when `brokkr kill` reaches us
 /// mid-orchestration.
-fn forward_sigterm_then_kill(child: &mut std::process::Child, tracked: bool) {
+fn forward_sigterm_then_kill(child: &mut std::process::Child, isolate_pg: bool) {
     let pid = child.id();
-    // Tracked children are PG-isolated: SIGTERM the group so sæhrimnir /
-    // cargo / rustc helpers get the cooperative shutdown too. Untracked
+    // PG-isolated children: SIGTERM the group so sæhrimnir / cargo /
+    // rustc helpers get the cooperative shutdown too. Non-isolated
     // children share brokkr's PG (so the same `kill -<pgid>` would also
     // signal brokkr) - SIGTERM only the leader; if the user is doing
     // ctrl-C from the terminal, the child already received SIGINT via
     // the foreground PG anyway.
-    if tracked {
+    if isolate_pg {
         crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
     } else {
         // SAFETY: sending SIGTERM to our own child by PID; ESRCH is
@@ -392,8 +410,8 @@ fn forward_sigterm_then_kill(child: &mut std::process::Child, tracked: bool) {
             Err(_) => break,
         }
     }
-    // SIGKILL escalation: PG for tracked, single-PID for untracked.
-    if tracked {
+    // SIGKILL escalation: PG for isolated, single-PID for non-isolated.
+    if isolate_pg {
         crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGKILL).ok();
     }
     drop(child.kill());
@@ -415,6 +433,7 @@ pub fn spawn_captured(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
+    isolate_pg: bool,
 ) -> Result<std::process::Child, DevError> {
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -426,11 +445,14 @@ pub fn spawn_captured(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
-    // Own process group so the sidecar can `kill(-pgid, ...)` the
-    // whole tree on stop-marker / shutdown-request paths and sweep up
-    // any helper processes the workload itself spawned.
+    // PG isolation is opt-in for the same reason as the deadline
+    // runner: the caller asserts a SigtermGuard is active so terminal
+    // signals bridge to the PG. The sidecar's own SigtermGuard (around
+    // `run_sidecar`) is the typical pairing.
     use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
+    if isolate_pg {
+        cmd.process_group(0);
+    }
 
     cmd.spawn().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),
@@ -496,7 +518,7 @@ mod tests {
     #[test]
     fn deadline_lets_short_runs_finish_normally() {
         let result =
-            run_captured_with_env_and_deadline("/bin/true", &[], cwd(), &[], Duration::from_secs(5), None)
+            run_captured_with_env_and_deadline("/bin/true", &[], cwd(), &[], Duration::from_secs(5), None, false)
                 .unwrap();
         assert!(!result.killed_on_deadline);
         assert!(result.captured.status.success());
@@ -515,6 +537,7 @@ mod tests {
             &[],
             Duration::from_millis(250),
             None,
+            false,
         )
         .unwrap();
         let elapsed = start.elapsed();
@@ -540,6 +563,7 @@ mod tests {
             &[],
             Duration::from_secs(5),
             None,
+            false,
         )
         .unwrap();
         assert!(!result.killed_on_deadline);

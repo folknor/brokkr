@@ -214,6 +214,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         req.debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
+        true, // isolate_pg: SigtermGuard above bridges terminal signals
     )?;
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
@@ -330,6 +331,7 @@ fn orchestrate(
         mock_dir,
         Some(&|pid| lock.add_mock_pid(pid)),
         Some(&|pid| lock.remove_mock_pid(pid)),
+        true, // isolate_pg: sync-smoke's outer SigtermGuard covers this
     )?;
     // Don't seed `child_pid` with the mock's PID - the captured runner's
     // `on_spawn` callback will publish the harness PID seconds from now,
@@ -365,6 +367,7 @@ fn orchestrate(
         &env_pairs,
         ceiling,
         Some(&|pid| lock.set_child_pid(pid)),
+        true, // isolate_pg: outer SigtermGuard active
     );
 
     // Capture harness elapsed before tearing down sæhrimnir so a
@@ -587,6 +590,14 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         req.debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
+        // isolate_pg=false: sync-bench has no outer SigtermGuard
+        // (BenchHarness's sidecar installs its own per-iteration, but
+        // it doesn't cover the build phase). PG-isolating cargo here
+        // would orphan it on terminal Ctrl-C; --hard accepts the
+        // single-PID kill (cargo reaps its own children on its way
+        // down via SIGCHLD, but rustc workers may briefly orphan -
+        // tracked as a known limit in TODO.md).
+        false,
     )?;
     output::ratatoskr_msg(&format!(
         "harness build ok (sweep={}, binary={})",
@@ -680,6 +691,10 @@ fn bench_loop(
         mock_dir,
         Some(&|pid| harness.lock().add_mock_pid(pid)),
         Some(&|pid| harness.lock().remove_mock_pid(pid)),
+        // isolate_pg=false: same reason as the build call above. The
+        // mock spawns BEFORE the bench loop where sidecar's
+        // SigtermGuard takes over.
+        false,
     )?;
     output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
@@ -724,6 +739,10 @@ fn bench_loop(
                 &["--test-harness", &script_str],
                 req.project_root,
                 &env_pairs,
+                // isolate_pg=true: sidecar installs its own
+                // SigtermGuard around `run_sidecar` below, covering
+                // the lifetime of this child.
+                true,
             )?;
             let pid = child.id();
             harness.lock().set_child_pid(pid);

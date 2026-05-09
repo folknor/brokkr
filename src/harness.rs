@@ -277,7 +277,7 @@ impl BenchHarness {
 
             let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
-            let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+            let child = output::spawn_captured(&prog_str, args, cwd, &env, true)?;
             last_pid = child.id();
             self.lock.set_child_pid(last_pid);
 
@@ -443,7 +443,7 @@ impl BenchHarness {
 
             let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
-            let child = output::spawn_captured(&prog_str, args, cwd, &env)?;
+            let child = output::spawn_captured(&prog_str, args, cwd, &env, true)?;
             last_pid = child.id();
             self.lock.set_child_pid(last_pid);
             let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
@@ -892,7 +892,7 @@ pub fn run_hotpath_capture(
     env.extend_from_slice(extra_env);
 
     let start = std::time::Instant::now();
-    let child = output::spawn_captured(binary, args, project_root, &env)?;
+    let child = output::spawn_captured(binary, args, project_root, &env, true)?;
     if let Some(lock) = lock {
         lock.set_child_pid(child.id());
     }
