@@ -151,14 +151,17 @@ pub struct MockServer {
     child: Option<std::process::Child>,
     pid: u32,
     endpoints: Endpoints,
+    ready_elapsed: Duration,
 }
 
-/// Diagnostic outcome of [`MockServer::shutdown`]. None of these fields
-/// gate caller success - they're recorded into `run.toml` for triage.
+/// Diagnostic outcome of [`MockServer::shutdown`]. The exit/signal fields
+/// are recorded into `run.toml` for triage; `shutdown_elapsed` is also
+/// surfaced in the user-visible per-phase summary.
 pub struct MockOutcome {
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub killed_after_budget: bool,
+    pub shutdown_elapsed: Duration,
 }
 
 impl MockServer {
@@ -182,6 +185,7 @@ impl MockServer {
 
         let fixture_str = fixture_path.display().to_string();
         let readiness_str = readiness.display().to_string();
+        let spawn_start = Instant::now();
         let mut child = Command::new(binary)
             .args([
                 "--fixture",
@@ -213,11 +217,19 @@ impl MockServer {
             child: Some(child),
             pid,
             endpoints,
+            ready_elapsed: spawn_start.elapsed(),
         })
     }
 
     pub fn endpoints(&self) -> &Endpoints {
         &self.endpoints
+    }
+
+    /// Wall-clock time from spawning sæhrimnir to parsing its readiness
+    /// sentinel. Surfaced in the per-phase summary printed by sync-smoke
+    /// / sync-bench so a slow cold-start is visible.
+    pub fn ready_elapsed(&self) -> Duration {
+        self.ready_elapsed
     }
 
     /// SIGTERM the child, grant [`SHUTDOWN_BUDGET`], escalate to SIGKILL
@@ -231,19 +243,23 @@ impl MockServer {
                 exit_code: None,
                 signal: None,
                 killed_after_budget: false,
+                shutdown_elapsed: Duration::ZERO,
             };
         };
+        let shutdown_start = Instant::now();
         let _term = proc_helpers::send_signal(self.pid, libc::SIGTERM);
         match wait_with_deadline(&mut child, self.pid, SHUTDOWN_BUDGET) {
             Ok(status) => MockOutcome {
                 exit_code: status.code(),
                 signal: status.signal(),
                 killed_after_budget: matches!(status.signal(), Some(s) if s == libc::SIGKILL),
+                shutdown_elapsed: shutdown_start.elapsed(),
             },
             Err(_) => MockOutcome {
                 exit_code: None,
                 signal: None,
                 killed_after_budget: true,
+                shutdown_elapsed: shutdown_start.elapsed(),
             },
         }
     }

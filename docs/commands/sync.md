@@ -57,6 +57,12 @@ preserves the artefact dir with `run.toml` (top-level metadata: brokkr
 version, sweep, harness exit code/elapsed, mock outcome) plus the harness's
 own artefacts and the captured mock stderr.
 
+The PASS/FAIL line carries a phase summary so a slow run is decomposable at
+a glance: `PASS in 3.7s (mock 0.4s, harness 3.2s, shutdown 0.1s)`. Phases
+that didn't run (e.g. a spawn-side failure before the harness started) are
+omitted, and the leading `in <total>` is dropped entirely if no phase
+recorded.
+
 ## `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug]`
 
 Measured variant of sync-smoke. Same two-child shape, but sæhrimnir is spawned

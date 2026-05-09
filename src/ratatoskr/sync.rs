@@ -220,6 +220,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
 
     output::ratatoskr_msg(&format!("running {test_id} (fixture: {fixture_name})"));
 
+    let mut timings = PhaseTimings::default();
     let outcome = orchestrate(
         req,
         cfg,
@@ -229,22 +230,66 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         &script_abs,
         &harness_dir,
         &mock_dir,
+        &mut timings,
     );
 
+    let summary = timings.summary();
     match outcome {
         Ok(()) => {
-            output::ratatoskr_msg("PASS");
+            output::ratatoskr_msg(&format!("PASS{summary}"));
             artefacts.finalize_success()?;
             Ok(())
         }
         Err(e) => {
-            output::ratatoskr_msg(&format!("FAIL: {e}"));
+            output::ratatoskr_msg(&format!("FAIL{summary}: {e}"));
             let path = artefacts.path().to_path_buf();
             artefacts.finalize_failure();
             output::ratatoskr_msg(&format!("artefacts preserved at {}", path.display()));
             Err(e)
         }
     }
+}
+
+/// Per-phase wall-clock timings for sync-smoke. Each field is `None`
+/// until the phase completes, so a spawn-side failure still produces a
+/// faithful summary (e.g. `FAIL in 0.4s (mock 0.4s)` if sæhrimnir died
+/// during readiness).
+#[derive(Default)]
+struct PhaseTimings {
+    mock_ready: Option<Duration>,
+    harness: Option<Duration>,
+    mock_shutdown: Option<Duration>,
+}
+
+impl PhaseTimings {
+    /// Render the trailing summary `(...)` clause for the PASS/FAIL line.
+    /// Returns an empty string when no phases recorded — keeps the
+    /// pre-spawn config-error path tidy.
+    fn summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut total = Duration::ZERO;
+        if let Some(d) = self.mock_ready {
+            parts.push(format!("mock {}", format_secs(d)));
+            total += d;
+        }
+        if let Some(d) = self.harness {
+            parts.push(format!("harness {}", format_secs(d)));
+            total += d;
+        }
+        if let Some(d) = self.mock_shutdown {
+            parts.push(format!("shutdown {}", format_secs(d)));
+            total += d;
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" in {} ({})", format_secs(total), parts.join(", "))
+        }
+    }
+}
+
+fn format_secs(d: Duration) -> String {
+    format!("{:.1}s", d.as_secs_f64())
 }
 
 /// The two-child orchestration body. Pulled into its own function so
@@ -261,8 +306,10 @@ fn orchestrate(
     script_abs: &Path,
     harness_dir: &Path,
     mock_dir: &Path,
+    timings: &mut PhaseTimings,
 ) -> Result<(), DevError> {
     let mock = MockServer::spawn(mock_binary, fixture_path, mock_dir)?;
+    timings.mock_ready = Some(mock.ready_elapsed());
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
 
     let bin_dir_str = built.bin_dir.display().to_string();
@@ -292,8 +339,16 @@ fn orchestrate(
         ceiling,
     );
 
+    // Capture harness elapsed before tearing down sæhrimnir so a
+    // ceiling-kill or non-zero exit still surfaces a harness duration in
+    // the summary line.
+    if let Ok(dc) = deadline_capture.as_ref() {
+        timings.harness = Some(dc.captured.elapsed);
+    }
+
     // Whatever the harness did, sæhrimnir gets torn down next.
     let mock_outcome = mock.shutdown();
+    timings.mock_shutdown = Some(mock_outcome.shutdown_elapsed);
 
     let dc = deadline_capture?;
     fs::write(harness_dir.join("binary-stdout.log"), &dc.captured.stdout).map_err(DevError::Io)?;
@@ -606,6 +661,7 @@ fn bench_loop(
     fixture_name: &str,
 ) -> Result<(), DevError> {
     let mock = MockServer::spawn(mock_binary, fixture_path, mock_dir)?;
+    output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
 
     let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
@@ -716,6 +772,10 @@ fn bench_loop(
 
     drop(fifo);
     let mock_outcome = mock.shutdown();
+    output::ratatoskr_msg(&format!(
+        "mock shutdown in {}",
+        format_secs(mock_outcome.shutdown_elapsed)
+    ));
 
     bench_outcome?;
 
