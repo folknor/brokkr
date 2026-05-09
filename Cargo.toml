@@ -10,11 +10,11 @@ name = "brokkr"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 toml = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libc = "0.2"
+libc = "0.2.186"
 rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
