@@ -1529,24 +1529,27 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
         // still alive (and anyone peeking at `brokkr lock` sees stale
         // state pointing at a live child with no owner).
         //
-        // Tracked children (`child_pid`, `mock_pids`) are spawned as
-        // their own process-group leaders, so we SIGKILL the whole
-        // group via `kill(-pgid, ...)`. That sweeps up cargo's rustc /
-        // sæhrimnir's helper workers / any descendant brokkr handed off
-        // to. Brokkr itself is NOT in its own PG (it shares the user's
-        // terminal session), so we keep the per-PID kill for `info.pid`.
+        // Tracked children may have been spawned with `process_group(0)`
+        // (sync-smoke / service-test / service-suite / mock-serve /
+        // BenchHarness sidecar) or not (sync-bench pre-loop spawns,
+        // nidhogg tile server). The lockfile doesn't carry the policy,
+        // so detect at kill time via `getpgid(pid)` and fan out
+        // accordingly: PG leader → group kill (sweeps descendants);
+        // non-leader → single-PID kill. Brokkr itself shares the user's
+        // terminal session and is never a PG leader of its own children,
+        // so we keep its kill as a plain per-PID kill.
         if let Some(child_pid) = info.child_pid {
-            let child_sent = send_pgrp_signal(child_pid, libc::SIGKILL);
+            let (kind, sent) = kill_tracked_pid(child_pid, libc::SIGKILL);
             output::lock_msg(&format!(
-                "SIGKILL child PG {child_pid}: {}",
-                if child_sent { "sent" } else { "not running" },
+                "SIGKILL child {kind} {child_pid}: {}",
+                if sent { "sent" } else { "not running" },
             ));
         }
         for mock_pid in &info.mock_pids {
-            let mock_sent = send_pgrp_signal(*mock_pid, libc::SIGKILL);
+            let (kind, sent) = kill_tracked_pid(*mock_pid, libc::SIGKILL);
             output::lock_msg(&format!(
-                "SIGKILL mock PG {mock_pid}: {}",
-                if mock_sent { "sent" } else { "not running" },
+                "SIGKILL mock {kind} {mock_pid}: {}",
+                if sent { "sent" } else { "not running" },
             ));
         }
         let brokkr_sent = send_signal(info.pid, libc::SIGKILL);
@@ -1594,6 +1597,30 @@ fn send_pgrp_signal(pid: u32, signal: libc::c_int) -> bool {
     }
     let err = std::io::Error::last_os_error();
     err.raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Signal a tracked PID, choosing PG-kill vs single-PID kill at runtime
+/// based on whether the PID is a process-group leader. Returns the
+/// label used in user-facing output (`"PG"` / `"PID"`) plus whether
+/// the target existed at signal time.
+///
+/// The lockfile doesn't carry an isolation policy alongside each PID,
+/// so we use `getpgid(pid) == pid` to detect: spawns that called
+/// `process_group(0)` become their own PG leader (PGID == PID), while
+/// non-isolated spawns inherit brokkr's PG (PGID != PID). For the
+/// former, `kill(-pid, ...)` sweeps the whole group; for the latter
+/// it would target brokkr's own PG (catastrophic) or return ESRCH if
+/// no group with that PGID exists, missing the actual child.
+fn kill_tracked_pid(pid: u32, signal: libc::c_int) -> (&'static str, bool) {
+    let pgid = unsafe { libc::getpgid(pid.cast_signed()) };
+    // Cast guarded by `pgid > 0`; `cast_unsigned` is the documented
+    // i32->u32 conversion that clippy doesn't flag (mirrors the
+    // pid.cast_signed() pattern we use for the inverse direction).
+    if pgid > 0 && pgid.cast_unsigned() == pid {
+        ("PG", send_pgrp_signal(pid, signal))
+    } else {
+        ("PID", send_signal(pid, signal))
+    }
 }
 
 // ---------------------------------------------------------------------------
