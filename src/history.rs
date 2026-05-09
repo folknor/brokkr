@@ -319,7 +319,7 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
 
         lines.push(format!(
             "{ts}  {project:<10} {elapsed:>7}  {cmd}{commit_display}{fail_tag}",
-            ts = &entry.timestamp,
+            ts = entry.timestamp,
             cmd = entry.command,
         ));
     }

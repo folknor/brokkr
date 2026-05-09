@@ -199,10 +199,9 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         command: "sync-smoke",
         project_root: &project_root_str,
     })?;
-    // Cooperative SIGTERM for `brokkr kill`. Installed after lock so a
-    // user who SIGTERMed during `lockfile::acquire`'s wait already exited;
-    // dropped at function end so the captured runner's flag-poll path
-    // sees the guard the whole time we own a workload child.
+    // Cooperative SIGTERM for `brokkr kill`. Installed before the cargo
+    // build so the captured runner's flag-poll covers the build phase
+    // too, then stays in scope through orchestrate + mock teardown.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let built = build::build_for_harness(

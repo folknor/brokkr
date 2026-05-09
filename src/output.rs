@@ -172,33 +172,12 @@ pub fn run_captured_with_env(
     cwd: &Path,
     env: &[(&str, &str)],
 ) -> Result<CapturedOutput, DevError> {
-    let start = Instant::now();
-
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    for &(key, value) in env {
-        cmd.env(key, value);
-    }
-    crate::oom::protect_child(&mut cmd);
-
-    let output = cmd.output().map_err(|e| DevError::Subprocess {
-        program: program.to_owned(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-
-    let elapsed = start.elapsed();
-
-    Ok(CapturedOutput {
-        status: output.status,
-        stdout: output.stdout,
-        stderr: output.stderr,
-        elapsed,
-    })
+    // Route through the deadline+observed runner so the shutdown-flag
+    // poll covers cargo build / cargo metadata too. `Duration::MAX`
+    // disables the deadline branch in practice (kernel pid lifetime is
+    // measured in hours, this in eons).
+    let dc = run_captured_with_env_and_deadline(program, args, cwd, env, Duration::MAX, None)?;
+    Ok(dc.captured)
 }
 
 /// Captured output plus a flag indicating whether the deadline fired.
@@ -352,7 +331,9 @@ pub fn run_captured_with_env_and_deadline(
 fn forward_sigterm_then_kill(child: &mut std::process::Child) {
     let pid = child.id();
     // SAFETY: signalling our own child by PID; ESRCH if it already exited
-    // is benign (handled by the subsequent wait loop).
+    // is benign (handled by the subsequent wait loop). `cast_signed` is
+    // the documented conversion for u32->pid_t (which is i32 on linux);
+    // PID fits comfortably (linux pid_max <= 2^22).
     unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
     let term_sent = Instant::now();
     while term_sent.elapsed() < SIGTERM_FORWARD_BUDGET {

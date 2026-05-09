@@ -55,9 +55,11 @@ During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
 goes into the auxiliary `mock_pid` slot, the harness binary into `child_pid`
 - so `brokkr lock` from another shell shows live RSS/CPU for both, and
 `brokkr kill --hard` SIGKILLs both. `brokkr kill` (cooperative SIGTERM) is
-caught by a guard installed for the post-build window; the captured runner
-forwards SIGTERM to the harness child with a 1.5s budget, then mock-teardown
-drains sæhrimnir, then brokkr exits with `DevError::Interrupted`.
+caught by a guard installed right after the lockfile and held through
+build + run + teardown; the captured runner (used for both `cargo build`
+and the harness binary) polls the shutdown flag every 50ms, forwards
+SIGTERM to whichever child is current with a 1.5s budget, then mock-
+teardown drains sæhrimnir and brokkr exits with `DevError::Interrupted`.
 
 After the harness exits, brokkr SIGTERMs sæhrimnir with the standard 1.5s
 budget then escalates to SIGKILL. PASS/FAIL on the harness exit code; FAIL

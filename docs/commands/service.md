@@ -99,11 +99,13 @@ Mock artefacts (`stderr.log`, `readiness`) land under
 `brokkr lock` from another shell shows the live harness PID (and progress
 `run R/T,` for soak / suite cycles), plus the mock PID under a separate
 `mock PID …` line. `brokkr kill --hard` SIGKILLs both children alongside
-brokkr; `brokkr kill` (SIGTERM) is caught by a guard installed for the
-post-build window - the captured runner forwards SIGTERM to the harness
-child with a 1.5s budget, the orchestrator then drains the mock with the
-same budget, and `service-suite`'s loop catches `DevError::Interrupted` so
-the post-loop mock-teardown still runs gracefully.
+brokkr; `brokkr kill` (SIGTERM) is caught by a guard installed right
+after the lockfile and held through build + run + teardown - the captured
+runner (used for both `cargo build` and the harness binary) forwards
+SIGTERM to whichever child is current with a 1.5s budget, the orchestrator
+then drains the mock with the same budget, and `service-suite`'s loop
+catches `DevError::Interrupted` so the post-loop mock-teardown still runs
+gracefully.
 
 `service-test`: the mock spawns once before the soak begins and is
 reused across all `-N` iterations of the same script. Scripts without a
