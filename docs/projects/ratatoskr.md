@@ -66,6 +66,15 @@ points at the directory containing both binaries.
 - `sync-bench`: `.brokkr/ratatoskr/sync/<test>/run-N/iter-K/harness/` per
   iteration; the best iteration's `summary.json` is ingested as KvPair rows.
 
+Per-run cleanup is the runtime's job: `ArtefactDir::finalize_success`
+removes the `run-N/` dir on green runs (unless `--keep-artefacts` or
+`preserve_data_dir = on_success_too` was set), `finalize_failure`
+preserves it, and a panic / early return defaults to preserve so
+diagnostics are never lost. To sweep accumulated dirs from past
+failures, run `brokkr clean` - on ratatoskr projects it removes the
+whole `.brokkr/ratatoskr/` tree (it acquires the project lock first,
+so concurrent harness runs and `mock-serve` are not affected).
+
 ## Cross-cutting design
 
 Cross-cutting design lives in the ratatoskr repo at

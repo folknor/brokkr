@@ -88,7 +88,7 @@ For details, read the linked docs.
 - `check` / `test` - validation pipeline. See `docs/commands/check.md`.
 - `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status.
 - `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`.
-- `clean [--worktrees]` - remove scratch/temp files. `--worktrees` also purges all persistent benchmark worktrees.
+- `clean [--worktrees]` - remove scratch/temp files. On ratatoskr projects also wipes `.brokkr/ratatoskr/` (run-N artefact dirs left by failed runs, plus `mock/` dirs from `mock-serve`). `--worktrees` also purges all persistent benchmark worktrees.
 - `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression).
 - `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`.
 - `kill [--hard]` - cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM (graceful: SIGKILLs child, flushes partial sidecar data under `dirty` alias, releases lock, runs `brokkr clean`). `--hard` sends SIGKILL to brokkr + child. Exits 130 on graceful path.

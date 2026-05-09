@@ -25,6 +25,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
+use crate::output;
+
+/// Emit a one-line hint pointing at `brokkr clean` for sweeping
+/// preserved artefact dirs. Call from any failure path that has just
+/// printed a "FAIL ... (artefacts: <path>)" or "artefacts preserved at
+/// ..." message.
+pub fn emit_clean_hint() {
+    output::ratatoskr_msg("hint: `brokkr clean` removes preserved artefacts");
+}
 
 /// A freshly-allocated `<parent>/<test_id>/run-N/` directory.
 ///

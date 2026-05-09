@@ -12,7 +12,7 @@ use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
-use crate::ratatoskr::artefacts::ArtefactDir;
+use crate::ratatoskr::artefacts::{self, ArtefactDir};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
 use crate::ratatoskr::saehrimnir::{
@@ -255,6 +255,7 @@ fn run_single(
             "FAIL {} in {}ms (artefacts: {dir})",
             result.exit_label, result.elapsed_ms
         ));
+        artefacts::emit_clean_hint();
         Err(DevError::ExitCode(1))
     }
 }
@@ -298,6 +299,7 @@ fn run_soak(
     output::ratatoskr_msg(&format_soak_summary(&results, repeat));
 
     if results.iter().any(|(_, r)| !r.succeeded) {
+        artefacts::emit_clean_hint();
         Err(DevError::ExitCode(1))
     } else {
         Ok(())
@@ -749,6 +751,7 @@ pub fn service_suite(
     output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
 
     if results.iter().any(|r| !r.result.succeeded) {
+        artefacts::emit_clean_hint();
         Err(DevError::ExitCode(1))
     } else {
         Ok(())

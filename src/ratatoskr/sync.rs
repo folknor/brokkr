@@ -26,7 +26,7 @@ use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::project::Project;
-use crate::ratatoskr::artefacts::ArtefactDir;
+use crate::ratatoskr::artefacts::{self, ArtefactDir};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, ScriptInfo};
 use crate::sidecar;
@@ -257,6 +257,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
             let path = artefacts.path().to_path_buf();
             artefacts.finalize_failure();
             output::ratatoskr_msg(&format!("artefacts preserved at {}", path.display()));
+            artefacts::emit_clean_hint();
             Err(e)
         }
     }
@@ -641,6 +642,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
                 "FAIL: {e} (artefacts preserved at {})",
                 path.display()
             ));
+            artefacts::emit_clean_hint();
             Err(e)
         }
     }

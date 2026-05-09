@@ -1393,6 +1393,19 @@ fn cmd_clean(
         }
     }
 
+    // Clean ratatoskr artefact tree (`.brokkr/ratatoskr/<test>/run-N/`,
+    // `.brokkr/ratatoskr/sync/<test>/run-N/[iter-K/]`, plus the
+    // `mock/<fixture>/` dirs left by `mock-serve`). The whole tree is
+    // debris by the time `clean` runs because we hold the project lock.
+    if project == Project::Ratatoskr {
+        let ratatoskr_root = project_root.join(".brokkr/ratatoskr");
+        if ratatoskr_root.exists() {
+            let runs = count_run_dirs(&ratatoskr_root);
+            std::fs::remove_dir_all(&ratatoskr_root)?;
+            output::run_msg(&format!("removed {runs} ratatoskr run dir(s)"));
+        }
+    }
+
     if worktrees {
         let removed = worktree::purge_all(project_root)?;
         output::run_msg(&format!("removed {removed} worktree(s)"));
@@ -1408,6 +1421,33 @@ fn cmd_clean(
 
     output::result_msg("clean done");
     Ok(())
+}
+
+fn count_run_dirs(root: &Path) -> u32 {
+    let mut count = 0u32;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let is_run = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("run-"))
+                .is_some_and(|rest| rest.parse::<u32>().is_ok());
+            if is_run {
+                count += 1;
+            } else {
+                stack.push(path);
+            }
+        }
+    }
+    count
 }
 
 fn cmd_lock() -> Result<(), DevError> {

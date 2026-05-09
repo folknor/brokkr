@@ -198,6 +198,39 @@ Currently `find_executable` infers the expected binary name from `BuildConfig.bi
 
 If the process panics or is killed (SIGKILL/SIGTERM) inside a `--commit` benchmark, the worktree at `.brokkr/worktree/<hash>` is left behind. Mitigated: `Worktree::create` cleans up stale worktrees at the same path before creating a new one. A `Drop` impl would require interior mutability or an `Option` wrapper - probably not worth the complexity.
 
+### PID-reuse race in `brokkr kill --hard` and `brokkr lock`
+
+The lockfile stores bare `child_pid` / `mock_pids: Vec<u32>` and the
+kill path resolves them at signal time (`src/main.rs::kill_tracked_pid`,
+`getpgid(pid) == pid` for PG-leader detection). If brokkr loses control
+of a child without clearing its slot - SIGKILL of brokkr itself,
+panic-without-Drop, hard reboot mid-run - the kernel may recycle the
+PID before the next `--hard` lookup. The lookup then SIGKILLs an
+unrelated process (or PG, if the new occupant is also a leader).
+
+Same race for `brokkr lock`'s RSS/CPU display: `process_summary(pid)`
+will read /proc for whatever process now owns that PID. Mostly harmless
+for display; load-bearing for `--hard`.
+
+Closing this means storing a per-PID liveness witness alongside each
+recorded PID. The cheapest one: `start_time` from `/proc/<pid>/stat`
+field 22 (clock-ticks-since-boot, monotonic per PID). On signal:
+
+  1. Read the current `/proc/<pid>/stat` field 22.
+  2. Compare to the value stashed at registration time.
+  3. Match → signal. Mismatch → "PID recycled, skipping" log line.
+
+Schema change is small: `child_pid=12345 12977382` (pid + start_time
+on the same line, space-separated). `add_mock_pid` / `set_child_pid`
+read field 22 at write time; the kill path re-reads at signal time
+and compares before signaling. `getpgid` check stays.
+
+Not urgent - the race window for a tracked child to die without
+brokkr-owned cleanup is narrow (panic without Drop, brokkr SIGKILL,
+reboot), and the consequences for the wrong target are recoverable in
+practice. File this when we see it actually fire, or alongside the
+next lockfile schema change for free.
+
 ### Hung-script diagnostics on ceiling-kill (ratatoskr orchestration)
 
 When a ratatoskr orchestration command (`sync-smoke`, `sync-bench`,
