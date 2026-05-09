@@ -44,12 +44,14 @@ Flags:
 - `-N <COUNT>` - on a single script, repeats with per-iter status, per-iter
   artefact dir, `--keep-going`, exit-code aggregation; on a directory, runs
   the cohort `<COUNT>` times in order via the `service-suite` code path.
-- `--debug` - flips the build to dev profile (default release).
+- `--debug` / `--release` - force the harness sweep build profile. Default is
+  release unless `[ratatoskr.harness] debug = true` flips it; the flags
+  override the toml. Mutually exclusive.
 
 Cross-cutting design lives at
 `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
 
-## `service-suite [--filter SUBSTR] [-N COUNT] [--keep-going] [--include-ignored] [--keep-artefacts] [--debug]`
+## `service-suite [--filter SUBSTR] [-N COUNT] [--keep-going] [--include-ignored] [--keep-artefacts] [--debug | --release]`
 
 Run every discovered service-test script in sequence against a single shared
 harness build. `-N` runs the whole cohort `<count>` times in order (e.g. 50

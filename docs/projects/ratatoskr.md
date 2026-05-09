@@ -14,9 +14,12 @@ ratatoskr exercises two separate harness flows from brokkr:
    server) + the ratatoskr harness binary. See `docs/commands/sync.md`.
 
 Both share the harness build pipeline through `[ratatoskr.harness]` (which
-`[[check]]` sweep to build, which package's binary to spawn). See
-`docs/brokkr.toml.md` for the config block, and `RatatoskrConfig` /
+`[[check]]` sweep to build, which package's binary to spawn, and an optional
+`debug = true` to default the orchestration commands to the dev profile).
+See `docs/brokkr.toml.md` for the config block, and `RatatoskrConfig` /
 `HarnessConfig` rustdoc in `src/config.rs` for parse-time validation.
+The orchestration commands accept `--debug` / `--release` (mutually exclusive)
+to override the toml on a per-invocation basis.
 
 ## sæhrimnir contract
 

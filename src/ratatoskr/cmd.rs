@@ -53,7 +53,7 @@ pub fn service_test(
     dev_config: &DevConfig,
     script: &str,
     keep_artefacts: bool,
-    debug: bool,
+    profile_override: Option<bool>,
     repeat: u32,
     keep_going: bool,
 ) -> Result<(), DevError> {
@@ -77,7 +77,7 @@ pub fn service_test(
             dev_config,
             Some(&filter),
             keep_artefacts,
-            debug,
+            profile_override,
             keep_going,
             false,
             repeat,
@@ -136,6 +136,7 @@ pub fn service_test(
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
+    let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         project_root,
         &dev_config.check,
@@ -546,7 +547,7 @@ pub fn service_suite(
     dev_config: &DevConfig,
     filter: Option<&str>,
     keep_artefacts: bool,
-    debug: bool,
+    profile_override: Option<bool>,
     keep_going: bool,
     include_ignored: bool,
     repeat: u32,
@@ -611,6 +612,7 @@ pub fn service_suite(
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
+    let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         project_root,
         &dev_config.check,

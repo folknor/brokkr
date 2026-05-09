@@ -1570,9 +1570,15 @@ Examples:
 
         /// Build the harness sweep with the dev profile (`<target>/debug/`).
         /// Default is release for parity with `brokkr test` and to match
-        /// what users will run in production.
-        #[arg(long)]
+        /// what users will run in production. Overrides
+        /// `[ratatoskr.harness] debug` from `brokkr.toml`.
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
+
+        /// Force the release profile, overriding `[ratatoskr.harness] debug`
+        /// from `brokkr.toml`. Mutually exclusive with `--debug`.
+        #[arg(long)]
+        release: bool,
 
         /// Repeat count. For a single script: number of iterations
         /// (each gets its own `run-N/`). For a directory: number of
@@ -1621,9 +1627,15 @@ Examples:
         keep_artefacts: bool,
 
         /// Build the harness sweep with the dev profile (`<target>/debug/`).
-        /// Default is release.
-        #[arg(long)]
+        /// Default is release. Overrides `[ratatoskr.harness] debug` from
+        /// `brokkr.toml`.
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
+
+        /// Force the release profile, overriding `[ratatoskr.harness] debug`
+        /// from `brokkr.toml`. Mutually exclusive with `--debug`.
+        #[arg(long)]
+        release: bool,
 
         /// Keep going after a failed script. Default is to stop on the
         /// first failure so the artefact dir lands fast for triage.
@@ -1678,9 +1690,15 @@ Examples:
         keep_artefacts: bool,
 
         /// Build the harness sweep with the dev profile (`<target>/debug/`).
-        /// Default is release.
-        #[arg(long)]
+        /// Default is release. Overrides `[ratatoskr.harness] debug` from
+        /// `brokkr.toml`.
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
+
+        /// Force the release profile, overriding `[ratatoskr.harness] debug`
+        /// from `brokkr.toml`. Mutually exclusive with `--debug`.
+        #[arg(long)]
+        release: bool,
     },
 
     /// [ratatoskr] Bench a sync-test script against sæhrimnir (plan 3)
@@ -1717,8 +1735,14 @@ Examples:
 
         /// Build the harness sweep with the dev profile (`<target>/debug/`).
         /// Default is release for parity with what users will run.
-        #[arg(long)]
+        /// Overrides `[ratatoskr.harness] debug` from `brokkr.toml`.
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
+
+        /// Force the release profile, overriding `[ratatoskr.harness] debug`
+        /// from `brokkr.toml`. Mutually exclusive with `--debug`.
+        #[arg(long)]
+        release: bool,
     },
 
     /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C

@@ -191,6 +191,7 @@ mod tests {
         let harness = HarnessConfig {
             sweep: "missing".into(),
             binary: "app".into(),
+            debug: None,
         };
         let err = build_for_harness(Path::new("/"), &checks, &harness, false, None, None, false)
             .unwrap_err()

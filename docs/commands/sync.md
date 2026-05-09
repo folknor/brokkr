@@ -42,7 +42,7 @@ parse top-of-file frontmatter (`description`, `expected`, `fixture`,
 output names the expected directory and notes that the cohort may not have
 landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
 
-## `sync-smoke <SCRIPT> [--keep-artefacts] [--debug]`
+## `sync-smoke <SCRIPT> [--keep-artefacts] [--debug | --release]`
 
 Two-child orchestration. Validates `[ratatoskr.harness]`, `[ratatoskr]
 mock_server_binary`, and `[ratatoskr] fixtures_dir`, parses the script's
@@ -96,7 +96,7 @@ that didn't run (e.g. a spawn-side failure before the harness started) are
 omitted, and the leading `in <total>` is dropped entirely if no phase
 recorded.
 
-## `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug]`
+## `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug | --release]`
 
 Measured variant of sync-smoke. Same two-child shape, but sæhrimnir is spawned
 once and reused across `--bench` iterations (default 3), and the harness

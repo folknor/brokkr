@@ -112,7 +112,7 @@ pub struct SyncSmokeRequest<'a> {
     pub dev_config: &'a DevConfig,
     pub script: &'a str,
     pub keep_artefacts: bool,
-    pub debug: bool,
+    pub profile_override: Option<bool>,
 }
 
 /// Drive `brokkr sync-smoke` end-to-end:
@@ -207,11 +207,12 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     // end, before `_lock`.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
+    let debug = req.profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         req.project_root,
         &req.dev_config.check,
         harness_cfg,
-        req.debug,
+        debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
         true, // isolate_pg: SigtermGuard above bridges terminal signals
@@ -482,7 +483,7 @@ pub struct SyncBenchRequest<'a> {
     /// semantics across pbfhogg/elivagar.
     pub force: bool,
     pub keep_artefacts: bool,
-    pub debug: bool,
+    pub profile_override: Option<bool>,
     /// Literal `brokkr <...>` invocation, threaded through for the
     /// `brokkr_args` column in results.db.
     pub brokkr_args: String,
@@ -584,11 +585,12 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     .with_brokkr_args(req.brokkr_args.clone())
     .with_measure_mode(Some("bench"));
 
+    let debug = req.profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         req.project_root,
         &req.dev_config.check,
         harness_cfg,
-        req.debug,
+        debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
         // isolate_pg=false: sync-bench has no outer SigtermGuard
@@ -977,6 +979,7 @@ mod tests {
             harness: Some(HarnessConfig {
                 sweep: "harness".into(),
                 binary: "app".into(),
+                debug: None,
             }),
             mock_server_binary: None,
             fixtures_dir: None,

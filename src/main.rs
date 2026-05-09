@@ -992,6 +992,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             script,
             keep_artefacts,
             debug,
+            release,
             repeat,
             keep_going,
         } => {
@@ -1001,7 +1002,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 &script,
                 keep_artefacts,
-                debug,
+                profile_override(debug, release),
                 repeat,
                 keep_going,
             )
@@ -1016,6 +1017,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             force,
             keep_artefacts,
             debug,
+            release,
         } => {
             project::require(project, Project::Ratatoskr, "sync-bench")?;
             ratatoskr::sync::run_sync_bench(&ratatoskr::sync::SyncBenchRequest {
@@ -1025,7 +1027,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 bench,
                 force,
                 keep_artefacts,
-                debug,
+                profile_override: profile_override(debug, release),
                 brokkr_args: brokkr_args.clone(),
             })
         }
@@ -1037,6 +1039,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             script,
             keep_artefacts,
             debug,
+            release,
         } => {
             project::require(project, Project::Ratatoskr, "sync-smoke")?;
             ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
@@ -1044,7 +1047,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 dev_config: &dev_config,
                 script: &script,
                 keep_artefacts,
-                debug,
+                profile_override: profile_override(debug, release),
             })
         }
         Command::MockServe { fixture } => {
@@ -1067,6 +1070,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             filter,
             keep_artefacts,
             debug,
+            release,
             keep_going,
             include_ignored,
             repeat,
@@ -1077,7 +1081,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 filter.as_deref(),
                 keep_artefacts,
-                debug,
+                profile_override(debug, release),
                 keep_going,
                 include_ignored,
                 repeat,
@@ -1094,6 +1098,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
 ///
 /// Host features are appended first, then CLI features. Duplicates are removed
 /// (CLI wins, but since features are additive this just means dedup).
+/// Resolve the ratatoskr harness profile override from the two CLI flags.
+/// `Some(true)` = force dev, `Some(false)` = force release, `None` = defer
+/// to `[ratatoskr.harness] debug` in `brokkr.toml`. The flags are
+/// `conflicts_with` each other in clap, so they can't both be set.
+fn profile_override(debug: bool, release: bool) -> Option<bool> {
+    if debug {
+        Some(true)
+    } else if release {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn resolve_features(dev_config: &config::DevConfig, cli_features: &[String]) -> Vec<String> {
     let host_features = config::host_features(dev_config);
     if host_features.is_empty() {

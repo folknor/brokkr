@@ -400,6 +400,14 @@ pub struct HarnessConfig {
     /// Name of the cargo package whose binary the harness spawns.
     /// Must appear in `[[check]].build_packages` of the named sweep.
     pub binary: String,
+
+    /// When true, orchestration commands (`service-test`, `service-suite`,
+    /// `sync-smoke`, `sync-bench`) build the harness sweep with the dev
+    /// profile by default. The CLI `--debug` flag still forces dev when
+    /// this is unset; there's no way to force release back from the CLI
+    /// short of editing the toml.
+    #[serde(default)]
+    pub debug: Option<bool>,
 }
 
 #[allow(dead_code)]
@@ -1695,6 +1703,7 @@ features = ["a"]
             harness: Some(HarnessConfig {
                 sweep: "harness".into(),
                 binary: "app".into(),
+                debug: None,
             }),
             ..RatatoskrConfig::default()
         };
@@ -1713,6 +1722,7 @@ features = ["a"]
             harness: Some(HarnessConfig {
                 sweep: "nope".into(),
                 binary: "app".into(),
+                debug: None,
             }),
             ..RatatoskrConfig::default()
         };
@@ -1735,6 +1745,7 @@ features = ["a"]
             harness: Some(HarnessConfig {
                 sweep: "harness".into(),
                 binary: "service".into(),
+                debug: None,
             }),
             ..RatatoskrConfig::default()
         };
