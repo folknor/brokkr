@@ -16,25 +16,50 @@ use crate::harness::{self, BenchConfig, BenchHarness, BenchResult};
 use crate::output;
 use crate::pmtiles;
 
-/// RAII guard that kills a child process on drop if it hasn't been consumed.
-struct ChildGuard(Option<std::process::Child>);
+/// RAII guard that kills the tile-server child process group on drop
+/// (if not consumed) and unpublishes its PID from the lockfile so
+/// `brokkr lock` / `--hard` reflect reality during the lifecycle.
+struct ChildGuard<'a> {
+    child: Option<std::process::Child>,
+    lock: &'a crate::lockfile::LockGuard,
+    pid: u32,
+}
 
-impl ChildGuard {
-    fn new(child: std::process::Child) -> Self {
-        Self(Some(child))
+impl<'a> ChildGuard<'a> {
+    fn new(child: std::process::Child, lock: &'a crate::lockfile::LockGuard) -> Self {
+        let pid = child.id();
+        // Publish the tile server's PG-leader PID under the auxiliary
+        // mock_pids slot. Same shape as ratatoskr's FixtureSession:
+        // `brokkr kill --hard` SIGKILLs every entry, and the server is
+        // spawned in its own process group so the kill sweeps any
+        // helper threads / subprocesses too.
+        lock.add_mock_pid(pid);
+        Self {
+            child: Some(child),
+            lock,
+            pid,
+        }
     }
 
-    /// Take ownership of the child, preventing kill-on-drop.
+    /// Take ownership of the child, preventing kill-on-drop. The
+    /// auxiliary PID stays in the lockfile - the caller is responsible
+    /// for clearing it (e.g. by calling `lock.remove_mock_pid` after a
+    /// successful graceful shutdown).
     fn take(&mut self) -> Option<std::process::Child> {
-        self.0.take()
+        self.child.take()
     }
 }
 
-impl Drop for ChildGuard {
+impl<'a> Drop for ChildGuard<'a> {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
+            // SIGKILL the whole process group (server is its own PG
+            // leader). Plain `child.kill()` would only target the
+            // leader and leave any worker subprocesses running.
+            crate::ratatoskr::process::send_signal_pgrp(self.pid, libc::SIGKILL).ok();
             child.kill().ok();
             child.wait().ok();
+            self.lock.remove_mock_pid(self.pid);
         }
     }
 }
@@ -130,6 +155,7 @@ pub fn run(
             port,
             &project_root,
             &tile_coords,
+            harness.lock(),
         )
     })?;
 
@@ -149,13 +175,19 @@ fn run_lifecycle(
     port: u16,
     project_root: &Path,
     tile_coords: &[(u32, u32, u32)],
+    lock: &crate::lockfile::LockGuard,
 ) -> Result<BenchResult, DevError> {
     let start = Instant::now();
 
-    // 1. Spawn server with piped stderr. ChildGuard ensures cleanup on error.
-    let mut guard = ChildGuard::new(spawn_server(binary, data_dir, tiles, port, project_root)?);
+    // 1. Spawn server with piped stderr. ChildGuard ensures cleanup on
+    //    error - tracks the PG-leader PID via add_mock_pid /
+    //    remove_mock_pid so `brokkr kill --hard` can reach the server.
+    let mut guard = ChildGuard::new(
+        spawn_server(binary, data_dir, tiles, port, project_root)?,
+        lock,
+    );
     let child = guard
-        .0
+        .child
         .as_mut()
         .ok_or_else(|| DevError::Config("failed to get child process".into()))?;
 
@@ -245,18 +277,20 @@ fn run_lifecycle(
     }
 
     // 5. Send SIGTERM for graceful shutdown. Take child from guard so we
-    //    control the shutdown sequence (guard no longer kills on drop).
+    //    control the shutdown sequence (guard no longer kills on drop,
+    //    so we also have to unpublish the mock_pids entry ourselves).
     let mut child = guard
         .take()
         .ok_or_else(|| DevError::Config("child process already consumed".into()))?;
     output::bench_msg("sending SIGTERM");
-    #[allow(clippy::cast_possible_wrap)]
-    let pid = child.id() as i32;
-    // SAFETY: sending SIGTERM to our own child process.
-    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let pid = child.id();
+    // SIGTERM the whole process group (server is its own PG leader)
+    // so any worker subprocesses drain along with the leader.
+    crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
 
     // 6. Wait for process exit, then join reader to get remaining stderr.
     let status = child.wait().map_err(DevError::Io)?;
+    lock.remove_mock_pid(pid);
     let (_, remaining_stderr) = reader_handle.join().unwrap_or_default();
 
     let elapsed_ms = harness::elapsed_to_ms(&start.elapsed());
@@ -303,6 +337,10 @@ fn spawn_server(
 ) -> Result<std::process::Child, DevError> {
     let port_str = port.to_string();
 
+    // Own process group so `--hard` / panic-Drop / kill paths can take
+    // the whole tile-server tree down via `kill(-pgid, ...)` instead of
+    // just signalling the leader.
+    use std::os::unix::process::CommandExt;
     Command::new(binary)
         .args(["serve", "--data-dir", data_dir, "--tiles", tiles])
         .env("PORT", &port_str)
@@ -310,6 +348,7 @@ fn spawn_server(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
+        .process_group(0)
         .spawn()
         .map_err(|e| DevError::Subprocess {
             program: binary.display().to_string(),

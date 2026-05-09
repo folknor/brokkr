@@ -250,6 +250,15 @@ pub fn run_captured_with_env_and_deadline(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
+    // Each captured child becomes its own process-group leader. Lets
+    // `--hard` / deadline kill / cooperative SIGTERM target the WHOLE
+    // group via `kill(-pgid, ...)`, sweeping up cargo's rustc, build.rs
+    // helpers, sæhrimnir's child workers, etc. Terminal Ctrl-C still
+    // reaches the captured child indirectly: brokkr's SigtermGuard
+    // catches SIGINT, sets `SHUTDOWN_REQUESTED`, the wait loop polls
+    // and forwards SIGTERM to the child PG.
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
 
     let mut child = cmd.spawn().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),
@@ -293,6 +302,11 @@ pub fn run_captured_with_env_and_deadline(
                     })?;
                 }
                 if start.elapsed() >= deadline {
+                    // SIGKILL the whole process group (child is its own
+                    // PG leader) so descendants (rustc / sæhrimnir
+                    // helpers / harness subprocesses) don't outlive the
+                    // deadline kill.
+                    crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
                     drop(child.kill());
                     killed_on_deadline = true;
                     break child.wait().map_err(|e| DevError::Subprocess {
@@ -344,11 +358,10 @@ pub fn run_captured_with_env_and_deadline(
 /// mid-orchestration.
 fn forward_sigterm_then_kill(child: &mut std::process::Child) {
     let pid = child.id();
-    // SAFETY: signalling our own child by PID; ESRCH if it already exited
-    // is benign (handled by the subsequent wait loop). `cast_signed` is
-    // the documented conversion for u32->pid_t (which is i32 on linux);
-    // PID fits comfortably (linux pid_max <= 2^22).
-    unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
+    // SIGTERM the whole process group (child is its own PG leader) so
+    // sæhrimnir / cargo / rustc helpers all get the cooperative
+    // shutdown signal. ESRCH if the group has already exited is benign.
+    crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
     let term_sent = Instant::now();
     while term_sent.elapsed() < SIGTERM_FORWARD_BUDGET {
         match child.try_wait() {
@@ -357,6 +370,9 @@ fn forward_sigterm_then_kill(child: &mut std::process::Child) {
             Err(_) => break,
         }
     }
+    // Escalate to SIGKILL on the group; `child.kill()` only signals
+    // the leader.
+    crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGKILL).ok();
     drop(child.kill());
 }
 
@@ -387,6 +403,11 @@ pub fn spawn_captured(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
+    // Own process group so the sidecar can `kill(-pgid, ...)` the
+    // whole tree on stop-marker / shutdown-request paths and sweep up
+    // any helper processes the workload itself spawned.
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
 
     cmd.spawn().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),

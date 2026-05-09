@@ -178,11 +178,18 @@ impl MockServer {
     /// orchestrator publish the mock PID into the lockfile in time for
     /// `brokkr kill --hard` arriving during the readiness window to
     /// find it.
+    ///
+    /// `on_failure` is the inverse: invoked with the same PID if
+    /// readiness fails (sentinel never written, child exited early,
+    /// budget expired). Lets the orchestrator unpublish the PID it just
+    /// added via `on_spawn`, so a stale `mock_pids` entry doesn't
+    /// linger until later code clears the whole set.
     pub fn spawn_observed(
         binary: &Path,
         fixture_path: &Path,
         mock_dir: &Path,
         on_spawn: Option<&dyn Fn(u32)>,
+        on_failure: Option<&dyn Fn(u32)>,
     ) -> Result<Self, DevError> {
         let readiness = mock_dir.join("readiness");
         if readiness.exists() {
@@ -194,6 +201,10 @@ impl MockServer {
         let fixture_str = fixture_path.display().to_string();
         let readiness_str = readiness.display().to_string();
         let spawn_start = Instant::now();
+        // Own process group so `kill(-pgid, ...)` from `--hard` /
+        // shutdown / deadline paths sweeps sæhrimnir's helper workers
+        // (mock SMTP/IMAP/JMAP listeners) along with the leader.
+        use std::os::unix::process::CommandExt;
         let mut child = Command::new(binary)
             .args([
                 "--fixture",
@@ -204,6 +215,7 @@ impl MockServer {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr_log)
+            .process_group(0)
             .spawn()
             .map_err(|e| DevError::Subprocess {
                 program: binary.display().to_string(),
@@ -218,11 +230,15 @@ impl MockServer {
         let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
             Ok(ep) => ep,
             Err(e) => {
-                // Bounded shutdown: SIGTERM, give SHUTDOWN_BUDGET, then
-                // SIGKILL. A wedged sæhrimnir that ignores SIGTERM can't
-                // make the readiness-failure path hang forever.
-                let _term = proc_helpers::send_signal(pid, libc::SIGTERM);
+                // Bounded shutdown: SIGTERM the PG, give
+                // SHUTDOWN_BUDGET, then SIGKILL. A wedged sæhrimnir
+                // that ignores SIGTERM can't make the readiness-failure
+                // path hang forever.
+                let _term = proc_helpers::send_signal_pgrp(pid, libc::SIGTERM);
                 let _outcome = wait_with_deadline(&mut child, pid, SHUTDOWN_BUDGET);
+                if let Some(cb) = on_failure {
+                    cb(pid);
+                }
                 return Err(e);
             }
         };
@@ -267,7 +283,9 @@ impl MockServer {
             };
         };
         let shutdown_start = Instant::now();
-        let _term = proc_helpers::send_signal(self.pid, libc::SIGTERM);
+        // SIGTERM the whole sæhrimnir process group (child is its own
+        // PG leader) so helper listeners drain too.
+        let _term = proc_helpers::send_signal_pgrp(self.pid, libc::SIGTERM);
         match wait_with_deadline(&mut child, self.pid, SHUTDOWN_BUDGET) {
             Ok(status) => MockOutcome {
                 exit_code: status.code(),
@@ -292,7 +310,9 @@ impl Drop for MockServer {
         // leak the child; nothing graceful to wait for if we're
         // unwinding.
         if let Some(mut child) = self.child.take() {
-            let _kill = proc_helpers::send_signal(self.pid, libc::SIGKILL);
+            // SIGKILL the whole process group so listener helpers go
+            // down with the leader on panic-unwind.
+            let _kill = proc_helpers::send_signal_pgrp(self.pid, libc::SIGKILL);
             let _reaped = child.wait();
         }
     }
@@ -390,11 +410,15 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     // [`SHUTDOWN_BUDGET`].
     let _signals = MockServeSignalGuard::install();
 
+    // Own process group so the SIGTERM/SIGKILL paths reach sæhrimnir's
+    // helper listeners via `kill(-pgid, ...)`.
+    use std::os::unix::process::CommandExt;
     let mut child = Command::new(&binary)
         .args(["--fixture", &fixture_str, "--readiness-file", &readiness_str])
         .stdin(Stdio::null())
         // Inherit stdout/stderr so the user sees sæhrimnir's logs live.
         // Capture-and-replay would obscure timing for a foreground tool.
+        .process_group(0)
         .spawn()
         .map_err(|e| DevError::Subprocess {
             program: binary.display().to_string(),
@@ -412,7 +436,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
             // sentinel - don't leave it running, and don't let a wedged
             // child make `brokkr kill` hang here either. SIGTERM, give
             // SHUTDOWN_BUDGET, then SIGKILL via wait_with_deadline.
-            let _term = proc_helpers::send_signal(child_pid, libc::SIGTERM);
+            let _term = proc_helpers::send_signal_pgrp(child_pid, libc::SIGTERM);
             let _outcome = wait_with_deadline(&mut child, child_pid, SHUTDOWN_BUDGET);
             return Err(e);
         }
@@ -616,9 +640,9 @@ fn wait_with_signals(
         }
         if MOCK_SIGNAL_FLAG.load(Ordering::Relaxed) {
             output::ratatoskr_msg("signal received, shutting saehrimnir down");
-            // Best-effort SIGTERM; if the child has just exited, ESRCH
-            // is fine.
-            let _term = proc_helpers::send_signal(pid, libc::SIGTERM);
+            // Best-effort SIGTERM to the whole process group; if the
+            // child has just exited, ESRCH is fine.
+            let _term = proc_helpers::send_signal_pgrp(pid, libc::SIGTERM);
             return wait_with_deadline(child, pid, SHUTDOWN_BUDGET);
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -642,7 +666,7 @@ pub fn wait_with_deadline(
             output::ratatoskr_msg(&format!(
                 "saehrimnir did not exit within {budget:?}, escalating to SIGKILL"
             ));
-            let _kill = proc_helpers::send_signal(pid, libc::SIGKILL);
+            let _kill = proc_helpers::send_signal_pgrp(pid, libc::SIGKILL);
             return child.wait().map_err(DevError::Io);
         }
         std::thread::sleep(Duration::from_millis(25));

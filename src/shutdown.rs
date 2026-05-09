@@ -34,42 +34,53 @@ pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }
 
-extern "C" fn sigterm_handler(_: libc::c_int) {
+extern "C" fn shutdown_handler(_: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-fn set_sigterm(handler: libc::sighandler_t) {
+fn set_handler(signum: libc::c_int, handler: libc::sighandler_t) {
     // SAFETY: `signal` with a plain function pointer is safe; the
     // handler body only touches an AtomicBool which is itself
     // async-signal-safe to write.
     unsafe {
-        libc::signal(libc::SIGTERM, handler);
+        libc::signal(signum, handler);
     }
 }
 
-/// RAII guard that installs the SIGTERM handler for the duration of a
-/// sidecar run and restores the default action on drop. Scoped this
-/// tightly so `brokkr kill` during non-sidecar work (cargo build,
-/// brokkr check, …) terminates brokkr immediately instead of being
-/// silently swallowed into a flag nobody polls.
+/// RAII guard that installs SIGTERM + SIGINT handlers for the duration
+/// of a tracked-child window and restores the default action on drop.
+///
+/// SIGTERM covers `brokkr kill`. SIGINT covers terminal Ctrl-C: now that
+/// captured children spawn with `process_group(0)`, the terminal sends
+/// SIGINT only to brokkr's foreground PG (which excludes the child), so
+/// without this handler ctrl-C would orphan the child. The handler sets
+/// `SHUTDOWN_REQUESTED`; the captured runner's poll loop sees the flag
+/// and forwards SIGTERM to the child PG before returning `Interrupted`.
+///
+/// Scoped tightly so `brokkr kill` / ctrl-C during non-tracked work
+/// (cargo build outside an orchestrator, `brokkr check`, ...) terminates
+/// brokkr immediately instead of being silently swallowed into a flag
+/// nobody polls.
 pub struct SigtermGuard;
 
 impl SigtermGuard {
     pub fn install() -> Self {
         SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
-        let h: libc::sighandler_t = sigterm_handler as *const () as usize;
-        set_sigterm(h);
+        let h: libc::sighandler_t = shutdown_handler as *const () as usize;
+        set_handler(libc::SIGTERM, h);
+        set_handler(libc::SIGINT, h);
         Self
     }
 }
 
 impl Drop for SigtermGuard {
     fn drop(&mut self) {
-        set_sigterm(libc::SIG_DFL);
+        set_handler(libc::SIGTERM, libc::SIG_DFL);
+        set_handler(libc::SIGINT, libc::SIG_DFL);
         // Reset the flag so a captured subprocess invoked AFTER this
         // guard's scope (e.g. in main's cleanup path) doesn't see a
-        // sticky `true` left over from a SIGTERM that already fired and
-        // was handled. Without this, `output::run_captured_with_env`'s
+        // sticky `true` left over from a SIGTERM/SIGINT that already
+        // fired and was handled. Without this, the captured runner's
         // flag-poll loop would spuriously SIGTERM unrelated children.
         SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
     }

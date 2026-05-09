@@ -59,9 +59,15 @@ is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail,
 During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
 joins the auxiliary `mock_pids` set, the harness binary lands in
 `child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
-both, and `brokkr kill --hard` SIGKILLs every entry. After the harness
-exits, `child_pid` is cleared so a stale PID can't be SIGKILLed by
-`--hard` once the kernel has recycled it. `brokkr kill` (cooperative SIGTERM) is
+both. Tracked children are spawned in their own process groups; every
+intentional kill (`--hard`, deadline expiry, cooperative SIGTERM,
+`MockServer::shutdown`) targets the whole group via `kill(-pgid, ...)`,
+so descendants (cargo's rustc, sæhrimnir's protocol listeners, harness
+helpers) go down with the leader. Terminal Ctrl-C is bridged: the
+captured runner installs SIGINT alongside SIGTERM, both setting the
+shutdown flag, and the wait-loop forwards SIGTERM to the child PG.
+After the harness exits, `child_pid` is cleared so a stale PID can't be
+SIGKILLed by `--hard` once the kernel has recycled it. `brokkr kill` (cooperative SIGTERM) is
 caught by a guard installed right after the lockfile and held through
 build + run + teardown; the captured runner (used for both `cargo build`
 and the harness binary) polls the shutdown flag every 50ms, forwards

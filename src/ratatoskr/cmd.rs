@@ -1171,6 +1171,7 @@ impl FixtureSession {
             &fixture_path,
             &mock_dir,
             Some(&|pid| lock.add_mock_pid(pid)),
+            Some(&|pid| lock.remove_mock_pid(pid)),
         )?;
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();

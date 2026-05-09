@@ -1524,21 +1524,28 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
     }
 
     if hard {
-        // Kill the child first, then brokkr - otherwise there's a brief
+        // Kill children first, then brokkr - otherwise there's a brief
         // window where brokkr is dead but the tool it was measuring is
         // still alive (and anyone peeking at `brokkr lock` sees stale
         // state pointing at a live child with no owner).
+        //
+        // Tracked children (`child_pid`, `mock_pids`) are spawned as
+        // their own process-group leaders, so we SIGKILL the whole
+        // group via `kill(-pgid, ...)`. That sweeps up cargo's rustc /
+        // sæhrimnir's helper workers / any descendant brokkr handed off
+        // to. Brokkr itself is NOT in its own PG (it shares the user's
+        // terminal session), so we keep the per-PID kill for `info.pid`.
         if let Some(child_pid) = info.child_pid {
-            let child_sent = send_signal(child_pid, libc::SIGKILL);
+            let child_sent = send_pgrp_signal(child_pid, libc::SIGKILL);
             output::lock_msg(&format!(
-                "SIGKILL child PID {child_pid}: {}",
+                "SIGKILL child PG {child_pid}: {}",
                 if child_sent { "sent" } else { "not running" },
             ));
         }
         for mock_pid in &info.mock_pids {
-            let mock_sent = send_signal(*mock_pid, libc::SIGKILL);
+            let mock_sent = send_pgrp_signal(*mock_pid, libc::SIGKILL);
             output::lock_msg(&format!(
-                "SIGKILL mock PID {mock_pid}: {}",
+                "SIGKILL mock PG {mock_pid}: {}",
                 if mock_sent { "sent" } else { "not running" },
             ));
         }
@@ -1569,6 +1576,19 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
 /// Send a signal to a PID. Returns `true` if the process existed.
 fn send_signal(pid: u32, signal: libc::c_int) -> bool {
     let ret = unsafe { libc::kill(pid.cast_signed(), signal) };
+    if ret == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    err.raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Send a signal to the process group whose PGID equals `pid` (i.e.
+/// `kill(-pid, signal)`). Returns `true` if the group existed. Used
+/// for tracked children spawned with `process_group(0)` so descendants
+/// (rustc, sæhrimnir's helpers, etc.) go down with the leader.
+fn send_pgrp_signal(pid: u32, signal: libc::c_int) -> bool {
+    let ret = unsafe { libc::kill(-pid.cast_signed(), signal) };
     if ret == 0 {
         return true;
     }

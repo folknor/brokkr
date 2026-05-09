@@ -284,6 +284,9 @@ impl BenchHarness {
             // run_sidecar takes ownership of the child, drains stdout/stderr
             // in background threads, and returns everything when the child exits.
             let result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
+            // Iteration's child has reaped; clear so a stale PID can't
+            // be SIGKILLed by `--hard` once the kernel recycles it.
+            self.lock.clear_child_pid();
             let stopped = result.stopped_by_marker;
             let interrupted = result.stopped_by_signal;
 
@@ -444,6 +447,7 @@ impl BenchHarness {
             last_pid = child.id();
             self.lock.set_child_pid(last_pid);
             let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
+            self.lock.clear_child_pid();
             let stopped = sidecar_result.stopped_by_marker;
             let interrupted = sidecar_result.stopped_by_signal;
 
@@ -893,6 +897,9 @@ pub fn run_hotpath_capture(
         lock.set_child_pid(child.id());
     }
     let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start, stop_marker);
+    if let Some(lock) = lock {
+        lock.clear_child_pid();
+    }
     let stopped = sidecar_result.stopped_by_marker;
     let interrupted = sidecar_result.stopped_by_signal;
 

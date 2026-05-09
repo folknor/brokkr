@@ -52,6 +52,35 @@ pub fn send_signal(pid: u32, signum: i32) -> Result<(), DevError> {
     Err(DevError::Io(err))
 }
 
+/// Send `signum` to the entire process group whose PGID equals `pid`.
+///
+/// Used by the kill paths that target children spawned with
+/// `process_group(0)` (the PG leader's PID == its PGID, so the caller
+/// passes the leader PID and we negate inside). Sends to descendants
+/// too, so cargo's rustc / sæhrimnir's helper subprocesses go down with
+/// the leader and don't get orphaned.
+///
+/// `ESRCH` is normalized to `Ok(())` because "the group is already
+/// gone" is the desired post-condition for every caller (deadline kill,
+/// cooperative SIGTERM, `--hard`, `MockServer::shutdown`).
+#[allow(dead_code)]
+pub fn send_signal_pgrp(pid: u32, signum: i32) -> Result<(), DevError> {
+    let signed = i32::try_from(pid)
+        .map_err(|_| DevError::Build(format!("pid {pid} does not fit pid_t")))?;
+    // SAFETY: `kill(-pgid, sig)` is async-signal-safe and takes plain
+    // integers. PIDs in the valid kernel range fit in i32 (kernel.pid_max
+    // < 2^22), and we just type-checked.
+    let ret = unsafe { libc::kill(-signed, signum) };
+    if ret == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(DevError::Io(err))
+}
+
 /// Whether `pid` refers to a live process.
 ///
 /// Implemented as `kill(pid, 0)`:

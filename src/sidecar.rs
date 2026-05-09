@@ -679,6 +679,10 @@ pub(crate) fn run_sidecar(
                     )
                 };
                 output::sidecar_msg(&display);
+                // SIGKILL the whole process group (the captured runner
+                // / harness child is its own PG leader) so descendants
+                // get reaped along with the leader.
+                crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
                 child.kill().ok();
                 // Wait for process to actually exit so we can collect status.
                 let status = child.wait().ok();
@@ -692,6 +696,7 @@ pub(crate) fn run_sidecar(
         // Graceful shutdown via `brokkr kill` (SIGTERM handler set this flag).
         if crate::shutdown::is_shutdown_requested() {
             output::sidecar_msg("shutdown requested, killing child");
+            crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
             child.kill().ok();
             let status = child.wait().ok();
             child_elapsed = Some(start.elapsed());

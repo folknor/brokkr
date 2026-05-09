@@ -329,6 +329,7 @@ fn orchestrate(
         fixture_path,
         mock_dir,
         Some(&|pid| lock.add_mock_pid(pid)),
+        Some(&|pid| lock.remove_mock_pid(pid)),
     )?;
     // Don't seed `child_pid` with the mock's PID - the captured runner's
     // `on_spawn` callback will publish the harness PID seconds from now,
@@ -678,6 +679,7 @@ fn bench_loop(
         fixture_path,
         mock_dir,
         Some(&|pid| harness.lock().add_mock_pid(pid)),
+        Some(&|pid| harness.lock().remove_mock_pid(pid)),
     )?;
     output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
     let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
