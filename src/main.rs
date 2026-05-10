@@ -211,6 +211,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         limit,
         all,
         fix_gremlins,
+        timings,
         args,
     } = cli.command
     {
@@ -232,6 +233,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             limit,
             all,
             fix_gremlins,
+            timings,
             &args,
         );
     }

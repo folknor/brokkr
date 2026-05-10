@@ -28,6 +28,14 @@ pub(crate) struct LibtestRun {
     /// `None` if cargo never emitted `Finished` (build failed or no rebuild
     /// happened - though cargo emits `Finished` even on cache hits).
     pub(crate) build_elapsed: Option<Duration>,
+    /// (test name, wall-clock duration) for every test the tracker observed
+    /// running to completion. Order is observation order (libtest runs
+    /// `--test-threads=1`, so this is also start order). Note: the
+    /// deferred-observe state machine clears pending on the *next* start
+    /// marker or `test result:` summary, so a test whose first println
+    /// looks like a bare status (`println!("ok")`) will have its duration
+    /// inflated by the gap until the next test starts.
+    pub(crate) completed: Vec<(String, Duration)>,
 }
 
 pub(crate) enum LibtestOutcome {
@@ -52,6 +60,7 @@ pub(crate) struct HungTest {
 #[derive(Default)]
 struct TestTracker {
     current: HashMap<String, Instant>,
+    completed: Vec<(String, Duration)>,
 }
 
 impl TestTracker {
@@ -60,7 +69,9 @@ impl TestTracker {
     }
 
     fn observe_result(&mut self, name: &str) {
-        self.current.remove(name);
+        if let Some(started) = self.current.remove(name) {
+            self.completed.push((name.to_owned(), started.elapsed()));
+        }
     }
 
     fn timed_out(&self, timeout: Duration) -> Option<(String, Duration)> {
@@ -158,6 +169,10 @@ where
         .lock()
         .map_err(|_| DevError::Build("build_elapsed mutex poisoned".into()))?
         .take();
+    let completed = tracker
+        .lock()
+        .map(|mut t| std::mem::take(&mut t.completed))
+        .map_err(|_| DevError::Build("test tracker mutex poisoned".into()))?;
 
     Ok(LibtestRun {
         captured: CapturedOutput {
@@ -171,6 +186,7 @@ where
             None => LibtestOutcome::Completed,
         },
         build_elapsed,
+        completed,
     })
 }
 
@@ -1067,6 +1083,7 @@ mod tests {
             .unwrap_or_else(Instant::now);
         let tracker = Arc::new(Mutex::new(TestTracker {
             current: HashMap::from([("watchdog::hangs".to_owned(), started)]),
+            completed: Vec::new(),
         }));
         let done = Arc::new(AtomicBool::new(false));
         let hung = Arc::new(Mutex::new(None::<HungTest>));

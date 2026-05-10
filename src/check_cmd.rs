@@ -47,6 +47,7 @@ pub(crate) fn cmd_check(
     limit: usize,
     all: bool,
     fix_gremlins: bool,
+    timings: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let active_sweeps =
@@ -54,11 +55,86 @@ pub(crate) fn cmd_check(
 
     run_gremlins(project_root, json, limit, all, fix_gremlins)?;
     run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
-    run_test_phase(project, project_root, &active_sweeps, package, raw, json, extra_args)?;
-    if !json {
-        output::result_msg("check passed");
+    let mut collected_timings: Vec<TestTiming> = Vec::new();
+    let test_result = run_test_phase(
+        project,
+        project_root,
+        &active_sweeps,
+        package,
+        raw,
+        json,
+        extra_args,
+        timings.then_some(&mut collected_timings),
+    );
+    match test_result {
+        Ok(()) => {
+            if !json {
+                output::result_msg("check passed");
+            }
+            if timings {
+                emit_timings(&collected_timings, limit, all, json, active_sweeps.len() > 1);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if timings {
+                emit_timings(&collected_timings, limit, all, json, active_sweeps.len() > 1);
+            }
+            Err(e)
+        }
     }
-    Ok(())
+}
+
+/// One test timing observation, tagged with its sweep label so the merged
+/// descending list can show which sweep an entry came from.
+pub(crate) struct TestTiming {
+    pub(crate) sweep: String,
+    pub(crate) name: String,
+    pub(crate) elapsed: std::time::Duration,
+}
+
+fn emit_timings(timings: &[TestTiming], limit: usize, all: bool, json: bool, multi_sweep: bool) {
+    if json {
+        for t in timings {
+            cargo_json::emit(&cargo_json::CheckEvent::TestTiming(
+                cargo_json::TestTimingEvent {
+                    sweep: multi_sweep.then(|| t.sweep.clone()),
+                    name: t.name.clone(),
+                    elapsed_seconds: (t.elapsed.as_secs_f64() * 1000.0).round() / 1000.0,
+                },
+            ));
+        }
+        return;
+    }
+
+    if timings.is_empty() {
+        output::run_msg("timings: no tests ran");
+        return;
+    }
+
+    let mut sorted: Vec<&TestTiming> = timings.iter().collect();
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.elapsed));
+
+    let total = sorted.len();
+    let displayed: &[&TestTiming] = if all || total <= limit {
+        &sorted
+    } else {
+        &sorted[..limit]
+    };
+
+    let mut msg = format!("timings: {total} test(s), slowest first\n");
+    for t in displayed {
+        let secs = t.elapsed.as_secs_f64();
+        if multi_sweep {
+            msg.push_str(&format!("  {secs:>7.3}s [{}] {}\n", t.sweep, t.name));
+        } else {
+            msg.push_str(&format!("  {secs:>7.3}s {}\n", t.name));
+        }
+    }
+    if displayed.len() < total {
+        msg.push_str(&format!("  ... {} more (rerun with --all to show)\n", total - displayed.len()));
+    }
+    output::run_msg(msg.trim_end());
 }
 
 /// Build the list of sweeps both phases iterate, applying the
@@ -806,6 +882,7 @@ fn run_test_phase(
     raw: bool,
     json: bool,
     extra_args: &[String],
+    mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
     // `brokkr check`'s test phase always runs `cargo test` without
@@ -831,6 +908,7 @@ fn run_test_phase(
             raw,
             json,
             multi,
+            timings.as_deref_mut(),
         )?;
         if !success {
             return Err(DevError::Build("tests failed".into()));
@@ -936,7 +1014,7 @@ fn run_sweep_pre_build(
 /// the `cargo ... (sweep: <label>)` log line carries the suffix - in
 /// single-sweep mode (legacy `--all-features` path or one [[check]]
 /// entry) the label noise is unhelpful.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 fn run_one_test_sweep(
     project_root: &Path,
     sweep: &ResolvedSweep,
@@ -946,6 +1024,7 @@ fn run_one_test_sweep(
     raw: bool,
     json: bool,
     multi: bool,
+    timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
 
@@ -1031,6 +1110,15 @@ fn run_one_test_sweep(
         },
     )?;
     let captured = run.captured;
+    if let Some(out) = timings {
+        for (name, elapsed) in run.completed {
+            out.push(TestTiming {
+                sweep: sweep.label.clone(),
+                name,
+                elapsed,
+            });
+        }
+    }
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);

@@ -13,10 +13,22 @@ pub enum CheckEvent {
     Diagnostic(DiagnosticEvent),
     TestFailure(TestFailureEvent),
     TestHung(TestHungEvent),
+    TestTiming(TestTimingEvent),
     DiagnosticSummary(DiagnosticSummaryEvent),
     TestSummary(TestSummaryEvent),
     Gremlin(GremlinEvent),
     GremlinSummary(GremlinSummaryEvent),
+}
+
+/// Per-test wall-clock timing observed by the libtest watchdog tracker.
+/// Emitted in `--json` mode when `--timings` is set, one per completed
+/// test (in observation order, not sorted - the consumer sorts).
+#[derive(Serialize)]
+pub struct TestTimingEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<String>,
+    pub name: String,
+    pub elapsed_seconds: f64,
 }
 
 #[derive(Serialize)]

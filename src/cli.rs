@@ -120,6 +120,13 @@ Examples:
         #[arg(long)]
         fix_gremlins: bool,
 
+        /// After the check is otherwise done, print every test that ran in
+        /// descending order by wall-clock time. Capped at `--limit` (or
+        /// uncapped with `--all`). Build time is excluded - timing
+        /// starts when libtest emits the per-test start marker.
+        #[arg(long)]
+        timings: bool,
+
         /// Raw arguments forwarded to the test phase. Tokens before a
         /// literal `--` are passed to `cargo test` (before cargo's own
         /// `--`); tokens after the second `--` are passed to libtest
