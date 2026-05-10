@@ -553,12 +553,19 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
 
     // Validate `--gate <name>` references a configured gate before
     // building/running anything - errors here cost nothing.
-    if let Some(name) = req.gate
-        && !cfg.gate.contains_key(name)
-    {
-        return Err(DevError::Config(format!(
-            "sync-bench: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
-        )));
+    if let Some(name) = req.gate {
+        let gate = cfg.gate.get(name).ok_or_else(|| {
+            DevError::Config(format!(
+                "sync-bench: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
+            ))
+        })?;
+        if gate.metrics.is_empty() && !req.as_baseline {
+            return Err(DevError::Config(format!(
+                "sync-bench: gate `{name}` has no [ratatoskr.gate.{name}.metrics.*] rules. \
+                 An empty rule set silently passes - add at least one rule, or use \
+                 --as-baseline if you only want to record."
+            )));
+        }
     }
 
     let script_abs = Path::new(req.script).canonicalize().map_err(|e| {

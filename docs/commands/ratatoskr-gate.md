@@ -19,7 +19,7 @@ gated `sync-bench` run. Schema:
 CREATE TABLE gate_runs (
   uuid          TEXT PRIMARY KEY,
   created_at    INTEGER NOT NULL,   -- unix seconds
-  git_commit    TEXT NOT NULL,      -- "dirty" alias allowed via --force
+  git_commit    TEXT NOT NULL,      -- always the real short SHA; see `dirty` for tree state
   dirty         INTEGER NOT NULL,   -- 0/1
   hostname      TEXT NOT NULL,      -- libc gethostname
   gate_name     TEXT NOT NULL,      -- e.g. "jmap_small"
@@ -146,9 +146,10 @@ folk-desktop = "a344fcc2"
 Brokkr never auto-edits `brokkr.toml`. Promotion is always a manual paste
 so the diff lands in a normal commit.
 
-`--force` lets a dirty git tree record (rows land with `git_commit =
-"dirty"`, `dirty = 1`). Dirty rows are valid baselines but flagged in the
-gate report.
+`--force` lets a dirty git tree record (rows land with the real
+`git_commit` SHA plus `dirty = 1`, so the SHA stays useful for
+forensics). Dirty rows are valid baselines but flagged in the gate
+report.
 
 ## Out of scope for v1
 
