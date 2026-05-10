@@ -1069,6 +1069,12 @@ fn evaluate_against_baseline(
         &baseline_entry.uuid[..8.min(baseline_entry.uuid.len())],
         outcomes.len(),
     ));
+    if baseline_entry.dirty {
+        output::ratatoskr_msg(
+            "  [warn] baseline was recorded on a dirty git tree (--force); \
+             consider re-recording on a clean checkout",
+        );
+    }
     if !report.is_empty() {
         for line in report.lines() {
             output::ratatoskr_msg(line);
