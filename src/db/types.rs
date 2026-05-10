@@ -249,7 +249,7 @@ pub struct QueryFilter {
 // ---------------------------------------------------------------------------
 
 /// Generate a UUIDv4 as 32 hex chars (no dashes).
-pub(super) fn generate_uuid() -> Result<String, DevError> {
+pub(crate) fn generate_uuid() -> Result<String, DevError> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     // Set version 4.
@@ -261,7 +261,7 @@ pub(super) fn generate_uuid() -> Result<String, DevError> {
 }
 
 /// Return the first 8 hex chars of a UUID.
-pub(super) fn short_uuid(uuid: &str) -> String {
+pub(crate) fn short_uuid(uuid: &str) -> String {
     uuid[..8.min(uuid.len())].to_owned()
 }
 

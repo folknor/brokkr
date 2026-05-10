@@ -18,10 +18,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::build::CargoProfile;
-use crate::config::{DevConfig, RatatoskrConfig};
+use crate::config::{DevConfig, GateConfig, RatatoskrConfig};
 use crate::context;
+use crate::db::gate::{GateDb, GateRow};
 use crate::db::{KvPair, KvValue};
 use crate::error::DevError;
+use crate::git;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::lockfile::{self, LockContext};
 use crate::output;
@@ -29,6 +31,7 @@ use crate::project::Project;
 use crate::ratatoskr::artefacts::{self, ArtefactDir};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, ScriptInfo};
+use crate::ratatoskr::gate as gate_eval;
 use crate::sidecar;
 use crate::ratatoskr::saehrimnir::{
     endpoint_env_pairs, require_path, resolve_fixture, MockOutcome, MockServer,
@@ -487,6 +490,12 @@ pub struct SyncBenchRequest<'a> {
     /// Literal `brokkr <...>` invocation, threaded through for the
     /// `brokkr_args` column in results.db.
     pub brokkr_args: String,
+    /// Run the named gate after the bench completes. See
+    /// `docs/commands/ratatoskr-gate.md`.
+    pub gate: Option<&'a str>,
+    /// Record this run as a baseline candidate for the named gate;
+    /// suppress evaluation. Only meaningful when `gate` is set.
+    pub as_baseline: bool,
 }
 
 /// Drive `brokkr sync-bench` end-to-end:
@@ -540,6 +549,16 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     }
     if req.bench == 0 {
         return Err(DevError::Config("sync-bench: --bench must be >= 1".into()));
+    }
+
+    // Validate `--gate <name>` references a configured gate before
+    // building/running anything - errors here cost nothing.
+    if let Some(name) = req.gate
+        && !cfg.gate.contains_key(name)
+    {
+        return Err(DevError::Config(format!(
+            "sync-bench: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
+        )));
     }
 
     let script_abs = Path::new(req.script).canonicalize().map_err(|e| {
@@ -630,6 +649,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         &paths.scratch_dir,
         &harness,
         fixture_name,
+        debug,
     );
 
     match outcome {
@@ -680,6 +700,7 @@ fn bench_loop(
     scratch_dir: &Path,
     harness: &BenchHarness,
     fixture_name: &str,
+    debug: bool,
 ) -> Result<(), DevError> {
     // PID published from inside spawn_observed - before readiness wait
     // - so a `brokkr kill --hard` arriving during startup finds it.
@@ -875,7 +896,244 @@ fn bench_loop(
         elapsed_ms,
         best.run_idx + 1,
     ));
+
+    if let Some(gate_name) = req.gate {
+        run_gate_hook(&GateHookCtx {
+            req,
+            cfg,
+            gate_name,
+            project_root: req.project_root,
+            script_abs,
+            fixture_name,
+            debug,
+            elapsed_ms,
+            summary: &best.summary,
+            sidecar_data: &sidecar_runs[best.run_idx],
+        })?;
+    }
+
     Ok(())
+}
+
+/// Inputs for the post-bench gate hook.
+struct GateHookCtx<'a> {
+    req: &'a SyncBenchRequest<'a>,
+    cfg: &'a RatatoskrConfig,
+    gate_name: &'a str,
+    project_root: &'a Path,
+    script_abs: &'a Path,
+    fixture_name: &'a str,
+    debug: bool,
+    elapsed_ms: i64,
+    summary: &'a serde_json::Map<String, serde_json::Value>,
+    sidecar_data: &'a sidecar::SidecarData,
+}
+
+/// Record the gated run into `gate.db`, then either: print the
+/// `--as-baseline` paste-line and return, or look up the configured
+/// per-hostname baseline and evaluate every metric rule. Returns
+/// `DevError::Config` on any rule failure so sync-bench exits non-zero.
+fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
+    let gate = ctx
+        .cfg
+        .gate
+        .get(ctx.gate_name)
+        .expect("gate existence already validated upstream");
+
+    // Validate the gate's configured script matches the current
+    // invocation. The gate is bound to a specific script; mixing them
+    // up would silently compare against a different fixture's baseline.
+    let configured_script = if gate.script.is_absolute() {
+        gate.script.clone()
+    } else {
+        ctx.project_root.join(&gate.script)
+    };
+    let configured_canon = configured_script
+        .canonicalize()
+        .unwrap_or(configured_script.clone());
+    if configured_canon != ctx.script_abs {
+        return Err(DevError::Config(format!(
+            "gate `{}`: configured script `{}` does not match invocation script `{}`",
+            ctx.gate_name,
+            gate.script.display(),
+            ctx.script_abs.display(),
+        )));
+    }
+
+    let hostname = crate::config::hostname()?;
+    let git_info = git::collect(ctx.project_root)?;
+    let profile_name = if ctx.debug { "debug" } else { "release" };
+
+    let sidecar_blob = sidecar_to_json(ctx.sidecar_data);
+    let meta_blob = meta_to_json(ctx.summary);
+
+    let row = GateRow {
+        git_commit: git_info.commit.clone(),
+        dirty: !git_info.is_clean,
+        hostname: hostname.clone(),
+        gate_name: ctx.gate_name.to_owned(),
+        script: ctx.script_abs.display().to_string(),
+        fixture: ctx.fixture_name.to_owned(),
+        profile: profile_name.into(),
+        elapsed_ms: ctx.elapsed_ms,
+        exit_code: 0,
+        success: true,
+        sidecar: serde_json::to_string(&sidecar_blob).unwrap_or_else(|_| "{}".into()),
+        meta: serde_json::to_string(&meta_blob).unwrap_or_else(|_| "{}".into()),
+    };
+
+    let db_path = ctx.project_root.join(".brokkr/ratatoskr/gate.db");
+    let db = GateDb::open(&db_path)?;
+    let uuid = db.insert(&row)?;
+    let short = &uuid[..8.min(uuid.len())];
+
+    output::ratatoskr_msg(&format!(
+        "gate `{}` recorded run {short} on host `{hostname}`",
+        ctx.gate_name
+    ));
+
+    if ctx.req.as_baseline {
+        output::ratatoskr_msg("--as-baseline: skipping evaluation. Add this line to brokkr.toml:");
+        output::ratatoskr_msg(&format!(
+            "    [ratatoskr.gate.{}.baseline]\n    {hostname} = \"{uuid}\"",
+            ctx.gate_name
+        ));
+        return Ok(());
+    }
+
+    evaluate_against_baseline(&db, &hostname, ctx.gate_name, gate, &row)
+}
+
+/// Look up the pinned per-hostname baseline UUID in `brokkr.toml`,
+/// fetch the row from `gate.db`, validate gate/script/fixture identity,
+/// run rule evaluation, and emit a report. Returns
+/// `DevError::Config("gate failed: ...")` on any rule failure.
+fn evaluate_against_baseline(
+    db: &GateDb,
+    hostname: &str,
+    gate_name: &str,
+    gate: &GateConfig,
+    current_row: &GateRow,
+) -> Result<(), DevError> {
+    let baseline_uuid = gate.baseline.get(hostname).ok_or_else(|| {
+        DevError::Config(format!(
+            "gate `{gate_name}`: no baseline pinned for host `{hostname}` in \
+             [ratatoskr.gate.{gate_name}.baseline]. Record one with --as-baseline \
+             and add the printed line to brokkr.toml."
+        ))
+    })?;
+    let baseline_entry = db.lookup_baseline(baseline_uuid, hostname)?.ok_or_else(|| {
+        DevError::Config(format!(
+            "gate `{gate_name}`: baseline UUID `{baseline_uuid}` not found in gate.db \
+             on host `{hostname}` - the pinned UUID was recorded on a different machine. \
+             Record locally with --as-baseline and update brokkr.toml."
+        ))
+    })?;
+    if baseline_entry.gate_name != gate_name {
+        return Err(DevError::Config(format!(
+            "gate `{gate_name}`: baseline row's gate is `{}` (mismatch)",
+            baseline_entry.gate_name
+        )));
+    }
+    if baseline_entry.script != current_row.script {
+        return Err(DevError::Config(format!(
+            "gate `{gate_name}`: baseline script `{}` != current `{}`",
+            baseline_entry.script, current_row.script
+        )));
+    }
+    if baseline_entry.fixture != current_row.fixture {
+        return Err(DevError::Config(format!(
+            "gate `{gate_name}`: baseline fixture `{}` != current `{}`",
+            baseline_entry.fixture, current_row.fixture
+        )));
+    }
+
+    let current_run = gate_eval::GateRun::from_parts(
+        current_row.elapsed_ms,
+        current_row.exit_code,
+        current_row.success,
+        serde_json::from_str(&current_row.sidecar).unwrap_or_default(),
+        serde_json::from_str(&current_row.meta).unwrap_or_default(),
+    );
+    let baseline_run = gate_eval::GateRun::from_entry(&baseline_entry)?;
+
+    let outcomes = gate_eval::evaluate(gate, &current_run, &baseline_run)?;
+    let (report, any_failed) = gate_eval::format_report(&outcomes);
+    let label_suffix = gate
+        .baseline_label
+        .as_deref()
+        .map(|l| format!(" ({l})"))
+        .unwrap_or_default();
+    output::ratatoskr_msg(&format!(
+        "gate `{gate_name}` vs baseline {}{label_suffix} ({} rules):",
+        &baseline_entry.uuid[..8.min(baseline_entry.uuid.len())],
+        outcomes.len(),
+    ));
+    if !report.is_empty() {
+        for line in report.lines() {
+            output::ratatoskr_msg(line);
+        }
+    }
+    if any_failed {
+        return Err(DevError::Config(format!(
+            "gate `{gate_name}` FAILED: one or more rules breached"
+        )));
+    }
+    output::ratatoskr_msg(&format!("gate `{gate_name}` PASSED"));
+    Ok(())
+}
+
+/// Project a `SidecarData` into a flat JSON object usable by gate
+/// `sidecar.<key>` selectors. Surfaces the summary fields plus a few
+/// derived peaks/totals from the sample stream so common rules
+/// (`sidecar.rss_peak_kb`, `sidecar.read_bytes`) work without the
+/// gate doing its own aggregation.
+fn sidecar_to_json(data: &sidecar::SidecarData) -> serde_json::Value {
+    let mut peak_rss_kb: i64 = data.summary.vm_hwm_kb;
+    let mut max_threads: i64 = 0;
+    let mut last = data.samples.last();
+    for s in &data.samples {
+        peak_rss_kb = peak_rss_kb.max(s.rss_kb);
+        max_threads = max_threads.max(s.num_threads);
+        last = Some(s);
+    }
+    let (read_bytes, write_bytes, vol_cs, nonvol_cs, minflt, majflt) = match last {
+        Some(s) => (s.read_bytes, s.write_bytes, s.vol_cs, s.nonvol_cs, s.minflt, s.majflt),
+        None => (0, 0, 0, 0, 0, 0),
+    };
+    serde_json::json!({
+        "vm_hwm_kb": data.summary.vm_hwm_kb,
+        "rss_peak_kb": peak_rss_kb,
+        "sample_count": data.summary.sample_count,
+        "marker_count": data.summary.marker_count,
+        "wall_time_ms": data.summary.wall_time_ms,
+        "num_threads_max": max_threads,
+        "read_bytes": read_bytes,
+        "write_bytes": write_bytes,
+        "vol_cs": vol_cs,
+        "nonvol_cs": nonvol_cs,
+        "minflt": minflt,
+        "majflt": majflt,
+    })
+}
+
+/// Project the harness-side `summary.json` map into the meta blob
+/// stored in gate.db. Same scalar-only rule as `summary_to_kv`: bools
+/// pass through (so `correct = true` stays evaluable), nested objects
+/// and arrays are dropped.
+fn meta_to_json(map: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for (k, v) in map {
+        match v {
+            serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+            | serde_json::Value::Bool(_) => {
+                out.insert(k.clone(), v.clone());
+            }
+            _ => {}
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Read `summary.json` from the harness's per-iter artefact dir. Missing
@@ -989,6 +1247,7 @@ mod tests {
             test_endpoint_env_graph: None,
             test_endpoint_env_gmail: Some("RATATOSKR_TEST_GMAIL_ENDPOINT".into()),
             sync_script_dir: None,
+            gate: std::collections::BTreeMap::new(),
         }
     }
 

@@ -1743,6 +1743,20 @@ Examples:
         /// from `brokkr.toml`. Mutually exclusive with `--debug`.
         #[arg(long)]
         release: bool,
+
+        /// Run the named `[ratatoskr.gate.<name>]` gate after the bench
+        /// completes. Records a row in `.brokkr/ratatoskr/gate.db`,
+        /// looks up the per-hostname baseline, and exits non-zero if any
+        /// metric rule fails. See `docs/commands/ratatoskr-gate.md`.
+        #[arg(long, value_name = "NAME")]
+        gate: Option<String>,
+
+        /// Record this run as a baseline candidate for `--gate <name>`,
+        /// suppress gate evaluation, and print the new UUID plus the TOML
+        /// line to paste under `[ratatoskr.gate.<name>.baseline]`.
+        /// Requires `--gate`.
+        #[arg(long, requires = "gate")]
+        as_baseline: bool,
     },
 
     /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C

@@ -1018,6 +1018,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             keep_artefacts,
             debug,
             release,
+            gate,
+            as_baseline,
         } => {
             project::require(project, Project::Ratatoskr, "sync-bench")?;
             ratatoskr::sync::run_sync_bench(&ratatoskr::sync::SyncBenchRequest {
@@ -1029,6 +1031,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 keep_artefacts,
                 profile_override: profile_override(debug, release),
                 brokkr_args: brokkr_args.clone(),
+                gate: gate.as_deref(),
+                as_baseline,
             })
         }
         Command::SyncList => {

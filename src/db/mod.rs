@@ -1,5 +1,6 @@
 mod compare;
 mod format;
+pub mod gate;
 mod hotpath;
 mod migrate;
 mod query;

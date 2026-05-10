@@ -13,6 +13,7 @@ pub mod artefacts;
 pub mod build;
 pub mod cmd;
 pub mod discover;
+pub mod gate;
 pub mod process;
 pub mod saehrimnir;
 pub mod sync;

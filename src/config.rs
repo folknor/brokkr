@@ -382,6 +382,66 @@ pub struct RatatoskrConfig {
     /// `crates/app/tests/sync-harness` when unset. Consumed by
     /// `sync-list`, `sync-smoke`, and `sync-bench`.
     pub sync_script_dir: Option<PathBuf>,
+
+    /// Named `[ratatoskr.gate.<name>]` blocks. Each gate pins a
+    /// per-hostname baseline UUID (looked up in `.brokkr/ratatoskr/gate.db`)
+    /// plus a set of metric rules. See `docs/commands/ratatoskr-gate.md`.
+    #[serde(default)]
+    pub gate: BTreeMap<String, GateConfig>,
+}
+
+/// One `[ratatoskr.gate.<name>]` block.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateConfig {
+    /// Path to the sync-bench script this gate applies to. Used to
+    /// validate that the looked-up baseline row matches the current
+    /// invocation.
+    pub script: PathBuf,
+
+    /// Optional human-readable label, recorded for context when a
+    /// developer reads the config; not consumed by the gate logic.
+    #[serde(default)]
+    pub baseline_label: Option<String>,
+
+    /// Per-hostname pinned baseline UUIDs. Lookup is by libc hostname.
+    /// Missing entry for the current host is a hard error at gate time.
+    #[serde(default)]
+    pub baseline: BTreeMap<String, String>,
+
+    /// Per-metric rules. Keys use dotted namespacing: bare
+    /// (`elapsed_ms`/`exit_code`/`success`), `sidecar.*`, or `meta.*`.
+    #[serde(default)]
+    pub metrics: BTreeMap<String, MetricRule>,
+}
+
+/// One metric's threshold rules. All fields are optional; multiple
+/// fields stack as logical AND. See `docs/commands/ratatoskr-gate.md`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MetricRule {
+    /// Hard upper cap: current value must be `<= max`.
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// Hard lower floor: current value must be `>= min`.
+    #[serde(default)]
+    pub min: Option<f64>,
+    /// Relative upper bound: current `<=` baseline `*` factor.
+    #[serde(default)]
+    pub max_relative: Option<f64>,
+    /// Relative lower bound: current `>=` baseline `*` factor.
+    #[serde(default)]
+    pub min_relative: Option<f64>,
+    /// Maximum allowed delta vs baseline: `current - baseline <= max_delta`.
+    #[serde(default)]
+    pub max_delta: Option<f64>,
+    /// Literal equality with the given scalar. Numbers compare as f64;
+    /// strings compare as Text via the JSON-blob path.
+    #[serde(default)]
+    pub equal: Option<toml::Value>,
+    /// Current value must equal the baseline row's value exactly.
+    #[serde(default)]
+    pub equal_to_baseline: Option<bool>,
 }
 
 /// `[ratatoskr.harness]` - which `[[check]]` sweep `brokkr service-test`
