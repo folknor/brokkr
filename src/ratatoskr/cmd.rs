@@ -1185,8 +1185,8 @@ impl FixtureSession {
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();
         output::ratatoskr_msg(&format!(
-            "mock-server up: fixture={fixture_name} jmap={} imap={} smtp={} graph={} gmail={} caldav={}",
-            ep.jmap, ep.imap, ep.smtp, ep.graph, ep.gmail, ep.caldav
+            "mock-server up: fixture={fixture_name} jmap={} imap={} smtp={} graph={} gmail={} caldav={} people={} gcal={}",
+            ep.jmap, ep.imap, ep.smtp, ep.graph, ep.gmail, ep.caldav, ep.people, ep.gcal
         ));
         Ok(Self {
             fixture_name: fixture_name.to_owned(),
