@@ -1259,6 +1259,7 @@ mod tests {
             test_endpoint_env_smtp: None,
             test_endpoint_env_graph: None,
             test_endpoint_env_gmail: Some("RATATOSKR_TEST_GMAIL_ENDPOINT".into()),
+            test_endpoint_env_caldav: Some("RATATOSKR_TEST_CALDAV_ENDPOINT".into()),
             sync_script_dir: None,
             gate: std::collections::BTreeMap::new(),
         }
@@ -1271,6 +1272,7 @@ mod tests {
             smtp: 1003,
             graph: 1004,
             gmail: 1005,
+            caldav: 1006,
         }
     }
 
@@ -1285,6 +1287,7 @@ mod tests {
                 "RATATOSKR_TEST_JMAP_ENDPOINT",
                 "RATATOSKR_TEST_IMAP_ENDPOINT",
                 "RATATOSKR_TEST_GMAIL_ENDPOINT",
+                "RATATOSKR_TEST_CALDAV_ENDPOINT",
             ]
         );
     }

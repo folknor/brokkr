@@ -53,7 +53,7 @@ mock/readiness` (its stderr piped to `mock/stderr.log`), parses the readiness
 sentinel for per-protocol ports, then spawns `<harness binary> --test-harness
 <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set
 plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT` per protocol whose env-var spelling
-is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail,
+is configured under `[ratatoskr]` (HTTP origins for jmap/graph/gmail/caldav,
 `host:port` for imap/smtp).
 
 During the run brokkr publishes both PIDs into the lockfile - sæhrimnir

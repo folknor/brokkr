@@ -377,6 +377,7 @@ pub struct RatatoskrConfig {
     pub test_endpoint_env_smtp: Option<String>,
     pub test_endpoint_env_graph: Option<String>,
     pub test_endpoint_env_gmail: Option<String>,
+    pub test_endpoint_env_caldav: Option<String>,
 
     /// Where sync-test scripts live. Defaults to
     /// `crates/app/tests/sync-harness` when unset. Consumed by

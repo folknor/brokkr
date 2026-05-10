@@ -39,9 +39,10 @@ pub struct Endpoints {
     pub smtp: u16,
     pub graph: u16,
     pub gmail: u16,
+    pub caldav: u16,
 }
 
-/// Parse sæhrimnir's readiness sentinel. Expects exactly five lines,
+/// Parse sæhrimnir's readiness sentinel. Expects exactly six lines,
 /// one per protocol, in any order:
 ///
 /// ```text
@@ -50,6 +51,7 @@ pub struct Endpoints {
 /// SMTP <port>
 /// GRAPH <port>
 /// GMAIL <port>
+/// CALDAV <port>
 /// ```
 ///
 /// Whitespace between name and port is one-or-more ASCII spaces.
@@ -64,6 +66,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
     let mut smtp: Option<u16> = None;
     let mut graph: Option<u16> = None;
     let mut gmail: Option<u16> = None;
+    let mut caldav: Option<u16> = None;
     let mut seen: HashSet<&'static str> = HashSet::new();
 
     for (lineno, raw) in text.lines().enumerate() {
@@ -91,10 +94,11 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
             "SMTP" => ("SMTP", &mut smtp),
             "GRAPH" => ("GRAPH", &mut graph),
             "GMAIL" => ("GMAIL", &mut gmail),
+            "CALDAV" => ("CALDAV", &mut caldav),
             other => {
                 return Err(DevError::Config(format!(
                     "saehrimnir sentinel line {}: unknown protocol {other:?} \
-                     (expected JMAP / IMAP / SMTP / GRAPH / GMAIL)",
+                     (expected JMAP / IMAP / SMTP / GRAPH / GMAIL / CALDAV)",
                     lineno + 1
                 )));
             }
@@ -114,6 +118,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
         ("SMTP", smtp.is_none()),
         ("GRAPH", graph.is_none()),
         ("GMAIL", gmail.is_none()),
+        ("CALDAV", caldav.is_none()),
     ]
     .into_iter()
     .filter_map(|(n, missing)| missing.then_some(n))
@@ -132,6 +137,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
         smtp: smtp.expect("checked above"),
         graph: graph.expect("checked above"),
         gmail: gmail.expect("checked above"),
+        caldav: caldav.expect("checked above"),
     })
 }
 
@@ -525,6 +531,9 @@ pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(
     if let Some(name) = &cfg.test_endpoint_env_gmail {
         out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.gmail)));
     }
+    if let Some(name) = &cfg.test_endpoint_env_caldav {
+        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.caldav)));
+    }
     out
 }
 
@@ -635,6 +644,7 @@ fn print_endpoints(ep: &Endpoints) {
     output::ratatoskr_msg(&format!("  smtp   127.0.0.1:{}", ep.smtp));
     output::ratatoskr_msg(&format!("  graph  http://127.0.0.1:{}", ep.graph));
     output::ratatoskr_msg(&format!("  gmail  http://127.0.0.1:{}", ep.gmail));
+    output::ratatoskr_msg(&format!("  caldav http://127.0.0.1:{}", ep.caldav));
 }
 
 /// Send a signal to the child, choosing between `kill(-pgid, ...)` and
@@ -749,7 +759,7 @@ mod tests {
 
     #[test]
     fn parses_canonical_sentinel() {
-        let text = "JMAP 12345\nIMAP 23456\nSMTP 34567\nGRAPH 45678\nGMAIL 56789\n";
+        let text = "JMAP 12345\nIMAP 23456\nSMTP 34567\nGRAPH 45678\nGMAIL 56789\nCALDAV 60000\n";
         let ep = parse_sentinel(text).unwrap();
         assert_eq!(
             ep,
@@ -759,19 +769,21 @@ mod tests {
                 smtp: 34567,
                 graph: 45678,
                 gmail: 56789,
+                caldav: 60000,
             }
         );
     }
 
     #[test]
     fn tolerates_blank_lines_and_arbitrary_order() {
-        let text = "\nGMAIL 5\n\nGRAPH 4\nJMAP 1\nIMAP 2\nSMTP 3\n";
+        let text = "\nGMAIL 5\n\nCALDAV 6\nGRAPH 4\nJMAP 1\nIMAP 2\nSMTP 3\n";
         let ep = parse_sentinel(text).unwrap();
         assert_eq!(ep.jmap, 1);
         assert_eq!(ep.imap, 2);
         assert_eq!(ep.smtp, 3);
         assert_eq!(ep.graph, 4);
         assert_eq!(ep.gmail, 5);
+        assert_eq!(ep.caldav, 6);
     }
 
     #[test]
@@ -782,11 +794,12 @@ mod tests {
         assert!(msg.contains("missing entries"), "got: {msg}");
         assert!(msg.contains("SMTP"), "got: {msg}");
         assert!(msg.contains("GRAPH"), "got: {msg}");
+        assert!(msg.contains("CALDAV"), "got: {msg}");
     }
 
     #[test]
     fn duplicate_entry_errors() {
-        let text = "JMAP 1\nIMAP 2\nSMTP 3\nGRAPH 4\nGMAIL 5\nJMAP 6\n";
+        let text = "JMAP 1\nIMAP 2\nSMTP 3\nGRAPH 4\nGMAIL 5\nCALDAV 6\nJMAP 7\n";
         let err = parse_sentinel(text).unwrap_err();
         assert!(err.to_string().contains("duplicate JMAP"), "got: {err}");
     }
