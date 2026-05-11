@@ -4,7 +4,7 @@
 //! directory, parse frontmatter, print a sorted table. No ratatoskr or
 //! sæhrimnir runtime dependency.
 //!
-//! `sync-smoke` builds the harness sweep (plan 1's `[ratatoskr.harness]`),
+//! `sync-smoke` builds the harness binary per `[ratatoskr.harness]`,
 //! spawns sæhrimnir against the script's declared fixture, parses the
 //! per-protocol ports out of the readiness sentinel, then spawns
 //! `<harness binary> --test-harness <SCRIPT>` with the
@@ -126,7 +126,7 @@ pub struct SyncSmokeRequest<'a> {
 ///    get an env var.
 /// 2. Parse the script's frontmatter; require a `fixture: <NAME>`.
 /// 3. Acquire the global lockfile.
-/// 4. Build the harness sweep (same feature contract as `brokkr check`).
+/// 4. Build the harness binary per `[ratatoskr.harness]`.
 /// 5. Allocate `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/`
 ///    and `mock/` subdirs.
 /// 6. Spawn sæhrimnir with `--fixture <PATH>` + `--readiness-file
@@ -147,14 +147,15 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
         DevError::Config(
             "sync-smoke: no [ratatoskr] section in brokkr.toml. \
-             Required to locate sæhrimnir and the harness sweep."
+             Required to locate sæhrimnir and the harness binary."
                 .into(),
         )
     })?;
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
             "sync-smoke: no [ratatoskr.harness] section in brokkr.toml. \
-             Required to know which sweep to build."
+             Declare it with `package = \"<crate>\"` (and optional \
+             `binary`, `features`, `debug`)."
                 .into(),
         )
     })?;
@@ -213,7 +214,6 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let debug = req.profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         req.project_root,
-        &req.dev_config.check,
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
@@ -221,8 +221,8 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         true, // isolate_pg: SigtermGuard above bridges terminal signals
     )?;
     output::ratatoskr_msg(&format!(
-        "harness build ok (sweep={}, binary={})",
-        built.sweep_label,
+        "harness build ok (features={}, binary={})",
+        built.features_label,
         built.binary.display(),
     ));
 
@@ -434,11 +434,11 @@ fn write_run_toml(
     mock: &MockOutcome,
 ) -> Result<(), DevError> {
     let mut s = format!(
-        "brokkr_version = \"{}\"\nscript = \"{}\"\nharness_binary = \"{}\"\nsweep = \"{}\"\nharness_elapsed_ms = {}\n",
+        "brokkr_version = \"{}\"\nscript = \"{}\"\nharness_binary = \"{}\"\nfeatures = \"{}\"\nharness_elapsed_ms = {}\n",
         env!("CARGO_PKG_VERSION"),
         script_abs.display(),
         built.binary.display(),
-        built.sweep_label,
+        built.features_label,
         dc.captured.elapsed.as_millis(),
     );
     if let Some(code) = dc.captured.status.code() {
@@ -503,7 +503,7 @@ pub struct SyncBenchRequest<'a> {
 /// 1. Validate config (same as sync-smoke).
 /// 2. Resolve script + fixture from frontmatter.
 /// 3. Bootstrap [`crate::config::ResolvedPaths`] + acquire the bench
-///    lockfile via [`BenchHarness::new`]; build the harness sweep.
+///    lockfile via [`BenchHarness::new`]; build the harness binary.
 /// 4. Allocate one top-level run dir
 ///    `.brokkr/ratatoskr/sync/<test>/run-N/` with `mock/` plus per-iter
 ///    `iter-K/harness/` subdirs. The whole bench shares one sæhrimnir
@@ -528,14 +528,15 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
         DevError::Config(
             "sync-bench: no [ratatoskr] section in brokkr.toml. \
-             Required to locate sæhrimnir and the harness sweep."
+             Required to locate sæhrimnir and the harness binary."
                 .into(),
         )
     })?;
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
             "sync-bench: no [ratatoskr.harness] section in brokkr.toml. \
-             Required to know which sweep to build."
+             Declare it with `package = \"<crate>\"` (and optional \
+             `binary`, `features`, `debug`)."
                 .into(),
         )
     })?;
@@ -614,7 +615,6 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let debug = req.profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         req.project_root,
-        &req.dev_config.check,
         harness_cfg,
         debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
@@ -629,8 +629,8 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         false,
     )?;
     output::ratatoskr_msg(&format!(
-        "harness build ok (sweep={}, binary={})",
-        built.sweep_label,
+        "harness build ok (features={}, binary={})",
+        built.features_label,
         built.binary.display(),
     ));
 
@@ -1248,8 +1248,9 @@ mod tests {
     fn cfg_with_endpoints() -> RatatoskrConfig {
         RatatoskrConfig {
             harness: Some(HarnessConfig {
-                sweep: "harness".into(),
-                binary: "app".into(),
+                package: "app".into(),
+                binary: None,
+                features: Vec::new(),
                 debug: None,
             }),
             mock_server_binary: None,

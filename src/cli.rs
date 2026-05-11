@@ -1575,7 +1575,7 @@ Examples:
         #[arg(long)]
         keep_artefacts: bool,
 
-        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release for parity with `brokkr test` and to match
         /// what users will run in production. Overrides
         /// `[ratatoskr.harness] debug` from `brokkr.toml`.
@@ -1613,7 +1613,7 @@ Examples:
     ///
     /// Discovers `crates/app/tests/service-harness/**/*.lua`, optionally
     /// filters by substring against the script's relative name, builds the
-    /// harness sweep once, then runs each script through the same path
+    /// harness binary once, then runs each script through the same path
     /// `service-test` uses (per-script artefact dir, ceiling-bounded spawn,
     /// preserve-on-failure). Scripts marked `expected = ignored` in the
     /// frontmatter are skipped unless `--include-ignored` is set. Default
@@ -1633,7 +1633,7 @@ Examples:
         #[arg(long)]
         keep_artefacts: bool,
 
-        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release. Overrides `[ratatoskr.harness] debug` from
         /// `brokkr.toml`.
         #[arg(long, conflicts_with = "release")]
@@ -1674,7 +1674,7 @@ Examples:
 
     /// [ratatoskr] Run a sync-test script against sæhrimnir (plan 3)
     ///
-    /// Builds the harness sweep declared by `[ratatoskr.harness]`,
+    /// Builds the harness binary declared by `[ratatoskr.harness]`,
     /// spawns sæhrimnir against the script's `-- fixture: <NAME>`
     /// frontmatter, parses the per-protocol ports out of the readiness
     /// sentinel, then spawns `<harness binary> --test-harness <SCRIPT>`
@@ -1696,7 +1696,7 @@ Examples:
         #[arg(long)]
         keep_artefacts: bool,
 
-        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release. Overrides `[ratatoskr.harness] debug` from
         /// `brokkr.toml`.
         #[arg(long, conflicts_with = "release")]
@@ -1740,7 +1740,7 @@ Examples:
         #[arg(long)]
         keep_artefacts: bool,
 
-        /// Build the harness sweep with the dev profile (`<target>/debug/`).
+        /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release for parity with what users will run.
         /// Overrides `[ratatoskr.harness] debug` from `brokkr.toml`.
         #[arg(long, conflicts_with = "release")]

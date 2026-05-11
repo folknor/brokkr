@@ -44,7 +44,7 @@ Flags:
 - `-N <COUNT>` - on a single script, repeats with per-iter status, per-iter
   artefact dir, `--keep-going`, exit-code aggregation; on a directory, runs
   the cohort `<COUNT>` times in order via the `service-suite` code path.
-- `--debug` / `--release` - force the harness sweep build profile. Default is
+- `--debug` / `--release` - force the harness build profile. Default is
   release unless `[ratatoskr.harness] debug = true` flips it; the flags
   override the toml. Mutually exclusive.
 

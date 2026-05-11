@@ -13,13 +13,25 @@ ratatoskr exercises two separate harness flows from brokkr:
    `sync-bench`) - two-child orchestration with sæhrimnir (mock email
    server) + the ratatoskr harness binary. See `docs/commands/sync.md`.
 
-Both share the harness build pipeline through `[ratatoskr.harness]` (which
-`[[check]]` sweep to build, which package's binary to spawn, and an optional
-`debug = true` to default the orchestration commands to the dev profile).
-See `docs/brokkr.toml.md` for the config block, and `RatatoskrConfig` /
-`HarnessConfig` rustdoc in `src/config.rs` for parse-time validation.
-The orchestration commands accept `--debug` / `--release` (mutually exclusive)
-to override the toml on a per-invocation basis.
+Both share the harness build pipeline through `[ratatoskr.harness]`. The
+block is a **self-contained build spec** - it names the cargo package to
+build (`package`), optionally an override `[[bin]]` to spawn (`binary`,
+defaults to `package`), optional cargo `features`, and an optional
+`debug = true` to default the orchestration commands to the dev profile.
+It does **not** reference `[[check]]`: orchestration builds are
+intentionally outside the everyday `brokkr check` sweep matrix, so adding
+an orchestration command never widens the per-crate feature graph that
+`brokkr check` and `brokkr check -p <crate>` walk.
+
+See `RatatoskrConfig` / `HarnessConfig` rustdoc in `src/config.rs` for
+the fields. The orchestration commands accept `--debug` / `--release`
+(mutually exclusive) to override the toml on a per-invocation basis.
+
+A stale `[ratatoskr.harness].sweep` field from the pre-decoupling shape
+is rejected at parse time with a migration message: drop the matching
+`[[check]] name = "<sweep>"` entry and fold its `features` /
+`build_packages` directly into `[ratatoskr.harness]` as `features` /
+`package`.
 
 ## sæhrimnir contract
 

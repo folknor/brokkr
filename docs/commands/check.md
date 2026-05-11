@@ -121,6 +121,14 @@ different modules of the same package all run; use a more qualified name
 user's `<name>` argument is the filter), and there's no CLI ad-hoc path (the
 test runner doesn't accept `--features`).
 
+Per-project orchestration blocks (today: `[ratatoskr.harness]`) are **not**
+`[[check]]` sweeps and are invisible to both `brokkr check` and `brokkr test`.
+They describe how to build a binary that ratatoskr's orchestration commands
+(`service-test`, `service-suite`, `mock-serve`, `sync-smoke`, `sync-bench`)
+spawn, with their own `package` / `features` / `debug` fields. `[test.profiles]`
+may only reference `[[check]]` entries in its `sweeps` list, never an
+orchestration block.
+
 ## Env vars exported to `cargo test`
 
 Both `brokkr check` (test phase) and `brokkr test` set the following on every

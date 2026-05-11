@@ -121,8 +121,8 @@ pub fn service_test(
         .ok_or_else(|| {
             DevError::Config(
                 "service-test: no [ratatoskr.harness] section in brokkr.toml. \
-                 Add a [[check]] entry naming the harness sweep, then \
-                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\"."
+                 Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
+                 (and optional `binary`, `features`, `debug`)."
                     .into(),
             )
         })?;
@@ -139,7 +139,6 @@ pub fn service_test(
     let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         project_root,
-        &dev_config.check,
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
@@ -147,8 +146,8 @@ pub fn service_test(
         true, // isolate_pg: outer SigtermGuard active
     )?;
     output::ratatoskr_msg(&format!(
-        "harness build ok (sweep={}, binary={})",
-        built.sweep_label,
+        "harness build ok (features={}, binary={})",
+        built.features_label,
         built.binary.display(),
     ));
 
@@ -578,8 +577,8 @@ pub fn service_suite(
         .ok_or_else(|| {
             DevError::Config(
                 "service-suite: no [ratatoskr.harness] section in brokkr.toml. \
-                 Add a [[check]] entry naming the harness sweep, then \
-                 [ratatoskr.harness] sweep = \"<name>\", binary = \"<package>\"."
+                 Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
+                 (and optional `binary`, `features`, `debug`)."
                     .into(),
             )
         })?;
@@ -615,7 +614,6 @@ pub fn service_suite(
     let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         project_root,
-        &dev_config.check,
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
@@ -623,8 +621,8 @@ pub fn service_suite(
         true, // isolate_pg: outer SigtermGuard active
     )?;
     output::ratatoskr_msg(&format!(
-        "harness build ok (sweep={}, binary={})",
-        built.sweep_label,
+        "harness build ok (features={}, binary={})",
+        built.features_label,
         built.binary.display(),
     ));
     output::ratatoskr_msg(&format_suite_header(
@@ -1070,7 +1068,7 @@ struct RunMetadata {
     brokkr_version: String,
     script: String,
     binary: String,
-    sweep: String,
+    features: String,
     elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
@@ -1108,7 +1106,7 @@ fn write_artefacts(
         brokkr_version: env!("CARGO_PKG_VERSION").to_owned(),
         script: script_abs.display().to_string(),
         binary: built.binary.display().to_string(),
-        sweep: built.sweep_label.clone(),
+        features: built.features_label.clone(),
         elapsed_ms: u64::try_from(captured.elapsed.as_millis()).unwrap_or(u64::MAX),
         exit_code: captured.status.code(),
         signal: captured.status.signal(),
@@ -1262,7 +1260,7 @@ mod tests {
         HarnessBuild {
             binary: bin_dir.join("app"),
             bin_dir: bin_dir.to_path_buf(),
-            sweep_label: "harness".to_owned(),
+            features_label: "default".to_owned(),
         }
     }
 
@@ -1321,7 +1319,7 @@ mod tests {
         );
         let toml_body = fs::read_to_string(artefact_dir.join("run.toml")).unwrap();
         assert!(toml_body.contains("brokkr_version ="));
-        assert!(toml_body.contains("sweep = \"harness\""));
+        assert!(toml_body.contains("features = \"default\""));
         assert!(toml_body.contains("elapsed_ms = 42"));
         assert!(toml_body.contains("exit_code = 0"));
         assert!(!toml_body.contains("signal ="), "no signal on clean exit");

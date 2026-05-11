@@ -1,113 +1,71 @@
-//! Sweep-aware builds for the service-test harness.
+//! Self-contained builds for ratatoskr's orchestration commands.
 //!
-//! `service-test` consults `[ratatoskr.harness]` in `brokkr.toml`,
-//! finds the matching `[[check]]` entry, builds every `build_packages`
-//! member with the sweep's feature flags, and returns the path to the
-//! primary binary. Same feature contract `brokkr check` enforces, so
-//! the harness can never run against a feature combination the rest of
-//! the toolchain has not validated.
+//! Reads `[ratatoskr.harness]` from `brokkr.toml` (package, optional
+//! binary override, optional features, optional debug) and invokes
+//! `cargo build` directly. Decoupled from `[[check]]`: the orchestration
+//! build no longer participates in `brokkr check`'s sweep matrix, so
+//! everyday checks don't compile orchestration-only feature graphs.
 //!
 //! The actual cargo invocation goes through [`crate::build::cargo_build`],
-//! which already knows how to pass `--message-format=json` and pick
-//! the produced executable out of cargo's stdout. Everything here is
-//! just orchestration: pick the right sweep, iterate `build_packages`,
-//! capture the binary that matches `[ratatoskr.harness].binary`.
+//! which already knows how to pass `--message-format=json` and pick the
+//! produced executable out of cargo's stdout.
 
 use std::path::{Path, PathBuf};
 
 use crate::build::{self, BuildConfig};
-use crate::config::{CheckEntry, HarnessConfig};
+use crate::config::HarnessConfig;
 use crate::error::DevError;
 use crate::output;
 
 /// Result of a successful harness build.
 #[derive(Debug)]
 pub struct HarnessBuild {
-    /// Path to the binary the harness will spawn (per
-    /// `[ratatoskr.harness].binary`). Always under `<target>/<profile>/`.
+    /// Path to the binary the harness will spawn. Always under
+    /// `<target>/<profile>/`.
     pub binary: PathBuf,
-    /// Directory containing every binary the sweep produced. The
+    /// Directory containing every binary the package produced. The
     /// harness exports this as `BROKKR_TEST_BIN_DIR` so spawned-binary
     /// tests can find sibling helpers (`parent_death_helper`, etc.)
     /// without re-deriving the cargo target dir.
     pub bin_dir: PathBuf,
-    /// `[[check]].name` of the sweep used. Surfaced in error messages.
-    pub sweep_label: String,
+    /// Human-readable features summary (e.g. `default`, `feat-a,feat-b`).
+    /// Surfaced in log lines and `run.toml`.
+    pub features_label: String,
 }
 
-/// Build the harness sweep. `debug = true` produces a dev-profile
-/// build at `<target>/debug/`; the default is release for parity with
-/// `brokkr test`'s default and to match what users will run in
-/// production.
-///
-/// Returns the binary path, the bin dir for sibling helpers, and the
-/// sweep label. Build failures surface as [`DevError::Build`] with
-/// cargo's filtered diagnostic output already printed by
-/// [`crate::build::cargo_build`].
+/// Build the harness per `[ratatoskr.harness]`. `debug = true` produces
+/// a dev-profile build at `<target>/debug/`; the default is release for
+/// parity with `brokkr test`'s default.
 pub fn build_for_harness(
     project_root: &Path,
-    check_entries: &[CheckEntry],
     harness_cfg: &HarnessConfig,
     debug: bool,
     on_spawn: Option<&dyn Fn(u32)>,
     on_done: Option<&dyn Fn()>,
     isolate_pg: bool,
 ) -> Result<HarnessBuild, DevError> {
-    // The cross-check in src/config.rs already verified that the named
-    // sweep exists and that `binary` is in its `build_packages`. The
-    // lookup here is defensive in case a code path ever reaches us
-    // bypassing that validation.
-    let entry = check_entries
-        .iter()
-        .find(|e| e.name == harness_cfg.sweep)
-        .ok_or_else(|| {
-            DevError::Config(format!(
-                "[ratatoskr.harness].sweep '{}' has no matching `[[check]]` entry",
-                harness_cfg.sweep
-            ))
-        })?;
-
     let profile_name = if debug { "dev" } else { "release" };
+    let features_label = feature_summary(&harness_cfg.features);
 
     output::ratatoskr_msg(&format!(
-        "building sweep '{}' (features: {}, profile: {profile_name})",
-        entry.name,
-        feature_summary(entry),
+        "building package '{}' (features: {features_label}, profile: {profile_name})",
+        harness_cfg.package,
     ));
 
-    let mut binary_path: Option<PathBuf> = None;
-    for pkg in &entry.build_packages {
-        let cfg = BuildConfig {
-            package: Some(pkg.clone()),
-            bin: None,
-            example: None,
-            features: entry.features.clone(),
-            default_features: !entry.no_default_features,
-            profile: profile_name,
-        };
-        // Fire on_done after EACH cargo invocation - both success and
-        // failure - so the orchestrator's `child_pid` slot doesn't keep
-        // pointing at a now-reaped cargo PID between package builds (or
-        // after a build error). Without this, a multi-package sweep
-        // leaves a stale PID for `brokkr kill --hard` to potentially
-        // SIGKILL after the kernel recycles it.
-        let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolate_pg);
-        if let Some(cb) = on_done {
-            cb();
-        }
-        let path = result?;
-        if pkg == &harness_cfg.binary {
-            binary_path = Some(path);
-        }
+    let cfg = BuildConfig {
+        package: Some(harness_cfg.package.clone()),
+        bin: harness_cfg.binary.clone(),
+        example: None,
+        features: harness_cfg.features.clone(),
+        default_features: true,
+        profile: profile_name,
+    };
+    let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolate_pg);
+    if let Some(cb) = on_done {
+        cb();
     }
+    let binary = result?;
 
-    let binary = binary_path.ok_or_else(|| {
-        DevError::Build(format!(
-            "[ratatoskr.harness].binary '{}' was not produced by sweep '{}' \
-             (build_packages: {:?})",
-            harness_cfg.binary, entry.name, entry.build_packages
-        ))
-    })?;
     let bin_dir = binary
         .parent()
         .ok_or_else(|| {
@@ -121,81 +79,31 @@ pub fn build_for_harness(
     Ok(HarnessBuild {
         binary,
         bin_dir,
-        sweep_label: entry.name.clone(),
+        features_label,
     })
 }
 
-/// Render an entry's feature flags for the `[ratatoskr] building ...`
-/// log line. Distinguishes "default" (no flags), "no-default-features"
-/// alone, and an explicit feature list.
-fn feature_summary(entry: &CheckEntry) -> String {
-    if entry.features.is_empty() {
-        if entry.no_default_features {
-            "no-default-features".to_owned()
-        } else {
-            "default".to_owned()
-        }
-    } else if entry.no_default_features {
-        format!("no-default-features + {}", entry.features.join(","))
+/// Render a features list for the `[ratatoskr] building ...` log line.
+fn feature_summary(features: &[String]) -> String {
+    if features.is_empty() {
+        "default".to_owned()
     } else {
-        entry.features.join(",")
+        features.join(",")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
-
     use super::*;
-
-    fn entry(name: &str, features: &[&str], nodef: bool, packages: &[&str]) -> CheckEntry {
-        CheckEntry {
-            name: name.into(),
-            features: features.iter().map(|s| (*s).to_owned()).collect(),
-            no_default_features: nodef,
-            build_packages: packages.iter().map(|s| (*s).to_owned()).collect(),
-        }
-    }
 
     #[test]
     fn feature_summary_default_when_empty() {
-        let e = entry("a", &[], false, &[]);
-        assert_eq!(feature_summary(&e), "default");
+        assert_eq!(feature_summary(&[]), "default");
     }
 
     #[test]
-    fn feature_summary_no_default_alone() {
-        let e = entry("a", &[], true, &[]);
-        assert_eq!(feature_summary(&e), "no-default-features");
-    }
-
-    #[test]
-    fn feature_summary_with_features() {
-        let e = entry("a", &["test-helpers", "harness"], false, &[]);
-        assert_eq!(feature_summary(&e), "test-helpers,harness");
-    }
-
-    #[test]
-    fn feature_summary_with_features_and_no_default() {
-        let e = entry("a", &["commands"], true, &[]);
-        assert_eq!(
-            feature_summary(&e),
-            "no-default-features + commands"
-        );
-    }
-
-    #[test]
-    fn build_errors_when_sweep_not_found() {
-        // Pure resolver test - no cargo invocation.
-        let checks = vec![entry("other", &[], false, &["app"])];
-        let harness = HarnessConfig {
-            sweep: "missing".into(),
-            binary: "app".into(),
-            debug: None,
-        };
-        let err = build_for_harness(Path::new("/"), &checks, &harness, false, None, None, false)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("'missing'"), "got: {err}");
+    fn feature_summary_joins_with_commas() {
+        let f = vec!["a".to_owned(), "b".to_owned()];
+        assert_eq!(feature_summary(&f), "a,b");
     }
 }

@@ -447,30 +447,47 @@ pub struct MetricRule {
     pub equal_to_baseline: Option<bool>,
 }
 
-/// `[ratatoskr.harness]` - which `[[check]]` sweep `brokkr service-test`
-/// builds against, and which package's binary is the primary spawn
-/// target. Both fields are required when the table is present;
-/// validation against the rest of the config (sweep exists, binary in
-/// that sweep's `build_packages`) runs at parse time so a typo errors
-/// out before the cargo build kicks off.
+/// `[ratatoskr.harness]` - self-contained build spec for ratatoskr's
+/// orchestration commands (`service-test`, `service-suite`,
+/// `mock-serve`, `sync-smoke`, `sync-bench`). Decoupled from `[[check]]`
+/// so that the everyday `brokkr check` pass doesn't get conflated with
+/// "which features must the spawned binary have." See
+/// `docs/projects/ratatoskr.md`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessConfig {
-    /// Name of the `[[check]]` entry whose features apply to harness
-    /// builds. Must reference an existing entry.
-    pub sweep: String,
+    /// Cargo package to build. Passed straight to `cargo build --package`.
+    pub package: String,
 
-    /// Name of the cargo package whose binary the harness spawns.
-    /// Must appear in `[[check]].build_packages` of the named sweep.
-    pub binary: String,
+    /// Which `[[bin]]` inside `package` to spawn. Defaults to `package`
+    /// (the common case). Override only when the orchestration target
+    /// is a non-default bin inside a multi-binary package.
+    #[serde(default)]
+    pub binary: Option<String>,
 
-    /// When true, orchestration commands (`service-test`, `service-suite`,
-    /// `sync-smoke`, `sync-bench`) build the harness sweep with the dev
-    /// profile by default. The CLI `--debug` flag still forces dev when
-    /// this is unset; there's no way to force release back from the CLI
-    /// short of editing the toml.
+    /// Cargo features to activate for the harness build. Empty = cargo
+    /// defaults. There is no `no_default_features` here: orchestration
+    /// builds are not in the `brokkr check` sweep matrix, so the
+    /// no-default-features story is irrelevant.
+    #[serde(default)]
+    pub features: Vec<String>,
+
+    /// When true, orchestration commands build the harness with the dev
+    /// profile by default. The CLI `--debug` / `--release` flags still
+    /// override per-invocation.
     #[serde(default)]
     pub debug: Option<bool>,
+}
+
+impl HarnessConfig {
+    /// Resolved binary name (defaults to `package` when unset). Not
+    /// consumed by production code today - `cargo build` already takes
+    /// `--package` and `--bin` separately - but exercised by parse tests
+    /// to lock the defaulting rule into the schema.
+    #[cfg(test)]
+    pub fn binary_name(&self) -> &str {
+        self.binary.as_deref().unwrap_or(&self.package)
+    }
 }
 
 #[allow(dead_code)]
@@ -526,7 +543,6 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let check = parse_check(table)?;
     let test = parse_test(table)?;
     validate_check_against_test(&check, test.as_ref())?;
-    validate_ratatoskr_against_check(ratatoskr.as_ref(), &check)?;
     let capture_env = parse_capture_env(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -666,12 +682,33 @@ fn parse_sluggrs(
 }
 
 /// Parse the optional `[ratatoskr]` section from the root table.
+///
+/// Rejects the pre-decoupling `[ratatoskr.harness].sweep` field with a
+/// migration message - that field is gone; orchestration builds are now
+/// fully described by `package`/`binary`/`features` directly under
+/// `[ratatoskr.harness]` and never reference `[[check]]`. See
+/// `docs/projects/ratatoskr.md`.
 fn parse_ratatoskr(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<RatatoskrConfig>, DevError> {
     let Some(value) = table.get("ratatoskr") else {
         return Ok(None);
     };
+    if let Some(harness) = value.as_table().and_then(|t| t.get("harness"))
+        && let Some(ht) = harness.as_table()
+        && ht.contains_key("sweep")
+    {
+        return Err(DevError::Config(
+            "[ratatoskr.harness].sweep is no longer supported. The harness \
+             build spec is now self-contained: drop the `[[check]]` entry \
+             that the sweep referenced, then under `[ratatoskr.harness]` \
+             declare `package = \"<crate>\"` (required), optional \
+             `binary = \"<bin>\"` (defaults to `package`), optional \
+             `features = [...]`, and optional `debug = true`. See \
+             docs/projects/ratatoskr.md."
+                .into(),
+        ));
+    }
     let config: RatatoskrConfig = value
         .clone()
         .try_into()
@@ -788,49 +825,6 @@ fn validate_check_against_test(
                 )));
             }
         }
-    }
-    Ok(())
-}
-
-/// Cross-check `[ratatoskr.harness]` against `[[check]]`: the named
-/// sweep must exist, and the named binary must appear in that sweep's
-/// `build_packages`. Both rules catch a typo at parse time before the
-/// cargo build kicks off, so a fresh checkout sees the helpful error
-/// instead of a confused cargo failure.
-fn validate_ratatoskr_against_check(
-    ratatoskr: Option<&RatatoskrConfig>,
-    check: &[CheckEntry],
-) -> Result<(), DevError> {
-    let Some(r) = ratatoskr else {
-        return Ok(());
-    };
-    let Some(harness) = &r.harness else {
-        return Ok(());
-    };
-    let entry = check.iter().find(|e| e.name == harness.sweep).ok_or_else(|| {
-        let known: Vec<&str> = check.iter().map(|e| e.name.as_str()).collect();
-        let known = if known.is_empty() {
-            "no `[[check]]` entries are configured".to_owned()
-        } else {
-            format!("known sweeps: {}", known.join(", "))
-        };
-        DevError::Config(format!(
-            "[ratatoskr.harness].sweep references '{}', but no `[[check]]` \
-             entry with that name exists ({known}).",
-            harness.sweep
-        ))
-    })?;
-    if !entry.build_packages.iter().any(|p| p == &harness.binary) {
-        let pkgs = if entry.build_packages.is_empty() {
-            "the sweep declares no `build_packages`".to_owned()
-        } else {
-            format!("declared: {}", entry.build_packages.join(", "))
-        };
-        return Err(DevError::Config(format!(
-            "[ratatoskr.harness].binary = '{}' does not appear in \
-             [[check]].build_packages of sweep '{}' ({pkgs}).",
-            harness.binary, harness.sweep
-        )));
     }
     Ok(())
 }
@@ -1755,73 +1749,58 @@ features = ["a"]
     }
 
     #[test]
-    fn ratatoskr_harness_accepts_valid_pair() {
-        let check = vec![CheckEntry {
-            name: "harness".into(),
-            features: vec!["test-helpers".into()],
-            no_default_features: false,
-            build_packages: vec!["app".into(), "parent_death_helper".into()],
-        }];
-        let r = RatatoskrConfig {
-            harness: Some(HarnessConfig {
-                sweep: "harness".into(),
-                binary: "app".into(),
-                debug: None,
-            }),
-            ..RatatoskrConfig::default()
-        };
-        validate_ratatoskr_against_check(Some(&r), &check).unwrap();
-    }
-
-    #[test]
-    fn ratatoskr_harness_rejects_unknown_sweep() {
-        let check = vec![CheckEntry {
-            name: "all".into(),
+    fn ratatoskr_harness_binary_defaults_to_package() {
+        let h = HarnessConfig {
+            package: "app".into(),
+            binary: None,
             features: Vec::new(),
-            no_default_features: false,
-            build_packages: vec!["app".into()],
-        }];
-        let r = RatatoskrConfig {
-            harness: Some(HarnessConfig {
-                sweep: "nope".into(),
-                binary: "app".into(),
-                debug: None,
-            }),
-            ..RatatoskrConfig::default()
+            debug: None,
         };
-        let err = validate_ratatoskr_against_check(Some(&r), &check)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("'nope'"), "got: {err}");
-        assert!(err.contains("known sweeps"), "got: {err}");
+        assert_eq!(h.binary_name(), "app");
     }
 
     #[test]
-    fn ratatoskr_harness_rejects_binary_not_in_build_packages() {
-        let check = vec![CheckEntry {
-            name: "harness".into(),
+    fn ratatoskr_harness_binary_override_wins() {
+        let h = HarnessConfig {
+            package: "app".into(),
+            binary: Some("parent_death_helper".into()),
             features: Vec::new(),
-            no_default_features: false,
-            build_packages: vec!["app".into()],
-        }];
-        let r = RatatoskrConfig {
-            harness: Some(HarnessConfig {
-                sweep: "harness".into(),
-                binary: "service".into(),
-                debug: None,
-            }),
-            ..RatatoskrConfig::default()
+            debug: None,
         };
-        let err = validate_ratatoskr_against_check(Some(&r), &check)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("'service'"), "got: {err}");
-        assert!(err.contains("declared: app"), "got: {err}");
+        assert_eq!(h.binary_name(), "parent_death_helper");
     }
 
     #[test]
-    fn ratatoskr_harness_no_op_without_section() {
-        validate_ratatoskr_against_check(None, &[]).unwrap();
+    fn ratatoskr_harness_rejects_legacy_sweep_field() {
+        let raw = r#"
+project = "ratatoskr"
+[ratatoskr.harness]
+sweep = "harness"
+binary = "app"
+"#;
+        let root: toml::Value = toml::from_str(raw).unwrap();
+        let table = root.as_table().unwrap();
+        let err = parse_ratatoskr(table).unwrap_err().to_string();
+        assert!(err.contains("sweep"), "got: {err}");
+        assert!(err.contains("no longer supported"), "got: {err}");
+    }
+
+    #[test]
+    fn ratatoskr_harness_parses_new_schema() {
+        let raw = r#"
+project = "ratatoskr"
+[ratatoskr.harness]
+package = "app"
+debug = true
+"#;
+        let root: toml::Value = toml::from_str(raw).unwrap();
+        let table = root.as_table().unwrap();
+        let cfg = parse_ratatoskr(table).unwrap().unwrap();
+        let h = cfg.harness.unwrap();
+        assert_eq!(h.package, "app");
+        assert_eq!(h.binary_name(), "app");
+        assert!(h.features.is_empty());
+        assert_eq!(h.debug, Some(true));
     }
 
     #[test]
