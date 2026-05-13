@@ -7,6 +7,7 @@ This file documents the **schema-universal** parts of brokkr.toml:
 - Dataset entry structure (pbf / osc / pmtiles tables)
 - Shared variant-selection flags (`--variant`, `--osc-seq`, `--tiles`)
 - `[[check]]` array - feature sweeps for clippy + tests
+- `[[dependency_rule]]` array - direct Cargo dependency boundary rules
 - `[test]` section - default package, default profile, named test profiles
 
 For project-specific config blocks see:
@@ -55,7 +56,7 @@ Top-level keys that aren't `project` are treated as hostname sections
 appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
-`litehtml`, `sluggrs`, `check`, `test`, `capture_env`.
+`litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`.
 
 ## Dataset structure
 
@@ -119,6 +120,36 @@ build_packages = ["pbfhogg-cli"]
 The legacy `[check]` table form (with `consumer_features`) is rejected at
 parse time with a migration message - move the flags into a `[[check]]` entry.
 
+## `[[dependency_rule]]` array
+
+Optional. Each entry forbids direct Cargo dependencies from one or more
+workspace packages to one or more package names. `brokkr check` enforces these
+rules before clippy/tests by reading `cargo metadata --no-deps`. With no
+entries, the phase is skipped silently.
+
+```toml
+[[dependency_rule]]
+name = "app-db-boundary"
+from = "app"
+forbid = ["db", "service-state"]
+
+[[dependency_rule]]
+name = "core-no-sqlite"
+from = ["rtsk", "app"]
+forbid = "rusqlite"
+```
+
+- `name` (optional) - label surfaced in violation output.
+- `from` (required) - workspace package name, or an array of names, whose
+  direct dependency list is checked.
+- `forbid` (required) - package name, or array of package names, that may not
+  appear in those direct dependencies. This can name workspace crates or
+  external crates.
+
+Rules are intentionally direct-edge checks: `app -> db` is rejected when `db`
+appears in `app`'s manifest dependencies. Transitive architectural constraints
+should be encoded by adding rules for the intermediate crates too.
+
 ## `[test]` section
 
 Optional. Three things live here: a default cargo package, a default
@@ -136,56 +167,27 @@ sweeps = ["all", "consumer"]
 skip = ["tier2::", "tier3::", "platform::", "serial::"]
 include_ignored = false
 
-[test.profiles.sort]
-description = "Tier 2: expanded sort command tests"
-extends = "tier1"
-tests = ["cli_sort"]
-skip = ["platform::", "serial::"]
-
 [test.profiles.full]
 sweeps = ["all"]
-skip = ["platform::"]
 include_ignored = true
-
-[test.profiles.platform]
-sweeps = ["all"]
-only = ["platform::"]
-include_ignored = true
-env = { BROKKR_TEST_PLATFORM = "1" }
-
-[test.profiles.serial]
-sweeps = ["all"]
-only = ["serial::"]
-include_ignored = true
-test_threads = 1
 ```
 
 - `default_package` is the cargo package `brokkr test` passes to
-  `cargo test -p` when no `-p/--package` is given on the command line. Needed
-  for multi-crate workspaces where there's no single obvious package
-  (e.g. ratatoskr); optional for single-crate projects that already have a
-  built-in default via `Project::cli_package()` (pbfhogg-cli, nidhogg).
-  Resolution order: explicit `-p` on CLI > `[test].default_package` >
-  `Project::cli_package()` > error.
+  `cargo test -p` when no `-p/--package` is given. Resolution order:
+  explicit CLI `-p` > `[test].default_package` > `Project::cli_package()` >
+  error.
 - `default_profile` is the validation profile `brokkr check` uses when no
-  `--profile` is passed. With no profile config in `brokkr.toml`,
-  `brokkr check` runs every `[[check]]` entry without libtest filters; with no
-  `[[check]]` either, it falls back to a single `--all-features` sweep so
-  projects that haven't migrated keep today's behaviour exactly.
+  `--profile` is passed. With no profile config, `brokkr check` runs every
+  `[[check]]` entry without libtest filters; with no `[[check]]` either, it
+  falls back to a single `--all-features` sweep.
 - `[test.profiles.<name>]` declares a test selection layered onto one or more
   `[[check]]` entries. Fields: `sweeps` (required, list of `[[check]]` entry
   names), `tests` (`--test <name>`), `only` (positional substring filter),
   `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`.
-  `extends = "<other>"` walks the chain to the root with cycle detection
-  (parents-of-parents resolve too); collections are **replaced** (not
-  concatenated, child wins), env merges key-by-key. Cycles are rejected at
-  resolve time. Sweep names that don't resolve to a `[[check]]` entry are
-  caught at parse time.
-- Profiles use Rust **module paths** as the annotation surface. Test-file
-  authors declare `mod tier2 { ... }` / `mod platform { ... }` /
-  `mod serial { ... }` to mark cost classes; the brokkr profile's `only` /
-  `skip` lists translate directly into cargo's substring filter and `--skip`
-  flag (which match module paths).
+  `extends = "<other>"` walks the chain with cycle detection; collections are
+  replaced (child wins), env merges key-by-key.
+- Profiles use Rust module paths as the annotation surface; `only` / `skip`
+  translate directly into cargo substring filters and `--skip`.
 - The legacy `[test.sweeps.*]` map is rejected at parse time. Sweeps now live
   in `[[check]]` entries; profiles reference them by name.
 

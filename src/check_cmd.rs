@@ -23,7 +23,8 @@ use std::path::Path;
 use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
-use crate::config::{CheckEntry, TestConfig};
+use crate::config::{CheckEntry, DependencyRule, TestConfig};
+use crate::dependency_rules;
 use crate::error::DevError;
 use crate::gremlins;
 use crate::output;
@@ -37,6 +38,7 @@ pub(crate) fn cmd_check(
     project: Option<Project>,
     project_root: &Path,
     check_entries: &[CheckEntry],
+    dependency_rules: &[DependencyRule],
     test_cfg: Option<&TestConfig>,
     features: &[String],
     no_default_features: bool,
@@ -54,6 +56,7 @@ pub(crate) fn cmd_check(
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
 
     run_gremlins(project_root, json, limit, all, fix_gremlins)?;
+    run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
     run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
     let mut collected_timings: Vec<TestTiming> = Vec::new();
     let test_result = run_test_phase(
@@ -305,6 +308,85 @@ fn run_gremlins(
     msg.push_str("  hint: rerun with `brokkr check --fix-gremlins` to rewrite all banned chars in place\n");
     output::error(msg.trim_end());
     Err(DevError::Build("gremlins found".into()))
+}
+
+fn run_dependency_rules(
+    project_root: &Path,
+    rules: &[DependencyRule],
+    json: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    if !json {
+        output::run_msg("cargo metadata --format-version 1 --no-deps (dependency rules)");
+    }
+    let report = dependency_rules::check(project_root, rules)?;
+
+    if json {
+        for violation in &report.violations {
+            cargo_json::emit(&cargo_json::CheckEvent::DependencyViolation(
+                cargo_json::DependencyViolationEvent {
+                    rule: violation.rule.clone(),
+                    from: violation.from.clone(),
+                    to: violation.to.clone(),
+                    alias: violation.alias.clone(),
+                    kind: violation.kind.as_str(),
+                    target: violation.target.clone(),
+                    optional: violation.optional,
+                },
+            ));
+        }
+        cargo_json::emit(&cargo_json::CheckEvent::DependencySummary(
+            cargo_json::DependencySummaryEvent {
+                status: if report.violations.is_empty() {
+                    "ok"
+                } else {
+                    "failed"
+                },
+                rules: report.rules,
+                packages: report.packages,
+                violations: report.violations.len(),
+            },
+        ));
+    }
+
+    if report.violations.is_empty() {
+        if !json {
+            output::run_msg(&format!(
+                "dependency rules: ok ({} rule(s), {} workspace package(s))",
+                report.rules, report.packages,
+            ));
+        }
+        return Ok(());
+    }
+
+    if !json {
+        let total = report.violations.len();
+        let displayed = if all || total <= limit {
+            &report.violations[..]
+        } else {
+            &report.violations[..limit]
+        };
+        let mut msg = format!("dependency rules: {total} violation(s)\n");
+        for violation in displayed {
+            msg.push_str("  ");
+            msg.push_str(&dependency_rules::format_violation(violation));
+            msg.push('\n');
+        }
+        if displayed.len() < total {
+            msg.push_str(&format!(
+                "  +{} more (--all to see)\n",
+                total - displayed.len()
+            ));
+        }
+        output::error(msg.trim_end());
+    }
+
+    Err(DevError::Build("dependency rules failed".into()))
 }
 
 #[allow(clippy::too_many_arguments)]

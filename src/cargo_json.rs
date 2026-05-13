@@ -11,10 +11,12 @@ use serde::Serialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CheckEvent {
     Diagnostic(DiagnosticEvent),
+    DependencyViolation(DependencyViolationEvent),
     TestFailure(TestFailureEvent),
     TestHung(TestHungEvent),
     TestTiming(TestTimingEvent),
     DiagnosticSummary(DiagnosticSummaryEvent),
+    DependencySummary(DependencySummaryEvent),
     TestSummary(TestSummaryEvent),
     Gremlin(GremlinEvent),
     GremlinSummary(GremlinSummaryEvent),
@@ -64,6 +66,28 @@ pub struct DiagnosticEvent {
     pub children: Vec<ChildDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DependencyViolationEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    pub from: String,
+    pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub optional: bool,
+}
+
+#[derive(Serialize)]
+pub struct DependencySummaryEvent {
+    pub status: &'static str,
+    pub rules: usize,
+    pub packages: usize,
+    pub violations: usize,
 }
 
 #[derive(Serialize)]

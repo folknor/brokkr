@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
 use crate::error::DevError;
 use crate::project::Project;
@@ -16,6 +17,10 @@ pub struct DevConfig {
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
     pub ratatoskr: Option<RatatoskrConfig>,
+    /// Static Cargo package dependency boundary rules enforced by
+    /// `brokkr check` before clippy/tests. Empty when the project does
+    /// not define any `[[dependency_rule]]` entries.
+    pub dependency_rules: Vec<DependencyRule>,
     /// Each `[[check]]` entry in `brokkr.toml`. One entry = one
     /// (clippy + test) sweep with the entry's feature flags. Empty
     /// when the file has no `[[check]]` arrays - in that case
@@ -28,6 +33,67 @@ pub struct DevConfig {
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
     /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
     pub capture_env: Vec<String>,
+}
+
+/// One `[[dependency_rule]]` entry: a direct Cargo dependency that must
+/// not exist.
+///
+/// `from` names one or more workspace packages. `forbid` names package
+/// dependencies that are illegal for those packages. Both accept either
+/// a single string or an array of strings in TOML.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyRule {
+    /// Optional human label surfaced in violation output.
+    pub name: Option<String>,
+    /// Workspace package(s) whose direct dependency list is checked.
+    #[serde(deserialize_with = "string_or_vec")]
+    pub from: Vec<String>,
+    /// Package names that may not appear in `from`'s direct dependencies.
+    #[serde(deserialize_with = "string_or_vec")]
+    pub forbid: Vec<String>,
+}
+
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringOrVec;
+
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or an array of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![value.to_owned()])
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![value])
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+            while let Some(value) = seq.next_element::<String>()? {
+                out.push(value);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 /// One `[[check]]` entry: a single named cargo invocation shape that
@@ -540,6 +606,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
     let ratatoskr = parse_ratatoskr(table)?;
+    let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
     validate_check_against_test(&check, test.as_ref())?;
@@ -554,6 +621,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             litehtml,
             sluggrs,
             ratatoskr,
+            dependency_rules,
             check,
             test,
             capture_env,
@@ -633,6 +701,7 @@ fn parse_hosts(
             || key == "litehtml"
             || key == "sluggrs"
             || key == "ratatoskr"
+            || key == "dependency_rule"
             || key == "check"
             || key == "test"
             || key == "capture_env"
@@ -714,6 +783,64 @@ fn parse_ratatoskr(
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("ratatoskr: {e}")))?;
     Ok(Some(config))
+}
+
+/// Parse the optional `[[dependency_rule]]` array of tables.
+fn parse_dependency_rules(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<DependencyRule>, DevError> {
+    let Some(value) = table.get("dependency_rule") else {
+        return Ok(Vec::new());
+    };
+    if value.is_table() {
+        return Err(DevError::Config(
+            "[dependency_rule] (table form) is not supported. Use one or \
+             more `[[dependency_rule]]` array-of-table entries with `from` \
+             and `forbid`."
+                .into(),
+        ));
+    }
+
+    let rules: Vec<DependencyRule> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[dependency_rule]]: {e}")))?;
+
+    for (idx, rule) in rules.iter().enumerate() {
+        let label = rule
+            .name
+            .as_deref()
+            .map_or_else(|| format!("#{}", idx + 1), |name| format!("{name:?}"));
+        if rule.name.as_deref().is_some_and(|name| name.trim().is_empty()) {
+            return Err(DevError::Config(format!(
+                "[[dependency_rule]] {label} has empty `name`"
+            )));
+        }
+        validate_non_empty_string_list("from", &rule.from, &label)?;
+        validate_non_empty_string_list("forbid", &rule.forbid, &label)?;
+    }
+
+    Ok(rules)
+}
+
+fn validate_non_empty_string_list(
+    field: &str,
+    values: &[String],
+    label: &str,
+) -> Result<(), DevError> {
+    if values.is_empty() {
+        return Err(DevError::Config(format!(
+            "[[dependency_rule]] {label} has empty `{field}` list"
+        )));
+    }
+    for value in values {
+        if value.trim().is_empty() {
+            return Err(DevError::Config(format!(
+                "[[dependency_rule]] {label} has blank string in `{field}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Parse the optional `[[check]]` array of tables.
@@ -1085,6 +1212,7 @@ mod tests {
             litehtml: None,
             sluggrs: None,
             ratatoskr: None,
+            dependency_rules: Vec::new(),
             check: Vec::new(),
             test: None,
             capture_env: Vec::new(),
@@ -1696,6 +1824,55 @@ features = "all"
 "#,
         );
         assert!(parse_check(&table).is_err());
+    }
+
+    #[test]
+    fn parse_dependency_rules_accepts_single_or_array_values() {
+        let table = root_table(
+            r#"
+project = "ratatoskr"
+
+[[dependency_rule]]
+name = "app-db"
+from = "app"
+forbid = ["db", "service-state"]
+"#,
+        );
+        let rules = parse_dependency_rules(&table).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name.as_deref(), Some("app-db"));
+        assert_eq!(rules[0].from, vec!["app"]);
+        assert_eq!(rules[0].forbid, vec!["db", "service-state"]);
+    }
+
+    #[test]
+    fn parse_dependency_rules_rejects_empty_lists() {
+        let table = root_table(
+            r#"
+project = "ratatoskr"
+
+[[dependency_rule]]
+from = []
+forbid = "db"
+"#,
+        );
+        let err = parse_dependency_rules(&table).unwrap_err().to_string();
+        assert!(err.contains("empty `from`"), "got: {err}");
+    }
+
+    #[test]
+    fn dependency_rule_is_not_treated_as_host_section() {
+        let table = root_table(
+            r#"
+project = "ratatoskr"
+
+[[dependency_rule]]
+from = "app"
+forbid = "db"
+"#,
+        );
+        let hosts = parse_hosts(&table).unwrap();
+        assert!(hosts.is_empty());
     }
 
     #[test]

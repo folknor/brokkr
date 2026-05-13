@@ -60,7 +60,7 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 
 | Command | Description |
 |---------|-------------|
-| `check` | Run gremlin scan + clippy + tests (extra args forwarded to `cargo test`) |
+| `check` | Run gremlin scan + dependency rules + clippy + tests (extra args forwarded to `cargo test`) |
 | `test [-p <PKG>] <NAME>` | Run one cargo test in release mode via `cargo test -p <PKG> <NAME>` with `--include-ignored --nocapture --test-threads=1`; streams output, prints a `[test] PASS/FAIL` footer per run. Package resolution: explicit `-p` > `[test] default_package` in brokkr.toml > built-in default (pbfhogg-cli, nidhogg). `-N` repeats, `-j` passes through to cargo, `--raw` disables filtering. Gated off for litehtml/sluggrs (use `brokkr visual`). |
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
@@ -74,6 +74,17 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 `check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), failures become `FAILED name location message`. Use `--raw` for unfiltered cargo output, or `--json` for NDJSON with full-fidelity structured diagnostics (one JSON object per line). Falls back to raw output automatically if parsing fails.
 
 A gremlin scan runs before clippy and fails the check if any banned Unicode character is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files. Covers invisible/zero-width characters, non-breaking spaces, soft hyphen, line/paragraph separators, bidi marks/overrides/isolates, em/en dashes, typographic single and double quotes, plus `U+0003`, `U+000B`, and `U+FFFC`. Text mode prints one line per hit (`file:line:col U+XXXX NAME`); JSON mode emits `gremlin` / `gremlin_summary` events. See `src/gremlins.rs` for the full banned set.
+
+If `brokkr.toml` contains `[[dependency_rule]]` entries, `check` then validates direct Cargo dependency boundaries from `cargo metadata --no-deps`. Example:
+
+```toml
+[[dependency_rule]]
+name = "app-db-boundary"
+from = "app"
+forbid = ["db", "service-state"]
+```
+
+This rejects direct `app -> db` or `app -> service-state` dependencies before clippy/tests run. `from` and `forbid` each accept either one string or an array of package names; `forbid` can name workspace crates or external crates.
 
 When many diagnostics are found at once (e.g. picking the checker up on an existing codebase), text mode caps each phase at `--limit N` entries (default 20) and prefers files changed on the current branch so the most actionable hits surface first. The cap applies to both the gremlin phase and the clippy phase (independently), with a trailer summarising what's hidden (`+N more in this branch, +M in unchanged files (--all to see)`). Use `--all` to see everything, or `--limit N` to override the cap. `--raw` and `--json` bypass the cap.
 
@@ -426,6 +437,7 @@ nidhogg = "/home/folk/Programs/nidhogg"
 - `[hostname]` - per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
 - `features` - cargo features appended to every build (all measurable commands, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top
 - `[[check]]` - top-level array of tables (not host-scoped). Each entry is one (clippy + test) sweep with the entry's feature flags. Fields: `name` (required, unique label - referenced by name from `[test.profiles.*].sweeps`), `features = [...]` (explicit list; the `features = "all"` sentinel is rejected so adding a new feature to `Cargo.toml` doesn't silently broaden coverage), `no_default_features = true|false`, `build_packages = ["pbfhogg-cli", ...]` (rebuilt with the entry's features before the test phase, keeping `tests/cli_*.rs` `CliInvoker` calls honest). Multiple entries catch lints that feature-gated proc-macro rewrites mask under any single feature set. The legacy `[check]` table form (with `consumer_features`) is rejected at parse time
+- `[[dependency_rule]]` - top-level array of direct Cargo dependency boundary rules enforced by `brokkr check`. Fields: optional `name`, `from = "app"` or `from = ["app", "rtsk"]`, and `forbid = "db"` or `forbid = ["db", "rusqlite"]`
 - `[test]` - top-level (not host-scoped). `default_package = "..."` is the cargo package `brokkr test` uses when no `-p/--package` is given; required for multi-crate workspaces that lack a built-in default. Explicit CLI `-p` always wins. `default_profile = "..."` is the validation profile `brokkr check` uses when no `--profile` is passed - typically `tier1` for fast inner-loop runs. `[test.profiles.<name>]` declares a profile with `sweeps = [...]` (list of `[[check]]` entry names), optional `tests`/`only`/`skip`/`include_ignored`/`test_threads`/`env`, and optional `extends = "<other>"` (single-parent inheritance, child collections replace parent's). Profiles use Rust **module paths** as the annotation surface: tests inside `mod tier2 { ... }` / `mod platform { ... }` / `mod serial { ... }` are filtered by name substring (`only = ["tier2::"]`, `skip = ["platform::"]`). Dangling sweep references (profile names a `[[check]]` entry that doesn't exist) are caught at parse time. The legacy `[test.sweeps.*]` map form is rejected; sweeps live in `[[check]]` now
 
 ## License

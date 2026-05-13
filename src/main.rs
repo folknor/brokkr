@@ -14,6 +14,7 @@ mod cli;
 mod config;
 mod context;
 mod db;
+mod dependency_rules;
 mod elivagar;
 mod env;
 mod error;
@@ -215,14 +216,16 @@ fn run(cli: Cli) -> Result<(), DevError> {
         args,
     } = cli.command
     {
-        let (project, check_entries, test_cfg, project_root) = match project::detect_optional()? {
-            Some((p, cfg, root)) => (Some(p), cfg.check, cfg.test, root),
-            None => (None, Vec::new(), None, std::env::current_dir()?),
-        };
+        let (project, check_entries, dependency_rules, test_cfg, project_root) =
+            match project::detect_optional()? {
+                Some((p, cfg, root)) => (Some(p), cfg.check, cfg.dependency_rules, cfg.test, root),
+                None => (None, Vec::new(), Vec::new(), None, std::env::current_dir()?),
+            };
         return check_cmd::cmd_check(
             project,
             &project_root,
             &check_entries,
+            &dependency_rules,
             test_cfg.as_ref(),
             &features,
             no_default_features,

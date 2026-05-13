@@ -2,16 +2,17 @@
 
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
-full validation pass (gremlins + clippy + tests); `test` runs one named cargo
-test against the same sweep set.
+full validation pass (gremlins + dependency rules + clippy + tests); `test`
+runs one named cargo test against the same sweep set.
 
-For the underlying config (`[[check]]` array, `[test]` section, profiles) see
-`docs/brokkr.toml.md`.
+For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
+section, profiles) see `docs/brokkr.toml.md`.
 
 ## `brokkr check`
 
-Gremlins + clippy + tests. Trailing args after `brokkr check --` are split on a
-literal `--`: tokens before it go to `cargo test` (e.g.
+Gremlins + dependency rules + clippy + tests. Trailing args after
+`brokkr check --` are split on a literal `--`: tokens before it go to
+`cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
 to libtest after the enforced `--test-threads=1` (e.g.
 `brokkr check -- -- --ignored`). With no separator, every token is
@@ -57,6 +58,12 @@ spaces, bidi overrides, em/en dashes, typographic quotes). `--fix-gremlins`
 rewrites every banned char in place with its ASCII equivalent (or deletes it
 for zero-width/bidi noise) before the scan runs, so the subsequent check finds
 zero and passes.
+
+Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
+in `brokkr.toml`; without entries it is skipped silently. It reads
+`cargo metadata --no-deps` and fails on configured direct dependency boundary
+violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`.
+JSON mode emits `dependency_violation` and `dependency_summary` events.
 
 When hits exceed `--limit`, both the gremlin and clippy phases prefer files
 changed on the current branch (computed via git merge-base against

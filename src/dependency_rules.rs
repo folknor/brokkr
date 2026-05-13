@@ -1,0 +1,265 @@
+//! Static Cargo dependency-boundary checks for `brokkr check`.
+//!
+//! Rules come from `[[dependency_rule]]` entries in `brokkr.toml`.
+//! Each rule forbids direct dependencies from one or more workspace
+//! packages to one or more package names.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::config::DependencyRule;
+use crate::error::DevError;
+use crate::output;
+
+#[derive(Debug, Clone)]
+pub struct DependencyViolation {
+    pub rule: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub alias: Option<String>,
+    pub kind: DependencyKind,
+    pub target: Option<String>,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    Normal,
+    Dev,
+    Build,
+    Unknown,
+}
+
+impl DependencyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Dev => "dev",
+            Self::Build => "build",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl From<Option<&str>> for DependencyKind {
+    fn from(value: Option<&str>) -> Self {
+        match value {
+            None => Self::Normal,
+            Some("dev") => Self::Dev,
+            Some("build") => Self::Build,
+            Some(_) => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DependencyReport {
+    pub rules: usize,
+    pub packages: usize,
+    pub violations: Vec<DependencyViolation>,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+    workspace_members: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CargoPackage {
+    name: String,
+    id: String,
+    #[serde(default)]
+    dependencies: Vec<CargoDependency>,
+}
+
+#[derive(Deserialize)]
+struct CargoDependency {
+    name: String,
+    rename: Option<String>,
+    kind: Option<String>,
+    target: Option<String>,
+    optional: bool,
+}
+
+pub fn check(
+    project_root: &Path,
+    rules: &[DependencyRule],
+) -> Result<DependencyReport, DevError> {
+    let captured = output::run_captured(
+        "cargo",
+        &["metadata", "--format-version", "1", "--no-deps"],
+        project_root,
+    )?;
+    if !captured.status.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    check_metadata(&stdout, rules)
+}
+
+pub fn check_metadata(
+    metadata_json: &str,
+    rules: &[DependencyRule],
+) -> Result<DependencyReport, DevError> {
+    let metadata: CargoMetadata = serde_json::from_str(metadata_json)?;
+    let workspace_ids: BTreeSet<&str> = metadata
+        .workspace_members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let workspace_packages: Vec<&CargoPackage> = metadata
+        .packages
+        .iter()
+        .filter(|pkg| workspace_ids.contains(pkg.id.as_str()))
+        .collect();
+    let by_name: BTreeMap<&str, &CargoPackage> = workspace_packages
+        .iter()
+        .map(|pkg| (pkg.name.as_str(), *pkg))
+        .collect();
+
+    let mut violations = Vec::new();
+    for rule in rules {
+        let forbidden: BTreeSet<&str> = rule.forbid.iter().map(String::as_str).collect();
+        for from in &rule.from {
+            let Some(pkg) = by_name.get(from.as_str()) else {
+                return Err(DevError::Config(format!(
+                    "[[dependency_rule]] references package '{from}' in `from`, \
+                     but cargo metadata has no workspace package with that name"
+                )));
+            };
+            for dep in &pkg.dependencies {
+                if !forbidden.contains(dep.name.as_str()) {
+                    continue;
+                }
+                violations.push(DependencyViolation {
+                    rule: rule.name.clone(),
+                    from: pkg.name.clone(),
+                    to: dep.name.clone(),
+                    alias: dep.rename.clone(),
+                    kind: DependencyKind::from(dep.kind.as_deref()),
+                    target: dep.target.clone(),
+                    optional: dep.optional,
+                });
+            }
+        }
+    }
+
+    Ok(DependencyReport {
+        rules: rules.len(),
+        packages: workspace_packages.len(),
+        violations,
+    })
+}
+
+pub fn format_violation(v: &DependencyViolation) -> String {
+    let mut out = String::new();
+    if let Some(rule) = &v.rule {
+        out.push_str(&format!("[{rule}] "));
+    }
+    out.push_str(&format!("{} -> {}", v.from, v.to));
+    if let Some(alias) = &v.alias {
+        out.push_str(&format!(" as {alias}"));
+    }
+    out.push_str(&format!(" ({})", v.kind.as_str()));
+    if let Some(target) = &v.target {
+        out.push_str(&format!(" target {target}"));
+    }
+    if v.optional {
+        out.push_str(" optional");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn metadata() -> &'static str {
+        r#"{
+  "packages": [
+    {
+      "name": "app",
+      "id": "path+file:///repo/crates/app#0.1.0",
+      "dependencies": [
+        {
+          "name": "db",
+          "rename": null,
+          "kind": null,
+          "target": null,
+          "optional": false
+        },
+        {
+          "name": "service-state",
+          "rename": "service_state",
+          "kind": "dev",
+          "target": "cfg(unix)",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "db",
+      "id": "path+file:///repo/crates/db#0.1.0",
+      "dependencies": []
+    },
+    {
+      "name": "service-state",
+      "id": "path+file:///repo/crates/service-state#0.1.0",
+      "dependencies": []
+    }
+  ],
+  "workspace_members": [
+    "path+file:///repo/crates/app#0.1.0",
+    "path+file:///repo/crates/db#0.1.0",
+    "path+file:///repo/crates/service-state#0.1.0"
+  ]
+}"#
+    }
+
+    #[test]
+    fn direct_forbidden_dependency_is_reported() {
+        let rules = vec![DependencyRule {
+            name: Some("app-db-boundary".into()),
+            from: vec!["app".into()],
+            forbid: vec!["db".into()],
+        }];
+        let report = check_metadata(metadata(), &rules).unwrap();
+        assert_eq!(report.violations.len(), 1);
+        let violation = &report.violations[0];
+        assert_eq!(violation.from, "app");
+        assert_eq!(violation.to, "db");
+        assert_eq!(violation.kind, DependencyKind::Normal);
+    }
+
+    #[test]
+    fn rule_can_forbid_multiple_dependencies() {
+        let rules = vec![DependencyRule {
+            name: None,
+            from: vec!["app".into()],
+            forbid: vec!["db".into(), "service-state".into()],
+        }];
+        let report = check_metadata(metadata(), &rules).unwrap();
+        assert_eq!(report.violations.len(), 2);
+        assert_eq!(report.violations[1].alias.as_deref(), Some("service_state"));
+        assert_eq!(report.violations[1].kind, DependencyKind::Dev);
+        assert!(report.violations[1].optional);
+    }
+
+    #[test]
+    fn missing_from_package_is_a_config_error() {
+        let rules = vec![DependencyRule {
+            name: None,
+            from: vec!["missing".into()],
+            forbid: vec!["db".into()],
+        }];
+        let err = check_metadata(metadata(), &rules).unwrap_err().to_string();
+        assert!(err.contains("missing"), "got: {err}");
+    }
+}
