@@ -52,7 +52,8 @@ which is why the JSON ingestion path was needed; see `src/cargo_filter.rs`
 module header).
 
 Gremlin phase runs first and fails the check if any banned Unicode character
-is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files - see
+is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
+untracked-not-gitignored, so new plan docs are caught before staging) - see
 `src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
 spaces, bidi overrides, em/en dashes, typographic quotes). `--fix-gremlins`
 rewrites every banned char in place with its ASCII equivalent (or deletes it

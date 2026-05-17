@@ -47,7 +47,7 @@ Single crate, single binary. No workspace.
 - `src/cli.rs` - CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`. All commands are top-level - no subcommand enums for litehtml/sluggrs
 - `src/cargo_filter.rs` - Formatter primitives (`ClippyDiagnostic`, `ClippyParse`) plus the legacy text-output parser still used as a fallback by the test-phase build-error path. See the module header for why the JSON path replaced text scraping
 - `src/cargo_json.rs` - JSON event model and parser for `check`. `CheckEvent` enum (Diagnostic, TestFailure, TestHung, DiagnosticSummary, TestSummary, Gremlin, GremlinSummary) serialized as NDJSON
-- `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files for invisible/deceptive Unicode
+- `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked + untracked-not-gitignored) for invisible/deceptive Unicode
 - `src/scope.rs` - Scope + limit helpers. `changed_files()` computes files modified on the current branch via git merge-base; `partition()` sorts diagnostics scoped-first; `format_trailer()` builds the overflow summary
 - `src/measure.rs` - `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
 - `src/{pbfhogg,elivagar,nidhogg}/dispatch.rs` - Per-project dispatch (split from the old unified `src/dispatch.rs` in 0313f74). Pbfhogg exposes `run_command_with_params()`; elivagar and nidhogg expose `run_command()`. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions

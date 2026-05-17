@@ -1,6 +1,6 @@
 //! Gremlin detector for `brokkr check`.
 //!
-//! Scans tracked source, config, and doc files for invisible or visually
+//! Scans tracked and untracked-not-ignored source, config, and doc files for invisible or visually
 //! deceptive Unicode characters that tend to sneak in via copy-paste from
 //! editors, chat logs, or LLM output and cause subtle bugs. The banned
 //! set covers three families:
@@ -69,11 +69,11 @@ fn replacement(c: char) -> Option<&'static str> {
     })
 }
 
-/// Rewrite every tracked scannable file, replacing gremlin chars with their
+/// Rewrite every scannable file (tracked or untracked-not-ignored), replacing gremlin chars with their
 /// ASCII equivalents (or deleting zero-width / bidi noise). Returns one
 /// summary entry per file that was actually modified.
 pub fn fix(project_root: &Path) -> Result<Vec<FixSummary>, DevError> {
-    let files = tracked_files(project_root)?;
+    let files = scannable_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
         if !is_scannable(rel) {
@@ -167,7 +167,7 @@ const SCANNED_EXTENSIONS: &[&str] = &["rs", "toml", "md", "js", "sh"];
 
 /// Scan every tracked file with a scannable extension.
 pub fn scan(project_root: &Path) -> Result<Vec<Gremlin>, DevError> {
-    let files = tracked_files(project_root)?;
+    let files = scannable_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
         if !is_scannable(rel) {
@@ -235,9 +235,9 @@ fn is_scannable(rel: &Path) -> bool {
     SCANNED_EXTENSIONS.contains(&ext)
 }
 
-fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
+fn scannable_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
     let output = Command::new("git")
-        .args(["ls-files", "-z"])
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .current_dir(project_root)
         .output()
         .map_err(DevError::Io)?;
