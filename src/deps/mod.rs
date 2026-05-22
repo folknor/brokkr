@@ -117,6 +117,7 @@ pub struct DepsArgs {
     pub json: bool,
     pub limit: usize,
     pub all: bool,
+    pub chains: bool,
     pub no_fail: bool,
 }
 
@@ -143,7 +144,10 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     if args.json {
         render_json(&events)?;
     } else {
-        render_text(&events, args.limit, args.all);
+        // --all implies --chains; chains is just the per-pin chain
+        // toggle, --all also uncaps the per-phase item count.
+        let show_chains = args.chains || args.all;
+        render_text(&events, args.limit, args.all, show_chains);
     }
 
     if findings > 0 && !args.no_fail {
@@ -177,7 +181,7 @@ fn render_json(events: &[DepsEvent]) -> Result<(), DevError> {
     Ok(())
 }
 
-fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
+fn render_text(events: &[DepsEvent], limit: usize, all: bool, show_chains: bool) {
     let mut dups = Vec::new();
     let mut gits = Vec::new();
     let mut paths = Vec::new();
@@ -190,7 +194,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
         }
     }
 
-    render_section(&dups, "crate", "crates", "with multiple versions", limit, all, render_duplicate_text);
+    render_dup_section(&dups, limit, all, show_chains);
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
 
@@ -208,12 +212,38 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     }
 }
 
-/// When not `--all`, cap the number of dep-chain example paths shown
-/// per duplicated `(crate, version)`. The blame anchor list above each
-/// chain already captures the actionable signal; the chains are just
-/// for tracing how the version is dragged in. In big dep trees the
-/// same chain repeats per workspace member, which drowns the report.
+/// When chains are shown and `--all` is not set, cap the number of
+/// dep-chain examples per duplicated `(crate, version)`. The blame
+/// anchor list above each chain already captures the actionable
+/// signal; the chains are tracing detail. In big dep trees the same
+/// chain repeats per workspace member, which drowns the report.
 const PATHS_PER_PIN: usize = 3;
+
+fn render_dup_section(
+    items: &[&DuplicateVersionEvent],
+    limit: usize,
+    all: bool,
+    show_chains: bool,
+) {
+    if items.is_empty() {
+        return;
+    }
+    let noun = if items.len() == 1 { "crate" } else { "crates" };
+    output::deps_msg(&format!(
+        "{} {noun} with multiple versions:",
+        items.len()
+    ));
+    let shown = if all { items.len() } else { limit.min(items.len()) };
+    for item in items.iter().take(shown) {
+        render_duplicate_text(item, show_chains, all);
+    }
+    if shown < items.len() {
+        output::deps_msg(&format!(
+            "  ... and {} more (use --all to show)",
+            items.len() - shown
+        ));
+    }
+}
 
 fn render_section<T>(
     items: &[&T],
@@ -222,7 +252,7 @@ fn render_section<T>(
     suffix: &str,
     limit: usize,
     all: bool,
-    render_one: fn(&T, bool),
+    render_one: fn(&T),
 ) {
     if items.is_empty() {
         return;
@@ -236,7 +266,7 @@ fn render_section<T>(
     output::deps_msg(&header);
     let shown = if all { items.len() } else { limit.min(items.len()) };
     for item in items.iter().take(shown) {
-        render_one(item, all);
+        render_one(item);
     }
     if shown < items.len() {
         output::deps_msg(&format!(
@@ -246,7 +276,7 @@ fn render_section<T>(
     }
 }
 
-fn render_duplicate_text(dup: &DuplicateVersionEvent, all: bool) {
+fn render_duplicate_text(dup: &DuplicateVersionEvent, show_chains: bool, all: bool) {
     output::deps_msg(&format!("  {}: {} versions", dup.krate, dup.pins.len()));
     for pin in &dup.pins {
         let blame = if pin.direct_blame.is_empty() {
@@ -255,7 +285,14 @@ fn render_duplicate_text(dup: &DuplicateVersionEvent, all: bool) {
             pin.direct_blame.join(", ")
         };
         output::deps_msg(&format!("    {}  blamed on: {}", pin.version, blame));
-        let path_cap = if all { pin.paths.len() } else { PATHS_PER_PIN.min(pin.paths.len()) };
+        if !show_chains {
+            continue;
+        }
+        let path_cap = if all {
+            pin.paths.len()
+        } else {
+            PATHS_PER_PIN.min(pin.paths.len())
+        };
         for path in pin.paths.iter().take(path_cap) {
             output::deps_msg(&format!("        {}", path.join(" -> ")));
         }
@@ -269,7 +306,7 @@ fn render_duplicate_text(dup: &DuplicateVersionEvent, all: bool) {
     }
 }
 
-fn render_git_text(git: &GitDependencyEvent, _all: bool) {
+fn render_git_text(git: &GitDependencyEvent) {
     let ref_part = match (&git.tag, &git.branch, &git.rev) {
         (Some(t), _, _) => format!("tag={t}"),
         (_, Some(b), _) => format!("branch={b}"),
@@ -282,7 +319,7 @@ fn render_git_text(git: &GitDependencyEvent, _all: bool) {
     ));
 }
 
-fn render_path_text(path: &PathDependencyEvent, _all: bool) {
+fn render_path_text(path: &PathDependencyEvent) {
     output::deps_msg(&format!(
         "  {} {}  {}",
         path.krate, path.version, path.manifest_path

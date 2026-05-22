@@ -160,9 +160,17 @@ Examples:
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
-        /// Show every finding without capping.
+        /// Show every finding without capping. Implies `--chains`.
         #[arg(long)]
         all: bool,
+
+        /// Under each duplicate version's blame line, print example
+        /// chains from a workspace member to that `(crate, version)`.
+        /// Useful for understanding *why* a transitive dep is being
+        /// pulled in. Off by default - the blame anchor list is the
+        /// actionable signal; chains are just tracing detail.
+        #[arg(long)]
+        chains: bool,
 
         /// Always exit 0, even when findings exist. Useful for
         /// report-only invocations in CI.
