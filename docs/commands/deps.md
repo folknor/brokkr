@@ -38,9 +38,9 @@ it into `run()`, add a render arm. No changes to callers.
 
 Shells out to `cargo metadata --format-version 1` once per run and
 deserializes a minimal subset (packages, workspace members, resolve
-graph). No extra crate dependencies. Planned `--online` phases shell out
-to existing tools (`cargo audit`, `ccu`) - no native network code in
-brokkr.
+graph). No extra crate dependencies. Network phases shell out to
+existing tools (`ccu` today, `cargo audit` planned) - no native
+network code in brokkr.
 
 ## Checks
 
@@ -89,45 +89,44 @@ workspace is usually a dev shortcut (forgot to publish a fork) or a hand-
 patched dependency that wouldn't reproduce on a clean checkout. Emits
 `PathDependency` with the resolved manifest path.
 
-### advisory [planned, --online]
+### outdated [v1]
 
-Shells out to `cargo audit --json`, adapts its findings into `Advisory`
-events with the advisory id, severity, patched-in version, and the
-RustSec-classified kind (`vulnerability` or `unmaintained`).
+Shells out to `ccu --json` (the user's check-updates tool, pinned at
+`schema_version=1`). Emits one `Outdated` event per non-up-to-date
+direct dep, carrying name + installed + latest + severity
+(`patch`/`minor`/`major`) + source_file + line_number.
 
-If `cargo audit` isn't installed: emit a single `ToolMissing` event with
-the install hint (`cargo install cargo-audit`) and skip the phase. We do
-not auto-install - this is a network-touching tool the user should
-consent to.
+These events are informational - they don't count toward the failure-
+counting findings tally. A patch bump shouldn't fail your build; you
+look at the report and decide.
 
-### outdated [planned, --online]
+If `ccu` is missing or fails for any reason (offline, schema mismatch,
+crash), the phase emits a single `ToolMissing` event with a reason
+string and skips. Doesn't fail the run.
 
-Shells out to `ccu --json` (from `~/Programs/check-updates`, user's own
-tool - `--json` flag to be added there). Adapts each finding into an
-`Outdated` event with current/latest/severity (patch/minor/major).
+### advisory [planned]
 
-Defaults to `warn` on major gaps, `info` on minor/patch (otherwise the
-report becomes noise).
+Shells out to `cargo audit --json`, adapts findings into `Advisory`
+events with id, severity, patched-in version, and kind
+(`vulnerability` / `unmaintained`). Same `ToolMissing` skip pattern.
 
-If `ccu` isn't installed: same `ToolMissing` skip pattern as `advisory`.
+### yanked [idea]
 
-### yanked [idea, --online]
+`cargo audit` covers some yanks via advisories but not all. Could add
+a direct sparse-index lookup phase later if we find it's missing real
+problems.
 
-`cargo audit` covers some yanks via advisories but not all. Could add a
-direct sparse-index lookup phase later if we find it's missing real
-problems. Not in v1.
+### single_publisher [idea]
 
-### single_publisher [idea, --online]
-
-Crates whose only publisher is a single user account with <N total crates,
-or <M monthly downloads. Supply-chain hygiene signal. Risky to surface
-because it implicates real people - keep it gated and `info`-only if it
-ships.
+Crates whose only publisher is a single user account with <N total
+crates, or <M monthly downloads. Supply-chain hygiene signal. Risky
+to surface because it implicates real people - keep it `info`-only
+if it ships.
 
 ## CLI
 
 ```
-brokkr deps                       # offline phases, terse text output
+brokkr deps                       # all phases, terse text output
 brokkr deps --chains              # add per-pin example chains under blame lines
 brokkr deps --json                # NDJSON
 brokkr deps --limit 50            # cap shown items per phase (default 20)
@@ -135,9 +134,9 @@ brokkr deps --all                 # no cap; implies --chains
 brokkr deps --no-fail             # exit 0 even when findings exist
 ```
 
-Exit code: `1` if any findings exist, `0` otherwise. `--no-fail` always
-exits 0. (Planned `--online` and `--only` flags will come with the
-network phases.)
+Exit code: `1` if any findings (duplicate / git / path) exist, `0`
+otherwise. Outdated findings and tool-missing skips are informational
+and don't drive the exit code. `--no-fail` always exits 0.
 
 ## Code layout
 
@@ -147,9 +146,10 @@ src/deps/
   duplicate_version.rs   # blame-aware duplicate detection
   git_dependency.rs      # git+ source scanning with ref parsing
   path_dependency.rs     # non-workspace path deps
+  outdated.rs            # ccu --json shell-out
 ```
 
-Future phases land as siblings (`advisory.rs`, `outdated.rs`, etc.). The
+Future phases land as siblings (`advisory.rs`, etc.). The
 cargo-metadata deserializer lives in `mod.rs` until it grows enough to
 warrant its own file.
 
@@ -165,8 +165,8 @@ Ship in this order, each as its own PR:
    Proves the plumbing. **[shipped]**
 2. `duplicate_version` phase. **[shipped]**
 3. `git_dependency` + `path_dependency` phases. **[shipped]**
+4. `outdated` phase via `ccu --json` shell-out. **[shipped]**
 
-That's v1 done. Next: the `--online` phases (`advisory` via `cargo audit`,
-`outdated` via `ccu`). Both are shell-outs to existing tools - no native
-network code, no advisory-db cache management, no sparse-index parsing
-in brokkr itself.
+That's v1 done. Next: `advisory` via `cargo audit --json` - same
+shell-out pattern, same graceful `ToolMissing` skip. No native network
+code, no advisory-db cache management in brokkr itself.

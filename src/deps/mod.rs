@@ -77,17 +77,19 @@ pub struct OutdatedEvent {
     pub line_number: u64,
 }
 
-/// Emitted when an `--online` phase tried to invoke an external tool
-/// that wasn't installed. Doesn't count as a finding for exit-code
-/// purposes - it's a heads-up, not a smell in the user's code.
+/// Emitted when a phase couldn't produce its findings because an
+/// external tool was missing or failed to run. Doesn't count as a
+/// finding for exit-code purposes - it's a heads-up about the
+/// phase, not a smell in the user's code.
 #[derive(Serialize)]
 pub struct ToolMissingEvent {
     /// Phase that wanted the tool.
     pub phase: &'static str,
     /// Executable name we tried to invoke.
     pub tool: &'static str,
-    /// One-line hint shown in the text renderer.
-    pub install_hint: &'static str,
+    /// Why the phase was skipped: install hint when the tool isn't on
+    /// PATH, error description when it ran but failed.
+    pub reason: String,
 }
 
 #[derive(Serialize)]
@@ -151,14 +153,18 @@ pub struct DepsArgs {
     pub limit: usize,
     pub all: bool,
     pub chains: bool,
-    pub online: bool,
     pub no_fail: bool,
 }
 
 pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     let metadata = load_metadata(project_root)?;
     let mut events = Vec::new();
-    let mut phases_run = vec!["duplicate_version", "git_dependency", "path_dependency"];
+    let phases_run = vec![
+        "duplicate_version",
+        "git_dependency",
+        "path_dependency",
+        "outdated",
+    ];
 
     let dup_events = duplicate_version::run(&metadata);
     let git_events = git_dependency::run(&metadata);
@@ -172,11 +178,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
     events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
     events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
-
-    if args.online {
-        phases_run.push("outdated");
-        events.extend(outdated::run(project_root)?);
-    }
+    events.extend(outdated::run(project_root));
 
     events.push(DepsEvent::Summary(SummaryEvent {
         phases_run,
@@ -252,8 +254,8 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool, show_chains: bool)
 
     for tool_missing in &missing {
         output::deps_msg(&format!(
-            "{} skipped: {} not installed ({})",
-            tool_missing.phase, tool_missing.tool, tool_missing.install_hint
+            "{} skipped ({}): {}",
+            tool_missing.phase, tool_missing.tool, tool_missing.reason,
         ));
     }
 
