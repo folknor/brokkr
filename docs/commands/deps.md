@@ -92,16 +92,41 @@ positional focus form:
 ```
 brokkr deps foo
 brokkr deps hashbrown@0.17.1
+brokkr deps mime              # substring fallback - matches mime, mime_guess, ...
 ```
 
-Focus mode suppresses the other phases and prints every distinct
-Normal-kind chain from a workspace member down to the named package,
-over host-filtered metadata. If the package isn't in the host-filtered
-graph at all, falls back to the unfiltered metadata and says so
-explicitly (silent empty output would be more confusing than the
-fallback note).
+Focus mode suppresses the other phases and emits, for each matched
+version, a one-line metadata header followed by every distinct
+Normal-kind chain from a workspace member down to it:
 
-False-positive risk: low. Blame is deterministic.
+```
+[deps] hashbrown 0.17.1  source=crates.io  manifest=~/.cargo/.../Cargo.toml  (6 chains)
+[deps]   bifrost-graph 0.1.0 -> reqwest 0.13.3 -> h2 0.4.14 -> indexmap 2.14.0 -> hashbrown 0.17.1
+[deps]   ...
+```
+
+`source` is the normalised origin: `crates.io`, `git+<url>#<sha>`,
+`registry=<url>`, `workspace`, or `path`. `manifest` is the resolved
+Cargo.toml with `$HOME` collapsed to `~`. The JSON output carries
+the same two fields on each `ChainTrace`.
+
+Resolution falls back in three steps:
+
+1. **Exact match in host-filtered metadata.** The common case.
+2. **Exact match in unfiltered metadata.** If the spec resolves only
+   for an inactive target. Prints
+   `<spec>: not in host-filtered graph; showing all-target chains`
+   so the chain output isn't silently from a different target.
+3. **Substring search across all package names** (case-insensitive).
+   If neither exact lookup hits, brokkr greps for the needle and
+   prints every match with a leading
+   `no exact match for "<spec>"; showing N substring matches` note.
+   Lets `brokkr deps mime` enumerate `mime` + `mime_guess` + ...
+   without the user having to know the exact crate name. Only
+   errors when there are zero substring matches.
+
+False-positive risk: low. Blame is deterministic; substring fallback
+is gated behind exact lookup failing.
 
 ### git_dependency [v1]
 
@@ -182,8 +207,9 @@ if it ships.
 
 ```
 brokkr deps                       # all phases, terse text output
-brokkr deps <pkg>                 # focus mode: chains for one package only
+brokkr deps <pkg>                 # focus mode: metadata + chains for one package
 brokkr deps hashbrown@0.17.1      # focus mode pinned to a specific version
+brokkr deps mime                  # substring fallback if no exact match
 brokkr deps --json                # NDJSON
 brokkr deps --limit 50            # cap shown items per phase (default 20)
 brokkr deps --all                 # no per-phase cap

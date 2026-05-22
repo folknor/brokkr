@@ -1,12 +1,15 @@
-//! `brokkr deps <pkg>` - chain trace for one package.
+//! `brokkr deps <pkg>` - metadata + chain trace for one package.
 //!
-//! Given a spec like `"indexmap"` or `"hashbrown@0.17.1"`, walks the
-//! resolve graph backwards over Normal-kind edges and prints every
+//! Given a spec like `"indexmap"` or `"hashbrown@0.17.1"`, prints a
+//! one-line metadata header (`source=...  manifest=...`) and every
 //! distinct chain from a workspace member down to the target. Uses
 //! host-filtered metadata by default so we don't surface chains that
-//! only exist for inactive targets. If the spec doesn't resolve in the
-//! host-filtered graph at all, falls back to the unfiltered graph and
-//! says so explicitly - silent empty output is the worst case.
+//! only exist for inactive targets. If the spec doesn't resolve in
+//! the host-filtered graph, falls back to the unfiltered graph and
+//! says so. If it doesn't resolve there either, falls back to a
+//! substring search across all package names so `brokkr deps mime`
+//! enumerates `mime`, `mime_guess`, ... instead of erroring out -
+//! matches what people kept hand-rolling against `cargo metadata`.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -25,71 +28,49 @@ pub(super) fn run_focus(
     let (name, version) = parse_spec(spec);
     let host_md = load_metadata_host_filtered(project_root)?;
 
-    let (md, fell_back) = if has_match(&host_md, name, version) {
-        (host_md, false)
-    } else {
-        let unfiltered = load_metadata(project_root)?;
-        if !has_match(&unfiltered, name, version) {
-            return Err(DevError::Build(format!(
-                "no package named {spec:?} in this workspace's resolve graph"
-            )));
-        }
-        (unfiltered, true)
-    };
-
-    let traces = trace(&md, name, version);
-
-    if json {
-        for t in &traces {
-            let line = serde_json::to_string(t)?;
-            println!("{line}");
-        }
-        return Ok(());
+    if has_exact_match(&host_md, name, version) {
+        return emit_traces(&host_md, &exact_predicate(name, version), None, json);
     }
 
-    if fell_back {
-        output::deps_msg(&format!(
+    let unfiltered = load_metadata(project_root)?;
+    if has_exact_match(&unfiltered, name, version) {
+        let note = format!(
             "{spec}: not in host-filtered graph; showing all-target chains"
-        ));
+        );
+        return emit_traces(
+            &unfiltered,
+            &exact_predicate(name, version),
+            Some(&note),
+            json,
+        );
     }
-    for t in &traces {
-        output::deps_msg(&format!("{} {} ({} chains)", t.krate, t.version, t.chains.len()));
-        if t.chains.is_empty() {
-            output::deps_msg("  (no parents - package is a workspace member or unreachable)");
-            continue;
-        }
-        for chain in &t.chains {
-            output::deps_msg(&format!("  {}", chain.join(" -> ")));
-        }
+
+    // Substring fallback: case-insensitive `contains` on package name.
+    // Honours the optional `@version` suffix if the user supplied one.
+    let needle = name.to_ascii_lowercase();
+    let predicate: Box<dyn Fn(&CargoPackage) -> bool> = Box::new(move |p| {
+        p.name.to_ascii_lowercase().contains(&needle)
+            && version.is_none_or(|v| p.version == v)
+    });
+    let match_count = unfiltered.packages.iter().filter(|p| predicate(p)).count();
+    if match_count == 0 {
+        return Err(DevError::Build(format!(
+            "no package matching {spec:?} in this workspace's resolve graph"
+        )));
     }
-    Ok(())
+    let note = format!(
+        "no exact match for {spec:?}; showing {match_count} substring match{}",
+        if match_count == 1 { "" } else { "es" }
+    );
+    emit_traces(&unfiltered, &predicate, Some(&note), json)
 }
 
-#[derive(serde::Serialize)]
-pub struct ChainTrace {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    pub version: String,
-    /// Chains ordered workspace-root first, target last.
-    pub chains: Vec<Vec<String>>,
-}
-
-fn parse_spec(spec: &str) -> (&str, Option<&str>) {
-    match spec.split_once('@') {
-        Some((n, v)) => (n, Some(v)),
-        None => (spec, None),
-    }
-}
-
-fn has_match(md: &CargoMetadata, name: &str, version: Option<&str>) -> bool {
-    md.packages.iter().any(|p| pkg_matches(p, name, version))
-}
-
-fn pkg_matches(p: &CargoPackage, name: &str, version: Option<&str>) -> bool {
-    p.name == name && version.is_none_or(|v| p.version == v)
-}
-
-fn trace(md: &CargoMetadata, name: &str, version: Option<&str>) -> Vec<ChainTrace> {
+fn emit_traces(
+    md: &CargoMetadata,
+    predicate: &dyn Fn(&CargoPackage) -> bool,
+    prefix_note: Option<&str>,
+    json: bool,
+) -> Result<(), DevError> {
     let workspace_set: HashSet<&str> = md
         .workspace_members
         .iter()
@@ -116,28 +97,122 @@ fn trace(md: &CargoMetadata, name: &str, version: Option<&str>) -> Vec<ChainTrac
         }
     }
 
-    let mut out = Vec::new();
-    let mut targets: Vec<&CargoPackage> = md
-        .packages
-        .iter()
-        .filter(|p| pkg_matches(p, name, version))
-        .collect();
-    targets.sort_by(|a, b| a.version.cmp(&b.version));
+    let mut targets: Vec<&CargoPackage> =
+        md.packages.iter().filter(|p| predicate(p)).collect();
+    targets.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
 
-    for pkg in targets {
-        let chains = chains_to_workspace(
-            pkg.id.as_str(),
-            &workspace_set,
-            &normal_parents,
-            &id_to_label,
-        );
-        out.push(ChainTrace {
-            krate: pkg.name.clone(),
-            version: pkg.version.clone(),
-            chains,
-        });
+    let traces: Vec<ChainTrace> = targets
+        .iter()
+        .map(|p| ChainTrace {
+            krate: p.name.clone(),
+            version: p.version.clone(),
+            source: format_source(p, &workspace_set),
+            manifest_path: tildify(&p.manifest_path),
+            chains: chains_to_workspace(
+                p.id.as_str(),
+                &workspace_set,
+                &normal_parents,
+                &id_to_label,
+            ),
+        })
+        .collect();
+
+    if json {
+        for t in &traces {
+            let line = serde_json::to_string(t)?;
+            println!("{line}");
+        }
+        return Ok(());
     }
-    out
+
+    if let Some(note) = prefix_note {
+        output::deps_msg(note);
+    }
+    for t in &traces {
+        let chain_label = if t.chains.len() == 1 {
+            "1 chain".to_string()
+        } else {
+            format!("{} chains", t.chains.len())
+        };
+        output::deps_msg(&format!(
+            "{} {}  source={}  manifest={}  ({chain_label})",
+            t.krate, t.version, t.source, t.manifest_path
+        ));
+        if t.chains.is_empty() {
+            output::deps_msg("  (no parents - package is a workspace member or unreachable)");
+            continue;
+        }
+        for chain in &t.chains {
+            output::deps_msg(&format!("  {}", chain.join(" -> ")));
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct ChainTrace {
+    #[serde(rename = "crate")]
+    pub krate: String,
+    pub version: String,
+    /// Normalised source label: `crates.io`, `git+<url>#<sha>`,
+    /// `registry=<url>`, `workspace`, or `path`. Replaces the raw
+    /// `source` string from cargo metadata which is verbose and full
+    /// of `registry+` URL noise.
+    pub source: String,
+    /// Manifest path with `$HOME` prefix replaced by `~` for read-
+    /// ability. The JSON value is the same shortened form so scripts
+    /// match what the text renderer shows.
+    pub manifest_path: String,
+    /// Chains ordered workspace-root first, target last.
+    pub chains: Vec<Vec<String>>,
+}
+
+fn parse_spec(spec: &str) -> (&str, Option<&str>) {
+    match spec.split_once('@') {
+        Some((n, v)) => (n, Some(v)),
+        None => (spec, None),
+    }
+}
+
+fn has_exact_match(md: &CargoMetadata, name: &str, version: Option<&str>) -> bool {
+    md.packages.iter().any(|p| {
+        p.name == name && version.is_none_or(|v| p.version == v)
+    })
+}
+
+fn exact_predicate<'a>(
+    name: &'a str,
+    version: Option<&'a str>,
+) -> impl Fn(&CargoPackage) -> bool + 'a {
+    move |p: &CargoPackage| p.name == name && version.is_none_or(|v| p.version == v)
+}
+
+fn format_source(p: &CargoPackage, workspace_set: &HashSet<&str>) -> String {
+    const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    match p.source.as_deref() {
+        None => {
+            if workspace_set.contains(p.id.as_str()) {
+                "workspace".to_string()
+            } else {
+                "path".to_string()
+            }
+        }
+        Some(s) if s == CRATES_IO => "crates.io".to_string(),
+        Some(s) => match s.strip_prefix("registry+") {
+            Some(rest) => format!("registry={rest}"),
+            None => s.to_string(),
+        },
+    }
+}
+
+fn tildify(path: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME")
+        && let Some(home_str) = home.to_str()
+        && let Some(rest) = path.strip_prefix(home_str)
+    {
+        return format!("~{rest}");
+    }
+    path.to_string()
 }
 
 /// BFS upward from `target_id`. Each branch ends when it reaches a
