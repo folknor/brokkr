@@ -104,6 +104,21 @@ If `ccu` is missing or fails for any reason (offline, schema mismatch,
 crash), the phase emits a single `ToolMissing` event with a reason
 string and skips. Doesn't fail the run.
 
+### stale [v1]
+
+Same `ccu --json` invocation as `outdated` (one network call, two
+signals). Reads each check's `latest_released_at` and emits a `Stale`
+event when the newest available version was published more than
+~8 months ago. Crosses to severity `"abandoned"` past ~2 years.
+
+The point of looking at the latest version's age (not the installed
+version's) is to answer "is this project maintained?". A long gap on
+the latest release is a hint that nobody's pushing fixes upstream
+anymore - regardless of which version you happen to be on.
+
+Informational, same as `outdated`. ISO-8601 date parsing handles
+crates.io's verbatim format (`"2024-11-12T18:34:21.123456+00:00"`).
+
 ### advisory [planned]
 
 Shells out to `cargo audit --json`, adapts findings into `Advisory`
@@ -135,7 +150,7 @@ brokkr deps --no-fail             # exit 0 even when findings exist
 ```
 
 Exit code: `1` if any findings (duplicate / git / path) exist, `0`
-otherwise. Outdated findings and tool-missing skips are informational
+otherwise. Outdated, stale, and tool-missing events are informational
 and don't drive the exit code. `--no-fail` always exits 0.
 
 ## Code layout
@@ -146,7 +161,7 @@ src/deps/
   duplicate_version.rs   # blame-aware duplicate detection
   git_dependency.rs      # git+ source scanning with ref parsing
   path_dependency.rs     # non-workspace path deps
-  outdated.rs            # ccu --json shell-out
+  ccu.rs                 # ccu --json shell-out (outdated + stale)
 ```
 
 Future phases land as siblings (`advisory.rs`, etc.). The
@@ -165,7 +180,7 @@ Ship in this order, each as its own PR:
    Proves the plumbing. **[shipped]**
 2. `duplicate_version` phase. **[shipped]**
 3. `git_dependency` + `path_dependency` phases. **[shipped]**
-4. `outdated` phase via `ccu --json` shell-out. **[shipped]**
+4. `outdated` + `stale` phases via `ccu --json` shell-out. **[shipped]**
 
 That's v1 done. Next: `advisory` via `cargo audit --json` - same
 shell-out pattern, same graceful `ToolMissing` skip. No native network

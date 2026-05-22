@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::DevError;
 use crate::output;
 
+mod ccu;
 mod duplicate_version;
 mod git_dependency;
-mod outdated;
 mod path_dependency;
 
 // --- Event model (NDJSON-serializable) ---
@@ -28,6 +28,7 @@ pub enum DepsEvent {
     GitDependency(GitDependencyEvent),
     PathDependency(PathDependencyEvent),
     Outdated(OutdatedEvent),
+    Stale(StaleEvent),
     ToolMissing(ToolMissingEvent),
     Summary(SummaryEvent),
 }
@@ -75,6 +76,21 @@ pub struct OutdatedEvent {
     pub source_file: String,
     /// Line number in that manifest, useful for jump-to.
     pub line_number: u64,
+}
+
+#[derive(Serialize)]
+pub struct StaleEvent {
+    #[serde(rename = "crate")]
+    pub krate: String,
+    /// Version on the registry whose release date is the basis for
+    /// this event (i.e. the latest available, not the installed one).
+    pub version: String,
+    /// ISO-8601 timestamp, verbatim from ccu / crates.io.
+    pub released_at: String,
+    /// Days since `released_at` as of the run.
+    pub age_days: u64,
+    /// `"stale"` (>= ~8 months) or `"abandoned"` (>= ~2 years).
+    pub severity: &'static str,
 }
 
 /// Emitted when a phase couldn't produce its findings because an
@@ -164,6 +180,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
         "git_dependency",
         "path_dependency",
         "outdated",
+        "stale",
     ];
 
     let dup_events = duplicate_version::run(&metadata);
@@ -178,7 +195,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
     events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
     events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
-    events.extend(outdated::run(project_root));
+    events.extend(ccu::run(project_root));
 
     events.push(DepsEvent::Summary(SummaryEvent {
         phases_run,
@@ -230,6 +247,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool, show_chains: bool)
     let mut gits = Vec::new();
     let mut paths = Vec::new();
     let mut outdated = Vec::new();
+    let mut stale = Vec::new();
     let mut missing = Vec::new();
     for e in events {
         match e {
@@ -237,6 +255,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool, show_chains: bool)
             DepsEvent::GitDependency(g) => gits.push(g),
             DepsEvent::PathDependency(p) => paths.push(p),
             DepsEvent::Outdated(o) => outdated.push(o),
+            DepsEvent::Stale(s) => stale.push(s),
             DepsEvent::ToolMissing(t) => missing.push(t),
             DepsEvent::Summary(_) => {}
         }
@@ -246,11 +265,18 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool, show_chains: bool)
             .cmp(&severity_rank(&b.severity))
             .then(a.krate.cmp(&b.krate))
     });
+    // Abandoned first, then stale; within each, oldest first.
+    stale.sort_by(|a, b| {
+        stale_rank(a.severity)
+            .cmp(&stale_rank(b.severity))
+            .then(b.age_days.cmp(&a.age_days))
+    });
 
     render_dup_section(&dups, limit, all, show_chains);
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
     render_section(&outdated, "outdated dependency", "outdated dependencies", "", limit, all, render_outdated_text);
+    render_section(&stale, "stale dependency", "stale dependencies", "", limit, all, render_stale_text);
 
     for tool_missing in &missing {
         output::deps_msg(&format!(
@@ -394,6 +420,17 @@ fn render_outdated_text(o: &OutdatedEvent) {
     ));
 }
 
+fn render_stale_text(s: &StaleEvent) {
+    output::deps_msg(&format!(
+        "  {}: {} {}  latest released {} ({} ago)",
+        s.severity,
+        s.krate,
+        s.version,
+        s.released_at_date(),
+        human_age(s.age_days),
+    ));
+}
+
 /// Lower is more severe. Used for sorting so majors print first.
 fn severity_rank(severity: &str) -> u8 {
     match severity {
@@ -401,5 +438,32 @@ fn severity_rank(severity: &str) -> u8 {
         "minor" => 1,
         "patch" => 2,
         _ => 3,
+    }
+}
+
+fn stale_rank(severity: &str) -> u8 {
+    match severity {
+        "abandoned" => 0,
+        "stale" => 1,
+        _ => 2,
+    }
+}
+
+fn human_age(days: u64) -> String {
+    let years = days / 365;
+    let months = (days % 365) / 30;
+    match (years, months) {
+        (0, m) => format!("{}mo", m.max(1)),
+        (y, 0) => format!("{y}y"),
+        (y, m) => format!("{y}y{m}mo"),
+    }
+}
+
+impl StaleEvent {
+    /// First 10 characters of `released_at`, or the whole string if
+    /// it's shorter. Lets the text renderer show "2023-04-15" instead
+    /// of the full microsecond+timezone form.
+    fn released_at_date(&self) -> &str {
+        self.released_at.get(..10).unwrap_or(&self.released_at)
     }
 }
