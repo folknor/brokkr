@@ -207,8 +207,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
         json,
         limit,
         all,
-        chains,
         no_fail,
+        focus,
     } = cli.command
     {
         let project_root = match project::detect_optional()? {
@@ -221,8 +221,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 json,
                 limit,
                 all,
-                chains,
                 no_fail,
+                focus,
             },
         );
     }

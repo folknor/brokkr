@@ -50,17 +50,26 @@ Same crate resolved at >=2 versions. The point is **assigning blame**:
 when foo 1.0 and foo 2.0 both ship, you want to know which of your direct
 deps is anchoring the old one.
 
-Algorithm: for each `(crate, version)` instance, BFS backwards through
-the resolve graph until each branch hits a workspace member. The first
-non-workspace hop on each path is the blame anchor; the workspace member
-itself is the anchor if the path is just one hop (`(direct)` suffix).
-Anchors are emitted as a sorted, deduped list per pin.
+Algorithm: for each `(crate, version)` instance, take one reverse step
+through the resolve graph - the set of direct parents that picked this
+version *is* the blame. Workspace members appear as `"<name> (direct)"`;
+other parents as `"name version"`. Sorted, deduplicated.
 
-Each event carries one `VersionPin` per resolved version, with a sorted
-`direct_blame` list and a `paths` list (each path is a chain of
-`"name version"` labels from a workspace member to the target).
+Two filters keep the blame honest:
 
-Text renderer prints the blame lines by default:
+- **Host-target.** Metadata for this phase is loaded with
+  `--filter-platform=<host>` (host triple parsed from `rustc -vV`).
+  Transitive crates that only exist for inactive targets (e.g.
+  `wasmparser -> hashbrown 0.15.5` on a linux host) disappear from the
+  graph entirely, matching what `cargo tree -i <crate> --target all`
+  shows. Other phases keep the unfiltered metadata.
+- **Normal kind.** Only `dep_kinds[*].kind == null` edges count. Dev
+  and build deps are dropped, mirroring `cargo tree -d`'s default.
+
+Each event carries one `VersionPin` per resolved version with a sorted
+`direct_blame` list.
+
+Text renderer:
 
 ```
 [deps] 1 crate with multiple versions:
@@ -69,11 +78,22 @@ Text renderer prints the blame lines by default:
 [deps]     2.1.0  blamed on: new-lib 2.0, our-crate (direct)
 ```
 
-`--chains` adds example chains under each blame line, capped to 3 per
-pin unless `--all` is also set. (In big trees the same chain repeats
-across workspace members and floods the report.)
+For the upward chain - "who is pulling in this crate?" - use the
+positional focus form:
 
-False-positive risk: low. The blame computation is deterministic.
+```
+brokkr deps foo
+brokkr deps hashbrown@0.17.1
+```
+
+Focus mode suppresses the other phases and prints every distinct
+Normal-kind chain from a workspace member down to the named package,
+over host-filtered metadata. If the package isn't in the host-filtered
+graph at all, falls back to the unfiltered metadata and says so
+explicitly (silent empty output would be more confusing than the
+fallback note).
+
+False-positive risk: low. Blame is deterministic.
 
 ### git_dependency [v1]
 
@@ -142,10 +162,11 @@ if it ships.
 
 ```
 brokkr deps                       # all phases, terse text output
-brokkr deps --chains              # add per-pin example chains under blame lines
+brokkr deps <pkg>                 # focus mode: chains for one package only
+brokkr deps hashbrown@0.17.1      # focus mode pinned to a specific version
 brokkr deps --json                # NDJSON
 brokkr deps --limit 50            # cap shown items per phase (default 20)
-brokkr deps --all                 # no cap; implies --chains
+brokkr deps --all                 # no per-phase cap
 brokkr deps --no-fail             # exit 0 even when findings exist
 ```
 
@@ -159,6 +180,7 @@ and don't drive the exit code. `--no-fail` always exits 0.
 src/deps/
   mod.rs                 # DepsEvent enum, run(), text + JSON renderers
   duplicate_version.rs   # blame-aware duplicate detection
+  focus.rs               # `brokkr deps <pkg>` chain trace
   git_dependency.rs      # git+ source scanning with ref parsing
   path_dependency.rs     # non-workspace path deps
   ccu.rs                 # ccu --json shell-out (outdated + stale)

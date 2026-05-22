@@ -160,22 +160,22 @@ Examples:
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
-        /// Show every finding without capping. Implies `--chains`.
+        /// Show every finding without capping.
         #[arg(long)]
         all: bool,
-
-        /// Under each duplicate version's blame line, print example
-        /// chains from a workspace member to that `(crate, version)`.
-        /// Useful for understanding *why* a transitive dep is being
-        /// pulled in. Off by default - the blame anchor list is the
-        /// actionable signal; chains are just tracing detail.
-        #[arg(long)]
-        chains: bool,
 
         /// Always exit 0, even when findings exist. Useful for
         /// report-only invocations in CI.
         #[arg(long)]
         no_fail: bool,
+
+        /// Optional package spec (`name` or `name@version`). When set,
+        /// suppress the other phases and print every Normal-kind chain
+        /// from a workspace member down to the named package. Useful
+        /// for answering "who is pulling in this crate?" and for
+        /// disambiguating one specific version of a duplicate.
+        #[arg(value_name = "PKG")]
+        focus: Option<String>,
     },
     /// Show environment information
     #[command(display_order = 1)]

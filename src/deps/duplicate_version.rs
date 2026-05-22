@@ -1,11 +1,13 @@
 //! `duplicate_version` phase.
 //!
 //! Finds crate names with >=2 resolved versions in `cargo metadata`. For
-//! each duplicate, computes blame: the workspace-direct dep(s) that anchor
-//! each version, plus the chain(s) from a workspace member to that
-//! `(name, version)` instance.
+//! each duplicate, computes blame: the set of direct parents (one
+//! reverse step in the resolve graph) that pinned that version. Edges
+//! are filtered to Normal kind only (Dev/Build dropped, mirroring
+//! `cargo tree -d`'s default). Target gating is handled upstream by
+//! loading metadata with `--filter-platform=<host>`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{CargoMetadata, DuplicateVersionEvent, VersionPin};
 
@@ -28,14 +30,18 @@ pub fn run(metadata: &CargoMetadata) -> Vec<DuplicateVersionEvent> {
         .map(|p| (p.id.as_str(), p.name.as_str()))
         .collect();
 
-    // Reverse adjacency: for each id, who depends on it.
-    let mut parents: HashMap<&str, Vec<&str>> = HashMap::new();
+    // Reverse adjacency over Normal-kind edges only. A package may appear
+    // as both Normal and Dev/Build from the same parent; the parent counts
+    // if at least one of its dep_kinds is Normal.
+    let mut normal_parents: HashMap<&str, Vec<&str>> = HashMap::new();
     for node in &metadata.resolve.nodes {
-        for dep_id in &node.dependencies {
-            parents
-                .entry(dep_id.as_str())
-                .or_default()
-                .push(node.id.as_str());
+        for d in &node.deps {
+            if d.dep_kinds.iter().any(|dk| dk.kind.is_none()) {
+                normal_parents
+                    .entry(d.pkg.as_str())
+                    .or_default()
+                    .push(node.id.as_str());
+            }
         }
     }
 
@@ -52,23 +58,17 @@ pub fn run(metadata: &CargoMetadata) -> Vec<DuplicateVersionEvent> {
         }
         let mut pins: Vec<VersionPin> = pkgs
             .iter()
-            .map(|pkg| {
-                let (blame, paths) = blame_for(
+            .map(|pkg| VersionPin {
+                version: pkg.version.clone(),
+                direct_blame: direct_blame(
                     pkg.id.as_str(),
                     &workspace_set,
-                    &parents,
+                    &normal_parents,
                     &id_to_label,
                     &id_to_name,
-                );
-                VersionPin {
-                    version: pkg.version.clone(),
-                    direct_blame: blame,
-                    paths,
-                }
+                ),
             })
             .collect();
-        // Stable order: by version string. Good enough for v1; full semver
-        // sort can come later.
         pins.sort_by(|a, b| a.version.cmp(&b.version));
         events.push(DuplicateVersionEvent {
             krate: name.to_string(),
@@ -78,69 +78,28 @@ pub fn run(metadata: &CargoMetadata) -> Vec<DuplicateVersionEvent> {
     events
 }
 
-/// Backwards BFS from `target_id` to every workspace member, returning
-/// (direct-blame anchors, labeled paths). Each path is `[ws, ..., target]`
-/// using `"name version"` labels.
-fn blame_for(
+/// One reverse step over Normal-kind edges. Workspace-direct parents
+/// get a `(direct)` suffix on the bare crate name; non-workspace
+/// parents are labelled `"name version"`. Sorted, deduplicated.
+fn direct_blame(
     target_id: &str,
     workspace_set: &HashSet<&str>,
-    parents: &HashMap<&str, Vec<&str>>,
+    normal_parents: &HashMap<&str, Vec<&str>>,
     id_to_label: &HashMap<&str, String>,
     id_to_name: &HashMap<&str, &str>,
-) -> (Vec<String>, Vec<Vec<String>>) {
-    // Paths are built tail-first: each queue entry is target -> ... -> ws.
-    // We reverse for output. Workspace members terminate a branch but are
-    // *not* added to `visited`, so multiple paths can reach the same
-    // workspace member through different intermediaries.
-    let mut queue: VecDeque<Vec<&str>> = VecDeque::new();
-    queue.push_back(vec![target_id]);
-    let mut visited: HashSet<&str> = HashSet::new();
-    visited.insert(target_id);
-    let mut found: Vec<Vec<&str>> = Vec::new();
-
-    while let Some(path) = queue.pop_front() {
-        let last = *path.last().expect("path is non-empty by construction");
-        if workspace_set.contains(last) && path.len() > 1 {
-            found.push(path);
-            continue;
-        }
-        let Some(ps) = parents.get(last) else {
-            continue;
-        };
-        for &p in ps {
-            // Cycle prevention for non-workspace nodes only. Workspace
-            // members aren't marked visited so multiple paths can land
-            // on the same one.
-            if !workspace_set.contains(p) && !visited.insert(p) {
-                continue;
-            }
-            let mut next = path.clone();
-            next.push(p);
-            queue.push_back(next);
-        }
-    }
-
+) -> Vec<String> {
+    let Some(parents) = normal_parents.get(target_id) else {
+        return Vec::new();
+    };
     let mut blame: BTreeSet<String> = BTreeSet::new();
-    let mut labeled_paths: Vec<Vec<String>> = Vec::new();
-    for path in &found {
-        let labeled: Vec<String> = path
-            .iter()
-            .rev()
-            .map(|&id| id_to_label.get(id).cloned().unwrap_or_else(|| id.to_string()))
-            .collect();
-
-        let anchor = if labeled.len() == 2 {
-            // [ws, target] - workspace depends directly on target.
-            let ws_name = id_to_name.get(path[path.len() - 1]).copied().unwrap_or("");
-            format!("{ws_name} (direct)")
+    for &pid in parents {
+        let label = if workspace_set.contains(pid) {
+            let name = id_to_name.get(pid).copied().unwrap_or("");
+            format!("{name} (direct)")
         } else {
-            // [ws, mid, ..., target] - first non-workspace hop is the
-            // blame anchor. After reversal that's labeled[1].
-            labeled[1].clone()
+            id_to_label.get(pid).cloned().unwrap_or_else(|| pid.to_string())
         };
-        blame.insert(anchor);
-        labeled_paths.push(labeled);
+        blame.insert(label);
     }
-
-    (blame.into_iter().collect(), labeled_paths)
+    blame.into_iter().collect()
 }
