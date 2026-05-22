@@ -157,6 +157,10 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
             }));
         }
     }
+    // Marker so the renderer can print an "all at latest" line in the
+    // zero-upgrade case. Without it, an empty outdated section is
+    // indistinguishable from a skipped one.
+    events.push(DepsEvent::OutdatedComplete);
     Ok(events)
 }
 

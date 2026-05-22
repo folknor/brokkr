@@ -1,13 +1,23 @@
 //! `duplicate_version` phase.
 //!
-//! Finds crate names with >=2 resolved versions in `cargo metadata`. For
-//! each duplicate, computes blame: the set of direct parents (one
-//! reverse step in the resolve graph) that pinned that version. Edges
-//! are filtered to Normal kind only (Dev/Build dropped, mirroring
-//! `cargo tree -d`'s default). Target gating is handled upstream by
-//! loading metadata with `--filter-platform=<host>`.
+//! Finds crate names with >=2 resolved versions in `cargo metadata` and
+//! for each version reports two things:
+//!
+//! - `picked_by` - the direct parents of the pin (one reverse step
+//!   over Normal-kind edges, host-target filtered). Workspace members
+//!   appear with a `(direct)` tag. This is "what crate's resolver
+//!   landed on this version".
+//! - `via_workspace` - workspace-direct dep names that lead to the pin
+//!   via chains whose immediate pinner is transitive. Empty when every
+//!   pinner is already a workspace member or workspace-direct dep,
+//!   since `picked_by` already names what to bump in that case. This
+//!   is the "what should I bump in Cargo.toml" hint, computed once so
+//!   the reader doesn't have to run `cargo tree -i` to figure it out.
+//!
+//! Target gating is handled upstream by loading metadata with
+//! `--filter-platform=<host>`; this module only filters dep kinds.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::{CargoMetadata, DuplicateVersionEvent, VersionPin};
 
@@ -58,15 +68,27 @@ pub fn run(metadata: &CargoMetadata) -> Vec<DuplicateVersionEvent> {
         }
         let mut pins: Vec<VersionPin> = pkgs
             .iter()
-            .map(|pkg| VersionPin {
-                version: pkg.version.clone(),
-                direct_blame: direct_blame(
+            .map(|pkg| {
+                let picked_by = picked_by(
                     pkg.id.as_str(),
                     &workspace_set,
                     &normal_parents,
                     &id_to_label,
                     &id_to_name,
-                ),
+                );
+                let via_workspace = via_workspace(
+                    pkg.id.as_str(),
+                    name,
+                    &workspace_set,
+                    &normal_parents,
+                    &id_to_name,
+                    &picked_by,
+                );
+                VersionPin {
+                    version: pkg.version.clone(),
+                    picked_by,
+                    via_workspace,
+                }
             })
             .collect();
         pins.sort_by(|a, b| a.version.cmp(&b.version));
@@ -81,7 +103,7 @@ pub fn run(metadata: &CargoMetadata) -> Vec<DuplicateVersionEvent> {
 /// One reverse step over Normal-kind edges. Workspace-direct parents
 /// get a `(direct)` suffix on the bare crate name; non-workspace
 /// parents are labelled `"name version"`. Sorted, deduplicated.
-fn direct_blame(
+fn picked_by(
     target_id: &str,
     workspace_set: &HashSet<&str>,
     normal_parents: &HashMap<&str, Vec<&str>>,
@@ -102,4 +124,63 @@ fn direct_blame(
         blame.insert(label);
     }
     blame.into_iter().collect()
+}
+
+/// Workspace-direct dep names that lead to the pin. Computed by
+/// walking up every Normal-kind chain from `target_id` to a workspace
+/// member and recording the workspace member's direct dep on each
+/// chain (the second-to-last id in tail-first order). Filtered to
+/// drop names already in `picked_by` (so they aren't repeated) and
+/// the dup's own name (which appears when a workspace member depends
+/// directly on the dup - already conveyed by the `(direct)` tag).
+fn via_workspace(
+    target_id: &str,
+    target_name: &str,
+    workspace_set: &HashSet<&str>,
+    normal_parents: &HashMap<&str, Vec<&str>>,
+    id_to_name: &HashMap<&str, &str>,
+    picked_by_labels: &[String],
+) -> Vec<String> {
+    // Bare names from the picker list, with any `(direct)` suffix or
+    // version suffix stripped. Used to dedup so we don't repeat names
+    // already on the same line.
+    let picked_names: HashSet<&str> = picked_by_labels
+        .iter()
+        .map(|s| s.split_whitespace().next().unwrap_or(""))
+        .collect();
+
+    let mut via: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<Vec<&str>> = VecDeque::new();
+    queue.push_back(vec![target_id]);
+    let mut visited: HashSet<&str> = HashSet::new();
+    visited.insert(target_id);
+
+    while let Some(path) = queue.pop_front() {
+        let last = *path.last().expect("path is non-empty by construction");
+        if workspace_set.contains(last) && path.len() > 1 {
+            // Need at least one hop between workspace member and dup:
+            // length-2 chains (ws -> dup directly) are already covered
+            // by the `(direct)` tag on the picker.
+            if path.len() >= 3 {
+                let ws_anchor_id = path[path.len() - 2];
+                let anchor_name = *id_to_name.get(ws_anchor_id).unwrap_or(&"");
+                if anchor_name != target_name && !picked_names.contains(anchor_name) {
+                    via.insert(anchor_name.to_string());
+                }
+            }
+            continue;
+        }
+        let Some(ps) = normal_parents.get(last) else {
+            continue;
+        };
+        for &p in ps {
+            if !workspace_set.contains(p) && !visited.insert(p) {
+                continue;
+            }
+            let mut next = path.clone();
+            next.push(p);
+            queue.push_back(next);
+        }
+    }
+    via.into_iter().collect()
 }

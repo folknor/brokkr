@@ -47,13 +47,21 @@ network code in brokkr.
 ### duplicate_version [v1]
 
 Same crate resolved at >=2 versions. The point is **assigning blame**:
-when foo 1.0 and foo 2.0 both ship, you want to know which of your direct
-deps is anchoring the old one.
+when foo 1.0 and foo 2.0 both ship, you want to know who picked each
+and what's in your Cargo.toml that you can change to fix it.
 
-Algorithm: for each `(crate, version)` instance, take one reverse step
-through the resolve graph - the set of direct parents that picked this
-version *is* the blame. Workspace members appear as `"<name> (direct)"`;
-other parents as `"name version"`. Sorted, deduplicated.
+Each `VersionPin` carries two fields:
+
+- `picked_by` - direct parents of the pin (one reverse step through
+  the resolve graph). Workspace members appear as `"<name> (direct)"`;
+  other parents as `"name version"`. This answers "who landed on this
+  version?".
+- `via_workspace` - workspace-direct dep names that lead to the pin
+  via chains whose immediate picker is transitive. Empty when every
+  picker is already a workspace member or a workspace-direct dep -
+  in that case `picked_by` already names what to bump. This answers
+  "what's in my Cargo.toml that I can update?" without making the
+  reader run `cargo tree -i`.
 
 Two filters keep the blame honest:
 
@@ -66,16 +74,16 @@ Two filters keep the blame honest:
 - **Normal kind.** Only `dep_kinds[*].kind == null` edges count. Dev
   and build deps are dropped, mirroring `cargo tree -d`'s default.
 
-Each event carries one `VersionPin` per resolved version with a sorted
-`direct_blame` list.
-
 Text renderer:
 
 ```
-[deps] 1 crate with multiple versions:
+[deps] 2 crates with multiple versions:
+[deps]   hashbrown: 2 versions
+[deps]     0.14.5  picked by dashmap 6.2.1
+[deps]     0.17.1  picked by indexmap 2.14.0  [via calcard, mail-parser, reqwest]
 [deps]   foo: 2 versions
-[deps]     1.0.3  blamed on: old-lib 0.4
-[deps]     2.1.0  blamed on: new-lib 2.0, our-crate (direct)
+[deps]     1.0.3  picked by old-lib 0.4
+[deps]     2.1.0  picked by new-lib 2.0, our-crate (direct)
 ```
 
 For the upward chain - "who is pulling in this crate?" - use the
@@ -120,9 +128,21 @@ These events are informational - they don't count toward the failure-
 counting findings tally. A patch bump shouldn't fail your build; you
 look at the report and decide.
 
+The section is presented as an **exhaustive** answer about crates.io:
+if a direct dep isn't here, it has no newer version available. The
+text renderer phrases the header as
+`N upgrade(s) available on crates.io; no other candidates:` and, when
+ccu found nothing, prints `All direct deps are at latest on crates.io.`
+- a colleague reading "duplicate hashbrown" then asking "should I bump
+`reqwest`?" can resolve it from this section alone without running
+`cargo search`. The completeness signal relies on a marker event
+(`OutdatedComplete`) ccu emits after a successful parse so the
+renderer can distinguish "0 upgrades, checked" from "didn't check".
+
 If `ccu` is missing or fails for any reason (offline, schema mismatch,
 crash), the phase emits a single `ToolMissing` event with a reason
-string and skips. Doesn't fail the run.
+string and skips. Doesn't fail the run, and doesn't print the
+"all at latest" line - the `ToolMissing` event covers it.
 
 ### stale [v1]
 

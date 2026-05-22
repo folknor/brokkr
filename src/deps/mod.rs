@@ -31,6 +31,13 @@ pub enum DepsEvent {
     GitDependency(GitDependencyEvent),
     PathDependency(PathDependencyEvent),
     Outdated(OutdatedEvent),
+    /// Marker emitted by the `outdated` phase whenever ccu ran to
+    /// completion, regardless of how many upgrades it found. Lets the
+    /// renderer print an "all at latest on crates.io" line for the
+    /// zero-upgrade case instead of silently omitting the section -
+    /// the colleague otherwise can't tell "we checked and there's
+    /// nothing" from "we couldn't check".
+    OutdatedComplete,
     Stale(StaleEvent),
     ToolMissing(ToolMissingEvent),
     Summary(SummaryEvent),
@@ -124,7 +131,13 @@ pub struct VersionPin {
     /// Direct (one-reverse-step) parents that pulled in this version,
     /// over Normal-kind edges only. Workspace members appear as
     /// `"<name> (direct)"`; non-workspace parents as `"name version"`.
-    pub direct_blame: Vec<String>,
+    pub picked_by: Vec<String>,
+    /// Workspace-direct dep names (bare, no version) that lead to this
+    /// pin via chains whose immediate picker is transitive. Empty when
+    /// every picker is already a workspace member or workspace-direct
+    /// dep - in that case `picked_by` already says what to bump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub via_workspace: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -315,6 +328,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     let mut gits = Vec::new();
     let mut paths = Vec::new();
     let mut outdated = Vec::new();
+    let mut outdated_ran = false;
     let mut stale = Vec::new();
     let mut missing = Vec::new();
     for e in events {
@@ -323,6 +337,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
             DepsEvent::GitDependency(g) => gits.push(g),
             DepsEvent::PathDependency(p) => paths.push(p),
             DepsEvent::Outdated(o) => outdated.push(o),
+            DepsEvent::OutdatedComplete => outdated_ran = true,
             DepsEvent::Stale(s) => stale.push(s),
             DepsEvent::ToolMissing(t) => missing.push(t),
             DepsEvent::Summary(_) => {}
@@ -343,7 +358,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     render_dup_section(&dups, limit, all);
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
-    render_section(&outdated, "outdated dependency", "outdated dependencies", "", limit, all, render_outdated_text);
+    render_outdated_section(&outdated, outdated_ran, limit, all);
     render_section(&stale, "stale dependency", "stale dependencies", "", limit, all, render_stale_text);
 
     for tool_missing in &missing {
@@ -392,6 +407,41 @@ fn render_dup_section(
     }
 }
 
+/// The outdated section communicates an exhaustive answer, not a
+/// partial finding: if a direct dep isn't here, it has no newer
+/// version on crates.io. Header phrasing and the explicit zero-case
+/// line both lean on that. When ccu didn't run at all, this prints
+/// nothing - the accompanying `ToolMissing` event covers it.
+fn render_outdated_section(
+    items: &[&OutdatedEvent],
+    outdated_ran: bool,
+    limit: usize,
+    all: bool,
+) {
+    if !outdated_ran {
+        return;
+    }
+    if items.is_empty() {
+        output::deps_msg("All direct deps are at latest on crates.io.");
+        return;
+    }
+    let noun = if items.len() == 1 { "upgrade" } else { "upgrades" };
+    output::deps_msg(&format!(
+        "{} {noun} available on crates.io; no other candidates:",
+        items.len()
+    ));
+    let shown = if all { items.len() } else { limit.min(items.len()) };
+    for item in items.iter().take(shown) {
+        render_outdated_text(item);
+    }
+    if shown < items.len() {
+        output::deps_msg(&format!(
+            "  ... and {} more (use --all to show)",
+            items.len() - shown
+        ));
+    }
+}
+
 fn render_section<T>(
     items: &[&T],
     singular: &str,
@@ -426,12 +476,20 @@ fn render_section<T>(
 fn render_duplicate_text(dup: &DuplicateVersionEvent) {
     output::deps_msg(&format!("  {}: {} versions", dup.krate, dup.pins.len()));
     for pin in &dup.pins {
-        let blame = if pin.direct_blame.is_empty() {
+        let picked = if pin.picked_by.is_empty() {
             "(unknown)".to_string()
         } else {
-            pin.direct_blame.join(", ")
+            pin.picked_by.join(", ")
         };
-        output::deps_msg(&format!("    {}  blamed on: {}", pin.version, blame));
+        let suffix = if pin.via_workspace.is_empty() {
+            String::new()
+        } else {
+            format!("  [via {}]", pin.via_workspace.join(", "))
+        };
+        output::deps_msg(&format!(
+            "    {}  picked by {picked}{suffix}",
+            pin.version
+        ));
     }
 }
 
@@ -464,11 +522,9 @@ fn render_outdated_text(o: &OutdatedEvent) {
 
 fn render_stale_text(s: &StaleEvent) {
     output::deps_msg(&format!(
-        "  {}: {} {}  latest released {} ({} ago)",
+        "  {}: {} (last release {} ago)",
         s.severity,
         s.krate,
-        s.version,
-        s.released_at_date(),
         human_age(s.age_days),
     ));
 }
@@ -501,11 +557,3 @@ fn human_age(days: u64) -> String {
     }
 }
 
-impl StaleEvent {
-    /// First 10 characters of `released_at`, or the whole string if
-    /// it's shorter. Lets the text renderer show "2023-04-15" instead
-    /// of the full microsecond+timezone form.
-    fn released_at_date(&self) -> &str {
-        self.released_at.get(..10).unwrap_or(&self.released_at)
-    }
-}
