@@ -1,8 +1,7 @@
 # brokkr deps
 
 Audits `Cargo.lock` (and `cargo metadata`) for dependency smells. Works in any
-of brokkr's six projects - no `brokkr.toml` required, but if present its
-`[deps]` block tunes allowlists.
+Rust+git repo - no `brokkr.toml` required.
 
 Status legend: **[v1]** = first cut, **[planned]** = designed, not built,
 **[idea]** = on the wishlist, may never ship.
@@ -11,9 +10,8 @@ Status legend: **[v1]** = first cut, **[planned]** = designed, not built,
 
 One opinionated command that bundles the checks we keep running by hand
 (`cargo tree -d`, `cargo audit`, `cargo outdated`, eyeballing the lockfile)
-into a single report scoped to *our* projects, with project-aware allowlists.
-The target reader is "someone touching `Cargo.toml` who wants to know whether
-they just made things worse."
+into a single report scoped to *our* projects. The target reader is "someone
+touching `Cargo.toml` who wants to know whether they just made things worse."
 
 Not a replacement for `cargo audit` / `cargo deny` - those have richer rule
 languages and CI integrations. `brokkr deps` is the daily-driver triage view.
@@ -23,110 +21,73 @@ languages and CI integrations. `brokkr deps` is the daily-driver triage view.
 Mirrors `brokkr check`:
 
 - Phase-based. Each smell is a phase that emits zero or more events.
-- Structured event model in `src/deps/events.rs` (one `DepsEvent` enum,
-  serde-tagged like `CheckEvent` in `src/cargo_json.rs`).
+- `DepsEvent` enum in `src/deps/mod.rs`, serde-tagged like `CheckEvent` in
+  `src/cargo_json.rs`.
 - Default output: prefixed text via `[deps]`, grouped by phase, capped by
-  `--limit N` with a "+N hidden" trailer (reuse `src/scope.rs::format_trailer`).
-- `--json` emits NDJSON: one event per line on stdout, no prefixed output.
-  Every phase always emits a `*_summary` event at the end, even on zero
-  findings, so consumers can tell "ran and clean" from "didn't run".
-- Exit code: `0` if no severity>=warn findings, `1` otherwise. `--no-fail`
-  to always exit 0 (useful for the report-only invocation in CI).
+  `--limit N` with a "+N hidden" trailer.
+- `--json` emits NDJSON on stdout, one event per line. Every run ends
+  with a `summary` event listing the phases that ran plus a findings
+  count.
+- Exit code: `1` if any findings, `0` otherwise. `--no-fail` always
+  exits 0 (useful for report-only CI runs).
 
-Adding a check later means: one new `DepsEvent` variant, one new function
-that pushes those events, one new render arm. No changes to callers.
+Adding a phase later: one new `DepsEvent` variant, one new module, wire
+it into `run()`, add a render arm. No changes to callers.
 
-## Data sources
+## Data source
 
-- **`Cargo.lock`** parsed via `cargo_lock` crate - gives every resolved
-  package, source (`registry+...`, `git+...`, path), and the dependency graph.
-- **`cargo metadata --format-version=1`** parsed via `cargo_metadata` crate -
-  gives workspace members, direct vs transitive distinction, features.
-- **Network (planned phases only)**: crates.io sparse index for yanked +
-  newest version; RustSec advisory db (git clone, cached under
-  `$XDG_CACHE_HOME/brokkr/advisory-db`).
-
-Phases that don't need network run unconditionally; network phases are gated
-behind `--online` (default off) so the offline path stays fast and
-deterministic.
+Shells out to `cargo metadata --format-version 1` once per run and
+deserializes a minimal subset (packages, workspace members, resolve
+graph). No extra crate dependencies. Planned `--online` phases shell out
+to existing tools (`cargo audit`, `ccu`) - no native network code in
+brokkr.
 
 ## Checks
 
 ### duplicate_version [v1]
 
-Same crate resolved at >=2 versions. The point of this check is **assigning
-blame**: when foo 1.0 and foo 2.0 both ship, you want to know which of your
-direct deps is anchoring the old one so you can file an issue, upgrade, or
-add an allowlist entry.
+Same crate resolved at >=2 versions. The point is **assigning blame**:
+when foo 1.0 and foo 2.0 both ship, you want to know which of your direct
+deps is anchoring the old one.
 
-For each duplicated crate, emit one `DuplicateVersion` event with one
-`VersionPin` per resolved version:
+Algorithm: for each `(crate, version)` instance, BFS backwards through
+the resolve graph until each branch hits a workspace member. The first
+non-workspace hop on each path is the blame anchor; the workspace member
+itself is the anchor if the path is just one hop (`(direct)` suffix).
+Anchors are emitted as a sorted, deduped list per pin.
 
-```jsonc
-{
-  "kind": "duplicate_version",
-  "crate": "foo",
-  "pins": [
-    {
-      "version": "1.0.3",
-      "direct_blame": ["old-lib"],          // workspace direct deps anchoring this version
-      "paths": [                            // every distinct chain from a workspace member
-        ["our-crate", "old-lib 0.4", "foo 1.0.3"]
-      ]
-    },
-    {
-      "version": "2.1.0",
-      "direct_blame": ["new-lib", "foo"],   // including foo itself if we depend directly
-      "paths": [
-        ["our-crate", "new-lib 2.0", "foo 2.1.0"],
-        ["our-crate", "foo 2.1.0"]
-      ]
-    }
-  ]
-}
-```
+Each event carries one `VersionPin` per resolved version, with a sorted
+`direct_blame` list and a `paths` list (each path is a chain of
+`"name version"` labels from a workspace member to the target).
 
-Computed by walking the `cargo_metadata` resolve graph: for each `(crate,
-version)` node, find every parent chain back to a workspace member. Dedupe
-chains by the first non-workspace hop ("direct dep") - that's the blame
-anchor. Then collapse chains under each direct-blame entry.
-
-Text renderer prints it like:
+Text renderer prints the blame lines by default:
 
 ```
-[deps] foo: 2 versions
-  1.0.3  blamed on: old-lib 0.4
-                    our-crate -> old-lib 0.4 -> foo 1.0.3
-  2.1.0  blamed on: new-lib 2.0, our-crate (direct)
-                    our-crate -> new-lib 2.0 -> foo 2.1.0
-                    our-crate -> foo 2.1.0
+[deps] 1 crate with multiple versions:
+[deps]   foo: 2 versions
+[deps]     1.0.3  blamed on: old-lib 0.4
+[deps]     2.1.0  blamed on: new-lib 2.0, our-crate (direct)
 ```
 
-The blame line is the headline. The paths underneath are for when the
-blame line isn't enough (multi-hop transitive cases).
-
-Allowlist: `deps.allow_duplicate = ["hashbrown", "syn"]` - crate names where
-the duplication is known and intentional (proc-macro stacks, hashbrown
-straddling editions, etc.). Allowlisted dupes still emit events at `info`
-severity so the report stays honest.
+`--chains` adds example chains under each blame line, capped to 3 per
+pin unless `--all` is also set. (In big trees the same chain repeats
+across workspace members and floods the report.)
 
 False-positive risk: low. The blame computation is deterministic.
 
 ### git_dependency [v1]
 
 Any package with `source = "git+..."`. Emits `GitDependency` with the repo
-URL and pinned rev/branch/tag.
-
-Allowlist: `deps.allow_git = ["litehtml-rs", "sluggrs"]` - our six sister
-crates and any deliberate forks. Anything not on the list is `warn`.
+URL, resolved commit SHA (from the source fragment), and the requested ref
+(branch / tag / rev) if the manifest specified one.
 
 ### path_dependency [v1]
 
-Any package with no source (local path dep). Emits `PathDependency` with the
-resolved manifest path.
-
-Allowlist: `deps.allow_path` - implicit allow for workspace members; warn for
-anything else (a path dep outside the workspace is usually a dev accident).
+Any package with no source that isn't a workspace member. Workspace
+path-linking is the whole point of a workspace, but a path dep *outside* the
+workspace is usually a dev shortcut (forgot to publish a fork) or a hand-
+patched dependency that wouldn't reproduce on a clean checkout. Emits
+`PathDependency` with the resolved manifest path.
 
 ### duplicate_purpose [v1]
 
@@ -146,19 +107,8 @@ tls:             rustls, native-tls, openssl
 Emits one `DuplicatePurpose` event per overlapping pair, with the dep paths
 that pull each.
 
-Allowlist: `deps.allow_duplicate_purpose = [["serde_json", "simd-json"]]` -
-pairs that are intentional.
-
 False-positive risk: medium. The list is opinionated. Keep it short - if a
 pair generates noise across projects, remove it.
-
-### pre_release [v1]
-
-Direct deps (workspace member -> X) where X resolves to 0.x.y. Informational
-only (`info` severity, doesn't fail the run). Lots of the Rust ecosystem is
-0.x and that's fine - the value is just *seeing the count* per project.
-
-Allowlist: none; this never fails the run.
 
 ### advisory [planned, --online]
 
@@ -170,9 +120,6 @@ If `cargo audit` isn't installed: emit a single `ToolMissing` event with
 the install hint (`cargo install cargo-audit`) and skip the phase. We do
 not auto-install - this is a network-touching tool the user should
 consent to.
-
-Allowlist by advisory id: `deps.allow_advisory = ["RUSTSEC-2024-0001"]`.
-Allowlisted findings still emit at `info`.
 
 ### outdated [planned, --online]
 
@@ -198,65 +145,36 @@ or <M monthly downloads. Supply-chain hygiene signal. Risky to surface
 because it implicates real people - keep it gated and `info`-only if it
 ships.
 
-### license [idea]
-
-Compare each crate's license against a project-configured allowlist
-(`deps.allow_license = ["MIT", "Apache-2.0", "BSD-*"]`). Off by default.
-
-## `brokkr.toml` schema
-
-All optional. Absent block = defaults.
-
-```toml
-[deps]
-allow_duplicate         = ["hashbrown", "syn"]
-allow_git               = ["litehtml-rs", "sluggrs"]
-allow_path              = []
-allow_duplicate_purpose = [["serde_json", "simd-json"]]
-allow_advisory          = ["RUSTSEC-2024-0001"]
-allow_license           = ["MIT", "Apache-2.0"]
-```
-
-Per-project: workspace members are always allowed as path deps without
-needing to list them.
-
 ## CLI
 
 ```
-brokkr deps                       # all offline phases, text output
+brokkr deps                       # offline phases, terse text output
+brokkr deps --chains              # add per-pin example chains under blame lines
 brokkr deps --json                # NDJSON
-brokkr deps --online              # add yanked/advisory/outdated (network)
-brokkr deps --only duplicate_version,git_dependency
 brokkr deps --limit 50            # cap shown items per phase (default 20)
-brokkr deps --all                 # no cap
-brokkr deps --no-fail             # exit 0 even with warnings
+brokkr deps --all                 # no cap; implies --chains
+brokkr deps --no-fail             # exit 0 even when findings exist
 ```
 
-`--only` accepts comma-separated phase names matching the event variant in
-snake_case. Unknown names error out with the valid set listed.
+Exit code: `1` if any findings exist, `0` otherwise. `--no-fail` always
+exits 0. (Planned `--online` and `--only` flags will come with the
+network phases.)
 
 ## Code layout
 
 ```
 src/deps/
-  mod.rs            # run(), phase orchestration, severity tallying
-  events.rs         # DepsEvent enum + per-variant structs (serde)
-  lockfile.rs       # cargo_lock parsing wrapper
-  metadata.rs       # cargo_metadata wrapper, direct-vs-transitive
-  phases/
-    duplicate_version.rs
-    git_dependency.rs
-    path_dependency.rs
-    duplicate_purpose.rs
-    pre_release.rs
-    yanked.rs        # planned
-    advisory.rs      # planned
-    outdated.rs      # planned
-  purpose.rs        # curated heuristic table
-  render.rs         # text renderer (the JSON path is just serde)
+  mod.rs                 # DepsEvent enum, run(), text + JSON renderers
+  duplicate_version.rs   # blame-aware duplicate detection
+  git_dependency.rs      # git+ source scanning with ref parsing
+  path_dependency.rs     # non-workspace path deps
 ```
 
-`src/cli.rs` gets one new `Command::Deps { ... }` variant. Dispatch lands
+Future phases land as siblings (`duplicate_purpose.rs`, `advisory.rs`,
+etc.). The cargo-metadata deserializer lives in `mod.rs` until it grows
+enough to warrant its own file.
+
+`src/cli.rs` carries the `Command::Deps { ... }` variant. Dispatch lands
 in `src/main.rs` next to the other shared commands (not project-gated).
 
 ## v1 cut
@@ -265,12 +183,10 @@ Ship in this order, each as its own PR:
 
 1. Scaffolding: `Command::Deps`, `DepsEvent` enum with `Summary` only,
    `--json` path, empty run that just emits a `Summary { findings: 0 }`.
-   Proves the plumbing.
-2. `duplicate_version` phase.
-3. `git_dependency` + `path_dependency` phases (share a Cargo.lock walk).
+   Proves the plumbing. **[shipped]**
+2. `duplicate_version` phase. **[shipped]**
+3. `git_dependency` + `path_dependency` phases. **[shipped]**
 4. `duplicate_purpose` phase with the initial curated table.
-5. `pre_release` phase.
-6. `brokkr.toml` `[deps]` block + allowlist plumbing.
 
 After v1 ships and we've used it for a week or two, add the `--online`
 phases (`advisory` via `cargo audit`, `outdated` via `ccu`). Both are
