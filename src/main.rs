@@ -15,6 +15,7 @@ mod config;
 mod context;
 mod db;
 mod dependency_rules;
+mod deps;
 mod elivagar;
 mod env;
 mod error;
@@ -202,6 +203,27 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if let Command::Fmt { args } = &cli.command {
         return cmd_fmt(args);
     }
+    if let Command::Deps {
+        json,
+        limit,
+        all,
+        no_fail,
+    } = cli.command
+    {
+        let project_root = match project::detect_optional()? {
+            Some((_, _, root)) => root,
+            None => std::env::current_dir()?,
+        };
+        return deps::run(
+            &project_root,
+            &deps::DepsArgs {
+                json,
+                limit,
+                all,
+                no_fail,
+            },
+        );
+    }
     if let Command::Check {
         features,
         no_default_features,
@@ -284,7 +306,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Diff { .. }
         | Command::BuildGeocodeIndex { .. }
         | Command::Check { .. }
-        | Command::Fmt { .. } => unreachable!(),
+        | Command::Fmt { .. }
+        | Command::Deps { .. } => unreachable!(),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {
             mode,

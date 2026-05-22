@@ -143,6 +143,32 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
+    ///
+    /// Phase-based; each phase emits zero or more findings. v1 ships
+    /// `duplicate_version` with blame attribution (which of your direct
+    /// deps is anchoring an old version). See `docs/commands/deps.md`.
+    #[command(display_order = 0)]
+    Deps {
+        /// Emit NDJSON events on stdout (one JSON object per line). No
+        /// prefixed log output, no terminal colors.
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum findings printed per phase. Ignored with `--json` or
+        /// `--all`.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Show every finding without capping.
+        #[arg(long)]
+        all: bool,
+
+        /// Always exit 0, even when findings exist. Useful for
+        /// report-only invocations in CI.
+        #[arg(long)]
+        no_fail: bool,
+    },
     /// Show environment information
     #[command(display_order = 1)]
     Env,

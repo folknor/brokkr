@@ -97,6 +97,10 @@ pub fn ratatoskr_msg(msg: &str) {
     println!("[ratatoskr] {msg}");
 }
 
+pub fn deps_msg(msg: &str) {
+    println!("[deps]    {msg}");
+}
+
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
