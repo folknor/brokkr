@@ -15,6 +15,8 @@ use crate::error::DevError;
 use crate::output;
 
 mod duplicate_version;
+mod git_dependency;
+mod path_dependency;
 
 // --- Event model (NDJSON-serializable) ---
 
@@ -22,7 +24,37 @@ mod duplicate_version;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DepsEvent {
     DuplicateVersion(DuplicateVersionEvent),
+    GitDependency(GitDependencyEvent),
+    PathDependency(PathDependencyEvent),
     Summary(SummaryEvent),
+}
+
+#[derive(Serialize)]
+pub struct GitDependencyEvent {
+    #[serde(rename = "crate")]
+    pub krate: String,
+    pub version: String,
+    /// Repo URL with the `git+` prefix stripped.
+    pub url: String,
+    /// Resolved commit SHA (from the source URL fragment, the lockfile's
+    /// pinned commit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Branch name if the manifest requested a branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Tag name if the manifest requested a tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PathDependencyEvent {
+    #[serde(rename = "crate")]
+    pub krate: String,
+    pub version: String,
+    /// Absolute path to the dep's `Cargo.toml`.
+    pub manifest_path: String,
 }
 
 #[derive(Serialize)]
@@ -63,6 +95,9 @@ pub(crate) struct CargoPackage {
     pub name: String,
     pub version: String,
     pub id: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    pub manifest_path: String,
 }
 
 #[derive(Deserialize)]
@@ -88,11 +123,17 @@ pub struct DepsArgs {
 pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     let metadata = load_metadata(project_root)?;
     let mut events = Vec::new();
-    let phases_run = vec!["duplicate_version"];
+    let phases_run = vec!["duplicate_version", "git_dependency", "path_dependency"];
 
     let dup_events = duplicate_version::run(&metadata);
-    let findings = dup_events.len();
+    let git_events = git_dependency::run(&metadata);
+    let path_events = path_dependency::run(&metadata);
+
+    let findings = dup_events.len() + git_events.len() + path_events.len();
+
     events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
+    events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
+    events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
 
     events.push(DepsEvent::Summary(SummaryEvent {
         phases_run,
@@ -137,46 +178,75 @@ fn render_json(events: &[DepsEvent]) -> Result<(), DevError> {
 }
 
 fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
-    let dups: Vec<&DuplicateVersionEvent> = events
-        .iter()
-        .filter_map(|e| match e {
-            DepsEvent::DuplicateVersion(d) => Some(d),
-            _ => None,
-        })
-        .collect();
-
-    if dups.is_empty() {
-        output::deps_msg("no duplicate versions");
-    } else {
-        let shown = if all { dups.len() } else { limit.min(dups.len()) };
-        output::deps_msg(&format!(
-            "{} crate{} with multiple versions:",
-            dups.len(),
-            if dups.len() == 1 { "" } else { "s" }
-        ));
-        for dup in dups.iter().take(shown) {
-            render_duplicate_text(dup);
-        }
-        if shown < dups.len() {
-            output::deps_msg(&format!(
-                "  ... and {} more (use --all to show)",
-                dups.len() - shown
-            ));
+    let mut dups = Vec::new();
+    let mut gits = Vec::new();
+    let mut paths = Vec::new();
+    for e in events {
+        match e {
+            DepsEvent::DuplicateVersion(d) => dups.push(d),
+            DepsEvent::GitDependency(g) => gits.push(g),
+            DepsEvent::PathDependency(p) => paths.push(p),
+            DepsEvent::Summary(_) => {}
         }
     }
 
+    render_section(&dups, "crate", "crates", "with multiple versions", limit, all, render_duplicate_text);
+    render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
+    render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
+
     if let Some(DepsEvent::Summary(s)) = events.last() {
+        if s.findings == 0 {
+            output::deps_msg(&format!("ran {} phases, no findings", s.phases_run.len()));
+        } else {
+            output::deps_msg(&format!(
+                "ran {} phases, {} finding{}",
+                s.phases_run.len(),
+                s.findings,
+                if s.findings == 1 { "" } else { "s" },
+            ));
+        }
+    }
+}
+
+/// When not `--all`, cap the number of dep-chain example paths shown
+/// per duplicated `(crate, version)`. The blame anchor list above each
+/// chain already captures the actionable signal; the chains are just
+/// for tracing how the version is dragged in. In big dep trees the
+/// same chain repeats per workspace member, which drowns the report.
+const PATHS_PER_PIN: usize = 3;
+
+fn render_section<T>(
+    items: &[&T],
+    singular: &str,
+    plural: &str,
+    suffix: &str,
+    limit: usize,
+    all: bool,
+    render_one: fn(&T, bool),
+) {
+    if items.is_empty() {
+        return;
+    }
+    let noun = if items.len() == 1 { singular } else { plural };
+    let header = if suffix.is_empty() {
+        format!("{} {noun}:", items.len())
+    } else {
+        format!("{} {noun} {suffix}:", items.len())
+    };
+    output::deps_msg(&header);
+    let shown = if all { items.len() } else { limit.min(items.len()) };
+    for item in items.iter().take(shown) {
+        render_one(item, all);
+    }
+    if shown < items.len() {
         output::deps_msg(&format!(
-            "ran {} phase{}, {} finding{}",
-            s.phases_run.len(),
-            if s.phases_run.len() == 1 { "" } else { "s" },
-            s.findings,
-            if s.findings == 1 { "" } else { "s" },
+            "  ... and {} more (use --all to show)",
+            items.len() - shown
         ));
     }
 }
 
-fn render_duplicate_text(dup: &DuplicateVersionEvent) {
+fn render_duplicate_text(dup: &DuplicateVersionEvent, all: bool) {
     output::deps_msg(&format!("  {}: {} versions", dup.krate, dup.pins.len()));
     for pin in &dup.pins {
         let blame = if pin.direct_blame.is_empty() {
@@ -185,8 +255,36 @@ fn render_duplicate_text(dup: &DuplicateVersionEvent) {
             pin.direct_blame.join(", ")
         };
         output::deps_msg(&format!("    {}  blamed on: {}", pin.version, blame));
-        for path in &pin.paths {
+        let path_cap = if all { pin.paths.len() } else { PATHS_PER_PIN.min(pin.paths.len()) };
+        for path in pin.paths.iter().take(path_cap) {
             output::deps_msg(&format!("        {}", path.join(" -> ")));
         }
+        if path_cap < pin.paths.len() {
+            output::deps_msg(&format!(
+                "        ... and {} more chain{} (use --all)",
+                pin.paths.len() - path_cap,
+                if pin.paths.len() - path_cap == 1 { "" } else { "s" },
+            ));
+        }
     }
+}
+
+fn render_git_text(git: &GitDependencyEvent, _all: bool) {
+    let ref_part = match (&git.tag, &git.branch, &git.rev) {
+        (Some(t), _, _) => format!("tag={t}"),
+        (_, Some(b), _) => format!("branch={b}"),
+        (_, _, Some(r)) => format!("rev={r}"),
+        _ => "(default branch)".to_string(),
+    };
+    output::deps_msg(&format!(
+        "  {} {}  {} @ {}",
+        git.krate, git.version, git.url, ref_part
+    ));
+}
+
+fn render_path_text(path: &PathDependencyEvent, _all: bool) {
+    output::deps_msg(&format!(
+        "  {} {}  {}",
+        path.krate, path.version, path.manifest_path
+    ));
 }
