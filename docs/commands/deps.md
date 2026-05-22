@@ -89,27 +89,6 @@ workspace is usually a dev shortcut (forgot to publish a fork) or a hand-
 patched dependency that wouldn't reproduce on a clean checkout. Emits
 `PathDependency` with the resolved manifest path.
 
-### duplicate_purpose [v1]
-
-Two crates with overlapping purpose in the resolved graph. Small curated
-heuristic table in `src/deps/purpose.rs`:
-
-```
-async runtime:   tokio, async-std, smol
-random:          rand, fastrand, nanorand, oorandom
-http client:     reqwest, ureq, hyper-client, isahc
-json:            serde_json, simd-json, json
-regex:           regex, fancy-regex, onig, regress
-hashmap:         (multiple hashbrown versions handled by duplicate_version)
-tls:             rustls, native-tls, openssl
-```
-
-Emits one `DuplicatePurpose` event per overlapping pair, with the dep paths
-that pull each.
-
-False-positive risk: medium. The list is opinionated. Keep it short - if a
-pair generates noise across projects, remove it.
-
 ### advisory [planned, --online]
 
 Shells out to `cargo audit --json`, adapts its findings into `Advisory`
@@ -170,9 +149,9 @@ src/deps/
   path_dependency.rs     # non-workspace path deps
 ```
 
-Future phases land as siblings (`duplicate_purpose.rs`, `advisory.rs`,
-etc.). The cargo-metadata deserializer lives in `mod.rs` until it grows
-enough to warrant its own file.
+Future phases land as siblings (`advisory.rs`, `outdated.rs`, etc.). The
+cargo-metadata deserializer lives in `mod.rs` until it grows enough to
+warrant its own file.
 
 `src/cli.rs` carries the `Command::Deps { ... }` variant. Dispatch lands
 in `src/main.rs` next to the other shared commands (not project-gated).
@@ -186,9 +165,8 @@ Ship in this order, each as its own PR:
    Proves the plumbing. **[shipped]**
 2. `duplicate_version` phase. **[shipped]**
 3. `git_dependency` + `path_dependency` phases. **[shipped]**
-4. `duplicate_purpose` phase with the initial curated table.
 
-After v1 ships and we've used it for a week or two, add the `--online`
-phases (`advisory` via `cargo audit`, `outdated` via `ccu`). Both are
-shell-outs to existing tools - no native network code, no advisory-db
-cache management, no sparse-index parsing in brokkr itself.
+That's v1 done. Next: the `--online` phases (`advisory` via `cargo audit`,
+`outdated` via `ccu`). Both are shell-outs to existing tools - no native
+network code, no advisory-db cache management, no sparse-index parsing
+in brokkr itself.

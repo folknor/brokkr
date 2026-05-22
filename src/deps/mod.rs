@@ -16,6 +16,7 @@ use crate::output;
 
 mod duplicate_version;
 mod git_dependency;
+mod outdated;
 mod path_dependency;
 
 // --- Event model (NDJSON-serializable) ---
@@ -26,6 +27,8 @@ pub enum DepsEvent {
     DuplicateVersion(DuplicateVersionEvent),
     GitDependency(GitDependencyEvent),
     PathDependency(PathDependencyEvent),
+    Outdated(OutdatedEvent),
+    ToolMissing(ToolMissingEvent),
     Summary(SummaryEvent),
 }
 
@@ -55,6 +58,36 @@ pub struct PathDependencyEvent {
     pub version: String,
     /// Absolute path to the dep's `Cargo.toml`.
     pub manifest_path: String,
+}
+
+#[derive(Serialize)]
+pub struct OutdatedEvent {
+    #[serde(rename = "crate")]
+    pub krate: String,
+    /// Version currently resolved in Cargo.lock.
+    pub installed: String,
+    /// Newest version available on crates.io.
+    pub latest: String,
+    /// `ccu`'s severity classification: `patch`, `minor`, or `major`.
+    pub severity: String,
+    /// Manifest path where this dep is declared (relative to project
+    /// root, as `ccu` reports it).
+    pub source_file: String,
+    /// Line number in that manifest, useful for jump-to.
+    pub line_number: u64,
+}
+
+/// Emitted when an `--online` phase tried to invoke an external tool
+/// that wasn't installed. Doesn't count as a finding for exit-code
+/// purposes - it's a heads-up, not a smell in the user's code.
+#[derive(Serialize)]
+pub struct ToolMissingEvent {
+    /// Phase that wanted the tool.
+    pub phase: &'static str,
+    /// Executable name we tried to invoke.
+    pub tool: &'static str,
+    /// One-line hint shown in the text renderer.
+    pub install_hint: &'static str,
 }
 
 #[derive(Serialize)]
@@ -118,23 +151,32 @@ pub struct DepsArgs {
     pub limit: usize,
     pub all: bool,
     pub chains: bool,
+    pub online: bool,
     pub no_fail: bool,
 }
 
 pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     let metadata = load_metadata(project_root)?;
     let mut events = Vec::new();
-    let phases_run = vec!["duplicate_version", "git_dependency", "path_dependency"];
+    let mut phases_run = vec!["duplicate_version", "git_dependency", "path_dependency"];
 
     let dup_events = duplicate_version::run(&metadata);
     let git_events = git_dependency::run(&metadata);
     let path_events = path_dependency::run(&metadata);
 
+    // Only offline phases contribute to the failure-counting findings.
+    // `outdated` (and future network phases) are informational - a
+    // patch bump on a dependency shouldn't fail your build.
     let findings = dup_events.len() + git_events.len() + path_events.len();
 
     events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
     events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
     events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
+
+    if args.online {
+        phases_run.push("outdated");
+        events.extend(outdated::run(project_root)?);
+    }
 
     events.push(DepsEvent::Summary(SummaryEvent {
         phases_run,
@@ -185,18 +227,35 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool, show_chains: bool)
     let mut dups = Vec::new();
     let mut gits = Vec::new();
     let mut paths = Vec::new();
+    let mut outdated = Vec::new();
+    let mut missing = Vec::new();
     for e in events {
         match e {
             DepsEvent::DuplicateVersion(d) => dups.push(d),
             DepsEvent::GitDependency(g) => gits.push(g),
             DepsEvent::PathDependency(p) => paths.push(p),
+            DepsEvent::Outdated(o) => outdated.push(o),
+            DepsEvent::ToolMissing(t) => missing.push(t),
             DepsEvent::Summary(_) => {}
         }
     }
+    outdated.sort_by(|a, b| {
+        severity_rank(&a.severity)
+            .cmp(&severity_rank(&b.severity))
+            .then(a.krate.cmp(&b.krate))
+    });
 
     render_dup_section(&dups, limit, all, show_chains);
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
+    render_section(&outdated, "outdated dependency", "outdated dependencies", "", limit, all, render_outdated_text);
+
+    for tool_missing in &missing {
+        output::deps_msg(&format!(
+            "{} skipped: {} not installed ({})",
+            tool_missing.phase, tool_missing.tool, tool_missing.install_hint
+        ));
+    }
 
     if let Some(DepsEvent::Summary(s)) = events.last() {
         if s.findings == 0 {
@@ -324,4 +383,21 @@ fn render_path_text(path: &PathDependencyEvent) {
         "  {} {}  {}",
         path.krate, path.version, path.manifest_path
     ));
+}
+
+fn render_outdated_text(o: &OutdatedEvent) {
+    output::deps_msg(&format!(
+        "  {}: {} {} -> {}  ({}:{})",
+        o.severity, o.krate, o.installed, o.latest, o.source_file, o.line_number,
+    ));
+}
+
+/// Lower is more severe. Used for sorting so majors print first.
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "major" => 0,
+        "minor" => 1,
+        "patch" => 2,
+        _ => 3,
+    }
 }

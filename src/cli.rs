@@ -172,6 +172,15 @@ Examples:
         #[arg(long)]
         chains: bool,
 
+        /// Enable network-touching phases that shell out to external
+        /// tools: `outdated` (via `ccu`) - and eventually `advisory`
+        /// (via `cargo audit`). Off by default so the offline path
+        /// stays fast and deterministic. If the underlying tool is
+        /// missing, brokkr emits a single `tool_missing` event with
+        /// the install hint and skips the phase.
+        #[arg(long)]
+        online: bool,
+
         /// Always exit 0, even when findings exist. Useful for
         /// report-only invocations in CI.
         #[arg(long)]

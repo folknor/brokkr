@@ -208,6 +208,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         limit,
         all,
         chains,
+        online,
         no_fail,
     } = cli.command
     {
@@ -222,6 +223,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 limit,
                 all,
                 chains,
+                online,
                 no_fail,
             },
         );
