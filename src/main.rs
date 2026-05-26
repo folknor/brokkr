@@ -203,6 +203,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if let Command::Fmt { args } = &cli.command {
         return cmd_fmt(args);
     }
+    if let Command::Run { args } = &cli.command {
+        return cmd_cargo_run(args);
+    }
     if let Command::Deps {
         json,
         limit,
@@ -309,6 +312,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::BuildGeocodeIndex { .. }
         | Command::Check { .. }
         | Command::Fmt { .. }
+        | Command::Run { .. }
         | Command::Deps { .. } => unreachable!(),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {
@@ -1589,6 +1593,35 @@ fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
         }),
         None => Err(DevError::Subprocess {
             program: "cargo fmt".into(),
+            code: None,
+            stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
+        }),
+    }
+}
+
+fn cmd_cargo_run(args: &[String]) -> Result<(), DevError> {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command as ProcCommand;
+
+    let mut cmd = ProcCommand::new("cargo");
+    cmd.arg("run");
+    cmd.args(args);
+    let status = cmd.status().map_err(|e| DevError::Subprocess {
+        program: "cargo".into(),
+        code: None,
+        stderr: e.to_string(),
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+    match status.code() {
+        Some(code) => Err(DevError::Subprocess {
+            program: "cargo run".into(),
+            code: Some(code),
+            stderr: String::new(),
+        }),
+        None => Err(DevError::Subprocess {
+            program: "cargo run".into(),
             code: None,
             stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
         }),

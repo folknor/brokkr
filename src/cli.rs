@@ -143,6 +143,13 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run `cargo run`. All arguments are forwarded raw.
+    #[command(display_order = 0)]
+    Run {
+        /// Raw arguments forwarded to `cargo run`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///
     /// Phase-based; each phase emits zero or more findings. v1 ships
