@@ -49,7 +49,12 @@ struct CcuOutput {
 #[derive(Deserialize)]
 struct CcuCheck {
     dependency: CcuDependency,
-    installed: String,
+    /// `null` when the dep is declared in Cargo.toml but not resolved
+    /// into Cargo.lock (workspace-only, platform-gated, or behind an
+    /// inactive feature). Such entries have nothing to upgrade so the
+    /// Outdated phase skips them; Stale still considers them since the
+    /// crate may be abandoned regardless of local use.
+    installed: Option<String>,
     latest: String,
     /// `null` when up-to-date; otherwise `"patch"` / `"minor"` /
     /// `"major"`.
@@ -126,16 +131,18 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
     let mut seen_outdated: HashSet<(String, String, String)> = HashSet::new();
     let mut seen_stale: HashSet<(String, String)> = HashSet::new();
     for check in parsed.checks {
-        if let Some(severity) = check.severity {
+        if let Some(severity) = check.severity
+            && let Some(installed) = check.installed.clone()
+        {
             let key = (
                 check.dependency.name.clone(),
-                check.installed.clone(),
+                installed.clone(),
                 check.latest.clone(),
             );
             if seen_outdated.insert(key) {
                 events.push(DepsEvent::Outdated(OutdatedEvent {
                     krate: check.dependency.name.clone(),
-                    installed: check.installed.clone(),
+                    installed,
                     latest: check.latest.clone(),
                     severity,
                     source_file: check.dependency.source_file.clone(),
