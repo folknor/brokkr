@@ -51,6 +51,7 @@ mod sluggrs;
 mod test_cmd;
 mod test_runner;
 mod tools;
+mod wc;
 mod worktree;
 
 use std::path::Path;
@@ -206,6 +207,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if let Command::Run { args } = &cli.command {
         return cmd_cargo_run(args);
     }
+    if let Command::Wc { threshold } = &cli.command {
+        let project_root = match project::detect_optional()? {
+            Some((_, _, root)) => root,
+            None => std::env::current_dir()?,
+        };
+        return wc::run(&project_root, *threshold);
+    }
     if let Command::Deps {
         json,
         limit,
@@ -313,6 +321,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Check { .. }
         | Command::Fmt { .. }
         | Command::Run { .. }
+        | Command::Wc { .. }
         | Command::Deps { .. } => unreachable!(),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {

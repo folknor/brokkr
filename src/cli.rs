@@ -150,6 +150,16 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List rust source files above a line-count threshold (default 800).
+    ///
+    /// Scans tracked and untracked-not-ignored `.rs` files and prints those
+    /// with more than THRESHOLD lines, largest first.
+    #[command(display_order = 0)]
+    Wc {
+        /// Only list files with more than this many lines.
+        #[arg(default_value_t = crate::wc::DEFAULT_THRESHOLD)]
+        threshold: usize,
+    },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///
     /// Phase-based; each phase emits zero or more findings. v1 ships

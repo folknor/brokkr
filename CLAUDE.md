@@ -88,6 +88,7 @@ For details, read the linked docs.
 
 - `check` / `test` - validation pipeline. See `docs/commands/check.md`.
 - `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status.
+- `wc [threshold]` - list tracked `.rs` files with more than `threshold` lines (default 800), largest first. Works in any project.
 - `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`.
 - `clean [--worktrees]` - remove scratch/temp files. On ratatoskr projects also wipes `.brokkr/ratatoskr/` (run-N artefact dirs left by failed runs, plus `mock/` dirs from `mock-serve`). `--worktrees` also purges all persistent benchmark worktrees.
 - `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression).

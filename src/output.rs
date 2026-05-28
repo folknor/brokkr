@@ -101,6 +101,10 @@ pub fn deps_msg(msg: &str) {
     println!("[deps]    {msg}");
 }
 
+pub fn wc_msg(msg: &str) {
+    println!("[wc]      {msg}");
+}
+
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
