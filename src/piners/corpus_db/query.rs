@@ -26,6 +26,7 @@ pub struct RunRow {
 }
 
 /// One per-probe disposition row (the rendered subset of the column set).
+#[derive(Clone)]
 pub struct DispositionRow {
     pub probe: String,
     pub outcome: String,

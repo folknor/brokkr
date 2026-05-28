@@ -5,6 +5,8 @@
 //! generic [`grid`] primitive does the width computation; the typed renderers
 //! just project their rows into cells.
 
+use serde_json::Value;
+
 use super::query::{DispositionRow, GateMissRow, RawTable, RunRow, TradeDiffRow, TrendRow};
 
 /// Render a header + rows as a left-aligned, space-padded grid. Empty rows
@@ -66,6 +68,39 @@ fn fs(v: &Option<String>) -> String {
     v.clone().unwrap_or_else(|| "-".to_owned())
 }
 
+/// Compact the stored selector JSON to its *intent* for the runs table. The
+/// selector persists the full resolved `ids` list so a run is reproducible,
+/// but rendering all of them (231 for `--all`) wrecks the table - and the
+/// probe count already has its own column, with the id list reachable via
+/// `brokkr results <id>` or `--sql`. Show `all` / `kw=…` / `probe=…` (+`bless`)
+/// instead. Falls back to the raw string if the JSON is an unexpected shape,
+/// so nothing is silently blanked.
+fn fmt_selector(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_owned();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if v.get("all").and_then(Value::as_bool) == Some(true) {
+        parts.push("all".to_owned());
+    }
+    if let Some(probe) = v.get("probe").and_then(Value::as_str) {
+        parts.push(format!("probe={probe}"));
+    }
+    if let Some(kws) = v.get("keywords").and_then(Value::as_array) {
+        let names: Vec<&str> = kws.iter().filter_map(Value::as_str).collect();
+        if !names.is_empty() {
+            parts.push(format!("kw={}", names.join(",")));
+        }
+    }
+    if v.get("bless").and_then(Value::as_bool) == Some(true) {
+        parts.push("bless".to_owned());
+    }
+    if parts.is_empty() {
+        return raw.to_owned();
+    }
+    parts.join(" ")
+}
+
 /// The recent-runs table (bare `brokkr results` in piners).
 pub fn runs_table(rows: &[RunRow]) -> String {
     let cells: Vec<Vec<String>> = rows
@@ -79,7 +114,7 @@ pub fn runs_table(rows: &[RunRow]) -> String {
                 r.probe_count.to_string(),
                 fi(r.harness_exit_code),
                 r.fail_reason.clone().unwrap_or_default(),
-                r.selector.clone(),
+                fmt_selector(&r.selector),
             ]
         })
         .collect();
@@ -192,4 +227,33 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
 pub fn raw_table(t: &RawTable) -> String {
     let headers: Vec<&str> = t.columns.iter().map(String::as_str).collect();
     grid(&headers, &t.rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_selector;
+
+    #[test]
+    fn compacts_all_selector_dropping_ids() {
+        // The id list is the table-wrecker; `all` must stand in for it.
+        let raw = r#"{"all":true,"bless":false,"ids":["a","b","c"],"keywords":[],"probe":null}"#;
+        assert_eq!(fmt_selector(raw), "all");
+    }
+
+    #[test]
+    fn compacts_keyword_and_probe_selectors() {
+        let kw = r#"{"all":false,"bless":false,"ids":["a"],"keywords":["magnifier","bracket"],"probe":null}"#;
+        assert_eq!(fmt_selector(kw), "kw=magnifier,bracket");
+        let probe = r#"{"all":false,"bless":false,"ids":["x"],"keywords":[],"probe":"x"}"#;
+        assert_eq!(fmt_selector(probe), "probe=x");
+    }
+
+    #[test]
+    fn appends_bless_and_falls_back_on_garbage() {
+        let blessed = r#"{"all":true,"bless":true,"ids":[],"keywords":[],"probe":null}"#;
+        assert_eq!(fmt_selector(blessed), "all bless");
+        // Unparsable / unexpected shape is shown verbatim, never blanked.
+        assert_eq!(fmt_selector("not json"), "not json");
+        assert_eq!(fmt_selector("{}"), "{}");
+    }
 }

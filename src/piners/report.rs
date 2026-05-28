@@ -17,7 +17,7 @@
 //! record kind needs no brokkr change beyond (optionally) modelling it for
 //! persistence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
@@ -388,9 +388,26 @@ pub fn dense_na_breakdown(probes: &[ProbeLine]) -> Vec<DenseNaGroup> {
 
 /// Render the per-probe lines, the computed summary, and the two breakdowns
 /// to the `[corpus]` log.
-pub fn render(report: &HarnessReport) {
+///
+/// Only probes that *deviate* from their pinned `expected` are printed
+/// individually: `deviating` carries those ids (the gate's violation set, the
+/// caller's single source of truth for "not where the pin says it should
+/// be"). A probe sitting exactly on its pin is suppressed and folded into one
+/// trailing count - its disposition is already pinned and reproduced in the
+/// summary, so the surviving lines are the ones worth eyeballing. On an
+/// unblessed corpus every probe deviates, so nothing is hidden; the summary
+/// and both breakdowns are always computed over the full set regardless.
+pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
+    let mut pinned = 0u64;
     for p in &report.probes {
-        output::corpus_msg(&format_probe(p));
+        if deviating.contains(p.probe.as_str()) {
+            output::corpus_msg(&format_probe(p));
+        } else {
+            pinned += 1;
+        }
+    }
+    if pinned > 0 {
+        output::corpus_msg(&format!("{pinned} probe(s) match their pin (hidden)"));
     }
 
     let summary = summarize(&report.probes);

@@ -759,6 +759,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             run,
             where_expr,
             sql,
+            full,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -778,6 +779,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 run,
                 where_expr,
                 sql,
+                full,
             };
             // piners records no benchmarks; `results` queries the corpus run
             // store there instead of the (empty) results.db.

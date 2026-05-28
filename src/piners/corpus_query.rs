@@ -23,6 +23,7 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::output;
+use crate::piners::corpus_db::query::DispositionRow;
 use crate::piners::corpus_db::{self, CorpusDb};
 use crate::request::ResultsQuery;
 use crate::resolve::corpus_runs_db_path;
@@ -77,7 +78,7 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
 
     // Bare positional run id or --run N: that run's per-probe detail.
     if let Some(run_id) = explicit_run_id(q)? {
-        return render_run_detail(&db, run_id);
+        return render_run_detail(&db, run_id, q.full);
     }
 
     // Bare `brokkr results`: the recent-runs table.
@@ -129,13 +130,36 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
     Ok(())
 }
 
-fn render_run_detail(db: &CorpusDb, run_id: i64) -> Result<(), DevError> {
+fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevError> {
     let disps = db.dispositions_for_run(run_id)?;
     if disps.is_empty() {
         output::result_msg(&format!("run {run_id}: no per-probe dispositions recorded"));
     } else {
+        // Default to the deviations - the rows whose stored disposition does
+        // not match their pin (`gate_ok = 0`, the `DEVIATES` rows). A run on
+        // the full corpus is 200+ probes and most sit exactly on their pin;
+        // showing all of them buries the handful that moved. `--full` opts
+        // back into the complete table.
+        let total = disps.len();
+        let shown: Vec<DispositionRow> = if full {
+            disps
+        } else {
+            disps.iter().filter(|d| !d.gate_ok).cloned().collect()
+        };
+        let hidden = total - shown.len();
         println!("run {run_id}");
-        println!("{}", corpus_db::dispositions_table(&disps));
+        if shown.is_empty() {
+            output::result_msg(&format!(
+                "all {total} probe(s) match their pin - pass --full to show"
+            ));
+        } else {
+            println!("{}", corpus_db::dispositions_table(&shown));
+            if hidden > 0 {
+                output::result_msg(&format!(
+                    "{hidden} probe(s) match their pin (hidden) - pass --full to show"
+                ));
+            }
+        }
     }
 
     let misses = db.gate_misses_for_run(run_id)?;

@@ -21,7 +21,7 @@
 //! two deliberate writers of `pins.toml`; see [`crate::piners::reseed`] and
 //! [`crate::piners::bless`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -231,18 +231,26 @@ pub fn corpus(
     std::fs::write(artefacts.path().join("harness.stderr"), &captured.stderr).ok();
 
     let report = report::parse(&captured.stdout);
-    report::render(&report);
 
     let elapsed_ms = captured.elapsed.as_millis();
     let harness_code = captured.status.code();
     let harness_ok = harness_code == Some(0);
 
-    // Evaluate the gate up front. It drives the pass/fail decision and feeds
-    // the gate_miss table (selected probes the harness emitted no line for).
-    // Bless never gates - it ignores the verdict - but the diffs still record.
+    // Evaluate the gate up front. It drives the pass/fail decision, feeds the
+    // gate_miss table (selected probes the harness emitted no line for), and
+    // selects which per-probe lines render prints: a probe sitting exactly on
+    // its pin is folded into a count, so the lines that survive are the
+    // deviations. Bless never gates - it ignores the verdict - but the diffs
+    // still record and still drive the render filter (what differs from the
+    // pins about to be re-stamped).
     let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
     let gate_blocks = !args.bless && !args.no_gate && !gate_diffs.is_empty();
     let run_pass = harness_ok && !gate_blocks;
+
+    // Render the body now that the deviation set is known. Probes matching
+    // their pin collapse to a single count; the survivors are worth reading.
+    let deviating: HashSet<&str> = gate_diffs.iter().map(|d| d.probe.as_str()).collect();
+    report::render(&report, &deviating);
 
     // One-line failure classification, mirrored into the DB so a discarded run
     // dir loses nothing. Harness breaks rank ahead of gate deviations.

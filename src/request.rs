@@ -26,6 +26,9 @@ pub(crate) struct ResultsQuery {
     pub(crate) run: Option<i64>,
     pub(crate) where_expr: Option<String>,
     pub(crate) sql: Option<String>,
+    /// Run-detail view: show every probe, not just the ones deviating from
+    /// their pin. Ignored by the other views.
+    pub(crate) full: bool,
 }
 
 /// Query parameters for the `sidecar` command.

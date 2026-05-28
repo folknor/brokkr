@@ -77,7 +77,12 @@ kinds without a brokkr change:
 
 brokkr parses tolerantly (unknown fields ignored) and renders per-probe lines +
 a computed summary + root-cause breakdown (by `signature` domain/dimension) +
-dense-na breakdown (by builtin: site/na/probe counts).
+dense-na breakdown (by builtin: site/na/probe counts). The per-probe lines are
+trimmed to the **deviations**: a probe sitting exactly on its pinned `expected`
+(the gate's satisfied set) is suppressed and folded into one `N probe(s) match
+their pin (hidden)` line, so the surviving lines are the regressions/surprise
+improvements worth reading. On an unblessed corpus everything deviates, so
+nothing is hidden. The summary and both breakdowns always cover the full set.
 
 ## The corpus run store (`runs.db`)
 
@@ -116,9 +121,16 @@ piners records no benchmarks, so `results` queries `runs.db` instead of the
 (`--commit`/`--compare`/`--command`/`--mode`/`--dataset`/`--meta`/`--env`/
 `--grep`) are rejected with an error here; the corpus flags do:
 
-- `brokkr results` - table of recent runs.
+- `brokkr results` - table of recent runs. The `selector` column renders the
+  selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`), not the full
+  resolved id list it stores - that would be 200+ ids wide for an `--all` run.
+  The id list stays reachable via the run-detail view or `--sql`.
 - `brokkr results <id>` / `--run <id>` - that run's per-probe dispositions (+
-  gate misses + stderr). Default is the latest run.
+  gate misses + stderr). Default is the latest run. Only the **deviations**
+  (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
+  the pin-matchers fold into a `N probe(s) match their pin (hidden)` line - a
+  200-probe `--all` run otherwise buries the few that moved. `--full` shows the
+  complete table.
 - `brokkr results --probe <id>` - the probe's disposition + its `trade_diff`
   rows (the drill-down a blessed `actionable_drift` probe still carries).
 - `brokkr results --diffs --where "<expr>"` - `trade_diff` rows across the run

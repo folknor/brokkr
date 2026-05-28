@@ -1053,6 +1053,11 @@ The bench filters above do not apply there; the piners flags below do:
         /// (the escape hatch for anything the canned views don't cover).
         #[arg(long, value_name = "SQL")]
         sql: Option<String>,
+
+        /// [piners] In the run-detail view (`--run`/bare id), show every probe
+        /// instead of only the ones that deviate from their pin.
+        #[arg(long)]
+        full: bool,
     },
     /// Query sidecar /proc timelines, markers, and phase summaries
     #[command(
