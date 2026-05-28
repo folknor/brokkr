@@ -30,11 +30,8 @@ registry_dir = "corpus-registry" # pins.toml + <keyword>.toml files (default)
 package = "piners-runner"  # cargo package
 binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin corpus`)
 # features = ["..."]       # optional
-# debug = true             # corpus already defaults to debug; set false to force release
+# debug = true             # corpus defaults to debug; --debug/--release also override
 ```
-
-`corpus` defaults to a debug build (parity is opt-level-independent);
-`--debug` / `--release` override `[piners.harness] debug`.
 
 ## The corpus and the registry
 
@@ -103,16 +100,18 @@ compares against existing pins). No build, no harness, no
 **filesystem**, not `pins.toml` - it pins probes not yet pinned, resolving
 ids against `corpus_root/validation/<id>/`.
 
-- `--reseed --all` - stamp every probe under `validation/`. Authoritative
-  full regen: a probe whose dir vanished upstream drops out.
-- `--reseed --probe <id>` - upsert one probe, leaving the rest intact.
+- `--reseed --all` - stamp every parity probe under `validation/`;
+  top-level dirs without `tv_trades.csv` (multi-mode self-tests, per-symbol
+  containers) are skipped with a count. Authoritative full regen: a probe
+  whose dir vanished upstream drops out.
+- `--reseed --probe <id>` - upsert one probe (hard-errors on a missing
+  file, since you named it explicitly).
 
 Output is deterministic (sorted by id, inline `pine`/`csv = { path,
-xxh128 }`) and idempotent (re-stamping overwrites hashes). It prints
-`added=N changed=M removed=K`; `git diff pins.toml` is the review surface
-where a re-pin's drift becomes visible at the point you adopt it.
-Bootstrap: `brokkr corpus --reseed --all`, commit, write keyword files,
-run a slice.
+xxh128 }`) and idempotent. It prints `added=N changed=M removed=K`; `git
+diff pins.toml` is the review surface where a re-pin's drift becomes
+visible. Bootstrap: `brokkr corpus --reseed --all`, commit, write keyword
+files, run a slice.
 
 ## The manifest hand-off
 

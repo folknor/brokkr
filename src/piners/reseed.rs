@@ -125,9 +125,16 @@ fn stamp_one(id: &str, corpus_root: &Path) -> Result<Pin, DevError> {
     })
 }
 
-/// Walk `validation/` and stamp every probe directory. A subdir with
-/// neither pinned file is not a probe and is skipped; a subdir with
-/// exactly one is malformed and reported.
+/// Walk `validation/` and stamp every single-oracle parity probe.
+///
+/// The upstream corpus contains dirs that are not parity probes: a
+/// multi-mode self-test (`strategy.pine` + `trades-*.csv`, no
+/// `tv_trades.csv`), and a container of nested per-symbol probes (no files
+/// at its top level). Both lack `tv_trades.csv` at the top level, so the
+/// presence of the oracle is the discriminator: a top-level dir without
+/// `tv_trades.csv` is skipped (counted), not an error. `--probe <id>` -
+/// where the user named the probe explicitly - still hard-errors on a
+/// missing file.
 fn stamp_all(validation: &Path, corpus_root: &Path) -> Result<BTreeMap<String, Pin>, DevError> {
     if !validation.is_dir() {
         return Err(DevError::Config(format!(
@@ -149,28 +156,19 @@ fn stamp_all(validation: &Path, corpus_root: &Path) -> Result<BTreeMap<String, P
     ids.sort();
 
     let mut pins = BTreeMap::new();
-    let mut malformed: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
     for id in ids {
-        let dir = validation.join(&id);
-        let has_pine = dir.join(PINE_FILE).exists();
-        let has_csv = dir.join(CSV_FILE).exists();
-        if !has_pine && !has_csv {
-            continue; // not a probe dir
+        if !validation.join(&id).join(CSV_FILE).exists() {
+            skipped += 1; // non-parity dir: self-test, symbol container, etc.
+            continue;
         }
-        match stamp_one(&id, corpus_root) {
-            Ok(pin) => {
-                pins.insert(id, pin);
-            }
-            Err(_) => malformed.push(id),
-        }
+        pins.insert(id.clone(), stamp_one(&id, corpus_root)?);
     }
 
-    if !malformed.is_empty() {
-        return Err(DevError::Config(format!(
-            "corpus --reseed --all: {} probe dir(s) missing {PINE_FILE} or {CSV_FILE}:\n  {}",
-            malformed.len(),
-            malformed.join("\n  ")
-        )));
+    if skipped > 0 {
+        output::corpus_msg(&format!(
+            "skipped {skipped} non-parity dir(s) (no {CSV_FILE})"
+        ));
     }
 
     Ok(pins)
@@ -313,6 +311,31 @@ mod tests {
     fn toml_key_quotes_only_when_needed() {
         assert_eq!(toml_key("magnifier-tick-01"), "magnifier-tick-01");
         assert_eq!(toml_key("weird.id"), "\"weird.id\"");
+    }
+
+    #[test]
+    fn stamp_all_skips_dirs_without_the_oracle() {
+        let root =
+            std::env::temp_dir().join(format!("brokkr_piners_reseed_{}", std::process::id()));
+        let validation = root.join("validation");
+        // A real parity probe: both files.
+        let probe = validation.join("alpha-01");
+        std::fs::create_dir_all(&probe).unwrap();
+        std::fs::write(probe.join("strategy.pine"), b"//@version=6\n").unwrap();
+        std::fs::write(probe.join("tv_trades.csv"), b"a,b\n1,2\n").unwrap();
+        // A multi-mode self-test: strategy.pine but no tv_trades.csv.
+        let selftest = validation.join("selftest-01");
+        std::fs::create_dir_all(&selftest).unwrap();
+        std::fs::write(selftest.join("strategy.pine"), b"//@version=6\n").unwrap();
+        std::fs::write(selftest.join("trades-mode-a.csv"), b"x\n").unwrap();
+        // A container dir with nothing at its top level.
+        std::fs::create_dir_all(validation.join("container/nested")).unwrap();
+
+        let pins = stamp_all(&validation, &root).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(pins.len(), 1);
+        assert!(pins.contains_key("alpha-01"));
     }
 }
 

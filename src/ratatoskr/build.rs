@@ -47,7 +47,7 @@ pub fn build_for_harness(
     let profile_name = if debug { "dev" } else { "release" };
     let features_label = feature_summary(&harness_cfg.features);
 
-    output::ratatoskr_msg(&format!(
+    output::harness_msg(&format!(
         "building package '{}' (features: {features_label}, profile: {profile_name})",
         harness_cfg.package,
     ));
