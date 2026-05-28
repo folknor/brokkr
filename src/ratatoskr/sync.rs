@@ -28,7 +28,7 @@ use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::project::Project;
-use crate::ratatoskr::artefacts::{self, ArtefactDir};
+use crate::artefacts::{self, ArtefactDir};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, ScriptInfo};
 use crate::ratatoskr::gate as gate_eval;

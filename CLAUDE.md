@@ -1,6 +1,6 @@
 # brokkr
 
-Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs, and ratatoskr. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
+Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs, ratatoskr, and piners. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
 
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
@@ -16,7 +16,7 @@ Subagents must NOT run any shell commands. They write code only. Integration, bu
 
 ## How it works
 
-Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
+Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr|piners"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
 
 Install: `cargo install --path ~/Programs/brokkr`
 
@@ -30,6 +30,7 @@ These files are not auto-loaded - read them on demand based on what the user ask
 - `docs/commands/sync.md` - **read when** the project is ratatoskr and the user asks about `mock-serve`, `sync-list`, `sync-smoke`, or `sync-bench`. Covers sæhrimnir orchestration, readiness sentinel parsing, endpoint env-var export, marker FIFO usage.
 - `docs/commands/ratatoskr-gate.md` - **read when** the project is ratatoskr and the user asks about `--gate`, `--as-baseline`, the `[ratatoskr.gate.*]` config block, baseline pinning per hostname, gate.db, or sync-bench regression thresholds (max/max_relative/max_delta/min/min_relative/equal/equal_to_baseline).
 - `docs/commands/service.md` - **read when** the project is ratatoskr and the user asks about `service-test`, `service-suite`, or `service-list`. Covers lua VM, frontmatter, ceiling, artefact layout.
+- `docs/commands/corpus.md` - **read when** the project is piners and the user asks about `brokkr corpus`, the parity-corpus runner, the `pins.toml`/keyword registry, probe selection (`--keyword`/`--probe`/`--all`/`--verify-only`), xxh128 verification, the manifest schema, or the harness NDJSON/exit-code contract.
 - `docs/commands/measure.md` - **read when** the user asks about `--bench`, `--hotpath`, `--alloc`, `--stop`, the sidecar profiler, the marker FIFO, `BenchHarness`, hotpath JSON contract, or `brokkr sidecar` queries.
 - `docs/projects/pbfhogg.md` - **read when** working on pbfhogg-specific commands, verify subcommands, snapshot graph, OSC parser, io_uring/direct-io constraints, or the download command.
 - `docs/projects/elivagar.md` - **read when** working on elivagar-specific commands.
@@ -55,7 +56,8 @@ Single crate, single binary. No workspace.
 - `src/elivagar/commands.rs` - `ElivagarCommand` enum (Tilegen, PmtilesWriter, NodeStore, Planetiler, Tilemaker)
 - `src/context.rs` - `HarnessContext`, `BenchContext`, bootstrap helpers, worktree lifecycle
 - `src/resolve.rs` - Path resolution helpers (PBF, OSC, bbox, data dirs, results DB)
-- `src/project.rs` - `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs/Ratatoskr), `detect()`, `require()` gating
+- `src/project.rs` - `Project` enum (Pbfhogg/Elivagar/Nidhogg/Litehtml/Sluggrs/Ratatoskr/Piners), `detect()`, `require()` gating
+- `src/artefacts.rs` - `ArtefactDir`: per-run `<parent>/<test_id>/run-N/` allocator with preserve-on-failure semantics. Shared by ratatoskr (`.brokkr/ratatoskr`) and piners (`.brokkr/piners`)
 - `src/config.rs` - `DevConfig`, `Dataset`, `PbfEntry`, `OscEntry`, `HostConfig`, `LitehtmlConfig`, `LitehtmlFixture`, `RatatoskrConfig`, `HarnessConfig`, `ResolvedPaths`, TOML parsing, hostname via libc
 - `src/build.rs` - `BuildConfig`, `cargo_build()` (JSON message parsing for executable path), `project_info()` via cargo metadata
 - `src/harness.rs` - `BenchHarness` (lockfile + SQLite + env + git), `run_internal()`, `run_external()`, `run_distribution()`
@@ -80,6 +82,7 @@ Single crate, single binary. No workspace.
 - `src/nidhogg/` - server lifecycle, ingest, update, query, geocode, benchmarks, verify. See `docs/projects/nidhogg.md`.
 - `src/litehtml/` - 4 modules: visual reference testing. See `docs/projects/litehtml.md`.
 - `src/ratatoskr/` - harness orchestration (`saehrimnir.rs`, `sync.rs`, `cmd.rs`, `discover.rs`). See `docs/projects/ratatoskr.md`.
+- `src/piners/` - `brokkr corpus` parity-corpus runner: `registry.rs` (pins.toml + keyword loading, xxh128 verification), `select.rs` (selection resolution), `manifest.rs` (harness manifest), `report.rs` (NDJSON parse/render), `cmd.rs` (orchestration). See `docs/commands/corpus.md`.
 - `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio + pngjs).
 
 ## Shared commands quick reference

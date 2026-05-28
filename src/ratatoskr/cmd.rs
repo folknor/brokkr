@@ -12,7 +12,7 @@ use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
-use crate::ratatoskr::artefacts::{self, ArtefactDir};
+use crate::artefacts::{self, ArtefactDir};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
 use crate::ratatoskr::saehrimnir::{

@@ -17,6 +17,7 @@ pub struct DevConfig {
     pub litehtml: Option<LitehtmlConfig>,
     pub sluggrs: Option<SluggrsConfig>,
     pub ratatoskr: Option<RatatoskrConfig>,
+    pub piners: Option<PinersConfig>,
     /// Static Cargo package dependency boundary rules enforced by
     /// `brokkr check` before clippy/tests. Empty when the project does
     /// not define any `[[dependency_rule]]` entries.
@@ -556,6 +557,57 @@ impl HarnessConfig {
     }
 }
 
+/// Piners-specific configuration from `[piners]` in brokkr.toml.
+///
+/// Drives `brokkr corpus`, the parity-corpus runner. `[piners.harness]`
+/// (reusing [`HarnessConfig`]) describes the binary brokkr builds once
+/// and invokes with the resolved probe manifest. The flat fields locate
+/// the read-only corpus submodule, the piners-owned pin/keyword registry,
+/// and the shared OHLCV feeds the probes run against. See
+/// `docs/commands/corpus.md`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinersConfig {
+    /// Build spec for the corpus harness binary. Required to actually run
+    /// probes; `--verify-only` works without it.
+    pub harness: Option<HarnessConfig>,
+
+    /// Root of the read-only corpus submodule, resolved relative to
+    /// `brokkr.toml`. Pinned probe paths in `pins.toml` resolve under
+    /// here. Defaults to `corpus`.
+    pub corpus_root: Option<PathBuf>,
+
+    /// Directory holding the piners-owned registry: `pins.toml` (the
+    /// canonical id -> path+xxh128 universe) plus one `*.toml` per keyword
+    /// (id lists). Resolved relative to `brokkr.toml`. Defaults to
+    /// `corpus-registry`.
+    pub registry_dir: Option<PathBuf>,
+
+    /// Shared OHLCV feed paths the probes run against, keyed by an
+    /// arbitrary label (e.g. timeframe). Resolved relative to
+    /// `brokkr.toml` and passed through to the harness in the manifest.
+    /// Not hash-gated - only `strategy.pine` and `tv_trades.csv` are
+    /// pinned oracles.
+    #[serde(default)]
+    pub feeds: BTreeMap<String, PathBuf>,
+}
+
+impl PinersConfig {
+    /// Corpus submodule root, defaulting to `corpus`.
+    pub fn corpus_root(&self) -> &Path {
+        self.corpus_root
+            .as_deref()
+            .unwrap_or_else(|| Path::new("corpus"))
+    }
+
+    /// Registry directory, defaulting to `corpus-registry`.
+    pub fn registry_dir(&self) -> &Path {
+        self.registry_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("corpus-registry"))
+    }
+}
+
 #[allow(dead_code)]
 pub struct ResolvedPaths {
     pub hostname: String,
@@ -600,12 +652,14 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "sluggrs" => Project::Sluggrs,
         "ratatoskr" => Project::Ratatoskr,
         "saehrimnir" => Project::Saehrimnir,
+        "piners" => Project::Piners,
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
     let ratatoskr = parse_ratatoskr(table)?;
+    let piners = parse_piners(table)?;
     let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
@@ -621,6 +675,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             litehtml,
             sluggrs,
             ratatoskr,
+            piners,
             dependency_rules,
             check,
             test,
@@ -701,6 +756,7 @@ fn parse_hosts(
             || key == "litehtml"
             || key == "sluggrs"
             || key == "ratatoskr"
+            || key == "piners"
             || key == "dependency_rule"
             || key == "check"
             || key == "test"
@@ -782,6 +838,20 @@ fn parse_ratatoskr(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("ratatoskr: {e}")))?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[piners]` section from the root table.
+fn parse_piners(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<PinersConfig>, DevError> {
+    let Some(value) = table.get("piners") else {
+        return Ok(None);
+    };
+    let config: PinersConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("piners: {e}")))?;
     Ok(Some(config))
 }
 
@@ -1212,6 +1282,7 @@ mod tests {
             litehtml: None,
             sluggrs: None,
             ratatoskr: None,
+            piners: None,
             dependency_rules: Vec::new(),
             check: Vec::new(),
             test: None,

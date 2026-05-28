@@ -15,6 +15,7 @@ pub enum Project {
     Sluggrs,
     Ratatoskr,
     Saehrimnir,
+    Piners,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
     /// The `&'static str` is leaked once at startup from the TOML value.
@@ -32,6 +33,7 @@ impl Project {
             Self::Sluggrs => "sluggrs",
             Self::Ratatoskr => "ratatoskr",
             Self::Saehrimnir => "saehrimnir",
+            Self::Piners => "piners",
             Self::Other(s) => s,
         }
     }
@@ -51,6 +53,7 @@ impl Project {
             | Self::Sluggrs
             | Self::Ratatoskr
             | Self::Saehrimnir
+            | Self::Piners
             | Self::Other(_) => None,
         }
     }

@@ -9,7 +9,6 @@
 //! `test-helpers` feature). The cross-cutting design lives at
 //! `<ratatoskr>/docs/harness/{problem-statement,architecture,roadmap}.md`.
 
-pub mod artefacts;
 pub mod build;
 pub mod cmd;
 pub mod discover;

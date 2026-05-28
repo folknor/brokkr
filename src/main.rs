@@ -6,6 +6,7 @@
 // even when compiled under `cargo clippy --all-targets` (which sets
 // `cfg(test)` on the whole crate for the test-harness build).
 
+mod artefacts;
 mod build;
 mod cargo_filter;
 mod cargo_json;
@@ -34,6 +35,7 @@ mod oom;
 mod osc;
 mod output;
 mod pbfhogg;
+mod piners;
 mod pmtiles;
 mod preflight;
 mod profile;
@@ -1134,6 +1136,30 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 repeat,
             )
         }
+        // ----- piners-only commands -----
+        Command::Corpus {
+            keyword,
+            probe,
+            all,
+            verify_only,
+            debug,
+            release,
+            keep_artefacts,
+        } => {
+            project::require(project, Project::Piners, "corpus")?;
+            piners::cmd::corpus(
+                &project_root,
+                &dev_config,
+                &piners::cmd::CorpusArgs {
+                    keywords: keyword,
+                    probe,
+                    all,
+                    verify_only,
+                    profile_override: profile_override(debug, release),
+                    keep_artefacts,
+                },
+            )
+        }
     }
 }
 
@@ -1468,6 +1494,18 @@ fn cmd_clean(
             let runs = count_run_dirs(&ratatoskr_root);
             std::fs::remove_dir_all(&ratatoskr_root)?;
             output::run_msg(&format!("removed {runs} ratatoskr run dir(s)"));
+        }
+    }
+
+    // Clean piners corpus artefact tree (`.brokkr/piners/corpus/run-N/`,
+    // each holding a manifest + captured harness output). Debris by the
+    // time `clean` runs because we hold the project lock.
+    if project == Project::Piners {
+        let piners_root = project_root.join(".brokkr/piners");
+        if piners_root.exists() {
+            let runs = count_run_dirs(&piners_root);
+            std::fs::remove_dir_all(&piners_root)?;
+            output::run_msg(&format!("removed {runs} piners run dir(s)"));
         }
     }
 

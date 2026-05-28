@@ -97,6 +97,10 @@ pub fn ratatoskr_msg(msg: &str) {
     println!("[ratatoskr] {msg}");
 }
 
+pub fn corpus_msg(msg: &str) {
+    println!("[corpus]  {msg}");
+}
+
 pub fn deps_msg(msg: &str) {
     println!("[deps]    {msg}");
 }

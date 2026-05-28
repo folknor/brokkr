@@ -13,6 +13,7 @@ This file documents the **schema-universal** parts of brokkr.toml:
 For project-specific config blocks see:
 - `[litehtml]` -> `docs/projects/litehtml.md`
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
+- `[piners]` and `[piners.harness]` -> the `[piners]` section below; runner behaviour is in `docs/commands/corpus.md`
 
 For project-specific CLI flags that adjust dataset resolution or cargo
 features (`--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`,

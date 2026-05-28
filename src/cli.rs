@@ -1843,6 +1843,67 @@ Examples:
         #[arg(long, value_name = "NAME")]
         fixture: String,
     },
+
+    /// [piners] Run a keyword-selected slice of the parity corpus
+    ///
+    /// Resolves probes from the piners-owned registry (`pins.toml` +
+    /// `<keyword>.toml` files under `[piners] registry_dir`), hard-verifies
+    /// each selected probe's `strategy.pine` + `tv_trades.csv` against the
+    /// read-only corpus submodule by xxh128, writes a manifest, builds the
+    /// `[piners.harness]` binary once, and invokes it with `--manifest
+    /// <path>`. The harness emits NDJSON per-probe disposition lines that
+    /// brokkr renders.
+    ///
+    /// Selection is over the pinned universe: `--keyword` (repeatable)
+    /// unions groupings, `--probe <id>` picks one, `--all` takes
+    /// everything (the slow characterization pass). A bare invocation with
+    /// no selection is an error - the full corpus never runs by accident.
+    /// `--verify-only` walks and verifies the whole universe without
+    /// building or running. A missing pinned path or a hash mismatch is a
+    /// hard error. The run fails on a real break (compile/runtime) or a
+    /// non-zero harness exit; parity tiers are reported but do not fail the
+    /// run yet (baseline work is deferred). Default profile is debug.
+    #[command(name = "corpus", display_order = 70)]
+    Corpus {
+        /// Keyword grouping to select (repeatable; union of matched
+        /// probes). Resolves through `pins.toml`, so every selected probe
+        /// is verified.
+        #[arg(long, value_name = "KEYWORD")]
+        keyword: Vec<String>,
+
+        /// Select a single probe by id, resolved directly against
+        /// `pins.toml`. A probe pinned but absent from every keyword file
+        /// is still selectable this way.
+        #[arg(long, value_name = "ID")]
+        probe: Option<String>,
+
+        /// Select the whole pinned universe (slow characterization pass).
+        #[arg(long)]
+        all: bool,
+
+        /// Verify every pinned probe's files against the submodule and
+        /// exit, without building or running the harness. Use after a
+        /// submodule re-pin to catch drift.
+        #[arg(long)]
+        verify_only: bool,
+
+        /// Build the harness with the dev profile (`<target>/debug/`).
+        /// This is already the default for `corpus`; the flag is here to
+        /// override `[piners.harness] debug = false`. Mutually exclusive
+        /// with `--release`.
+        #[arg(long, conflicts_with = "release")]
+        debug: bool,
+
+        /// Build the harness with the release profile (the slow
+        /// characterization build). Overrides the debug default.
+        #[arg(long)]
+        release: bool,
+
+        /// Preserve the run dir (manifest + harness output) even on
+        /// success. Failures are always preserved.
+        #[arg(long)]
+        keep_artefacts: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

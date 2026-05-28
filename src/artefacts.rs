@@ -1,6 +1,11 @@
-//! Per-test artefact directories for the service-test harness.
+//! Per-run artefact directories for harness-style commands.
 //!
-//! Each script run gets `<project_root>/.brokkr/ratatoskr/<test>/run-N/`,
+//! Shared by ratatoskr's service/sync harness (`.brokkr/ratatoskr/...`)
+//! and piners' corpus runner (`.brokkr/piners/...`). The API takes a
+//! generic parent path, so each caller supplies its own `.brokkr/<proj>`
+//! root.
+//!
+//! Each run gets `<parent>/<test_id>/run-N/`,
 //! where N is the smallest positive integer such that `run-N/` does not
 //! already exist. Callers populate the directory while the run executes
 //! (frame log, event log, /proc snapshots, data-dir copies); when the
@@ -16,10 +21,8 @@
 //! possible failure mode for a test harness, so the safe behaviour is
 //! "keep what we have."
 //!
-//! The helper lives under `src/ratatoskr/` for now because it has no
-//! other callers; the API takes a generic parent path so it lifts to a
-//! shared location unchanged the day a second project wants the same
-//! shape.
+//! The API takes a generic parent path, so each project supplies its own
+//! `.brokkr/<project>` root.
 
 use std::fs;
 use std::path::{Path, PathBuf};
