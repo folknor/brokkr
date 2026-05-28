@@ -18,7 +18,7 @@ use crate::error::DevError;
 use crate::output::CapturedOutput;
 use crate::ratatoskr::process::snapshot_proc;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
 pub(crate) struct LibtestRun {
@@ -90,6 +90,7 @@ pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
+    timeout: Duration,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -147,7 +148,7 @@ where
     let done_t = Arc::clone(&done);
     let hung_t = Arc::clone(&hung);
     let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(cwd_t, cargo_pid, tracker_t, done_t, hung_t);
+        watchdog_loop(cwd_t, cargo_pid, tracker_t, done_t, hung_t, timeout);
     });
 
     let status = child.wait().map_err(|e| DevError::Subprocess {
@@ -499,8 +500,9 @@ fn watchdog_loop(
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
+    timeout: Duration,
 ) {
-    watchdog_loop_with_timing(cwd, cargo_pid, tracker, done, hung, TEST_TIMEOUT, WATCHDOG_POLL);
+    watchdog_loop_with_timing(cwd, cargo_pid, tracker, done, hung, timeout, WATCHDOG_POLL);
 }
 
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.

@@ -13,9 +13,16 @@
 //! accepted. Profile-declared `env` vars *are* propagated, so a
 //! profile that gates platform tests behind `BROKKR_TEST_PLATFORM=1`
 //! still works under `brokkr test`.
+//!
+//! The per-test watchdog ceiling (shared with `brokkr check`, normally
+//! 20s) can be raised with `--timeout <SECS>` (1-280). Because a higher
+//! ceiling only makes sense for one isolated test, it is gated: each
+//! sweep is enumerated with libtest `--list` first, and `<NAME>` matching
+//! more than one test in any sweep is a hard error before anything runs.
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::build;
 use crate::cargo_filter;
@@ -50,8 +57,10 @@ pub fn run(
     jobs: Option<u32>,
     raw: bool,
     debug: bool,
+    timeout: Option<u64>,
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
+    let ceiling = timeout.map_or(test_runner::TEST_TIMEOUT, Duration::from_secs);
     let sweeps = decide_sweeps(dev_config.test.as_ref(), &dev_config.check)?;
     let multi = sweeps.len() > 1;
 
@@ -102,6 +111,23 @@ pub fn run(
             continue;
         }
 
+        // A `--timeout` override is only honored for a single isolated
+        // test. Enumerate the matches with libtest `--list` up front and
+        // refuse to run if `<name>` is a prefix that pulls in several
+        // tests under one raised ceiling. Sweeps that match zero (the
+        // test is feature-gated out) are fine - they'll just SKIP.
+        if timeout.is_some() {
+            let matched = count_matching_tests(&pkg, name, sweep, &env_refs, project_root, debug)?;
+            if matched > 1 {
+                return Err(DevError::Config(format!(
+                    "--timeout only applies to a single test, but `{name}` matches {matched} tests \
+                     in sweep `{}`. Narrow it to one fully-qualified test name \
+                     (e.g. `my_module::my_test`), or drop --timeout to run them all at the 20s ceiling.",
+                    sweep.label
+                )));
+            }
+        }
+
         for n in 1..=repeat {
             let mut args: Vec<String> = vec!["test".into()];
             if !debug {
@@ -131,7 +157,7 @@ pub fn run(
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
 
-            let outcome = run_one(&arg_refs, project_root, &env_refs, &tag, raw)?;
+            let outcome = run_one(&arg_refs, project_root, &env_refs, &tag, raw, ceiling)?;
             outcomes.push(outcome);
         }
     }
@@ -187,6 +213,49 @@ fn run_pre_build(
         sweep.label
     );
     Ok(false)
+}
+
+/// Count how many tests `<name>` matches in this sweep via libtest
+/// `--list`. Used to gate the `--timeout` override on a single match.
+/// Builds (cache-shared with the real run that follows) then lists; each
+/// runnable test prints a `path::to::test: test` line, so we count those.
+/// A build/list failure returns `Ok(0)` so the subsequent real run is the
+/// one that surfaces the compile error through the normal BUILD FAILED path.
+fn count_matching_tests(
+    pkg: &str,
+    name: &str,
+    sweep: &ResolvedSweep,
+    env: &[(&str, &str)],
+    project_root: &Path,
+    debug: bool,
+) -> Result<usize, DevError> {
+    let mut args: Vec<String> = vec!["test".into()];
+    if !debug {
+        args.push("--release".into());
+    }
+    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.push("-p".into());
+    args.push(pkg.into());
+    args.push(name.into());
+    args.push("--".into());
+    args.push("--include-ignored".into());
+    args.push("--list".into());
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env)?;
+    if !captured.status.success() {
+        return Ok(0);
+    }
+    Ok(count_listed_tests(&String::from_utf8_lossy(&captured.stdout)))
+}
+
+/// Count libtest `--list` entries that are runnable tests. The list format
+/// is one `name: kind` line per entry; `kind` is `test` or `benchmark`.
+fn count_listed_tests(stdout: &str) -> usize {
+    stdout
+        .lines()
+        .filter(|l| l.trim_end().ends_with(": test"))
+        .count()
 }
 
 /// Resolve the cargo package name in precedence order:
@@ -266,11 +335,13 @@ fn run_one(
     env: &[(&str, &str)],
     tag: &str,
     raw: bool,
+    ceiling: Duration,
 ) -> Result<Outcome, DevError> {
     let run = test_runner::streaming_run_libtest(
         args,
         project_root,
         env,
+        ceiling,
         make_stdout_forwarder(raw),
         make_stderr_forwarder(raw),
         |elapsed| {
@@ -303,7 +374,10 @@ fn run_one(
 
     if let LibtestOutcome::HungTest(hung) = &run.outcome {
         output::error(&test_runner::format_hung_test(hung, project_root));
-        println!("[test]    FAIL {tag} ({wall}) - hung test exceeded 20s");
+        println!(
+            "[test]    FAIL {tag} ({wall}) - hung test exceeded {}s",
+            hung.ceiling.as_secs()
+        );
         std::io::stdout().flush().ok();
         return Ok(Outcome::Fail);
     }
@@ -713,6 +787,25 @@ include_ignored = false
         // Sweep struct only carries label / feature_args / build_packages -
         // any libtest filter from the profile is intentionally absent.
         assert_eq!(sweeps[0].label, "all");
+    }
+
+    #[test]
+    fn count_listed_tests_counts_only_tests() {
+        // libtest --list output: one `name: kind` line per entry, then a
+        // trailing summary line we must not count.
+        let listing = "\
+foo::bar: test
+foo::baz: test
+benches::throughput: benchmark
+3 tests, 1 benchmark
+";
+        assert_eq!(count_listed_tests(listing), 2);
+    }
+
+    #[test]
+    fn count_listed_tests_zero_when_no_matches() {
+        assert_eq!(count_listed_tests("0 tests, 0 benchmarks\n"), 0);
+        assert_eq!(count_listed_tests(""), 0);
     }
 
     #[test]

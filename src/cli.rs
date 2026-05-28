@@ -1499,6 +1499,12 @@ Examples:
         /// BROKKR_TEST_BIN_DIR points at <target>/debug accordingly.
         #[arg(long)]
         debug: bool,
+        /// Override the per-test watchdog ceiling, in seconds (1-280).
+        /// Only honored when `<name>` matches exactly one test per sweep;
+        /// if it matches more than one, `brokkr test` errors before
+        /// running. Without this flag the ceiling is the standard 20s.
+        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..=280))]
+        timeout: Option<u64>,
     },
     /// [litehtml/sluggrs] List fixtures/snapshots and approval state
     #[command(display_order = 50)]

@@ -1180,6 +1180,7 @@ fn run_one_test_sweep(
         &arg_refs,
         project_root,
         &env_refs,
+        test_runner::TEST_TIMEOUT,
         |_| {},
         |_| {},
         move |elapsed| {

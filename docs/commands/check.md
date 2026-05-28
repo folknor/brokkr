@@ -110,10 +110,20 @@ Flags:
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--raw` - disable all filtering
 - `--debug` - dev profile instead of release
+- `--timeout <SECS>` - raise the per-test watchdog ceiling (1-280s)
 
 Because `cargo test <name>` is a substring filter, identically-named tests in
 different modules of the same package all run; use a more qualified name
 (module path) to disambiguate.
+
+A per-test watchdog (shared with `brokkr check`'s test phase) kills any test
+that runs longer than 20s and reports it as a hung test. `--timeout <SECS>`
+raises that ceiling for `brokkr test` only, and only for a genuinely single
+test: each sweep is enumerated with libtest `--list` first, and if `<NAME>`
+matches more than one test in any sweep the command errors before running
+anything. Sweeps where the name matches zero tests (feature-gated out) are
+fine and still `SKIP`. There is no way to disable the ceiling entirely - 280s
+is the cap.
 
 ## Sweep selection table (`brokkr check`)
 
