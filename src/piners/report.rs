@@ -7,6 +7,14 @@
 //! grows it (extra tiers, deltas, provenance) ahead of brokkr learning to
 //! render them, the same forward-compat posture as the cargo JSON parser. A
 //! stray legacy `summary` line is skipped rather than mis-parsed as a probe.
+//!
+//! Lines are discriminated by an optional `kind` field. A line with no `kind`
+//! - or `kind == "disposition"` - is a per-probe disposition line: the only
+//! kind that feeds aggregation and the gate. Any other `kind` (e.g. the
+//! harness's per-trade `trade_diff` drill-down records) is tolerated and
+//! skipped, living in `harness.stdout` for inspection but never touching the
+//! summary, breakdowns, or exit code. This tolerate-and-skip posture means a
+//! new harness record kind needs no brokkr change.
 
 use std::collections::BTreeMap;
 
@@ -143,10 +151,12 @@ pub struct DenseNaGroup {
 const MAX_EXAMPLES: usize = 4;
 
 /// Parse NDJSON harness stdout. Blank lines are skipped; a legacy `summary`
-/// line is skipped (the harness no longer emits one); a line that fails to
-/// parse as a probe is surfaced as a warning but does not abort - the run's
-/// exit status is the source of truth, and a forward-compat field we cannot
-/// model should not sink the report.
+/// line is skipped (the harness no longer emits one); any line whose `kind`
+/// is present and not `"disposition"` (e.g. `trade_diff` drill-down records)
+/// is skipped without parsing; a disposition line that fails to parse is
+/// surfaced as a warning but does not abort - the run's exit status is the
+/// source of truth, and a forward-compat field we cannot model should not
+/// sink the report.
 pub fn parse(stdout: &[u8]) -> HarnessReport {
     let text = String::from_utf8_lossy(stdout);
     let mut report = HarnessReport::default();
@@ -156,16 +166,33 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         if trimmed.is_empty() {
             continue;
         }
+        // Peek at the line as a generic value to discriminate record kinds
+        // before committing to the ProbeLine shape.
+        let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                output::corpus_msg(&format!("warning: unparsable NDJSON line: {e}"));
+                continue;
+            }
+        };
+
         // Tolerate (and ignore) a stray legacy summary line.
-        let is_summary = serde_json::from_str::<serde_json::Value>(trimmed)
-            .ok()
-            .and_then(|v| v.get("summary").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false);
-        if is_summary {
+        if value.get("summary").and_then(serde_json::Value::as_bool) == Some(true) {
             continue;
         }
 
-        match serde_json::from_str::<ProbeLine>(trimmed) {
+        // Discriminate by `kind`. A line that omits `kind` is a disposition
+        // line (the harness's original shape, unchanged); `kind == "disposition"`
+        // is the explicit form of the same. Any other `kind` - a `trade_diff`
+        // drill-down record today, or a future record type - is skipped: it
+        // lives in harness.stdout for inspection but never enters aggregation
+        // or the gate.
+        match value.get("kind").and_then(serde_json::Value::as_str) {
+            None | Some("disposition") => {}
+            Some(_) => continue,
+        }
+
+        match serde_json::from_value::<ProbeLine>(value) {
             Ok(p) => report.probes.push(p),
             Err(e) => output::corpus_msg(&format!("warning: unparsable probe line: {e}")),
         }
@@ -457,5 +484,34 @@ mod tests {
         let r = parse(nd);
         assert_eq!(r.probes.len(), 1);
         assert_eq!(r.probes[0].probe, "p1");
+    }
+
+    #[test]
+    fn skips_trade_diff_and_unknown_kind_lines() {
+        // A disposition line (no kind), a trade_diff drill-down record, and a
+        // hypothetical future record kind. Only the disposition is aggregated;
+        // the drill-down records live in stdout but never enter the report.
+        let nd = br#"{"probe":"p1","outcome":"parity","count_tier":"drift","acceptance":{"tier":"actionable_drift"}}
+{"kind":"trade_diff","probe":"p1","bar":42,"entry_id":"e1","exit_id":"x1","qty":1.0,"side":"long","ours_price":100.5,"tv_price":100.25,"price_delta":0.25}
+{"kind":"trade_diff","probe":"p1","bar":58,"entry_id":"e2","exit_id":"x2","qty":2.0,"side":"short","ours_price":99.0,"tv_price":99.0,"price_delta":0.0}
+{"kind":"future_record","probe":"p1","whatever":true}
+"#;
+        let r = parse(nd);
+        assert_eq!(r.probes.len(), 1); // only the disposition line
+        assert_eq!(r.probes[0].probe, "p1");
+        let s = summarize(&r.probes);
+        assert_eq!((s.total, s.actionable_drift), (1, 1)); // drill-down lines excluded
+    }
+
+    #[test]
+    fn accepts_explicit_disposition_kind() {
+        // The harness may also tag disposition lines uniformly with
+        // kind:"disposition"; brokkr treats that identically to no kind.
+        let r = parse(
+            br#"{"kind":"disposition","probe":"p1","outcome":"parity","acceptance":{"tier":"accepted"}}
+"#,
+        );
+        assert_eq!(r.probes.len(), 1);
+        assert_eq!(r.probes[0].disposition(), "accepted");
     }
 }

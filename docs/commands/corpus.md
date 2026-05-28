@@ -179,6 +179,23 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 - `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
 - `*_fail`: carries `error` instead of the parity fields.
 
+### Line kinds (`kind` discrimination)
+
+Lines carry an optional `kind` field. brokkr aggregates **only** disposition
+lines and tolerantly skips everything else, so the harness can interleave new
+record kinds without a brokkr change:
+
+- no `kind`, or `kind == "disposition"` - the per-probe line above. The only
+  kind that feeds the summary, breakdowns, and the gate. (The harness need not
+  emit `kind` on these; brokkr accepts both forms.)
+- `kind == "trade_diff"` - a per-trade drill-down record, one per divergent
+  matched pair, emitted inline in probe order (self-limiting: an exact probe
+  emits none). Carries the probe id, bar indices, entry/exit IDs, qty, side,
+  both timestamps, ours/tv prices, and deltas. brokkr never parses or
+  aggregates these - they live in `harness.stdout` for inspection (filter
+  `kind == "trade_diff"` for a probe to get its full per-trade breakdown).
+- any other `kind` - skipped (forward-compat).
+
 brokkr parses tolerantly (unknown fields ignored; `signature`/`dense_na_sites`
 model only the fields it groups by) and renders per-probe lines + a computed
 summary + root-cause breakdown (by `signature` domain/dimension) + dense-na
