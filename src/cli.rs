@@ -1899,6 +1899,25 @@ Examples:
         #[arg(long, conflicts_with_all = ["verify_only", "keyword"])]
         reseed: bool,
 
+        /// Run the selection, then stamp each selected probe's current
+        /// disposition into its `expected` field in `pins.toml` (the gate's
+        /// pinned contract). Sibling to `--reseed`: reseed adopts new corpus
+        /// content, bless adopts new dispositions. Records reality, including
+        /// `compile_fail`/`runtime_fail`/`no_tv_data`/`no_overlap` outcomes.
+        /// Prints `blessed N (changed M)`; review with `git diff pins.toml`.
+        /// Combine with `--all`/`--keyword`/`--probe` to scope what is
+        /// blessed. Not usable with `--verify-only` or `--reseed`.
+        #[arg(long, conflicts_with_all = ["verify_only", "reseed"])]
+        bless: bool,
+
+        /// Run, aggregate, and report the per-probe expected-disposition gate
+        /// diff, but do not fail on it. The harness exit code still governs
+        /// pass/fail. Use during the bless-everything rollout (before
+        /// expectations exist) or for ad-hoc "just show me the breakdown"
+        /// runs.
+        #[arg(long)]
+        no_gate: bool,
+
         /// Build the harness with the dev profile (`<target>/debug/`).
         /// This is already the default for `corpus`; the flag is here to
         /// override `[piners.harness] debug = false`. Mutually exclusive

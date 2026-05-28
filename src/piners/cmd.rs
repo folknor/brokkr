@@ -4,19 +4,22 @@
 //! every selected probe's `strategy.pine` + `tv_trades.csv` against the
 //! read-only submodule, writes a manifest, builds the harness once, and
 //! invokes it with `--manifest <path>`. The harness consumes the manifest
-//! and emits NDJSON disposition lines that brokkr renders.
+//! and emits one enriched NDJSON disposition line per probe (no trailing
+//! summary line); brokkr aggregates the summary and breakdowns itself (see
+//! [`crate::piners::report`]).
 //!
-//! Verification is the only hard correctness gate today: a missing path or
-//! a hash mismatch aborts before anything runs. Parity tiers are read from
-//! the harness output but do not fail the run yet - tier-based pass/fail
-//! arrives with the deferred parity-baseline work. The run fails only on a
-//! real break (`compile_fail`/`runtime_fail`), a non-zero harness exit, or
-//! a hash mismatch.
+//! Two correctness gates apply. First, **verification**: a missing path or a
+//! hash mismatch aborts before anything is built. Second, the **per-probe
+//! expected-disposition gate** ([`crate::piners::gate`]): each probe pins an
+//! `expected` label in `pins.toml`, and any deviation - regression or
+//! surprise improvement - fails the run, as does a probe never blessed.
+//! `--no-gate` downgrades the gate to informational. The run also fails on a
+//! real break (`compile_fail`/`runtime_fail`) or any non-zero harness exit;
+//! the exit code stays authoritative for breaks.
 //!
-//! The harness binary itself lives in piners (declared via
-//! `[piners.harness]`). Until it learns `--manifest`, the spawn captures
-//! its "unknown flag" failure faithfully; the brokkr-side plumbing here is
-//! structurally complete.
+//! `--reseed` (re-stamp hashes) and `--bless` (re-stamp dispositions) are the
+//! two deliberate writers of `pins.toml`; see [`crate::piners::reseed`] and
+//! [`crate::piners::bless`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +50,14 @@ pub struct CorpusArgs {
     /// Stamp `pins.toml` from the corpus filesystem instead of running.
     /// Routed to [`crate::piners::reseed`]; see its module docs.
     pub reseed: bool,
+    /// Run the selection, then stamp each probe's current disposition into
+    /// its `expected` field. Handled inline after the harness run (the run
+    /// pipeline is shared); see [`crate::piners::bless`].
+    pub bless: bool,
+    /// Run + aggregate + report the per-probe gate diff, but never fail on
+    /// it. Covers the bless-everything rollout and ad-hoc "just show me"
+    /// runs. The harness exit code still governs pass/fail.
+    pub no_gate: bool,
     /// `Some(true)` = debug, `Some(false)` = release, `None` = default
     /// (debug for this command).
     pub profile_override: Option<bool>,
@@ -69,7 +80,7 @@ pub fn corpus(
     }
 
     let registry_dir = project_root.join(cfg.registry_dir());
-    let registry = Registry::load(&registry_dir)?;
+    let mut registry = Registry::load(&registry_dir)?;
     registry.lint()?;
 
     let sel_args = SelectArgs {
@@ -201,31 +212,55 @@ pub fn corpus(
     report::render(&report);
 
     let elapsed_ms = captured.elapsed.as_millis();
+    let harness_code = captured.status.code();
+    let harness_ok = harness_code == Some(0);
 
-    // The harness exit code is authoritative (see docs/commands/corpus.md):
-    //   0 = clean, 1 = compile_fail/runtime_fail break(s), 2 = harness
-    //   error (bad manifest, unreadable feeds). Anything else (signal,
-    //   unexpected code) is a failure too.
-    match captured.status.code() {
-        Some(0) => {
-            output::corpus_msg(&format!("PASS in {elapsed_ms}ms"));
+    // Bless: record the current dispositions into pins.toml and stop. Bless
+    // adopts reality regardless of parity breaks, so it does not gate; the
+    // run dir is kept as success/failure to mirror the harness exit.
+    if args.bless {
+        let pins_path = registry_dir.join("pins.toml");
+        crate::piners::bless::apply(&pins_path, &mut registry.pins, &report, &ids)?;
+        if harness_ok {
             artefacts.finalize_success()?;
-            Ok(())
-        }
-        other => {
-            let dir = artefacts.path().to_path_buf();
+        } else {
             artefacts.finalize_failure();
-            let reason = match other {
+        }
+        return Ok(());
+    }
+
+    // Per-probe expected-disposition gate. Any deviation (or an unblessed /
+    // never-emitted probe) fails the run unless --no-gate downgrades it to
+    // informational. The harness exit code remains authoritative for breaks.
+    let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
+    if !gate_diffs.is_empty() {
+        crate::piners::gate::render_diffs(&gate_diffs);
+    }
+    let gate_blocks = !gate_diffs.is_empty() && !args.no_gate;
+
+    if harness_ok && !gate_blocks {
+        output::corpus_msg(&format!("PASS in {elapsed_ms}ms"));
+        artefacts.finalize_success()?;
+        Ok(())
+    } else {
+        let dir = artefacts.path().to_path_buf();
+        artefacts.finalize_failure();
+        // Harness breaks are the more fundamental failure; report them
+        // first, falling back to the gate when the harness itself was clean.
+        let reason = if harness_ok {
+            format!("{} gate deviation(s)", gate_diffs.len())
+        } else {
+            match harness_code {
                 Some(1) => "parity break(s)".to_owned(),
                 Some(2) => "harness error".to_owned(),
                 Some(c) => format!("harness exit={c}"),
                 None => "harness killed by signal".to_owned(),
-            };
-            output::corpus_msg(&format!(
-                "FAIL: {reason} in {elapsed_ms}ms (artefacts: {})",
-                dir.display()
-            ));
-            Err(DevError::ExitCode(1))
-        }
+            }
+        };
+        output::corpus_msg(&format!(
+            "FAIL: {reason} in {elapsed_ms}ms (artefacts: {})",
+            dir.display()
+        ));
+        Err(DevError::ExitCode(1))
     }
 }

@@ -67,7 +67,7 @@ pub fn run(
         BTreeMap::new()
     };
 
-    let new_pins = if args.all {
+    let mut new_pins = if args.all {
         stamp_all(&validation, &corpus_root)?
     } else if let Some(id) = &args.probe {
         let mut merged = existing.clone();
@@ -81,10 +81,15 @@ pub fn run(
         ));
     };
 
+    // Reseed touches the pinned content (pine/csv hashes) only. The blessed
+    // `expected` disposition is an independent contract owned by `--bless`,
+    // so carry it forward for every probe that survives the re-stamp.
+    carry_expected(&mut new_pins, &existing);
+
     let diff = Diff::compute(&existing, &new_pins);
 
     std::fs::create_dir_all(&registry_dir).map_err(DevError::Io)?;
-    std::fs::write(&pins_path, format_pins(&new_pins)).map_err(DevError::Io)?;
+    std::fs::write(&pins_path, registry::serialize_pins(&new_pins)).map_err(DevError::Io)?;
 
     output::corpus_msg(&format!(
         "reseed: {} probe(s) -> {} (added={} changed={} removed={})",
@@ -114,6 +119,8 @@ fn stamp_one(id: &str, corpus_root: &Path) -> Result<Pin, DevError> {
     }
 
     Ok(Pin {
+        // Content-only stamp; the caller carries `expected` forward.
+        expected: None,
         pine: FilePin {
             path: pine_rel,
             xxh128: preflight::compute_xxh128(&pine_abs)?,
@@ -123,6 +130,17 @@ fn stamp_one(id: &str, corpus_root: &Path) -> Result<Pin, DevError> {
             xxh128: preflight::compute_xxh128(&csv_abs)?,
         },
     })
+}
+
+/// Copy each surviving probe's blessed `expected` from the old pin set into
+/// the freshly stamped one. A probe new to the corpus stays `expected: None`
+/// (unblessed), which the gate treats as a hard "must bless".
+fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
+    for (id, pin) in new.iter_mut() {
+        if let Some(prev) = old.get(id) {
+            pin.expected = prev.expected.clone();
+        }
+    }
 }
 
 /// Walk `validation/` and stamp every single-oracle parity probe.
@@ -201,57 +219,6 @@ impl Diff {
     }
 }
 
-/// Render the pin set as deterministic TOML: entries sorted by id (the
-/// `BTreeMap` iteration order), inline `pine`/`csv` tables with exactly
-/// `path` + `xxh128`, blank line between entries, single trailing newline.
-fn format_pins(pins: &BTreeMap<String, Pin>) -> String {
-    let entries: Vec<String> = pins
-        .iter()
-        .map(|(id, pin)| {
-            format!(
-                "[probes.{}]\npine = {{ path = {}, xxh128 = {} }}\ncsv = {{ path = {}, xxh128 = {} }}\n",
-                toml_key(id),
-                toml_str(&pin.pine.path.to_string_lossy()),
-                toml_str(&pin.pine.xxh128),
-                toml_str(&pin.csv.path.to_string_lossy()),
-                toml_str(&pin.csv.xxh128),
-            )
-        })
-        .collect();
-    // Each entry already ends in a newline; joining with one more puts a
-    // blank line between entries and leaves a single trailing newline.
-    entries.join("\n")
-}
-
-/// A probe id as a TOML key: bare when it is all `[A-Za-z0-9_-]`, else
-/// quoted.
-fn toml_key(id: &str) -> String {
-    let bare = !id.is_empty()
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    if bare {
-        id.to_owned()
-    } else {
-        toml_str(id)
-    }
-}
-
-/// A TOML basic string with `"` and `\` escaped.
-fn toml_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -259,6 +226,7 @@ mod tests {
 
     fn pin(p: &str, h: &str) -> Pin {
         Pin {
+            expected: None,
             pine: FilePin {
                 path: PathBuf::from(format!("validation/{p}/strategy.pine")),
                 xxh128: h.to_owned(),
@@ -271,26 +239,24 @@ mod tests {
     }
 
     #[test]
-    fn format_is_sorted_and_inline() {
-        let mut pins = BTreeMap::new();
-        pins.insert("zeta-01".to_owned(), pin("zeta-01", "ff"));
-        pins.insert("alpha-01".to_owned(), pin("alpha-01", "aa"));
-        let out = format_pins(&pins);
-        // alpha sorts before zeta
-        assert!(out.find("alpha-01").unwrap() < out.find("zeta-01").unwrap());
-        assert!(out.contains("pine = { path = \"validation/alpha-01/strategy.pine\", xxh128 = \"aa\" }"));
-        assert!(out.ends_with("}\n"));
-    }
+    fn carry_expected_preserves_blessed_label_across_restamp() {
+        // old probe was blessed; the re-stamp produced a fresh (expected:
+        // None) pin with a new hash. carry_expected must restore the label.
+        let mut old = BTreeMap::new();
+        let mut blessed = pin("keep", "old-hash");
+        blessed.expected = Some("accepted".to_owned());
+        old.insert("keep".to_owned(), blessed);
+        old.insert("vanished".to_owned(), pin("vanished", "x"));
 
-    #[test]
-    fn format_round_trips_through_loader() {
-        let mut pins = BTreeMap::new();
-        pins.insert("p-01".to_owned(), pin("p-01", "abc123"));
-        let text = format_pins(&pins);
-        let parsed: BTreeMap<String, Pin> = toml::from_str::<super::ReparseProbes>(&text)
-            .unwrap()
-            .probes;
-        assert_eq!(parsed, pins);
+        let mut new = BTreeMap::new();
+        new.insert("keep".to_owned(), pin("keep", "new-hash")); // re-stamped
+        new.insert("fresh".to_owned(), pin("fresh", "y")); // brand new
+
+        carry_expected(&mut new, &old);
+
+        assert_eq!(new["keep"].expected.as_deref(), Some("accepted"));
+        assert_eq!(new["keep"].pine.xxh128, "new-hash"); // content still updated
+        assert_eq!(new["fresh"].expected, None); // unblessed newcomer
     }
 
     #[test]
@@ -305,12 +271,6 @@ mod tests {
         new.insert("fresh".to_owned(), pin("fresh", "33"));
         let d = Diff::compute(&old, &new);
         assert_eq!((d.added, d.changed, d.removed), (1, 1, 1));
-    }
-
-    #[test]
-    fn toml_key_quotes_only_when_needed() {
-        assert_eq!(toml_key("magnifier-tick-01"), "magnifier-tick-01");
-        assert_eq!(toml_key("weird.id"), "\"weird.id\"");
     }
 
     #[test]
@@ -337,11 +297,4 @@ mod tests {
         assert_eq!(pins.len(), 1);
         assert!(pins.contains_key("alpha-01"));
     }
-}
-
-#[cfg(test)]
-#[derive(serde::Deserialize)]
-struct ReparseProbes {
-    #[serde(default)]
-    probes: BTreeMap<String, Pin>,
 }

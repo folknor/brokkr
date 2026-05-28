@@ -28,6 +28,26 @@ use crate::preflight;
 /// File name of the canonical pin file inside the registry directory.
 const PINS_FILE: &str = "pins.toml";
 
+/// The canonical per-probe disposition labels. A probe's actual disposition
+/// (and its pinned `expected`) is one of these: the four parity acceptance
+/// tiers, then the four non-`parity` outcomes. This is the single unit the
+/// gate compares - `count_tier` (exact/near/drift) stays diagnostic.
+pub const DISPOSITION_LABELS: [&str; 8] = [
+    "byte_exact",
+    "accepted",
+    "actionable_drift",
+    "count_divergent",
+    "compile_fail",
+    "runtime_fail",
+    "no_tv_data",
+    "no_overlap",
+];
+
+/// True if `label` is one of [`DISPOSITION_LABELS`].
+pub fn is_disposition(label: &str) -> bool {
+    DISPOSITION_LABELS.contains(&label)
+}
+
 /// One pinned file: a path relative to the corpus root plus its xxh128.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -38,10 +58,17 @@ pub struct FilePin {
     pub xxh128: String,
 }
 
-/// A pinned probe: its input script and its oracle trade list.
+/// A pinned probe: its input script, its oracle trade list, and the
+/// disposition the gate holds it to.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Pin {
+    /// The blessed disposition label (one of [`DISPOSITION_LABELS`]). `None`
+    /// means never blessed: the gate treats that as a hard "must bless"
+    /// failure rather than passing silently. Stamped by `--bless`, preserved
+    /// across `--reseed` (which touches `pine`/`csv` only).
+    #[serde(default)]
+    pub expected: Option<String>,
     pub pine: FilePin,
     pub csv: FilePin,
 }
@@ -130,8 +157,10 @@ impl Registry {
     }
 
     /// Structural lint: every id referenced by a keyword file must exist
-    /// in `pins.toml`. A keyword pointing at an unknown id means the
-    /// registry is lying about what is selectable.
+    /// in `pins.toml`, and every pinned `expected` must be a known
+    /// disposition label. A keyword pointing at an unknown id means the
+    /// registry is lying about what is selectable; an unknown `expected`
+    /// means the gate could never be satisfied.
     pub fn lint(&self) -> Result<(), DevError> {
         let mut dangling: Vec<String> = Vec::new();
         for (keyword, ids) in &self.keywords {
@@ -141,13 +170,32 @@ impl Registry {
                 }
             }
         }
-        if dangling.is_empty() {
+        let mut bad_expected: Vec<String> = Vec::new();
+        for (id, pin) in &self.pins {
+            if let Some(exp) = &pin.expected
+                && !is_disposition(exp)
+            {
+                bad_expected.push(format!("{id} -> expected = \"{exp}\""));
+            }
+        }
+        let mut errs: Vec<String> = Vec::new();
+        if !dangling.is_empty() {
+            errs.push(format!(
+                "keyword file(s) reference ids absent from {PINS_FILE}:\n  {}",
+                dangling.join("\n  ")
+            ));
+        }
+        if !bad_expected.is_empty() {
+            errs.push(format!(
+                "pin(s) carry an unknown `expected` label (must be one of {}):\n  {}",
+                DISPOSITION_LABELS.join(", "),
+                bad_expected.join("\n  ")
+            ));
+        }
+        if errs.is_empty() {
             Ok(())
         } else {
-            Err(DevError::Config(format!(
-                "piners: keyword file(s) reference ids absent from {PINS_FILE}:\n  {}",
-                dangling.join("\n  ")
-            )))
+            Err(DevError::Config(format!("piners: {}", errs.join("\n"))))
         }
     }
 
@@ -223,6 +271,61 @@ fn verify_one(
     Ok(())
 }
 
+/// Render a pin set as deterministic `pins.toml`: entries sorted by id (the
+/// `BTreeMap` order), an `expected` line first when blessed, then inline
+/// `pine`/`csv = { path, xxh128 }` tables. Blank line between entries, single
+/// trailing newline. Shared by `--reseed` and `--bless`, the two writers.
+pub fn serialize_pins(pins: &BTreeMap<String, Pin>) -> String {
+    let entries: Vec<String> = pins
+        .iter()
+        .map(|(id, pin)| {
+            let mut s = format!("[probes.{}]\n", toml_key(id));
+            if let Some(exp) = &pin.expected {
+                s.push_str(&format!("expected = {}\n", toml_str(exp)));
+            }
+            s.push_str(&format!(
+                "pine = {{ path = {}, xxh128 = {} }}\ncsv = {{ path = {}, xxh128 = {} }}\n",
+                toml_str(&pin.pine.path.to_string_lossy()),
+                toml_str(&pin.pine.xxh128),
+                toml_str(&pin.csv.path.to_string_lossy()),
+                toml_str(&pin.csv.xxh128),
+            ));
+            s
+        })
+        .collect();
+    // Each entry ends in a newline; joining with one more puts a blank line
+    // between entries and leaves a single trailing newline.
+    entries.join("\n")
+}
+
+/// A probe id as a TOML key: bare when it is all `[A-Za-z0-9_-]`, else quoted.
+fn toml_key(id: &str) -> String {
+    let bare = !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if bare {
+        id.to_owned()
+    } else {
+        toml_str(id)
+    }
+}
+
+/// A TOML basic string with `"` and `\` escaped.
+fn toml_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -234,6 +337,7 @@ mod tests {
             pins.insert(
                 (*id).to_owned(),
                 Pin {
+                    expected: None,
                     pine: FilePin {
                         path: PathBuf::from(format!("validation/{id}/strategy.pine")),
                         xxh128: "00".into(),
@@ -300,5 +404,36 @@ csv  = { path = "validation/beta-02/tv_trades.csv", xxh128 = "ddd" }
         assert_eq!(r.pins["alpha-01"].pine.xxh128, "aaa");
         assert_eq!(r.keywords["ema"], vec!["alpha-01".to_owned()]);
         assert!(r.lint().is_ok());
+    }
+
+    #[test]
+    fn lint_fails_on_unknown_expected_label() {
+        let mut r = registry_with(&[], &["a"]);
+        r.pins.get_mut("a").unwrap().expected = Some("totally-bogus".to_owned());
+        let err = r.lint().unwrap_err();
+        assert!(format!("{err:?}").contains("totally-bogus"));
+    }
+
+    #[test]
+    fn serialize_pins_emits_expected_and_round_trips() {
+        let mut r = registry_with(&[], &["alpha-01"]);
+        r.pins.get_mut("alpha-01").unwrap().expected = Some("accepted".to_owned());
+        let text = serialize_pins(&r.pins);
+        assert!(text.contains("expected = \"accepted\""));
+        // expected precedes pine within the entry.
+        assert!(text.find("expected").unwrap() < text.find("pine").unwrap());
+        let reparsed = load_pins_str(&text);
+        assert_eq!(reparsed["alpha-01"].expected.as_deref(), Some("accepted"));
+        assert_eq!(reparsed["alpha-01"].pine.xxh128, "00");
+    }
+
+    fn load_pins_str(text: &str) -> BTreeMap<String, Pin> {
+        toml::from_str::<PinsFile>(text).unwrap().probes
+    }
+
+    #[test]
+    fn toml_key_quotes_only_when_needed() {
+        assert_eq!(toml_key("magnifier-tick-01"), "magnifier-tick-01");
+        assert_eq!(toml_key("weird.id"), "\"weird.id\"");
     }
 }

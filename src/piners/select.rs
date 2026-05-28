@@ -98,6 +98,7 @@ mod tests {
 
     fn pin() -> Pin {
         Pin {
+            expected: None,
             pine: FilePin {
                 path: PathBuf::from("p.pine"),
                 xxh128: "00".into(),

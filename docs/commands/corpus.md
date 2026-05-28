@@ -3,15 +3,12 @@
 Gated to `project = "piners"`. Runs a keyword-selected slice of the
 PineScript-v6 parity corpus to completion, uncapped, so the VM-iteration
 loop (edit Rust, run the relevant probes, read the verdict) stays inside
-the prompt-cache-warm window. The full-corpus characterization pass still
-exists (`--all`) but is explicitly off the fast budget.
-
-Helpers live in `src/piners/` (`registry.rs`, `select.rs`, `manifest.rs`,
-`report.rs`, `cmd.rs`).
+the prompt-cache-warm window. `--all` is the full characterization pass,
+explicitly off the fast budget. Helpers live in `src/piners/`.
 
 ## `[piners]` config
 
-Kept out of the `[[check]]` sweep, like `[ratatoskr]`. All paths resolve
+Kept out of the `[[check]]` sweep, like `[ratatoskr]`. Paths resolve
 relative to `brokkr.toml`.
 
 ```toml
@@ -25,7 +22,7 @@ registry_dir = "corpus-registry" # pins.toml + <keyword>.toml files (default)
 "1m" = "corpus/data/feed-1m.parquet"
 
 # Corpus harness binary, reusing the shared [*.harness] shape. Required to
-# run probes; --verify-only works without it.
+# run probes; --verify-only and --reseed work without it.
 [piners.harness]
 package = "piners-runner"  # cargo package
 binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin corpus`)
@@ -37,29 +34,29 @@ binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin c
 
 The corpus is a read-only git submodule (default `./corpus`, upstream
 `pineforge-corpus`). Each probe is a directory with `strategy.pine` (the
-input) and `tv_trades.csv` (the TradingView oracle). It is read-only:
-anything written inside diverges from upstream and is clobbered on re-pin.
-
-Probes are pinned in a piners-owned registry (default `corpus-registry/`),
-normalized into two file kinds:
+input) and `tv_trades.csv` (the TradingView oracle); writing inside it
+diverges from upstream and is clobbered on re-pin. Probes are pinned in a
+piners-owned registry (default `corpus-registry/`), two file kinds:
 
 - `pins.toml` - the canonical, verified universe. One `[probes.<id>]`
-  table per probe, each pinning both files by path + xxh128:
+  table per probe, pinning both files by path + xxh128 and the disposition
+  the gate holds the probe to:
 
   ```toml
   [probes.magnifier-tick-dist-endpoints-01]
+  expected = "actionable_drift"  # the blessed disposition (gate contract)
   pine = { path = "validation/<id>/strategy.pine", xxh128 = "<hex>" }
   csv  = { path = "validation/<id>/tv_trades.csv", xxh128 = "<hex>" }
   ```
 
   `path` is relative to `corpus_root`. `xxh128` is brokkr's standard file
-  hash (`preflight::compute_xxh128`, 32 lowercase hex chars,
-  case-insensitive compare).
+  hash (`preflight::compute_xxh128`, 32 lowercase hex, case-insensitive).
+  `expected` is one disposition label (see the gate, below); absent until
+  the probe is blessed.
 
 - `<keyword>.toml` (any other `*.toml`) - a pure selection grouping. The
-  keyword is the file stem; the body is `probes = ["id", ...]`. Keyword
-  files carry ids only, never hashes - the hash is the most volatile field
-  (it changes on every upstream re-pin), so it lives in exactly one place.
+  keyword is the file stem; body is `probes = ["id", ...]`. Ids only - the
+  volatile fields (hashes, expectations) live only in `pins.toml`.
 
 The hash is pinned, not just the name: a name alone is unverifiable because
 upstream can re-pin and change a probe's bytes under the same name.
@@ -71,129 +68,133 @@ Selection is over the pinned universe. No selection (and no `--all` /
 full-corpus pass never runs by accident.
 
 - `--keyword <k>` (repeatable) - union of the listed groupings.
-- `--probe <id>` - one probe, resolved directly against `pins.toml`. A
-  probe that is pinned but absent from every keyword file is still
-  selectable this way.
+- `--probe <id>` - one probe, resolved directly against `pins.toml`.
 - `--all` - the whole pinned universe (slow characterization pass).
 - `--verify-only` - verify every pinned probe against the submodule and
-  exit, without building or running. Use after a submodule re-pin to catch
-  drift.
-- `--reseed` - stamp `pins.toml` from the corpus filesystem; see below.
+  exit, without building or running. Use after a submodule re-pin.
+- `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
+- `--bless` - run the selection, then stamp current dispositions (below).
 
-## Verification (the hard gate)
+## Verification (the content gate)
 
-On every run, each selected probe's two pinned files are resolved under
-`corpus_root` and hashed. A missing path or a hash mismatch is a hard
-error before anything is built or run - the registry is lying or the
-submodule drifted. There is no `--allow-drift` override; re-stamp the
-registry with `--reseed` (the deliberate act of re-validating the oracle)
-or fix the submodule. This is the only correctness gate today; parity
-pass/fail baselines are deferred.
+Each selected probe's two files are resolved under `corpus_root` and
+hashed before any build. A missing path or hash mismatch is a hard error
+(registry lying or submodule drifted) - no `--allow-drift`; re-stamp with
+`--reseed` or fix the submodule.
 
-## Reseed: creating and re-stamping pins.toml
+## The expected-disposition gate
 
-`--reseed` is the bootstrap and after-re-pin re-stamp - the only
-sanctioned way `pins.toml` is created or refreshed (`--verify-only` only
-compares against existing pins). No build, no harness, no
-`[piners.harness]` needed; mutually exclusive with `--verify-only` and
-`--keyword`. Unlike every other mode its universe is the corpus
-**filesystem**, not `pins.toml` - it pins probes not yet pinned, resolving
-ids against `corpus_root/validation/<id>/`.
+Aggregate floors (the old `≥132 exact` thresholds) are gone - a regression
+on one probe could hide behind another's improvement. Each probe pins an
+`expected` disposition, one of:
 
-- `--reseed --all` - stamp every parity probe under `validation/`;
-  top-level dirs without `tv_trades.csv` (multi-mode self-tests, per-symbol
-  containers) are skipped with a count. Authoritative full regen: a probe
-  whose dir vanished upstream drops out.
-- `--reseed --probe <id>` - upsert one probe (hard-errors on a missing
-  file, since you named it explicitly).
+```
+byte_exact | accepted | actionable_drift | count_divergent   (parity tiers)
+compile_fail | runtime_fail | no_tv_data | no_overlap         (outcomes)
+```
 
-Output is deterministic (sorted by id, inline `pine`/`csv = { path,
-xxh128 }`) and idempotent. It prints `added=N changed=M removed=K`; `git
-diff pins.toml` is the review surface where a re-pin's drift becomes
-visible. Bootstrap: `brokkr corpus --reseed --all`, commit, write keyword
-files, run a slice.
+A probe's *actual* disposition is its acceptance tier (`outcome == parity`)
+else the outcome. brokkr compares actual vs `expected` per selected probe;
+**any** deviation fails - regression (`accepted -> count_divergent`) and
+surprise improvement (`actionable_drift -> accepted`) alike, each as `id:
+expected X, got Y`. No `expected` yet (freshly reseeded) is a hard "must
+bless"; so is a selected probe the harness emitted no line for. `count_tier`
+is *not* gated (diagnostic only). `--no-gate` downgrades the gate to
+informational (still runs/aggregates/prints; harness exit governs breaks) -
+for rollout or ad-hoc breakdown runs.
+
+## Reseed and bless: the two writers of pins.toml
+
+Independent deliberate acts, reviewed via `git diff pins.toml`: reseed
+adopts new *content*, bless adopts new *dispositions*.
+
+`--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
+the only way the file is created or its hashes refreshed. No build/harness.
+Excludes `--verify-only`/`--keyword`.
+
+- `--reseed --all` - stamp every parity probe under `validation/`; dirs
+  without `tv_trades.csv` (self-tests, symbol containers) skipped with a
+  count; vanished probes drop out.
+- `--reseed --probe <id>` - upsert one (hard-errors on a missing file).
+
+Prints `added/changed/removed`. Touches `pine`/`csv` only - **preserves**
+each surviving probe's `expected`; a brand-new probe stays unblessed.
+
+`--bless [--all|--keyword <k>|--probe <id>]` runs the selection (verify +
+build + harness), then stamps each probe's current disposition into
+`expected`. Records reality including fails (a probe exercising an
+unimplemented feature legitimately pins `expected = "compile_fail"`; the
+gate then catches it starting to compile). Never gates. Prints `blessed N
+(changed M)`. Excludes `--verify-only`/`--reseed`.
+
+Bootstrap: `--reseed --all` → commit → write keyword files → `--bless
+--all` → commit → runs are gated.
 
 ## The manifest hand-off
 
-After verification brokkr writes `manifest.json` into the run dir and
-hands its path to the harness. The harness consumes only the manifest - it
-never re-resolves paths or re-checks hashes. Schema:
+After verification brokkr writes `manifest.json` into the run dir and hands
+its path to the harness, which consumes only the manifest (never
+re-resolving paths or re-checking hashes). Schema:
 
 ```json
 {
   "version": 1,
   "corpus_root": "/abs/path/to/corpus",
-  "probes": [
-    {
-      "probe": "magnifier-tick-dist-endpoints-01",
-      "probe_dir": "validation/magnifier-tick-dist-endpoints-01",
-      "pine": { "path": "validation/<id>/strategy.pine", "xxh128": "..." },
-      "csv":  { "path": "validation/<id>/tv_trades.csv", "xxh128": "..." },
-      "keywords": ["magnifier"]
-    }
-  ],
+  "probes": [{
+    "probe": "<id>", "probe_dir": "validation/<id>",
+    "pine": { "path": "validation/<id>/strategy.pine", "xxh128": "..." },
+    "csv":  { "path": "validation/<id>/tv_trades.csv", "xxh128": "..." },
+    "keywords": ["magnifier"]
+  }],
   "feeds": { "1m": "/abs/path/to/feed.parquet" }
 }
 ```
 
-All probe paths are relative to the top-level `corpus_root`. Each entry
-carries the explicit canonical `probe` id (the `pins.toml` key) so the
-harness emits it verbatim rather than inferring an id from `probe_dir`'s
-basename (fragile once first-party probes land). The harness ignores
-`pine`/`csv`/`keywords` - brokkr already verified them; they are a record.
-`feeds` are absolute (resolved relative to `brokkr.toml`) and passed
-through verbatim.
+Probe paths are relative to `corpus_root`. The explicit `probe` id (the
+`pins.toml` key) is what the harness emits - never inferred from
+`probe_dir`'s basename. `expected` is brokkr-side (the gate), *not* in the
+manifest. The harness ignores `pine`/`csv`/`keywords` (already verified; a
+record). `feeds` are absolute, passed through verbatim.
 
 ## The harness contract
 
-brokkr builds the `[piners.harness]` binary once (`cargo build -p <pkg>
---bin <bin>`, debug profile by default - parity is opt-level-independent),
-then spawns it as:
+Built once (`cargo build -p <pkg> --bin <bin>`, debug by default - parity
+is opt-level-independent), then spawned as `<bin> --manifest
+<run-dir>/manifest.json` with `BROKKR_HARNESS_ARTEFACT_DIR` (run dir) and
+`BROKKR_TEST_BIN_DIR` (`target/debug/`) set, mirroring ratatoskr.
 
-```
-<bin> --manifest <run-dir>/manifest.json
-```
-
-with `BROKKR_HARNESS_ARTEFACT_DIR` (the run dir) and `BROKKR_TEST_BIN_DIR`
-(`target/debug/`) set, mirroring ratatoskr's `--test-harness` spawn. The
-binary emits NDJSON to stdout: one disposition line per probe, then a
-summary line.
-
-Per-probe line:
+Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 
 ```json
-{"probe":"<id>","outcome":"parity","matched":42,"ours_only":0,"tv_only":0,
- "count_tier":"exact",
- "acceptance":{"tier":"accepted","profile":"production",
-               "p90":{"entry":0.0,"exit":0.18},"failing":["exit_price"]}}
+{"probe":"<id>","outcome":"parity","matched":218,"ours_only":0,"tv_only":0,
+ "count_tier":"drift",
+ "acceptance":{"tier":"actionable_drift","profile":"production","failing":["exit_price"]},
+ "signature":{"domain":"broker-fidelity","leg":"exit","dimension":"exit_price","dimension_breaches":3},
+ "dense_na_sites":[{"name":"strategy.exit","call_site":"...","na_count":7}]}
 ```
 
-`outcome` is `parity | compile_fail | runtime_fail | no_tv_data |
-no_overlap`. `count_tier` and `acceptance` (tier `byte_exact | accepted |
-actionable_drift | count_divergent`; profile `strict | production`) are
-present only when `outcome == "parity"`. A `*_fail` outcome carries an
-`error` string instead. Summary line: `{"summary":true,"total":...,...}`.
+- `outcome`: `parity | compile_fail | runtime_fail | no_tv_data | no_overlap`.
+- `count_tier` (`exact|near|drift`) + `acceptance` (tier `byte_exact|accepted|
+  actionable_drift|count_divergent`, profile `strict|production`): parity only.
+- `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
+- `*_fail`: carries `error` instead of the parity fields.
 
-brokkr parses these tolerantly (unknown fields ignored, forward-compat)
-and renders a per-probe table plus the summary.
+brokkr parses tolerantly (unknown fields ignored; `signature`/`dense_na_sites`
+model only the fields it groups by) and renders per-probe lines + a computed
+summary + root-cause breakdown (by `signature` domain/dimension) + dense-na
+breakdown (by builtin: site/na/probe counts).
 
 ## Exit codes
 
-The harness exit code is authoritative:
-
-- `0` - clean.
-- `1` - one or more `compile_fail` / `runtime_fail` breaks.
-- `2` - harness error (bad manifest, unreadable feeds).
-
-brokkr maps a non-zero harness exit (and any signal) to `PASS`/`FAIL` and
-exits non-zero. `actionable_drift` does not fail the run yet - the tier is
-reported and read by the caller; tier-based pass/fail arrives with the
-deferred parity-baseline work. A hash mismatch fails earlier, before the
-build.
+Harness exit: `0` clean, `1` compile/runtime break(s), `2` harness error.
+brokkr exits non-zero on a non-zero harness exit (or signal) **or** an
+active gate deviation. Hash mismatch fails earlier (before build).
+`--no-gate` and `--bless` never fail on gate diffs; `--verify-only` exits 0
+once all pins verify.
 
 ## Artefacts
 
 Each invocation gets `.brokkr/piners/corpus/run-N/` holding `manifest.json`
-plus the captured `harness.stdout` / `harness.stderr`. The dir is dropped
-on success unless `--keep-artefacts`; failures are always preserved.
-`brokkr clean` wipes `.brokkr/piners/`.
+plus captured `harness.stdout` / `harness.stderr`. Dropped on success
+unless `--keep-artefacts`; failures are always preserved. `brokkr clean`
+wipes `.brokkr/piners/`.
