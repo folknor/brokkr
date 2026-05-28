@@ -19,6 +19,13 @@ pub(crate) struct ResultsQuery {
     pub(crate) grep: Vec<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
+    // ----- piners corpus-store query fields (ignored for other projects) -----
+    pub(crate) probe: Option<String>,
+    pub(crate) diffs: bool,
+    pub(crate) trend: Option<String>,
+    pub(crate) run: Option<i64>,
+    pub(crate) where_expr: Option<String>,
+    pub(crate) sql: Option<String>,
 }
 
 /// Query parameters for the `sidecar` command.

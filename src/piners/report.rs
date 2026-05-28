@@ -9,12 +9,13 @@
 //! stray legacy `summary` line is skipped rather than mis-parsed as a probe.
 //!
 //! Lines are discriminated by an optional `kind` field. A line with no `kind`
-//! - or `kind == "disposition"` - is a per-probe disposition line: the only
-//! kind that feeds aggregation and the gate. Any other `kind` (e.g. the
-//! harness's per-trade `trade_diff` drill-down records) is tolerated and
-//! skipped, living in `harness.stdout` for inspection but never touching the
-//! summary, breakdowns, or exit code. This tolerate-and-skip posture means a
-//! new harness record kind needs no brokkr change.
+//! (or `kind == "disposition"`) is a per-probe disposition line: the only kind
+//! that feeds aggregation and the gate. A `kind == "trade_diff"` line is a
+//! per-trade drill-down record; brokkr collects these into the report so the
+//! corpus DB can persist them, but they never touch the summary, breakdowns,
+//! or exit code. Any other `kind` is tolerated and skipped, so a new harness
+//! record kind needs no brokkr change beyond (optionally) modelling it for
+//! persistence.
 
 use std::collections::BTreeMap;
 
@@ -22,6 +23,19 @@ use serde::Deserialize;
 
 use crate::output;
 use crate::piners::registry;
+
+/// Per-dimension p90 divergence magnitudes carried on the acceptance block of
+/// a non-exact parity probe. Each field is absent when that dimension had no
+/// divergence to summarize.
+#[derive(Debug, Clone, Deserialize)]
+pub struct P90 {
+    #[serde(default)]
+    pub entry: Option<f64>,
+    #[serde(default)]
+    pub exit: Option<f64>,
+    #[serde(default)]
+    pub pnl: Option<f64>,
+}
 
 /// Acceptance detail, present only when `outcome == "parity"`.
 #[derive(Debug, Clone, Deserialize)]
@@ -32,26 +46,38 @@ pub struct Acceptance {
     pub profile: String,
     #[serde(default)]
     pub failing: Vec<String>,
+    /// Per-dimension p90 magnitudes; present on non-exact parity probes.
+    #[serde(default)]
+    pub p90: Option<P90>,
 }
 
-/// Root-cause signature, present on non-exact parity probes. The harness
-/// line carries more (`leg`, `detail`, `dimension_breaches`, builtin hints);
-/// brokkr models only what it groups by and lets serde drop the rest
-/// (forward-compat - these structs deliberately omit `deny_unknown_fields`).
+/// Root-cause signature, present on non-exact parity probes. brokkr groups by
+/// `domain`/`dimension` and persists the rest (`leg`, `detail`,
+/// `dimension_breaches`) to the corpus DB. Still forward-compat: serde drops
+/// any field not modelled here (no `deny_unknown_fields`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Signature {
     #[serde(default)]
     pub domain: String,
     #[serde(default)]
     pub dimension: String,
+    #[serde(default)]
+    pub leg: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub dimension_breaches: u64,
 }
 
-/// One dense-`na` call site, present only when non-empty. The harness also
-/// carries `call_site`; brokkr aggregates by `name` and sums `na_count`.
+/// One dense-`na` call site, present only when non-empty. brokkr aggregates by
+/// `name` and sums `na_count` for the console breakdown, and persists
+/// `call_site` to the corpus DB so individual sites stay queryable.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DenseNaSite {
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub call_site: String,
     #[serde(default)]
     pub na_count: u64,
 }
@@ -99,10 +125,66 @@ impl ProbeLine {
     }
 }
 
+/// A per-trade `trade_diff` drill-down line (`kind == "trade_diff"`), one per
+/// matched-but-divergent trade pair. The nine index/`our_*` fields are always
+/// present; every other field is omitted by the harness when its leg or
+/// metadata is absent (open round trips, a ts not found in the bar series, a
+/// missing entry/exit leg), hence `Option`. brokkr persists these verbatim to
+/// the corpus DB - they never enter aggregation or the gate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TradeDiffLine {
+    pub probe: String,
+    pub our_index: i64,
+    pub tv_index: i64,
+    pub our_entry_ts: i64,
+    pub our_exit_ts: i64,
+    pub our_entry_price: f64,
+    pub our_exit_price: f64,
+    pub our_qty: f64,
+    pub our_pnl: f64,
+    #[serde(default)]
+    pub entry_ts_delta: Option<i64>,
+    #[serde(default)]
+    pub exit_ts_delta: Option<i64>,
+    #[serde(default)]
+    pub entry_price_delta: Option<f64>,
+    #[serde(default)]
+    pub exit_price_delta: Option<f64>,
+    #[serde(default)]
+    pub our_entry_bar: Option<i64>,
+    #[serde(default)]
+    pub our_exit_bar: Option<i64>,
+    #[serde(default)]
+    pub our_side: Option<String>,
+    #[serde(default)]
+    pub our_entry_id: Option<String>,
+    #[serde(default)]
+    pub our_exit_id: Option<String>,
+    #[serde(default)]
+    pub tv_entry_ts: Option<i64>,
+    #[serde(default)]
+    pub tv_exit_ts: Option<i64>,
+    #[serde(default)]
+    pub tv_entry_price: Option<f64>,
+    #[serde(default)]
+    pub tv_exit_price: Option<f64>,
+    #[serde(default)]
+    pub tv_entry_qty: Option<f64>,
+    #[serde(default)]
+    pub tv_pnl: Option<f64>,
+    #[serde(default)]
+    pub tv_entry_signal: Option<String>,
+    #[serde(default)]
+    pub tv_exit_signal: Option<String>,
+}
+
 /// Everything parsed out of one harness run.
 #[derive(Debug, Default)]
 pub struct HarnessReport {
     pub probes: Vec<ProbeLine>,
+    /// Per-trade drill-down records (`kind == "trade_diff"`), collected for
+    /// persistence. Empty for an exact run. Never feeds the summary or gate.
+    pub trade_diffs: Vec<TradeDiffLine>,
 }
 
 /// Computed summary tally, replacing the deleted harness-emitted summary.
@@ -182,19 +264,22 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         }
 
         // Discriminate by `kind`. A line that omits `kind` is a disposition
-        // line (the harness's original shape, unchanged); `kind == "disposition"`
-        // is the explicit form of the same. Any other `kind` - a `trade_diff`
-        // drill-down record today, or a future record type - is skipped: it
-        // lives in harness.stdout for inspection but never enters aggregation
-        // or the gate.
+        // line (the harness's original shape, unchanged); `kind ==
+        // "disposition"` is the explicit form of the same - both feed
+        // aggregation and the gate. A `kind == "trade_diff"` line is collected
+        // for persistence but stays out of aggregation. Any other `kind` - a
+        // future record type - is skipped. A line that fails to parse is
+        // surfaced as a warning but never aborts the run.
         match value.get("kind").and_then(serde_json::Value::as_str) {
-            None | Some("disposition") => {}
+            None | Some("disposition") => match serde_json::from_value::<ProbeLine>(value) {
+                Ok(p) => report.probes.push(p),
+                Err(e) => output::corpus_msg(&format!("warning: unparsable probe line: {e}")),
+            },
+            Some("trade_diff") => match serde_json::from_value::<TradeDiffLine>(value) {
+                Ok(t) => report.trade_diffs.push(t),
+                Err(e) => output::corpus_msg(&format!("warning: unparsable trade_diff line: {e}")),
+            },
             Some(_) => continue,
-        }
-
-        match serde_json::from_value::<ProbeLine>(value) {
-            Ok(p) => report.probes.push(p),
-            Err(e) => output::corpus_msg(&format!("warning: unparsable probe line: {e}")),
         }
     }
 
@@ -487,18 +572,26 @@ mod tests {
     }
 
     #[test]
-    fn skips_trade_diff_and_unknown_kind_lines() {
-        // A disposition line (no kind), a trade_diff drill-down record, and a
-        // hypothetical future record kind. Only the disposition is aggregated;
-        // the drill-down records live in stdout but never enter the report.
+    fn collects_trade_diff_and_skips_unknown_kind_lines() {
+        // A disposition line (no kind), two trade_diff drill-down records in
+        // the authoritative 26-field shape, and a hypothetical future record
+        // kind. The disposition feeds aggregation; the trade_diffs are
+        // collected for persistence but stay out of the summary; the unknown
+        // kind is skipped. The second trade_diff exercises the open/partial
+        // shape - the deltas and every `tv_*` field omitted.
         let nd = br#"{"probe":"p1","outcome":"parity","count_tier":"drift","acceptance":{"tier":"actionable_drift"}}
-{"kind":"trade_diff","probe":"p1","bar":42,"entry_id":"e1","exit_id":"x1","qty":1.0,"side":"long","ours_price":100.5,"tv_price":100.25,"price_delta":0.25}
-{"kind":"trade_diff","probe":"p1","bar":58,"entry_id":"e2","exit_id":"x2","qty":2.0,"side":"short","ours_price":99.0,"tv_price":99.0,"price_delta":0.0}
+{"kind":"trade_diff","probe":"p1","our_index":1,"tv_index":1,"entry_ts_delta":0,"exit_ts_delta":0,"entry_price_delta":2.2737367544323206e-13,"exit_price_delta":0.08000000000015461,"our_entry_ts":1745295300,"our_exit_ts":1745295300,"our_entry_bar":125,"our_exit_bar":125,"our_entry_price":1582.6000000000001,"our_exit_price":1582.14,"our_qty":1.0,"our_pnl":-0.4600000000000364,"our_side":"Long","our_entry_id":"L","our_exit_id":"X","tv_entry_ts":1745295300,"tv_exit_ts":1745295300,"tv_entry_price":1582.6,"tv_exit_price":1582.06,"tv_entry_qty":1.0,"tv_pnl":-0.54,"tv_entry_signal":"entry long","tv_exit_signal":"mid-bar stop"}
+{"kind":"trade_diff","probe":"p1","our_index":2,"tv_index":2,"our_entry_ts":1745295600,"our_exit_ts":1745295900,"our_entry_price":99.0,"our_exit_price":100.0,"our_qty":2.0,"our_pnl":2.0}
 {"kind":"future_record","probe":"p1","whatever":true}
 "#;
         let r = parse(nd);
         assert_eq!(r.probes.len(), 1); // only the disposition line
         assert_eq!(r.probes[0].probe, "p1");
+        assert_eq!(r.trade_diffs.len(), 2); // both drill-down records collected
+        assert_eq!(r.trade_diffs[0].tv_exit_signal.as_deref(), Some("mid-bar stop"));
+        assert_eq!(r.trade_diffs[1].our_index, 2);
+        assert!(r.trade_diffs[1].tv_pnl.is_none()); // omitted leg -> None
+        assert!(r.trade_diffs[1].entry_price_delta.is_none());
         let s = summarize(&r.probes);
         assert_eq!((s.total, s.actionable_drift), (1, 1)); // drill-down lines excluded
     }

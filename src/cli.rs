@@ -955,7 +955,17 @@ Examples:
   brokkr results --dataset europe                   # filter by dataset (substring match on input file)
   brokkr results --command tags-filter --dataset eu # combine filters
   brokkr results --compare a65a 911c                # compare two commits
-  brokkr results --compare a65a 911c --mode bench   # compare, filtered"
+  brokkr results --compare a65a 911c --mode bench   # compare, filtered
+
+In a piners project, `results` queries the corpus run store
+(.brokkr/piners/corpus/runs.db) instead - piners records no benchmarks.
+The bench filters above do not apply there; the piners flags below do:
+  brokkr results                                    # table of recent corpus runs
+  brokkr results 42                                 # run 42's per-probe dispositions
+  brokkr results --probe magnifier-tick-dist-endpoints-01   # disposition + trade_diff rows
+  brokkr results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
+  brokkr results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
+  brokkr results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch"
     )]
     Results {
         /// UUID prefix to look up specific result(s)
@@ -1015,6 +1025,34 @@ Examples:
         /// Maximum number of functions shown in hotpath reports (0 = all)
         #[arg(long, default_value = "10")]
         top: usize,
+
+        /// [piners] Show one probe's disposition plus its `trade_diff` rows
+        /// (for the selected/latest run).
+        #[arg(long, value_name = "ID")]
+        probe: Option<String>,
+
+        /// [piners] With `--where`, list `trade_diff` rows across the run.
+        #[arg(long)]
+        diffs: bool,
+
+        /// [piners] Trend a probe's disposition/tier/p90 over recent runs.
+        #[arg(long, value_name = "ID")]
+        trend: Option<String>,
+
+        /// [piners] Select a specific corpus run id (default: latest). Also
+        /// accepted as a bare positional argument.
+        #[arg(long, value_name = "N")]
+        run: Option<i64>,
+
+        /// [piners] Raw SQL boolean filter for `--diffs` (trusted local input;
+        /// the DB is opened read-only). E.g. `--diffs --where "exit_price_delta > 0.05"`.
+        #[arg(long = "where", value_name = "EXPR")]
+        where_expr: Option<String>,
+
+        /// [piners] Run a read-only `SELECT`/`WITH` query against runs.db
+        /// (the escape hatch for anything the canned views don't cover).
+        #[arg(long, value_name = "SQL")]
+        sql: Option<String>,
     },
     /// Query sidecar /proc timelines, markers, and phase summaries
     #[command(

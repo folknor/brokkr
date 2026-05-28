@@ -6,29 +6,11 @@ loop (edit Rust, run the relevant probes, read the verdict) stays inside
 the prompt-cache-warm window. `--all` is the full characterization pass,
 explicitly off the fast budget. Helpers live in `src/piners/`.
 
-## `[piners]` config
+## Config
 
-Kept out of the `[[check]]` sweep, like `[ratatoskr]`. Paths resolve
-relative to `brokkr.toml`.
-
-```toml
-[piners]
-corpus_root  = "corpus"          # read-only corpus submodule root (default)
-registry_dir = "corpus-registry" # pins.toml + <keyword>.toml files (default)
-
-# Shared OHLCV feeds, passed to the harness in the manifest verbatim
-# (absolute after resolution). Not hash-gated.
-[piners.feeds]
-"1m" = "corpus/data/feed-1m.parquet"
-
-# Corpus harness binary, reusing the shared [*.harness] shape. Required to
-# run probes; --verify-only and --reseed work without it.
-[piners.harness]
-package = "piners-runner"  # cargo package
-binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin corpus`)
-# features = ["..."]       # optional
-# debug = true             # corpus defaults to debug; --debug/--release also override
-```
+The `[piners]` block (`corpus_root`, `registry_dir`, `feeds`, `harness`) is
+documented in `docs/brokkr.toml.piners.md`. Kept out of the `[[check]]` sweep,
+like `[ratatoskr]`; paths resolve relative to `brokkr.toml`.
 
 ## The corpus and the registry
 
@@ -130,77 +112,6 @@ gate then catches it starting to compile). Never gates. Prints `blessed N
 Bootstrap: `--reseed --all` → commit → write keyword files → `--bless
 --all` → commit → runs are gated.
 
-## The manifest hand-off
-
-After verification brokkr writes `manifest.json` into the run dir and hands
-its path to the harness, which consumes only the manifest (never
-re-resolving paths or re-checking hashes). Schema:
-
-```json
-{
-  "version": 1,
-  "corpus_root": "/abs/path/to/corpus",
-  "probes": [{
-    "probe": "<id>", "probe_dir": "validation/<id>",
-    "pine": { "path": "validation/<id>/strategy.pine", "xxh128": "..." },
-    "csv":  { "path": "validation/<id>/tv_trades.csv", "xxh128": "..." },
-    "keywords": ["magnifier"]
-  }],
-  "feeds": { "1m": "/abs/path/to/feed.parquet" }
-}
-```
-
-Probe paths are relative to `corpus_root`. The explicit `probe` id (the
-`pins.toml` key) is what the harness emits - never inferred from
-`probe_dir`'s basename. `expected` is brokkr-side (the gate), *not* in the
-manifest. The harness ignores `pine`/`csv`/`keywords` (already verified; a
-record). `feeds` are absolute, passed through verbatim.
-
-## The harness contract
-
-Built once (`cargo build -p <pkg> --bin <bin>`, debug by default - parity
-is opt-level-independent), then spawned as `<bin> --manifest
-<run-dir>/manifest.json` with `BROKKR_HARNESS_ARTEFACT_DIR` (run dir) and
-`BROKKR_TEST_BIN_DIR` (`target/debug/`) set, mirroring ratatoskr.
-
-Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
-
-```json
-{"probe":"<id>","outcome":"parity","matched":218,"ours_only":0,"tv_only":0,
- "count_tier":"drift",
- "acceptance":{"tier":"actionable_drift","profile":"production","failing":["exit_price"]},
- "signature":{"domain":"broker-fidelity","leg":"exit","dimension":"exit_price","dimension_breaches":3},
- "dense_na_sites":[{"name":"strategy.exit","call_site":"...","na_count":7}]}
-```
-
-- `outcome`: `parity | compile_fail | runtime_fail | no_tv_data | no_overlap`.
-- `count_tier` (`exact|near|drift`) + `acceptance` (tier `byte_exact|accepted|
-  actionable_drift|count_divergent`, profile `strict|production`): parity only.
-- `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
-- `*_fail`: carries `error` instead of the parity fields.
-
-### Line kinds (`kind` discrimination)
-
-Lines carry an optional `kind` field. brokkr aggregates **only** disposition
-lines and tolerantly skips everything else, so the harness can interleave new
-record kinds without a brokkr change:
-
-- no `kind`, or `kind == "disposition"` - the per-probe line above. The only
-  kind that feeds the summary, breakdowns, and the gate. (The harness need not
-  emit `kind` on these; brokkr accepts both forms.)
-- `kind == "trade_diff"` - a per-trade drill-down record, one per divergent
-  matched pair, emitted inline in probe order (self-limiting: an exact probe
-  emits none). Carries the probe id, bar indices, entry/exit IDs, qty, side,
-  both timestamps, ours/tv prices, and deltas. brokkr never parses or
-  aggregates these - they live in `harness.stdout` for inspection (filter
-  `kind == "trade_diff"` for a probe to get its full per-trade breakdown).
-- any other `kind` - skipped (forward-compat).
-
-brokkr parses tolerantly (unknown fields ignored; `signature`/`dense_na_sites`
-model only the fields it groups by) and renders per-probe lines + a computed
-summary + root-cause breakdown (by `signature` domain/dimension) + dense-na
-breakdown (by builtin: site/na/probe counts).
-
 ## Exit codes
 
 Harness exit: `0` clean, `1` compile/runtime break(s), `2` harness error.
@@ -212,6 +123,14 @@ once all pins verify.
 ## Artefacts
 
 Each invocation gets `.brokkr/piners/corpus/run-N/` holding `manifest.json`
-plus captured `harness.stdout` / `harness.stderr`. Dropped on success
-unless `--keep-artefacts`; failures are always preserved. `brokkr clean`
-wipes `.brokkr/piners/`.
+plus captured `harness.stdout` / `harness.stderr` during the run. Every run's
+NDJSON is then ingested into the corpus run store (`runs.db`), so the dir is
+**always** dropped once ingest commits - unless `--keep-artefacts`, or on the
+`DevError::Interrupted` / spawn-error paths. `brokkr clean` removes the
+`run-N/` dirs but spares `runs.db`.
+
+## See also
+
+- `docs/brokkr.toml.piners.md` - the `[piners]` config block.
+- `docs/projects/piners.md` - the harness NDJSON + manifest contracts, the
+  `runs.db` run store and its schema, and the `brokkr results` query surface.

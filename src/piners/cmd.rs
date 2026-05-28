@@ -30,11 +30,13 @@ use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output;
+use crate::piners::corpus_db::{CorpusDb, RunRecord};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry};
 use crate::piners::report;
 use crate::piners::select::{self, SelectArgs};
 use crate::ratatoskr::build;
+use crate::resolve::corpus_runs_db_path;
 
 /// Where corpus run dirs live, relative to the project root:
 /// `<this>/corpus/run-N/`.
@@ -156,6 +158,7 @@ pub fn corpus(
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let artefacts = ArtefactDir::allocate(&artefact_parent, "corpus", args.keep_artefacts)?;
+    let corpus_db_path = corpus_runs_db_path(project_root);
 
     let manifest_path = artefacts.path().join("manifest.json");
     let manifest = Manifest::build(&corpus_root, &verified, &registry, feeds);
@@ -193,9 +196,26 @@ pub fn corpus(
             return Err(DevError::Interrupted);
         }
         Err(e) => {
-            std::fs::write(
-                artefacts.path().join("spawn-error.txt"),
-                format!("failed to spawn {}: {e}\n", built.binary.display()),
+            let msg = format!("failed to spawn {}: {e}\n", built.binary.display());
+            std::fs::write(artefacts.path().join("spawn-error.txt"), &msg).ok();
+            // Record the failed run so it surfaces in `brokkr results`, then
+            // still preserve the dir - a spawn failure is exactly when on-disk
+            // forensics matter most, and the DB row is a convenience index.
+            let selector = selector_json(args, &ids);
+            let record = RunRecord {
+                selector: &selector,
+                gated: !args.no_gate,
+                result: "fail",
+                fail_reason: Some("harness failed to spawn"),
+                harness_exit_code: None,
+                stderr: &msg,
+            };
+            ingest_run(
+                &corpus_db_path,
+                &record,
+                &report::HarnessReport::default(),
+                &BTreeMap::new(),
+                &[],
             )
             .ok();
             artefacts.finalize_failure();
@@ -205,6 +225,8 @@ pub fn corpus(
     _lock.clear_child_pid();
 
     let captured = capture.captured;
+    // Keep stdout/stderr on disk until ingest commits - the pre-ingest safety
+    // net if anything panics between here and the DB write.
     std::fs::write(artefacts.path().join("harness.stdout"), &captured.stdout).ok();
     std::fs::write(artefacts.path().join("harness.stderr"), &captured.stderr).ok();
 
@@ -215,52 +237,110 @@ pub fn corpus(
     let harness_code = captured.status.code();
     let harness_ok = harness_code == Some(0);
 
-    // Bless: record the current dispositions into pins.toml and stop. Bless
-    // adopts reality regardless of parity breaks, so it does not gate; the
-    // run dir is kept as success/failure to mirror the harness exit.
+    // Evaluate the gate up front. It drives the pass/fail decision and feeds
+    // the gate_miss table (selected probes the harness emitted no line for).
+    // Bless never gates - it ignores the verdict - but the diffs still record.
+    let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
+    let gate_blocks = !args.bless && !args.no_gate && !gate_diffs.is_empty();
+    let run_pass = harness_ok && !gate_blocks;
+
+    // One-line failure classification, mirrored into the DB so a discarded run
+    // dir loses nothing. Harness breaks rank ahead of gate deviations.
+    let fail_reason: Option<String> = if run_pass {
+        None
+    } else if harness_ok {
+        Some(format!("{} gate deviation(s)", gate_diffs.len()))
+    } else {
+        Some(match harness_code {
+            Some(1) => "parity break(s)".to_owned(),
+            Some(2) => "harness error".to_owned(),
+            Some(c) => format!("harness exit={c}"),
+            None => "harness killed by signal".to_owned(),
+        })
+    };
+
+    // Persist the run BEFORE any pins mutation or finalize, using the pinned
+    // expectations as they stand at run time. An ingest failure preserves the
+    // dir (the on-disk stdout is the evidence) and propagates.
+    let expected: BTreeMap<String, Option<String>> = ids
+        .iter()
+        .map(|id| {
+            let exp = registry.pins.get(id).and_then(|p| p.expected.clone());
+            (id.clone(), exp)
+        })
+        .collect();
+    let selector = selector_json(args, &ids);
+    let stderr_text = String::from_utf8_lossy(&captured.stderr);
+    let record = RunRecord {
+        selector: &selector,
+        gated: !args.no_gate,
+        result: if run_pass { "pass" } else { "fail" },
+        fail_reason: fail_reason.as_deref(),
+        harness_exit_code: harness_code,
+        stderr: &stderr_text,
+    };
+    if let Err(e) = ingest_run(&corpus_db_path, &record, &report, &expected, &gate_diffs) {
+        output::corpus_msg(&format!(
+            "warning: failed to persist run to {}: {e}",
+            corpus_db_path.display()
+        ));
+        artefacts.finalize_failure();
+        return Err(e);
+    }
+
+    // Bless: stamp current dispositions into pins.toml. The run is already
+    // persisted, so the dir drops like any other (unless --keep-artefacts).
     if args.bless {
         let pins_path = registry_dir.join("pins.toml");
         crate::piners::bless::apply(&pins_path, &mut registry.pins, &report, &ids)?;
-        if harness_ok {
-            artefacts.finalize_success()?;
-        } else {
-            artefacts.finalize_failure();
-        }
+        artefacts.finalize_success()?;
         return Ok(());
     }
 
-    // Per-probe expected-disposition gate. Any deviation (or an unblessed /
-    // never-emitted probe) fails the run unless --no-gate downgrades it to
-    // informational. The harness exit code remains authoritative for breaks.
-    let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
     if !gate_diffs.is_empty() {
         crate::piners::gate::render_diffs(&gate_diffs);
     }
-    let gate_blocks = !gate_diffs.is_empty() && !args.no_gate;
 
-    if harness_ok && !gate_blocks {
+    // Data is durable in the DB; the dir is always dropped (unless
+    // --keep-artefacts). No preserve-on-failure - `brokkr results` is the home
+    // for the run's drill-down now.
+    if run_pass {
         output::corpus_msg(&format!("PASS in {elapsed_ms}ms"));
         artefacts.finalize_success()?;
         Ok(())
     } else {
-        let dir = artefacts.path().to_path_buf();
-        artefacts.finalize_failure();
-        // Harness breaks are the more fundamental failure; report them
-        // first, falling back to the gate when the harness itself was clean.
-        let reason = if harness_ok {
-            format!("{} gate deviation(s)", gate_diffs.len())
-        } else {
-            match harness_code {
-                Some(1) => "parity break(s)".to_owned(),
-                Some(2) => "harness error".to_owned(),
-                Some(c) => format!("harness exit={c}"),
-                None => "harness killed by signal".to_owned(),
-            }
-        };
+        artefacts.finalize_success()?;
+        let reason = fail_reason.unwrap_or_else(|| "fail".to_owned());
         output::corpus_msg(&format!(
-            "FAIL: {reason} in {elapsed_ms}ms (artefacts: {})",
-            dir.display()
+            "FAIL: {reason} in {elapsed_ms}ms (recorded; see `brokkr results`)"
         ));
         Err(DevError::ExitCode(1))
     }
+}
+
+/// Build the `selector` JSON stored on the run row: the resolved probe ids
+/// plus the raw selection flags - enough to group by and to reproduce.
+fn selector_json(args: &CorpusArgs, ids: &[String]) -> String {
+    serde_json::json!({
+        "all": args.all,
+        "keywords": args.keywords,
+        "probe": args.probe,
+        "bless": args.bless,
+        "ids": ids,
+    })
+    .to_string()
+}
+
+/// Open the corpus DB and persist one run. Separate so both the spawn-error
+/// path and the normal path share the open+record sequence.
+fn ingest_run(
+    db_path: &Path,
+    record: &RunRecord<'_>,
+    report: &report::HarnessReport,
+    expected: &BTreeMap<String, Option<String>>,
+    gate_diffs: &[crate::piners::gate::GateDiff],
+) -> Result<(), DevError> {
+    let db = CorpusDb::open(db_path)?;
+    db.record_run(record, report, expected, gate_diffs)?;
+    Ok(())
 }

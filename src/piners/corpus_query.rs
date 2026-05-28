@@ -1,0 +1,196 @@
+//! `brokkr results`, project-gated to piners.
+//!
+//! piners records no benchmarks, so its `results.db` is always empty and the
+//! `results` command is repurposed to query the corpus run store
+//! (`.brokkr/piners/corpus/runs.db`, written by `brokkr corpus`). The command
+//! is bimodal: the benchmark filters (`--commit`/`--compare`/`--command`/
+//! `--mode`/`--dataset`/`--meta`/`--env`/`--grep`) don't apply here and are
+//! rejected with a clear error; the piners flags below do.
+//!
+//! Flag -> view:
+//! - bare                -> table of recent runs
+//! - `<id>` / `--run N`  -> that run's per-probe dispositions (+ gate misses)
+//! - `--probe X`         -> X's disposition + its `trade_diff` rows
+//! - `--diffs --where E` -> `trade_diff` rows across the run matching E
+//! - `--trend X`         -> X's disposition/tier/p90 over recent runs
+//! - `--sql Q`           -> read-only `SELECT`/`WITH` escape hatch
+//!
+//! The canned views are `?N`-parameterized; `--where`/`--sql` interpolate
+//! trusted local SQL, guarded by the read-only DB open plus a SELECT-only UX
+//! check (see [`super::corpus_db`]).
+
+use std::path::Path;
+
+use crate::error::DevError;
+use crate::output;
+use crate::piners::corpus_db::{self, CorpusDb};
+use crate::request::ResultsQuery;
+use crate::resolve::corpus_runs_db_path;
+
+pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
+    reject_bench_flags(q)?;
+
+    let db_path = corpus_runs_db_path(project_root);
+    if !db_path.exists() {
+        output::result_msg("no corpus runs yet (run `brokkr corpus ...` first)");
+        return Ok(());
+    }
+    let db = CorpusDb::open_readonly(&db_path)?;
+
+    // --sql escape hatch (read-only, SELECT/WITH only).
+    if let Some(sql) = &q.sql {
+        guard_sql(sql, "--sql", true)?;
+        let table = db.raw_sql(sql)?;
+        println!("{}", corpus_db::raw_table(&table));
+        return Ok(());
+    }
+
+    // --trend <probe> over recent runs.
+    if let Some(probe) = &q.trend {
+        let rows = db.trend_for_probe(probe, q.limit)?;
+        println!("{}", corpus_db::trend_table(&rows));
+        return Ok(());
+    }
+
+    // --diffs [--where E]: trade_diff rows across the selected/latest run.
+    if q.diffs {
+        let Some(run_id) = resolve_run(&db, q)? else {
+            output::result_msg("no corpus runs to filter");
+            return Ok(());
+        };
+        let where_expr = q.where_expr.as_deref().unwrap_or("1=1");
+        guard_sql(where_expr, "--where", false)?;
+        let table = db.diffs_where(run_id, where_expr)?;
+        println!("run {run_id}");
+        println!("{}", corpus_db::raw_table(&table));
+        return Ok(());
+    }
+
+    // --probe <id>: disposition + its trade_diff rows.
+    if let Some(probe) = &q.probe {
+        let Some(run_id) = resolve_run(&db, q)? else {
+            output::result_msg("no corpus runs recorded");
+            return Ok(());
+        };
+        return render_probe(&db, run_id, probe);
+    }
+
+    // Bare positional run id or --run N: that run's per-probe detail.
+    if let Some(run_id) = explicit_run_id(q)? {
+        return render_run_detail(&db, run_id);
+    }
+
+    // Bare `brokkr results`: the recent-runs table.
+    let rows = db.recent_runs(q.limit)?;
+    println!("{}", corpus_db::runs_table(&rows));
+    Ok(())
+}
+
+/// The run id named explicitly via `--run` or the bare positional argument.
+/// A non-numeric positional is a clear error (it's not a probe selector).
+fn explicit_run_id(q: &ResultsQuery) -> Result<Option<i64>, DevError> {
+    if let Some(run) = q.run {
+        return Ok(Some(run));
+    }
+    if let Some(s) = &q.query {
+        return s.parse::<i64>().map(Some).map_err(|_| {
+            DevError::Config(format!(
+                "results (piners): '{s}' is not a run id - pass a numeric run id, \
+                 or use `--probe <id>` to look up a probe"
+            ))
+        });
+    }
+    Ok(None)
+}
+
+/// The explicit run id if given, else the latest recorded run.
+fn resolve_run(db: &CorpusDb, q: &ResultsQuery) -> Result<Option<i64>, DevError> {
+    if let Some(id) = explicit_run_id(q)? {
+        return Ok(Some(id));
+    }
+    db.latest_run_id()
+}
+
+fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError> {
+    match db.disposition_for_probe(run_id, probe)? {
+        Some(d) => {
+            println!("run {run_id}");
+            println!("{}", corpus_db::dispositions_table(std::slice::from_ref(&d)));
+            let diffs = db.trade_diffs_for_probe(run_id, probe)?;
+            if diffs.is_empty() {
+                output::result_msg("(no trade_diff rows - probe was byte-exact or divergence-free)");
+            } else {
+                println!("\ntrade_diff:");
+                println!("{}", corpus_db::trade_diffs_table(&diffs));
+            }
+        }
+        None => output::result_msg(&format!("probe '{probe}' not found in run {run_id}")),
+    }
+    Ok(())
+}
+
+fn render_run_detail(db: &CorpusDb, run_id: i64) -> Result<(), DevError> {
+    let disps = db.dispositions_for_run(run_id)?;
+    if disps.is_empty() {
+        output::result_msg(&format!("run {run_id}: no per-probe dispositions recorded"));
+    } else {
+        println!("run {run_id}");
+        println!("{}", corpus_db::dispositions_table(&disps));
+    }
+
+    let misses = db.gate_misses_for_run(run_id)?;
+    if !misses.is_empty() {
+        println!("\ngate misses (selected, no disposition emitted):");
+        println!("{}", corpus_db::gate_misses_block(&misses));
+    }
+
+    if let Some(stderr) = db.run_stderr(run_id)?
+        && !stderr.trim().is_empty()
+    {
+        println!("\nharness stderr:\n{stderr}");
+    }
+    Ok(())
+}
+
+/// Reject the benchmark filters - they have no meaning against the corpus
+/// store, and silently ignoring them would mislead.
+fn reject_bench_flags(q: &ResultsQuery) -> Result<(), DevError> {
+    let any_bench = q.commit.is_some()
+        || q.compare.is_some()
+        || q.command.is_some()
+        || q.mode.is_some()
+        || q.dataset.is_some()
+        || !q.meta.is_empty()
+        || !q.env.is_empty()
+        || !q.grep.is_empty();
+    if any_bench {
+        return Err(DevError::Config(
+            "results (piners): --commit/--compare/--command/--mode/--dataset/--meta/--env/--grep \
+             are benchmark filters and don't apply to the corpus run store. Use \
+             --probe/--diffs/--trend/--run/--where/--sql (or a bare run id)."
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// UX guard for the raw-SQL paths. The read-only DB open is the load-bearing
+/// safety; this just yields a clean error instead of a SQLite write failure.
+/// `require_select` is true for `--sql` (a full query) and false for `--where`
+/// (a boolean expression); both reject `;` to block statement stacking.
+fn guard_sql(input: &str, flag: &str, require_select: bool) -> Result<(), DevError> {
+    if input.contains(';') {
+        return Err(DevError::Config(format!(
+            "results {flag}: ';' (statement stacking) is not allowed"
+        )));
+    }
+    if require_select {
+        let first = input.split_whitespace().next().unwrap_or("");
+        if !first.eq_ignore_ascii_case("select") && !first.eq_ignore_ascii_case("with") {
+            return Err(DevError::Config(format!(
+                "results {flag}: only read-only SELECT/WITH queries are allowed"
+            )));
+        }
+    }
+    Ok(())
+}

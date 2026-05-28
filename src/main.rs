@@ -753,6 +753,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             grep,
             limit,
             top,
+            probe,
+            diffs,
+            trend,
+            run,
+            where_expr,
+            sql,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -766,8 +772,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 grep,
                 limit,
                 top,
+                probe,
+                diffs,
+                trend,
+                run,
+                where_expr,
+                sql,
             };
-            results_cmd::cmd_results(&dev_config, &project_root, &rq)
+            // piners records no benchmarks; `results` queries the corpus run
+            // store there instead of the (empty) results.db.
+            if project == Project::Piners {
+                piners::corpus_query::cmd(&project_root, &rq)
+            } else {
+                results_cmd::cmd_results(&dev_config, &project_root, &rq)
+            }
         }
         Command::Sidecar {
             query,
@@ -1503,15 +1521,25 @@ fn cmd_clean(
         }
     }
 
-    // Clean piners corpus artefact tree (`.brokkr/piners/corpus/run-N/`,
-    // each holding a manifest + captured harness output). Debris by the
-    // time `clean` runs because we hold the project lock.
+    // Clean piners corpus artefact tree (`.brokkr/piners/corpus/run-N/`, each
+    // holding a manifest + captured harness output). These are debris by the
+    // time `clean` runs (we hold the project lock) - but the corpus run store
+    // (`.brokkr/piners/corpus/runs.db`, + its `-wal`/`-shm`) is the source of
+    // truth now and must survive, so only the `run-N/` dirs are removed.
     if project == Project::Piners {
-        let piners_root = project_root.join(".brokkr/piners");
-        if piners_root.exists() {
-            let runs = count_run_dirs(&piners_root);
-            std::fs::remove_dir_all(&piners_root)?;
-            output::run_msg(&format!("removed {runs} piners run dir(s)"));
+        let corpus_root = project_root.join(".brokkr/piners/corpus");
+        let mut removed = 0;
+        if corpus_root.exists() {
+            for entry in std::fs::read_dir(&corpus_root)?.flatten() {
+                let path = entry.path();
+                if path.is_dir() && entry.file_name().to_string_lossy().starts_with("run-") {
+                    std::fs::remove_dir_all(&path).ok();
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            output::run_msg(&format!("removed {removed} piners run dir(s)"));
         }
     }
 
