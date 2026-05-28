@@ -1887,6 +1887,18 @@ Examples:
         #[arg(long)]
         verify_only: bool,
 
+        /// Stamp `pins.toml` from the corpus filesystem (no build, no
+        /// harness). Sibling to `--verify-only`, and the only way
+        /// `pins.toml` is created or re-stamped. Resolves ids against
+        /// `corpus_root/validation/<id>/`, not the pinned universe.
+        /// `--reseed --all` regenerates the whole file from the
+        /// submodule (probes whose dirs vanished drop out); `--reseed
+        /// --probe <id>` upserts one. Prints added/changed/removed; review
+        /// the result with `git diff pins.toml`. Not usable with
+        /// `--keyword` or `--verify-only`.
+        #[arg(long, conflicts_with_all = ["verify_only", "keyword"])]
+        reseed: bool,
+
         /// Build the harness with the dev profile (`<target>/debug/`).
         /// This is already the default for `corpus`; the flag is here to
         /// override `[piners.harness] debug = false`. Mutually exclusive

@@ -71,6 +71,19 @@ pub struct Registry {
     pub keywords: BTreeMap<String, Vec<String>>,
 }
 
+/// Parse just `pins.toml` into the id -> [`Pin`] map. Shared by
+/// [`Registry::load`] and `brokkr corpus --reseed` (which reads the
+/// existing pins to compute its added/changed/removed diff and to merge a
+/// single `--probe` upsert).
+pub fn load_pins(pins_path: &Path) -> Result<BTreeMap<String, Pin>, DevError> {
+    let text = std::fs::read_to_string(pins_path).map_err(|e| {
+        DevError::Config(format!("piners: failed to read {}: {e}", pins_path.display()))
+    })?;
+    let parsed: PinsFile = toml::from_str(&text)
+        .map_err(|e| DevError::Config(format!("piners: {}: {e}", pins_path.display())))?;
+    Ok(parsed.probes)
+}
+
 impl Registry {
     /// Load `pins.toml` and every sibling `<keyword>.toml` from
     /// `registry_dir`. Does not touch the corpus; call
@@ -83,16 +96,7 @@ impl Registry {
             )));
         }
 
-        let pins_path = registry_dir.join(PINS_FILE);
-        let pins_text = std::fs::read_to_string(&pins_path).map_err(|e| {
-            DevError::Config(format!(
-                "piners: failed to read {}: {e}",
-                pins_path.display()
-            ))
-        })?;
-        let pins_file: PinsFile = toml::from_str(&pins_text).map_err(|e| {
-            DevError::Config(format!("piners: {}: {e}", pins_path.display()))
-        })?;
+        let pins = load_pins(&registry_dir.join(PINS_FILE))?;
 
         let mut keywords = BTreeMap::new();
         let mut entries: Vec<PathBuf> = std::fs::read_dir(registry_dir)
@@ -122,10 +126,7 @@ impl Registry {
             keywords.insert(stem.to_owned(), kw.probes);
         }
 
-        Ok(Self {
-            pins: pins_file.probes,
-            keywords,
-        })
+        Ok(Self { pins, keywords })
     }
 
     /// Structural lint: every id referenced by a keyword file must exist

@@ -81,15 +81,38 @@ full-corpus pass never runs by accident.
 - `--verify-only` - verify every pinned probe against the submodule and
   exit, without building or running. Use after a submodule re-pin to catch
   drift.
+- `--reseed` - stamp `pins.toml` from the corpus filesystem; see below.
 
 ## Verification (the hard gate)
 
 On every run, each selected probe's two pinned files are resolved under
 `corpus_root` and hashed. A missing path or a hash mismatch is a hard
 error before anything is built or run - the registry is lying or the
-submodule drifted. There is no `--allow-drift` override; fix the registry
-(re-pin) or the submodule. This is the only correctness gate today; parity
+submodule drifted. There is no `--allow-drift` override; re-stamp the
+registry with `--reseed` (the deliberate act of re-validating the oracle)
+or fix the submodule. This is the only correctness gate today; parity
 pass/fail baselines are deferred.
+
+## Reseed: creating and re-stamping pins.toml
+
+`--reseed` is the bootstrap and after-re-pin re-stamp - the only
+sanctioned way `pins.toml` is created or refreshed (`--verify-only` only
+compares against existing pins). No build, no harness, no
+`[piners.harness]` needed; mutually exclusive with `--verify-only` and
+`--keyword`. Unlike every other mode its universe is the corpus
+**filesystem**, not `pins.toml` - it pins probes not yet pinned, resolving
+ids against `corpus_root/validation/<id>/`.
+
+- `--reseed --all` - stamp every probe under `validation/`. Authoritative
+  full regen: a probe whose dir vanished upstream drops out.
+- `--reseed --probe <id>` - upsert one probe, leaving the rest intact.
+
+Output is deterministic (sorted by id, inline `pine`/`csv = { path,
+xxh128 }`) and idempotent (re-stamping overwrites hashes). It prints
+`added=N changed=M removed=K`; `git diff pins.toml` is the review surface
+where a re-pin's drift becomes visible at the point you adopt it.
+Bootstrap: `brokkr corpus --reseed --all`, commit, write keyword files,
+run a slice.
 
 ## The manifest hand-off
 

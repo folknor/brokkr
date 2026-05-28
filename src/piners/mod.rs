@@ -6,4 +6,5 @@ pub mod cmd;
 pub mod manifest;
 pub mod registry;
 pub mod report;
+pub mod reseed;
 pub mod select;

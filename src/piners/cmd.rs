@@ -44,6 +44,9 @@ pub struct CorpusArgs {
     pub probe: Option<String>,
     pub all: bool,
     pub verify_only: bool,
+    /// Stamp `pins.toml` from the corpus filesystem instead of running.
+    /// Routed to [`crate::piners::reseed`]; see its module docs.
+    pub reseed: bool,
     /// `Some(true)` = debug, `Some(false)` = release, `None` = default
     /// (debug for this command).
     pub profile_override: Option<bool>,
@@ -58,6 +61,12 @@ pub fn corpus(
     args: &CorpusArgs,
 ) -> Result<(), DevError> {
     let cfg = dev_config.piners.clone().unwrap_or_default();
+
+    // Reseed stamps pins.toml from the corpus filesystem - no registry to
+    // load (it may not exist yet), no build, no harness. Route early.
+    if args.reseed {
+        return crate::piners::reseed::run(project_root, &cfg, args);
+    }
 
     let registry_dir = project_root.join(cfg.registry_dir());
     let registry = Registry::load(&registry_dir)?;
