@@ -963,7 +963,11 @@ The bench filters above do not apply there; the piners flags below do:
   brokkr results                                    # table of recent corpus runs
   brokkr results 42                                 # run 42's per-probe dispositions
   brokkr results --probe magnifier-tick-dist-endpoints-01   # disposition + trade_diff rows
+  brokkr results --diffs --probe a --probe b                # multi-probe diff table (latest run)
+  brokkr results --diffs --probe a --columns our_qty,tv_entry_qty,our_pnl,tv_pnl  # projected
+  brokkr results --diffs --probe a --columns all            # every column, rendered vertically
   brokkr results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
+  brokkr results --runtimes --over 269                      # probes whose runtime nears the wall
   brokkr results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
   brokkr results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch"
     )]
@@ -1026,14 +1030,35 @@ The bench filters above do not apply there; the piners flags below do:
         #[arg(long, default_value = "10")]
         top: usize,
 
-        /// [piners] Show one probe's disposition plus its `trade_diff` rows
-        /// (for the selected/latest run).
+        /// [piners] Probe selector. A single `--probe` (without `--diffs`)
+        /// shows that probe's combo view - its disposition plus `trade_diff`
+        /// rows. Repeatable under `--diffs` to narrow the diff table to several
+        /// probes at once.
         #[arg(long, value_name = "ID")]
-        probe: Option<String>,
+        probe: Vec<String>,
 
-        /// [piners] With `--where`, list `trade_diff` rows across the run.
+        /// [piners] List `trade_diff` rows across the run (latest run by
+        /// default). Shape it with `--probe`, `--columns`, and/or `--where`.
         #[arg(long)]
         diffs: bool,
+
+        /// [piners] Project the `--diffs` table onto these columns
+        /// (comma-separated or repeated). Default is a curated set covering the
+        /// time/price/qty/pnl axes; `all` selects every trade_diff column and
+        /// renders vertically. An unknown name lists the valid columns.
+        #[arg(long, value_name = "COLS", value_delimiter = ',')]
+        columns: Vec<String>,
+
+        /// [piners] Show each probe's most-recent runtime, slowest first
+        /// (shares the pre-run ceiling's per-probe estimate, so it can't drift
+        /// from the wall).
+        #[arg(long)]
+        runtimes: bool,
+
+        /// [piners] With `--runtimes`, keep only probes above this many seconds
+        /// (e.g. `--over 269` for what nears the ceiling).
+        #[arg(long, value_name = "SECS")]
+        over: Option<f64>,
 
         /// [piners] Trend a probe's disposition/tier/p90 over recent runs.
         #[arg(long, value_name = "ID")]

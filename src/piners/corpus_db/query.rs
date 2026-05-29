@@ -45,7 +45,9 @@ pub struct DispositionRow {
     pub error: Option<String>,
 }
 
-/// One per-trade drill-down row (the rendered subset).
+/// One per-trade drill-down row (the rendered subset). `our_qty`/`tv_entry_qty`
+/// carry the size axis the curated view historically dropped - the field the
+/// pyramiding investigations turned on.
 pub struct TradeDiffRow {
     pub our_index: i64,
     pub tv_index: i64,
@@ -54,6 +56,8 @@ pub struct TradeDiffRow {
     pub exit_ts_delta: Option<i64>,
     pub entry_price_delta: Option<f64>,
     pub exit_price_delta: Option<f64>,
+    pub our_qty: f64,
+    pub tv_entry_qty: Option<f64>,
     pub our_pnl: f64,
     pub tv_pnl: Option<f64>,
 }
@@ -69,6 +73,13 @@ pub struct TrendRow {
     pub ours_only: i64,
     pub tv_only: i64,
     pub p90_exit: Option<f64>,
+}
+
+/// One probe's most-recent runtime, for the `--runtimes` view.
+pub struct RuntimeRow {
+    pub probe: String,
+    pub runtime_ms: f64,
+    pub run_id: i64,
 }
 
 /// A selected probe that produced no disposition line.
@@ -122,9 +133,103 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
     })
 }
 
+fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
+    Ok(RuntimeRow {
+        probe: row.get("probe")?,
+        runtime_ms: row.get("runtime_ms")?,
+        run_id: row.get("run_id")?,
+    })
+}
+
 const DISPOSITION_COLS: &str = "\
 probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
 count_tier, p90_entry, p90_exit, p90_pnl, sig_domain, sig_dimension, error";
+
+/// Every queryable `trade_diff` column - the 26 harness fields (`run_id` is
+/// excluded; the run is already fixed by the query). This is the allow-list
+/// behind `--columns`: only an identifier appearing here is ever interpolated
+/// into the projection's SELECT, so a typo can't become SQL injection. Listed
+/// in the schema's column order so `--columns all` reads naturally.
+pub const TRADE_DIFF_COLUMNS: &[&str] = &[
+    "probe",
+    "our_index",
+    "tv_index",
+    "our_entry_ts",
+    "our_exit_ts",
+    "our_entry_price",
+    "our_exit_price",
+    "our_qty",
+    "our_pnl",
+    "entry_ts_delta",
+    "exit_ts_delta",
+    "entry_price_delta",
+    "exit_price_delta",
+    "our_entry_bar",
+    "our_exit_bar",
+    "our_side",
+    "our_entry_id",
+    "our_exit_id",
+    "tv_entry_ts",
+    "tv_exit_ts",
+    "tv_entry_price",
+    "tv_exit_price",
+    "tv_entry_qty",
+    "tv_pnl",
+    "tv_entry_signal",
+    "tv_exit_signal",
+];
+
+/// The curated default projection for `--diffs`: the four axes a trade pair can
+/// diverge on - time, price, size, pnl - at a glance. `our_qty`/`tv_entry_qty`
+/// are the size axis the old hard-coded view dropped. `--columns all` widens to
+/// every column (rendered vertically); `--columns a,b,c` picks a subset.
+pub const DEFAULT_DIFF_COLUMNS: &[&str] = &[
+    "probe",
+    "our_index",
+    "tv_index",
+    "our_side",
+    "entry_ts_delta",
+    "exit_ts_delta",
+    "entry_price_delta",
+    "exit_price_delta",
+    "our_qty",
+    "tv_entry_qty",
+    "our_pnl",
+    "tv_pnl",
+];
+
+/// Resolve a `--columns` request into a validated SELECT list. Empty -> the
+/// curated [`DEFAULT_DIFF_COLUMNS`]; the lone token `all` -> every column;
+/// otherwise each name must be a known [`TRADE_DIFF_COLUMNS`] entry. An unknown
+/// name errors with the full valid set - that error *is* the column-discovery
+/// path, which is why there is no separate `--list-columns`.
+pub fn resolve_diff_columns(requested: &[String]) -> Result<Vec<String>, DevError> {
+    let owned = |cols: &[&str]| cols.iter().map(|s| (*s).to_owned()).collect();
+    if requested.is_empty() {
+        return Ok(owned(DEFAULT_DIFF_COLUMNS));
+    }
+    if requested.len() == 1 && requested[0] == "all" {
+        return Ok(owned(TRADE_DIFF_COLUMNS));
+    }
+    let mut out = Vec::with_capacity(requested.len());
+    for c in requested {
+        if c == "all" {
+            return Err(DevError::Config(
+                "results --columns: 'all' selects every column and must stand alone, \
+                 not be mixed with named columns"
+                    .to_owned(),
+            ));
+        }
+        if !TRADE_DIFF_COLUMNS.contains(&c.as_str()) {
+            return Err(DevError::Config(format!(
+                "results --columns: unknown trade_diff column '{c}'. Valid columns:\n  {}",
+                TRADE_DIFF_COLUMNS.join(", ")
+            )));
+        }
+        out.push(c.clone());
+    }
+    Ok(out)
+}
 
 impl CorpusDb {
     /// The newest `run_id`, or `None` if the DB has no runs.
@@ -212,7 +317,7 @@ impl CorpusDb {
     ) -> Result<Vec<TradeDiffRow>, DevError> {
         let mut stmt = self.conn().prepare(
             "SELECT our_index, tv_index, our_side, entry_ts_delta, exit_ts_delta, \
-                    entry_price_delta, exit_price_delta, our_pnl, tv_pnl \
+                    entry_price_delta, exit_price_delta, our_qty, tv_entry_qty, our_pnl, tv_pnl \
              FROM trade_diff WHERE run_id = ?1 AND probe = ?2 ORDER BY our_index",
         )?;
         let rows = stmt.query_map(rusqlite::params![run_id, probe], |r| {
@@ -224,6 +329,8 @@ impl CorpusDb {
                 exit_ts_delta: r.get("exit_ts_delta")?,
                 entry_price_delta: r.get("entry_price_delta")?,
                 exit_price_delta: r.get("exit_price_delta")?,
+                our_qty: r.get("our_qty")?,
+                tv_entry_qty: r.get("tv_entry_qty")?,
                 our_pnl: r.get("our_pnl")?,
                 tv_pnl: r.get("tv_pnl")?,
             })
@@ -257,16 +364,63 @@ impl CorpusDb {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// `trade_diff` rows for a run filtered by a raw boolean expression
-    /// (trusted local SQL; the connection is read-only).
-    pub fn diffs_where(&self, run_id: i64, where_expr: &str) -> Result<RawTable, DevError> {
-        let sql = format!(
-            "SELECT probe, our_index, tv_index, our_side, entry_price_delta, exit_price_delta, \
-                    entry_ts_delta, exit_ts_delta, our_pnl, tv_pnl \
-             FROM trade_diff WHERE run_id = ?1 AND ({where_expr}) ORDER BY probe, our_index"
-        );
+    /// `trade_diff` rows for a run, narrowed to a `probes` set (empty = all
+    /// probes in the run), projected onto `columns`, optionally further filtered
+    /// by a raw boolean expression. `columns` must come from
+    /// [`resolve_diff_columns`] - it is interpolated, so the allow-list is the
+    /// only thing standing between projection and SQL injection; the probe set
+    /// and `run_id` are bound, and `where_expr` is trusted local input against a
+    /// read-only connection. Ordered (probe, our_index).
+    pub fn diffs(
+        &self,
+        run_id: i64,
+        probes: &[String],
+        columns: &[String],
+        where_expr: Option<&str>,
+    ) -> Result<RawTable, DevError> {
+        let select = columns.join(", ");
+        let mut sql = format!("SELECT {select} FROM trade_diff WHERE run_id = ?1");
+        if !probes.is_empty() {
+            // probe IN (?2, ?3, ...) - the ids are bound, never interpolated.
+            let placeholders: Vec<String> =
+                (0..probes.len()).map(|i| format!("?{}", i + 2)).collect();
+            sql.push_str(&format!(" AND probe IN ({})", placeholders.join(", ")));
+        }
+        if let Some(expr) = where_expr {
+            sql.push_str(&format!(" AND ({expr})"));
+        }
+        sql.push_str(" ORDER BY probe, our_index");
         let mut stmt = self.conn().prepare(&sql)?;
-        read_raw(&mut stmt, rusqlite::params![run_id])
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + probes.len());
+        params.push(&run_id);
+        for p in probes {
+            params.push(p);
+        }
+        read_raw(&mut stmt, params.as_slice())
+    }
+
+    /// Each probe's most recent recorded runtime (the latest run carrying a
+    /// non-null `runtime_ms`), slowest first. This is the per-probe form of
+    /// [`Self::estimated_runtime_ms`] - the *same* "latest non-null per probe"
+    /// selection the pre-run ceiling sums - so the `--runtimes` view can never
+    /// disagree with the wall. `over_ms`, when set, keeps only probes above it.
+    pub fn runtimes(&self, over_ms: Option<f64>) -> Result<Vec<RuntimeRow>, DevError> {
+        let mut sql = String::from(
+            "SELECT probe, runtime_ms, run_id FROM disposition d \
+             WHERE runtime_ms IS NOT NULL \
+               AND run_id = (SELECT MAX(run_id) FROM disposition d2 \
+                             WHERE d2.probe = d.probe AND d2.runtime_ms IS NOT NULL)",
+        );
+        if over_ms.is_some() {
+            sql.push_str(" AND runtime_ms > ?1");
+        }
+        sql.push_str(" ORDER BY runtime_ms DESC");
+        let mut stmt = self.conn().prepare(&sql)?;
+        let rows = match over_ms {
+            Some(ms) => stmt.query_map([ms], runtime_row)?.collect::<Result<Vec<_>, _>>()?,
+            None => stmt.query_map([], runtime_row)?.collect::<Result<Vec<_>, _>>()?,
+        };
+        Ok(rows)
     }
 
     /// Estimated wall-clock runtime for a selection, in milliseconds: the sum
@@ -402,5 +556,77 @@ mod tests {
         );
         // Latest p1 row has NULL runtime; the 120ms run-1 row is used.
         assert_eq!(db.estimated_runtime_ms(&["p1".to_owned()]).unwrap(), 120.0);
+    }
+
+    fn owned(cols: &[&str]) -> Vec<String> {
+        cols.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn resolve_columns_empty_is_the_curated_default_with_qty() {
+        let cols = resolve_diff_columns(&[]).unwrap();
+        assert_eq!(cols, owned(DEFAULT_DIFF_COLUMNS));
+        // The whole point of the change: qty is in the default.
+        assert!(cols.iter().any(|c| c == "our_qty"));
+        assert!(cols.iter().any(|c| c == "tv_entry_qty"));
+    }
+
+    #[test]
+    fn resolve_columns_all_is_every_column() {
+        assert_eq!(resolve_diff_columns(&owned(&["all"])).unwrap(), owned(TRADE_DIFF_COLUMNS));
+    }
+
+    #[test]
+    fn resolve_columns_validates_and_preserves_order() {
+        let req = owned(&["our_qty", "tv_entry_qty", "our_pnl"]);
+        assert_eq!(resolve_diff_columns(&req).unwrap(), req);
+        // Unknown name errors (and the message lists the valid set - the
+        // discovery path that stands in for --list-columns).
+        let err = resolve_diff_columns(&owned(&["our_qty", "bogus"])).unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+        assert!(err.to_string().contains("our_qty"));
+        // `all` mixed with names is rejected (it means "everything", alone).
+        assert!(resolve_diff_columns(&owned(&["all", "our_qty"])).is_err());
+    }
+
+    #[test]
+    fn runtimes_lists_latest_per_probe_slowest_first_and_agrees_with_the_ceiling() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"slow","outcome":"parity","runtime_ms":300000}
+{"probe":"fast","outcome":"parity","runtime_ms":100}
+"#,
+        );
+        // `slow` re-runs faster; the latest value must win (not the max).
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"slow","outcome":"parity","runtime_ms":5000}
+"#,
+        );
+
+        let rows = db.runtimes(None).unwrap();
+        // Slowest first: slow(5000) then fast(100).
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].probe, "slow");
+        assert_eq!(rows[0].runtime_ms, 5000.0);
+        assert_eq!(rows[0].run_id, 2);
+        assert_eq!(rows[1].probe, "fast");
+
+        // The anti-drift guarantee: Σ of the listed runtimes equals the
+        // ceiling's estimate over the same probes. A SQL view could diverge;
+        // this one shares the per-probe selection, so it can't.
+        let sum: f64 = rows.iter().map(|r| r.runtime_ms).sum();
+        let est = db
+            .estimated_runtime_ms(&["slow".to_owned(), "fast".to_owned()])
+            .unwrap();
+        assert_eq!(sum, est);
+
+        // --over filters in seconds: > 1s keeps only `slow` (5000ms).
+        let over = db.runtimes(Some(1000.0)).unwrap();
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].probe, "slow");
     }
 }

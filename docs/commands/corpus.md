@@ -70,7 +70,9 @@ before the build with a preflight error naming the estimate; re-run with
 `--force` to override. Verification runs first, so hash/submodule drift still
 surfaces on an over-budget selection. `--verify-only` is exempt (it never runs
 the harness). The ceiling is a pre-run wall only - a run already underway is
-never killed for exceeding it.
+never killed for exceeding it. `brokkr results --runtimes` previews the same
+per-probe estimate this wall sums (see `docs/projects/piners.md`), so you can
+see which probes drive the cost before a selection is refused.
 
 ## Verification (the content gate)
 

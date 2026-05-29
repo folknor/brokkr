@@ -8,16 +8,20 @@
 //! rejected with a clear error; the piners flags below do.
 //!
 //! Flag -> view:
-//! - bare                -> table of recent runs
-//! - `<id>` / `--run N`  -> that run's per-probe dispositions (+ gate misses)
-//! - `--probe X`         -> X's disposition + its `trade_diff` rows
-//! - `--diffs --where E` -> `trade_diff` rows across the run matching E
-//! - `--trend X`         -> X's disposition/tier/p90 over recent runs
-//! - `--sql Q`           -> read-only `SELECT`/`WITH` escape hatch
+//! - bare                  -> table of recent runs
+//! - `<id>` / `--run N`    -> that run's per-probe dispositions (+ gate misses)
+//! - `--probe X`           -> X's disposition + its `trade_diff` rows (combo)
+//! - `--diffs [--probe …]  -> `trade_diff` table across the run, optionally
+//!    [--columns …]            narrowed to a probe set, projected onto columns
+//!    [--where E]`             (`all` => every column, vertical), and/or filtered
+//! - `--runtimes [--over S]` -> per-probe most-recent runtime, slowest first
+//! - `--trend X`           -> X's disposition/tier/p90 over recent runs
+//! - `--sql Q`             -> read-only `SELECT`/`WITH` escape hatch
 //!
-//! The canned views are `?N`-parameterized; `--where`/`--sql` interpolate
-//! trusted local SQL, guarded by the read-only DB open plus a SELECT-only UX
-//! check (see [`super::corpus_db`]).
+//! The canned views are `?N`-parameterized; `--columns` interpolates only
+//! allow-listed identifiers (see [`super::corpus_db::query::resolve_diff_columns`]),
+//! while `--where`/`--sql` interpolate trusted local SQL - all guarded by the
+//! read-only DB open plus a SELECT-only UX check (see [`super::corpus_db`]).
 
 use std::path::Path;
 
@@ -46,6 +50,19 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         return Ok(());
     }
 
+    // --runtimes [--over SECS]: per-probe most-recent runtime, slowest first.
+    // Calls the same per-probe estimate the pre-run ceiling sums, so the view
+    // can never disagree with the wall.
+    if q.runtimes {
+        let over_ms = q.over.map(|s| s * 1000.0);
+        let rows = db.runtimes(over_ms)?;
+        println!(
+            "{}",
+            corpus_db::runtimes_table(&rows, super::cmd::RUNTIME_CEILING_MS)
+        );
+        return Ok(());
+    }
+
     // --trend <probe> over recent runs.
     if let Some(probe) = &q.trend {
         let rows = db.trend_for_probe(probe, q.limit)?;
@@ -53,27 +70,58 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         return Ok(());
     }
 
-    // --diffs [--where E]: trade_diff rows across the selected/latest run.
+    // `--columns` only shapes the `--diffs` table; reject it elsewhere rather
+    // than silently ignore it.
+    if !q.columns.is_empty() && !q.diffs {
+        return Err(DevError::Config(
+            "results --columns shapes the --diffs table - add --diffs \
+             (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
+                .to_owned(),
+        ));
+    }
+
+    // --diffs [--probe ... ] [--columns ...] [--where E]: the shapeable diff
+    // table across the selected/latest run. `--probe` here is an IN-list
+    // filter, not the combo view.
     if q.diffs {
         let Some(run_id) = resolve_run(&db, q)? else {
             output::result_msg("no corpus runs to filter");
             return Ok(());
         };
-        let where_expr = q.where_expr.as_deref().unwrap_or("1=1");
-        guard_sql(where_expr, "--where", false)?;
-        let table = db.diffs_where(run_id, where_expr)?;
+        let columns = corpus_db::resolve_diff_columns(&q.columns)?;
+        let vertical = q.columns.len() == 1 && q.columns[0] == "all";
+        let where_expr = match &q.where_expr {
+            Some(e) => {
+                guard_sql(e, "--where", false)?;
+                Some(e.as_str())
+            }
+            None => None,
+        };
+        let table = db.diffs(run_id, &q.probe, &columns, where_expr)?;
         println!("run {run_id}");
-        println!("{}", corpus_db::raw_table(&table));
+        if vertical {
+            println!("{}", corpus_db::raw_records(&table));
+        } else {
+            println!("{}", corpus_db::raw_table(&table));
+        }
         return Ok(());
     }
 
-    // --probe <id>: disposition + its trade_diff rows.
-    if let Some(probe) = &q.probe {
+    // --probe <id>: one probe's combo view (disposition + its trade_diff rows).
+    // Multiple probes only make sense as the diff-table filter above.
+    if !q.probe.is_empty() {
+        if q.probe.len() > 1 {
+            return Err(DevError::Config(
+                "results: multiple --probe needs --diffs (the multi-probe diff table); \
+                 a bare --probe shows one probe's full combo view"
+                    .to_owned(),
+            ));
+        }
         let Some(run_id) = resolve_run(&db, q)? else {
             output::result_msg("no corpus runs recorded");
             return Ok(());
         };
-        return render_probe(&db, run_id, probe);
+        return render_probe(&db, run_id, &q.probe[0]);
     }
 
     // Bare positional run id or --run N: that run's per-probe detail.

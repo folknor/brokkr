@@ -7,7 +7,9 @@
 
 use serde_json::Value;
 
-use super::query::{DispositionRow, GateMissRow, RawTable, RunRow, TradeDiffRow, TrendRow};
+use super::query::{
+    DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, TradeDiffRow, TrendRow,
+};
 
 /// Render a header + rows as a left-aligned, space-padded grid. Empty rows
 /// yield `"(none)"`.
@@ -183,6 +185,8 @@ pub fn trade_diffs_table(rows: &[TradeDiffRow]) -> String {
                 fi(t.exit_ts_delta),
                 ff(t.entry_price_delta),
                 ff(t.exit_price_delta),
+                ff(Some(t.our_qty)),
+                ff(t.tv_entry_qty),
                 ff(Some(t.our_pnl)),
                 ff(t.tv_pnl),
             ]
@@ -190,8 +194,8 @@ pub fn trade_diffs_table(rows: &[TradeDiffRow]) -> String {
         .collect();
     grid(
         &[
-            "our#", "tv#", "side", "Δentry_ts", "Δexit_ts", "Δentry_px", "Δexit_px", "our_pnl",
-            "tv_pnl",
+            "our#", "tv#", "side", "Δentry_ts", "Δexit_ts", "Δentry_px", "Δexit_px", "our_qty",
+            "tv_qty", "our_pnl", "tv_pnl",
         ],
         &cells,
     )
@@ -223,10 +227,61 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
     )
 }
 
-/// A raw `--where`/`--sql` result set.
+/// A raw result set (`--where`/`--sql`, and the projected `--diffs` table).
 pub fn raw_table(t: &RawTable) -> String {
     let headers: Vec<&str> = t.columns.iter().map(String::as_str).collect();
     grid(&headers, &t.rows)
+}
+
+/// A raw result set rendered vertically (psql `\x` style): one `column  value`
+/// block per row, blank-line separated. Used for `--columns all`, where the 26
+/// trade_diff columns won't fit a terminal row but a single-probe deep dive
+/// wants them all.
+pub fn raw_records(t: &RawTable) -> String {
+    if t.rows.is_empty() {
+        return "(none)".to_owned();
+    }
+    let width = t.columns.iter().map(String::len).max().unwrap_or(0);
+    let mut out = String::new();
+    for (i, row) in t.rows.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("-- row {} --\n", i + 1));
+        for (col, val) in t.columns.iter().zip(row) {
+            out.push_str(&format!("{col:<width$}  {val}\n"));
+        }
+    }
+    out.trim_end().to_owned()
+}
+
+/// The `--runtimes` view: each probe's most-recent runtime, slowest first, in
+/// seconds. `ceiling_ms` is the pre-run wall (the same constant the runner
+/// enforces); a probe whose single runtime already clears it is flagged, and a
+/// footer sums the shown set against the ceiling so the slow-probe/disable
+/// workflow reads straight off the table.
+pub fn runtimes_table(rows: &[RuntimeRow], ceiling_ms: f64) -> String {
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            vec![
+                r.probe.clone(),
+                format!("{:.1}", r.runtime_ms / 1000.0),
+                r.run_id.to_string(),
+                if r.runtime_ms > ceiling_ms { "OVER".to_owned() } else { String::new() },
+            ]
+        })
+        .collect();
+    let mut out = grid(&["probe", "runtime_s", "run", ""], &cells);
+    if !rows.is_empty() {
+        let sum_ms: f64 = rows.iter().map(|r| r.runtime_ms).sum();
+        out.push_str(&format!(
+            "\n\nΣ(shown) = {:.1}s · pre-run ceiling = {:.0}s (summed per selection)",
+            sum_ms / 1000.0,
+            ceiling_ms / 1000.0,
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

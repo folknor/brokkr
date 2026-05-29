@@ -45,7 +45,7 @@ const ARTEFACT_PARENT: &str = ".brokkr/piners";
 /// Pre-run runtime wall, in milliseconds (~270s). A selection whose estimated
 /// runtime (the sum over selected probes of each probe's most recent recorded
 /// `runtime_ms`) exceeds this is refused before building, unless `--force`.
-const RUNTIME_CEILING_MS: f64 = 270_000.0;
+pub(crate) const RUNTIME_CEILING_MS: f64 = 270_000.0;
 
 /// Flags lifted off the `Corpus` CLI command.
 #[derive(Debug, Default)]

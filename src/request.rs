@@ -20,8 +20,18 @@ pub(crate) struct ResultsQuery {
     pub(crate) limit: usize,
     pub(crate) top: usize,
     // ----- piners corpus-store query fields (ignored for other projects) -----
-    pub(crate) probe: Option<String>,
+    /// Probe selector. One id (no `--diffs`) is the combo view; repeated under
+    /// `--diffs` is an IN-list filter on the diff table.
+    pub(crate) probe: Vec<String>,
     pub(crate) diffs: bool,
+    /// `--columns` projection for the `--diffs` table. Empty = curated default;
+    /// `["all"]` = every column, rendered vertically; else a validated subset.
+    pub(crate) columns: Vec<String>,
+    /// `--runtimes`: per-probe most-recent runtime, slowest first.
+    pub(crate) runtimes: bool,
+    /// `--over <secs>`: with `--runtimes`, keep only probes above this many
+    /// seconds.
+    pub(crate) over: Option<f64>,
     pub(crate) trend: Option<String>,
     pub(crate) run: Option<i64>,
     pub(crate) where_expr: Option<String>,

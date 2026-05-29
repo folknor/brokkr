@@ -19,8 +19,10 @@ pub mod query;
 mod schema;
 
 pub use format::{
-    dispositions_table, gate_misses_block, raw_table, runs_table, trade_diffs_table, trend_table,
+    dispositions_table, gate_misses_block, raw_records, raw_table, runs_table, runtimes_table,
+    trade_diffs_table, trend_table,
 };
+pub use query::resolve_diff_columns;
 pub use ingest::RunRecord;
 
 /// Handle to the corpus runs database.

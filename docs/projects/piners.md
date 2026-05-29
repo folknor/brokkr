@@ -58,7 +58,8 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 - `*_fail`: carries `error` instead of the parity fields.
 - `runtime_ms` (optional, any outcome): per-probe wall-clock milliseconds.
   brokkr can't time probes itself (the whole selection is one harness
-  subprocess), so this is the only runtime source. Persisted; not yet rendered.
+  subprocess), so this is the only runtime source. Persisted, and rendered by
+  `brokkr results --runtimes` (below).
 
 ### Line kinds (`kind` discrimination)
 
@@ -105,8 +106,8 @@ migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/
   ok), `matched`/`ours_only`/`tv_only`, `count_tier`, `acc_tier`/`acc_profile`,
   `acc_failing` (JSON array), `p90_entry/exit/pnl`, `sig_domain`/`sig_leg`/
   `sig_dimension`/`sig_detail`/`sig_breaches`, `error`, `runtime_ms` (per-probe
-  wall-clock ms from the harness; absent on older output, stored but not yet
-  rendered in any canned view - reachable via `--sql`).
+  wall-clock ms from the harness; absent on older output, surfaced by the
+  `--runtimes` view).
 - `trade_diff` (PK `run_id,probe,our_index,tv_index`) - all 26 NDJSON fields.
   The volume driver; the PK covers probe-within-run lookups.
 - `gate_miss` (PK `run_id,probe`) - selected probes the harness emitted **no**
@@ -136,13 +137,31 @@ piners records no benchmarks, so `results` queries `runs.db` instead of the
   the pin-matchers fold into a `N probe(s) match their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
   complete table.
-- `brokkr results --probe <id>` - the probe's disposition + its `trade_diff`
-  rows (the drill-down a blessed `actionable_drift` probe still carries).
-- `brokkr results --diffs --where "<expr>"` - `trade_diff` rows across the run
-  matching a raw boolean expression.
+- `brokkr results --probe <id>` - one probe's **combo** view: its disposition +
+  its `trade_diff` rows (the drill-down a blessed `actionable_drift` probe still
+  carries). The curated diff columns cover all four divergence axes -
+  time/price/**qty**/pnl; `our_qty`/`tv_qty` were the field the pyramiding
+  investigations turned on and used to be missing. A single `--probe` only.
+- `brokkr results --diffs [--probe <id>…] [--columns …] [--where "<expr>"]` -
+  the shapeable `trade_diff` table across the latest run (or `--run N`). `--probe`
+  is repeatable here, an `IN`-list filter (not the combo view). `--columns
+  a,b,c` projects onto a subset; `--columns all` selects every `trade_diff`
+  column and renders **vertically** (psql `\x` style, since 26 columns won't fit
+  a row); an unknown column name errors with the valid set - that error is the
+  column-discovery path (there is no `--list-columns`). `--where` still takes a
+  raw boolean expression. Default order is `(probe, our_index)`.
+- `brokkr results --runtimes [--over <secs>]` - each probe's most-recent
+  runtime, slowest first, in seconds, with a footer summing the shown set
+  against the pre-run ceiling. It calls the *same* per-probe "latest non-null
+  `runtime_ms`" selection the `corpus` runtime wall sums (`estimated_runtime_ms`),
+  so the view can never disagree with the ceiling - the slow-probe/disable
+  workflow reads straight off it. `--over 269` shows what nears the wall.
 - `brokkr results --trend <probe>` - disposition/tier/p90 over recent runs.
-- `brokkr results --sql "<SELECT…>"` - read-only escape hatch.
+- `brokkr results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
+  ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,
+  promote it to a named view rather than keep reaching through this door.
 
-Canned views are `?N`-parameterized. `--where`/`--sql` interpolate trusted
-local SQL; safety rests on the read-only DB open (the load-bearing guard), with
-a `SELECT`/`WITH`-only, no-`;` UX check on top.
+Canned views are `?N`-parameterized; `--columns` interpolates only allow-listed
+column identifiers (a typo can't become injection). `--where`/`--sql`
+interpolate trusted local SQL; safety rests on the read-only DB open (the
+load-bearing guard), with a `SELECT`/`WITH`-only, no-`;` UX check on top.
