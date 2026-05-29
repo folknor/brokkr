@@ -1977,6 +1977,12 @@ Examples:
         /// success. Failures are always preserved.
         #[arg(long)]
         keep_artefacts: bool,
+
+        /// Run even when the selection's estimated runtime (the sum of each
+        /// probe's most recent recorded runtime) exceeds the ~270s ceiling.
+        /// Without this, an over-budget selection is refused before building.
+        #[arg(long)]
+        force: bool,
     },
 }
 

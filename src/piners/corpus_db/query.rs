@@ -8,7 +8,7 @@
 //! ([`super::CorpusDb::open_readonly`]); the caller adds a SELECT-only UX
 //! guard before reaching here.
 
-use rusqlite::Row;
+use rusqlite::{OptionalExtension, Row};
 
 use super::CorpusDb;
 use crate::error::DevError;
@@ -269,6 +269,26 @@ impl CorpusDb {
         read_raw(&mut stmt, rusqlite::params![run_id])
     }
 
+    /// Estimated wall-clock runtime for a selection, in milliseconds: the sum
+    /// over `probes` of each probe's most recent recorded `runtime_ms` (the
+    /// latest run in which it carries a non-null runtime). Probes never run, or
+    /// run only on harness output predating `runtime_ms`, contribute 0. Drives
+    /// the pre-run ceiling in `cmd.rs`.
+    pub fn estimated_runtime_ms(&self, probes: &[String]) -> Result<f64, DevError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT runtime_ms FROM disposition \
+             WHERE probe = ?1 AND runtime_ms IS NOT NULL \
+             ORDER BY run_id DESC LIMIT 1",
+        )?;
+        let mut total = 0.0;
+        for probe in probes {
+            if let Some(ms) = stmt.query_row([probe], |r| r.get::<_, f64>(0)).optional()? {
+                total += ms;
+            }
+        }
+        Ok(total)
+    }
+
     /// Run an arbitrary read-only query (the `--sql` escape hatch).
     pub fn raw_sql(&self, sql: &str) -> Result<RawTable, DevError> {
         let mut stmt = self.conn().prepare(sql)?;
@@ -309,5 +329,78 @@ fn value_to_string(v: rusqlite::types::ValueRef<'_>) -> String {
         ValueRef::Real(f) => f.to_string(),
         ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
         ValueRef::Blob(_) => "<blob>".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::piners::report::parse;
+
+    /// Record one run from an NDJSON literal, no gate context.
+    fn record(db: &CorpusDb, result: &str, nd: &[u8]) {
+        let report = parse(nd);
+        let run = crate::piners::corpus_db::RunRecord {
+            selector: "{}",
+            gated: true,
+            result,
+            fail_reason: None,
+            harness_exit_code: Some(0),
+            stderr: "",
+        };
+        db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
+    }
+
+    #[test]
+    fn estimated_runtime_sums_latest_per_probe_and_treats_missing_as_zero() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        // Run 1: p1=100ms, p2=200ms.
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"p1","outcome":"parity","runtime_ms":100}
+{"probe":"p2","outcome":"parity","runtime_ms":200}
+"#,
+        );
+        // Run 2: only p1, now slower (150ms). p2 absent -> its run-1 value stands.
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"p1","outcome":"parity","runtime_ms":150}
+"#,
+        );
+
+        // p1 latest (150) + p2 latest (200) + p3 unseen (0) = 350.
+        let est = db
+            .estimated_runtime_ms(&["p1".to_owned(), "p2".to_owned(), "p3".to_owned()])
+            .unwrap();
+        assert_eq!(est, 350.0);
+
+        // A selection of only never-run probes estimates 0.
+        assert_eq!(db.estimated_runtime_ms(&["nope".to_owned()]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn estimated_runtime_ignores_null_runtime_rows() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        // A probe whose latest run carries no runtime_ms falls back to the most
+        // recent run that does; with none at all it contributes 0.
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"p1","outcome":"parity","runtime_ms":120}
+"#,
+        );
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"p1","outcome":"parity"}
+"#,
+        );
+        // Latest p1 row has NULL runtime; the 120ms run-1 row is used.
+        assert_eq!(db.estimated_runtime_ms(&["p1".to_owned()]).unwrap(), 120.0);
     }
 }

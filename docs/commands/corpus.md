@@ -56,6 +56,21 @@ full-corpus pass never runs by accident.
   exit, without building or running. Use after a submodule re-pin.
 - `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
 - `--bless` - run the selection, then stamp current dispositions (below).
+- `--force` - bypass the pre-run runtime ceiling (below).
+
+## Runtime ceiling (the pre-run wall)
+
+After verification but before building, brokkr estimates the selection's
+wall-clock cost: the sum over selected probes of each probe's **most recent
+recorded `runtime_ms`** (from the corpus run store; the harness emits per-probe
+runtime on each disposition line). Probes never run - or run only on harness
+output predating the field - contribute 0, so a fresh DB or a never-run
+selection always passes. If the estimate exceeds **270s**, the run is refused
+before the build with a preflight error naming the estimate; re-run with
+`--force` to override. Verification runs first, so hash/submodule drift still
+surfaces on an over-budget selection. `--verify-only` is exempt (it never runs
+the harness). The ceiling is a pre-run wall only - a run already underway is
+never killed for exceeding it.
 
 ## Verification (the content gate)
 
@@ -116,7 +131,8 @@ Bootstrap: `--reseed --all` → commit → write keyword files → `--bless
 
 Harness exit: `0` clean, `1` compile/runtime break(s), `2` harness error.
 brokkr exits non-zero on a non-zero harness exit (or signal) **or** an
-active gate deviation. Hash mismatch fails earlier (before build).
+active gate deviation. Hash mismatch fails earlier (before build); the
+runtime-ceiling refusal fails after verification but before the build.
 `--no-gate` and `--bless` never fail on gate diffs; `--verify-only` exits 0
 once all pins verify.
 

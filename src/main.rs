@@ -1168,6 +1168,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             debug,
             release,
             keep_artefacts,
+            force,
         } => {
             project::require(project, Project::Piners, "corpus")?;
             piners::cmd::corpus(
@@ -1183,6 +1184,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     no_gate,
                     profile_override: profile_override(debug, release),
                     keep_artefacts,
+                    force,
                 },
             )
         }

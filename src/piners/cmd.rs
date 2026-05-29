@@ -42,6 +42,11 @@ use crate::resolve::corpus_runs_db_path;
 /// `<this>/corpus/run-N/`.
 const ARTEFACT_PARENT: &str = ".brokkr/piners";
 
+/// Pre-run runtime wall, in milliseconds (~270s). A selection whose estimated
+/// runtime (the sum over selected probes of each probe's most recent recorded
+/// `runtime_ms`) exceeds this is refused before building, unless `--force`.
+const RUNTIME_CEILING_MS: f64 = 270_000.0;
+
 /// Flags lifted off the `Corpus` CLI command.
 #[derive(Debug, Default)]
 pub struct CorpusArgs {
@@ -64,6 +69,8 @@ pub struct CorpusArgs {
     /// (debug for this command).
     pub profile_override: Option<bool>,
     pub keep_artefacts: bool,
+    /// Bypass the pre-run runtime ceiling (the [`RUNTIME_CEILING_MS`] wall).
+    pub force: bool,
 }
 
 /// Entry point for `brokkr corpus`.
@@ -111,6 +118,15 @@ pub fn corpus(
     if args.verify_only {
         output::corpus_msg(&format!("verify-only: {} probe(s) OK", verified.len()));
         return Ok(());
+    }
+
+    // Pre-run runtime wall: now that the selection has verified, refuse it if
+    // its estimated runtime (sum of each probe's most recent recorded runtime)
+    // blows the ~270s ceiling, unless --force. Placed after verification so a
+    // submodule/hash drift surfaces even on an over-budget selection;
+    // verify_only has already returned, so it's naturally exempt.
+    if !args.force {
+        enforce_runtime_ceiling(project_root, &ids)?;
     }
 
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
@@ -169,8 +185,9 @@ pub fn corpus(
         manifest_path.display()
     ));
 
-    // No enforced ceiling: the ~270s budget is a guideline, not a wall.
-    // PID is tracked so `brokkr kill` reaches the harness.
+    // The ~270s budget is enforced as a pre-run wall (above), not mid-run:
+    // once we commit to a run we let it finish. PID is tracked so `brokkr
+    // kill` reaches the harness.
     let binary_str = built.binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
     let artefact_str = artefacts.path().display().to_string();
@@ -324,6 +341,30 @@ pub fn corpus(
         ));
         Err(DevError::ExitCode(1))
     }
+}
+
+/// Refuse a selection projected to exceed [`RUNTIME_CEILING_MS`]. The estimate
+/// is the sum over `ids` of each probe's most recent recorded `runtime_ms`;
+/// probes with no recorded runtime (a fresh DB, never-run probes, or output
+/// predating the field) contribute 0, so a brand-new corpus always passes.
+/// Read-only DB open - this never writes.
+fn enforce_runtime_ceiling(project_root: &Path, ids: &[String]) -> Result<(), DevError> {
+    let db_path = corpus_runs_db_path(project_root);
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let est_ms = CorpusDb::open_readonly(&db_path)?.estimated_runtime_ms(ids)?;
+    if est_ms > RUNTIME_CEILING_MS {
+        return Err(DevError::Preflight(vec![format!(
+            "corpus: estimated runtime {:.0}s for {} probe(s) exceeds the {:.0}s ceiling \
+             (sum of each probe's most recent recorded runtime). \
+             Re-run with --force to override.",
+            est_ms / 1000.0,
+            ids.len(),
+            RUNTIME_CEILING_MS / 1000.0,
+        )]));
+    }
+    Ok(())
 }
 
 /// Build the `selector` JSON stored on the run row: the resolved probe ids
