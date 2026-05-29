@@ -36,6 +36,10 @@ pub struct DispositionRow {
     pub matched: i64,
     pub ours_only: i64,
     pub tv_only: i64,
+    /// Window-boundary-artifact discount: `ours_only`/`tv_only` stay raw, these
+    /// explain the gap to the effective divergence the label was scored on.
+    pub boundary_ours: i64,
+    pub boundary_tv: i64,
     pub count_tier: Option<String>,
     pub p90_entry: Option<f64>,
     pub p90_exit: Option<f64>,
@@ -72,6 +76,8 @@ pub struct TrendRow {
     pub matched: i64,
     pub ours_only: i64,
     pub tv_only: i64,
+    pub boundary_ours: i64,
+    pub boundary_tv: i64,
     pub p90_exit: Option<f64>,
 }
 
@@ -123,6 +129,8 @@ fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
         matched: row.get("matched")?,
         ours_only: row.get("ours_only")?,
         tv_only: row.get("tv_only")?,
+        boundary_ours: row.get("boundary_ours")?,
+        boundary_tv: row.get("boundary_tv")?,
         count_tier: row.get("count_tier")?,
         p90_entry: row.get("p90_entry")?,
         p90_exit: row.get("p90_exit")?,
@@ -143,7 +151,8 @@ fn runtime_row(row: &Row<'_>) -> rusqlite::Result<RuntimeRow> {
 
 const DISPOSITION_COLS: &str = "\
 probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
-count_tier, p90_entry, p90_exit, p90_pnl, sig_domain, sig_dimension, error";
+boundary_ours, boundary_tv, count_tier, p90_entry, p90_exit, p90_pnl, \
+sig_domain, sig_dimension, error";
 
 /// Every queryable `trade_diff` column - the 26 harness fields (`run_id` is
 /// excluded; the run is already fixed by the query). This is the allow-list
@@ -344,7 +353,9 @@ impl CorpusDb {
         let mut stmt = self.conn().prepare(
             "SELECT d.run_id AS run_id, r.started_at AS started_at, d.disposition AS disposition, \
                     d.count_tier AS count_tier, d.gate_ok AS gate_ok, d.matched AS matched, \
-                    d.ours_only AS ours_only, d.tv_only AS tv_only, d.p90_exit AS p90_exit \
+                    d.ours_only AS ours_only, d.tv_only AS tv_only, \
+                    d.boundary_ours AS boundary_ours, d.boundary_tv AS boundary_tv, \
+                    d.p90_exit AS p90_exit \
              FROM disposition d JOIN run r ON r.run_id = d.run_id \
              WHERE d.probe = ?1 ORDER BY d.run_id DESC LIMIT ?2",
         )?;
@@ -358,6 +369,8 @@ impl CorpusDb {
                 matched: r.get("matched")?,
                 ours_only: r.get("ours_only")?,
                 tv_only: r.get("tv_only")?,
+                boundary_ours: r.get("boundary_ours")?,
+                boundary_tv: r.get("boundary_tv")?,
                 p90_exit: r.get("p90_exit")?,
             })
         })?;

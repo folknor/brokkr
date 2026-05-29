@@ -70,6 +70,17 @@ fn fs(v: &Option<String>) -> String {
     v.clone().unwrap_or_else(|| "-".to_owned())
 }
 
+/// A boundary-discount count: `-` for zero (the common "nothing discounted"
+/// case) so the non-zero values pop, ASCII so the byte-width grid stays
+/// aligned.
+fn bnd(v: i64) -> String {
+    if v == 0 {
+        "-".to_owned()
+    } else {
+        v.to_string()
+    }
+}
+
 /// Compact the stored selector JSON to its *intent* for the runs table. The
 /// selector persists the full resolved `ids` list so a run is reproducible,
 /// but rendering all of them (231 for `--all`) wrecks the table - and the
@@ -145,6 +156,8 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
                 d.matched.to_string(),
                 d.ours_only.to_string(),
                 d.tv_only.to_string(),
+                bnd(d.boundary_ours),
+                bnd(d.boundary_tv),
                 fs(&d.count_tier),
                 ff(d.p90_entry),
                 ff(d.p90_exit),
@@ -157,7 +170,7 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
     grid(
         &[
             "probe", "outcome", "disposition", "expected", "gate", "matched", "ours", "tv",
-            "tier", "p90_en", "p90_ex", "p90_pnl", "signature", "error",
+            "b_ours", "b_tv", "tier", "p90_en", "p90_ex", "p90_pnl", "signature", "error",
         ],
         &cells,
     )
@@ -215,13 +228,16 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
                 t.matched.to_string(),
                 t.ours_only.to_string(),
                 t.tv_only.to_string(),
+                bnd(t.boundary_ours),
+                bnd(t.boundary_tv),
                 ff(t.p90_exit),
             ]
         })
         .collect();
     grid(
         &[
-            "run", "started_at", "disposition", "tier", "gate", "matched", "ours", "tv", "p90_ex",
+            "run", "started_at", "disposition", "tier", "gate", "matched", "ours", "tv", "b_ours",
+            "b_tv", "p90_ex",
         ],
         &cells,
     )

@@ -93,6 +93,20 @@ pub struct ProbeLine {
     pub ours_only: u64,
     #[serde(default)]
     pub tv_only: u64,
+    /// Count of `ours_only` trades piners classified as window-boundary
+    /// artifacts (a data-start phase offset at the shared-window seam, not a
+    /// parity bug). Absent on harness output predating the discriminator.
+    /// `ours_only`/`tv_only` stay *raw*: the factual unmatched-pairing counts,
+    /// reconcilable as `our_trade_count = matched + ours_only` (and disjoint
+    /// from the matched-but-divergent `trade_diff` rows). These `boundary_*`
+    /// fields explain the gap, and the *effective* divergence piners scored the
+    /// label/signature on is the difference (`ours_only - boundary_ours`).
+    #[serde(default)]
+    pub boundary_ours: u64,
+    /// Count of `tv_only` trades piners classified as window-boundary artifacts.
+    /// See [`Self::boundary_ours`].
+    #[serde(default)]
+    pub boundary_tv: u64,
     #[serde(default)]
     pub count_tier: Option<String>,
     #[serde(default)]
@@ -127,6 +141,26 @@ impl ProbeLine {
         } else {
             self.outcome.clone()
         }
+    }
+
+    /// The effective `ours_only` count after discounting window-boundary
+    /// artifacts - the real (interior) divergence piners scored the label and
+    /// signature on. `saturating_sub` is defensive: by contract
+    /// `boundary_ours <= ours_only`, but a malformed line must not underflow.
+    pub fn effective_ours(&self) -> u64 {
+        self.ours_only.saturating_sub(self.boundary_ours)
+    }
+
+    /// The effective `tv_only` count after discounting window-boundary
+    /// artifacts. See [`Self::effective_ours`].
+    pub fn effective_tv(&self) -> u64 {
+        self.tv_only.saturating_sub(self.boundary_tv)
+    }
+
+    /// Did piners discount any trades on this probe as window-boundary
+    /// artifacts? Drives the "no silent drop" summary line.
+    pub fn has_boundary_discount(&self) -> bool {
+        self.boundary_ours > 0 || self.boundary_tv > 0
     }
 }
 
@@ -213,6 +247,11 @@ pub struct Summary {
     pub no_overlap: u64,
     /// Outcomes brokkr does not yet model (forward-compat).
     pub other: u64,
+    /// Probes on which piners discounted at least one window-boundary artifact.
+    pub boundary_probes: u64,
+    /// Total trades (ours + tv) discounted as window-boundary artifacts across
+    /// all probes. The "M trades discounted" half of the summary line.
+    pub boundary_trades: u64,
 }
 
 /// One root-cause group: non-exact parity probes sharing a
@@ -323,12 +362,26 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
             "no_overlap" => s.no_overlap += 1,
             _ => s.other += 1,
         }
+        // Window-boundary discounting is orthogonal to outcome: tally it for
+        // every probe so the "log what was dropped" line covers the full set.
+        if p.has_boundary_discount() {
+            s.boundary_probes += 1;
+            s.boundary_trades += p.boundary_ours + p.boundary_tv;
+        }
     }
     s
 }
 
 /// Group probes carrying a signature by `domain/dimension`, with counts and
 /// a few example ids. Probes without a signature (the exact ones) drop out.
+///
+/// This is the divergence breakdown, and it is keyed on the `signature` -
+/// which piners computes off the *effective* (boundary-discounted) divergence.
+/// A probe whose only divergence is the window-boundary seam therefore arrives
+/// with no count-divergence signature and drops out here automatically; the
+/// breakdown reports the effective divergent population without brokkr having
+/// to re-net the raw `ours_only`/`tv_only` itself. (The discount is still made
+/// visible via the summary line and the disposition's `boundary_*` columns.)
 pub fn root_cause_breakdown(probes: &[ProbeLine]) -> Vec<RootCauseGroup> {
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for p in probes {
@@ -418,6 +471,17 @@ pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
     let summary = summarize(&report.probes);
     output::corpus_msg(&format_summary(&summary));
 
+    // No silent drop: whenever piners reclassified any unmatched trades as
+    // window-boundary artifacts, say so. A probe flipping count_divergent ->
+    // accepted on the discount would otherwise read as "we fixed it" when we
+    // only discounted the seam.
+    if summary.boundary_probes > 0 {
+        output::corpus_msg(&format!(
+            "boundary artifacts: {} probe(s), {} trade(s) discounted (effective parity scored on the interior)",
+            summary.boundary_probes, summary.boundary_trades
+        ));
+    }
+
     let root = root_cause_breakdown(&report.probes);
     if !root.is_empty() {
         output::corpus_msg("root-cause breakdown (non-exact probes by domain/dimension):");
@@ -468,6 +532,19 @@ fn format_probe(p: &ProbeLine) -> String {
         " matched={} ours_only={} tv_only={}",
         p.matched, p.ours_only, p.tv_only
     ));
+    // Make the raw-vs-effective gap explicit on the deviation line: the raw
+    // counts above are the factual unmatched pairings (our_trade_count =
+    // matched + ours_only), while the discount shows what piners scored the
+    // label on.
+    if p.has_boundary_discount() {
+        line.push_str(&format!(
+            " (boundary ours={} tv={}; effective ours={} tv={})",
+            p.boundary_ours,
+            p.boundary_tv,
+            p.effective_ours(),
+            p.effective_tv(),
+        ));
+    }
     line
 }
 
@@ -616,6 +693,71 @@ mod tests {
         assert!(r.trade_diffs[1].entry_price_delta.is_none());
         let s = summarize(&r.probes);
         assert_eq!((s.total, s.actionable_drift), (1, 1)); // drill-down lines excluded
+    }
+
+    #[test]
+    fn parses_boundary_fields_and_computes_effective() {
+        // A boundary-only probe: raw ours_only=2, all discounted -> effective 0.
+        // piners scores it accepted off the effective counts; brokkr keeps the
+        // raw counts and carries the discount alongside.
+        let r = parse(
+            br#"{"probe":"p1","outcome":"parity","matched":208,"ours_only":2,"tv_only":1,"boundary_ours":2,"boundary_tv":1,"acceptance":{"tier":"accepted"}}
+{"probe":"p2","outcome":"parity","matched":50,"ours_only":3,"tv_only":0,"acceptance":{"tier":"actionable_drift"}}
+"#,
+        );
+        assert_eq!((r.probes[0].ours_only, r.probes[0].boundary_ours), (2, 2));
+        assert_eq!((r.probes[0].tv_only, r.probes[0].boundary_tv), (1, 1));
+        assert_eq!((r.probes[0].effective_ours(), r.probes[0].effective_tv()), (0, 0));
+        assert!(r.probes[0].has_boundary_discount());
+        // Absent fields default to 0 -> no discount, effective == raw.
+        assert!(!r.probes[1].has_boundary_discount());
+        assert_eq!(r.probes[1].effective_ours(), 3);
+        // Defensive: a malformed boundary > raw saturates at 0, never underflows.
+        let bad = parse(br#"{"probe":"x","outcome":"parity","ours_only":1,"boundary_ours":5}"#);
+        assert_eq!(bad.probes[0].effective_ours(), 0);
+    }
+
+    #[test]
+    fn summarize_counts_boundary_artifacts() {
+        let r = parse(
+            br#"{"probe":"a","outcome":"parity","ours_only":2,"boundary_ours":2,"acceptance":{"tier":"accepted"}}
+{"probe":"b","outcome":"parity","ours_only":1,"tv_only":3,"boundary_ours":1,"boundary_tv":2,"acceptance":{"tier":"actionable_drift"}}
+{"probe":"c","outcome":"parity","ours_only":4,"acceptance":{"tier":"count_divergent"}}
+"#,
+        );
+        let s = summarize(&r.probes);
+        // a (2) and b (1+2=3) carry discounts; c does not.
+        assert_eq!(s.boundary_probes, 2);
+        assert_eq!(s.boundary_trades, 5);
+    }
+
+    #[test]
+    fn boundary_only_probe_drops_from_breakdown_but_side_flip_stays() {
+        // The #2c contract fixture. Two count-divergence triggers exist on the
+        // piners side: (1) effective ours_only/tv_only > 0 -> sig dimension
+        // ours_only/tv_only; (2) a timestamp-matched opposing-direction pair
+        // (the side guard) -> sig dimension `side`. Boundary discounting nets
+        // only trigger (1). So:
+        //  - `boundary-only`: raw ours_only=2 fully discounted -> piners emits
+        //    `accepted` with NO count-divergence signature. It must NOT appear
+        //    in the divergence breakdown.
+        //  - `side-flip`: a genuine long/short flip stays `count_divergent` with
+        //    sig_dimension=`side` even at effective 0/0. It MUST stay.
+        let r = parse(
+            br#"{"probe":"boundary-only","outcome":"parity","matched":208,"ours_only":2,"tv_only":0,"boundary_ours":2,"acceptance":{"tier":"accepted"}}
+{"probe":"side-flip","outcome":"parity","matched":40,"ours_only":0,"tv_only":0,"acceptance":{"tier":"count_divergent"},"signature":{"domain":"broker-fidelity","dimension":"side"}}
+"#,
+        );
+        let groups = root_cause_breakdown(&r.probes);
+        // Only the side-flip's signature survives; the boundary-only probe (no
+        // signature) is absent.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].key, "broker-fidelity/side");
+        assert_eq!(groups[0].examples, vec!["side-flip".to_owned()]);
+        // And the boundary-only probe is tallied as a discount, not a divergence.
+        let s = summarize(&r.probes);
+        assert_eq!((s.accepted, s.count_divergent), (1, 1));
+        assert_eq!((s.boundary_probes, s.boundary_trades), (1, 2));
     }
 
     #[test]

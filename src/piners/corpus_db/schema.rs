@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS disposition (
     matched       INTEGER NOT NULL,
     ours_only     INTEGER NOT NULL,
     tv_only       INTEGER NOT NULL,
+    boundary_ours INTEGER NOT NULL DEFAULT 0,
+    boundary_tv   INTEGER NOT NULL DEFAULT 0,
     count_tier    TEXT,
     acc_tier      TEXT,
     acc_profile   TEXT,

@@ -1,16 +1,18 @@
 //! Per-db `user_version` migrations for the corpus runs database.
 //!
 //! Mirrors `src/db/migrate.rs`. Version 1 was the initial schema; version 2
-//! adds the per-probe `disposition.runtime_ms` column. On a fresh database the
-//! schema DDL in `schema.rs` creates the current tables (column included) and
-//! stamps the version, so the migration steps below only run for a v1 db on
-//! disk. The `has_table` helper lives here so a future column add stays a
-//! localized change, exactly as in `ResultsDb`.
+//! adds the per-probe `disposition.runtime_ms` column; version 3 adds the
+//! `disposition.boundary_ours`/`boundary_tv` window-boundary-artifact discount
+//! columns. On a fresh database the schema DDL in `schema.rs` creates the
+//! current tables (columns included) and stamps the version, so the migration
+//! steps below only run for an older db on disk. The `has_table` helper lives
+//! here so a future column add stays a localized change, exactly as in
+//! `ResultsDb`.
 
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 2;
+pub(super) const SCHEMA_VERSION: i64 = 3;
 
 /// Run all pending migrations based on `PRAGMA user_version`. On a fresh
 /// database the schema DDL in `schema.rs` creates the v1 tables and stamps the
@@ -29,6 +31,25 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     // guard via `has_column` keeps the migration idempotent if rerun.
     if current < 2 && !has_column(conn, "disposition", "runtime_ms") {
         conn.execute("ALTER TABLE disposition ADD COLUMN runtime_ms REAL", [])?;
+    }
+
+    // v2 -> v3: add the window-boundary-artifact discount columns. NOT NULL is
+    // safe under ALTER ADD because of the DEFAULT 0 - existing rows (raw counts,
+    // no discount recorded) read back as zero, which is exactly "nothing
+    // discounted". Idempotency guarded by `has_column` as above.
+    if current < 3 {
+        if !has_column(conn, "disposition", "boundary_ours") {
+            conn.execute(
+                "ALTER TABLE disposition ADD COLUMN boundary_ours INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_column(conn, "disposition", "boundary_tv") {
+            conn.execute(
+                "ALTER TABLE disposition ADD COLUMN boundary_tv INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -76,14 +97,19 @@ mod tests {
             outcome TEXT NOT NULL, disposition TEXT NOT NULL, PRIMARY KEY (run_id, probe));";
 
     #[test]
-    fn v1_to_v2_adds_runtime_ms_and_is_idempotent() {
+    fn v1_to_current_adds_all_columns_and_is_idempotent() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(V1_SCHEMA).unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         assert!(!has_column(&conn, "disposition", "runtime_ms"));
+        assert!(!has_column(&conn, "disposition", "boundary_ours"));
+        assert!(!has_column(&conn, "disposition", "boundary_tv"));
 
         run_migrations(&conn).unwrap();
+        // v1 -> v2 and v2 -> v3 both run when starting from v1.
         assert!(has_column(&conn, "disposition", "runtime_ms"));
+        assert!(has_column(&conn, "disposition", "boundary_ours"));
+        assert!(has_column(&conn, "disposition", "boundary_tv"));
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
@@ -92,6 +118,36 @@ mod tests {
         // Rerunning is a no-op (the version guard short-circuits; has_column
         // would also prevent a duplicate ALTER).
         run_migrations(&conn).unwrap();
-        assert!(has_column(&conn, "disposition", "runtime_ms"));
+        assert!(has_column(&conn, "disposition", "boundary_ours"));
+    }
+
+    #[test]
+    fn v2_to_v3_adds_only_the_boundary_columns() {
+        // A v2 db already has runtime_ms; the v2 -> v3 step adds just the two
+        // boundary columns and leaves existing rows reading back as 0.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        conn.execute("ALTER TABLE disposition ADD COLUMN runtime_ms REAL", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO disposition (run_id, probe, outcome, disposition) \
+             VALUES (1, 'p1', 'parity', 'accepted')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+
+        run_migrations(&conn).unwrap();
+        assert!(has_column(&conn, "disposition", "boundary_ours"));
+        assert!(has_column(&conn, "disposition", "boundary_tv"));
+        // The pre-existing row reads back as "nothing discounted".
+        let (bo, bt): (i64, i64) = conn
+            .query_row(
+                "SELECT boundary_ours, boundary_tv FROM disposition WHERE probe = 'p1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((bo, bt), (0, 0));
     }
 }

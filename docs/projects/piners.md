@@ -54,6 +54,19 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 - `count_tier` (`exact|near|drift`) + `acceptance` (tier `byte_exact|accepted|
   actionable_drift|count_divergent`, profile `strict|production`, optional
   `p90{entry,exit,pnl}`): parity only.
+- `ours_only`/`tv_only` (raw unmatched-pairing counts) + `boundary_ours`/
+  `boundary_tv` (optional, default 0): the window-boundary-artifact discount. A
+  data-start phase offset at the shared-window seam produces a burst of
+  unmatched trades that vanish once both runs re-sync; piners classifies those as
+  artifacts. The raw counts stay **factual** (`our_trade_count = matched +
+  ours_only`, disjoint from the matched-but-divergent `trade_diff` rows), and
+  `boundary_*` carries the gap. piners scores the **label and signature** on the
+  *effective* divergence (`ours_only - boundary_ours`, `tv_only - boundary_tv`),
+  so a boundary-only probe arrives `accepted` with `boundary_ours == ours_only`.
+  brokkr persists raw + discount and renders both; it never re-nets the raw
+  counts (the effective-derived signature already drops boundary-only probes
+  from the breakdown). The `boundary_*` ≤ raw invariant is a contract, not
+  enforced; a malformed line saturates `effective` at 0.
 - `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
 - `*_fail`: carries `error` instead of the parity fields.
 - `runtime_ms` (optional, any outcome): per-probe wall-clock milliseconds.
@@ -81,7 +94,12 @@ kinds without a brokkr change:
 
 brokkr parses tolerantly (unknown fields ignored) and renders per-probe lines +
 a computed summary + root-cause breakdown (by `signature` domain/dimension) +
-dense-na breakdown (by builtin: site/na/probe counts). The per-probe lines are
+dense-na breakdown (by builtin: site/na/probe counts). When any probe carried a
+window-boundary discount, a `boundary artifacts: N probe(s), M trade(s)
+discounted` line follows the summary (the "log what was dropped" rule - a probe
+flipping `count_divergent -> accepted` on the discount would otherwise read as a
+fix rather than a reclassification), and each surviving deviation line shows its
+`boundary`/`effective` counts. The per-probe lines are
 trimmed to the **deviations**: a probe sitting exactly on its pinned `expected`
 (the gate's satisfied set) is suppressed and folded into one `N probe(s) match
 their pin (hidden)` line, so the surviving lines are the regressions/surprise
@@ -103,7 +121,9 @@ migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/
   self-contained.
 - `disposition` (PK `run_id,probe`) - `outcome`, `disposition` (gate label),
   `expected` + `gate_ok` (from the pins at run time; `None` expected is never
-  ok), `matched`/`ours_only`/`tv_only`, `count_tier`, `acc_tier`/`acc_profile`,
+  ok), `matched`/`ours_only`/`tv_only`, `boundary_ours`/`boundary_tv` (the
+  window-boundary discount; `NOT NULL DEFAULT 0`, so pre-v3 rows read as
+  "nothing discounted"), `count_tier`, `acc_tier`/`acc_profile`,
   `acc_failing` (JSON array), `p90_entry/exit/pnl`, `sig_domain`/`sig_leg`/
   `sig_dimension`/`sig_detail`/`sig_breaches`, `error`, `runtime_ms` (per-probe
   wall-clock ms from the harness; absent on older output, surfaced by the
@@ -136,7 +156,10 @@ piners records no benchmarks, so `results` queries `runs.db` instead of the
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
   the pin-matchers fold into a `N probe(s) match their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
-  complete table.
+  complete table. The disposition table carries `b_ours`/`b_tv` columns (the
+  window-boundary discount, `-` when none) beside raw `ours`/`tv`, so a probe
+  that reads `accepted` with non-zero `ours` is self-explaining; `--trend` shows
+  them too.
 - `brokkr results --probe <id>` - one probe's **combo** view: its disposition +
   its `trade_diff` rows (the drill-down a blessed `actionable_drift` probe still
   carries). The curated diff columns cover all four divergence axes -
