@@ -56,6 +56,9 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   `p90{entry,exit,pnl}`): parity only.
 - `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
 - `*_fail`: carries `error` instead of the parity fields.
+- `runtime_ms` (optional, any outcome): per-probe wall-clock milliseconds.
+  brokkr can't time probes itself (the whole selection is one harness
+  subprocess), so this is the only runtime source. Persisted; not yet rendered.
 
 ### Line kinds (`kind` discrimination)
 
@@ -101,7 +104,9 @@ migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/
   `expected` + `gate_ok` (from the pins at run time; `None` expected is never
   ok), `matched`/`ours_only`/`tv_only`, `count_tier`, `acc_tier`/`acc_profile`,
   `acc_failing` (JSON array), `p90_entry/exit/pnl`, `sig_domain`/`sig_leg`/
-  `sig_dimension`/`sig_detail`/`sig_breaches`, `error`.
+  `sig_dimension`/`sig_detail`/`sig_breaches`, `error`, `runtime_ms` (per-probe
+  wall-clock ms from the harness; absent on older output, stored but not yet
+  rendered in any canned view - reachable via `--sql`).
 - `trade_diff` (PK `run_id,probe,our_index,tv_index`) - all 26 NDJSON fields.
   The volume driver; the PK covers probe-within-run lookups.
 - `gate_miss` (PK `run_id,probe`) - selected probes the harness emitted **no**

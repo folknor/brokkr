@@ -162,9 +162,9 @@ fn insert_disposition(
         "INSERT INTO disposition \
          (run_id, probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
           count_tier, acc_tier, acc_profile, acc_failing, p90_entry, p90_exit, p90_pnl, \
-          sig_domain, sig_leg, sig_dimension, sig_detail, sig_breaches, error) \
+          sig_domain, sig_leg, sig_dimension, sig_detail, sig_breaches, error, runtime_ms) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                 ?17, ?18, ?19, ?20, ?21, ?22)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             run_id,
             p.probe,
@@ -188,6 +188,7 @@ fn insert_disposition(
             sig_detail,
             sig_breaches,
             p.error,
+            p.runtime_ms,
         ],
     )?;
     Ok(())
@@ -256,7 +257,7 @@ mod tests {
 
     #[test]
     fn record_and_query_roundtrip() {
-        let nd = br#"{"probe":"p1","outcome":"parity","matched":218,"ours_only":0,"tv_only":1,"count_tier":"drift","acceptance":{"tier":"actionable_drift","profile":"production","failing":["exit_price"],"p90":{"exit":0.08}},"signature":{"domain":"broker-fidelity","leg":"exit","dimension":"exit_price","dimension_breaches":3},"dense_na_sites":[{"name":"strategy.exit","call_site":"s.pine:12","na_count":7}]}
+        let nd = br#"{"probe":"p1","outcome":"parity","matched":218,"ours_only":0,"tv_only":1,"count_tier":"drift","acceptance":{"tier":"actionable_drift","profile":"production","failing":["exit_price"],"p90":{"exit":0.08}},"signature":{"domain":"broker-fidelity","leg":"exit","dimension":"exit_price","dimension_breaches":3},"dense_na_sites":[{"name":"strategy.exit","call_site":"s.pine:12","na_count":7}],"runtime_ms":142.7}
 {"kind":"trade_diff","probe":"p1","our_index":1,"tv_index":1,"exit_price_delta":0.08,"our_entry_ts":1745295300,"our_exit_ts":1745295300,"our_entry_price":1582.6,"our_exit_price":1582.14,"our_qty":1.0,"our_pnl":-0.46,"our_side":"Long","tv_pnl":-0.54}
 {"kind":"trade_diff","probe":"p1","our_index":2,"tv_index":2,"our_entry_ts":1,"our_exit_ts":2,"our_entry_price":9.0,"our_exit_price":10.0,"our_qty":1.0,"our_pnl":1.0}
 "#;
@@ -293,6 +294,13 @@ mod tests {
         assert!(disp.gate_ok);
         assert_eq!(disp.p90_exit, Some(0.08));
         assert_eq!(disp.tv_only, 1);
+
+        // runtime_ms is stored (store-only for now: reachable via raw SQL, not
+        // yet on any canned query row).
+        let rt = db
+            .raw_sql("SELECT runtime_ms FROM disposition WHERE probe = 'p1'")
+            .unwrap();
+        assert_eq!(rt.rows[0][0], "142.7");
 
         // Both trade_diff rows persisted; the second has NULL tv_pnl.
         let diffs = db.trade_diffs_for_probe(run_id, "p1").unwrap();

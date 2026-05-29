@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS disposition (
     sig_detail    TEXT,
     sig_breaches  INTEGER,
     error         TEXT,
+    runtime_ms    REAL,
     PRIMARY KEY (run_id, probe)
 );
 CREATE INDEX IF NOT EXISTS idx_disposition_probe ON disposition(probe, run_id);

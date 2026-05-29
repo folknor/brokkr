@@ -104,6 +104,11 @@ pub struct ProbeLine {
     /// Error string carried by a `*_fail` outcome.
     #[serde(default)]
     pub error: Option<String>,
+    /// Wall-clock time the harness spent on this probe, in milliseconds.
+    /// Absent on harness output predating the field; modelled as `f64` to
+    /// accept both integer and fractional ms. Stored but not yet rendered.
+    #[serde(default)]
+    pub runtime_ms: Option<f64>,
 }
 
 impl ProbeLine {
