@@ -1,8 +1,8 @@
 # piners project notes
 
 `project = "piners"` in `brokkr.toml`. The one command is `brokkr corpus`
-(the parity-corpus runner) plus `brokkr results` (project-gated to the corpus
-run store, below). Driving the runner - config, selection, verification, the
+(the parity-corpus runner) plus `brokkr corpus-results` (its query sibling
+over the corpus run store, below). Driving the runner - config, selection, verification, the
 expected-disposition gate, reseed/bless - is documented in
 `docs/commands/corpus.md`. This doc covers the **data contracts** the harness
 emits and the **run store** brokkr persists them to. Helpers: `src/piners/`.
@@ -72,7 +72,7 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
 - `runtime_ms` (optional, any outcome): per-probe wall-clock milliseconds.
   brokkr can't time probes itself (the whole selection is one harness
   subprocess), so this is the only runtime source. Persisted, and rendered by
-  `brokkr results --runtimes` (below).
+  `brokkr corpus-results --runtimes` (below).
 
 ### Line kinds (`kind` discrimination)
 
@@ -140,18 +140,21 @@ or fail) once ingest commits - only `DevError::Interrupted` and the spawn-error
 path preserve it (and `--keep-artefacts`). `brokkr clean` removes the `run-N/`
 dirs but spares `runs.db`. An ingest failure preserves the dir and propagates.
 
-## Querying via `brokkr results`
+## Querying via `brokkr corpus-results`
 
-piners records no benchmarks, so `results` queries `runs.db` instead of the
-(empty) `results.db`. The command is bimodal: the benchmark filters
-(`--commit`/`--compare`/`--command`/`--mode`/`--dataset`/`--meta`/`--env`/
-`--grep`) are rejected with an error here; the corpus flags do:
+The corpus run store has its own command, `brokkr corpus-results`, separate
+from `brokkr results`. They used to be one: piners recorded no benchmarks, so
+`results` was rerouted to `runs.db` and rejected the benchmark filters. That
+broke once piners gained hotpath/alloc support - those runs land in the shared
+`results.db` like every other project, so `brokkr results` keeps its benchmark
+meaning and the corpus store moved to a dedicated command. No overloaded query
+struct, no benchmark filters to reject. The corpus views:
 
-- `brokkr results` - table of recent runs. The `selector` column renders the
-  selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`), not the full
+- `brokkr corpus-results` - table of recent runs. The `selector` column renders
+  the selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`), not the full
   resolved id list it stores - that would be 200+ ids wide for an `--all` run.
   The id list stays reachable via the run-detail view or `--sql`.
-- `brokkr results <id>` / `--run <id>` - that run's per-probe dispositions (+
+- `brokkr corpus-results <id>` / `--run <id>` - that run's per-probe dispositions (+
   gate misses + stderr). Default is the latest run. Only the **deviations**
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
   the pin-matchers fold into a `N probe(s) match their pin (hidden)` line - a
@@ -160,12 +163,12 @@ piners records no benchmarks, so `results` queries `runs.db` instead of the
   window-boundary discount, `-` when none) beside raw `ours`/`tv`, so a probe
   that reads `accepted` with non-zero `ours` is self-explaining; `--trend` shows
   them too.
-- `brokkr results --probe <id>` - one probe's **combo** view: its disposition +
+- `brokkr corpus-results --probe <id>` - one probe's **combo** view: its disposition +
   its `trade_diff` rows (the drill-down a blessed `actionable_drift` probe still
   carries). The curated diff columns cover all four divergence axes -
   time/price/**qty**/pnl; `our_qty`/`tv_qty` were the field the pyramiding
   investigations turned on and used to be missing. A single `--probe` only.
-- `brokkr results --diffs [--probe <id>…] [--columns …] [--where "<expr>"]` -
+- `brokkr corpus-results --diffs [--probe <id>…] [--columns …] [--where "<expr>"]` -
   the shapeable `trade_diff` table across the latest run (or `--run N`). `--probe`
   is repeatable here, an `IN`-list filter (not the combo view). `--columns
   a,b,c` projects onto a subset; `--columns all` selects every `trade_diff`
@@ -173,14 +176,14 @@ piners records no benchmarks, so `results` queries `runs.db` instead of the
   a row); an unknown column name errors with the valid set - that error is the
   column-discovery path (there is no `--list-columns`). `--where` still takes a
   raw boolean expression. Default order is `(probe, our_index)`.
-- `brokkr results --runtimes [--over <secs>]` - each probe's most-recent
+- `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
   runtime, slowest first, in seconds, with a footer summing the shown set
   against the pre-run ceiling. It calls the *same* per-probe "latest non-null
   `runtime_ms`" selection the `corpus` runtime wall sums (`estimated_runtime_ms`),
   so the view can never disagree with the ceiling - the slow-probe/disable
   workflow reads straight off it. `--over 269` shows what nears the wall.
-- `brokkr results --trend <probe>` - disposition/tier/p90 over recent runs.
-- `brokkr results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
+- `brokkr corpus-results --trend <probe>` - disposition/tier/p90 over recent runs.
+- `brokkr corpus-results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,
   promote it to a named view rather than keep reaching through this door.
 

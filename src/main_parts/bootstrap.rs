@@ -1,3 +1,6 @@
+// Measurement entry point: threads the resolved config/project/dataset/variant
+// context through to the closure. The args are the context, not a smell.
+#[allow(clippy::too_many_arguments)]
 fn run_measured<F>(
     mode: &cli::ModeArgs,
     dev_config: &config::DevConfig,
@@ -680,16 +683,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             grep,
             limit,
             top,
-            probe,
-            diffs,
-            columns,
-            runtimes,
-            over,
-            trend,
-            run,
-            where_expr,
-            sql,
-            full,
         } => {
             let rq = ResultsQuery {
                 query,
@@ -703,24 +696,39 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 grep,
                 limit,
                 top,
+            };
+            results_cmd::cmd_results(&dev_config, &project_root, &rq)
+        }
+        Command::CorpusResults {
+            run_id,
+            run,
+            limit,
+            probe,
+            diffs,
+            columns,
+            runtimes,
+            over,
+            trend,
+            where_expr,
+            sql,
+            full,
+        } => {
+            project::require(project, Project::Piners, "corpus-results")?;
+            let cq = CorpusQuery {
+                run_id,
+                run,
+                limit,
                 probe,
                 diffs,
                 columns,
                 runtimes,
                 over,
                 trend,
-                run,
                 where_expr,
                 sql,
                 full,
             };
-            // piners records no benchmarks; `results` queries the corpus run
-            // store there instead of the (empty) results.db.
-            if project == Project::Piners {
-                piners::corpus_query::cmd(&project_root, &rq)
-            } else {
-                results_cmd::cmd_results(&dev_config, &project_root, &rq)
-            }
+            piners::corpus_query::cmd(&project_root, &cq)
         }
         Command::Sidecar {
             query,

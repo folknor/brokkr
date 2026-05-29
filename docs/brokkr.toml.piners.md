@@ -1,6 +1,6 @@
 # `[piners]` config
 
-The piners block, read by `brokkr corpus` / `brokkr results`. Kept out of the
+The piners block, read by `brokkr corpus` / `brokkr corpus-results`. Kept out of the
 `[[check]]` sweep, like `[ratatoskr]`. All paths resolve relative to
 `brokkr.toml`. See `docs/commands/corpus.md` for the runner and
 `docs/projects/piners.md` for the data contracts + run store.

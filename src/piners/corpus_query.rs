@@ -1,11 +1,11 @@
-//! `brokkr results`, project-gated to piners.
+//! `brokkr corpus-results`, project-gated to piners.
 //!
-//! piners records no benchmarks, so its `results.db` is always empty and the
-//! `results` command is repurposed to query the corpus run store
-//! (`.brokkr/piners/corpus/runs.db`, written by `brokkr corpus`). The command
-//! is bimodal: the benchmark filters (`--commit`/`--compare`/`--command`/
-//! `--mode`/`--dataset`/`--meta`/`--env`/`--grep`) don't apply here and are
-//! rejected with a clear error; the piners flags below do.
+//! Queries the corpus run store (`.brokkr/piners/corpus/runs.db`, written by
+//! `brokkr corpus`). This is its own command rather than a mode of `brokkr
+//! results`: piners now records hotpath/alloc benchmarks into the shared
+//! `results.db` like every other project, so `results` keeps its benchmark
+//! meaning and the corpus store gets a dedicated surface (no overloaded
+//! struct, no benchmark filters to reject).
 //!
 //! Flag -> view:
 //! - bare                  -> table of recent runs
@@ -29,12 +29,10 @@ use crate::error::DevError;
 use crate::output;
 use crate::piners::corpus_db::query::DispositionRow;
 use crate::piners::corpus_db::{self, CorpusDb};
-use crate::request::ResultsQuery;
+use crate::request::CorpusQuery;
 use crate::resolve::corpus_runs_db_path;
 
-pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
-    reject_bench_flags(q)?;
-
+pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     let db_path = corpus_runs_db_path(project_root);
     if !db_path.exists() {
         output::result_msg("no corpus runs yet (run `brokkr corpus ...` first)");
@@ -74,7 +72,7 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     // than silently ignore it.
     if !q.columns.is_empty() && !q.diffs {
         return Err(DevError::Config(
-            "results --columns shapes the --diffs table - add --diffs \
+            "corpus-results --columns shapes the --diffs table - add --diffs \
              (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
                 .to_owned(),
         ));
@@ -112,7 +110,7 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
     if !q.probe.is_empty() {
         if q.probe.len() > 1 {
             return Err(DevError::Config(
-                "results: multiple --probe needs --diffs (the multi-probe diff table); \
+                "corpus-results: multiple --probe needs --diffs (the multi-probe diff table); \
                  a bare --probe shows one probe's full combo view"
                     .to_owned(),
             ));
@@ -129,7 +127,7 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
         return render_run_detail(&db, run_id, q.full);
     }
 
-    // Bare `brokkr results`: the recent-runs table.
+    // Bare `brokkr corpus-results`: the recent-runs table.
     let rows = db.recent_runs(q.limit)?;
     println!("{}", corpus_db::runs_table(&rows));
     Ok(())
@@ -137,23 +135,14 @@ pub fn cmd(project_root: &Path, q: &ResultsQuery) -> Result<(), DevError> {
 
 /// The run id named explicitly via `--run` or the bare positional argument.
 /// A non-numeric positional is a clear error (it's not a probe selector).
-fn explicit_run_id(q: &ResultsQuery) -> Result<Option<i64>, DevError> {
-    if let Some(run) = q.run {
-        return Ok(Some(run));
-    }
-    if let Some(s) = &q.query {
-        return s.parse::<i64>().map(Some).map_err(|_| {
-            DevError::Config(format!(
-                "results (piners): '{s}' is not a run id - pass a numeric run id, \
-                 or use `--probe <id>` to look up a probe"
-            ))
-        });
-    }
-    Ok(None)
+fn explicit_run_id(q: &CorpusQuery) -> Result<Option<i64>, DevError> {
+    // `--run` and the bare positional are equivalent; prefer the flag. clap
+    // already rejects a non-numeric positional, so there is no parse path here.
+    Ok(q.run.or(q.run_id))
 }
 
 /// The explicit run id if given, else the latest recorded run.
-fn resolve_run(db: &CorpusDb, q: &ResultsQuery) -> Result<Option<i64>, DevError> {
+fn resolve_run(db: &CorpusDb, q: &CorpusQuery) -> Result<Option<i64>, DevError> {
     if let Some(id) = explicit_run_id(q)? {
         return Ok(Some(id));
     }
@@ -224,28 +213,6 @@ fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevEr
     Ok(())
 }
 
-/// Reject the benchmark filters - they have no meaning against the corpus
-/// store, and silently ignoring them would mislead.
-fn reject_bench_flags(q: &ResultsQuery) -> Result<(), DevError> {
-    let any_bench = q.commit.is_some()
-        || q.compare.is_some()
-        || q.command.is_some()
-        || q.mode.is_some()
-        || q.dataset.is_some()
-        || !q.meta.is_empty()
-        || !q.env.is_empty()
-        || !q.grep.is_empty();
-    if any_bench {
-        return Err(DevError::Config(
-            "results (piners): --commit/--compare/--command/--mode/--dataset/--meta/--env/--grep \
-             are benchmark filters and don't apply to the corpus run store. Use \
-             --probe/--diffs/--trend/--run/--where/--sql (or a bare run id)."
-                .to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 /// UX guard for the raw-SQL paths. The read-only DB open is the load-bearing
 /// safety; this just yields a clean error instead of a SQLite write failure.
 /// `require_select` is true for `--sql` (a full query) and false for `--where`
@@ -253,14 +220,14 @@ fn reject_bench_flags(q: &ResultsQuery) -> Result<(), DevError> {
 fn guard_sql(input: &str, flag: &str, require_select: bool) -> Result<(), DevError> {
     if input.contains(';') {
         return Err(DevError::Config(format!(
-            "results {flag}: ';' (statement stacking) is not allowed"
+            "corpus-results {flag}: ';' (statement stacking) is not allowed"
         )));
     }
     if require_select {
         let first = input.split_whitespace().next().unwrap_or("");
         if !first.eq_ignore_ascii_case("select") && !first.eq_ignore_ascii_case("with") {
             return Err(DevError::Config(format!(
-                "results {flag}: only read-only SELECT/WITH queries are allowed"
+                "corpus-results {flag}: only read-only SELECT/WITH queries are allowed"
             )));
         }
     }

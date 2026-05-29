@@ -58,7 +58,7 @@ use cli::{Cli, Command, VerifyCommand};
 use context::{acquire_cmd_lock, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
-use request::{ResultsQuery, SidecarQuery};
+use request::{CorpusQuery, ResultsQuery, SidecarQuery};
 
 include!("main_parts/bootstrap.rs");
 include!("main_parts/commands.rs");

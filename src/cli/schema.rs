@@ -957,19 +957,8 @@ Examples:
   brokkr results --compare a65a 911c                # compare two commits
   brokkr results --compare a65a 911c --mode bench   # compare, filtered
 
-In a piners project, `results` queries the corpus run store
-(.brokkr/piners/corpus/runs.db) instead - piners records no benchmarks.
-The bench filters above do not apply there; the piners flags below do:
-  brokkr results                                    # table of recent corpus runs
-  brokkr results 42                                 # run 42's per-probe dispositions
-  brokkr results --probe magnifier-tick-dist-endpoints-01   # disposition + trade_diff rows
-  brokkr results --diffs --probe a --probe b                # multi-probe diff table (latest run)
-  brokkr results --diffs --probe a --columns our_qty,tv_entry_qty,our_pnl,tv_pnl  # projected
-  brokkr results --diffs --probe a --columns all            # every column, rendered vertically
-  brokkr results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
-  brokkr results --runtimes --over 269                      # probes whose runtime nears the wall
-  brokkr results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
-  brokkr results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch"
+In a piners project this queries the same .brokkr/results.db (hotpath/alloc
+runs). The corpus run store has its own command - see `brokkr corpus-results`."
     )]
     Results {
         /// UUID prefix to look up specific result(s)
@@ -1029,60 +1018,6 @@ The bench filters above do not apply there; the piners flags below do:
         /// Maximum number of functions shown in hotpath reports (0 = all)
         #[arg(long, default_value = "10")]
         top: usize,
-
-        /// [piners] Probe selector. A single `--probe` (without `--diffs`)
-        /// shows that probe's combo view - its disposition plus `trade_diff`
-        /// rows. Repeatable under `--diffs` to narrow the diff table to several
-        /// probes at once.
-        #[arg(long, value_name = "ID")]
-        probe: Vec<String>,
-
-        /// [piners] List `trade_diff` rows across the run (latest run by
-        /// default). Shape it with `--probe`, `--columns`, and/or `--where`.
-        #[arg(long)]
-        diffs: bool,
-
-        /// [piners] Project the `--diffs` table onto these columns
-        /// (comma-separated or repeated). Default is a curated set covering the
-        /// time/price/qty/pnl axes; `all` selects every trade_diff column and
-        /// renders vertically. An unknown name lists the valid columns.
-        #[arg(long, value_name = "COLS", value_delimiter = ',')]
-        columns: Vec<String>,
-
-        /// [piners] Show each probe's most-recent runtime, slowest first
-        /// (shares the pre-run ceiling's per-probe estimate, so it can't drift
-        /// from the wall).
-        #[arg(long)]
-        runtimes: bool,
-
-        /// [piners] With `--runtimes`, keep only probes above this many seconds
-        /// (e.g. `--over 269` for what nears the ceiling).
-        #[arg(long, value_name = "SECS")]
-        over: Option<f64>,
-
-        /// [piners] Trend a probe's disposition/tier/p90 over recent runs.
-        #[arg(long, value_name = "ID")]
-        trend: Option<String>,
-
-        /// [piners] Select a specific corpus run id (default: latest). Also
-        /// accepted as a bare positional argument.
-        #[arg(long, value_name = "N")]
-        run: Option<i64>,
-
-        /// [piners] Raw SQL boolean filter for `--diffs` (trusted local input;
-        /// the DB is opened read-only). E.g. `--diffs --where "exit_price_delta > 0.05"`.
-        #[arg(long = "where", value_name = "EXPR")]
-        where_expr: Option<String>,
-
-        /// [piners] Run a read-only `SELECT`/`WITH` query against runs.db
-        /// (the escape hatch for anything the canned views don't cover).
-        #[arg(long, value_name = "SQL")]
-        sql: Option<String>,
-
-        /// [piners] In the run-detail view (`--run`/bare id), show every probe
-        /// instead of only the ones that deviate from their pin.
-        #[arg(long)]
-        full: bool,
     },
     /// Query sidecar /proc timelines, markers, and phase summaries
     #[command(
@@ -2008,6 +1943,92 @@ Examples:
         /// Without this, an over-budget selection is refused before building.
         #[arg(long)]
         force: bool,
+    },
+
+    /// [piners] Query the corpus run store (.brokkr/piners/corpus/runs.db)
+    #[command(
+        name = "corpus-results",
+        display_order = 71,
+        long_about = "\
+Query the corpus run store written by `brokkr corpus`
+(.brokkr/piners/corpus/runs.db). This is piners' parity-corpus query
+surface; `brokkr results` stays the benchmark store (hotpath/alloc).
+
+Examples:
+  brokkr corpus-results                                    # table of recent corpus runs
+  brokkr corpus-results 42                                 # run 42's per-probe dispositions
+  brokkr corpus-results --probe magnifier-tick-dist-endpoints-01   # disposition + trade_diff rows
+  brokkr corpus-results --diffs --probe a --probe b                # multi-probe diff table (latest run)
+  brokkr corpus-results --diffs --probe a --columns our_qty,tv_entry_qty,our_pnl,tv_pnl  # projected
+  brokkr corpus-results --diffs --probe a --columns all            # every column, rendered vertically
+  brokkr corpus-results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
+  brokkr corpus-results --runtimes --over 269                      # probes whose runtime nears the wall
+  brokkr corpus-results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
+  brokkr corpus-results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch"
+    )]
+    CorpusResults {
+        /// Corpus run id (default: latest). A bare positional, also accepted
+        /// as `--run`.
+        #[arg(value_name = "RUN_ID")]
+        run_id: Option<i64>,
+
+        /// Select a specific corpus run id (default: latest). Equivalent to the
+        /// bare positional.
+        #[arg(long, value_name = "N")]
+        run: Option<i64>,
+
+        /// Maximum number of rows to show (recent-runs table; --trend history)
+        #[arg(long, short = 'n', default_value = "20")]
+        limit: usize,
+
+        /// Probe selector. A single `--probe` (without `--diffs`) shows that
+        /// probe's combo view - its disposition plus `trade_diff` rows.
+        /// Repeatable under `--diffs` to narrow the diff table to several
+        /// probes at once.
+        #[arg(long, value_name = "ID")]
+        probe: Vec<String>,
+
+        /// List `trade_diff` rows across the run (latest run by default). Shape
+        /// it with `--probe`, `--columns`, and/or `--where`.
+        #[arg(long)]
+        diffs: bool,
+
+        /// Project the `--diffs` table onto these columns (comma-separated or
+        /// repeated). Default is a curated set covering the time/price/qty/pnl
+        /// axes; `all` selects every trade_diff column and renders vertically.
+        /// An unknown name lists the valid columns.
+        #[arg(long, value_name = "COLS", value_delimiter = ',')]
+        columns: Vec<String>,
+
+        /// Show each probe's most-recent runtime, slowest first (shares the
+        /// pre-run ceiling's per-probe estimate, so it can't drift from the
+        /// wall).
+        #[arg(long)]
+        runtimes: bool,
+
+        /// With `--runtimes`, keep only probes above this many seconds (e.g.
+        /// `--over 269` for what nears the ceiling).
+        #[arg(long, value_name = "SECS")]
+        over: Option<f64>,
+
+        /// Trend a probe's disposition/tier/p90 over recent runs.
+        #[arg(long, value_name = "ID")]
+        trend: Option<String>,
+
+        /// Raw SQL boolean filter for `--diffs` (trusted local input; the DB is
+        /// opened read-only). E.g. `--diffs --where "exit_price_delta > 0.05"`.
+        #[arg(long = "where", value_name = "EXPR")]
+        where_expr: Option<String>,
+
+        /// Run a read-only `SELECT`/`WITH` query against runs.db (the escape
+        /// hatch for anything the canned views don't cover).
+        #[arg(long, value_name = "SQL")]
+        sql: Option<String>,
+
+        /// In the run-detail view (`--run`/bare id), show every probe instead
+        /// of only the ones that deviate from their pin.
+        #[arg(long)]
+        full: bool,
     },
 }
 

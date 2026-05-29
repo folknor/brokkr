@@ -85,7 +85,7 @@ fn bnd(v: i64) -> String {
 /// selector persists the full resolved `ids` list so a run is reproducible,
 /// but rendering all of them (231 for `--all`) wrecks the table - and the
 /// probe count already has its own column, with the id list reachable via
-/// `brokkr results <id>` or `--sql`. Show `all` / `kw=…` / `probe=…` (+`bless`)
+/// `brokkr corpus-results <id>` or `--sql`. Show `all` / `kw=…` / `probe=…` (+`bless`)
 /// instead. Falls back to the raw string if the JSON is an unexpected shape,
 /// so nothing is silently blanked.
 fn fmt_selector(raw: &str) -> String {
@@ -114,7 +114,7 @@ fn fmt_selector(raw: &str) -> String {
     parts.join(" ")
 }
 
-/// The recent-runs table (bare `brokkr results` in piners).
+/// The recent-runs table (bare `brokkr corpus-results`).
 pub fn runs_table(rows: &[RunRow]) -> String {
     let cells: Vec<Vec<String>> = rows
         .iter()

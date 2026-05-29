@@ -33,7 +33,7 @@ These files are not auto-loaded - read them on demand based on what the user ask
 - `docs/commands/corpus.md` - **read when** the project is piners and the user asks about driving `brokkr corpus` - the parity-corpus runner, the `pins.toml`/keyword registry, probe selection (`--keyword`/`--probe`/`--all`/`--verify-only`), xxh128 verification, the expected-disposition gate, reseed/bless, or exit codes.
 - `docs/brokkr.toml.piners.md` - **read when** the user asks about the `[piners]` config block (`corpus_root`, `registry_dir`, `feeds`, `harness`).
 - `docs/commands/measure.md` - **read when** the user asks about `--bench`, `--hotpath`, `--alloc`, `--stop`, the sidecar profiler, the marker FIFO, `BenchHarness`, hotpath JSON contract, or `brokkr sidecar` queries.
-- `docs/projects/piners.md` - **read when** the project is piners and the user asks about the harness NDJSON/manifest contracts, the `trade_diff` shape, the `runs.db` corpus run store and its schema, or the `brokkr results` query surface (project-gated to piners).
+- `docs/projects/piners.md` - **read when** the project is piners and the user asks about the harness NDJSON/manifest contracts, the `trade_diff` shape, the `runs.db` corpus run store and its schema, or the `brokkr corpus-results` query surface (piners-only).
 - `docs/projects/pbfhogg.md` - **read when** working on pbfhogg-specific commands, verify subcommands, snapshot graph, OSC parser, io_uring/direct-io constraints, or the download command.
 - `docs/projects/elivagar.md` - **read when** working on elivagar-specific commands.
 - `docs/projects/nidhogg.md` - **read when** working on nidhogg-specific commands, server lifecycle, or the API client.
@@ -84,7 +84,7 @@ Single crate, single binary. No workspace.
 - `src/nidhogg/` - server lifecycle, ingest, update, query, geocode, benchmarks, verify. See `docs/projects/nidhogg.md`.
 - `src/litehtml/` - 4 modules: visual reference testing. See `docs/projects/litehtml.md`.
 - `src/ratatoskr/` - harness orchestration (`saehrimnir.rs`, `sync.rs`, `cmd.rs`, `discover.rs`). See `docs/projects/ratatoskr.md`.
-- `src/piners/` - `brokkr corpus` parity-corpus runner: `registry.rs` (pins.toml + keyword loading, xxh128 verification), `select.rs` (selection resolution), `manifest.rs` (harness manifest), `report.rs` (NDJSON parse/render, incl. `trade_diff` collection), `cmd.rs` (orchestration + run persistence), `corpus_db/` (the `runs.db` SQLite store: schema/migrate/ingest/query/format, mirroring `src/db`), `corpus_query.rs` (the piners `brokkr results` handler). See `docs/commands/corpus.md` and `docs/projects/piners.md`.
+- `src/piners/` - `brokkr corpus` parity-corpus runner: `registry.rs` (pins.toml + keyword loading, xxh128 verification), `select.rs` (selection resolution), `manifest.rs` (harness manifest), `report.rs` (NDJSON parse/render, incl. `trade_diff` collection), `cmd.rs` (orchestration + run persistence), `corpus_db/` (the `runs.db` SQLite store: schema/migrate/ingest/query/format, mirroring `src/db`), `corpus_query.rs` (the `brokkr corpus-results` handler). See `docs/commands/corpus.md` and `docs/projects/piners.md`.
 - `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio + pngjs).
 
 ## Shared commands quick reference
@@ -94,7 +94,8 @@ For details, read the linked docs.
 - `check` / `test` - validation pipeline. See `docs/commands/check.md`.
 - `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status.
 - `wc [threshold]` - list tracked `.rs` files with more than `threshold` lines (default 800), largest first. Works in any project.
-- `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`. In a piners project it instead queries the corpus run store (`.brokkr/piners/corpus/runs.db`) with piners flags (`--probe`/`--diffs`/`--trend`/`--run`/`--where`/`--sql`); see `docs/projects/piners.md`.
+- `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`. Uniform across all projects (piners included, for its hotpath/alloc runs).
+- `corpus-results` - **[piners]** query the corpus run store (`.brokkr/piners/corpus/runs.db`) written by `brokkr corpus`, with the corpus flags (`--probe`/`--diffs`/`--trend`/`--run`/`--runtimes`/`--where`/`--sql`/`--full`). The query sibling of `corpus`; split out of `results` once piners gained benchmark runs. See `docs/projects/piners.md`.
 - `clean [--worktrees]` - remove scratch/temp files. On ratatoskr projects also wipes `.brokkr/ratatoskr/` (run-N artefact dirs left by failed runs, plus `mock/` dirs from `mock-serve`). On piners projects removes the `.brokkr/piners/corpus/run-N/` dirs but **spares `runs.db`** (the corpus run store is the source of truth). `--worktrees` also purges all persistent benchmark worktrees.
 - `pmtiles-stats` - PMTiles v3 file statistics (zoom distribution, tile sizes, compression).
 - `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`.

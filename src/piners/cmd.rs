@@ -215,7 +215,7 @@ pub fn corpus(
         Err(e) => {
             let msg = format!("failed to spawn {}: {e}\n", built.binary.display());
             std::fs::write(artefacts.path().join("spawn-error.txt"), &msg).ok();
-            // Record the failed run so it surfaces in `brokkr results`, then
+            // Record the failed run so it surfaces in `brokkr corpus-results`, then
             // still preserve the dir - a spawn failure is exactly when on-disk
             // forensics matter most, and the DB row is a convenience index.
             let selector = selector_json(args, &ids);
@@ -327,8 +327,8 @@ pub fn corpus(
     }
 
     // Data is durable in the DB; the dir is always dropped (unless
-    // --keep-artefacts). No preserve-on-failure - `brokkr results` is the home
-    // for the run's drill-down now.
+    // --keep-artefacts). No preserve-on-failure - `brokkr corpus-results` is the
+    // home for the run's drill-down now.
     if run_pass {
         output::corpus_msg(&format!("PASS in {elapsed_ms}ms"));
         artefacts.finalize_success()?;
@@ -337,7 +337,7 @@ pub fn corpus(
         artefacts.finalize_success()?;
         let reason = fail_reason.unwrap_or_else(|| "fail".to_owned());
         output::corpus_msg(&format!(
-            "FAIL: {reason} in {elapsed_ms}ms (recorded; see `brokkr results`)"
+            "FAIL: {reason} in {elapsed_ms}ms (recorded; see `brokkr corpus-results`)"
         ));
         Err(DevError::ExitCode(1))
     }

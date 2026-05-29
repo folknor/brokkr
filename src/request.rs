@@ -19,7 +19,19 @@ pub(crate) struct ResultsQuery {
     pub(crate) grep: Vec<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
-    // ----- piners corpus-store query fields (ignored for other projects) -----
+}
+
+/// Query parameters for the `corpus-results` command (piners only) - the
+/// corpus run store (`.brokkr/piners/corpus/runs.db`). Distinct from
+/// [`ResultsQuery`]: no benchmark filters apply here, so the bench store and
+/// the corpus store no longer share one overloaded command.
+pub(crate) struct CorpusQuery {
+    /// Bare positional run id (default: latest). Equivalent to `--run`.
+    pub(crate) run_id: Option<i64>,
+    /// `--run N`: a specific corpus run id (default: latest).
+    pub(crate) run: Option<i64>,
+    /// Row cap for the recent-runs table and `--trend` history.
+    pub(crate) limit: usize,
     /// Probe selector. One id (no `--diffs`) is the combo view; repeated under
     /// `--diffs` is an IN-list filter on the diff table.
     pub(crate) probe: Vec<String>,
@@ -33,7 +45,6 @@ pub(crate) struct ResultsQuery {
     /// seconds.
     pub(crate) over: Option<f64>,
     pub(crate) trend: Option<String>,
-    pub(crate) run: Option<i64>,
     pub(crate) where_expr: Option<String>,
     pub(crate) sql: Option<String>,
     /// Run-detail view: show every probe, not just the ones deviating from

@@ -4,7 +4,7 @@
 //! disposition lines and the per-trade `trade_diff` drill-down lines - into a
 //! per-project SQLite database at `.brokkr/piners/corpus/runs.db`. Once a run
 //! is in the DB its artefact dir can be discarded (pass or fail) and its data
-//! stays queryable across runs via `brokkr results` (project-gated to piners).
+//! stays queryable across runs via `brokkr corpus-results` (piners only).
 //!
 //! Deliberately mirrors the `src/db` `ResultsDb` patterns - WAL, per-db
 //! `PRAGMA user_version` migrations ([`migrate`]), single-transaction bulk
