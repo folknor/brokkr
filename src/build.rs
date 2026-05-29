@@ -105,6 +105,24 @@ impl BuildConfig {
             profile: "release",
         }
     }
+
+    /// Build config for an external harness crate described by a `[*.harness]`
+    /// block (`package` + optional `binary`/`features`). `debug` selects the
+    /// dev profile, otherwise release. Shared by
+    /// [`crate::ratatoskr::build::build_for_harness`] and the measured corpus
+    /// path (which appends the hotpath feature to the returned config before
+    /// building) - both build the same engine, so the config mapping lives once
+    /// here rather than being duplicated per caller.
+    pub fn for_harness(harness_cfg: &crate::config::HarnessConfig, debug: bool) -> Self {
+        Self {
+            package: Some(harness_cfg.package.clone()),
+            bin: harness_cfg.binary.clone(),
+            example: None,
+            features: harness_cfg.features.clone(),
+            default_features: true,
+            profile: if debug { "dev" } else { "release" },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

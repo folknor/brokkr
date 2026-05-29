@@ -6,6 +6,29 @@ loop (edit Rust, run the relevant probes, read the verdict) stays inside
 the prompt-cache-warm window. `--all` is the full characterization pass,
 explicitly off the fast budget. Helpers live in `src/piners/`.
 
+## Measured runs (`--hotpath` / `--alloc`)
+
+`corpus` is a measurable command (`docs/commands/measure.md`): the measurement
+mode is a flag. A **bare** `corpus` is the parity run described in this doc
+(verify → gate → `runs.db`). `corpus --hotpath [N]` / `--alloc [N]` instead
+builds the `[piners.harness]` crate **with the hotpath feature added**, runs the
+selection through the sidecar + hotpath-capture path, and records to
+`.brokkr/results.db` - queryable with `brokkr results` like every other
+project, *not* `corpus-results` (that stays the parity run store). The gate,
+the runtime ceiling, and the `runs.db` ingest are all parity-only and skipped.
+
+- Selection is the same surface (`--keyword`/`--probe`/`--all`); it builds the
+  manifest workload, but no disposition is gated.
+- The parity-only flags (`--verify-only`/`--reseed`/`--bless`/`--no-gate`/
+  `--keep-artefacts`) conflict with the measurement flags.
+- Profile defaults to **release** for measured runs (meaningful timing);
+  `--debug` profiles the dev build. (Parity runs default debug.)
+- `--force` is dual-purpose: ceiling-bypass in a parity run, dirty-tree in a
+  measured run (the ceiling is a parity-only concept).
+- `--bench` is **not** supported - the harness emits NDJSON dispositions, not
+  the `key=value` stderr timing contract `--bench` consumes. Use
+  `--hotpath`/`--alloc`. Code: `src/piners/measured.rs`.
+
 ## Config
 
 The `[piners]` block (`corpus_root`, `registry_dir`, `feeds`, `harness`) is

@@ -6,6 +6,9 @@ over the corpus run store, below). Driving the runner - config, selection, verif
 expected-disposition gate, reseed/bless - is documented in
 `docs/commands/corpus.md`. This doc covers the **data contracts** the harness
 emits and the **run store** brokkr persists them to. Helpers: `src/piners/`.
+(`corpus --hotpath`/`--alloc` is a separate, *measured* path that records to
+`.brokkr/results.db` via `brokkr results`, not the `runs.db` store here - see
+the measured-runs section of `docs/commands/corpus.md`.)
 
 ## The manifest hand-off
 

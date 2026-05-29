@@ -1109,25 +1109,42 @@ fn run(cli: Cli) -> Result<(), DevError> {
             debug,
             release,
             keep_artefacts,
-            force,
+            mode,
         } => {
             project::require(project, Project::Piners, "corpus")?;
-            piners::cmd::corpus(
-                &project_root,
-                &dev_config,
-                &piners::cmd::CorpusArgs {
-                    keywords: keyword,
-                    probe,
-                    all,
-                    verify_only,
-                    reseed,
-                    bless,
-                    no_gate,
-                    profile_override: profile_override(debug, release),
-                    keep_artefacts,
-                    force,
-                },
-            )
+            // `--force` is dual-purpose: in a parity run it bypasses the
+            // runtime ceiling; in a measured run it carries the dirty-tree
+            // meaning (handled by run_measured/BenchContext). One field, mode
+            // picks the meaning.
+            let args = piners::cmd::CorpusArgs {
+                keywords: keyword,
+                probe,
+                all,
+                verify_only,
+                reseed,
+                bless,
+                no_gate,
+                profile_override: profile_override(debug, release),
+                keep_artefacts,
+                force: mode.force,
+            };
+            if mode.is_measured() {
+                // --hotpath/--alloc: build the harness with the hotpath feature
+                // and record to results.db, skipping the gate and runs.db.
+                run_measured(
+                    &mode,
+                    &dev_config,
+                    project,
+                    &project_root,
+                    "",
+                    "",
+                    &brokkr_args,
+                    |req| piners::measured::run(req, &args),
+                )
+            } else {
+                // Bare corpus: the parity run (gate + runs.db), unchanged.
+                piners::cmd::corpus(&project_root, &dev_config, &args)
+            }
         }
     }
 }

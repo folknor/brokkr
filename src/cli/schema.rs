@@ -1887,7 +1887,7 @@ Examples:
         /// Verify every pinned probe's files against the submodule and
         /// exit, without building or running the harness. Use after a
         /// submodule re-pin to catch drift.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
         verify_only: bool,
 
         /// Stamp `pins.toml` from the corpus filesystem (no build, no
@@ -1899,7 +1899,7 @@ Examples:
         /// --probe <id>` upserts one. Prints added/changed/removed; review
         /// the result with `git diff pins.toml`. Not usable with
         /// `--keyword` or `--verify-only`.
-        #[arg(long, conflicts_with_all = ["verify_only", "keyword"])]
+        #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc"])]
         reseed: bool,
 
         /// Run the selection, then stamp each selected probe's current
@@ -1910,7 +1910,7 @@ Examples:
         /// Prints `blessed N (changed M)`; review with `git diff pins.toml`.
         /// Combine with `--all`/`--keyword`/`--probe` to scope what is
         /// blessed. Not usable with `--verify-only` or `--reseed`.
-        #[arg(long, conflicts_with_all = ["verify_only", "reseed"])]
+        #[arg(long, conflicts_with_all = ["verify_only", "reseed", "bench", "hotpath", "alloc"])]
         bless: bool,
 
         /// Run, aggregate, and report the per-probe expected-disposition gate
@@ -1918,7 +1918,7 @@ Examples:
         /// pass/fail. Use during the bless-everything rollout (before
         /// expectations exist) or for ad-hoc "just show me the breakdown"
         /// runs.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
         no_gate: bool,
 
         /// Build the harness with the dev profile (`<target>/debug/`).
@@ -1934,15 +1934,21 @@ Examples:
         release: bool,
 
         /// Preserve the run dir (manifest + harness output) even on
-        /// success. Failures are always preserved.
-        #[arg(long)]
+        /// success. Failures are always preserved. (Parity runs only;
+        /// measured runs use the bench scratch dir.)
+        #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
         keep_artefacts: bool,
 
-        /// Run even when the selection's estimated runtime (the sum of each
-        /// probe's most recent recorded runtime) exceeds the ~270s ceiling.
-        /// Without this, an over-budget selection is refused before building.
-        #[arg(long)]
-        force: bool,
+        /// Measurement mode (`--hotpath`/`--alloc`) and shared build flags.
+        /// With no measurement flag this is a bare parity run (gate +
+        /// runs.db); `--hotpath`/`--alloc` build the harness with the hotpath
+        /// feature and record to results.db via `brokkr results`. NOTE:
+        /// `--force` is dual-purpose here - in a parity run it bypasses the
+        /// ~270s pre-run runtime ceiling; in a measured run it carries its
+        /// usual "run on a dirty tree" meaning (the ceiling is a parity-only
+        /// concept). `--bench` is not yet supported for corpus.
+        #[command(flatten)]
+        mode: ModeArgs,
     },
 
     /// [piners] Query the corpus run store (.brokkr/piners/corpus/runs.db)
@@ -2081,6 +2087,15 @@ pub(crate) struct ModeArgs {
     /// Useful for benchmarking only a specific phase of execution.
     #[arg(long)]
     pub(crate) stop: Option<String>,
+}
+
+impl ModeArgs {
+    /// Whether a measurement mode (`--bench`/`--hotpath`/`--alloc`) is set.
+    /// Used by commands like `corpus` that flatten `ModeArgs` and route bare
+    /// (no-measurement) invocations to a different, non-measured handler.
+    pub(crate) fn is_measured(&self) -> bool {
+        self.bench.is_some() || self.hotpath.is_some() || self.alloc.is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------

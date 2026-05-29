@@ -24,6 +24,18 @@ when the child is OOM-killed.
 Dataset paths resolve from `brokkr.toml` automatically. All flags go after
 the command name.
 
+## Measurable commands per project
+
+The measurable commands are pbfhogg's data ops, elivagar's tilegen/etc., and
+nidhogg's query/ingest. Piners' `corpus` is also measurable, but **only
+`--hotpath`/`--alloc`** (see `docs/commands/corpus.md`): a bare `corpus` is the
+parity run (gate + `runs.db`), while `corpus --hotpath`/`--alloc` builds the
+`[piners.harness]` crate with the hotpath feature and records to `results.db`
+via the same `BenchContext` path as everyone else. `corpus --bench` is refused
+- the parity harness emits NDJSON dispositions, not the `key=value` stderr
+timing contract `--bench` needs. The build-config seam both paths share is
+`BenchContext::with_build_config` + `BuildConfig::for_harness`.
+
 ## Benchmark harness
 
 `BenchHarness` (in `src/harness.rs`) provides:

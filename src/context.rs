@@ -139,6 +139,45 @@ impl BenchContext {
         wait: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
+        let build_config = if features.is_empty() && default_features {
+            build::BuildConfig::release(package)
+        } else if default_features {
+            build::BuildConfig::release_with_features(package, features)
+        } else {
+            build::BuildConfig::release_no_defaults(package, features)
+        };
+        Self::with_build_config(
+            dev_config,
+            project,
+            project_root,
+            build_root,
+            &build_config,
+            lock_command,
+            force,
+            wait,
+            stop_marker,
+        )
+    }
+
+    /// As [`BenchContext::new`], but the caller supplies the `BuildConfig`
+    /// directly instead of having it derived as a release build of the
+    /// project's own crate. Same lock -> `cargo_build` -> `BenchHarness`
+    /// lifecycle; the only difference is *what* gets built. This is the seam
+    /// the measured corpus path uses to build the `[piners.harness]` crate
+    /// (with the hotpath feature appended) while still recording to
+    /// `results.db` via the standard bench harness.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_build_config(
+        dev_config: &config::DevConfig,
+        project: Project,
+        project_root: &Path,
+        build_root: Option<&Path>,
+        build_config: &build::BuildConfig,
+        lock_command: &str,
+        force: bool,
+        wait: bool,
+        stop_marker: Option<String>,
+    ) -> Result<Self, DevError> {
         let (paths, effective_build_root, db_root) =
             resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         // Acquire the lock BEFORE building so concurrent brokkr invocations
@@ -153,19 +192,12 @@ impl BenchContext {
         } else {
             lockfile::acquire(&lock_ctx)?
         };
-        let build_config = if features.is_empty() && default_features {
-            build::BuildConfig::release(package)
-        } else if default_features {
-            build::BuildConfig::release_with_features(package, features)
-        } else {
-            build::BuildConfig::release_no_defaults(package, features)
-        };
         let cargo_features = if build_config.features.is_empty() {
             None
         } else {
             Some(build_config.features.join(","))
         };
-        let binary = build::cargo_build(&build_config, effective_build_root)?;
+        let binary = build::cargo_build(build_config, effective_build_root)?;
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,

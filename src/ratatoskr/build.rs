@@ -52,14 +52,7 @@ pub fn build_for_harness(
         harness_cfg.package,
     ));
 
-    let cfg = BuildConfig {
-        package: Some(harness_cfg.package.clone()),
-        bin: harness_cfg.binary.clone(),
-        example: None,
-        features: harness_cfg.features.clone(),
-        default_features: true,
-        profile: profile_name,
-    };
+    let cfg = BuildConfig::for_harness(harness_cfg, debug);
     let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolate_pg);
     if let Some(cb) = on_done {
         cb();
