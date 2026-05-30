@@ -23,7 +23,7 @@ use std::path::Path;
 use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
-use crate::config::{CheckEntry, DependencyRule, TestConfig};
+use crate::config::{CheckEntry, DependencyRule, GremlinsConfig, TestConfig};
 use crate::dependency_rules;
 use crate::error::DevError;
 use crate::gremlins;
@@ -40,6 +40,7 @@ pub(crate) fn cmd_check(
     check_entries: &[CheckEntry],
     dependency_rules: &[DependencyRule],
     test_cfg: Option<&TestConfig>,
+    gremlins_cfg: Option<&GremlinsConfig>,
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
@@ -55,7 +56,7 @@ pub(crate) fn cmd_check(
     let active_sweeps =
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
 
-    run_gremlins(project_root, json, limit, all, fix_gremlins)?;
+    run_gremlins(project_root, gremlins_cfg, json, limit, all, fix_gremlins)?;
     run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
     run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
     let mut collected_timings: Vec<TestTiming> = Vec::new();
@@ -229,13 +230,14 @@ fn effective_profile_name(
 
 fn run_gremlins(
     project_root: &Path,
+    config: Option<&GremlinsConfig>,
     json: bool,
     limit: usize,
     all: bool,
     fix: bool,
 ) -> Result<(), DevError> {
     if fix {
-        let fixed = gremlins::fix(project_root)?;
+        let fixed = gremlins::fix(project_root, config)?;
         if !json {
             let total: usize = fixed.iter().map(|f| f.count).sum();
             if total == 0 {
@@ -252,7 +254,7 @@ fn run_gremlins(
         }
     }
 
-    let found = gremlins::scan(project_root)?;
+    let found = gremlins::scan(project_root, config)?;
 
     if json {
         for g in &found {

@@ -40,6 +40,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let test = parse_test(table)?;
     validate_check_against_test(&check, test.as_ref())?;
     let capture_env = parse_capture_env(table)?;
+    let gremlins = parse_gremlins(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
 
@@ -55,6 +56,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             check,
             test,
             capture_env,
+            gremlins,
         },
     ))
 }
@@ -136,6 +138,7 @@ fn parse_hosts(
             || key == "check"
             || key == "test"
             || key == "capture_env"
+            || key == "gremlins"
         {
             continue;
         }
@@ -227,6 +230,40 @@ fn parse_piners(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("piners: {e}")))?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[gremlins]` section from the root table.
+///
+/// Validates each `exclude` entry: no empty strings (a blank prefix would
+/// match every path and silently disable the whole scan) and no absolute
+/// paths (exclusions are project-root-relative to match the git-relative
+/// paths the scanner walks).
+fn parse_gremlins(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<GremlinsConfig>, DevError> {
+    let Some(value) = table.get("gremlins") else {
+        return Ok(None);
+    };
+    let config: GremlinsConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("gremlins: {e}")))?;
+    for entry in &config.exclude {
+        if entry.trim().is_empty() {
+            return Err(DevError::Config(
+                "[gremlins].exclude contains an empty string - a blank prefix \
+                 would skip every file. List the directories to exclude."
+                    .into(),
+            ));
+        }
+        if Path::new(entry).is_absolute() {
+            return Err(DevError::Config(format!(
+                "[gremlins].exclude entry {entry:?} is absolute; exclusions are \
+                 project-root-relative directories."
+            )));
+        }
+    }
     Ok(Some(config))
 }
 

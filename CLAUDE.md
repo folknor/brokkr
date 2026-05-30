@@ -24,7 +24,8 @@ Install: `cargo install --path ~/Programs/brokkr`
 
 These files are not auto-loaded - read them on demand based on what the user asks. All `./docs/*` files must be 200 lines or less. Don't `wc` them before reading - just Read them.
 
-- `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, datasets, `[[check]]`, `[test]` profiles, `[litehtml]`, or `[ratatoskr]` blocks. Also covers CLI flags that select between configured variants/seqs/snapshots (`--variant`, `--osc-seq`, `--tiles`, `--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`, `--compression`, `--locations-on-ways`).
+- `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, the `[gremlins]` exclude list, `[[check]]`, `[test]` profiles, `[litehtml]`, or `[ratatoskr]` blocks.
+- `docs/brokkr.toml.datasets.md` - **read when** the user asks about `[<host>.datasets.*]` (pbf/osc/pmtiles entries) or the variant-selection CLI flags (`--variant`, `--osc-seq`, `--tiles`, `--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`, `--compression`, `--locations-on-ways`) - map-data projects only (pbfhogg/elivagar/nidhogg).
 - `docs/commands/check.md` - **read when** working on `brokkr check` or `brokkr test`, the gremlins/clippy/test pipeline, sweep selection, profile resolution, libtest filters, or the `BROKKR_TEST_BIN_DIR` contract.
 - `docs/commands/visual.md` - **read when** the project is litehtml-rs or sluggrs and the user asks about `visual`, `list`, `approve`, `report`, `visual-status`, `prepare`, `html-extract`, or `outline`.
 - `docs/commands/sync.md` - **read when** the project is ratatoskr and the user asks about `mock-serve`, `sync-list`, `sync-smoke`, or `sync-bench`. Covers sæhrimnir orchestration, readiness sentinel parsing, endpoint env-var export, marker FIFO usage.

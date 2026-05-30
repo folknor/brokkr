@@ -4,13 +4,15 @@ Per-project config consumed by brokkr. Lives at the project root (`./brokkr.toml
 
 This file documents the **schema-universal** parts of brokkr.toml:
 - Top-level shape (project key, host sections)
-- Dataset entry structure (pbf / osc / pmtiles tables)
-- Shared variant-selection flags (`--variant`, `--osc-seq`, `--tiles`)
+- `[gremlins]` section - directories the gremlin scanner skips
 - `[[check]]` array - feature sweeps for clippy + tests
 - `[[dependency_rule]]` array - direct Cargo dependency boundary rules
 - `[test]` section - default package, default profile, named test profiles
 
 For project-specific config blocks see:
+- Datasets (`[<host>.datasets.*]` pbf/osc/pmtiles) and the `--variant` /
+  `--osc-seq` / `--tiles` flags -> `docs/brokkr.toml.datasets.md` (map-data
+  projects only)
 - `[litehtml]` -> `docs/projects/litehtml.md`
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
 - `[piners]` and `[piners.harness]` -> the `[piners]` section below; runner behaviour is in `docs/commands/corpus.md`
@@ -34,20 +36,8 @@ drives.source = "nvme"
 drives.data = "ssd"
 features = ["linux-direct-io", "linux-io-uring"]
 
-[plantasjen.datasets.denmark]
-origin = "Geofabrik"
-download_date = "2026-02-20"
-bbox = "12.4,55.6,12.7,55.8"
-data_dir = "denmark-data"          # nidhogg only
-
-[plantasjen.datasets.denmark.pbf.indexed]
-file = "denmark-with-indexdata.osm.pbf"
-xxhash = "3f1977fd..."
-seq = 4704
-
-[plantasjen.datasets.denmark.osc.4705]
-file = "denmark-4705.osc.gz"
-xxhash = "fa581f7b..."
+# Map-data projects add [<host>.datasets.*] tables here -
+# see docs/brokkr.toml.datasets.md
 ```
 
 Top-level keys that aren't `project` are treated as hostname sections
@@ -57,34 +47,30 @@ Top-level keys that aren't `project` are treated as hostname sections
 appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
-`litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`.
+`litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
+`gremlins`.
 
-## Dataset structure
+## `[gremlins]` section
 
-- `pbf.<variant>` - PBF file entries keyed by variant name (e.g. `raw`,
-  `indexed`, `locations`). Each has `file`, optional `xxhash` (XXH128),
-  optional `seq`. `sha256` is accepted as an alias during migration.
-- `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
-  `file`, optional `xxhash`. `sha256` accepted as alias.
-- `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
-  `elivagar`). Each has `file`, optional `xxhash`. `sha256` accepted as alias.
-  Used by nidhogg `serve` and `bench tiles`.
-- Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir`
-  (nidhogg only).
+```toml
+[gremlins]
+exclude = ["docs/reference-manual", "vendor/upstream-docs"]
+```
 
-## Shared variant-selection flags
+Directories the `brokkr check` gremlin scanner skips (both the scan and
+`--fix-gremlins`) - for vendored material from an outside source that
+legitimately carries typographic punctuation, BOMs, and bidi marks. Entries
+are project-root-relative directories matched by path prefix on the
+git-relative path: `docs/manual` covers `docs/manual/` and below, but not a
+sibling `docs/manual-extra`. Empty/absolute entries are rejected at parse
+time. Omit the section to scan everything (the default).
 
-Every measurable command on a project that uses datasets accepts:
+## Datasets and variant-selection flags
 
-- `--variant <name>` - selects from `pbf.<name>`. Default: `indexed`
-  (pbfhogg), `raw` (elivagar/nidhogg).
-- `--osc-seq <seq>` - selects from `osc.<seq>`. Auto-selects if exactly one
-  OSC is configured.
-- `--tiles <variant>` - selects from `pmtiles.<variant>`. Auto-selects if
-  exactly one PMTiles entry is configured.
-
-pbfhogg has additional flags for snapshots, I/O backends, and compression -
-see `docs/projects/pbfhogg.md`.
+Host-scoped `[<host>.datasets.<name>]` tables (pbf/osc/pmtiles entries) and the
+`--variant` / `--osc-seq` / `--tiles` flags that select between them apply only
+to the map-data projects (pbfhogg, elivagar, nidhogg). See
+`docs/brokkr.toml.datasets.md`.
 
 ## `[[check]]` array
 

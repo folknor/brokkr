@@ -30,7 +30,38 @@ mod tests {
             check: Vec::new(),
             test: None,
             capture_env: Vec::new(),
+            gremlins: None,
         }
+    }
+
+    #[test]
+    fn gremlins_exclude_matches_dir_prefix() {
+        let cfg = GremlinsConfig {
+            exclude: vec!["docs/manual".to_owned(), "vendor/".to_owned()],
+        };
+        // The directory itself and anything beneath it are excluded.
+        assert!(cfg.is_excluded(Path::new("docs/manual")));
+        assert!(cfg.is_excluded(Path::new("docs/manual/ch1.md")));
+        assert!(cfg.is_excluded(Path::new("vendor/lib/foo.rs")));
+        // A sibling sharing a textual prefix is not.
+        assert!(!cfg.is_excluded(Path::new("docs/manual-extra/x.md")));
+        assert!(!cfg.is_excluded(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn parse_gremlins_rejects_empty_and_absolute() {
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nexclude = [\"\"]\n").unwrap();
+        assert!(parse_gremlins(&table).is_err());
+
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nexclude = [\"/abs/path\"]\n").unwrap();
+        assert!(parse_gremlins(&table).is_err());
+
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nexclude = [\"docs/manual\"]\n").unwrap();
+        let cfg = parse_gremlins(&table).unwrap().unwrap();
+        assert_eq!(cfg.exclude, vec!["docs/manual".to_owned()]);
     }
 
     #[test]

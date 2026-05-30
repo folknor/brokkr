@@ -183,10 +183,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
         args,
     } = cli.command
     {
-        let (project, check_entries, dependency_rules, test_cfg, project_root) =
+        let (project, check_entries, dependency_rules, test_cfg, gremlins_cfg, project_root) =
             match project::detect_optional()? {
-                Some((p, cfg, root)) => (Some(p), cfg.check, cfg.dependency_rules, cfg.test, root),
-                None => (None, Vec::new(), Vec::new(), None, std::env::current_dir()?),
+                Some((p, cfg, root)) => (
+                    Some(p),
+                    cfg.check,
+                    cfg.dependency_rules,
+                    cfg.test,
+                    cfg.gremlins,
+                    root,
+                ),
+                None => (None, Vec::new(), Vec::new(), None, None, std::env::current_dir()?),
             };
         return check_cmd::cmd_check(
             project,
@@ -194,6 +201,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &check_entries,
             &dependency_rules,
             test_cfg.as_ref(),
+            gremlins_cfg.as_ref(),
             &features,
             no_default_features,
             package.as_deref(),

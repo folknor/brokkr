@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::GremlinsConfig;
 use crate::error::DevError;
 
 /// One gremlin occurrence.
@@ -72,11 +73,14 @@ fn replacement(c: char) -> Option<&'static str> {
 /// Rewrite every scannable file (tracked or untracked-not-ignored), replacing gremlin chars with their
 /// ASCII equivalents (or deleting zero-width / bidi noise). Returns one
 /// summary entry per file that was actually modified.
-pub fn fix(project_root: &Path) -> Result<Vec<FixSummary>, DevError> {
+pub fn fix(
+    project_root: &Path,
+    config: Option<&GremlinsConfig>,
+) -> Result<Vec<FixSummary>, DevError> {
     let files = scannable_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
-        if !is_scannable(rel) {
+        if !is_scannable(rel) || is_excluded(rel, config) {
             continue;
         }
         let abs = project_root.join(rel);
@@ -165,12 +169,16 @@ const GREMLINS: &[(char, &str)] = &[
 /// File extensions scanned by default.
 const SCANNED_EXTENSIONS: &[&str] = &["rs", "toml", "md", "js", "sh"];
 
-/// Scan every tracked file with a scannable extension.
-pub fn scan(project_root: &Path) -> Result<Vec<Gremlin>, DevError> {
+/// Scan every tracked file with a scannable extension, skipping any path
+/// under a `[gremlins].exclude` directory.
+pub fn scan(
+    project_root: &Path,
+    config: Option<&GremlinsConfig>,
+) -> Result<Vec<Gremlin>, DevError> {
     let files = scannable_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
-        if !is_scannable(rel) {
+        if !is_scannable(rel) || is_excluded(rel, config) {
             continue;
         }
         let abs = project_root.join(rel);
@@ -226,6 +234,12 @@ fn gremlin_name(c: char) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// True when `rel` lives under a `[gremlins].exclude` directory and should
+/// be skipped. `None` config (no `[gremlins]` section) excludes nothing.
+fn is_excluded(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
+    config.is_some_and(|c| c.is_excluded(rel))
 }
 
 fn is_scannable(rel: &Path) -> bool {

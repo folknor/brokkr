@@ -60,6 +60,14 @@ rewrites every banned char in place with its ASCII equivalent (or deletes it
 for zero-width/bidi noise) before the scan runs, so the subsequent check finds
 zero and passes.
 
+A `[gremlins]` section with `exclude = ["docs/manual", ...]` skips listed
+directories in both the scan and `--fix-gremlins`. Use it for vendored
+material from an outside source (reference manuals, imported docs) that
+legitimately carries typographic punctuation, BOMs, and the like. Matching is
+by path prefix on the git-relative path, so `docs/manual` covers
+`docs/manual/` and everything beneath it but not a sibling `docs/manual-extra`.
+Empty and absolute entries are rejected at parse time.
+
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads
 `cargo metadata --no-deps` and fails on configured direct dependency boundary

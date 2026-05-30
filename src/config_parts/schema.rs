@@ -34,6 +34,43 @@ pub struct DevConfig {
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
     /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
     pub capture_env: Vec<String>,
+    /// `[gremlins]` config: directories the gremlin scanner skips. Used to
+    /// silence vendored / third-party material (reference manuals, imported
+    /// docs) that legitimately carries gremlin characters. `None` when the
+    /// project has no `[gremlins]` section. See [`GremlinsConfig`].
+    pub gremlins: Option<GremlinsConfig>,
+}
+
+/// `[gremlins]` section: tuning for the `brokkr check` gremlin scanner.
+///
+/// Today the only knob is `exclude`, a list of directories (relative to
+/// the project root) whose files are skipped by both the scan and the
+/// `--fix-gremlins` rewrite. Intended for vendored content from an
+/// outside source that ships its own typographic punctuation, BOMs, and
+/// other characters the scanner would otherwise flag.
+///
+/// Matching is by path prefix on the git-relative path: an entry
+/// `docs/manual` excludes `docs/manual` itself and everything under
+/// `docs/manual/`, but not a sibling like `docs/manual-extra`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GremlinsConfig {
+    /// Directories (project-root-relative) to skip when scanning for
+    /// gremlins. Empty / unset means scan everything.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+impl GremlinsConfig {
+    /// True when `rel` (a project-root-relative path) falls under any
+    /// excluded directory. A bare match on the directory itself counts,
+    /// as does anything beneath it; sibling paths sharing a prefix do not.
+    pub fn is_excluded(&self, rel: &Path) -> bool {
+        self.exclude.iter().any(|dir| {
+            let dir = Path::new(dir.trim_end_matches('/'));
+            rel == dir || rel.starts_with(dir)
+        })
+    }
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must
