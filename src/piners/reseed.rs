@@ -15,7 +15,8 @@
 //! - `--reseed --all` - walk `corpus_root/validation/*`, stamp every
 //!   probe. Authoritative full regen: a probe whose dir vanished upstream
 //!   drops out of the file.
-//! - `--reseed --probe <id>` - upsert one probe, leaving the rest intact.
+//! - `--reseed --probe <id>` (repeatable) - upsert the named probe(s),
+//!   leaving the rest intact.
 //!
 //! Output is deterministic (entries sorted by id, inline `pine`/`csv = {
 //! path, xxh128 }`) for clean diffs, and idempotent (re-stamping
@@ -50,7 +51,7 @@ pub fn run(
                 .into(),
         ));
     }
-    if args.all && args.probe.is_some() {
+    if args.all && !args.probe.is_empty() {
         return Err(DevError::Config(
             "corpus --reseed: --all and --probe are mutually exclusive.".into(),
         ));
@@ -69,14 +70,16 @@ pub fn run(
 
     let mut new_pins = if args.all {
         stamp_all(&validation, &corpus_root)?
-    } else if let Some(id) = &args.probe {
+    } else if !args.probe.is_empty() {
         let mut merged = existing.clone();
-        merged.insert(id.clone(), stamp_one(id, &corpus_root)?);
+        for id in &args.probe {
+            merged.insert(id.clone(), stamp_one(id, &corpus_root)?);
+        }
         merged
     } else {
         return Err(DevError::Config(
             "corpus --reseed requires --all (full regen) or --probe <id> \
-             (single upsert)."
+             (repeatable upsert)."
                 .into(),
         ));
     };

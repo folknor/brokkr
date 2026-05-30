@@ -1858,8 +1858,9 @@ Examples:
     /// brokkr renders.
     ///
     /// Selection is over the pinned universe: `--keyword` (repeatable)
-    /// unions groupings, `--probe <id>` picks one, `--all` takes
-    /// everything (the slow characterization pass). A bare invocation with
+    /// unions groupings, `--probe <id>` (repeatable) picks individual
+    /// probes, `--all` takes everything (the slow characterization pass). A
+    /// bare invocation with
     /// no selection is an error - the full corpus never runs by accident.
     /// `--verify-only` walks and verifies the whole universe without
     /// building or running. A missing pinned path or a hash mismatch is a
@@ -1874,11 +1875,11 @@ Examples:
         #[arg(long, value_name = "KEYWORD")]
         keyword: Vec<String>,
 
-        /// Select a single probe by id, resolved directly against
-        /// `pins.toml`. A probe pinned but absent from every keyword file
-        /// is still selectable this way.
+        /// Select a probe by id (repeatable; the union of the listed
+        /// probes), resolved directly against `pins.toml`. A probe pinned
+        /// but absent from every keyword file is still selectable this way.
         #[arg(long, value_name = "ID")]
-        probe: Option<String>,
+        probe: Vec<String>,
 
         /// Select the whole pinned universe (slow characterization pass).
         #[arg(long)]
@@ -1896,7 +1897,7 @@ Examples:
         /// `corpus_root/validation/<id>/`, not the pinned universe.
         /// `--reseed --all` regenerates the whole file from the
         /// submodule (probes whose dirs vanished drop out); `--reseed
-        /// --probe <id>` upserts one. Prints added/changed/removed; review
+        /// --probe <id>` (repeatable) upserts each. Prints added/changed/removed; review
         /// the result with `git diff pins.toml`. Not usable with
         /// `--keyword` or `--verify-only`.
         #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc"])]

@@ -96,8 +96,18 @@ fn fmt_selector(raw: &str) -> String {
     if v.get("all").and_then(Value::as_bool) == Some(true) {
         parts.push("all".to_owned());
     }
-    if let Some(probe) = v.get("probe").and_then(Value::as_str) {
-        parts.push(format!("probe={probe}"));
+    match v.get("probe") {
+        // Current shape: an array of ids (repeatable `--probe`).
+        Some(Value::Array(ps)) => {
+            let names: Vec<&str> = ps.iter().filter_map(Value::as_str).collect();
+            if !names.is_empty() {
+                parts.push(format!("probe={}", names.join(",")));
+            }
+        }
+        // Legacy shape (pre-repeatable `--probe`): a single string. Old
+        // runs.db rows still carry it, so keep rendering them.
+        Some(Value::String(p)) => parts.push(format!("probe={p}")),
+        _ => {}
     }
     if let Some(kws) = v.get("keywords").and_then(Value::as_array) {
         let names: Vec<&str> = kws.iter().filter_map(Value::as_str).collect();
@@ -313,8 +323,17 @@ mod tests {
 
     #[test]
     fn compacts_keyword_and_probe_selectors() {
-        let kw = r#"{"all":false,"bless":false,"ids":["a"],"keywords":["magnifier","bracket"],"probe":null}"#;
+        let kw = r#"{"all":false,"bless":false,"ids":["a"],"keywords":["magnifier","bracket"],"probe":[]}"#;
         assert_eq!(fmt_selector(kw), "kw=magnifier,bracket");
+        // Current shape: probe is an array (repeatable `--probe`).
+        let probe = r#"{"all":false,"bless":false,"ids":["x","y"],"keywords":[],"probe":["x","y"]}"#;
+        assert_eq!(fmt_selector(probe), "probe=x,y");
+    }
+
+    #[test]
+    fn renders_legacy_string_probe_selector() {
+        // Pre-repeatable runs persisted `probe` as a bare string; old
+        // runs.db rows must still render.
         let probe = r#"{"all":false,"bless":false,"ids":["x"],"keywords":[],"probe":"x"}"#;
         assert_eq!(fmt_selector(probe), "probe=x");
     }

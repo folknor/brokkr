@@ -199,8 +199,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
 fn selector_label(args: &CorpusArgs) -> String {
     if args.all {
         "all".to_owned()
-    } else if let Some(p) = &args.probe {
-        format!("probe={p}")
+    } else if !args.probe.is_empty() {
+        format!("probe={}", args.probe.join(","))
     } else if !args.keywords.is_empty() {
         format!("kw={}", args.keywords.join(","))
     } else {

@@ -51,7 +51,7 @@ pub(crate) const RUNTIME_CEILING_MS: f64 = 270_000.0;
 #[derive(Debug, Default)]
 pub struct CorpusArgs {
     pub keywords: Vec<String>,
-    pub probe: Option<String>,
+    pub probe: Vec<String>,
     pub all: bool,
     pub verify_only: bool,
     /// Stamp `pins.toml` from the corpus filesystem instead of running.

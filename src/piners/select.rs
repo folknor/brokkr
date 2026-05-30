@@ -2,7 +2,7 @@
 //!
 //! Selection is over the pinned universe in `pins.toml`. Keyword files
 //! are pure groupings: `--keyword` unions the ids they list, `--probe`
-//! picks one id directly, `--all` takes the whole universe. There is no
+//! (repeatable) picks ids directly, `--all` takes the whole universe. There is no
 //! implicit "run everything" - a bare invocation is an error, so the slow
 //! full-corpus pass is never triggered by accident.
 
@@ -14,8 +14,8 @@ use crate::piners::registry::Registry;
 pub struct SelectArgs {
     /// `--keyword` (repeatable): union of the listed groupings.
     pub keywords: Vec<String>,
-    /// `--probe <id>`: a single pinned probe.
-    pub probe: Option<String>,
+    /// `--probe <id>` (repeatable): the union of the listed pinned probes.
+    pub probe: Vec<String>,
     /// `--all`: the whole pinned universe (slow characterization path).
     pub all: bool,
     /// `--verify-only`: walk and verify the whole universe, run nothing.
@@ -57,7 +57,7 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
         }
     }
 
-    if let Some(probe) = &args.probe {
+    for probe in &args.probe {
         if !registry.pins.contains_key(probe) {
             return Err(DevError::Config(format!(
                 "piners: unknown probe '{probe}' - not pinned in pins.toml"
@@ -143,16 +143,36 @@ mod tests {
     #[test]
     fn probe_selects_one_even_if_unkeyworded() {
         let args = SelectArgs {
-            probe: Some("c".to_owned()),
+            probe: vec!["c".to_owned()],
             ..Default::default()
         };
         assert_eq!(resolve(&registry(), &args).unwrap(), vec!["c"]);
     }
 
     #[test]
+    fn multiple_probes_union_dedup_preserving_order() {
+        let args = SelectArgs {
+            probe: vec!["c".to_owned(), "a".to_owned(), "c".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(resolve(&registry(), &args).unwrap(), vec!["c", "a"]);
+    }
+
+    #[test]
+    fn probes_union_with_keywords_dedup() {
+        let args = SelectArgs {
+            keywords: vec!["x".to_owned()],
+            probe: vec!["a".to_owned(), "c".to_owned()],
+            ..Default::default()
+        };
+        // keyword x -> [a, b]; probe c is new, probe a already seen.
+        assert_eq!(resolve(&registry(), &args).unwrap(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
     fn unknown_probe_errors() {
         let args = SelectArgs {
-            probe: Some("zzz".to_owned()),
+            probe: vec!["zzz".to_owned()],
             ..Default::default()
         };
         assert!(resolve(&registry(), &args).is_err());

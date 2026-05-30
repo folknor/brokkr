@@ -73,7 +73,8 @@ Selection is over the pinned universe. No selection (and no `--all` /
 full-corpus pass never runs by accident.
 
 - `--keyword <k>` (repeatable) - union of the listed groupings.
-- `--probe <id>` - one probe, resolved directly against `pins.toml`.
+- `--probe <id>` (repeatable) - one or more probes, each resolved directly
+  against `pins.toml`; the union is selected.
 - `--all` - the whole pinned universe (slow characterization pass).
 - `--verify-only` - verify every pinned probe against the submodule and
   exit, without building or running. Use after a submodule re-pin.
@@ -137,7 +138,8 @@ Excludes `--verify-only`/`--keyword`.
 - `--reseed --all` - stamp every parity probe under `validation/`; dirs
   without `tv_trades.csv` (self-tests, symbol containers) skipped with a
   count; vanished probes drop out.
-- `--reseed --probe <id>` - upsert one (hard-errors on a missing file).
+- `--reseed --probe <id>` (repeatable) - upsert each named probe
+  (hard-errors on a missing file).
 
 Prints `added/changed/removed`. Touches `pine`/`csv` only - **preserves**
 each surviving probe's `expected`; a brand-new probe stays unblessed.
