@@ -384,12 +384,31 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
     let lines: Vec<&str> = stdout.lines().collect();
     let parsed = parse_test_output(&lines);
 
-    // All passed - compact summary.
+    // `filter_test` only runs on the failure path (cargo exited
+    // non-zero). So even when libtest recorded every test as passing,
+    // *something* failed - the evidence is a harness/process-level
+    // error that never produced a per-test `FAILED` line: a destructor
+    // that double-panics into SIGABRT, an at-exit nonzero, cargo's own
+    // `test failed` / `process didn't exit successfully` wrapper. Those
+    // live only in stderr, so the compact "all passed" summary would
+    // bury the one thing the user needs to see.
+    let harness_failure = stderr_has_harness_failure(stderr);
+
+    // All passed by libtest's count - compact summary, unless the
+    // process aborted around it (in which case surface the abort too).
     if parsed.failures.is_empty() && parsed.suites > 0 {
+        if harness_failure {
+            return format!(
+                "{} - but the test process exited non-zero:\n{}",
+                format_test_summary(&parsed),
+                harness_failure_excerpt(stderr),
+            );
+        }
         return format_test_summary(&parsed);
     }
 
-    // Parser found no failures but stdout has FAILED lines - fall back to raw.
+    // Parser found no failures (suites == 0). Surface a FAILED line the
+    // parser missed, or a harness-level abort - never silently succeed.
     if parsed.failures.is_empty() {
         let has_failed = stdout.lines().any(|l| l.contains("FAILED"));
         if has_failed {
@@ -405,10 +424,56 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
             }
             return raw;
         }
+        if harness_failure {
+            return format!(
+                "cargo test: the test process exited non-zero:\n{}",
+                harness_failure_excerpt(stderr),
+            );
+        }
     }
 
     // Failures present - format as one-liners.
     format_test_failures(&parsed)
+}
+
+/// True when stderr carries a cargo/libtest harness-level failure that
+/// produced no per-test `FAILED` line - the shapes that survive an
+/// otherwise all-passing libtest count: a process that aborts during
+/// teardown (`panic in a destructor` -> SIGABRT), a non-unwinding
+/// panic, or cargo's `test failed` / `process didn't exit successfully`
+/// wrapper. `filter_test` only runs when cargo already exited non-zero,
+/// so these are the failure-without-a-FAILED-line cases.
+fn stderr_has_harness_failure(stderr: &str) -> bool {
+    stderr.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("error: test failed")
+            || t.starts_with("process didn't exit successfully")
+            || t.contains("(signal:")
+            || t.contains("non-unwinding panic")
+            || t.contains("panic in a destructor")
+    })
+}
+
+/// The meaningful lines of a harness-level failure, with cargo's build
+/// and per-suite progress chatter (`Compiling`, `Running tests/...`,
+/// `Finished`) stripped so only the panic / abort / `Caused by` lines
+/// remain. Leading and trailing blank lines are trimmed.
+fn harness_failure_excerpt(stderr: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for line in stderr.lines() {
+        let t = line.trim_start();
+        if is_noise(t) || t.starts_with("Running ") {
+            continue;
+        }
+        out.push(line);
+    }
+    while out.first().is_some_and(|l| l.trim().is_empty()) {
+        out.remove(0);
+    }
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
 }
 
 /// Format parsed test results as a compact summary line.
@@ -924,6 +989,40 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
             "got: {result}"
         );
         assert!(!result.contains("could not compile"), "got: {result}");
+    }
+
+    #[test]
+    fn all_pass_but_process_aborted_surfaces_stderr() {
+        // libtest counts every test as passing, but the process aborts
+        // during teardown (a destructor double-panic -> SIGABRT). The
+        // compact summary must NOT swallow the abort - this is the
+        // piners `--all-features`/hotpath regression.
+        let stdout = "\
+running 12 tests
+test result: ok. 461 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.60s
+";
+        let stderr = "\
+   Compiling piners-vm v0.1.0 (/home/folk/Programs/piners/crates/piners-vm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests/compiler.rs (/media/folk/Banan/cargo/debug/deps/compiler-fd3c66bf0d4593bc)
+
+thread 'functions::compiler_limits_unbounded_recursive_user_functions' panicked at library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `-p piners-vm --test compiler`
+
+Caused by:
+  process didn't exit successfully: `compiler-fd3c66bf0d4593bc --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+";
+        let result = filter_test(stdout, stderr);
+        assert!(result.contains("461 passed"), "got: {result}");
+        assert!(result.contains("exited non-zero"), "got: {result}");
+        assert!(result.contains("panic in a destructor during cleanup"), "got: {result}");
+        assert!(result.contains("-p piners-vm --test compiler"), "got: {result}");
+        assert!(result.contains("SIGABRT"), "got: {result}");
+        // Build/progress chatter is stripped from the surfaced excerpt.
+        assert!(!result.contains("Compiling piners-vm"), "got: {result}");
+        assert!(!result.contains("Running tests/compiler.rs"), "got: {result}");
     }
 
     #[test]
