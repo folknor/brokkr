@@ -76,10 +76,99 @@ pub struct Signature {
 pub struct DenseNaSite {
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
+    /// Source location of the call. The harness has historically serialized
+    /// this both as a string (`"s.pine:12"`) and, for some builtins, as a bare
+    /// integer line number (`12`). brokkr accepts either and normalizes to a
+    /// string so a numeric value never sinks the line - see [`de_call_site`].
+    #[serde(default, deserialize_with = "de_call_site")]
     pub call_site: String,
     #[serde(default)]
     pub na_count: u64,
+}
+
+/// Deserialize a `call_site` from either a JSON string or a JSON integer,
+/// normalizing the integer form to its decimal string. The harness emits both
+/// shapes; modelling the field as a bare `String` made an integer value fail
+/// `from_value`, which (because the whole `ProbeLine` then failed) discarded
+/// the probe's gate-critical disposition over a pure diagnostic field. null is
+/// tolerated as an empty string for the same reason.
+fn de_call_site<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::fmt;
+
+    use serde::de::{Unexpected, Visitor};
+
+    struct CallSite;
+
+    impl<'de> Visitor<'de> for CallSite {
+        type Value = String;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string or integer call site")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_owned())
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_unit<E>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+
+        fn visit_none<E>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<String, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<String, E>
+        where
+            E: serde::de::Error,
+        {
+            // A fractional call site is nonsensical; refuse it rather than
+            // silently stringifying a float.
+            Err(E::invalid_type(Unexpected::Float(v), &self))
+        }
+    }
+
+    deserializer.deserialize_any(CallSite)
+}
+
+/// Deserialize `dense_na_sites` tolerantly: parse each element on its own and
+/// drop a single site that fails rather than sinking the whole disposition.
+/// Dense-na sites are pure diagnostics (they feed the console breakdown and the
+/// corpus DB, never the gate), so one malformed site must not cost us the
+/// probe's gate-critical disposition. Paired with [`de_call_site`], which keeps
+/// the common numeric-`call_site` site parseable in the first place; this is
+/// the backstop for any *other* future field-type drift inside a site.
+fn de_dense_na_sites<'de, D>(deserializer: D) -> Result<Vec<DenseNaSite>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<DenseNaSite>(v).ok())
+        .collect())
 }
 
 /// A per-probe disposition line.
@@ -113,7 +202,7 @@ pub struct ProbeLine {
     pub acceptance: Option<Acceptance>,
     #[serde(default)]
     pub signature: Option<Signature>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_dense_na_sites")]
     pub dense_na_sites: Vec<DenseNaSite>,
     /// Error string carried by a `*_fail` outcome.
     #[serde(default)]
@@ -314,14 +403,24 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         // for persistence but stays out of aggregation. Any other `kind` - a
         // future record type - is skipped. A line that fails to parse is
         // surfaced as a warning but never aborts the run.
+        // Pull the probe id out of the peeked value before `from_value`
+        // consumes it, so a parse failure names the offending probe instead of
+        // surfacing an anonymous `invalid type` error with no way to tell which
+        // line it came from.
+        let at = match value.get("probe").and_then(serde_json::Value::as_str) {
+            Some(id) => format!(" (probe {id})"),
+            None => String::new(),
+        };
         match value.get("kind").and_then(serde_json::Value::as_str) {
             None | Some("disposition") => match serde_json::from_value::<ProbeLine>(value) {
                 Ok(p) => report.probes.push(p),
-                Err(e) => output::corpus_msg(&format!("warning: unparsable probe line: {e}")),
+                Err(e) => output::corpus_msg(&format!("warning: unparsable probe line{at}: {e}")),
             },
             Some("trade_diff") => match serde_json::from_value::<TradeDiffLine>(value) {
                 Ok(t) => report.trade_diffs.push(t),
-                Err(e) => output::corpus_msg(&format!("warning: unparsable trade_diff line: {e}")),
+                Err(e) => {
+                    output::corpus_msg(&format!("warning: unparsable trade_diff line{at}: {e}"));
+                }
             },
             Some(_) => continue,
         }
@@ -758,6 +857,41 @@ mod tests {
         let s = summarize(&r.probes);
         assert_eq!((s.accepted, s.count_divergent), (1, 1));
         assert_eq!((s.boundary_probes, s.boundary_trades), (1, 2));
+    }
+
+    #[test]
+    fn accepts_numeric_call_site_and_keeps_disposition() {
+        // The regression: the harness emitted a numeric `call_site` (a bare line
+        // number) inside an optional diagnostic. Modelling it as a bare String
+        // made `from_value` fail, which discarded the whole probe - so the gate
+        // later reported "harness emitted no disposition". Now the integer is
+        // accepted and normalized to a string, and the disposition survives.
+        let r = parse(
+            br#"{"probe":"matrix-eigen-rank-deficient-cov-01","outcome":"parity","disposition":"accepted","acceptance":{"tier":"accepted"},"dense_na_sites":[{"name":"matrix.eigenvalues","call_site":13,"na_count":9968,"call_count":9968,"stub_count":0}]}
+"#,
+        );
+        assert_eq!(r.probes.len(), 1);
+        assert_eq!(r.probes[0].disposition(), "accepted");
+        assert_eq!(r.probes[0].dense_na_sites[0].name, "matrix.eigenvalues");
+        assert_eq!(r.probes[0].dense_na_sites[0].call_site, "13"); // int -> string
+        assert_eq!(r.probes[0].dense_na_sites[0].na_count, 9968);
+    }
+
+    #[test]
+    fn malformed_dense_na_site_does_not_sink_disposition() {
+        // A pure-diagnostic site with the wrong type on a non-call_site field
+        // (na_count as a string) is dropped on its own, but the gate-critical
+        // disposition and the sibling well-formed (numeric-call_site) site both
+        // survive. One bad diagnostic must never cost us the probe.
+        let r = parse(
+            br#"{"probe":"p1","outcome":"parity","acceptance":{"tier":"accepted"},"dense_na_sites":[{"name":"a","call_site":8,"na_count":5},{"name":"b","na_count":"oops"}]}
+"#,
+        );
+        assert_eq!(r.probes.len(), 1);
+        assert_eq!(r.probes[0].disposition(), "accepted");
+        assert_eq!(r.probes[0].dense_na_sites.len(), 1); // bad site dropped
+        assert_eq!(r.probes[0].dense_na_sites[0].name, "a");
+        assert_eq!(r.probes[0].dense_na_sites[0].call_site, "8");
     }
 
     #[test]
