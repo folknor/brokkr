@@ -3,7 +3,7 @@
 //! Scans tracked and untracked-not-ignored source, config, and doc files for invisible or visually
 //! deceptive Unicode characters that tend to sneak in via copy-paste from
 //! editors, chat logs, or LLM output and cause subtle bugs. The banned
-//! set covers three families:
+//! set covers several families:
 //!
 //! * zero-width / invisible (ZWSP, BOM inside files, word joiner, soft hyphen)
 //! * non-breaking spaces (NBSP, narrow NBSP)
@@ -11,6 +11,13 @@
 //! * line / paragraph separators
 //! * em-dash, en-dash
 //! * typographic single and double quotes
+//! * emoji / pictographs (Misc Symbols, Dingbats, the emoji planes, and the
+//!   stray pictographs in Misc Symbols & Arrows) plus emoji variation selectors
+//!
+//! Two neighbouring ranges are deliberately spared: the Arrows block
+//! (U+2190..=21FF, including `→` used as "maps to" in comments and display
+//! strings) and box-drawing / geometric shapes (U+2500..=25FF, used for tree
+//! and table output).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,7 +73,8 @@ fn replacement(c: char) -> Option<&'static str> {
         '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => "'",
         // Typographic double quotes → ASCII double quote
         '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => "\"",
-        _ => return None,
+        // Emoji / pictographs have no ASCII equivalent → delete.
+        _ => return pictograph_name(c as u32).map(|_| ""),
     })
 }
 
@@ -233,7 +241,30 @@ fn gremlin_name(c: char) -> Option<&'static str> {
             return Some(name);
         }
     }
-    None
+    pictograph_name(cp)
+}
+
+/// Banned emoji / pictographic ranges, checked after the hand-enumerated
+/// `GREMLINS` table misses. Returns a category label - there are far too many
+/// codepoints to name each one individually.
+///
+/// Spared on purpose: the Arrows block (U+2190..=21FF, e.g. `→`) and
+/// box-drawing / geometric shapes (U+2500..=25FF). Both are used legitimately
+/// throughout the codebase - `→` as "maps to" in comments and formatter
+/// output, box-drawing for tree/table rendering - so they fall outside every
+/// range below.
+fn pictograph_name(cp: u32) -> Option<&'static str> {
+    match cp {
+        0x2600..=0x26FF => Some("MISCELLANEOUS SYMBOL"),
+        0x2700..=0x27BF => Some("DINGBAT"),
+        // Stray non-arrow emoji inside Miscellaneous Symbols and Arrows
+        // (white/black large square, white medium star, heavy large circle).
+        // The arrows sharing this block are spared.
+        0x2B1B | 0x2B1C | 0x2B50 | 0x2B55 => Some("GEOMETRIC SYMBOL"),
+        0xFE00..=0xFE0F => Some("VARIATION SELECTOR"),
+        0x1F000..=0x1FAFF => Some("EMOJI / PICTOGRAPH"),
+        _ => None,
+    }
 }
 
 /// True when `rel` lives under a `[gremlins].exclude` directory and should
@@ -424,5 +455,76 @@ mod tests {
         assert!(!is_scannable(Path::new("foo.html")));
         assert!(!is_scannable(Path::new("Cargo.lock")));
         assert!(!is_scannable(Path::new("no_ext")));
+    }
+
+    #[test]
+    fn detects_warning_sign_misc_symbol() {
+        let out = scan_str("// danger \u{26A0} ahead\n");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].codepoint, 0x26A0);
+        assert_eq!(out[0].name, "MISCELLANEOUS SYMBOL");
+    }
+
+    #[test]
+    fn detects_dingbat_check_and_cross() {
+        let out = scan_str("\u{2705} ok \u{274C} no\n");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].codepoint, 0x2705);
+        assert_eq!(out[1].codepoint, 0x274C);
+        assert!(out.iter().all(|g| g.name == "DINGBAT"));
+    }
+
+    #[test]
+    fn detects_emoji_plane() {
+        let out = scan_str("ship it \u{1F680}\n");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].codepoint, 0x1F680);
+        assert_eq!(out[0].name, "EMOJI / PICTOGRAPH");
+    }
+
+    #[test]
+    fn detects_variation_selector() {
+        let out = scan_str("warn\u{FE0F}\n");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].codepoint, 0xFE0F);
+        assert_eq!(out[0].name, "VARIATION SELECTOR");
+    }
+
+    #[test]
+    fn detects_stray_2b_star() {
+        let out = scan_str("rated \u{2B50}\n");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].codepoint, 0x2B50);
+        assert_eq!(out[0].name, "GEOMETRIC SYMBOL");
+    }
+
+    #[test]
+    fn arrows_are_spared() {
+        // The Arrows block (incl. U+2192) is used as "maps to" throughout the
+        // codebase and its formatter output; it must not be flagged.
+        let out = scan_str("// v1 \u{2192} v2, a \u{2190} b, c \u{21D2} d\n");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn box_drawing_is_spared() {
+        // Tree/table rendering relies on box-drawing; U+2500..=25FF stays legal.
+        let out = scan_str("\u{250C}\u{2500}\u{2510}\n\u{2514}\u{2500}\u{2518}\n");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn fix_deletes_emoji_and_pictographs() {
+        let (fixed, count) = fix_content("done \u{2705}\u{FE0F} ship \u{1F680} ok\n");
+        assert_eq!(count, 3);
+        assert_eq!(fixed, "done  ship  ok\n");
+    }
+
+    #[test]
+    fn fix_preserves_arrows_and_box_drawing() {
+        let input = "a \u{2192} b \u{250C}\u{2500}\u{2518}\n";
+        let (fixed, count) = fix_content(input);
+        assert_eq!(count, 0);
+        assert_eq!(fixed, input);
     }
 }

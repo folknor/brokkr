@@ -55,10 +55,14 @@ Gremlin phase runs first and fails the check if any banned Unicode character
 is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
 untracked-not-gitignored, so new plan docs are caught before staging) - see
 `src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
-spaces, bidi overrides, em/en dashes, typographic quotes). `--fix-gremlins`
+spaces, bidi overrides, em/en dashes, typographic quotes, and emoji /
+pictographs: Misc Symbols, Dingbats, the emoji planes, and emoji variation
+selectors). The Arrows block (`→` and friends) and box-drawing / geometric
+shapes (`U+2500..=25FF`) are deliberately spared - both are used legitimately
+in comments, formatter output, and tree/table rendering. `--fix-gremlins`
 rewrites every banned char in place with its ASCII equivalent (or deletes it
-for zero-width/bidi noise) before the scan runs, so the subsequent check finds
-zero and passes.
+for zero-width/bidi/emoji noise, which have none) before the scan runs, so the
+subsequent check finds zero and passes.
 
 A `[gremlins]` section with `exclude = ["docs/manual", ...]` skips listed
 directories in both the scan and `--fix-gremlins`. Use it for vendored
