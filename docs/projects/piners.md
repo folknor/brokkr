@@ -180,8 +180,9 @@ struct, no benchmark filters to reject. The corpus views:
   column-discovery path (there is no `--list-columns`). `--where` still takes a
   raw boolean expression. Default order is `(probe, our_index)`.
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
-  runtime, slowest first, in seconds, with a footer summing the shown set
-  against the pre-run ceiling. It calls the *same* per-probe "latest non-null
+  runtime, slowest first, in milliseconds (the harness's unit - seconds
+  flattened the sub-second majority to one decimal), with a footer summing the
+  shown set against the pre-run ceiling in seconds. It calls the *same* per-probe "latest non-null
   `runtime_ms`" selection the `corpus` runtime wall sums (`estimated_runtime_ms`),
   so the view can never disagree with the ceiling - the slow-probe/disable
   workflow reads straight off it. `--over 269` shows what nears the wall.

@@ -282,23 +282,25 @@ pub fn raw_records(t: &RawTable) -> String {
 }
 
 /// The `--runtimes` view: each probe's most-recent runtime, slowest first, in
-/// seconds. `ceiling_ms` is the pre-run wall (the same constant the runner
-/// enforces); a probe whose single runtime already clears it is flagged, and a
-/// footer sums the shown set against the ceiling so the slow-probe/disable
-/// workflow reads straight off the table.
+/// milliseconds - the unit the harness emits and the store keeps; rendering in
+/// seconds flattened the sub-second majority of the corpus to `0.1`/`0.0`.
+/// `ceiling_ms` is the pre-run wall (the same constant the runner enforces); a
+/// probe whose single runtime already clears it is flagged, and a footer sums
+/// the shown set against the ceiling (both in seconds, the ceiling's unit) so
+/// the slow-probe/disable workflow reads straight off the table.
 pub fn runtimes_table(rows: &[RuntimeRow], ceiling_ms: f64) -> String {
     let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|r| {
             vec![
                 r.probe.clone(),
-                format!("{:.1}", r.runtime_ms / 1000.0),
+                format!("{:.0}", r.runtime_ms),
                 r.run_id.to_string(),
                 if r.runtime_ms > ceiling_ms { "OVER".to_owned() } else { String::new() },
             ]
         })
         .collect();
-    let mut out = grid(&["probe", "runtime_s", "run", ""], &cells);
+    let mut out = grid(&["probe", "runtime_ms", "run", ""], &cells);
     if !rows.is_empty() {
         let sum_ms: f64 = rows.iter().map(|r| r.runtime_ms).sum();
         out.push_str(&format!(
