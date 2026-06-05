@@ -79,12 +79,17 @@ fn print_header(info: &EnvInfo) {
     println!("{:<12} {}", "kernel:", info.kernel);
     println!("{:<12} {}", "governor:", info.governor);
     println!(
-        "{:<12} {} GB ({} GB available)",
+        "{:<12} {} ({} available)",
         "memory:",
-        info.memory_total_mb / 1024,
-        info.memory_available_mb / 1024,
+        format_gib(info.memory_total_mb),
+        format_gib(info.memory_available_mb),
     );
     println!("{:<12} {}", "io_uring:", info.io_uring_status);
+}
+
+/// Format a MiB count as GiB with one decimal, e.g. 30968 -> "30.2 GiB".
+fn format_gib(mib: u64) -> String {
+    format!("{:.1} GiB", mib as f64 / 1024.0)
 }
 
 fn print_drives(info: &EnvInfo) {
@@ -726,6 +731,26 @@ mod tests {
     fn version_from_single_version_word() {
         let stdout = b"3.14.159";
         assert_eq!(extract_version_from_stdout(stdout), "3.14.159");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_gib
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gib_from_typical_meminfo_total() {
+        // MemTotal: 31711476 kB -> 30968 MiB -> 30.2 GiB
+        assert_eq!(format_gib(30968), "30.2 GiB");
+    }
+
+    #[test]
+    fn gib_exact() {
+        assert_eq!(format_gib(16384), "16.0 GiB");
+    }
+
+    #[test]
+    fn gib_zero() {
+        assert_eq!(format_gib(0), "0.0 GiB");
     }
 
     // -----------------------------------------------------------------------
