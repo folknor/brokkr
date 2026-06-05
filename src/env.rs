@@ -10,6 +10,7 @@ use crate::project::Project;
 pub struct EnvInfo {
     pub hostname: String,
     pub kernel: String,
+    pub cpu: String,
     pub governor: String,
     pub memory_total_mb: u64,
     pub memory_available_mb: u64,
@@ -54,6 +55,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
     EnvInfo {
         hostname: paths.hostname.clone(),
         kernel: read_kernel(),
+        cpu: read_cpu(),
         governor: read_governor(),
         memory_total_mb: mem_total,
         memory_available_mb: mem_avail,
@@ -77,6 +79,7 @@ pub fn print(info: &EnvInfo) {
 fn print_header(info: &EnvInfo) {
     println!("{:<12} {}", "hostname:", info.hostname);
     println!("{:<12} {}", "kernel:", info.kernel);
+    println!("{:<12} {}", "cpu:", info.cpu);
     println!("{:<12} {}", "governor:", info.governor);
     println!(
         "{:<12} {} ({} available)",
@@ -209,6 +212,81 @@ fn extract_kernel_version(content: &str) -> String {
 /// Read the CPU frequency governor.
 fn read_governor() -> String {
     read_trimmed("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+}
+
+/// Build the CPU summary line: model, cores/threads, frequency range, boost.
+fn read_cpu() -> String {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let (model, cores, threads) = parse_cpuinfo(&cpuinfo);
+
+    let mut details: Vec<String> = Vec::with_capacity(3);
+    if let Some((cores, threads)) = cores.zip(threads) {
+        details.push(format!("{cores}c/{threads}t"));
+    }
+    if let Some(range) = read_freq_range() {
+        details.push(range);
+    }
+    if let Some(boost) = read_boost() {
+        details.push(boost);
+    }
+
+    if details.is_empty() {
+        model
+    } else {
+        format!("{} ({})", model, details.join(", "))
+    }
+}
+
+/// Extract model name, physical core count and logical thread count from
+/// `/proc/cpuinfo` content. Threads is the number of `processor` entries;
+/// cores comes from the `cpu cores` field (per-socket, fine for desktops).
+fn parse_cpuinfo(content: &str) -> (String, Option<u32>, Option<u32>) {
+    let mut model: Option<String> = None;
+    let mut cores: Option<u32> = None;
+    let mut threads: u32 = 0;
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "processor" => threads += 1,
+            "model name" if model.is_none() => model = Some(value.trim().to_owned()),
+            "cpu cores" if cores.is_none() => cores = value.trim().parse().ok(),
+            _ => {}
+        }
+    }
+    let threads = (threads > 0).then_some(threads);
+    (model.unwrap_or_else(|| "unknown".to_owned()), cores, threads)
+}
+
+/// Read the hardware min/max frequency range, e.g. "0.6-5.0 GHz".
+fn read_freq_range() -> Option<String> {
+    let min = read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq")?;
+    let max = read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")?;
+    Some(format!("{}-{} GHz", format_ghz(min), format_ghz(max)))
+}
+
+fn read_khz(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn format_ghz(khz: u64) -> String {
+    format!("{:.1}", khz as f64 / 1_000_000.0)
+}
+
+/// Read frequency-boost state. Checks the generic cpufreq knob first, then
+/// the intel_pstate turbo knob (which is inverted). Returns `None` if
+/// neither interface exists.
+fn read_boost() -> Option<String> {
+    if let Ok(v) = std::fs::read_to_string("/sys/devices/system/cpu/cpufreq/boost") {
+        let state = if v.trim() == "0" { "off" } else { "on" };
+        return Some(format!("boost {state}"));
+    }
+    if let Ok(v) = std::fs::read_to_string("/sys/devices/system/cpu/intel_pstate/no_turbo") {
+        let state = if v.trim() == "0" { "on" } else { "off" };
+        return Some(format!("boost {state}"));
+    }
+    None
 }
 
 /// Read total and available memory from `/proc/meminfo`, returning MB values.
@@ -731,6 +809,49 @@ mod tests {
     fn version_from_single_version_word() {
         let stdout = b"3.14.159";
         assert_eq!(extract_version_from_stdout(stdout), "3.14.159");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_cpuinfo / format_ghz
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cpuinfo_typical() {
+        let content = "processor\t: 0\n\
+                       model name\t: AMD Ryzen 9 5900X 12-Core Processor\n\
+                       cpu cores\t: 12\n\
+                       processor\t: 1\n\
+                       model name\t: AMD Ryzen 9 5900X 12-Core Processor\n\
+                       cpu cores\t: 12\n";
+        let (model, cores, threads) = parse_cpuinfo(content);
+        assert_eq!(model, "AMD Ryzen 9 5900X 12-Core Processor");
+        assert_eq!(cores, Some(12));
+        assert_eq!(threads, Some(2));
+    }
+
+    #[test]
+    fn cpuinfo_empty() {
+        let (model, cores, threads) = parse_cpuinfo("");
+        assert_eq!(model, "unknown");
+        assert_eq!(cores, None);
+        assert_eq!(threads, None);
+    }
+
+    #[test]
+    fn cpuinfo_missing_cores_field() {
+        // ARM cpuinfo often lacks "cpu cores" and "model name".
+        let content = "processor\t: 0\nBogoMIPS\t: 48.00\nprocessor\t: 1\n";
+        let (model, cores, threads) = parse_cpuinfo(content);
+        assert_eq!(model, "unknown");
+        assert_eq!(cores, None);
+        assert_eq!(threads, Some(2));
+    }
+
+    #[test]
+    fn ghz_from_khz() {
+        assert_eq!(format_ghz(4_954_565), "5.0");
+        assert_eq!(format_ghz(567_089), "0.6");
+        assert_eq!(format_ghz(3_600_000), "3.6");
     }
 
     // -----------------------------------------------------------------------
