@@ -458,7 +458,10 @@ fn is_libtest_result_summary(line: &str) -> bool {
 
 /// True for libtest's standalone status lines (`ok`, `FAILED`, `ignored`,
 /// optionally followed by ` <X.Xs>` when `--report-time` is enabled).
-fn is_bare_status_line(line: &str) -> bool {
+/// Also used by `test_cmd`'s display condenser: under `--nocapture` the
+/// verdict lands on its own line after the test's output, so the
+/// full-line `test NAME ... FAILED` filter never sees it.
+pub(crate) fn is_bare_status_line(line: &str) -> bool {
     let mut parts = line.split_whitespace();
     let Some(head) = parts.next() else {
         return false;

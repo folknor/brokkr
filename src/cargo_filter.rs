@@ -160,6 +160,7 @@ pub fn filter_clippy(output: &str) -> String {
 // --- Shared test output parser ---
 
 /// A single parsed test failure.
+#[derive(Clone)]
 pub struct ParsedTestFailure {
     pub name: String,
     pub location: Option<String>,
@@ -183,8 +184,20 @@ pub struct ParsedTestResults {
 /// panic locations and messages, and aggregates `test result:` summary lines.
 /// Works on any iterator of lines - callers can pre-filter JSON lines out
 /// before passing non-JSON lines here.
-#[allow(clippy::too_many_lines)] // state-machine parser - splitting hurts clarity
 pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
+    parse_test_output_with_stderr(lines, &[])
+}
+
+/// Like [`parse_test_output`], but also scans stderr for inline panic
+/// lines. Rust panics print to *stderr*, so under `--nocapture` (no
+/// captured `---- name stdout ----` blocks) the failure location and
+/// message are only recoverable from there. The `failures:` name list
+/// on stdout still vets which panics belong to actual failures.
+#[allow(clippy::too_many_lines)] // state-machine parser - splitting hurts clarity
+pub fn parse_test_output_with_stderr(
+    lines: &[&str],
+    stderr_lines: &[&str],
+) -> ParsedTestResults {
     let mut failures: Vec<ParsedTestFailure> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_detail = false;
@@ -192,6 +205,18 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
     let mut current_name = String::new();
     let mut current_panic_loc = String::new();
     let mut current_panic_msg = String::new();
+    // Under --nocapture there are no `---- name stdout ----` blocks (the
+    // failure detail section is empty), so the loop below never collects
+    // anything. The panic instead streams inline as
+    // `thread '<name>' panicked at <loc>:` followed by the message line.
+    // Collect those as a fallback; the thread name is the test name under
+    // --test-threads=1.
+    let mut inline_panics = InlinePanicCollector::default();
+    // Names from the `failures:` name-list section, used to vet the
+    // inline panics: a passing test may legitimately print panic lines
+    // (`catch_unwind`), and only listed names actually failed.
+    let mut failed_names: Vec<String> = Vec::new();
+    let mut in_name_list = false;
 
     for line in lines {
         let trimmed = line.trim_start();
@@ -210,6 +235,7 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
                 seen_failure_section = true;
             } else {
                 in_failure_detail = false;
+                in_name_list = true;
                 flush_parsed_failure(
                     &current_name,
                     &current_panic_loc,
@@ -221,6 +247,16 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
                 current_panic_msg.clear();
             }
             continue;
+        }
+
+        if in_name_list {
+            let t = line.trim();
+            if t.is_empty() || line.starts_with("test result:") {
+                in_name_list = false;
+            } else {
+                failed_names.push(t.to_string());
+                continue;
+            }
         }
 
         if in_failure_detail {
@@ -253,17 +289,9 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
                 current_panic_msg.clear();
             } else if line.contains("panicked at ") {
                 if let Some(idx) = line.find("panicked at ") {
-                    let rest = &line[idx + "panicked at ".len()..];
-                    let rest = rest.trim_end_matches(':');
-                    if let Some(body) = rest.strip_prefix('\'') {
-                        if let Some(end_quote) = body.find('\'') {
-                            current_panic_msg = body[..end_quote].to_string();
-                            let after = body[end_quote + 1..].trim_start_matches(", ");
-                            current_panic_loc = after.to_string();
-                        }
-                    } else {
-                        current_panic_loc = rest.to_string();
-                    }
+                    let (loc, msg) = parse_panicked_at(&line[idx + "panicked at ".len()..]);
+                    current_panic_loc = loc;
+                    current_panic_msg = msg.unwrap_or_default();
                 }
             } else if current_panic_msg.is_empty()
                 && !current_panic_loc.is_empty()
@@ -271,6 +299,10 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
             {
                 current_panic_msg = line.trim().to_string();
             }
+        }
+
+        if !in_failure_detail {
+            inline_panics.observe(line);
         }
 
         if !in_failure_detail && line.starts_with("test result:") {
@@ -314,6 +346,25 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
         }
     }
 
+    // --nocapture fallback: no `---- name stdout ----` blocks, so the
+    // detail section yielded nothing, but the stream carried inline
+    // panics. Gated on `failed > 0` because a *passing* test can print
+    // panic lines too (`catch_unwind`). When the name-list section is
+    // present, vet by name and take the *last* panic per failing test
+    // (a caught panic may precede the fatal one); fall back to the raw
+    // inline list only if no name matched (thread-name mismatch).
+    if failures.is_empty() && failed > 0 {
+        // Panic lines live on stderr; run them through their own
+        // collector (the message line follows its panic line within the
+        // same stream) and pool with any stdout-side hits before vetting.
+        let mut stderr_panics = InlinePanicCollector::default();
+        for line in stderr_lines {
+            stderr_panics.observe(line);
+        }
+        inline_panics.panics.extend(stderr_panics.panics);
+        failures = inline_panics.into_failures(&failed_names);
+    }
+
     ParsedTestResults {
         failures,
         passed,
@@ -323,6 +374,91 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
         suites,
         duration: if has_duration { Some(duration) } else { None },
     }
+}
+
+/// Collects `thread '<name>' panicked at <loc>:` lines streamed outside
+/// the failure-detail section, plus the message line that follows in the
+/// rustc 1.73+ format. Feeds the --nocapture fallback in
+/// [`parse_test_output`].
+#[derive(Default)]
+struct InlinePanicCollector {
+    panics: Vec<ParsedTestFailure>,
+    awaiting_msg: bool,
+}
+
+impl InlinePanicCollector {
+    fn observe(&mut self, line: &str) {
+        if let Some((name, loc, msg)) = parse_inline_panic_line(line) {
+            self.awaiting_msg = msg.is_none();
+            self.panics.push(ParsedTestFailure {
+                name,
+                location: Some(loc),
+                message: msg,
+            });
+            return;
+        }
+        if self.awaiting_msg && !line.trim().is_empty() {
+            // First non-blank line after `panicked at <loc>:` is the
+            // panic message - unless it's libtest's own verdict line
+            // (a panic with an empty message glues straight to it).
+            self.awaiting_msg = false;
+            let trimmed = line.trim();
+            if !matches!(trimmed, "ok" | "FAILED" | "ignored")
+                && let Some(last) = self.panics.last_mut()
+            {
+                last.message = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    /// Resolve into the failure list: vet by the `failures:` name list
+    /// when present, taking the *last* panic per failing test (a caught
+    /// panic may precede the fatal one); fall back to the raw inline
+    /// list only if no name matched (thread-name mismatch).
+    fn into_failures(self, failed_names: &[String]) -> Vec<ParsedTestFailure> {
+        let vetted: Vec<ParsedTestFailure> = failed_names
+            .iter()
+            .filter_map(|n| self.panics.iter().rfind(|p| &p.name == n).cloned())
+            .collect();
+        if vetted.is_empty() { self.panics } else { vetted }
+    }
+}
+
+/// Parse the tail of a `panicked at ` line into (location, message).
+///
+/// Two rustc shapes:
+/// - pre-1.73: `panicked at 'msg', src/lib.rs:15:9` - message inline,
+///   location after the closing quote;
+/// - 1.73+: `panicked at src/lib.rs:15:9:` - location only, message on
+///   the following line(s).
+fn parse_panicked_at(rest: &str) -> (String, Option<String>) {
+    let rest = rest.trim_end().trim_end_matches(':');
+    if let Some(body) = rest.strip_prefix('\'')
+        && let Some(end_quote) = body.find('\'')
+    {
+        let msg = body[..end_quote].to_string();
+        let loc = body[end_quote + 1..].trim_start_matches(", ").to_string();
+        return (loc, Some(msg));
+    }
+    (rest.to_string(), None)
+}
+
+/// Parse a streamed (non-detail-section) panic line:
+/// `thread '<name>' panicked at <loc>:` - rustc 1.73+ also inserts the
+/// thread id: `thread '<name>' (12345) panicked at <loc>:`. Returns
+/// (test name, location, inline message if the pre-1.73 shape).
+fn parse_inline_panic_line(line: &str) -> Option<(String, String, Option<String>)> {
+    let rest = line.strip_prefix("thread '")?;
+    let (name, after) = rest.split_once('\'')?;
+    if name.is_empty() {
+        return None;
+    }
+    let idx = after.find("panicked at ")?;
+    let (loc, msg) = parse_panicked_at(&after[idx + "panicked at ".len()..]);
+    if loc.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), loc, msg))
 }
 
 fn flush_parsed_failure(
@@ -968,6 +1104,148 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         // Should be one line per failure, not multi-line.
         let failure_lines: Vec<&str> = result.lines().filter(|l| l.starts_with("  FAILED")).collect();
         assert_eq!(failure_lines.len(), 1, "got: {result}");
+    }
+
+    #[test]
+    fn nocapture_failure_extracted_from_stderr_panic() {
+        // The `brokkr test` shape: --nocapture means no `---- name
+        // stdout ----` blocks; stdout carries the framing and `failures:`
+        // sections, while the panic prints to *stderr* (rustc 1.73+
+        // format with thread id). The FAIL footer needs
+        // name/location/message recovered from stderr.
+        let stdout = "\
+running 1 test
+some test output before the failure
+FAILED
+
+failures:
+
+failures:
+    test_cmd::tests::scratch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        let stderr = "\
+thread 'test_cmd::tests::scratch' (2365348) panicked at src/test_cmd.rs:601:9:
+assertion `left == right` failed: intentional failure
+  left: 4
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+";
+        let stdout_lines: Vec<&str> = stdout.lines().collect();
+        let stderr_lines: Vec<&str> = stderr.lines().collect();
+        let parsed = parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
+        assert_eq!(parsed.failed, 1);
+        assert_eq!(parsed.failures.len(), 1, "expected inline-panic fallback");
+        let f = &parsed.failures[0];
+        assert_eq!(f.name, "test_cmd::tests::scratch");
+        assert_eq!(f.location.as_deref(), Some("src/test_cmd.rs:601:9"));
+        assert_eq!(
+            f.message.as_deref(),
+            Some("assertion `left == right` failed: intentional failure")
+        );
+    }
+
+    #[test]
+    fn nocapture_caught_panic_in_passing_run_is_not_a_failure() {
+        // A passing test that uses catch_unwind prints a panic line on
+        // stderr. With 0 failed, the inline fallback must not fire -
+        // run_one checks failures *before* the exit status.
+        let stdout = "\
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        let stderr = "\
+thread 'foo::probes_panic_path' (1234) panicked at src/probe.rs:10:5:
+expected panic, caught fine
+";
+        let stdout_lines: Vec<&str> = stdout.lines().collect();
+        let stderr_lines: Vec<&str> = stderr.lines().collect();
+        let parsed = parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
+        assert_eq!(parsed.failed, 0);
+        assert!(parsed.failures.is_empty(), "caught panic misread as failure");
+    }
+
+    #[test]
+    fn nocapture_name_list_vets_stderr_panics_and_takes_last() {
+        // One test catches a panic then fails with a second, fatal one;
+        // another test's caught panic must not appear in failures. The
+        // name list says only `foo::fails` failed; its *last* panic wins.
+        let stdout = "\
+running 2 tests
+FAILED
+
+failures:
+
+failures:
+    foo::fails
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+        let stderr = "\
+thread 'foo::passes' (1) panicked at src/a.rs:1:1:
+caught and ignored
+thread 'foo::fails' (2) panicked at src/b.rs:5:5:
+caught inside the test
+thread 'foo::fails' (2) panicked at src/b.rs:9:9:
+the fatal assertion
+";
+        let stdout_lines: Vec<&str> = stdout.lines().collect();
+        let stderr_lines: Vec<&str> = stderr.lines().collect();
+        let parsed = parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
+        assert_eq!(parsed.failures.len(), 1);
+        let f = &parsed.failures[0];
+        assert_eq!(f.name, "foo::fails");
+        assert_eq!(f.location.as_deref(), Some("src/b.rs:9:9"));
+        assert_eq!(f.message.as_deref(), Some("the fatal assertion"));
+    }
+
+    #[test]
+    fn nocapture_old_style_stderr_panic_parses_msg_and_loc() {
+        // pre-1.73 format: message inline in quotes, location after.
+        let stdout = "\
+running 1 test
+FAILED
+
+failures:
+
+failures:
+    foo::old
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        let stderr = "thread 'foo::old' panicked at 'assert_eq!(1, 2)', src/lib.rs:15:9\n";
+        let stdout_lines: Vec<&str> = stdout.lines().collect();
+        let stderr_lines: Vec<&str> = stderr.lines().collect();
+        let parsed = parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
+        assert_eq!(parsed.failures.len(), 1);
+        let f = &parsed.failures[0];
+        assert_eq!(f.name, "foo::old");
+        assert_eq!(f.location.as_deref(), Some("src/lib.rs:15:9"));
+        assert_eq!(f.message.as_deref(), Some("assert_eq!(1, 2)"));
+    }
+
+    #[test]
+    fn detail_blocks_take_precedence_over_inline_panics() {
+        // When the `----` blocks exist (capture mode), they're strictly
+        // richer - the inline fallback must not fire or duplicate.
+        let stdout = "\
+thread 'foo::test_b' panicked at 'assert_eq!(1, 2)', src/lib.rs:15:9
+
+failures:
+
+---- foo::test_b stdout ----
+thread 'foo::test_b' panicked at 'assert_eq!(1, 2)', src/lib.rs:15:9
+
+failures:
+    foo::test_b
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+";
+        let lines: Vec<&str> = stdout.lines().collect();
+        let parsed = parse_test_output(&lines);
+        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(parsed.failures[0].name, "foo::test_b");
     }
 
     #[test]

@@ -371,7 +371,9 @@ fn run_one(
     let stderr_text = String::from_utf8_lossy(&run.captured.stderr);
     let stdout_lines: Vec<&str> = stdout_text.lines().collect();
     let stderr_lines: Vec<&str> = stderr_text.lines().collect();
-    let parsed = cargo_filter::parse_test_output(&stdout_lines);
+    // stderr matters: panics print there, and under --nocapture it's the
+    // only place the FAIL footer can recover the message/location from.
+    let parsed = cargo_filter::parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
 
     let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
     let has_compile_error = stderr_lines.iter().any(|l| {
@@ -443,22 +445,74 @@ fn run_one(
 }
 
 fn make_stdout_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
-    // Suppress leading blanks and collapse runs of consecutive blanks into
-    // one. Starts `true` so any blank line before we print anything is eaten
-    // - that gets rid of the gap cargo leaves between "Finished ..." and the
-    // test output.
-    let mut prev_blank = true;
+    let mut cond = StdoutCondenser::new(raw);
     move |line| {
-        let want = raw || keep_stdout_line(line);
-        if want {
-            let is_blank = line.trim().is_empty();
-            if !(is_blank && prev_blank) {
-                let mut out = std::io::stdout().lock();
-                writeln!(out, "{line}").ok();
-                out.flush().ok();
-                prev_blank = is_blank;
+        let lines = cond.next(line);
+        if lines.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        for l in &lines {
+            writeln!(out, "{l}").ok();
+        }
+        out.flush().ok();
+    }
+}
+
+/// Display-side condenser for the streamed test stdout. Pure state
+/// machine (returns the lines to print) so the framing rules are unit
+/// testable without capturing the process's stdout.
+///
+/// Rules (skipped in `raw` mode except blank collapsing):
+/// - framing lines rejected by `keep_stdout_line` are dropped;
+/// - a `failures:` header is held back until a non-blank line follows.
+///   Libtest prints the section twice (per-test output blocks, then the
+///   name list) and under `--nocapture` the first is always empty -
+///   consecutive headers collapse to one and a dangling empty header
+///   is dropped entirely;
+/// - leading blanks and runs of consecutive blanks collapse to one.
+struct StdoutCondenser {
+    raw: bool,
+    prev_blank: bool,
+    pending_failures: bool,
+}
+
+impl StdoutCondenser {
+    fn new(raw: bool) -> Self {
+        Self {
+            raw,
+            // Starts `true` so any blank line before we print anything is
+            // eaten - that gets rid of the gap cargo leaves between
+            // "Finished ..." and the test output.
+            prev_blank: true,
+            pending_failures: false,
+        }
+    }
+
+    fn next(&mut self, line: &str) -> Vec<String> {
+        if !self.raw {
+            if !keep_stdout_line(line) {
+                return Vec::new();
+            }
+            if line.trim() == "failures:" {
+                self.pending_failures = true;
+                return Vec::new();
             }
         }
+        let is_blank = line.trim().is_empty();
+        if !self.raw && self.pending_failures {
+            if is_blank {
+                return Vec::new();
+            }
+            self.pending_failures = false;
+            self.prev_blank = false;
+            return vec!["failures:".to_owned(), line.to_owned()];
+        }
+        if is_blank && self.prev_blank {
+            return Vec::new();
+        }
+        self.prev_blank = is_blank;
+        vec![line.to_owned()]
     }
 }
 
@@ -522,12 +576,19 @@ fn keep_stdout_line(line: &str) -> bool {
     if line.starts_with("test result:") {
         return false;
     }
+    // Under --nocapture the verdict arrives on its own line after the
+    // test's output ("FAILED"/"ok"/"ignored", optional `<X.Xs>` suffix).
+    // A test's own bare println!("ok") is indistinguishable and gets
+    // dropped from display too - it's still in the captured buffer.
+    if test_runner::is_bare_status_line(line) {
+        return false;
+    }
     true
 }
 
-/// Strip cargo's compile-phase chatter on stderr: `Compiling`/`Finished`
-/// progress, `warning:`/`error:` blocks (multi-line, terminated by a blank
-/// line), and the `N warnings emitted` summary. Compile errors are still
+/// Strip cargo's compile-phase chatter on stderr: `Compiling`/`Finished`/
+/// `Blocking` progress, `warning:`/`error:` blocks (multi-line, terminated
+/// by a blank line), and the `N warnings emitted` summary. Compile errors are still
 /// shown via `filter_clippy` in the BUILD FAILED path.
 fn keep_stderr_compile_line(line: &str, in_block: &mut bool) -> bool {
     let trimmed = line.trim_start();
@@ -548,6 +609,7 @@ fn keep_stderr_compile_line(line: &str, in_block: &mut bool) -> bool {
         || trimmed.starts_with("Downloading ")
         || trimmed.starts_with("Checking ")
         || trimmed.starts_with("Finished ")
+        || trimmed.starts_with("Blocking ")
     {
         return false;
     }
@@ -578,6 +640,61 @@ mod tests {
             "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; \
              finished in 0.01s"
         ));
+    }
+
+    #[test]
+    fn stdout_filter_strips_bare_verdict_lines() {
+        // --nocapture puts the verdict on its own line after the test's
+        // output; the "test NAME ... FAILED" suffix match never fires.
+        assert!(!keep_stdout_line("FAILED"));
+        assert!(!keep_stdout_line("ok"));
+        assert!(!keep_stdout_line("ignored"));
+        assert!(!keep_stdout_line("ok <0.001s>"));
+        // Not bare verdicts - real test output survives.
+        assert!(keep_stdout_line("FAILED to connect to server"));
+        assert!(keep_stdout_line("ok, moving on"));
+    }
+
+    fn drive_condenser(raw: bool, lines: &[&str]) -> Vec<String> {
+        let mut cond = StdoutCondenser::new(raw);
+        lines.iter().flat_map(|l| cond.next(l)).collect()
+    }
+
+    #[test]
+    fn condenser_collapses_duplicate_failures_headers() {
+        // The --nocapture shape: empty output-block section, blank,
+        // name-list section. One header survives, glued to the list.
+        let out = drive_condenser(
+            false,
+            &["failures:", "", "failures:", "    my_mod::my_test"],
+        );
+        assert_eq!(out, vec!["failures:", "    my_mod::my_test"]);
+    }
+
+    #[test]
+    fn condenser_drops_dangling_empty_failures_header() {
+        // A failures: header with nothing after it (stream ends) is
+        // never emitted.
+        let out = drive_condenser(false, &["real output", "failures:", ""]);
+        assert_eq!(out, vec!["real output"]);
+    }
+
+    #[test]
+    fn condenser_collapses_blank_runs_and_leading_blanks() {
+        let out = drive_condenser(false, &["", "", "a", "", "", "b"]);
+        assert_eq!(out, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn condenser_raw_mode_keeps_framing_and_headers() {
+        let out = drive_condenser(
+            true,
+            &["test result: ok. 1 passed", "failures:", "FAILED"],
+        );
+        assert_eq!(
+            out,
+            vec!["test result: ok. 1 passed", "failures:", "FAILED"]
+        );
     }
 
     #[test]
@@ -630,6 +747,10 @@ mod tests {
         ));
         assert!(!keep_stderr_compile_line(
             "    Finished `release` profile [optimized] target(s) in 45.13s",
+            &mut in_block
+        ));
+        assert!(!keep_stderr_compile_line(
+            "    Blocking waiting for file lock on build directory",
             &mut in_block
         ));
         assert!(!in_block);

@@ -112,9 +112,12 @@ with the same feature set the test crate sees.
 
 Streams the test's own stdout/stderr live (cargo/test-harness framing lines
 are stripped, including the per-suite `Running <target> (.../deps/...)`
-launch lines), then prints a `[test]` footer per run: `PASS`, `FAIL`,
-`BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually
-`#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was
+launch lines, standalone `ok`/`FAILED` verdict lines, and the duplicate
+empty `failures:` header), then prints a `[test]` footer per run: `PASS`,
+`FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually
+`#[cfg(feature = "...")]`-gated). The `FAIL` footer cites the panic message
+and location, recovered from the stderr stream since `--nocapture` produces
+no captured failure blocks. Exit code: non-zero if any run was
 `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed
 with at least one `PASS` exits `0`.
 
