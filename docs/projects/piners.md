@@ -18,15 +18,16 @@ paths or re-checking hashes). Schema:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "corpus_root": "/abs/path/to/corpus",
   "probes": [{
-    "probe": "<id>", "probe_dir": "validation/<id>",
-    "pine": { "path": "validation/<id>/strategy.pine", "xxh128": "..." },
-    "csv":  { "path": "validation/<id>/tv_trades.csv", "xxh128": "..." },
-    "keywords": ["magnifier"]
+    "probe": "<id>", "probe_dir": "vendor/pineforge-engine/validation/<id>",
+    "pine": { "path": "vendor/pineforge-engine/validation/<id>/strategy.pine", "xxh128": "..." },
+    "csv":  { "path": "vendor/pineforge-engine/validation/<id>/tv_trades.csv", "xxh128": "..." },
+    "keywords": ["magnifier"], "feed": "eth-15m-2025",
+    "bar_budget": 38000, "ohlcv_start_ms": 1700000000000, "tv_trades_csv_tz": "America/New_York"
   }],
-  "feeds": { "1m": "/abs/path/to/feed.parquet" }
+  "feeds": { "eth-15m-2025": { "primary": "/abs/...", "warmup": "/abs/...", "lower": "/abs/..." } }
 }
 ```
 
@@ -34,7 +35,9 @@ Probe paths are relative to `corpus_root`. The explicit `probe` id (the
 `pins.toml` key) is what the harness emits - never inferred from `probe_dir`'s
 basename. `expected` is brokkr-side (the gate), *not* in the manifest. The
 harness ignores `pine`/`csv`/`keywords` (already verified; a record). `feeds`
-are absolute, passed through verbatim.
+holds the selection's referenced feed groups, roles resolved absolute;
+per-probe `feed` names a group, and the overrides appear only when pinned
+(their semantics: `docs/commands/corpus.md`).
 
 ## The harness contract
 

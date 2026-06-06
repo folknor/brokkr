@@ -22,7 +22,7 @@
 //! [`crate::piners::bless`].
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::artefacts::ArtefactDir;
@@ -114,9 +114,13 @@ pub fn corpus(
         })?;
         verified.push(registry::verify_probe(id, pin, &corpus_root, project_root)?);
     }
+    let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, project_root)?;
 
     if args.verify_only {
-        output::corpus_msg(&format!("verify-only: {} probe(s) OK", verified.len()));
+        output::corpus_msg(&format!(
+            "verify-only: {} probe(s) + {feed_count} feed group(s) OK",
+            verified.len()
+        ));
         return Ok(());
     }
 
@@ -137,13 +141,6 @@ pub fn corpus(
                 .into(),
         )
     })?;
-
-    // Feed paths resolve relative to brokkr.toml; handed through verbatim.
-    let feeds: BTreeMap<String, PathBuf> = cfg
-        .feeds
-        .iter()
-        .map(|(k, v)| (k.clone(), project_root.join(v)))
-        .collect();
 
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
@@ -177,7 +174,7 @@ pub fn corpus(
     let corpus_db_path = corpus_runs_db_path(project_root);
 
     let manifest_path = artefacts.path().join("manifest.json");
-    let manifest = Manifest::build(&corpus_root, &verified, &registry, feeds);
+    let manifest = Manifest::build(&corpus_root, &verified, &registry);
     manifest.write(&manifest_path)?;
     output::corpus_msg(&format!(
         "manifest: {} probe(s) -> {}",
@@ -317,7 +314,7 @@ pub fn corpus(
     // persisted, so the dir drops like any other (unless --keep-artefacts).
     if args.bless {
         let pins_path = registry_dir.join("pins.toml");
-        crate::piners::bless::apply(&pins_path, &mut registry.pins, &report, &ids)?;
+        crate::piners::bless::apply(&pins_path, &mut registry, &report, &ids)?;
         artefacts.finalize_success()?;
         return Ok(());
     }
@@ -341,6 +338,33 @@ pub fn corpus(
         ));
         Err(DevError::ExitCode(1))
     }
+}
+
+/// Hard-verify the feed groups referenced by the selection, the feed leg of
+/// the content gate: the feed is part of each probe's oracle identity (same
+/// pine + csv against the wrong feed gates as a fake regression), so its
+/// files get the same hash-or-abort policy as `pine`/`csv`. Returns the
+/// number of groups verified. Shared by the parity and measured paths.
+pub(crate) fn verify_selected_feeds(
+    ids: &[String],
+    registry: &Registry,
+    corpus_root: &Path,
+    project_root: &Path,
+) -> Result<usize, DevError> {
+    let referenced: std::collections::BTreeSet<&str> = ids
+        .iter()
+        .filter_map(|id| registry.pins.get(id).and_then(|p| p.feed.as_deref()))
+        .collect();
+    for name in &referenced {
+        // lint guarantees the group exists; the ok_or_else is belt-and-braces.
+        let group = registry.feeds.get(*name).ok_or_else(|| {
+            DevError::Config(format!(
+                "piners: internal: referenced feed group '{name}' absent from [feeds]"
+            ))
+        })?;
+        registry::verify_feed_group(name, group, corpus_root, project_root)?;
+    }
+    Ok(referenced.len())
 }
 
 /// Refuse a selection projected to exceed [`RUNTIME_CEILING_MS`]. The estimate

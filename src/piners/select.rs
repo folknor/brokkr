@@ -97,17 +97,16 @@ mod tests {
     use std::path::PathBuf;
 
     fn pin() -> Pin {
-        Pin {
-            expected: None,
-            pine: FilePin {
+        Pin::new(
+            FilePin {
                 path: PathBuf::from("p.pine"),
                 xxh128: "00".into(),
             },
-            csv: FilePin {
+            FilePin {
                 path: PathBuf::from("p.csv"),
                 xxh128: "11".into(),
             },
-        }
+        )
     }
 
     fn registry() -> Registry {
@@ -118,7 +117,11 @@ mod tests {
         let mut keywords = BTreeMap::new();
         keywords.insert("x".to_owned(), vec!["a".to_owned(), "b".to_owned()]);
         keywords.insert("y".to_owned(), vec!["b".to_owned(), "c".to_owned()]);
-        Registry { pins, keywords }
+        Registry {
+            pins,
+            keywords,
+            ..Registry::default()
+        }
     }
 
     #[test]

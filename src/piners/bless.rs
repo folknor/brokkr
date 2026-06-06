@@ -19,19 +19,22 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::output;
-use crate::piners::registry::{self, Pin};
+use crate::piners::registry::{self, Registry};
 use crate::piners::report::HarnessReport;
 
-/// Stamp dispositions for `scope_ids` into `pins`, then rewrite `pins_path`.
+/// Stamp dispositions for `scope_ids` into the registry's pins, then
+/// rewrite `pins_path` (the whole file - `[feeds]`/`[roots]` round-trip
+/// untouched).
 ///
-/// `pins` is the whole loaded universe; only the selected ids are updated.
-/// A selected probe the harness emitted no line for is skipped with a
-/// warning (nothing to bless). A disposition that is not a known label
-/// (a malformed `parity` line with no tier) is refused for that probe rather
-/// than written, since it would fail [`Registry::lint`] on the next load.
+/// The registry holds the whole loaded universe; only the selected ids are
+/// updated. A selected probe the harness emitted no line for is skipped
+/// with a warning (nothing to bless). A disposition that is not a known
+/// label (a malformed `parity` line with no tier) is refused for that probe
+/// rather than written, since it would fail [`Registry::lint`] on the next
+/// load.
 pub fn apply(
     pins_path: &Path,
-    pins: &mut BTreeMap<String, Pin>,
+    registry: &mut Registry,
     report: &HarnessReport,
     scope_ids: &[String],
 ) -> Result<(), DevError> {
@@ -55,7 +58,7 @@ pub fn apply(
             rejected.push(format!("{id} ({disp})"));
             continue;
         }
-        let Some(pin) = pins.get_mut(id) else {
+        let Some(pin) = registry.pins.get_mut(id) else {
             continue; // selection came from this map; cannot happen
         };
         blessed += 1;
@@ -65,7 +68,11 @@ pub fn apply(
         }
     }
 
-    std::fs::write(pins_path, registry::serialize_pins(pins)).map_err(DevError::Io)?;
+    std::fs::write(
+        pins_path,
+        registry::serialize_pins(&registry.feeds, &registry.roots, &registry.pins),
+    )
+    .map_err(DevError::Io)?;
     output::corpus_msg(&format!(
         "blessed {blessed} (changed {changed}) -> {}",
         pins_path.display()
@@ -91,19 +98,27 @@ pub fn apply(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::piners::registry::FilePin;
+    use crate::piners::registry::{FilePin, Pin};
 
     fn pin(expected: Option<&str>) -> Pin {
-        Pin {
-            expected: expected.map(str::to_owned),
-            pine: FilePin {
+        let mut p = Pin::new(
+            FilePin {
                 path: "p.pine".into(),
                 xxh128: "00".into(),
             },
-            csv: FilePin {
+            FilePin {
                 path: "p.csv".into(),
                 xxh128: "11".into(),
             },
+        );
+        p.expected = expected.map(str::to_owned);
+        p
+    }
+
+    fn registry_of(pins: std::collections::BTreeMap<String, Pin>) -> Registry {
+        Registry {
+            pins,
+            ..Registry::default()
         }
     }
 
@@ -126,12 +141,13 @@ mod tests {
             "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"count_divergent\"}}\n{\"probe\":\"b\",\"outcome\":\"compile_fail\",\"error\":\"x\"}",
         );
 
-        apply(&pins_path, &mut pins, &rep, &["a".to_owned(), "b".to_owned()]).unwrap();
+        let mut reg = registry_of(pins);
+        apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(pins["a"].expected.as_deref(), Some("count_divergent"));
-        assert_eq!(pins["b"].expected.as_deref(), Some("compile_fail"));
-        assert_eq!(pins["untouched"].expected.as_deref(), Some("byte_exact"));
+        assert_eq!(reg.pins["a"].expected.as_deref(), Some("count_divergent"));
+        assert_eq!(reg.pins["b"].expected.as_deref(), Some("compile_fail"));
+        assert_eq!(reg.pins["untouched"].expected.as_deref(), Some("byte_exact"));
     }
 
     #[test]
@@ -142,10 +158,11 @@ mod tests {
         let mut pins = BTreeMap::new();
         pins.insert("a".to_owned(), pin(Some("accepted")));
 
-        apply(&pins_path, &mut pins, &report(""), &["a".to_owned()]).unwrap();
+        let mut reg = registry_of(pins);
+        apply(&pins_path, &mut reg, &report(""), &["a".to_owned()]).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
         // unchanged: no disposition emitted, nothing to bless
-        assert_eq!(pins["a"].expected.as_deref(), Some("accepted"));
+        assert_eq!(reg.pins["a"].expected.as_deref(), Some("accepted"));
     }
 }

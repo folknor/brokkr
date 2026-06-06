@@ -1851,8 +1851,9 @@ Examples:
     ///
     /// Resolves probes from the piners-owned registry (`pins.toml` +
     /// `<keyword>.toml` files under `[piners] registry_dir`), hard-verifies
-    /// each selected probe's `strategy.pine` + `tv_trades.csv` against the
-    /// read-only corpus submodule by xxh128, writes a manifest, builds the
+    /// each selected probe's `strategy.pine` + `tv_trades.csv` (and the
+    /// selection's referenced feed groups) against the corpus tree under
+    /// `[piners] corpus_root` by xxh128, writes a manifest, builds the
     /// `[piners.harness]` binary once, and invokes it with `--manifest
     /// <path>`. The harness emits NDJSON per-probe disposition lines that
     /// brokkr renders.
@@ -1893,12 +1894,15 @@ Examples:
 
         /// Stamp `pins.toml` from the corpus filesystem (no build, no
         /// harness). Sibling to `--verify-only`, and the only way
-        /// `pins.toml` is created or re-stamped. Resolves ids against
-        /// `corpus_root/validation/<id>/`, not the pinned universe.
-        /// `--reseed --all` regenerates the whole file from the
-        /// submodule (probes whose dirs vanished drop out); `--reseed
-        /// --probe <id>` (repeatable) upserts each. Prints added/changed/removed; review
-        /// the result with `git diff pins.toml`. Not usable with
+        /// `pins.toml` is created or re-stamped. Discovers probe dirs
+        /// anywhere under `corpus_root` by the marker (`strategy.pine` +
+        /// `tv_trades.csv`), not the pinned universe. `--reseed --all`
+        /// regenerates the whole file from the tree (probes whose dirs
+        /// vanished drop out); `--reseed --probe <id>` (repeatable)
+        /// upserts each. Re-stamps `[feeds]` hashes, preserves `[roots]`
+        /// and the hand-maintained probe fields, assigns feeds to new
+        /// probes by longest `[roots]` prefix. Prints added/changed/removed;
+        /// review the result with `git diff pins.toml`. Not usable with
         /// `--keyword` or `--verify-only`.
         #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc"])]
         reseed: bool,

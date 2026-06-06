@@ -5,9 +5,12 @@
 //!
 //! - `pins.toml` - the canonical, verified universe. One entry per probe
 //!   id, each pinning `strategy.pine` (input) and `tv_trades.csv` (oracle)
-//!   by path + xxh128. This is the single source of truth; `--probe`,
-//!   `--all`, `--verify-only`, and the future reseed helper all operate on
-//!   it alone.
+//!   by path + xxh128, plus three top-level tables: `[feeds.<name>]`
+//!   (hash-pinned OHLCV feed groups - the feed is part of a probe's oracle
+//!   identity now that universes with different feeds coexist), `[roots]`
+//!   (root-prefix -> feed assignments consumed by reseed), and
+//!   `[probes.<id>]`. This is the single source of truth; `--probe`,
+//!   `--all`, `--verify-only`, and reseed all operate on it alone.
 //! - `<keyword>.toml` (any other `*.toml`) - a pure selection grouping:
 //!   `probes = ["id", ...]`. The keyword is the file stem. Ids reference
 //!   `pins.toml`; a keyword cannot introduce a probe, only group pinned
@@ -16,6 +19,8 @@
 //! Pins carry the hash, not the keyword files, because the hash is the
 //! most volatile field (it changes on every upstream re-pin); duplicating
 //! it across keyword files would invite a self-contradicting registry.
+//! Feeds live in `pins.toml` for the same reason - keyword files stay
+//! trivially shaped and the volatile fields stay in one place.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -58,8 +63,46 @@ pub struct FilePin {
     pub xxh128: String,
 }
 
-/// A pinned probe: its input script, its oracle trade list, and the
-/// disposition the gate holds it to.
+/// One hash-pinned OHLCV feed group: the primary feed plus optional
+/// warmup/lower companions. A probe's TV export was taken against one
+/// specific feed, so the feed files are pinned oracles like `pine`/`csv` -
+/// the same pine + csv against the wrong feed gates as a fake regression.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedGroup {
+    pub primary: FilePin,
+    #[serde(default)]
+    pub warmup: Option<FilePin>,
+    #[serde(default)]
+    pub lower: Option<FilePin>,
+}
+
+impl FeedGroup {
+    /// The present (role, pin) pairs, primary first.
+    pub fn roles(&self) -> Vec<(&'static str, &FilePin)> {
+        let mut roles = vec![("primary", &self.primary)];
+        if let Some(w) = &self.warmup {
+            roles.push(("warmup", w));
+        }
+        if let Some(l) = &self.lower {
+            roles.push(("lower", l));
+        }
+        roles
+    }
+}
+
+/// One `[roots]` entry: the feed group reseed assigns to newly discovered
+/// probes under this corpus-root-relative prefix (longest prefix wins; an
+/// existing explicit `feed` on a pin is preserved).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RootEntry {
+    pub feed: String,
+}
+
+/// A pinned probe: its input script, its oracle trade list, the
+/// disposition the gate holds it to, and the optional per-probe overrides
+/// that flow into the manifest.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Pin {
@@ -69,16 +112,56 @@ pub struct Pin {
     /// across `--reseed` (which touches `pine`/`csv` only).
     #[serde(default)]
     pub expected: Option<String>,
+    /// Name of the `[feeds.<name>]` group this probe's TV export was taken
+    /// against. Assigned by reseed via `[roots]` (explicit value preserved).
+    #[serde(default)]
+    pub feed: Option<String>,
+    /// Override for the harness's scan bar cap (harness-side default stays
+    /// 10,000). Lives next to `expected` deliberately: changing a budget
+    /// changes the disposition contract and warrants a re-bless, reviewed
+    /// in the same `git diff pins.toml`. Hand-edited, reseed-preserved.
+    #[serde(default)]
+    pub bar_budget: Option<u64>,
+    /// Piners-side OHLCV start override (epoch ms) for vendor probes whose
+    /// in-submodule `inputs.json` cannot carry it. Probe-local `inputs.json`
+    /// keeps precedence. Hand-edited, reseed-preserved.
+    #[serde(default)]
+    pub ohlcv_start_ms: Option<i64>,
+    /// Piners-side `tv_trades.csv` timezone override; same carve-out rules
+    /// as `ohlcv_start_ms`. Hand-edited, reseed-preserved.
+    #[serde(default)]
+    pub tv_trades_csv_tz: Option<String>,
     pub pine: FilePin,
     pub csv: FilePin,
 }
 
-/// Raw `pins.toml` shape: `[probes.<id>]` tables.
+impl Pin {
+    /// A content-only pin: both files, no `expected`, no feed, no overrides.
+    pub fn new(pine: FilePin, csv: FilePin) -> Self {
+        Self {
+            expected: None,
+            feed: None,
+            bar_budget: None,
+            ohlcv_start_ms: None,
+            tv_trades_csv_tz: None,
+            pine,
+            csv,
+        }
+    }
+}
+
+/// The full `pins.toml` shape: `[feeds.<name>]` + `[roots]` +
+/// `[probes.<id>]`. Public because reseed loads and rewrites the whole file
+/// (feed hashes re-stamped, `[roots]` preserved verbatim).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PinsFile {
+pub struct PinsData {
     #[serde(default)]
-    probes: BTreeMap<String, Pin>,
+    pub feeds: BTreeMap<String, FeedGroup>,
+    #[serde(default)]
+    pub roots: BTreeMap<String, RootEntry>,
+    #[serde(default)]
+    pub probes: BTreeMap<String, Pin>,
 }
 
 /// Raw keyword-file shape: `probes = [ids]`.
@@ -94,21 +177,25 @@ struct KeywordFile {
 pub struct Registry {
     /// Canonical pins, keyed by probe id.
     pub pins: BTreeMap<String, Pin>,
+    /// Hash-pinned feed groups, keyed by group name.
+    pub feeds: BTreeMap<String, FeedGroup>,
+    /// Root-prefix -> feed assignments (reseed's input; kept loaded so
+    /// lint can validate them).
+    pub roots: BTreeMap<String, RootEntry>,
     /// keyword -> probe ids, built from the `<keyword>.toml` files.
     pub keywords: BTreeMap<String, Vec<String>>,
 }
 
-/// Parse just `pins.toml` into the id -> [`Pin`] map. Shared by
+/// Parse `pins.toml` into its full [`PinsData`]. Shared by
 /// [`Registry::load`] and `brokkr corpus --reseed` (which reads the
-/// existing pins to compute its added/changed/removed diff and to merge a
-/// single `--probe` upsert).
-pub fn load_pins(pins_path: &Path) -> Result<BTreeMap<String, Pin>, DevError> {
+/// existing file to compute its added/changed/removed diff, merge a single
+/// `--probe` upsert, and round-trip `[feeds]`/`[roots]`).
+pub fn load_pins(pins_path: &Path) -> Result<PinsData, DevError> {
     let text = std::fs::read_to_string(pins_path).map_err(|e| {
         DevError::Config(format!("piners: failed to read {}: {e}", pins_path.display()))
     })?;
-    let parsed: PinsFile = toml::from_str(&text)
-        .map_err(|e| DevError::Config(format!("piners: {}: {e}", pins_path.display())))?;
-    Ok(parsed.probes)
+    toml::from_str(&text)
+        .map_err(|e| DevError::Config(format!("piners: {}: {e}", pins_path.display())))
 }
 
 impl Registry {
@@ -123,7 +210,7 @@ impl Registry {
             )));
         }
 
-        let pins = load_pins(&registry_dir.join(PINS_FILE))?;
+        let data = load_pins(&registry_dir.join(PINS_FILE))?;
 
         let mut keywords = BTreeMap::new();
         let mut entries: Vec<PathBuf> = std::fs::read_dir(registry_dir)
@@ -153,14 +240,21 @@ impl Registry {
             keywords.insert(stem.to_owned(), kw.probes);
         }
 
-        Ok(Self { pins, keywords })
+        Ok(Self {
+            pins: data.probes,
+            feeds: data.feeds,
+            roots: data.roots,
+            keywords,
+        })
     }
 
     /// Structural lint: every id referenced by a keyword file must exist
-    /// in `pins.toml`, and every pinned `expected` must be a known
-    /// disposition label. A keyword pointing at an unknown id means the
-    /// registry is lying about what is selectable; an unknown `expected`
-    /// means the gate could never be satisfied.
+    /// in `pins.toml`, every pinned `expected` must be a known disposition
+    /// label, and every `feed` reference (on a pin or a `[roots]` entry)
+    /// must name a `[feeds]` group. A keyword pointing at an unknown id
+    /// means the registry is lying about what is selectable; an unknown
+    /// `expected` means the gate could never be satisfied; an unknown feed
+    /// means verification could never cover the probe's oracle feed.
     pub fn lint(&self) -> Result<(), DevError> {
         let mut dangling: Vec<String> = Vec::new();
         for (keyword, ids) in &self.keywords {
@@ -178,6 +272,19 @@ impl Registry {
                 bad_expected.push(format!("{id} -> expected = \"{exp}\""));
             }
         }
+        let mut bad_feed: Vec<String> = Vec::new();
+        for (id, pin) in &self.pins {
+            if let Some(feed) = &pin.feed
+                && !self.feeds.contains_key(feed)
+            {
+                bad_feed.push(format!("{id} -> feed = \"{feed}\""));
+            }
+        }
+        for (prefix, root) in &self.roots {
+            if !self.feeds.contains_key(&root.feed) {
+                bad_feed.push(format!("[roots] {prefix} -> feed = \"{}\"", root.feed));
+            }
+        }
         let mut errs: Vec<String> = Vec::new();
         if !dangling.is_empty() {
             errs.push(format!(
@@ -190,6 +297,12 @@ impl Registry {
                 "pin(s) carry an unknown `expected` label (must be one of {}):\n  {}",
                 DISPOSITION_LABELS.join(", "),
                 bad_expected.join("\n  ")
+            ));
+        }
+        if !bad_feed.is_empty() {
+            errs.push(format!(
+                "feed reference(s) name a group absent from [feeds]:\n  {}",
+                bad_feed.join("\n  ")
             ));
         }
         if errs.is_empty() {
@@ -232,7 +345,7 @@ pub struct VerifiedProbe {
 /// Resolve and hard-verify a single pinned probe against `corpus_root`.
 ///
 /// A missing file or a hash mismatch is a hard error: either the registry
-/// is lying or the submodule drifted under us. Reuses
+/// is lying or the corpus drifted under us. Reuses
 /// [`preflight::verify_file_hash`] (xxh128, mtime-cached) so the digest
 /// matches the rest of brokkr.
 pub fn verify_probe(
@@ -241,8 +354,9 @@ pub fn verify_probe(
     corpus_root: &Path,
     project_root: &Path,
 ) -> Result<VerifiedProbe, DevError> {
-    verify_one(id, "strategy.pine", &pin.pine, corpus_root, project_root)?;
-    verify_one(id, "tv_trades.csv", &pin.csv, corpus_root, project_root)?;
+    let subject = format!("probe '{id}'");
+    verify_one(&subject, "strategy.pine", &pin.pine, corpus_root, project_root)?;
+    verify_one(&subject, "tv_trades.csv", &pin.csv, corpus_root, project_root)?;
     Ok(VerifiedProbe {
         id: id.to_owned(),
         pine_rel: pin.pine.path.clone(),
@@ -252,8 +366,24 @@ pub fn verify_probe(
     })
 }
 
+/// Hard-verify a feed group's files against `corpus_root`, same
+/// no-bypass policy as [`verify_probe`]: the feed is part of the oracle
+/// identity of every probe that references the group.
+pub fn verify_feed_group(
+    name: &str,
+    group: &FeedGroup,
+    corpus_root: &Path,
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let subject = format!("feed group '{name}'");
+    for (role, pin) in group.roles() {
+        verify_one(&subject, role, pin, corpus_root, project_root)?;
+    }
+    Ok(())
+}
+
 fn verify_one(
-    id: &str,
+    subject: &str,
     label: &str,
     file: &FilePin,
     corpus_root: &Path,
@@ -262,40 +392,86 @@ fn verify_one(
     let abs = corpus_root.join(&file.path);
     if !abs.exists() {
         return Err(DevError::Preflight(vec![format!(
-            "piners: probe '{id}' pins a {label} path that is missing from the corpus:\n  {}\n  (registry is lying or the submodule drifted)",
+            "piners: {subject} pins a {label} path that is missing from the corpus:\n  {}\n  (registry is lying or the corpus drifted)",
             abs.display()
         )]));
     }
-    let origin = format!("probe {id} ({label})");
+    let origin = format!("{subject} ({label})");
     preflight::verify_file_hash(&abs, &file.xxh128, project_root, Some(&origin))?;
     Ok(())
 }
 
-/// Render a pin set as deterministic `pins.toml`: entries sorted by id (the
-/// `BTreeMap` order), an `expected` line first when blessed, then inline
-/// `pine`/`csv = { path, xxh128 }` tables. Blank line between entries, single
-/// trailing newline. Shared by `--reseed` and `--bless`, the two writers.
-pub fn serialize_pins(pins: &BTreeMap<String, Pin>) -> String {
-    let entries: Vec<String> = pins
-        .iter()
-        .map(|(id, pin)| {
-            let mut s = format!("[probes.{}]\n", toml_key(id));
-            if let Some(exp) = &pin.expected {
-                s.push_str(&format!("expected = {}\n", toml_str(exp)));
-            }
+/// Render the full pin file as deterministic `pins.toml`: `[feeds.<name>]`
+/// tables first, then the `[roots]` table, then `[probes.<id>]` entries -
+/// each section sorted by key (the `BTreeMap` order). Probe entries put the
+/// hand-maintained contract fields (`expected`, `feed`, the overrides)
+/// before the volatile `pine`/`csv` hashes. Blank line between blocks,
+/// single trailing newline. Shared by `--reseed` and `--bless`, the two
+/// writers.
+pub fn serialize_pins(
+    feeds: &BTreeMap<String, FeedGroup>,
+    roots: &BTreeMap<String, RootEntry>,
+    probes: &BTreeMap<String, Pin>,
+) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+
+    for (name, group) in feeds {
+        let mut s = format!("[feeds.{}]\n", toml_key(name));
+        for (role, pin) in group.roles() {
+            s.push_str(&format!("{role} = {}\n", file_pin_inline(pin)));
+        }
+        blocks.push(s);
+    }
+
+    if !roots.is_empty() {
+        let mut s = String::from("[roots]\n");
+        for (prefix, root) in roots {
             s.push_str(&format!(
-                "pine = {{ path = {}, xxh128 = {} }}\ncsv = {{ path = {}, xxh128 = {} }}\n",
-                toml_str(&pin.pine.path.to_string_lossy()),
-                toml_str(&pin.pine.xxh128),
-                toml_str(&pin.csv.path.to_string_lossy()),
-                toml_str(&pin.csv.xxh128),
+                "{} = {{ feed = {} }}\n",
+                toml_key(prefix),
+                toml_str(&root.feed)
             ));
-            s
-        })
-        .collect();
-    // Each entry ends in a newline; joining with one more puts a blank line
-    // between entries and leaves a single trailing newline.
-    entries.join("\n")
+        }
+        blocks.push(s);
+    }
+
+    for (id, pin) in probes {
+        let mut s = format!("[probes.{}]\n", toml_key(id));
+        if let Some(exp) = &pin.expected {
+            s.push_str(&format!("expected = {}\n", toml_str(exp)));
+        }
+        if let Some(feed) = &pin.feed {
+            s.push_str(&format!("feed = {}\n", toml_str(feed)));
+        }
+        if let Some(budget) = pin.bar_budget {
+            s.push_str(&format!("bar_budget = {budget}\n"));
+        }
+        if let Some(start) = pin.ohlcv_start_ms {
+            s.push_str(&format!("ohlcv_start_ms = {start}\n"));
+        }
+        if let Some(tz) = &pin.tv_trades_csv_tz {
+            s.push_str(&format!("tv_trades_csv_tz = {}\n", toml_str(tz)));
+        }
+        s.push_str(&format!(
+            "pine = {}\ncsv = {}\n",
+            file_pin_inline(&pin.pine),
+            file_pin_inline(&pin.csv),
+        ));
+        blocks.push(s);
+    }
+
+    // Each block ends in a newline; joining with one more puts a blank line
+    // between blocks and leaves a single trailing newline.
+    blocks.join("\n")
+}
+
+/// A [`FilePin`] as an inline TOML table.
+fn file_pin_inline(pin: &FilePin) -> String {
+    format!(
+        "{{ path = {}, xxh128 = {} }}",
+        toml_str(&pin.path.to_string_lossy()),
+        toml_str(&pin.xxh128),
+    )
 }
 
 /// A probe id as a TOML key: bare when it is all `[A-Za-z0-9_-]`, else quoted.
@@ -336,17 +512,16 @@ mod tests {
         for id in pin_ids {
             pins.insert(
                 (*id).to_owned(),
-                Pin {
-                    expected: None,
-                    pine: FilePin {
+                Pin::new(
+                    FilePin {
                         path: PathBuf::from(format!("validation/{id}/strategy.pine")),
                         xxh128: "00".into(),
                     },
-                    csv: FilePin {
+                    FilePin {
                         path: PathBuf::from(format!("validation/{id}/tv_trades.csv")),
                         xxh128: "11".into(),
                     },
-                },
+                ),
             );
         }
         let mut keywords = BTreeMap::new();
@@ -356,7 +531,23 @@ mod tests {
                 ids.iter().map(|s| (*s).to_owned()).collect(),
             );
         }
-        Registry { pins, keywords }
+        Registry {
+            pins,
+            feeds: BTreeMap::new(),
+            roots: BTreeMap::new(),
+            keywords,
+        }
+    }
+
+    fn feed_group(primary: &str) -> FeedGroup {
+        FeedGroup {
+            primary: FilePin {
+                path: PathBuf::from(primary),
+                xxh128: "ff".into(),
+            },
+            warmup: None,
+            lower: None,
+        }
     }
 
     #[test]
@@ -373,6 +564,37 @@ mod tests {
     }
 
     #[test]
+    fn lint_fails_on_unknown_pin_feed() {
+        let mut r = registry_with(&[], &["a"]);
+        r.pins.get_mut("a").unwrap().feed = Some("nope".to_owned());
+        let err = r.lint().unwrap_err();
+        assert!(format!("{err:?}").contains("feed = \\\"nope\\\""));
+    }
+
+    #[test]
+    fn lint_fails_on_unknown_root_feed() {
+        let mut r = registry_with(&[], &["a"]);
+        r.roots.insert(
+            "vendor/x".to_owned(),
+            RootEntry {
+                feed: "ghost-feed".to_owned(),
+            },
+        );
+        let err = r.lint().unwrap_err();
+        assert!(format!("{err:?}").contains("ghost-feed"));
+    }
+
+    #[test]
+    fn lint_passes_when_feed_references_resolve() {
+        let mut r = registry_with(&[], &["a"]);
+        r.feeds.insert("f1".to_owned(), feed_group("data/p.csv"));
+        r.pins.get_mut("a").unwrap().feed = Some("f1".to_owned());
+        r.roots
+            .insert("vendor/x".to_owned(), RootEntry { feed: "f1".to_owned() });
+        assert!(r.lint().is_ok());
+    }
+
+    #[test]
     fn keywords_for_returns_sorted_membership() {
         let r = registry_with(&[("y", &["a"]), ("x", &["a"]), ("z", &["b"])], &["a", "b"]);
         assert_eq!(r.keywords_for("a"), vec!["x".to_owned(), "y".to_owned()]);
@@ -385,13 +607,24 @@ mod tests {
         std::fs::write(
             dir.join("pins.toml"),
             r#"
+[feeds.eth-15m]
+primary = { path = "vendor/engine/data/15m.csv", xxh128 = "f0" }
+warmup  = { path = "vendor/engine/data/15m_warmup.csv", xxh128 = "f1" }
+
+[roots]
+"vendor/engine" = { feed = "eth-15m" }
+
 [probes.alpha-01]
-pine = { path = "validation/alpha-01/strategy.pine", xxh128 = "aaa" }
-csv  = { path = "validation/alpha-01/tv_trades.csv", xxh128 = "bbb" }
+feed = "eth-15m"
+bar_budget = 38000
+pine = { path = "vendor/engine/validation/alpha-01/strategy.pine", xxh128 = "aaa" }
+csv  = { path = "vendor/engine/validation/alpha-01/tv_trades.csv", xxh128 = "bbb" }
 
 [probes.beta-02]
-pine = { path = "validation/beta-02/strategy.pine", xxh128 = "ccc" }
-csv  = { path = "validation/beta-02/tv_trades.csv", xxh128 = "ddd" }
+ohlcv_start_ms = 1700000000000
+tv_trades_csv_tz = "America/New_York"
+pine = { path = "piners/beta-02/strategy.pine", xxh128 = "ccc" }
+csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
 "#,
         )
         .unwrap();
@@ -402,6 +635,16 @@ csv  = { path = "validation/beta-02/tv_trades.csv", xxh128 = "ddd" }
 
         assert_eq!(r.pins.len(), 2);
         assert_eq!(r.pins["alpha-01"].pine.xxh128, "aaa");
+        assert_eq!(r.pins["alpha-01"].feed.as_deref(), Some("eth-15m"));
+        assert_eq!(r.pins["alpha-01"].bar_budget, Some(38000));
+        assert_eq!(r.pins["beta-02"].ohlcv_start_ms, Some(1_700_000_000_000));
+        assert_eq!(
+            r.pins["beta-02"].tv_trades_csv_tz.as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(r.feeds["eth-15m"].primary.xxh128, "f0");
+        assert_eq!(r.feeds["eth-15m"].warmup.as_ref().unwrap().xxh128, "f1");
+        assert_eq!(r.roots["vendor/engine"].feed, "eth-15m");
         assert_eq!(r.keywords["ema"], vec!["alpha-01".to_owned()]);
         assert!(r.lint().is_ok());
     }
@@ -418,22 +661,59 @@ csv  = { path = "validation/beta-02/tv_trades.csv", xxh128 = "ddd" }
     fn serialize_pins_emits_expected_and_round_trips() {
         let mut r = registry_with(&[], &["alpha-01"]);
         r.pins.get_mut("alpha-01").unwrap().expected = Some("accepted".to_owned());
-        let text = serialize_pins(&r.pins);
+        let text = serialize_pins(&r.feeds, &r.roots, &r.pins);
         assert!(text.contains("expected = \"accepted\""));
         // expected precedes pine within the entry.
         assert!(text.find("expected").unwrap() < text.find("pine").unwrap());
         let reparsed = load_pins_str(&text);
-        assert_eq!(reparsed["alpha-01"].expected.as_deref(), Some("accepted"));
-        assert_eq!(reparsed["alpha-01"].pine.xxh128, "00");
+        assert_eq!(reparsed.probes["alpha-01"].expected.as_deref(), Some("accepted"));
+        assert_eq!(reparsed.probes["alpha-01"].pine.xxh128, "00");
     }
 
-    fn load_pins_str(text: &str) -> BTreeMap<String, Pin> {
-        toml::from_str::<PinsFile>(text).unwrap().probes
+    #[test]
+    fn serialize_pins_round_trips_feeds_roots_and_overrides() {
+        let mut r = registry_with(&[], &["alpha-01"]);
+        let mut group = feed_group("vendor/engine/data/15m.csv");
+        group.lower = Some(FilePin {
+            path: PathBuf::from("vendor/engine/data/1m.csv"),
+            xxh128: "f2".into(),
+        });
+        r.feeds.insert("eth-15m".to_owned(), group);
+        r.roots.insert(
+            "vendor/engine".to_owned(),
+            RootEntry {
+                feed: "eth-15m".to_owned(),
+            },
+        );
+        let pin = r.pins.get_mut("alpha-01").unwrap();
+        pin.feed = Some("eth-15m".to_owned());
+        pin.bar_budget = Some(38000);
+        pin.ohlcv_start_ms = Some(1_700_000_000_000);
+        pin.tv_trades_csv_tz = Some("America/New_York".to_owned());
+
+        let text = serialize_pins(&r.feeds, &r.roots, &r.pins);
+        // sections in order: feeds, roots, probes.
+        assert!(text.find("[feeds.eth-15m]").unwrap() < text.find("[roots]").unwrap());
+        assert!(text.find("[roots]").unwrap() < text.find("[probes.alpha-01]").unwrap());
+
+        let reparsed = load_pins_str(&text);
+        assert_eq!(reparsed.feeds["eth-15m"].lower.as_ref().unwrap().xxh128, "f2");
+        assert_eq!(reparsed.roots["vendor/engine"].feed, "eth-15m");
+        let p = &reparsed.probes["alpha-01"];
+        assert_eq!(p.feed.as_deref(), Some("eth-15m"));
+        assert_eq!(p.bar_budget, Some(38000));
+        assert_eq!(p.ohlcv_start_ms, Some(1_700_000_000_000));
+        assert_eq!(p.tv_trades_csv_tz.as_deref(), Some("America/New_York"));
+    }
+
+    fn load_pins_str(text: &str) -> PinsData {
+        toml::from_str::<PinsData>(text).unwrap()
     }
 
     #[test]
     fn toml_key_quotes_only_when_needed() {
         assert_eq!(toml_key("magnifier-tick-01"), "magnifier-tick-01");
         assert_eq!(toml_key("weird.id"), "\"weird.id\"");
+        assert_eq!(toml_key("vendor/engine"), "\"vendor/engine\"");
     }
 }

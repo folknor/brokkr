@@ -87,6 +87,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         })?;
         verified.push(registry::verify_probe(id, pin, &corpus_root, req.project_root)?);
     }
+    crate::piners::cmd::verify_selected_feeds(&ids, &reg, &corpus_root, req.project_root)?;
 
     // Measured runs default to release (meaningful timing); `--debug` profiles
     // the dev build instead. Parity runs default debug - see `cmd.rs`.
@@ -114,13 +115,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // Manifest into the bench scratch dir. The harness writes its (ignored)
     // NDJSON there via BROKKR_HARNESS_ARTEFACT_DIR, and run_hotpath_capture
     // drops the hotpath JSON report beside it.
-    let feeds = cfg
-        .feeds
-        .iter()
-        .map(|(k, v)| (k.clone(), req.project_root.join(v)))
-        .collect();
     let manifest_path = ctx.paths.scratch_dir.join("manifest.json");
-    Manifest::build(&corpus_root, &verified, &reg, feeds).write(&manifest_path)?;
+    Manifest::build(&corpus_root, &verified, &reg).write(&manifest_path)?;
 
     let bin_dir = ctx.binary.parent().ok_or_else(|| {
         DevError::Build(format!(

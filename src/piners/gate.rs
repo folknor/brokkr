@@ -78,17 +78,18 @@ mod tests {
     use std::path::PathBuf;
 
     fn pin(expected: Option<&str>) -> Pin {
-        Pin {
-            expected: expected.map(str::to_owned),
-            pine: FilePin {
+        let mut p = Pin::new(
+            FilePin {
                 path: PathBuf::from("p.pine"),
                 xxh128: "00".into(),
             },
-            csv: FilePin {
+            FilePin {
                 path: PathBuf::from("p.csv"),
                 xxh128: "11".into(),
             },
-        }
+        );
+        p.expected = expected.map(str::to_owned);
+        p
     }
 
     fn registry(pins: &[(&str, Option<&str>)]) -> Registry {
@@ -98,7 +99,7 @@ mod tests {
         }
         Registry {
             pins: map,
-            keywords: BTreeMap::new(),
+            ..Registry::default()
         }
     }
 
