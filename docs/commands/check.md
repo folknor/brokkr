@@ -111,14 +111,17 @@ flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary
 with the same feature set the test crate sees.
 
 Streams the test's own stdout/stderr live (cargo/test-harness framing lines
-are stripped), then prints a `[test]` footer per run: `PASS`, `FAIL`,
+are stripped, including the per-suite `Running <target> (.../deps/...)`
+launch lines), then prints a `[test]` footer per run: `PASS`, `FAIL`,
 `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually
 `#[cfg(feature = "...")]`-gated). Exit code: non-zero if any run was
 `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed
 with at least one `PASS` exits `0`.
 
 Flags:
-- `-N <n>` - repeat the test (per sweep) for flaky-test hunting
+- `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The
+  `[run] cargo ...` invocation and build-time lines print for run 1 only;
+  repeats collapse to one `[test]` footer line each
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--raw` - disable all filtering
 - `--debug` - dev profile instead of release

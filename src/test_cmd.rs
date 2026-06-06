@@ -4,7 +4,9 @@
 //! `--include-ignored --nocapture --test-threads=1`. Defaults to release;
 //! `--debug` switches to the dev profile. Streams the test's own
 //! stdout/stderr live (filtering out cargo/test-harness framing noise), then
-//! prints a `[test]` PASS/FAIL footer per sweep with wall time.
+//! prints a `[test]` PASS/FAIL footer per sweep with wall time. Under `-N`,
+//! the `[run] cargo ...` and build-time framing prints for run 1 only -
+//! repeats collapse to their footer line.
 //!
 //! Feature selection follows the same priority ladder as
 //! `brokkr check`'s test phase, with two intentional differences:
@@ -155,9 +157,16 @@ pub fn run(
             };
 
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
+            // Under `-N`, the invocation and build-time framing is identical
+            // every iteration - print it for run 1 only and let repeats
+            // collapse to their PASS/FAIL footer line.
+            let announce = n == 1;
+            if announce {
+                output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
+            }
 
-            let outcome = run_one(&arg_refs, project_root, &env_refs, &tag, raw, ceiling)?;
+            let outcome =
+                run_one(&arg_refs, project_root, &env_refs, &tag, raw, ceiling, announce)?;
             outcomes.push(outcome);
         }
     }
@@ -328,7 +337,10 @@ fn decide_sweeps(
 }
 
 /// Run one `cargo test` invocation. Prints the `[test]` footer and returns
-/// the outcome. Err only on spawn failure.
+/// the outcome. Err only on spawn failure. `announce` gates the
+/// "test binaries built in Xs" framing line - false for `-N` repeats
+/// after the first, where the build is cached and the line is noise.
+#[allow(clippy::too_many_arguments)]
 fn run_one(
     args: &[&str],
     project_root: &Path,
@@ -336,6 +348,7 @@ fn run_one(
     tag: &str,
     raw: bool,
     ceiling: Duration,
+    announce: bool,
 ) -> Result<Outcome, DevError> {
     let run = test_runner::streaming_run_libtest(
         args,
@@ -344,11 +357,13 @@ fn run_one(
         ceiling,
         make_stdout_forwarder(raw),
         make_stderr_forwarder(raw),
-        |elapsed| {
-            println!(
-                "[test]    test binaries built in {:.1}s; running tests",
-                elapsed.as_secs_f64()
-            );
+        move |elapsed| {
+            if announce {
+                println!(
+                    "[test]    test binaries built in {:.1}s; running tests",
+                    elapsed.as_secs_f64()
+                );
+            }
         },
     )?;
 
@@ -450,17 +465,22 @@ fn make_stdout_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
 fn make_stderr_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
     // Cargo emits compile noise (warnings, errors, progress) on stderr before
     // launching the test binary. The test's own eprintln! also lands here
-    // once the binary runs. Split on the "Running tests/..." line: before it,
-    // filter aggressively; after it, pass through (it's the test talking).
+    // once the binary runs. Split on the first "Running tests/..." line:
+    // before it, filter aggressively; after it, pass through (it's the test
+    // talking) - except further `Running <target> (<path>/deps/...)` lines,
+    // which cargo re-emits between every test binary in the package and
+    // which carry no signal (one such line per suite, ~10 in piners-runner).
     let mut in_test_phase = false;
     let mut in_compile_block = false;
     let mut prev_blank = true;
     move |line| {
-        let want = if raw || in_test_phase {
+        let want = if raw {
             true
-        } else if line.trim_start().starts_with("Running ") {
+        } else if is_cargo_running_line(line) {
             in_test_phase = true;
             false
+        } else if in_test_phase {
+            true
         } else {
             keep_stderr_compile_line(line, &mut in_compile_block)
         };
@@ -474,6 +494,16 @@ fn make_stderr_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
             }
         }
     }
+}
+
+/// Cargo's per-suite launch line: `Running unittests src/lib.rs
+/// (<target>/debug/deps/foo-abc123)` or `Running tests/bar.rs (...)`.
+/// Matched by shape (trailing parenthesized path under `deps/`) rather
+/// than the bare "Running " prefix, so a test's own eprintln! that
+/// happens to start with "Running " still passes through.
+fn is_cargo_running_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("Running ") && t.ends_with(')') && t.contains("/deps/")
 }
 
 /// Strip test-harness framing on stdout. The test's own `println!` output,
@@ -562,6 +592,25 @@ mod tests {
         // a user's println! starting with "test" wouldn't match the exact
         // " ... ok" / "... FAILED" / "... ignored" suffixes.
         assert!(keep_stdout_line("test the things now"));
+    }
+
+    #[test]
+    fn cargo_running_line_matches_suite_launch_shapes() {
+        assert!(is_cargo_running_line(
+            "     Running unittests src/bin/bench.rs (/media/folk/Banan/cargo/debug/deps/bench-d5eda320d87aa0a1)"
+        ));
+        assert!(is_cargo_running_line(
+            "     Running tests/montecarlo_threads.rs (/x/target/debug/deps/montecarlo_threads-dcc49cf)"
+        ));
+    }
+
+    #[test]
+    fn cargo_running_line_spares_test_output() {
+        // A test's own eprintln! starting with "Running " lacks the
+        // parenthesized deps path and must pass through.
+        assert!(!is_cargo_running_line("Running 500 monte carlo paths"));
+        assert!(!is_cargo_running_line("Running phase 2 (warmup)"));
+        assert!(!is_cargo_running_line("   Compiling brokkr v0.1.0"));
     }
 
     #[test]
