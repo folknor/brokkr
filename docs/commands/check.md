@@ -112,8 +112,9 @@ with the same feature set the test crate sees.
 
 Streams the test's own stdout/stderr live (cargo/test-harness framing lines
 are stripped, including the per-suite `Running <target> (.../deps/...)`
-launch lines, standalone `ok`/`FAILED` verdict lines, and the duplicate
-empty `failures:` header), then prints a `[test]` footer per run: `PASS`,
+launch lines, standalone `ok`/`FAILED` verdict lines, the duplicate
+empty `failures:` header, the `RUST_BACKTRACE` hint, and cargo's
+`to rerun pass ...` suggestion), then prints a `[test]` footer per run: `PASS`,
 `FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually
 `#[cfg(feature = "...")]`-gated). The `FAIL` footer cites the panic message
 and location, recovered from the stderr stream since `--nocapture` produces
@@ -123,8 +124,11 @@ with at least one `PASS` exits `0`.
 
 Flags:
 - `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The
-  `[run] cargo ...` invocation and build-time lines print for run 1 only;
-  repeats collapse to one `[test]` footer line each
+  `[run] cargo ...` invocation and build-time lines print for run 1 only.
+  The first occurrence of each distinct failure (keyed by panic location)
+  prints its full block; repeats of the same failure collapse to their
+  `[test] FAIL` footer alone. A closing `[test] summary:` line gives
+  PASS/FAIL counts plus one `Nx <msg> @ <loc>` line per distinct failure
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--raw` - disable all filtering
 - `--debug` - dev profile instead of release

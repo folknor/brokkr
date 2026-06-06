@@ -48,6 +48,50 @@ enum Outcome {
     NoMatch,
 }
 
+/// One run's outcome plus the failure identity the `-N` summary groups
+/// on. `fail_loc`/`fail_msg` are only set for `Outcome::Fail` and may
+/// be partial (an exit-code failure with no parsed panic has neither).
+struct RunReport {
+    outcome: Outcome,
+    fail_loc: Option<String>,
+    fail_msg: Option<String>,
+}
+
+impl RunReport {
+    fn bare(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            fail_loc: None,
+            fail_msg: None,
+        }
+    }
+}
+
+/// Shared across the `-N` repeat loop: failure signatures (panic
+/// location, falling back to message) whose full streamed block has
+/// already been shown once. Later runs failing with a seen signature
+/// have their block suppressed - the FAIL footer alone carries the
+/// per-run message.
+#[derive(Default)]
+struct RepeatState {
+    seen_failures: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl RepeatState {
+    /// Record a signature; true if this is its first occurrence.
+    fn first_sighting(&self, sig: &str) -> bool {
+        self.seen_failures
+            .lock()
+            .map(|mut s| s.insert(sig.to_owned()))
+            .unwrap_or(true)
+    }
+}
+
+/// Display destination for the streamed test output: live (run 1) or
+/// buffered (repeats), where the buffer is flushed - or dropped for an
+/// already-seen failure - once the outcome is known.
+type LineSink = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     dev_config: &DevConfig,
@@ -78,7 +122,8 @@ pub fn run(
     let target_dir = build::project_info(Some(project_root))?.target_dir;
     let project_env = check_cmd::build_test_env(Some(project), &target_dir, profile_dir);
 
-    let mut outcomes: Vec<Outcome> = Vec::new();
+    let mut reports: Vec<RunReport> = Vec::new();
+    let repeat_state = RepeatState::default();
 
     for sweep in &sweeps {
         if multi {
@@ -103,7 +148,7 @@ pub fn run(
         for build_pkg in &sweep.build_packages {
             if !run_pre_build(project_root, sweep, build_pkg, &env_refs, raw, debug)? {
                 pre_build_failed = true;
-                outcomes.push(Outcome::BuildFailed);
+                reports.push(RunReport::bare(Outcome::BuildFailed));
                 break;
             }
         }
@@ -165,13 +210,80 @@ pub fn run(
                 output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
             }
 
-            let outcome =
-                run_one(&arg_refs, project_root, &env_refs, &tag, raw, ceiling, announce)?;
-            outcomes.push(outcome);
+            let report = run_one(
+                &arg_refs,
+                project_root,
+                &env_refs,
+                &tag,
+                raw,
+                ceiling,
+                announce,
+                &repeat_state,
+                n > 1,
+            )?;
+            reports.push(report);
         }
     }
 
+    if repeat > 1 {
+        for line in format_repeat_summary(&reports) {
+            println!("{line}");
+        }
+    }
+
+    let outcomes: Vec<Outcome> = reports.iter().map(|r| r.outcome).collect();
     aggregate_exit(&outcomes, &pkg, name)
+}
+
+/// The `-N` closing summary: one counts line, then one line per distinct
+/// failure signature (grouped by panic location, falling back to message)
+/// with its occurrence count and a representative message.
+fn format_repeat_summary(reports: &[RunReport]) -> Vec<String> {
+    let total = reports.len();
+    let count = |o: Outcome| reports.iter().filter(|r| r.outcome == o).count();
+    let mut parts = vec![format!("{} PASS", count(Outcome::Pass))];
+    parts.push(format!("{} FAIL", count(Outcome::Fail)));
+    let build_failed = count(Outcome::BuildFailed);
+    if build_failed > 0 {
+        parts.push(format!("{build_failed} BUILD FAILED"));
+    }
+    let skipped = count(Outcome::NoMatch);
+    if skipped > 0 {
+        parts.push(format!("{skipped} SKIP"));
+    }
+    let mut lines = vec![format!(
+        "[test]    summary: {total} runs - {}",
+        parts.join(", ")
+    )];
+
+    // (group key, display text, count) - insertion order, first-seen
+    // message represents the group.
+    let mut groups: Vec<(String, String, usize)> = Vec::new();
+    for r in reports {
+        if r.outcome != Outcome::Fail {
+            continue;
+        }
+        let key = r
+            .fail_loc
+            .clone()
+            .or_else(|| r.fail_msg.clone())
+            .unwrap_or_else(|| "unknown failure".to_owned());
+        if let Some(g) = groups.iter_mut().find(|g| g.0 == key) {
+            g.2 += 1;
+            continue;
+        }
+        let display = match (&r.fail_msg, &r.fail_loc) {
+            (Some(m), Some(l)) => format!("{m} @ {l}"),
+            (Some(m), None) => m.clone(),
+            (None, Some(l)) => format!("@ {l}"),
+            (None, None) => "unknown failure".to_owned(),
+        };
+        groups.push((key, display, 1));
+    }
+    for (_, display, n) in groups {
+        lines.push(format!("[test]      {n}x {display}"));
+    }
+    lines
 }
 
 /// Build one cargo package with the sweep's feature flags before
@@ -337,9 +449,13 @@ fn decide_sweeps(
 }
 
 /// Run one `cargo test` invocation. Prints the `[test]` footer and returns
-/// the outcome. Err only on spawn failure. `announce` gates the
+/// the run report. Err only on spawn failure. `announce` gates the
 /// "test binaries built in Xs" framing line - false for `-N` repeats
 /// after the first, where the build is cached and the line is noise.
+/// `buffered` (repeats only) routes the streamed display into a buffer
+/// that is flushed once the outcome is known - and dropped entirely when
+/// the failure signature was already shown by an earlier run, leaving
+/// just the footer.
 #[allow(clippy::too_many_arguments)]
 fn run_one(
     args: &[&str],
@@ -349,14 +465,17 @@ fn run_one(
     raw: bool,
     ceiling: Duration,
     announce: bool,
-) -> Result<Outcome, DevError> {
+    repeat_state: &RepeatState,
+    buffered: bool,
+) -> Result<RunReport, DevError> {
+    let sink: Option<LineSink> = buffered.then(LineSink::default);
     let run = test_runner::streaming_run_libtest(
         args,
         project_root,
         env,
         ceiling,
-        make_stdout_forwarder(raw),
-        make_stderr_forwarder(raw),
+        make_stdout_forwarder(raw, sink.clone()),
+        make_stderr_forwarder(raw, sink.clone()),
         move |elapsed| {
             if announce {
                 println!(
@@ -390,17 +509,29 @@ fn run_one(
     let wall = format!("{:.2}s", test_wall.as_secs_f64());
 
     if let LibtestOutcome::HungTest(hung) = &run.outcome {
-        output::error(&test_runner::format_hung_test(hung, project_root));
+        let first = repeat_state.first_sighting(&format!("hung {}", hung.test));
+        flush_sink(sink, !first);
+        if first {
+            output::error(&test_runner::format_hung_test(hung, project_root));
+        }
         println!(
             "[test]    FAIL {tag} ({wall}) - hung test exceeded {}s",
             hung.ceiling.as_secs()
         );
         std::io::stdout().flush().ok();
-        return Ok(Outcome::Fail);
+        return Ok(RunReport {
+            outcome: Outcome::Fail,
+            fail_loc: None,
+            fail_msg: Some(format!("hung test exceeded {}s", hung.ceiling.as_secs())),
+        });
     }
 
     if !has_test_result && has_compile_error {
-        if !raw {
+        // Compile errors are identical across repeats by construction
+        // (same source, same flags) - show them once.
+        let first = repeat_state.first_sighting("build failed");
+        flush_sink(sink, !first);
+        if !raw && first {
             let filtered = cargo_filter::filter_clippy(stderr_text.as_ref());
             if !filtered.is_empty() {
                 output::error(&filtered);
@@ -408,47 +539,92 @@ fn run_one(
         }
         println!("[test]    BUILD FAILED {tag} ({wall})");
         std::io::stdout().flush().ok();
-        return Ok(Outcome::BuildFailed);
+        return Ok(RunReport::bare(Outcome::BuildFailed));
     }
 
     // Zero tests ran: the name didn't match anything in this sweep. Print
     // an informational SKIP; the caller decides whether this is a real
     // error (all sweeps missed) or fine (feature-gated out of this one).
     if parsed.passed == 0 && parsed.failed == 0 {
+        flush_sink(sink, false);
         println!(
             "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
         );
         std::io::stdout().flush().ok();
-        return Ok(Outcome::NoMatch);
+        return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
     if let Some(fail) = parsed.failures.first() {
         let msg = fail.message.as_deref().unwrap_or("<no panic message>");
         let loc = fail.location.as_deref().unwrap_or("<unknown location>");
+        // Suppress the streamed block when this failure signature already
+        // printed in full on an earlier run - the footer carries msg@loc.
+        let sig = fail
+            .location
+            .clone()
+            .or_else(|| fail.message.clone())
+            .unwrap_or_else(|| "unknown failure".to_owned());
+        let first = repeat_state.first_sighting(&sig);
+        flush_sink(sink, !first);
         println!("[test]    FAIL {tag} ({wall}) - {msg} @ {loc}");
         std::io::stdout().flush().ok();
-        return Ok(Outcome::Fail);
+        return Ok(RunReport {
+            outcome: Outcome::Fail,
+            fail_loc: fail.location.clone(),
+            fail_msg: fail.message.clone(),
+        });
     }
 
     if !run.captured.status.success() {
+        // No parsed failure to key a signature on - always show the block.
+        flush_sink(sink, false);
         println!(
             "[test]    FAIL {tag} ({wall}) - exit {:?}",
             run.captured.status.code()
         );
         std::io::stdout().flush().ok();
-        return Ok(Outcome::Fail);
+        return Ok(RunReport::bare(Outcome::Fail));
     }
 
+    flush_sink(sink, false);
     println!("[test]    PASS {tag} ({wall})");
     std::io::stdout().flush().ok();
-    Ok(Outcome::Pass)
+    Ok(RunReport::bare(Outcome::Pass))
 }
 
-fn make_stdout_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
+/// Flush a repeat-run display buffer to stdout, or drop it when the
+/// failure block was already shown by an earlier run. No-op in live
+/// (run 1) mode where `sink` is `None`.
+fn flush_sink(sink: Option<LineSink>, suppress: bool) {
+    let Some(s) = sink else { return };
+    if suppress {
+        return;
+    }
+    let lines = s.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+    if lines.is_empty() {
+        return;
+    }
+    let mut out = std::io::stdout().lock();
+    for l in &lines {
+        writeln!(out, "{l}").ok();
+    }
+    out.flush().ok();
+}
+
+fn make_stdout_forwarder(
+    raw: bool,
+    sink: Option<LineSink>,
+) -> impl FnMut(&str) + Send + 'static {
     let mut cond = StdoutCondenser::new(raw);
     move |line| {
         let lines = cond.next(line);
         if lines.is_empty() {
+            return;
+        }
+        if let Some(s) = &sink {
+            if let Ok(mut v) = s.lock() {
+                v.extend(lines);
+            }
             return;
         }
         let mut out = std::io::stdout().lock();
@@ -516,14 +692,20 @@ impl StdoutCondenser {
     }
 }
 
-fn make_stderr_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
+fn make_stderr_forwarder(
+    raw: bool,
+    sink: Option<LineSink>,
+) -> impl FnMut(&str) + Send + 'static {
     // Cargo emits compile noise (warnings, errors, progress) on stderr before
     // launching the test binary. The test's own eprintln! also lands here
     // once the binary runs. Split on the first "Running tests/..." line:
     // before it, filter aggressively; after it, pass through (it's the test
     // talking) - except further `Running <target> (<path>/deps/...)` lines,
     // which cargo re-emits between every test binary in the package and
-    // which carry no signal (one such line per suite, ~10 in piners-runner).
+    // which carry no signal (one such line per suite, ~10 in piners-runner),
+    // and the test-phase noise lines (`note: run with RUST_BACKTRACE`,
+    // cargo's `error: test failed, to rerun pass ...` - brokkr *is* the
+    // rerun tool).
     let mut in_test_phase = false;
     let mut in_compile_block = false;
     let mut prev_blank = true;
@@ -534,20 +716,35 @@ fn make_stderr_forwarder(raw: bool) -> impl FnMut(&str) + Send + 'static {
             in_test_phase = true;
             false
         } else if in_test_phase {
-            true
+            !is_test_phase_noise(line)
         } else {
             keep_stderr_compile_line(line, &mut in_compile_block)
         };
         if want {
             let is_blank = line.trim().is_empty();
             if !(is_blank && prev_blank) {
+                prev_blank = is_blank;
+                if let Some(s) = &sink {
+                    if let Ok(mut v) = s.lock() {
+                        v.push(line.to_owned());
+                    }
+                    return;
+                }
                 let mut err = std::io::stderr().lock();
                 writeln!(err, "{line}").ok();
                 err.flush().ok();
-                prev_blank = is_blank;
             }
         }
     }
+}
+
+/// Pure-noise lines in the test phase of stderr: the backtrace hint
+/// (brokkr's footer already carries the panic message/location) and
+/// cargo's rerun suggestion (brokkr *is* the rerun tool).
+fn is_test_phase_noise(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("note: run with `RUST_BACKTRACE=1`")
+        || t.starts_with("error: test failed, to rerun pass")
 }
 
 /// Cargo's per-suite launch line: `Running unittests src/lib.rs
@@ -640,6 +837,84 @@ mod tests {
             "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; \
              finished in 0.01s"
         ));
+    }
+
+    #[test]
+    fn test_phase_noise_strips_backtrace_hint_and_rerun_line() {
+        assert!(is_test_phase_noise(
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+        ));
+        assert!(is_test_phase_noise(
+            "error: test failed, to rerun pass `-p brokkr --bin brokkr`"
+        ));
+        // Real panic content and other notes survive.
+        assert!(!is_test_phase_noise(
+            "thread 'foo' panicked at src/x.rs:1:1:"
+        ));
+        assert!(!is_test_phase_noise("note: something else entirely"));
+        assert!(!is_test_phase_noise("error: a genuine test eprintln"));
+    }
+
+    #[test]
+    fn repeat_state_first_sighting_only_once_per_signature() {
+        let state = RepeatState::default();
+        assert!(state.first_sighting("src/a.rs:1:1"));
+        assert!(!state.first_sighting("src/a.rs:1:1"));
+        // A different signature is its own first sighting.
+        assert!(state.first_sighting("src/b.rs:2:2"));
+    }
+
+    fn report(outcome: Outcome, msg: Option<&str>, loc: Option<&str>) -> RunReport {
+        RunReport {
+            outcome,
+            fail_msg: msg.map(str::to_owned),
+            fail_loc: loc.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn repeat_summary_counts_and_groups_by_location() {
+        let reports = vec![
+            report(Outcome::Pass, None, None),
+            report(Outcome::Fail, Some("rolled 0"), Some("src/a.rs:7:9")),
+            report(Outcome::Pass, None, None),
+            // Same location, different message - groups with the first,
+            // whose message represents the group.
+            report(Outcome::Fail, Some("rolled 2"), Some("src/a.rs:7:9")),
+            report(Outcome::Fail, Some("boom"), Some("src/b.rs:1:1")),
+        ];
+        let lines = format_repeat_summary(&reports);
+        assert_eq!(lines[0], "[test]    summary: 5 runs - 2 PASS, 3 FAIL");
+        assert_eq!(lines[1], "[test]      2x rolled 0 @ src/a.rs:7:9");
+        assert_eq!(lines[2], "[test]      1x boom @ src/b.rs:1:1");
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn repeat_summary_all_pass_has_no_group_lines() {
+        let reports = vec![
+            report(Outcome::Pass, None, None),
+            report(Outcome::Pass, None, None),
+        ];
+        let lines = format_repeat_summary(&reports);
+        assert_eq!(lines, vec!["[test]    summary: 2 runs - 2 PASS, 0 FAIL"]);
+    }
+
+    #[test]
+    fn repeat_summary_includes_skip_and_build_failed_when_present() {
+        let reports = vec![
+            report(Outcome::Pass, None, None),
+            report(Outcome::BuildFailed, None, None),
+            report(Outcome::NoMatch, None, None),
+            // Exit-code failure with no parsed panic.
+            report(Outcome::Fail, None, None),
+        ];
+        let lines = format_repeat_summary(&reports);
+        assert_eq!(
+            lines[0],
+            "[test]    summary: 4 runs - 1 PASS, 1 FAIL, 1 BUILD FAILED, 1 SKIP"
+        );
+        assert_eq!(lines[1], "[test]      1x unknown failure");
     }
 
     #[test]
