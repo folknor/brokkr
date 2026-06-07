@@ -29,8 +29,10 @@
 //! probe gets its `feed` assigned by the longest matching `[roots]` prefix.
 //!
 //! Output is deterministic (sections and entries sorted by key, inline
-//! `{ path, xxh128 }` tables) for clean diffs, and idempotent (re-stamping
-//! overwrites hashes - the re-pin case).
+//! `{ path, xxh128 }` tables) for clean diffs, idempotent (re-stamping
+//! overwrites hashes - the re-pin case), and comment-preserving: the file
+//! is edited in place via [`crate::piners::pins_write`], so hand-written
+//! TOML comments survive the re-stamp.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,6 +41,7 @@ use crate::config::PinersConfig;
 use crate::error::DevError;
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
+use crate::piners::pins_write;
 use crate::piners::registry::{self, FeedGroup, FilePin, Pin, PinsData, RootEntry};
 use crate::preflight;
 
@@ -70,10 +73,16 @@ pub fn run(
     let registry_dir = project_root.join(cfg.registry_dir());
     let pins_path = registry_dir.join(PINS_FILE);
 
-    let existing = if pins_path.exists() {
-        registry::load_pins(&pins_path)?
+    // Keep the raw text alongside the parsed data: the writer edits the
+    // existing document in place so hand-written comments survive.
+    let existing_text = if pins_path.exists() {
+        Some(std::fs::read_to_string(&pins_path).map_err(DevError::Io)?)
     } else {
-        PinsData::default()
+        None
+    };
+    let existing = match existing_text.as_deref() {
+        Some(text) => registry::parse_pins(text, &pins_path)?,
+        None => PinsData::default(),
     };
 
     let discovered = discover(&corpus_root, &registry_dir)?;
@@ -120,7 +129,7 @@ pub fn run(
     std::fs::create_dir_all(&registry_dir).map_err(DevError::Io)?;
     std::fs::write(
         &pins_path,
-        registry::serialize_pins(&feeds, &existing.roots, &new_pins),
+        pins_write::render_pins(existing_text.as_deref(), &feeds, &existing.roots, &new_pins)?,
     )
     .map_err(DevError::Io)?;
 

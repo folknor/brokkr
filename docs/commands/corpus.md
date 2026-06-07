@@ -161,7 +161,9 @@ breaks) - for rollout or ad-hoc breakdown runs.
 ## Reseed and bless: the two writers of pins.toml
 
 Independent deliberate acts, reviewed via `git diff pins.toml`: reseed
-adopts new *content*, bless adopts new *dispositions*.
+adopts new *content*, bless adopts new *dispositions*. Both edit the file
+in place (`toml_edit`), so hand-written TOML comments survive - a comment
+on a removed probe goes with it.
 
 `--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
 the only way the file is created or its hashes refreshed. No build/harness.

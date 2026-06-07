@@ -12,13 +12,15 @@
 //! Unlike reseed, bless runs the harness first (the run pipeline is shared
 //! with [`crate::piners::cmd`]); it then merges dispositions for the
 //! selected probes into the already-loaded pin universe and rewrites the
-//! file, leaving unselected probes untouched.
+//! file in place via [`crate::piners::pins_write`] (hand-written comments
+//! survive), leaving unselected probes untouched.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::DevError;
 use crate::output;
+use crate::piners::pins_write;
 use crate::piners::registry::{self, Registry};
 use crate::piners::report::HarnessReport;
 
@@ -68,9 +70,20 @@ pub fn apply(
         }
     }
 
+    // Edit the existing file in place so hand-written comments survive.
+    let existing = if pins_path.exists() {
+        Some(std::fs::read_to_string(pins_path).map_err(DevError::Io)?)
+    } else {
+        None
+    };
     std::fs::write(
         pins_path,
-        registry::serialize_pins(&registry.feeds, &registry.roots, &registry.pins),
+        pins_write::render_pins(
+            existing.as_deref(),
+            &registry.feeds,
+            &registry.roots,
+            &registry.pins,
+        )?,
     )
     .map_err(DevError::Io)?;
     output::corpus_msg(&format!(

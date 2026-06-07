@@ -194,8 +194,14 @@ pub fn load_pins(pins_path: &Path) -> Result<PinsData, DevError> {
     let text = std::fs::read_to_string(pins_path).map_err(|e| {
         DevError::Config(format!("piners: failed to read {}: {e}", pins_path.display()))
     })?;
-    toml::from_str(&text)
-        .map_err(|e| DevError::Config(format!("piners: {}: {e}", pins_path.display())))
+    parse_pins(&text, pins_path)
+}
+
+/// Parse `pins.toml` text already in hand (reseed keeps the raw text around
+/// so the comment-preserving writer can edit it in place).
+pub fn parse_pins(text: &str, origin: &Path) -> Result<PinsData, DevError> {
+    toml::from_str(text)
+        .map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
 }
 
 impl Registry {
@@ -401,107 +407,6 @@ fn verify_one(
     Ok(())
 }
 
-/// Render the full pin file as deterministic `pins.toml`: `[feeds.<name>]`
-/// tables first, then the `[roots]` table, then `[probes.<id>]` entries -
-/// each section sorted by key (the `BTreeMap` order). Probe entries put the
-/// hand-maintained contract fields (`expected`, `feed`, the overrides)
-/// before the volatile `pine`/`csv` hashes. Blank line between blocks,
-/// single trailing newline. Shared by `--reseed` and `--bless`, the two
-/// writers.
-pub fn serialize_pins(
-    feeds: &BTreeMap<String, FeedGroup>,
-    roots: &BTreeMap<String, RootEntry>,
-    probes: &BTreeMap<String, Pin>,
-) -> String {
-    let mut blocks: Vec<String> = Vec::new();
-
-    for (name, group) in feeds {
-        let mut s = format!("[feeds.{}]\n", toml_key(name));
-        for (role, pin) in group.roles() {
-            s.push_str(&format!("{role} = {}\n", file_pin_inline(pin)));
-        }
-        blocks.push(s);
-    }
-
-    if !roots.is_empty() {
-        let mut s = String::from("[roots]\n");
-        for (prefix, root) in roots {
-            s.push_str(&format!(
-                "{} = {{ feed = {} }}\n",
-                toml_key(prefix),
-                toml_str(&root.feed)
-            ));
-        }
-        blocks.push(s);
-    }
-
-    for (id, pin) in probes {
-        let mut s = format!("[probes.{}]\n", toml_key(id));
-        if let Some(exp) = &pin.expected {
-            s.push_str(&format!("expected = {}\n", toml_str(exp)));
-        }
-        if let Some(feed) = &pin.feed {
-            s.push_str(&format!("feed = {}\n", toml_str(feed)));
-        }
-        if let Some(budget) = pin.bar_budget {
-            s.push_str(&format!("bar_budget = {budget}\n"));
-        }
-        if let Some(start) = pin.ohlcv_start_ms {
-            s.push_str(&format!("ohlcv_start_ms = {start}\n"));
-        }
-        if let Some(tz) = &pin.tv_trades_csv_tz {
-            s.push_str(&format!("tv_trades_csv_tz = {}\n", toml_str(tz)));
-        }
-        s.push_str(&format!(
-            "pine = {}\ncsv = {}\n",
-            file_pin_inline(&pin.pine),
-            file_pin_inline(&pin.csv),
-        ));
-        blocks.push(s);
-    }
-
-    // Each block ends in a newline; joining with one more puts a blank line
-    // between blocks and leaves a single trailing newline.
-    blocks.join("\n")
-}
-
-/// A [`FilePin`] as an inline TOML table.
-fn file_pin_inline(pin: &FilePin) -> String {
-    format!(
-        "{{ path = {}, xxh128 = {} }}",
-        toml_str(&pin.path.to_string_lossy()),
-        toml_str(&pin.xxh128),
-    )
-}
-
-/// A probe id as a TOML key: bare when it is all `[A-Za-z0-9_-]`, else quoted.
-fn toml_key(id: &str) -> String {
-    let bare = !id.is_empty()
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    if bare {
-        id.to_owned()
-    } else {
-        toml_str(id)
-    }
-}
-
-/// A TOML basic string with `"` and `\` escaped.
-fn toml_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -657,63 +562,4 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
         assert!(format!("{err:?}").contains("totally-bogus"));
     }
 
-    #[test]
-    fn serialize_pins_emits_expected_and_round_trips() {
-        let mut r = registry_with(&[], &["alpha-01"]);
-        r.pins.get_mut("alpha-01").unwrap().expected = Some("accepted".to_owned());
-        let text = serialize_pins(&r.feeds, &r.roots, &r.pins);
-        assert!(text.contains("expected = \"accepted\""));
-        // expected precedes pine within the entry.
-        assert!(text.find("expected").unwrap() < text.find("pine").unwrap());
-        let reparsed = load_pins_str(&text);
-        assert_eq!(reparsed.probes["alpha-01"].expected.as_deref(), Some("accepted"));
-        assert_eq!(reparsed.probes["alpha-01"].pine.xxh128, "00");
-    }
-
-    #[test]
-    fn serialize_pins_round_trips_feeds_roots_and_overrides() {
-        let mut r = registry_with(&[], &["alpha-01"]);
-        let mut group = feed_group("vendor/engine/data/15m.csv");
-        group.lower = Some(FilePin {
-            path: PathBuf::from("vendor/engine/data/1m.csv"),
-            xxh128: "f2".into(),
-        });
-        r.feeds.insert("eth-15m".to_owned(), group);
-        r.roots.insert(
-            "vendor/engine".to_owned(),
-            RootEntry {
-                feed: "eth-15m".to_owned(),
-            },
-        );
-        let pin = r.pins.get_mut("alpha-01").unwrap();
-        pin.feed = Some("eth-15m".to_owned());
-        pin.bar_budget = Some(38000);
-        pin.ohlcv_start_ms = Some(1_700_000_000_000);
-        pin.tv_trades_csv_tz = Some("America/New_York".to_owned());
-
-        let text = serialize_pins(&r.feeds, &r.roots, &r.pins);
-        // sections in order: feeds, roots, probes.
-        assert!(text.find("[feeds.eth-15m]").unwrap() < text.find("[roots]").unwrap());
-        assert!(text.find("[roots]").unwrap() < text.find("[probes.alpha-01]").unwrap());
-
-        let reparsed = load_pins_str(&text);
-        assert_eq!(reparsed.feeds["eth-15m"].lower.as_ref().unwrap().xxh128, "f2");
-        assert_eq!(reparsed.roots["vendor/engine"].feed, "eth-15m");
-        let p = &reparsed.probes["alpha-01"];
-        assert_eq!(p.feed.as_deref(), Some("eth-15m"));
-        assert_eq!(p.bar_budget, Some(38000));
-        assert_eq!(p.ohlcv_start_ms, Some(1_700_000_000_000));
-        assert_eq!(p.tv_trades_csv_tz.as_deref(), Some("America/New_York"));
-    }
-
-    fn load_pins_str(text: &str) -> PinsData {
-        toml::from_str::<PinsData>(text).unwrap()
-    }
-
-    #[test]
-    fn toml_key_quotes_only_when_needed() {
-        assert_eq!(toml_key("magnifier-tick-01"), "magnifier-tick-01");
-        assert_eq!(toml_key("weird.id"), "\"weird.id\"");
-        assert_eq!(toml_key("vendor/engine"), "\"vendor/engine\"");
-    }
 }

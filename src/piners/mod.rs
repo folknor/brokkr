@@ -9,6 +9,7 @@ pub mod corpus_query;
 pub mod gate;
 pub mod manifest;
 pub mod measured;
+pub mod pins_write;
 pub mod registry;
 pub mod report;
 pub mod reseed;

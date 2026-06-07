@@ -85,7 +85,7 @@ Single crate, single binary. No workspace.
 - `src/nidhogg/` - server lifecycle, ingest, update, query, geocode, benchmarks, verify. See `docs/projects/nidhogg.md`.
 - `src/litehtml/` - 4 modules: visual reference testing. See `docs/projects/litehtml.md`.
 - `src/ratatoskr/` - harness orchestration (`saehrimnir.rs`, `sync.rs`, `cmd.rs`, `discover.rs`). See `docs/projects/ratatoskr.md`.
-- `src/piners/` - `brokkr corpus` parity-corpus runner: `registry.rs` (pins.toml + keyword loading, xxh128 verification), `select.rs` (selection resolution), `manifest.rs` (harness manifest), `report.rs` (NDJSON parse/render, incl. `trade_diff` collection), `cmd.rs` (orchestration + run persistence), `corpus_db/` (the `runs.db` SQLite store: schema/migrate/ingest/query/format, mirroring `src/db`), `corpus_query.rs` (the `brokkr corpus-results` handler). See `docs/commands/corpus.md` and `docs/projects/piners.md`.
+- `src/piners/` - `brokkr corpus` parity-corpus runner: `registry.rs` (pins.toml + keyword loading, xxh128 verification), `pins_write.rs` (comment-preserving `pins.toml` writer via `toml_edit`, shared by `--reseed`/`--bless`), `select.rs` (selection resolution), `manifest.rs` (harness manifest), `report.rs` (NDJSON parse/render, incl. `trade_diff` collection), `cmd.rs` (orchestration + run persistence), `corpus_db/` (the `runs.db` SQLite store: schema/migrate/ingest/query/format, mirroring `src/db`), `corpus_query.rs` (the `brokkr corpus-results` handler). See `docs/commands/corpus.md` and `docs/projects/piners.md`.
 - `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio + pngjs).
 
 ## Shared commands quick reference
