@@ -71,6 +71,12 @@ pub struct CorpusArgs {
     pub keep_artefacts: bool,
     /// Bypass the pre-run runtime ceiling (the [`RUNTIME_CEILING_MS`] wall).
     pub force: bool,
+    /// Extra flags forwarded verbatim to the harness binary after
+    /// `--manifest <path>` (everything after a literal `--` on the CLI).
+    /// CLI-conflicted with `--verify-only`/`--reseed`/`--bless`; recorded
+    /// in the run row's selector so a perturbed run is never mistaken for
+    /// a clean one.
+    pub harness_args: Vec<String>,
 }
 
 /// Entry point for `brokkr corpus`.
@@ -194,9 +200,18 @@ pub fn corpus(
         ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
     ];
 
+    let mut harness_argv: Vec<&str> = vec!["--manifest", &manifest_str];
+    harness_argv.extend(args.harness_args.iter().map(String::as_str));
+    if !args.harness_args.is_empty() {
+        output::corpus_msg(&format!(
+            "forwarding to harness: {}",
+            args.harness_args.join(" ")
+        ));
+    }
+
     let capture = match output::run_captured_with_env_and_deadline(
         &binary_str,
-        &["--manifest", &manifest_str],
+        &harness_argv,
         project_root,
         &env_pairs,
         Duration::MAX,
@@ -393,12 +408,15 @@ fn enforce_runtime_ceiling(project_root: &Path, ids: &[String]) -> Result<(), De
 
 /// Build the `selector` JSON stored on the run row: the resolved probe ids
 /// plus the raw selection flags - enough to group by and to reproduce.
+/// Forwarded harness flags are part of the run's identity (they perturb
+/// harness behavior), so they persist here too.
 fn selector_json(args: &CorpusArgs, ids: &[String]) -> String {
     serde_json::json!({
         "all": args.all,
         "keywords": args.keywords,
         "probe": args.probe,
         "bless": args.bless,
+        "harness_args": args.harness_args,
         "ids": ids,
     })
     .to_string()

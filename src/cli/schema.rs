@@ -1870,16 +1870,17 @@ Examples:
     /// run yet (baseline work is deferred). Default profile is debug.
     #[command(name = "corpus", display_order = 70)]
     Corpus {
-        /// Keyword grouping to select (repeatable; union of matched
-        /// probes). Resolves through `pins.toml`, so every selected probe
-        /// is verified.
-        #[arg(long, value_name = "KEYWORD")]
+        /// Keyword grouping to select (repeatable or comma-separated;
+        /// union of matched probes). Resolves through `pins.toml`, so
+        /// every selected probe is verified.
+        #[arg(long, value_name = "KEYWORD", value_delimiter = ',')]
         keyword: Vec<String>,
 
-        /// Select a probe by id (repeatable; the union of the listed
-        /// probes), resolved directly against `pins.toml`. A probe pinned
-        /// but absent from every keyword file is still selectable this way.
-        #[arg(long, value_name = "ID")]
+        /// Select a probe by id (repeatable or comma-separated; the union
+        /// of the listed probes), resolved directly against `pins.toml`. A
+        /// probe pinned but absent from every keyword file is still
+        /// selectable this way.
+        #[arg(long, value_name = "ID", value_delimiter = ',')]
         probe: Vec<String>,
 
         /// Select the whole pinned universe (slow characterization pass).
@@ -1944,6 +1945,19 @@ Examples:
         #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
         keep_artefacts: bool,
 
+        /// Extra flags forwarded verbatim to the harness binary, appended
+        /// after `--manifest <path>`: everything after a literal `--`, e.g.
+        /// `brokkr corpus --probe x --no-gate -- --scan-signal-extra`. The
+        /// allowlist-friendly replacement for env-var-prefixed invocations.
+        /// Works for parity and measured runs; recorded in the run row's
+        /// selector (runs.db) / cli_args (results.db). Conflicts with
+        /// `--verify-only`/`--reseed` (no harness runs) and `--bless` (pins
+        /// must record default-behavior dispositions only). The gate stays
+        /// active - pair with `--no-gate` when the flags change dispositions.
+        #[arg(last = true, value_name = "HARNESS_FLAGS",
+              conflicts_with_all = ["verify_only", "reseed", "bless"])]
+        harness_args: Vec<String>,
+
         /// Measurement mode (`--hotpath`/`--alloc`) and shared build flags.
         /// With no measurement flag this is a bare parity run (gate +
         /// runs.db); `--hotpath`/`--alloc` build the harness with the hotpath
@@ -1994,9 +2008,9 @@ Examples:
 
         /// Probe selector. A single `--probe` (without `--diffs`) shows that
         /// probe's combo view - its disposition plus `trade_diff` rows.
-        /// Repeatable under `--diffs` to narrow the diff table to several
-        /// probes at once.
-        #[arg(long, value_name = "ID")]
+        /// Repeatable or comma-separated under `--diffs` to narrow the diff
+        /// table to several probes at once.
+        #[arg(long, value_name = "ID", value_delimiter = ',')]
         probe: Vec<String>,
 
         /// List `trade_diff` rows across the run (latest run by default). Shape

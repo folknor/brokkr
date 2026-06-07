@@ -86,8 +86,10 @@ Selection is over the pinned universe. No selection (and no `--all` /
 `--verify-only`) is a hard error listing the available keywords - the slow
 full-corpus pass never runs by accident.
 
-- `--keyword <k>` (repeatable) - union of the listed groupings.
-- `--probe <id>` (repeatable) - union of the named pinned probes.
+- `--keyword <k>` (repeatable or comma-separated) - union of the listed
+  groupings.
+- `--probe <id>` (repeatable or comma-separated, `--probe a,b,c`) - union
+  of the named pinned probes.
 - `--all` - the whole pinned universe (slow characterization pass).
 - `--verify-only` - verify every pinned probe (and every referenced feed
   group) against the corpus tree and exit, without building or running.
@@ -95,6 +97,23 @@ full-corpus pass never runs by accident.
 - `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
 - `--bless` - run the selection, then stamp current dispositions (below).
 - `--force` - bypass the pre-run runtime ceiling (below).
+
+## Forwarding flags to the harness
+
+Everything after a literal `--` is appended verbatim to the harness
+invocation, after `--manifest <path>`:
+
+    brokkr corpus --probe 16-volty-expan --no-gate -- --scan-signal-extra
+
+The allowlist-friendly replacement for env-var-prefixed invocations
+(`PINERS_CORPUS_*=1 brokkr corpus ...`), whose shifting prefixes defeat
+command approval. Works for parity and measured runs. Forwarded flags
+are part of the run's identity: recorded in the run row's selector
+(runs.db; `corpus-results` renders them as `probe=x -- --flag`) and in
+`cli_args` (results.db). Conflicts with `--verify-only`/`--reseed` (no
+harness runs) and `--bless` (pins must record default-behavior
+dispositions only). The gate stays active - pair with `--no-gate` when
+the flags change dispositions.
 
 ## Runtime ceiling (the pre-run wall)
 
@@ -196,5 +215,5 @@ dropped once ingest commits - unless `--keep-artefacts`, or on the
 ## See also
 
 - `docs/brokkr.toml.piners.md` - the `[piners]` config block.
-- `docs/projects/piners.md` - the harness NDJSON + manifest contracts,
-  `runs.db`, and the `brokkr corpus-results` query surface.
+- `docs/projects/piners.md` - harness NDJSON + manifest contracts,
+  `runs.db`, the `brokkr corpus-results` query surface.

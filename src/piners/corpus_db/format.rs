@@ -118,6 +118,14 @@ fn fmt_selector(raw: &str) -> String {
     if v.get("bless").and_then(Value::as_bool) == Some(true) {
         parts.push("bless".to_owned());
     }
+    // Forwarded harness flags perturb harness behavior - render them so a
+    // perturbed run is never mistaken for a clean one in the table.
+    if let Some(extra) = v.get("harness_args").and_then(Value::as_array) {
+        let flags: Vec<&str> = extra.iter().filter_map(Value::as_str).collect();
+        if !flags.is_empty() {
+            parts.push(format!("-- {}", flags.join(" ")));
+        }
+    }
     if parts.is_empty() {
         return raw.to_owned();
     }
@@ -347,5 +355,18 @@ mod tests {
         // Unparsable / unexpected shape is shown verbatim, never blanked.
         assert_eq!(fmt_selector("not json"), "not json");
         assert_eq!(fmt_selector("{}"), "{}");
+    }
+
+    #[test]
+    fn renders_forwarded_harness_args() {
+        // A perturbed run (forwarded harness flags) must be visibly distinct
+        // from a clean run of the same selection. Empty array = clean.
+        let perturbed = r#"{"all":false,"bless":false,"harness_args":["--scan-signal-extra","--scan-trade-chain"],"ids":["x"],"keywords":[],"probe":["x"]}"#;
+        assert_eq!(
+            fmt_selector(perturbed),
+            "probe=x -- --scan-signal-extra --scan-trade-chain"
+        );
+        let clean = r#"{"all":false,"bless":false,"harness_args":[],"ids":["x"],"keywords":[],"probe":["x"]}"#;
+        assert_eq!(fmt_selector(clean), "probe=x");
     }
 }

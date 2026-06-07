@@ -1117,6 +1117,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             debug,
             release,
             keep_artefacts,
+            harness_args,
             mode,
         } => {
             project::require(project, Project::Piners, "corpus")?;
@@ -1135,6 +1136,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 profile_override: profile_override(debug, release),
                 keep_artefacts,
                 force: mode.force,
+                harness_args,
             };
             if mode.is_measured() {
                 // --hotpath/--alloc: build the harness with the hotpath feature

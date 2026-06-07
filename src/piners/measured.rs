@@ -152,7 +152,11 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         metadata.push(KvPair::text("profile", "dev"));
     }
 
-    let subprocess_args = ["--manifest", manifest_str.as_str()];
+    // Forwarded harness flags (everything after `--`) ride along here too -
+    // profiling with a scan toggle enabled is a legitimate measured run. They
+    // land in the result row via `cli_args` below.
+    let mut subprocess_args: Vec<&str> = vec!["--manifest", manifest_str.as_str()];
+    subprocess_args.extend(args.harness_args.iter().map(String::as_str));
     let config = BenchConfig {
         command: "corpus".to_owned(),
         mode: None,
