@@ -14,6 +14,8 @@ pub struct EnvInfo {
     pub governor: String,
     pub memory_total_mb: u64,
     pub memory_available_mb: u64,
+    pub swap_total_mb: u64,
+    pub swap_free_mb: u64,
     pub io_uring_status: String,
     pub drives: Vec<(String, String)>,
     pub storage: Vec<StorageInfo>,
@@ -51,6 +53,7 @@ pub enum DatasetStatus {
 /// Collect all environment information.
 pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> EnvInfo {
     let (mem_total, mem_avail) = read_memory();
+    let (swap_total, swap_free) = read_swap();
 
     EnvInfo {
         hostname: paths.hostname.clone(),
@@ -59,6 +62,8 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         governor: read_governor(),
         memory_total_mb: mem_total,
         memory_available_mb: mem_avail,
+        swap_total_mb: swap_total,
+        swap_free_mb: swap_free,
         io_uring_status: read_io_uring_status(),
         drives: collect_drives(paths),
         storage: collect_storage(paths),
@@ -86,6 +91,12 @@ fn print_header(info: &EnvInfo) {
         "memory:",
         format_gib(info.memory_total_mb),
         format_gib(info.memory_available_mb),
+    );
+    println!(
+        "{:<12} {} ({} free)",
+        "swap:",
+        format_gib(info.swap_total_mb),
+        format_gib(info.swap_free_mb),
     );
     println!("{:<12} {}", "io_uring:", info.io_uring_status);
 }
@@ -299,6 +310,18 @@ pub(crate) fn read_memory() -> (u64, u64) {
     let total = parse_meminfo_field(&content, "MemTotal:");
     let avail = parse_meminfo_field(&content, "MemAvailable:");
     (total, avail)
+}
+
+/// Read total and free swap from `/proc/meminfo`, returning MB values.
+pub(crate) fn read_swap() -> (u64, u64) {
+    let content = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(s) => s,
+        Err(_) => return (0, 0),
+    };
+
+    let total = parse_meminfo_field(&content, "SwapTotal:");
+    let free = parse_meminfo_field(&content, "SwapFree:");
+    (total, free)
 }
 
 /// Find a line starting with `prefix` in meminfo content and parse the kB
