@@ -477,12 +477,12 @@ fn try_flock(fd: RawFd) -> Result<(), DevError> {
                     .map(|u| format!(", running {u}"))
                     .unwrap_or_default();
                 Err(DevError::Lock(format!(
-                    "already locked by PID {} - {} {} ({}{})\nuse --wait to queue behind the lock",
+                    "already locked by PID {} - {} {} ({}{})",
                     info.pid, info.project, info.command, info.project_root, uptime
                 )))
             }
             None => Err(DevError::Lock(
-                "already locked by unknown process\nuse --wait to queue behind the lock".into(),
+                "already locked by unknown process".into(),
             )),
         }
     } else {

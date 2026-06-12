@@ -137,6 +137,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
         return cmd_fmt(args);
     }
     if let Command::Run { args } = &cli.command {
+        let (project, project_root) = match project::detect_optional()? {
+            Some((p, _, root)) => (Some(p), root),
+            None => (None, std::env::current_dir()?),
+        };
+        let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
         return cmd_cargo_run(args);
     }
     if let Command::Wc { threshold } = &cli.command {
@@ -195,6 +200,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 ),
                 None => (None, Vec::new(), Vec::new(), None, None, std::env::current_dir()?),
             };
+        let _lock = acquire_cmd_lock_opt(project, &project_root, "check")?;
         return check_cmd::cmd_check(
             project,
             &project_root,
@@ -904,7 +910,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 Project::Litehtml | Project::Sluggrs => Err(DevError::Config(
                     "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
                 )),
-                _ => test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw, debug, timeout),
+                _ => {
+                    let _lock = acquire_cmd_lock(project, &project_root, "test")?;
+                    test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw, debug, timeout)
+                }
             }
         }
         Command::List => {

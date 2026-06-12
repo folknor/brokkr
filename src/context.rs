@@ -20,8 +20,19 @@ pub(crate) fn acquire_cmd_lock(
     project_root: &Path,
     command: &str,
 ) -> Result<lockfile::LockGuard, DevError> {
+    acquire_cmd_lock_opt(Some(project), project_root, command)
+}
+
+/// As [`acquire_cmd_lock`], but for commands that run outside a detected
+/// brokkr project (`check` / `test` / `run` in a bare Rust repo). Falls
+/// back to the project label `"brokkr"` when no project is detected.
+pub(crate) fn acquire_cmd_lock_opt(
+    project: Option<Project>,
+    project_root: &Path,
+    command: &str,
+) -> Result<lockfile::LockGuard, DevError> {
     lockfile::acquire(&lockfile::LockContext {
-        project: project.name(),
+        project: project.map_or("brokkr", Project::name),
         command,
         project_root: &project_root.display().to_string(),
     })
