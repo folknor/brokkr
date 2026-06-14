@@ -142,6 +142,41 @@ workspace is usually a dev shortcut (forgot to publish a fork) or a hand-
 patched dependency that wouldn't reproduce on a clean checkout. Emits
 `PathDependency` with the resolved manifest path.
 
+### native_code [v1]
+
+Lists dependencies that pull non-Rust code into the build. **Not**
+name-based - the `-sys` suffix is advisory and both over- and under-
+includes (`js-sys` / `windows-sys` are pure-Rust FFI declarations;
+plenty of native bundlers carry no suffix). Two orthogonal signals,
+each reported via a `reason` of `links` / `compiles` / `both`:
+
+- **links a native library** - the manifest's `links` key is set. The
+  canonical marker Cargo reserves for linking a system/bundled native
+  library; what makes a real `-sys` crate. Carried in the `links`
+  field of the event.
+- **compiles non-Rust code** - the crate has a *build-dependency* on a
+  known native-toolchain crate: `cc` (C/C++), `cmake`, `cxx-build`
+  (C++), `nasm-rs` (assembly). Carried in the `toolchains` field.
+  `cxx-build` pulls in `cc`, but a cxx user lists `cxx-build` as its
+  own direct build-dep, so scanning direct build edges suffices.
+
+Runs on the **host-filtered** metadata (like `duplicate_version`), so
+wasm-only native bundlers (`sqlite-wasm-rs`) don't appear on a native
+host. Workspace members are skipped - first-party native code is the
+user's own choice, not a dependency smell.
+
+Informational, like `outdated`/`stale`: native code is a portability /
+cross-compile / supply-chain heads-up, not a defect, so it doesn't
+drive the exit code.
+
+```
+[deps] 1 dependency with native code:
+[deps]   libsqlite3-sys 0.38.1  compiles (cc) + links sqlite3
+```
+
+Limitation: a build script that shells out to a compiler directly
+(not via `cc`/`cmake`/...) is invisible unless it also sets `links`.
+
 ### outdated [v1]
 
 Shells out to `ccu --json` (the user's check-updates tool, pinned at
@@ -229,6 +264,7 @@ src/deps/
   focus.rs               # `brokkr deps <pkg>` chain trace
   git_dependency.rs      # git+ source scanning with ref parsing
   path_dependency.rs     # non-workspace path deps
+  native_code.rs         # links= + cc/cmake/... build-dep detection
   ccu.rs                 # ccu --json shell-out (outdated + stale)
 ```
 
@@ -236,8 +272,8 @@ Future phases land as siblings (`advisory.rs`, etc.). The
 cargo-metadata deserializer lives in `mod.rs` until it grows enough to
 warrant its own file.
 
-`src/cli.rs` carries the `Command::Deps { ... }` variant. Dispatch lands
-in `src/main.rs` next to the other shared commands (not project-gated).
+`src/cli/schema.rs` carries the `Command::Deps { ... }` variant. Dispatch
+lands in `src/main.rs` next to the other shared commands (not project-gated).
 
 ## v1 cut
 

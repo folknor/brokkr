@@ -26,6 +26,7 @@ These files are not auto-loaded - read them on demand based on what the user ask
 
 - `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, the `[gremlins]` exclude list, `[[check]]`, `[test]` profiles, `[litehtml]`, or `[ratatoskr]` blocks.
 - `docs/brokkr.toml.datasets.md` - **read when** the user asks about `[<host>.datasets.*]` (pbf/osc/pmtiles entries) or the variant-selection CLI flags (`--variant`, `--osc-seq`, `--tiles`, `--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`, `--compression`, `--locations-on-ways`) - map-data projects only (pbfhogg/elivagar/nidhogg).
+- `docs/commands/deps.md` - **read when** the user asks about `brokkr deps` - the dependency-audit command (any Rust+git repo, not project-gated): the phase model, the `duplicate_version`/`git_dependency`/`path_dependency`/`outdated`/`stale` phases, focus mode (`brokkr deps <pkg>`), the `ccu --json` shell-out, exit codes, or the planned `advisory` phase.
 - `docs/commands/check.md` - **read when** working on `brokkr check` or `brokkr test`, the gremlins/clippy/test pipeline, sweep selection, profile resolution, libtest filters, or the `BROKKR_TEST_BIN_DIR` contract.
 - `docs/commands/visual.md` - **read when** the project is litehtml-rs or sluggrs and the user asks about `visual`, `list`, `approve`, `report`, `visual-status`, `prepare`, `html-extract`, or `outline`.
 - `docs/commands/sync.md` - **read when** the project is ratatoskr and the user asks about `mock-serve`, `sync-list`, `sync-smoke`, or `sync-bench`. Covers sæhrimnir orchestration, readiness sentinel parsing, endpoint env-var export, marker FIFO usage.
@@ -48,7 +49,7 @@ Single crate, single binary. No workspace.
 ### Source layout
 
 - `src/main.rs` - `main()`, command dispatch, `run_measured()`, `resolve_mode()`
-- `src/cli.rs` - CLI definition (clap derive): `Cli`, `Command` (top-level commands including all measurable commands), `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`. All commands are top-level - no subcommand enums for litehtml/sluggrs
+- `src/cli/` - CLI definition (clap derive), split into `schema.rs` (`Cli`, `Command` incl. `Command::Deps` and all measurable commands, `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`) and `validation.rs` (clap value parsers). All commands are top-level - no subcommand enums for litehtml/sluggrs
 - `src/cargo_filter.rs` - Formatter primitives (`ClippyDiagnostic`, `ClippyParse`) plus the legacy text-output parser still used as a fallback by the test-phase build-error path. See the module header for why the JSON path replaced text scraping
 - `src/cargo_json.rs` - JSON event model and parser for `check`. `CheckEvent` enum (Diagnostic, TestFailure, TestHung, DiagnosticSummary, TestSummary, Gremlin, GremlinSummary) serialized as NDJSON
 - `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked + untracked-not-gitignored) for invisible/deceptive Unicode
@@ -75,6 +76,7 @@ Single crate, single binary. No workspace.
 - `src/tools.rs` - External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config)
 - `src/worktree.rs` - Persistent git worktrees for retroactive benchmarking
 - `src/history.rs` - `HistoryDb` - global command history at `$XDG_DATA_HOME/brokkr/history.db`
+- `src/deps/` - `brokkr deps` dependency audit (any Rust+git repo, not project-gated). Phase-based like `check`: `mod.rs` (`DepsEvent` enum, `run()`, cargo-metadata deserializer, text + NDJSON renderers), `duplicate_version.rs` (blame-aware duplicate detection), `git_dependency.rs`, `path_dependency.rs`, `ccu.rs` (`ccu --json` shell-out feeding the outdated + stale phases), `focus.rs` (`brokkr deps <pkg>` chain trace). See `docs/commands/deps.md`.
 
 ### Project-specific modules
 
@@ -93,6 +95,7 @@ Single crate, single binary. No workspace.
 For details, read the linked docs.
 
 - `check` / `test` - validation pipeline. See `docs/commands/check.md`.
+- `deps` - dependency audit of `Cargo.lock` / `cargo metadata` (any Rust+git repo, not project-gated). Phases: duplicate versions (with blame), git deps, out-of-workspace path deps, plus informational outdated/stale via `ccu --json`. `brokkr deps <pkg>` is focus mode (chain trace). Supports `--json`, `--limit`, `--all`, `--no-fail`. Exit 1 on offline findings. See `docs/commands/deps.md`.
 - `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status.
 - `wc [threshold]` - list tracked `.rs` files with more than `threshold` lines (default 800), largest first. Works in any project.
 - `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`. Uniform across all projects (piners included, for its hotpath/alloc runs).

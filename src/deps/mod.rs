@@ -18,6 +18,7 @@ mod ccu;
 mod duplicate_version;
 mod focus;
 mod git_dependency;
+mod native_code;
 mod path_dependency;
 
 use focus::run_focus;
@@ -30,6 +31,7 @@ pub enum DepsEvent {
     DuplicateVersion(DuplicateVersionEvent),
     GitDependency(GitDependencyEvent),
     PathDependency(PathDependencyEvent),
+    NativeDependency(NativeDependencyEvent),
     Outdated(OutdatedEvent),
     /// Marker emitted by the `outdated` phase whenever ccu ran to
     /// completion, regardless of how many upgrades it found. Lets the
@@ -69,6 +71,26 @@ pub struct PathDependencyEvent {
     pub version: String,
     /// Absolute path to the dep's `Cargo.toml`.
     pub manifest_path: String,
+}
+
+/// A dependency that pulls non-Rust code into the build - either by
+/// linking a native library (`links` set) or by compiling C/C++/asm
+/// in a build script (build-dep on `cc`/`cmake`/`cxx-build`/`nasm-rs`).
+/// Informational - doesn't count toward the failure-driving findings.
+#[derive(Serialize)]
+pub struct NativeDependencyEvent {
+    #[serde(rename = "crate")]
+    pub krate: String,
+    pub version: String,
+    /// Which signal(s) fired: `"links"`, `"compiles"`, or `"both"`.
+    pub reason: &'static str,
+    /// Native library name from the manifest's `links` key, when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<String>,
+    /// Toolchain build-dep crates that drive compilation (`cc`, `cmake`,
+    /// ...). Empty when the crate only links a prebuilt library.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchains: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -163,6 +185,10 @@ pub(crate) struct CargoPackage {
     #[serde(default)]
     pub source: Option<String>,
     pub manifest_path: String,
+    /// The manifest's `links` key, if set - the canonical marker for a
+    /// crate that links a native library. Used by `native_code`.
+    #[serde(default)]
+    pub links: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -222,6 +248,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
         "duplicate_version",
         "git_dependency",
         "path_dependency",
+        "native_code",
         "outdated",
         "stale",
     ];
@@ -232,15 +259,21 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     let dup_events = duplicate_version::run(&host_metadata);
     let git_events = git_dependency::run(&metadata);
     let path_events = path_dependency::run(&metadata);
+    // native_code uses host-filtered metadata like duplicate_version so
+    // wasm-only native bundlers (e.g. sqlite-wasm-rs) don't show up on a
+    // native host.
+    let native_events = native_code::run(&host_metadata);
 
-    // Only offline phases contribute to the failure-counting findings.
-    // `outdated` (and future network phases) are informational - a
-    // patch bump on a dependency shouldn't fail your build.
+    // Only offline *smell* phases contribute to the failure-counting
+    // findings. `native_code` is offline but informational (native code
+    // is a heads-up, not a defect), as are the network phases
+    // (`outdated`/`stale`) - a patch bump shouldn't fail your build.
     let findings = dup_events.len() + git_events.len() + path_events.len();
 
     events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
     events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
     events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
+    events.extend(native_events.into_iter().map(DepsEvent::NativeDependency));
     events.extend(ccu::run(project_root));
 
     events.push(DepsEvent::Summary(SummaryEvent {
@@ -327,6 +360,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     let mut dups = Vec::new();
     let mut gits = Vec::new();
     let mut paths = Vec::new();
+    let mut native = Vec::new();
     let mut outdated = Vec::new();
     let mut outdated_ran = false;
     let mut stale = Vec::new();
@@ -336,6 +370,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
             DepsEvent::DuplicateVersion(d) => dups.push(d),
             DepsEvent::GitDependency(g) => gits.push(g),
             DepsEvent::PathDependency(p) => paths.push(p),
+            DepsEvent::NativeDependency(n) => native.push(n),
             DepsEvent::Outdated(o) => outdated.push(o),
             DepsEvent::OutdatedComplete => outdated_ran = true,
             DepsEvent::Stale(s) => stale.push(s),
@@ -358,6 +393,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     render_dup_section(&dups, limit, all);
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
+    render_section(&native, "dependency with native code", "dependencies with native code", "", limit, all, render_native_text);
     render_outdated_section(&outdated, outdated_ran, limit, all);
     render_section(&stale, "stale dependency", "stale dependencies", "", limit, all, render_stale_text);
 
@@ -511,6 +547,17 @@ fn render_path_text(path: &PathDependencyEvent) {
         "  {} {}  {}",
         path.krate, path.version, path.manifest_path
     ));
+}
+
+fn render_native_text(n: &NativeDependencyEvent) {
+    let mut parts = Vec::new();
+    if !n.toolchains.is_empty() {
+        parts.push(format!("compiles ({})", n.toolchains.join(", ")));
+    }
+    if let Some(lib) = &n.links {
+        parts.push(format!("links {lib}"));
+    }
+    output::deps_msg(&format!("  {} {}  {}", n.krate, n.version, parts.join(" + ")));
 }
 
 fn render_outdated_text(o: &OutdatedEvent) {
