@@ -200,7 +200,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 ),
                 None => (None, Vec::new(), Vec::new(), None, None, std::env::current_dir()?),
             };
-        let _lock = acquire_cmd_lock_opt(project, &project_root, "check")?;
+        let _lock = acquire_cmd_lock_opt_blocking(project, &project_root, "check")?;
         return check_cmd::cmd_check(
             project,
             &project_root,
@@ -911,7 +911,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
                 )),
                 _ => {
-                    let _lock = acquire_cmd_lock(project, &project_root, "test")?;
+                    let _lock = acquire_cmd_lock_blocking(project, &project_root, "test")?;
                     test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw, debug, timeout)
                 }
             }

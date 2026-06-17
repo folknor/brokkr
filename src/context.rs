@@ -38,6 +38,35 @@ pub(crate) fn acquire_cmd_lock_opt(
     })
 }
 
+/// Acquire the global lock, blocking until it is free instead of failing.
+///
+/// Used by quick validation commands (`check` / `test`) that an agent runs
+/// constantly. If a bench run (or any other brokkr) holds the lock, blocking
+/// here prints `[lock] waiting for …` then proceeds once released - so the
+/// command never exits with a confusing `lock: already locked` error that an
+/// agent might "handle" by bypassing the tool or inventing a polling loop.
+pub(crate) fn acquire_cmd_lock_opt_blocking(
+    project: Option<Project>,
+    project_root: &Path,
+    command: &str,
+) -> Result<lockfile::LockGuard, DevError> {
+    lockfile::acquire_blocking(&lockfile::LockContext {
+        project: project.map_or("brokkr", Project::name),
+        command,
+        project_root: &project_root.display().to_string(),
+    })
+}
+
+/// As [`acquire_cmd_lock_opt_blocking`], but for commands that always run
+/// inside a detected project.
+pub(crate) fn acquire_cmd_lock_blocking(
+    project: Project,
+    project_root: &Path,
+    command: &str,
+) -> Result<lockfile::LockGuard, DevError> {
+    acquire_cmd_lock_opt_blocking(Some(project), project_root, command)
+}
+
 /// Resolve project info (target_dir) using cargo metadata.
 pub(crate) fn bootstrap(build_root: Option<&Path>) -> Result<build::ProjectInfo, DevError> {
     build::project_info(build_root)
