@@ -73,7 +73,20 @@ fn replacement(c: char) -> Option<&'static str> {
         '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => "'",
         // Typographic double quotes → ASCII double quote
         '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => "\"",
-        // Emoji / pictographs have no ASCII equivalent → delete.
+        // Status-marker emoji → ASCII checkbox tokens. These carry meaning
+        // (done / partial / dropped / checked / accepted-declined) so they map
+        // to a token rather than being deleted with the rest of the emoji.
+        '\u{2705}' | '\u{2611}' | '\u{2713}' => "[x]", // ✅ ☑ ✓ done / checked / accepted
+        '\u{26A0}' => "[~]",                           // ⚠ partial / caution
+        '\u{274C}' => "[-]",                           // ❌ dropped / not done
+        '\u{2610}' => "[ ]",                           // ☐ unchecked
+        '\u{2717}' | '\u{2715}' => "[ ]",              // ✗ ✕ declined / no
+        // Colored circles used as calendar legend, not status.
+        '\u{1F535}' => "(blue)",
+        '\u{1F7E2}' => "(green)",
+        '\u{1F7E1}' => "(yellow)",
+        '\u{1F534}' => "(red)",
+        // Remaining emoji / pictographs have no ASCII equivalent → delete.
         _ => return pictograph_name(c as u32).map(|_| ""),
     })
 }
@@ -432,6 +445,26 @@ mod tests {
     }
 
     #[test]
+    fn fix_content_maps_status_emoji_to_tokens() {
+        // ✅ ⚠️ ❌ ☑ ☐ ✓ ✗ ✕ → ASCII tokens; ⚠️ carries a trailing
+        // U+FE0F variation selector that is still deleted, so it collapses
+        // cleanly to "[~]".
+        let (fixed, count) = fix_content(
+            "\u{2705} \u{26A0}\u{FE0F} \u{274C} \u{2611} \u{2610} \u{2713} \u{2717} \u{2715}\n",
+        );
+        assert_eq!(count, 9);
+        assert_eq!(fixed, "[x] [~] [-] [x] [ ] [x] [ ] [ ]\n");
+    }
+
+    #[test]
+    fn fix_content_maps_calendar_circles() {
+        let (fixed, count) =
+            fix_content("\u{1F535}\u{1F7E2}\u{1F7E1}\u{1F534}\n");
+        assert_eq!(count, 4);
+        assert_eq!(fixed, "(blue)(green)(yellow)(red)\n");
+    }
+
+    #[test]
     fn fix_content_is_noop_when_clean() {
         let (fixed, count) = fix_content("fn main() {\n    println!(\"ok\");\n}\n");
         assert_eq!(count, 0);
@@ -515,9 +548,11 @@ mod tests {
 
     #[test]
     fn fix_deletes_emoji_and_pictographs() {
+        // A non-status emoji (🚀) has no ASCII equivalent and is deleted;
+        // the status marker ✅ now maps to a token, its U+FE0F is deleted.
         let (fixed, count) = fix_content("done \u{2705}\u{FE0F} ship \u{1F680} ok\n");
         assert_eq!(count, 3);
-        assert_eq!(fixed, "done  ship  ok\n");
+        assert_eq!(fixed, "done [x] ship  ok\n");
     }
 
     #[test]
