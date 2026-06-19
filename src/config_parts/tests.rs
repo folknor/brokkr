@@ -762,6 +762,7 @@ features = ["a"]
         let test = TestConfig {
             default_package: None,
             default_profile: None,
+            debug: false,
             profiles,
         };
         let err = validate_check_against_test(&check, Some(&test))

@@ -2,7 +2,9 @@
 //!
 //! Runs exactly one named cargo test with the host/check features and
 //! `--include-ignored --nocapture --test-threads=1`. Defaults to release;
-//! `--debug` switches to the dev profile. Streams the test's own
+//! `--debug` switches to the dev profile, `--release` forces it back, and
+//! when neither is passed the `[test] debug` toml field decides. Streams
+//! the test's own
 //! stdout/stderr live (filtering out cargo/test-harness framing noise), then
 //! prints a `[test]` PASS/FAIL footer per sweep with wall time. Under `-N`,
 //! the `[run] cargo ...` and build-time framing prints for run 1 only -
@@ -102,7 +104,7 @@ pub fn run(
     repeat: u32,
     jobs: Option<u32>,
     raw: bool,
-    debug: bool,
+    profile_override: Option<bool>,
     timeout: Option<u64>,
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
@@ -113,11 +115,12 @@ pub fn run(
     let pkg = resolve_package(package, dev_config, project)?;
 
     // `brokkr test` defaults to `cargo test --release` (debug=false ->
-    // <target>/release); `--debug` flips both the cargo invocation and
-    // BROKKR_TEST_BIN_DIR over to <target>/debug. Tests that spawn the
+    // <target>/release); the dev profile flips both the cargo invocation
+    // and BROKKR_TEST_BIN_DIR over to <target>/debug. Tests that spawn the
     // just-rebuilt binary read this var to skip the
     // `cfg!(debug_assertions)` profile guess (which silently lies when
     // a workspace pins `[profile.test]` overrides).
+    let debug = resolve_debug(profile_override, dev_config.test.as_ref());
     let profile_dir = if debug { "debug" } else { "release" };
     let target_dir = build::project_info(Some(project_root))?.target_dir;
     let project_env = check_cmd::build_test_env(Some(project), &target_dir, profile_dir);
@@ -377,6 +380,15 @@ fn count_listed_tests(stdout: &str) -> usize {
         .lines()
         .filter(|l| l.trim_end().ends_with(": test"))
         .count()
+}
+
+/// Resolve `brokkr test`'s cargo profile to a `debug` bool. An explicit
+/// `--debug`/`--release` on the CLI (`profile_override`: `Some(true)` /
+/// `Some(false)`) always wins; with neither flag (`None`) the `[test] debug`
+/// toml field decides, defaulting to `false` (release) when there's no
+/// `[test]` section at all.
+fn resolve_debug(profile_override: Option<bool>, test_cfg: Option<&crate::config::TestConfig>) -> bool {
+    profile_override.unwrap_or_else(|| test_cfg.is_some_and(|t| t.debug))
 }
 
 /// Resolve the cargo package name in precedence order:
@@ -1251,6 +1263,32 @@ benches::throughput: benchmark
     fn count_listed_tests_zero_when_no_matches() {
         assert_eq!(count_listed_tests("0 tests, 0 benchmarks\n"), 0);
         assert_eq!(count_listed_tests(""), 0);
+    }
+
+    #[test]
+    fn resolve_debug_cli_override_wins_over_config() {
+        let debug_cfg = TestConfig {
+            debug: true,
+            ..Default::default()
+        };
+        // --release (Some(false)) beats `[test] debug = true`.
+        assert!(!resolve_debug(Some(false), Some(&debug_cfg)));
+        // --debug (Some(true)) holds even when config says release.
+        assert!(resolve_debug(Some(true), Some(&TestConfig::default())));
+    }
+
+    #[test]
+    fn resolve_debug_falls_back_to_config_then_release() {
+        let debug_cfg = TestConfig {
+            debug: true,
+            ..Default::default()
+        };
+        // No CLI flag: `[test] debug = true` decides.
+        assert!(resolve_debug(None, Some(&debug_cfg)));
+        // No CLI flag, config defaults to release.
+        assert!(!resolve_debug(None, Some(&TestConfig::default())));
+        // No CLI flag, no `[test]` section at all -> release.
+        assert!(!resolve_debug(None, None));
     }
 
     #[test]

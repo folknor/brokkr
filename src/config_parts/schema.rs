@@ -195,11 +195,18 @@ impl CheckEntry {
 ///   `include_ignored` / `test_threads` / `env`) on top of one or more
 ///   `[[check]]` entries (referenced by name in the profile's
 ///   `sweeps` field). Profiles can chain via `extends`.
+/// - `debug` flips `brokkr test`'s cargo profile from release (the
+///   default) to dev, so projects whose tests aren't profile-sensitive can
+///   pin the faster-compiling build without typing `--debug` every time.
+///   The CLI wins: `--debug` forces dev, `--release` forces release, and
+///   only when neither is passed does this field decide.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TestConfig {
     pub default_package: Option<String>,
     pub default_profile: Option<String>,
+    #[serde(default)]
+    pub debug: bool,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileDef>,
 }

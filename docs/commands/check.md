@@ -97,7 +97,9 @@ pointer to `brokkr visual`.)
 
 Run one specific cargo test. Defaults to release; pass `--debug` to run the
 dev profile instead (faster compile, useful when the failing test isn't
-profile-sensitive).
+profile-sensitive). Setting `[test] debug = true` in `brokkr.toml` flips the
+default to dev; `--release` forces release back. Precedence: `--debug` /
+`--release` (mutually exclusive) > `[test] debug` > release.
 
 Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and
 integration tests are matched by the name substring within the selected
@@ -138,7 +140,9 @@ Flags:
   PASS/FAIL counts plus one `Nx <msg> @ <loc>` line per distinct failure
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--raw` - disable all filtering
-- `--debug` - dev profile instead of release
+- `--debug` - dev profile instead of release (overrides `[test] debug`)
+- `--release` - force release, overriding `[test] debug = true` (mutually
+  exclusive with `--debug`)
 - `--timeout <SECS>` - raise the per-test watchdog ceiling (1-280s)
 
 Because `cargo test <name>` is a substring filter, identically-named tests in

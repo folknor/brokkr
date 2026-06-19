@@ -905,14 +905,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         }
         // ----- cargo single-test runner -----
-        Command::Test { name, package, repeat, jobs, raw, debug, timeout } => {
+        Command::Test { name, package, repeat, jobs, raw, debug, release, timeout } => {
             match project {
                 Project::Litehtml | Project::Sluggrs => Err(DevError::Config(
                     "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
                 )),
                 _ => {
                     let _lock = acquire_cmd_lock_blocking(project, &project_root, "test")?;
-                    test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw, debug, timeout)
+                    test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout)
                 }
             }
         }

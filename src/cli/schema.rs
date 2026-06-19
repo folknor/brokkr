@@ -1455,7 +1455,9 @@ Examples:
     /// Run one specific cargo test (release by default; --debug for dev)
     ///
     /// Always: --include-ignored, --nocapture, --test-threads=1.
-    /// Adds --release unless --debug is passed.
+    /// Adds --release unless dev profile is selected. Profile precedence:
+    /// `--debug` / `--release` on the CLI win; otherwise `[test] debug` in
+    /// brokkr.toml decides (default release).
     /// Feature selection matches `brokkr check` - defaults to --all-features,
     /// and runs a second sweep with [check].consumer_features if configured.
     /// Streams the test's own stdout/stderr live and prints a [test]
@@ -1500,8 +1502,13 @@ Examples:
         raw: bool,
         /// Build and run the test in dev profile instead of release.
         /// BROKKR_TEST_BIN_DIR points at <target>/debug accordingly.
-        #[arg(long)]
+        /// Overrides `[test] debug` from brokkr.toml.
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
+        /// Force the release profile, overriding `[test] debug = true`
+        /// from brokkr.toml. Mutually exclusive with --debug.
+        #[arg(long)]
+        release: bool,
         /// Override the per-test watchdog ceiling, in seconds (1-280).
         /// Only honored when `<name>` matches exactly one test per sweep;
         /// if it matches more than one, `brokkr test` errors before

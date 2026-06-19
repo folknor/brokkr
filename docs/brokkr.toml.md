@@ -163,6 +163,12 @@ include_ignored = true
   `cargo test -p` when no `-p/--package` is given. Resolution order:
   explicit CLI `-p` > `[test].default_package` > `Project::cli_package()` >
   error.
+- `debug` (default `false`) flips `brokkr test`'s cargo profile from release
+  to dev. Use it when the project's tests aren't profile-sensitive and the
+  faster compile is worth more than the faster run. CLI overrides win:
+  `--debug` forces dev, `--release` forces release; the field only decides
+  when neither is passed. (Affects `brokkr test` only - `brokkr check`'s
+  test phase always builds dev.)
 - `default_profile` is the validation profile `brokkr check` uses when no
   `--profile` is passed. With no profile config, `brokkr check` runs every
   `[[check]]` entry without libtest filters; with no `[[check]]` either, it
