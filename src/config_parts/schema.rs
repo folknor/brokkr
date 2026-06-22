@@ -687,6 +687,11 @@ pub struct LintConfig {
     /// relative to `brokkr.toml`. Defaults to `corpus-lint-registry`.
     pub registry_dir: Option<PathBuf>,
 
+    /// Directory `--reseed` walks for `.pine` snippets (recursively, keyed by
+    /// file stem), resolved relative to `brokkr.toml`. Must live under
+    /// `[piners] corpus_root`. Defaults to `registry_dir`.
+    pub snippets_dir: Option<PathBuf>,
+
     /// The external pine-lint validator. Defaults to `pine-lint` on PATH.
     pub pine_lint_bin: Option<String>,
 }
@@ -702,6 +707,11 @@ impl LintConfig {
         self.registry_dir
             .as_deref()
             .unwrap_or_else(|| Path::new("corpus-lint-registry"))
+    }
+
+    /// Snippet directory `--reseed` walks, defaulting to [`Self::registry_dir`].
+    pub fn snippets_dir(&self) -> &Path {
+        self.snippets_dir.as_deref().unwrap_or_else(|| self.registry_dir())
     }
 
     /// The external pine-lint binary, defaulting to `pine-lint`.

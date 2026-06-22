@@ -17,6 +17,7 @@ pub mod diff;
 pub mod lints_write;
 pub mod query;
 pub mod registry;
+pub mod reseed;
 pub mod select;
 pub mod validators;
 

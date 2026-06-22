@@ -2091,8 +2091,16 @@ agreement disposition per snippet. `--reanchor` consults TradingView
 
         /// Hash-verify every selected snippet against the corpus tree and
         /// exit, without building or running either validator.
-        #[arg(long, conflicts_with_all = ["reanchor", "bless"])]
+        #[arg(long, conflicts_with_all = ["reanchor", "bless", "reseed"])]
         verify_only: bool,
+
+        /// Stamp `lints.toml` from the snippet tree (the bootstrap and
+        /// after-edit re-stamp; the only way the file is created or its
+        /// hashes refreshed). No build, no run. `--reseed --all` regenerates
+        /// from the snippet dir; `--reseed --probe <id>` upserts. Preserves
+        /// each surviving probe's `expected` and TV anchor.
+        #[arg(long, conflicts_with_all = ["reanchor", "bless", "verify_only"])]
+        reseed: bool,
 
         /// Refresh the TV anchor: drive `pine-lint --tv` over the selection
         /// and re-stamp each probe's TV fingerprint + timestamp into

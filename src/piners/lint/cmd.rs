@@ -42,6 +42,9 @@ pub struct LintArgs {
     pub probe: Vec<String>,
     pub all: bool,
     pub verify_only: bool,
+    /// Stamp `lints.toml` from the snippet tree (no build, no run) - the
+    /// bootstrap writer. Routed to [`crate::piners::lint::reseed`].
+    pub reseed: bool,
     /// Refresh the TV anchor (`pine-lint --tv`) for the selection - the
     /// periodic, network-touching registry writer. Conflicts with the run
     /// writers on the CLI.
@@ -76,6 +79,12 @@ pub fn lint_corpus(
                 .into(),
         )
     })?;
+
+    // Reseed stamps lints.toml from the snippet tree - no registry to load (it
+    // may not exist yet), no build, no run. Route early.
+    if args.reseed {
+        return crate::piners::lint::reseed::run(project_root, &piners_cfg, lint_cfg, args);
+    }
 
     let registry_dir = project_root.join(lint_cfg.registry_dir());
     let mut registry = LintRegistry::load(&registry_dir)?;
@@ -191,7 +200,7 @@ pub fn lint_corpus(
         let abs = &abs_paths[id];
         let pin = &registry.pins[id];
 
-        let piners_set = match run(&validator, &[&subcommand, "--format", "json", "--file", abs]) {
+        let piners_set = match run(&validator, &[&subcommand, "--format", "json", abs]) {
             Ok(cap) => validators::parse_piners(&cap.stdout, scope),
             Err(e) => Err(format!("piners validate failed to spawn: {e}")),
         };

@@ -29,7 +29,7 @@ brokkr shells out to directly - piners need not know they exist.
 
 ## The validator JSON contracts
 
-- **piners** (`<bin> validate --format json --file <file>`):
+- **piners** (`<bin> validate --format json <file>`):
   `{"ok":bool,"diagnostics":[{"severity":"error|warning|hint","line":N,
   "column":N|null,"stage":"lex|parse|type|semantic","code":..,"message":..}]}`.
   `stage` drives the syntax-only filter. Exit code is **not** the signal (exits
@@ -64,6 +64,7 @@ package      = "<pkg>"           # cargo package brokkr builds from the tree
 binary       = "<bin>"           # bin exposing `validate --format json`
 subcommand   = "validate"        # default
 registry_dir = "corpus/lint-registry"  # lints.toml + <keyword>.toml
+snippets_dir = "corpus/lint-registry/snippets"  # .pine tree --reseed walks (default: registry_dir)
 pine_lint_bin = "pine-lint"      # external validator (default: pine-lint on PATH)
 ```
 
@@ -100,8 +101,24 @@ hard error listing the keywords - the full pass never runs by accident.
 - `--probe <id>` (repeatable / comma-separated) - union of named probes.
 - `--all` - the whole pinned universe.
 - `--verify-only` - hash-verify every pinned snippet and exit, no build/run.
+- `--reseed` - stamp `lints.toml` from the snippet tree (below).
 - `--reanchor` - refresh the TV anchor for the selection (below).
 - `--bless` - run, then stamp current dispositions into `expected` (below).
+
+## Reseed: the bootstrap writer
+
+`lints.toml` is created and its hashes refreshed only by `--reseed` (there is
+no `xxhsum` on PATH). It walks the snippet directory (`[piners.lint]
+snippets_dir`, default `registry_dir`, must live under `corpus_root`)
+recursively for `*.pine`, keyed by file stem:
+
+- `--reseed --all` - stamp every snippet; vanished ones drop out.
+- `--reseed --probe <id>` (repeatable) - upsert the named snippet(s).
+
+It touches the pinned *content* (snippet path + `xxh128`) only - each
+surviving probe's `expected` and TV anchor are carried forward. No build, no
+run. Bootstrap order: `--reseed --all` -> write keyword files -> `--bless
+--all` -> runs are gated.
 
 ## The diff and the disposition
 
