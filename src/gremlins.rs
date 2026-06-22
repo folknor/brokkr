@@ -76,11 +76,11 @@ fn replacement(c: char) -> Option<&'static str> {
         // Status-marker emoji → ASCII checkbox tokens. These carry meaning
         // (done / partial / dropped / checked / accepted-declined) so they map
         // to a token rather than being deleted with the rest of the emoji.
-        '\u{2705}' | '\u{2611}' | '\u{2713}' => "[x]", // ✅ ☑ ✓ done / checked / accepted
-        '\u{26A0}' => "[~]",                           // ⚠ partial / caution
-        '\u{274C}' => "[-]",                           // ❌ dropped / not done
-        '\u{2610}' => "[ ]",                           // ☐ unchecked
-        '\u{2717}' | '\u{2715}' => "[ ]",              // ✗ ✕ declined / no
+        '\u{2705}' | '\u{2611}' | '\u{2713}' => "[x]", // U+2705 U+2611 U+2713 done / checked / accepted
+        '\u{26A0}' => "[~]",                           // U+26A0 partial / caution
+        '\u{274C}' => "[-]",                           // U+274C dropped / not done
+        '\u{2610}' => "[ ]",                           // U+2610 unchecked
+        '\u{2717}' | '\u{2715}' => "[ ]",              // U+2717 U+2715 declined / no
         // Colored circles used as calendar legend, not status.
         '\u{1F535}' => "(blue)",
         '\u{1F7E2}' => "(green)",
@@ -446,9 +446,10 @@ mod tests {
 
     #[test]
     fn fix_content_maps_status_emoji_to_tokens() {
-        // ✅ ⚠️ ❌ ☑ ☐ ✓ ✗ ✕ → ASCII tokens; ⚠️ carries a trailing
-        // U+FE0F variation selector that is still deleted, so it collapses
-        // cleanly to "[~]".
+        // The eight status markers (U+2705 U+26A0 U+274C U+2611 U+2610
+        // U+2713 U+2717 U+2715) map to ASCII tokens; U+26A0 carries a
+        // trailing U+FE0F variation selector that is still deleted, so it
+        // collapses cleanly to "[~]".
         let (fixed, count) = fix_content(
             "\u{2705} \u{26A0}\u{FE0F} \u{274C} \u{2611} \u{2610} \u{2713} \u{2717} \u{2715}\n",
         );
@@ -548,8 +549,9 @@ mod tests {
 
     #[test]
     fn fix_deletes_emoji_and_pictographs() {
-        // A non-status emoji (🚀) has no ASCII equivalent and is deleted;
-        // the status marker ✅ now maps to a token, its U+FE0F is deleted.
+        // A non-status emoji (U+1F680) has no ASCII equivalent and is
+        // deleted; the status marker U+2705 now maps to a token, its
+        // U+FE0F is deleted.
         let (fixed, count) = fix_content("done \u{2705}\u{FE0F} ship \u{1F680} ok\n");
         assert_eq!(count, 3);
         assert_eq!(fixed, "done [x] ship  ok\n");
