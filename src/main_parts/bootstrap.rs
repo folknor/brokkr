@@ -1173,6 +1173,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             reanchor,
             bless,
             no_gate,
+            all_stages,
+            warnings,
             debug,
             release,
         } => {
@@ -1185,6 +1187,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 reanchor,
                 bless,
                 no_gate,
+                all_stages,
+                warnings,
                 profile_override: profile_override(debug, release),
             };
             piners::lint::cmd::lint_corpus(&project_root, &dev_config, &args)

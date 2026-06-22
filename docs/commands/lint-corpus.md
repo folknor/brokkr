@@ -29,11 +29,12 @@ brokkr shells out to directly - piners need not know they exist.
 
 ## The validator JSON contracts
 
-- **piners** (`<bin> validate <file> --format json`):
+- **piners** (`<bin> validate --format json --file <file>`):
   `{"ok":bool,"diagnostics":[{"severity":"error|warning|hint","line":N,
-  "column":N|null,"stage":..,"code":..,"message":..}]}`. Exit code is **not**
-  the signal (exits 1 when `!ok`, JSON still on stdout); only unparsable stdout
-  is a `piners_error`.
+  "column":N|null,"stage":"lex|parse|type|semantic","code":..,"message":..}]}`.
+  `stage` drives the syntax-only filter. Exit code is **not** the signal (exits
+  1 when `!ok`, JSON still on stdout); only unparsable stdout is a
+  `piners_error`.
 - **pine-lint** (offline and `--tv`, same schema):
   `{"success":bool,"result":{"errors":[{"start":{"line","column"},..}],
   "warnings":[..]}}`. `errors`/`warnings` are *absent* (not `[]`) when clean -
@@ -41,6 +42,19 @@ brokkr shells out to directly - piners need not know they exist.
 
 Only `error` and `warning` are gated (pine-lint has no `hint`). piners `hint`
 diagnostics are informational - never `piners_only` divergence.
+
+## Scope: which diagnostics count
+
+Two filters narrow what the diff compares, both reversible per run:
+
+- **Stage** - default **syntax-only** (`--all-stages` widens). The two
+  validators' *type/semantic* diagnostics diverge enough that comparing them is
+  mostly noise (the `compare-piners.mjs` prototype's finding). piners tags each
+  diagnostic with a `stage` (`lex`/`parse` = syntax); pine-lint is expected to
+  emit a `stage` too, and until it does brokkr falls back to a message
+  heuristic (`unexpected token`, `mismatched input`, ... ) ported from the
+  prototype.
+- **Severity** - default **errors only** (`--warnings` includes warnings).
 
 ## Config
 

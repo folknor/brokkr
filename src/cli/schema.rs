@@ -2111,6 +2111,17 @@ agreement disposition per snippet. `--reanchor` consults TradingView
         #[arg(long)]
         no_gate: bool,
 
+        /// Compare type/analysis diagnostics too, not just parser/syntax. The
+        /// default is syntax-only: the two validators' type/semantic
+        /// diagnostics diverge enough that comparing them is mostly noise.
+        #[arg(long)]
+        all_stages: bool,
+
+        /// Include warning diagnostics in the gated diff. Default is errors
+        /// only.
+        #[arg(long)]
+        warnings: bool,
+
         /// Build the piners validator with the dev profile (the default for
         /// lint-corpus; overrides `[piners.lint] debug = false`). Mutually
         /// exclusive with `--release`.

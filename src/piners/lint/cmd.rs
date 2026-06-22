@@ -51,6 +51,10 @@ pub struct LintArgs {
     pub bless: bool,
     /// Report the gate diff but never fail on it.
     pub no_gate: bool,
+    /// Compare type/analysis diagnostics too, not just parser/syntax.
+    pub all_stages: bool,
+    /// Include warning diagnostics in the gated diff (default: errors only).
+    pub warnings: bool,
     /// `Some(true)` = debug, `Some(false)` = release, `None` = default
     /// (debug for this command).
     pub profile_override: Option<bool>,
@@ -131,9 +135,22 @@ pub fn lint_corpus(
     };
 
     // --reanchor: refresh the TV fingerprint via `pine-lint --tv`, write the
-    // registry, and return. No validator build, no run store.
+    // registry, and return. No validator build, no run store. The anchor is
+    // filtered to the same scope the gate compares.
     if args.reanchor {
-        return reanchor(&registry_dir, &mut registry, &ids, &abs_paths, lint_cfg.pine_lint_bin(), &run);
+        let scope = validators::Scope {
+            include_warnings: args.warnings,
+            syntax_only: !args.all_stages,
+        };
+        return reanchor(
+            &registry_dir,
+            &mut registry,
+            &ids,
+            &abs_paths,
+            lint_cfg.pine_lint_bin(),
+            scope,
+            &run,
+        );
     }
 
     // Build the piners validator from the dirty tree (debug by default - lint
@@ -158,6 +175,10 @@ pub fn lint_corpus(
     let validator = built.binary.display().to_string();
     let subcommand = lint_cfg.subcommand().to_owned();
     let pine_lint = lint_cfg.pine_lint_bin().to_owned();
+    let scope = validators::Scope {
+        include_warnings: args.warnings,
+        syntax_only: !args.all_stages,
+    };
     output::lint_msg(&format!(
         "validator build ok (features={}, binary={})",
         built.features_label,
@@ -170,12 +191,12 @@ pub fn lint_corpus(
         let abs = &abs_paths[id];
         let pin = &registry.pins[id];
 
-        let piners_set = match run(&validator, &[&subcommand, abs, "--format", "json"]) {
-            Ok(cap) => validators::parse_piners(&cap.stdout),
+        let piners_set = match run(&validator, &[&subcommand, "--format", "json", "--file", abs]) {
+            Ok(cap) => validators::parse_piners(&cap.stdout, scope),
             Err(e) => Err(format!("piners validate failed to spawn: {e}")),
         };
         let lint_set = match run(&pine_lint, &[abs]) {
-            Ok(cap) => validators::parse_pine_lint(&cap.stdout),
+            Ok(cap) => validators::parse_pine_lint(&cap.stdout, scope),
             Err(e) => Err(format!("pine-lint failed to spawn: {e}")),
         };
 
@@ -286,6 +307,7 @@ fn reanchor(
     ids: &[String],
     abs_paths: &BTreeMap<String, String>,
     pine_lint: &str,
+    scope: validators::Scope,
     run: &RunFn,
 ) -> Result<(), DevError> {
     let now = now_rfc3339();
@@ -294,7 +316,7 @@ fn reanchor(
     for id in ids {
         let abs = &abs_paths[id];
         let set = match run(pine_lint, &["--tv", abs]) {
-            Ok(cap) => validators::parse_pine_lint(&cap.stdout),
+            Ok(cap) => validators::parse_pine_lint(&cap.stdout, scope),
             Err(e) => Err(format!("pine-lint --tv failed to spawn: {e}")),
         };
         match set {
