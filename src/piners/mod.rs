@@ -7,6 +7,7 @@ pub mod cmd;
 pub mod corpus_db;
 pub mod corpus_query;
 pub mod gate;
+pub mod lint;
 pub mod manifest;
 pub mod measured;
 pub mod pins_write;

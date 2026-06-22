@@ -13,3 +13,14 @@ pub(crate) fn corpus_runs_db_path(project_root: &Path) -> PathBuf {
         .join("runs.db")
 }
 
+/// Path to the piners *lint* corpus runs database (gitignored, local run
+/// history). Sibling of [`corpus_runs_db_path`] under the lint artefact tree
+/// so `brokkr lint-corpus` and `brokkr lint-results` resolve it identically.
+pub(crate) fn lint_runs_db_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".brokkr")
+        .join("piners")
+        .join("lint")
+        .join("runs.db")
+}
+

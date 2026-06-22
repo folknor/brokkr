@@ -1165,5 +1165,44 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 piners::cmd::corpus(&project_root, &dev_config, &args)
             }
         }
+        Command::LintCorpus {
+            keyword,
+            probe,
+            all,
+            verify_only,
+            reanchor,
+            bless,
+            no_gate,
+            debug,
+            release,
+        } => {
+            project::require(project, Project::Piners, "lint-corpus")?;
+            let args = piners::lint::cmd::LintArgs {
+                keywords: keyword,
+                probe,
+                all,
+                verify_only,
+                reanchor,
+                bless,
+                no_gate,
+                profile_override: profile_override(debug, release),
+            };
+            piners::lint::cmd::lint_corpus(&project_root, &dev_config, &args)
+        }
+        Command::LintResults {
+            run_id,
+            run,
+            limit,
+            full,
+        } => {
+            project::require(project, Project::Piners, "lint-results")?;
+            let lq = piners::lint::query::LintQuery {
+                run_id,
+                run,
+                limit,
+                full,
+            };
+            piners::lint::query::cmd(&project_root, &lq)
+        }
     }
 }

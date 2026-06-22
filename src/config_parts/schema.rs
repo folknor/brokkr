@@ -617,6 +617,12 @@ pub struct PinersConfig {
     /// probes; `--verify-only` works without it.
     pub harness: Option<HarnessConfig>,
 
+    /// Differential-lint corpus config (`[piners.lint]`). Drives
+    /// `brokkr lint-corpus` / `brokkr lint-results`. Independent of the
+    /// trade corpus above; shares only `corpus_root` for snippet
+    /// resolution. See `docs/commands/lint-corpus.md`.
+    pub lint: Option<LintConfig>,
+
     /// Root of the piners-owned corpus tree (vendor submodules +
     /// first-party probe dirs), resolved relative to `brokkr.toml`.
     /// Pinned probe and feed paths in `pins.toml` resolve under here.
@@ -643,6 +649,64 @@ impl PinersConfig {
         self.registry_dir
             .as_deref()
             .unwrap_or_else(|| Path::new("corpus-registry"))
+    }
+}
+
+/// `[piners.lint]` - the differential-lint corpus.
+///
+/// brokkr cargo-builds `package`/`binary` from the dirty tree (the
+/// validator under test) and invokes `<bin> <subcommand> <file> --format
+/// json` per probe; `pine_lint_bin` is the pre-installed external partner.
+/// Snippet paths in `lints.toml` resolve under `[piners] corpus_root`. See
+/// `docs/commands/lint-corpus.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LintConfig {
+    /// Cargo package brokkr builds from the dirty tree (`cargo build
+    /// --package`). The validator under test.
+    pub package: String,
+
+    /// Which `[[bin]]` inside `package` to invoke. Defaults to `package`.
+    #[serde(default)]
+    pub binary: Option<String>,
+
+    /// The validate subcommand on that binary. Defaults to `validate`.
+    #[serde(default)]
+    pub subcommand: Option<String>,
+
+    /// Cargo features for the validator build. Empty = cargo defaults.
+    #[serde(default)]
+    pub features: Vec<String>,
+
+    /// Build the validator with the dev profile by default. CLI
+    /// `--debug`/`--release` still override per-invocation.
+    #[serde(default)]
+    pub debug: Option<bool>,
+
+    /// Registry directory holding `lints.toml` + `<keyword>.toml`, resolved
+    /// relative to `brokkr.toml`. Defaults to `corpus-lint-registry`.
+    pub registry_dir: Option<PathBuf>,
+
+    /// The external pine-lint validator. Defaults to `pine-lint` on PATH.
+    pub pine_lint_bin: Option<String>,
+}
+
+impl LintConfig {
+    /// The validate subcommand, defaulting to `validate`.
+    pub fn subcommand(&self) -> &str {
+        self.subcommand.as_deref().unwrap_or("validate")
+    }
+
+    /// Registry directory, defaulting to `corpus-lint-registry`.
+    pub fn registry_dir(&self) -> &Path {
+        self.registry_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("corpus-lint-registry"))
+    }
+
+    /// The external pine-lint binary, defaulting to `pine-lint`.
+    pub fn pine_lint_bin(&self) -> &str {
+        self.pine_lint_bin.as_deref().unwrap_or("pine-lint")
     }
 }
 

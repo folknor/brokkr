@@ -2062,6 +2062,99 @@ Examples:
         #[arg(long)]
         full: bool,
     },
+
+    /// [piners] Differential-lint corpus: piners vs pine-lint over .pine snippets
+    #[command(
+        name = "lint-corpus",
+        display_order = 72,
+        long_about = "\
+Run a keyword-selected slice of the lint corpus through two offline
+validators - piners (this dirty tree) and pine-lint - diff their
+diagnostics on a (line, col, severity) grain, and gate on a pinned
+agreement disposition per snippet. `--reanchor` consults TradingView
+(pine-lint --tv) to re-ground the pins. See docs/commands/lint-corpus.md."
+    )]
+    LintCorpus {
+        /// Keyword grouping to select (repeatable or comma-separated; union
+        /// of matched probes). Resolves through `lints.toml`.
+        #[arg(long, value_name = "KEYWORD", value_delimiter = ',')]
+        keyword: Vec<String>,
+
+        /// Select a snippet by id (repeatable or comma-separated; the union
+        /// of the listed probes), resolved against `lints.toml`.
+        #[arg(long, value_name = "ID", value_delimiter = ',')]
+        probe: Vec<String>,
+
+        /// Select the whole pinned universe (full characterization pass).
+        #[arg(long)]
+        all: bool,
+
+        /// Hash-verify every selected snippet against the corpus tree and
+        /// exit, without building or running either validator.
+        #[arg(long, conflicts_with_all = ["reanchor", "bless"])]
+        verify_only: bool,
+
+        /// Refresh the TV anchor: drive `pine-lint --tv` over the selection
+        /// and re-stamp each probe's TV fingerprint + timestamp into
+        /// `lints.toml`. The periodic, network-touching registry writer.
+        /// Not usable with `--bless` or `--verify-only`.
+        #[arg(long, conflicts_with_all = ["bless", "verify_only"])]
+        reanchor: bool,
+
+        /// Run the selection, then stamp each probe's current disposition
+        /// into its `expected` field in `lints.toml`. Never gates. Not
+        /// usable with `--reanchor` or `--verify-only`.
+        #[arg(long, conflicts_with_all = ["reanchor", "verify_only"])]
+        bless: bool,
+
+        /// Run and report the per-probe gate diff, but do not fail on it.
+        #[arg(long)]
+        no_gate: bool,
+
+        /// Build the piners validator with the dev profile (the default for
+        /// lint-corpus; overrides `[piners.lint] debug = false`). Mutually
+        /// exclusive with `--release`.
+        #[arg(long, conflicts_with = "release")]
+        debug: bool,
+
+        /// Build the piners validator with the release profile.
+        #[arg(long)]
+        release: bool,
+    },
+
+    /// [piners] Query the lint corpus run store (.brokkr/piners/lint/runs.db)
+    #[command(
+        name = "lint-results",
+        display_order = 73,
+        long_about = "\
+Query the lint corpus run store written by `brokkr lint-corpus`
+(.brokkr/piners/lint/runs.db).
+
+Examples:
+  brokkr lint-results            # table of recent lint runs
+  brokkr lint-results 42         # run 42's per-probe dispositions (deviations only)
+  brokkr lint-results 42 --full  # every probe in run 42"
+    )]
+    LintResults {
+        /// Lint run id (default: latest). A bare positional, also accepted as
+        /// `--run`.
+        #[arg(value_name = "RUN_ID")]
+        run_id: Option<i64>,
+
+        /// Select a specific lint run id (default: latest). Equivalent to the
+        /// bare positional.
+        #[arg(long, value_name = "N")]
+        run: Option<i64>,
+
+        /// Maximum number of rows to show in the recent-runs table.
+        #[arg(long, short = 'n', default_value = "20")]
+        limit: usize,
+
+        /// In the run-detail view, show every probe instead of only the ones
+        /// that deviate from their pin.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

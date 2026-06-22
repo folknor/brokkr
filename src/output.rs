@@ -101,6 +101,10 @@ pub fn corpus_msg(msg: &str) {
     println!("[corpus]  {msg}");
 }
 
+pub fn lint_msg(msg: &str) {
+    println!("[lint]    {msg}");
+}
+
 pub fn harness_msg(msg: &str) {
     println!("[harness] {msg}");
 }
