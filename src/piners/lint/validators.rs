@@ -105,6 +105,13 @@ struct PineLintResponse {
     error: Option<String>,
     #[serde(default)]
     result: Option<PineLintResult>,
+    // The `--tv` path surfaces diagnostics at the top level rather than under
+    // `result` (local validation is uniformly under `result`). Read both so
+    // reanchor, which drives `pine-lint --tv`, sees them.
+    #[serde(default, deserialize_with = "null_as_empty")]
+    errors: Vec<PineLintDiag>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    warnings: Vec<PineLintDiag>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -157,14 +164,15 @@ pub fn parse_pine_lint(stdout: &[u8], scope: Scope) -> Result<DiagSet, String> {
             resp.error.as_deref().unwrap_or("no error message")
         ));
     }
-    let result = resp
-        .result
-        .ok_or_else(|| "pine-lint returned success=true but no result field".to_owned())?;
+    // Local validation lives under `result`; the `--tv` path surfaces the same
+    // arrays at the top level. Prefer `result`, fall back to top-level. A
+    // `success: true` response with neither is genuinely clean.
+    let (errors, warnings) = match &resp.result {
+        Some(r) => (&r.errors, &r.warnings),
+        None => (&resp.errors, &resp.warnings),
+    };
     let mut set = DiagSet::new();
-    for (diags, severity) in [
-        (&result.errors, Severity::Error),
-        (&result.warnings, Severity::Warning),
-    ] {
+    for (diags, severity) in [(errors, Severity::Error), (warnings, Severity::Warning)] {
         if !scope.keeps(severity) {
             continue;
         }
@@ -307,9 +315,23 @@ mod tests {
     }
 
     #[test]
+    fn pine_lint_tv_top_level_errors_are_read() {
+        // The --tv path emits diagnostics at the top level, not under `result`.
+        let json = br#"{"success":true,"errors":[{"start":{"line":5,"column":2},"message":"unexpected token"}]}"#;
+        let set = parse_pine_lint(json, ERR_SYNTAX).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&key(5, 2, Severity::Error)));
+    }
+
+    #[test]
+    fn pine_lint_success_with_no_diagnostics_is_clean() {
+        // success=true with neither `result` nor top-level arrays => clean.
+        assert!(parse_pine_lint(br#"{"success":true}"#, ALL).unwrap().is_empty());
+    }
+
+    #[test]
     fn pine_lint_failure_is_err() {
         assert!(parse_pine_lint(br#"{"success":false,"error":"rate limited"}"#, ALL).is_err());
-        assert!(parse_pine_lint(br#"{"success":true}"#, ALL).is_err());
         assert!(parse_pine_lint(b"<html>503</html>", ALL).is_err());
     }
 }
