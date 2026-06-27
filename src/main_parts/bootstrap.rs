@@ -58,6 +58,12 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Lead our own process group before spawning anything or acquiring the
+    // lock, so brokkr's internal `kill(-pgid, …)` sweeps can't escape upward
+    // into a launcher that spawned us without its own session. No-op for the
+    // common interactive-foreground case; see `shutdown::isolate_process_group`.
+    shutdown::isolate_process_group();
+
     // Don't record `history` itself (avoids recursive noise).
     let is_history = matches!(cli.command, Command::History { .. });
 

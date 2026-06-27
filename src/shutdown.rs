@@ -28,6 +28,77 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Put brokkr in its own process group at startup when it is safe to do so,
+/// so brokkr's internal `kill(-pgid, …)` sweeps can never escape *upward*
+/// into the process group of whatever launched it.
+///
+/// brokkr is full of group-kills: the deadline / cooperative-SIGTERM paths in
+/// `output.rs`, the test-runner watchdog, `ratatoskr/process.rs`, and the
+/// `--hard` branch in `main_parts/commands.rs`. Every one assumes "my process
+/// group holds only me and my descendants". An interactive shell guarantees
+/// that (each job gets its own group); so does a launcher that calls `setsid`
+/// (Claude Code runs each command in a fresh session). But a launcher that
+/// does *neither* (e.g. a `subprocess.run(...)` without `start_new_session`)
+/// leaves brokkr sharing the launcher's group, so one `kill(-pgid)` takes the
+/// launcher and its siblings down too. We refuse to depend on the launcher
+/// being polite and establish the invariant ourselves.
+///
+/// Two cases where we must NOT move, both detected before acting:
+///   * Already our own group leader (`getpgrp() == getpid()`) - the normal
+///     interactive-foreground job. `kill(-pgid)` already only reaches our
+///     subtree, and `setpgid(0, 0)` would be a no-op regardless.
+///   * Our group is the controlling terminal's foreground group (the
+///     `cmd | brokkr …` pipeline case). Detaching would cut us off from
+///     terminal-delivered SIGINT - the exact mechanism [`SigtermGuard`]
+///     relies on to forward Ctrl-C to tracked children - and risk SIGTTOU
+///     on output.
+///
+/// Everything else - notably the supervised/captured case where stdio is
+/// pipes and no terminal has us in the foreground - is where detaching both
+/// helps and is safe. Best-effort: any failure leaves us exactly where we
+/// were, no worse than before this call existed.
+pub fn isolate_process_group() {
+    // SAFETY: getpid/getpgrp/setpgid take no pointers and cannot corrupt
+    // memory; we only read their integer results.
+    let pid = unsafe { libc::getpid() };
+    let pgrp = unsafe { libc::getpgrp() };
+    if pgrp == pid {
+        return; // already a group leader
+    }
+    if terminal_foreground_pgrp() == Some(pgrp) {
+        return; // moving would break terminal Ctrl-C delivery
+    }
+    // Become a new group leader (PGID == PID). EPERM/ESRCH just mean we stay
+    // put, which is the pre-existing behaviour.
+    unsafe {
+        libc::setpgid(0, 0);
+    }
+}
+
+/// The foreground process group of brokkr's controlling terminal, or `None`
+/// when there is no controlling terminal (the supervised / fully-redirected
+/// case). Queries `/dev/tty` - the controlling terminal regardless of where
+/// stdio points - opened `O_NOCTTY` so the probe never *acquires* one.
+fn terminal_foreground_pgrp() -> Option<libc::pid_t> {
+    let path = b"/dev/tty\0";
+    // SAFETY: `path` is a NUL-terminated literal; open/tcgetpgrp/close take
+    // no caller-owned pointers beyond it and we check every return value.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr().cast::<libc::c_char>(),
+            libc::O_RDONLY | libc::O_NOCTTY,
+        )
+    };
+    if fd < 0 {
+        return None; // no controlling terminal
+    }
+    let fg = unsafe { libc::tcgetpgrp(fd) };
+    unsafe {
+        libc::close(fd);
+    }
+    if fg < 0 { None } else { Some(fg) }
+}
+
 /// Whether a shutdown has been requested via SIGTERM since the current
 /// `SigtermGuard` was installed.
 pub fn is_shutdown_requested() -> bool {
