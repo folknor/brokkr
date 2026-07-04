@@ -8,7 +8,7 @@
 //! ([`super::CorpusDb::open_readonly`]); the caller adds a SELECT-only UX
 //! guard before reaching here.
 
-use rusqlite::{OptionalExtension, Row};
+use rusqlite::Row;
 
 use super::CorpusDb;
 use crate::error::DevError;
@@ -413,10 +413,11 @@ impl CorpusDb {
     }
 
     /// Each probe's most recent recorded runtime (the latest run carrying a
-    /// non-null `runtime_ms`), slowest first. This is the per-probe form of
-    /// [`Self::estimated_runtime_ms`] - the *same* "latest non-null per probe"
-    /// selection the pre-run ceiling sums - so the `--runtimes` view can never
-    /// disagree with the wall. `over_ms`, when set, keeps only probes above it.
+    /// non-null `runtime_ms`), slowest first. A *diagnostic* view - "which probe
+    /// is heavy" - not the ceiling's basis: the harness overlaps probes, so the
+    /// sum of these per-probe figures runs several times the real wall (see
+    /// [`Self::estimated_wall_ms`], which the ceiling uses instead). `over_ms`,
+    /// when set, keeps only probes above it.
     pub fn runtimes(&self, over_ms: Option<f64>) -> Result<Vec<RuntimeRow>, DevError> {
         let mut sql = String::from(
             "SELECT probe, runtime_ms, run_id FROM disposition d \
@@ -436,24 +437,38 @@ impl CorpusDb {
         Ok(rows)
     }
 
-    /// Estimated wall-clock runtime for a selection, in milliseconds: the sum
-    /// over `probes` of each probe's most recent recorded `runtime_ms` (the
-    /// latest run in which it carries a non-null runtime). Probes never run, or
-    /// run only on harness output predating `runtime_ms`, contribute 0. Drives
-    /// the pre-run ceiling in `cmd.rs`.
-    pub fn estimated_runtime_ms(&self, probes: &[String]) -> Result<f64, DevError> {
+    /// Estimated whole-run wall for a `selection`, in milliseconds: the measured
+    /// `wall_ms` of the most recent run whose own selection was a **superset** of
+    /// (or equal to) `selection`. Since dropping probes can only shorten a run,
+    /// `wall(subset) <= wall(superset)`, so a covering run's real wall is a valid
+    /// upper bound - and any `--all` run covers everything, so one full run bounds
+    /// every selection. Returns `None` when no recorded run covers `selection`
+    /// (a fresh DB, or a selection no prior run is a superset of); the caller
+    /// treats that as "no measured basis, don't refuse".
+    ///
+    /// This replaces the old sum-of-per-probe-`runtime_ms` estimate, which
+    /// assumed serial probes and so overshot the real (probe-overlapping) wall
+    /// several-fold. Coverage is read off the stored `selector` JSON `ids`.
+    pub fn estimated_wall_ms(&self, selection: &[String]) -> Result<Option<f64>, DevError> {
+        let want: std::collections::HashSet<&str> =
+            selection.iter().map(String::as_str).collect();
+        // Newest first; stop at the first run whose id-set covers the selection.
+        // The most recent run is often `--all` (covers everything), so this
+        // typically returns on the first row.
         let mut stmt = self.conn().prepare(
-            "SELECT runtime_ms FROM disposition \
-             WHERE probe = ?1 AND runtime_ms IS NOT NULL \
-             ORDER BY run_id DESC LIMIT 1",
+            "SELECT selector, wall_ms FROM run \
+             WHERE wall_ms IS NOT NULL ORDER BY run_id DESC",
         )?;
-        let mut total = 0.0;
-        for probe in probes {
-            if let Some(ms) = stmt.query_row([probe], |r| r.get::<_, f64>(0)).optional()? {
-                total += ms;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (selector, wall_ms) = row?;
+            if selection_covered(&selector, &want) {
+                return Ok(Some(wall_ms));
             }
         }
-        Ok(total)
+        Ok(None)
     }
 
     /// Run an arbitrary read-only query (the `--sql` escape hatch).
@@ -488,6 +503,22 @@ fn read_raw(
     })
 }
 
+/// Does the run whose stored `selector` JSON is `selector` cover every id in
+/// `want`? Coverage is set-inclusion of the selector's `ids` array over `want`.
+/// A selector that fails to parse, or carries no `ids`, covers nothing (returns
+/// `false`) - a malformed row is skipped, never treated as a universal bound.
+fn selection_covered(selector: &str, want: &std::collections::HashSet<&str>) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(selector) else {
+        return false;
+    };
+    let Some(ids) = value.get("ids").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let have: std::collections::HashSet<&str> =
+        ids.iter().filter_map(serde_json::Value::as_str).collect();
+    want.iter().all(|id| have.contains(id))
+}
+
 fn value_to_string(v: rusqlite::types::ValueRef<'_>) -> String {
     use rusqlite::types::ValueRef;
     match v {
@@ -507,68 +538,74 @@ mod tests {
     use super::*;
     use crate::piners::report::parse;
 
-    /// Record one run from an NDJSON literal, no gate context.
+    /// Record one run from an NDJSON literal, no gate context, no wall.
     fn record(db: &CorpusDb, result: &str, nd: &[u8]) {
+        record_full(db, "{}", None, result, nd);
+    }
+
+    /// Record a run with an explicit `selector` JSON and measured `wall_ms` -
+    /// the inputs the superset-wall estimator reads.
+    fn record_full(db: &CorpusDb, selector: &str, wall_ms: Option<f64>, result: &str, nd: &[u8]) {
         let report = parse(nd);
         let run = crate::piners::corpus_db::RunRecord {
-            selector: "{}",
+            selector,
             gated: true,
             result,
             fail_reason: None,
             harness_exit_code: Some(0),
             stderr: "",
+            wall_ms,
         };
         db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
     }
 
+    /// Body NDJSON is irrelevant to the wall estimator (it reads the run
+    /// envelope's selector + wall_ms), so the wall tests use a one-probe line.
+    const ONE_LINE: &[u8] = br#"{"probe":"x","outcome":"parity"}
+"#;
+
     #[test]
-    fn estimated_runtime_sums_latest_per_probe_and_treats_missing_as_zero() {
+    fn estimated_wall_uses_the_most_recent_superset_runs_measured_wall() {
         let db = CorpusDb::open_in_memory().unwrap();
-        // Run 1: p1=100ms, p2=200ms.
-        record(
-            &db,
-            "pass",
-            br#"{"probe":"p1","outcome":"parity","runtime_ms":100}
-{"probe":"p2","outcome":"parity","runtime_ms":200}
-"#,
-        );
-        // Run 2: only p1, now slower (150ms). p2 absent -> its run-1 value stands.
-        record(
-            &db,
-            "pass",
-            br#"{"probe":"p1","outcome":"parity","runtime_ms":150}
-"#,
-        );
+        // Run 1: an `--all`-style full run over [a,b,c], wall 60s.
+        record_full(&db, r#"{"ids":["a","b","c"]}"#, Some(60_000.0), "pass", ONE_LINE);
+        // Run 2: a smaller slice [a], wall 5s.
+        record_full(&db, r#"{"ids":["a"]}"#, Some(5_000.0), "pass", ONE_LINE);
 
-        // p1 latest (150) + p2 latest (200) + p3 unseen (0) = 350.
+        // Selecting {a,b}: run 2 ([a]) does NOT cover it; run 1 ([a,b,c]) does,
+        // so the estimate is run 1's real 60s wall - the valid upper bound.
         let est = db
-            .estimated_runtime_ms(&["p1".to_owned(), "p2".to_owned(), "p3".to_owned()])
+            .estimated_wall_ms(&["a".to_owned(), "b".to_owned()])
             .unwrap();
-        assert_eq!(est, 350.0);
+        assert_eq!(est, Some(60_000.0));
 
-        // A selection of only never-run probes estimates 0.
-        assert_eq!(db.estimated_runtime_ms(&["nope".to_owned()]).unwrap(), 0.0);
+        // Selecting {a}: the newest covering run wins - run 2's 5s, not run 1's.
+        assert_eq!(db.estimated_wall_ms(&["a".to_owned()]).unwrap(), Some(5_000.0));
     }
 
     #[test]
-    fn estimated_runtime_ignores_null_runtime_rows() {
+    fn estimated_wall_is_none_when_no_run_covers_the_selection() {
         let db = CorpusDb::open_in_memory().unwrap();
-        // A probe whose latest run carries no runtime_ms falls back to the most
-        // recent run that does; with none at all it contributes 0.
-        record(
-            &db,
-            "pass",
-            br#"{"probe":"p1","outcome":"parity","runtime_ms":120}
-"#,
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(10_000.0), "pass", ONE_LINE);
+
+        // `z` is not in any recorded run's selection -> no covering run -> None
+        // (the caller reads this as "no measured basis, don't refuse").
+        assert_eq!(db.estimated_wall_ms(&["z".to_owned()]).unwrap(), None);
+        // A partial overlap still isn't coverage: {a,z} needs BOTH in one run.
+        assert_eq!(
+            db.estimated_wall_ms(&["a".to_owned(), "z".to_owned()]).unwrap(),
+            None
         );
-        record(
-            &db,
-            "pass",
-            br#"{"probe":"p1","outcome":"parity"}
-"#,
-        );
-        // Latest p1 row has NULL runtime; the 120ms run-1 row is used.
-        assert_eq!(db.estimated_runtime_ms(&["p1".to_owned()]).unwrap(), 120.0);
+    }
+
+    #[test]
+    fn estimated_wall_skips_runs_with_no_measured_wall() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        // Newest covering run has NULL wall (e.g. a spawn failure) -> skipped;
+        // the older covering run with a real wall is used.
+        record_full(&db, r#"{"ids":["a"]}"#, Some(8_000.0), "pass", ONE_LINE);
+        record_full(&db, r#"{"ids":["a"]}"#, None, "fail", ONE_LINE);
+        assert_eq!(db.estimated_wall_ms(&["a".to_owned()]).unwrap(), Some(8_000.0));
     }
 
     fn owned(cols: &[&str]) -> Vec<String> {
@@ -603,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn runtimes_lists_latest_per_probe_slowest_first_and_agrees_with_the_ceiling() {
+    fn runtimes_lists_latest_per_probe_slowest_first() {
         let db = CorpusDb::open_in_memory().unwrap();
         record(
             &db,
@@ -627,15 +664,6 @@ mod tests {
         assert_eq!(rows[0].runtime_ms, 5000.0);
         assert_eq!(rows[0].run_id, 2);
         assert_eq!(rows[1].probe, "fast");
-
-        // The anti-drift guarantee: Σ of the listed runtimes equals the
-        // ceiling's estimate over the same probes. A SQL view could diverge;
-        // this one shares the per-probe selection, so it can't.
-        let sum: f64 = rows.iter().map(|r| r.runtime_ms).sum();
-        let est = db
-            .estimated_runtime_ms(&["slow".to_owned(), "fast".to_owned()])
-            .unwrap();
-        assert_eq!(sum, est);
 
         // --over filters in seconds: > 1s keeps only `slow` (5000ms).
         let over = db.runtimes(Some(1000.0)).unwrap();

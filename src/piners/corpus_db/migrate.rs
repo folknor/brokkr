@@ -3,16 +3,18 @@
 //! Mirrors `src/db/migrate.rs`. Version 1 was the initial schema; version 2
 //! adds the per-probe `disposition.runtime_ms` column; version 3 adds the
 //! `disposition.boundary_ours`/`boundary_tv` window-boundary-artifact discount
-//! columns. On a fresh database the schema DDL in `schema.rs` creates the
-//! current tables (columns included) and stamps the version, so the migration
-//! steps below only run for an older db on disk. The `has_table` helper lives
-//! here so a future column add stays a localized change, exactly as in
-//! `ResultsDb`.
+//! columns; version 4 adds `run.wall_ms`, brokkr's own measured whole-run
+//! harness wall (the pre-run runtime ceiling estimates from these, not from
+//! summing the harness's overlapping per-probe `runtime_ms`). On a fresh
+//! database the schema DDL in `schema.rs` creates the current tables (columns
+//! included) and stamps the version, so the migration steps below only run for
+//! an older db on disk. The `has_table` helper lives here so a future column
+//! add stays a localized change, exactly as in `ResultsDb`.
 
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 4;
 
 /// Run all pending migrations based on `PRAGMA user_version`. On a fresh
 /// database the schema DDL in `schema.rs` creates the v1 tables and stamps the
@@ -50,6 +52,14 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
                 [],
             )?;
         }
+    }
+
+    // v3 -> v4: add brokkr's measured whole-run harness wall. Nullable (pre-v4
+    // runs never recorded it, and a spawn failure has no wall), so no DEFAULT -
+    // an absent wall reads back as NULL, which the ceiling estimator treats as
+    // "no measured wall for this run". Idempotency guarded by `has_column`.
+    if current < 4 && !has_column(conn, "run", "wall_ms") {
+        conn.execute("ALTER TABLE run ADD COLUMN wall_ms REAL", [])?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -106,10 +116,11 @@ mod tests {
         assert!(!has_column(&conn, "disposition", "boundary_tv"));
 
         run_migrations(&conn).unwrap();
-        // v1 -> v2 and v2 -> v3 both run when starting from v1.
+        // Every step v1 -> v4 runs when starting from v1.
         assert!(has_column(&conn, "disposition", "runtime_ms"));
         assert!(has_column(&conn, "disposition", "boundary_ours"));
         assert!(has_column(&conn, "disposition", "boundary_tv"));
+        assert!(has_column(&conn, "run", "wall_ms"));
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

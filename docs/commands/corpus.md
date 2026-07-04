@@ -118,17 +118,25 @@ the flags change dispositions.
 ## Runtime ceiling (the pre-run wall)
 
 After verification but before building, brokkr estimates the selection's
-wall-clock cost: the sum over selected probes of each probe's **most recent
-recorded `runtime_ms`** (from the corpus run store; the harness emits per-probe
-runtime on each disposition line). Probes never run - or run only on harness
-output predating the field - contribute 0, so a fresh DB or a never-run
-selection always passes. If the estimate exceeds **270s**, the run is refused
-before the build with a preflight error naming the estimate; re-run with
-`--force` to override. Verification runs first, so hash drift still surfaces
-on an over-budget selection; `--verify-only` is exempt. The ceiling is a
-pre-run wall only - a run already underway is never killed for exceeding it.
-`brokkr corpus-results --runtimes` previews the per-probe estimates this wall
-sums - the slow-probe workflow (trim `bar_budget`, or disable) reads off it.
+wall-clock cost: the **measured whole-run wall** (`run.wall_ms`, brokkr's own
+timing of the harness subprocess) of the most recent run whose selection was a
+**superset** of the current one. Dropping probes can only shorten a run, so
+`wall(subset) ≤ wall(superset)` makes a covering run's real wall a valid upper
+bound - and any `--all` run covers everything, so one full run bounds every
+selection. With no covering run recorded (a fresh DB, or a selection no prior
+run superset-covers) there is no measured basis and the run proceeds. If the
+estimate exceeds **270s**, the run is refused before the build with a preflight
+error naming it; re-run with `--force` to override. Verification runs first, so
+hash drift still surfaces on an over-budget selection; `--verify-only` is
+exempt. The ceiling is a pre-run wall only - a run already underway is never
+killed for exceeding it.
+
+This replaced an earlier estimate that **summed** each probe's most recent
+per-probe `runtime_ms`. The harness overlaps probes, so that sum ran ~5× the
+real wall (a ~60s full corpus summed to ~320s), producing false refusals.
+`brokkr corpus-results --runtimes` still lists per-probe runtimes (the slow-probe
+"trim `bar_budget`/disable" workflow reads off it) but is a diagnostic - its
+`Σ(shown)` is a per-probe sum, **not** the run wall the ceiling uses.
 
 ## Verification (the content gate)
 

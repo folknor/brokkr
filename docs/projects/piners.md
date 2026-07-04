@@ -123,8 +123,11 @@ migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/
 
 - `run` - `started_at`, `selector` (JSON: resolved ids + raw flags), `gated`
   (`!--no-gate`), `result` (pass/fail), `fail_reason`, `harness_exit_code`,
-  `probe_count`, `harness_stderr`. The exit/reason/stderr make a failed run
-  self-contained.
+  `probe_count`, `harness_stderr`, `wall_ms` (brokkr's own measured whole-run
+  harness wall; `NULL` on a spawn failure or pre-v4 rows). The exit/reason/stderr
+  make a failed run self-contained; `wall_ms` + `selector.ids` are what the
+  pre-run runtime ceiling estimates the next run from (superset-covering run's
+  measured wall - see `docs/commands/corpus.md`).
 - `disposition` (PK `run_id,probe`) - `outcome`, `disposition` (gate label),
   `expected` + `gate_ok` (from the pins at run time; `None` expected is never
   ok), `matched`/`ours_only`/`tv_only`, `boundary_ours`/`boundary_tv` (the
@@ -183,12 +186,12 @@ struct, no benchmark filters to reject. The corpus views:
   column-discovery path (there is no `--list-columns`). `--where` still takes a
   raw boolean expression. Default order is `(probe, our_index)`.
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
-  runtime, slowest first, in milliseconds (the harness's unit - seconds
-  flattened the sub-second majority to one decimal), with a footer summing the
-  shown set against the pre-run ceiling in seconds. It calls the *same* per-probe "latest non-null
-  `runtime_ms`" selection the `corpus` runtime wall sums (`estimated_runtime_ms`),
-  so the view can never disagree with the ceiling - the slow-probe/disable
-  workflow reads straight off it. `--over 269` shows what nears the wall.
+  runtime, slowest first, in milliseconds (the harness's unit). A **diagnostic**
+  for spotting heavy probes (trim `bar_budget`, or disable), *not* the ceiling's
+  basis: probes overlap in the harness, so the `Σ(shown)` footer is a per-probe
+  sum, several times the real run wall. The ceiling estimates from the measured
+  `run.wall_ms` of a superset-covering run instead (`estimated_wall_ms`).
+  `--over 269` shows what single probe nears the wall on its own.
 - `brokkr corpus-results --trend <probe>` - disposition/tier/p90 over recent runs.
 - `brokkr corpus-results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,

@@ -49,8 +49,9 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     }
 
     // --runtimes [--over SECS]: per-probe most-recent runtime, slowest first.
-    // Calls the same per-probe estimate the pre-run ceiling sums, so the view
-    // can never disagree with the wall.
+    // A diagnostic (which probe is heavy), not the ceiling's basis - probes
+    // overlap in the harness, so the per-probe sum is not the run wall; the
+    // ceiling estimates from the measured run.wall_ms instead.
     if q.runtimes {
         let over_ms = q.over.map(|s| s * 1000.0);
         let rows = db.runtimes(over_ms)?;

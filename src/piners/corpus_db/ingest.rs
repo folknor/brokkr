@@ -30,6 +30,11 @@ pub struct RunRecord<'a> {
     pub harness_exit_code: Option<i32>,
     /// Captured harness stderr (or a spawn-error message).
     pub stderr: &'a str,
+    /// brokkr's measured whole-run harness wall, in milliseconds. `None` when
+    /// the harness never ran (spawn failure). This is the quantity the pre-run
+    /// runtime ceiling estimates from - a real wall, not the sum of the
+    /// harness's overlapping per-probe `runtime_ms`.
+    pub wall_ms: Option<f64>,
 }
 
 impl CorpusDb {
@@ -78,8 +83,8 @@ fn record_inner(
     conn.execute(
         "INSERT INTO run \
          (started_at, selector, gated, result, fail_reason, harness_exit_code, \
-          probe_count, harness_stderr) \
-         VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          probe_count, harness_stderr, wall_ms) \
+         VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             run.selector,
             i64::from(run.gated),
@@ -88,6 +93,7 @@ fn record_inner(
             run.harness_exit_code,
             as_i64(report.probes.len()),
             run.stderr,
+            run.wall_ms,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -281,6 +287,7 @@ mod tests {
             fail_reason: Some("1 gate deviation(s)"),
             harness_exit_code: Some(0),
             stderr: "",
+            wall_ms: Some(1234.0),
         };
         let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
         assert_eq!(run_id, 1);

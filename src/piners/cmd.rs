@@ -238,6 +238,8 @@ pub fn corpus(
                 fail_reason: Some("harness failed to spawn"),
                 harness_exit_code: None,
                 stderr: &msg,
+                // Never ran -> no measured wall.
+                wall_ms: None,
             };
             ingest_run(
                 &corpus_db_path,
@@ -315,6 +317,9 @@ pub fn corpus(
         fail_reason: fail_reason.as_deref(),
         harness_exit_code: harness_code,
         stderr: &stderr_text,
+        // brokkr's own measurement of the whole harness subprocess - the real
+        // wall the ceiling estimates future runs from.
+        wall_ms: Some(elapsed_ms as f64),
     };
     if let Err(e) = ingest_run(&corpus_db_path, &record, &report, &expected, &gate_diffs) {
         output::corpus_msg(&format!(
@@ -383,20 +388,23 @@ pub(crate) fn verify_selected_feeds(
 }
 
 /// Refuse a selection projected to exceed [`RUNTIME_CEILING_MS`]. The estimate
-/// is the sum over `ids` of each probe's most recent recorded `runtime_ms`;
-/// probes with no recorded runtime (a fresh DB, never-run probes, or output
-/// predating the field) contribute 0, so a brand-new corpus always passes.
-/// Read-only DB open - this never writes.
+/// is the measured whole-run wall of the most recent run whose selection was a
+/// superset of `ids` (see [`CorpusDb::estimated_wall_ms`]) - a real wall, not
+/// the sum of the harness's overlapping per-probe runtimes. With no covering
+/// run recorded (a fresh DB, or a selection no prior run superset-covers) there
+/// is no measured basis, so the run proceeds. Read-only DB open - never writes.
 fn enforce_runtime_ceiling(project_root: &Path, ids: &[String]) -> Result<(), DevError> {
     let db_path = corpus_runs_db_path(project_root);
     if !db_path.exists() {
         return Ok(());
     }
-    let est_ms = CorpusDb::open_readonly(&db_path)?.estimated_runtime_ms(ids)?;
+    let Some(est_ms) = CorpusDb::open_readonly(&db_path)?.estimated_wall_ms(ids)? else {
+        return Ok(());
+    };
     if est_ms > RUNTIME_CEILING_MS {
         return Err(DevError::Preflight(vec![format!(
             "corpus: estimated runtime {:.0}s for {} probe(s) exceeds the {:.0}s ceiling \
-             (sum of each probe's most recent recorded runtime). \
+             (measured wall of the most recent run covering this selection). \
              Re-run with --force to override.",
             est_ms / 1000.0,
             ids.len(),
