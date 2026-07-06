@@ -537,6 +537,40 @@ pub(crate) fn resolve_default_pmtiles_path(
     )
 }
 
+/// Resolve a PMTiles file by --dataset/--commit/--file, per the
+/// `<scratch>/<dataset>-<commit>.pmtiles` naming convention tilegen produces.
+/// `--file` skips resolution entirely. `--commit` defaults to the current
+/// HEAD short hash. Only reads the file; does not rebuild for historical
+/// commits (the current release binary can inspect a file built by any
+/// commit).
+pub(crate) fn resolve_pmtiles_by_commit(
+    dataset: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    if let Some(f) = file {
+        let p = PathBuf::from(f);
+        if !p.exists() {
+            return Err(DevError::Config(format!("file not found: {}", p.display())));
+        }
+        return Ok(p);
+    }
+    let hash = match commit {
+        Some(c) => c.to_owned(),
+        None => crate::git::collect(project_root)?.commit,
+    };
+    let path = paths.scratch_dir.join(format!("{dataset}-{hash}.pmtiles"));
+    if !path.exists() {
+        return Err(DevError::Config(format!(
+            "no build for {hash}; run brokkr tilegen first (looked for {})",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
 /// Resolve PMTiles path and its size in one call.
 pub(crate) fn resolve_pmtiles_with_size(
     dataset: &str,

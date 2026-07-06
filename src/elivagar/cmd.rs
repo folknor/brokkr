@@ -5,7 +5,10 @@ use crate::context::{HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
-use crate::resolve::{resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_path};
+use crate::resolve::{
+    resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_by_commit,
+    resolve_pmtiles_path,
+};
 
 pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
@@ -125,6 +128,7 @@ pub(crate) fn verify(
     dataset: &str,
     tiles_variant: Option<&str>,
     features: &[String],
+    geometry_stats: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "verify")?;
     let pi = bootstrap(build_root)?;
@@ -134,5 +138,72 @@ pub(crate) fn verify(
         None => resolve_default_pmtiles_path(dataset, &paths, project_root)?,
     };
     let effective = build_root.unwrap_or(project_root);
-    super::verify::run(&pmtiles_path, effective, features)
+    super::verify::run(&pmtiles_path, effective, features, geometry_stats)
+}
+
+pub(crate) fn inspect(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    dataset: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "pmtiles-inspect")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
+    super::inspect::run(&pmtiles_path, project_root)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn diag(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    dataset: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+    z: u8,
+    x: u32,
+    y: u32,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "diag")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
+    super::diag::run(&pmtiles_path, project_root, z, x, y)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn svg(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    dataset: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+    z: u8,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    layers: Option<&str>,
+    output_path: Option<&Path>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "svg")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
+    super::svg::run(
+        &pmtiles_path,
+        project_root,
+        z,
+        x,
+        y,
+        width,
+        height,
+        layers,
+        output_path,
+    )
 }

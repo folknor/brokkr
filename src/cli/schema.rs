@@ -1330,6 +1330,67 @@ Examples:
     /// [elivagar] Download Natural Earth shapefiles for low-zoom layers
     #[command(display_order = 32)]
     DownloadNaturalEarth,
+    /// [elivagar] Inspect PMTiles header, tile stats, and metadata
+    #[command(name = "pmtiles-inspect", display_order = 33)]
+    PmtilesInspect {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Commit short hash selecting which tilegen output to open (default: current HEAD)
+        #[arg(long)]
+        commit: Option<String>,
+        /// Explicit PMTiles path, skips dataset/commit resolution
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// [elivagar] Per-ring winding/area diagnosis for one tile
+    #[command(display_order = 34)]
+    Diag {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Commit short hash selecting which tilegen output to open (default: current HEAD)
+        #[arg(long)]
+        commit: Option<String>,
+        /// Explicit PMTiles path, skips dataset/commit resolution
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(short = 'z', long)]
+        z: u8,
+        #[arg(short = 'x', long)]
+        x: u32,
+        #[arg(short = 'y', long)]
+        y: u32,
+    },
+    /// [elivagar] Render one tile to SVG
+    #[command(display_order = 35)]
+    Svg {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Commit short hash selecting which tilegen output to open (default: current HEAD)
+        #[arg(long)]
+        commit: Option<String>,
+        /// Explicit PMTiles path, skips dataset/commit resolution
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(short = 'z', long)]
+        z: u8,
+        #[arg(short = 'x', long)]
+        x: u32,
+        #[arg(short = 'y', long)]
+        y: u32,
+        #[arg(short = 'W', long, default_value_t = 1)]
+        width: u32,
+        #[arg(short = 'H', long, default_value_t = 1)]
+        height: u32,
+        /// Comma-separated layer names to render (default: all)
+        #[arg(short = 'l', long)]
+        layers: Option<String>,
+        /// Output file path (default: elivagar's own default)
+        #[arg(short = 'o', long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Print PMTiles v3 file statistics
     #[command(display_order = 19)]
     PmtilesStats {
@@ -2413,6 +2474,9 @@ pub(crate) enum VerifyCommand {
         /// PMTiles variant from config (auto-selects if only one configured)
         #[arg(long)]
         tiles: Option<String>,
+        /// Print per-zoom ocean ring geometry statistics
+        #[arg(long)]
+        geometry_stats: bool,
     },
 
     /// [nidhogg] Batch query verification

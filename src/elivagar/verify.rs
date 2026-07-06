@@ -9,7 +9,12 @@ use crate::build;
 use crate::error::DevError;
 use crate::output;
 
-pub fn run(pmtiles_path: &Path, project_root: &Path, features: &[String]) -> Result<(), DevError> {
+pub fn run(
+    pmtiles_path: &Path,
+    project_root: &Path,
+    features: &[String],
+    geometry_stats: bool,
+) -> Result<(), DevError> {
     let build_config = if features.is_empty() {
         build::BuildConfig::release(None)
     } else {
@@ -21,7 +26,11 @@ pub fn run(pmtiles_path: &Path, project_root: &Path, features: &[String]) -> Res
 
     output::verify_msg(&format!("elivagar verify: {}", pmtiles_path.display()));
 
-    let captured = output::run_captured(&binary_str, &["verify", &pmtiles_str], project_root)?;
+    let mut args = vec!["verify", &pmtiles_str];
+    if geometry_stats {
+        args.push("--geometry-stats");
+    }
+    let captured = output::run_captured(&binary_str, &args, project_root)?;
 
     if captured.status.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);

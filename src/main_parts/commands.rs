@@ -655,7 +655,11 @@ fn cmd_verify(
 ) -> Result<(), DevError> {
     match verify {
         // ----- elivagar verify variants -----
-        VerifyCommand::ElivVerify { dataset, tiles } => {
+        VerifyCommand::ElivVerify {
+            dataset,
+            tiles,
+            geometry_stats,
+        } => {
             project::require(project, Project::Elivagar, "verify")?;
             elivagar::cmd::verify(
                 dev_config,
@@ -665,6 +669,7 @@ fn cmd_verify(
                 &dataset,
                 tiles.as_deref(),
                 features,
+                geometry_stats,
             )
         }
 
