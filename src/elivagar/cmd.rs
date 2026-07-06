@@ -6,8 +6,8 @@ use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
 use crate::resolve::{
-    resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_by_commit,
-    resolve_pmtiles_path,
+    resolve_blessed_path, resolve_default_pmtiles_path, resolve_pbf_with_size,
+    resolve_pmtiles_by_commit, resolve_pmtiles_path,
 };
 
 pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
@@ -120,6 +120,7 @@ pub(crate) fn download_natural_earth(
     super::download_natural_earth::run(&paths.data_dir)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
     project: Project,
@@ -206,4 +207,70 @@ pub(crate) fn svg(
         layers,
         output_path,
     )
+}
+
+/// `brokkr regress` - resolve the current build's archive (durable output
+/// dir, by --commit/--file) and the blessed archive (brokkr.toml, xxhash-
+/// verified, or --against), then exec `elivagar regress <current> --against
+/// <blessed>` with the tolerance/reporting flags passed through.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn regress(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    dataset: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+    against: Option<&str>,
+    tol: i32,
+    max_moved: u64,
+    max_examples: usize,
+    svg_dump: Option<&Path>,
+    json: bool,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "regress")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let current = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
+    let blessed = match against {
+        Some(p) => {
+            let path = std::path::PathBuf::from(p);
+            if !path.exists() {
+                return Err(DevError::Config(format!(
+                    "blessed archive not found: {}",
+                    path.display()
+                )));
+            }
+            path
+        }
+        None => resolve_blessed_path(dataset, &paths, project_root)?,
+    };
+    super::regress::run(
+        &current,
+        &blessed,
+        project_root,
+        tol,
+        max_moved,
+        max_examples,
+        svg_dump,
+        json,
+    )
+}
+
+/// `brokkr bless` - copy the current tilegen output into the durable
+/// `data/blessed/` store and register it as the dataset's regress reference in
+/// brokkr.toml (comment-preserving). Refuses a dirty tree: blessing from
+/// uncommitted state would record a commit hash that does not reproduce.
+pub(crate) fn bless(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    dataset: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "bless")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    super::bless::run(project_root, &paths, dataset, commit, file)
 }

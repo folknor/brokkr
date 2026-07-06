@@ -355,6 +355,11 @@ fn cmd_clean(
         }
     }
 
+    // Clean the durable tilegen output store (elivagar).
+    if project == Project::Elivagar {
+        clean_elivagar_outputs(&paths);
+    }
+
     if worktrees {
         let removed = worktree::purge_all(project_root)?;
         output::run_msg(&format!("removed {removed} worktree(s)"));
@@ -370,6 +375,29 @@ fn cmd_clean(
 
     output::result_msg("clean done");
     Ok(())
+}
+
+/// Remove the durable tilegen output archives (`<dataset>-<commit>.pmtiles`)
+/// from the output store. They are reproducible (rerun tilegen), so `clean`
+/// reclaims their space; retention already bounds normal growth. Skipped when
+/// the output dir coincides with scratch (already wiped by the caller).
+fn clean_elivagar_outputs(paths: &config::ResolvedPaths) {
+    if paths.output_dir == paths.scratch_dir || !paths.output_dir.exists() {
+        return;
+    }
+    let mut removed = 0u32;
+    if let Ok(entries) = std::fs::read_dir(&paths.output_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("pmtiles") {
+                std::fs::remove_file(&path).ok();
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        output::run_msg(&format!("removed {removed} tilegen output archive(s)"));
+    }
 }
 
 fn count_run_dirs(root: &Path) -> u32 {

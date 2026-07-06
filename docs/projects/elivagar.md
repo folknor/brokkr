@@ -39,7 +39,8 @@ unique.
 All three take `--dataset`/`--commit`/`--file`, resolved by
 `resolve_pmtiles_by_commit()` in `src/resolve_parts/schema.rs`: `--file`
 skips resolution; otherwise the path is
-`<scratch_dir>/<dataset>-<commit>.pmtiles`, matching the naming convention
+`<output_dir>/<dataset>-<commit>.pmtiles` (the durable output store, default
+`data/tilegen`, NOT scratch), matching the naming convention
 `rename_elivagar_output()` (`src/elivagar/dispatch.rs`) uses after `tilegen`
 via `git rev-parse --short HEAD`. `--commit` defaults to current HEAD. These
 subcommands only read the file - the current release binary can inspect
@@ -49,6 +50,27 @@ which binary to build (no historical worktree rebuild, unlike `verify
 
 `brokkr verify pmtiles --geometry-stats` forwards `--geometry-stats` to
 `elivagar verify` (per-zoom ocean ring geometry statistics).
+
+## Output regression: regress / bless
+
+`brokkr regress` (`src/elivagar/regress.rs`) is a passthrough wrapper over
+`elivagar regress <current> --against <blessed>`: it resolves the CURRENT
+archive via `resolve_pmtiles_by_commit()` (durable output dir, by
+`--commit`/`--file`) and the BLESSED archive via `resolve_blessed_path()`
+(the singular `[<host>.datasets.<D>.blessed]` brokkr.toml entry, xxhash-
+verified) or an explicit `--against <path>`. Flags `--tol`/`--max-moved`/
+`--max-examples`/`--svg-dump`/`--json` pass straight through. The wrapper
+streams the report live and propagates elivagar's exit code verbatim (0 =
+no accountable diff, 1 = regression / budget overrun) - it is a gate.
+
+`brokkr bless` (`src/elivagar/bless.rs`) promotes a gate-passing output to
+the dataset's regress reference: it REFUSES a dirty tree (results.db and
+`*.md` excluded, matching bench discipline - a hash from uncommitted state
+does not reproduce), copies the current archive to
+`data/blessed/<dataset>-<commit>.pmtiles` (gitignored), computes its xxh128,
+and writes the singular `[<host>.datasets.<D>.blessed]` entry into
+brokkr.toml via `toml_edit` (comment-preserving). Blessing is manual and
+deliberate - run only after a landing's full gate battery (incl. human QA).
 
 Oracle (`scripts/validate/earcut-oracle.mjs`, a Node script, not a Rust
 subcommand) has no brokkr wrapper yet - deferred, since it needs a

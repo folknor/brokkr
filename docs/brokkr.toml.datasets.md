@@ -15,6 +15,13 @@ host-scoped - they live under `[<hostname>.datasets.<name>]`, never a global
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
   `elivagar`). Each has `file`, optional `xxhash`. `sha256` accepted as alias.
   Used by nidhogg `serve` and `bench tiles`.
+- `blessed` - the singular regress reference archive (elivagar). Fields:
+  `file` (relative to the data dir, conventionally `blessed/<dataset>-<commit>.pmtiles`),
+  `commit` (source commit, for provenance), optional `xxhash` (`sha256` alias).
+  Written by `brokkr bless`, read + hash-verified by `brokkr regress`. The
+  archive lives under gitignored `data/blessed/`; only this registration is
+  committed. Singular (not keyed by variant) - one pmtiles variant exists
+  today. Each host blesses its own.
 - Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir`
   (nidhogg only).
 
@@ -33,6 +40,11 @@ seq = 4704
 [plantasjen.datasets.denmark.osc.4705]
 file = "denmark-4705.osc.gz"
 xxhash = "fa581f7b..."
+
+[plantasjen.datasets.denmark.blessed]
+file = "blessed/denmark-661cd1c.pmtiles"
+commit = "661cd1c"
+xxhash = "9c2e0b4a..."
 ```
 
 ## Shared variant-selection flags

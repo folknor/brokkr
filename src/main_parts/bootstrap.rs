@@ -895,6 +895,45 @@ fn run(cli: Cli) -> Result<(), DevError> {
             layers.as_deref(),
             output.as_deref(),
         ),
+        Command::Regress {
+            dataset,
+            commit,
+            file,
+            against,
+            tol,
+            max_moved,
+            max_examples,
+            svg_dump,
+            json,
+        } => elivagar::cmd::regress(
+            &dev_config,
+            project,
+            &project_root,
+            &dataset,
+            commit.as_deref(),
+            file.as_deref(),
+            against.as_deref(),
+            tol,
+            max_moved,
+            max_examples,
+            svg_dump.as_deref(),
+            json,
+        ),
+        Command::Bless {
+            dataset,
+            commit,
+            file,
+        } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "bless")?;
+            elivagar::cmd::bless(
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                commit.as_deref(),
+                file.as_deref(),
+            )
+        }
         Command::DownloadOcean => {
             let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
             elivagar::cmd::download_ocean(&dev_config, project, &project_root)

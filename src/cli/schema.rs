@@ -1391,6 +1391,50 @@ Examples:
         #[arg(short = 'o', long)]
         output: Option<std::path::PathBuf>,
     },
+    /// [elivagar] Diff current tilegen output against the blessed archive
+    #[command(display_order = 36)]
+    Regress {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Commit short hash selecting which current output to diff (default: current HEAD)
+        #[arg(long)]
+        commit: Option<String>,
+        /// Explicit CURRENT PMTiles path, skips dataset/commit resolution
+        #[arg(long)]
+        file: Option<String>,
+        /// Explicit BLESSED PMTiles path, skips brokkr.toml blessed resolution
+        #[arg(long)]
+        against: Option<String>,
+        /// Geometry tolerance in the layer's extent units (default 0)
+        #[arg(long, default_value_t = 0)]
+        tol: i32,
+        /// tolerance_moved budget before exit 1 (default 0: any move fails)
+        #[arg(long, default_value_t = 0)]
+        max_moved: u64,
+        /// Per-class example cap (default 20)
+        #[arg(long, default_value_t = 20)]
+        max_examples: usize,
+        /// Dump side-by-side SVG pairs for the worst structural diffs to DIR
+        #[arg(long)]
+        svg_dump: Option<std::path::PathBuf>,
+        /// Emit a machine-readable report to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// [elivagar] Bless the current tilegen output as the regress reference
+    #[command(display_order = 37)]
+    Bless {
+        /// Dataset name from brokkr.toml
+        #[arg(long, default_value = "denmark")]
+        dataset: String,
+        /// Commit short hash selecting which output to bless (default: current HEAD)
+        #[arg(long)]
+        commit: Option<String>,
+        /// Explicit PMTiles path to bless, skips dataset/commit resolution
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Print PMTiles v3 file statistics
     #[command(display_order = 19)]
     PmtilesStats {

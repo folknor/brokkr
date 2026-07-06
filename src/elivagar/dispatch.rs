@@ -93,7 +93,14 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 return Err(DevError::ExitCode(out.code));
             }
 
-            rename_elivagar_output(command, &ctx.paths.scratch_dir, req.dataset, req.project_root);
+            rename_elivagar_output(
+                command,
+                &ctx.paths.scratch_dir,
+                &ctx.paths.output_dir,
+                &ctx.paths.data_dir,
+                req.dataset,
+                req.project_root,
+            );
 
             let ms = crate::duration_ms(out.elapsed);
             output::run_msg(&format!("elapsed={ms}ms"));
@@ -240,7 +247,14 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
     ));
     ctx.harness.record_result(&bench_config, &result)?;
 
-    rename_elivagar_output(command, &ctx.paths.scratch_dir, req.dataset, req.project_root);
+    rename_elivagar_output(
+        command,
+        &ctx.paths.scratch_dir,
+        &ctx.paths.output_dir,
+        &ctx.paths.data_dir,
+        req.dataset,
+        req.project_root,
+    );
 
     Ok(())
 }
@@ -499,13 +513,25 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
     }
 }
 
-/// After a successful tilegen run, rename the output PMTiles to
-/// `<scratch>/<dataset>-<commit>.pmtiles` and print the path.
+/// Number of most-recent `<dataset>-<commit>.pmtiles` archives kept per
+/// dataset in the durable output dir. Older ones are pruned after each run so
+/// the store does not grow without bound (denmark alone is ~350 MB/commit).
+const OUTPUT_RETENTION: usize = 5;
+
+/// After a successful tilegen run, move the raw output PMTiles from the
+/// scratch dir to the durable output store as `<output>/<dataset>-<commit>.pmtiles`
+/// and print the path. The output dir is deliberately NOT the scratch/tmp dir:
+/// elivagar wipes its `--tmp-dir` at every run start, so an archive written
+/// into scratch would be destroyed by the next run (which is exactly how a
+/// probe pair was already lost). Retention prunes the store to the last
+/// [`OUTPUT_RETENTION`] archives per dataset.
 ///
 /// For non-Tilegen commands, cleans up output files as before.
 fn rename_elivagar_output(
     command: &ElivagarCommand,
     scratch_dir: &std::path::Path,
+    output_dir: &std::path::Path,
+    data_dir: &std::path::Path,
     dataset: &str,
     project_root: &std::path::Path,
 ) {
@@ -522,16 +548,37 @@ fn rename_elivagar_output(
         return;
     }
 
+    // Refuse to use a wiped directory as the durable store: elivagar wipes its
+    // `--tmp-dir` (`<data>/tilegen_tmp`) at every run start, and on some hosts
+    // `scratch` is configured to that same dir. With the default output dir
+    // (`data/tilegen`) neither branch fires; this guards a host that
+    // mis-points `output` at scratch or the tmp dir.
+    let tmp_dir = data_dir.join("tilegen_tmp");
+    if output_dir == scratch_dir || output_dir == tmp_dir {
+        output::error(&format!(
+            "output dir {} coincides with elivagar's scratch/tmp dir; \
+             set a distinct [<host>].output in brokkr.toml. Leaving output in place.",
+            output_dir.display()
+        ));
+        return;
+    }
+
     let commit = crate::git::collect(project_root)
         .map(|g| g.commit)
         .unwrap_or_else(|_| "unknown".into());
 
+    if let Err(e) = std::fs::create_dir_all(output_dir) {
+        output::error(&format!("failed to create output dir: {e}"));
+        return;
+    }
+
     for path in &output_files {
         if path.exists() {
-            let dest = scratch_dir.join(format!("{dataset}-{commit}.pmtiles"));
+            let dest = output_dir.join(format!("{dataset}-{commit}.pmtiles"));
             match std::fs::rename(path, &dest) {
                 Ok(()) => {
                     output::run_msg(&format!("output: {}", dest.display()));
+                    prune_output_dir(output_dir, dataset);
                 }
                 Err(e) => {
                     output::error(&format!("failed to rename output: {e}"));
@@ -539,6 +586,41 @@ fn rename_elivagar_output(
                 }
             }
         }
+    }
+}
+
+/// Keep only the [`OUTPUT_RETENTION`] most-recent `<dataset>-*.pmtiles`
+/// archives (by mtime) in `output_dir`, deleting older ones. Best-effort:
+/// any IO error just leaves the file in place.
+fn prune_output_dir(output_dir: &std::path::Path, dataset: &str) {
+    let prefix = format!("{dataset}-");
+    let mut archives: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(output_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_match = path.extension().and_then(|e| e.to_str()) == Some("pmtiles")
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix));
+        if !is_match {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        archives.push((mtime, path));
+    }
+    if archives.len() <= OUTPUT_RETENTION {
+        return;
+    }
+    // Newest first; delete everything past the retention window.
+    archives.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    for (_, path) in archives.into_iter().skip(OUTPUT_RETENTION) {
+        std::fs::remove_file(&path).ok();
     }
 }
 

@@ -30,6 +30,7 @@ project = "pbfhogg"
 [plantasjen]
 data = "data"
 scratch = "data/scratch"
+output = "data/tilegen"   # durable tilegen output store (map-data projects)
 target = "target"
 port = 3033
 drives.source = "nvme"
@@ -43,7 +44,15 @@ features = ["linux-direct-io", "linux-io-uring"]
 Top-level keys that aren't `project` are treated as hostname sections
 (unknown non-table keys are rejected). Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
-`data/scratch/`, cargo target dir). Host `features` are cargo features
+`data/scratch/`, `data/tilegen/`, cargo target dir). `output` is the durable
+tilegen output store (map-data projects): `tilegen` renames each run's archive
+to `<output>/<dataset>-<commit>.pmtiles`, and `pmtiles-inspect`/`diag`/`svg`/
+`regress`/`bless` resolve it by `--commit`. It is kept SEPARATE from `scratch`
+on purpose - elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) every run,
+and on some hosts `scratch` points at that same dir, so archives written into
+scratch were destroyed by the next run. `brokkr` refuses to write outputs into
+a dir that coincides with scratch/tmp; retention keeps the last 5 archives per
+dataset. Host `features` are cargo features
 appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,

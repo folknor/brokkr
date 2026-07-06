@@ -464,6 +464,18 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
                     )));
                 }
             }
+            if let Some(blessed) = &ds.blessed {
+                if blessed.file.is_empty() {
+                    return Err(DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.blessed: file name is empty"
+                    )));
+                }
+                if blessed.commit.is_empty() {
+                    return Err(DevError::Config(format!(
+                        "{host}.datasets.{ds_name}.blessed: commit is empty"
+                    )));
+                }
+            }
             for (snap_key, snap) in &ds.snapshot {
                 validate_snapshot_key(snap_key).map_err(|e| {
                     DevError::Config(format!(
@@ -616,8 +628,13 @@ pub fn resolve_paths(
         .and_then(|h| h.scratch.as_deref())
         .unwrap_or("data/scratch");
 
+    let output_rel = host
+        .and_then(|h| h.output.as_deref())
+        .unwrap_or("data/tilegen");
+
     let data_dir = resolve_relative(project_root, data_rel);
     let scratch_dir = resolve_relative(project_root, scratch_rel);
+    let output_dir = resolve_relative(project_root, output_rel);
 
     let target_dir = match host.and_then(|h| h.target.as_deref()) {
         Some(t) => resolve_relative(project_root, t),
@@ -634,6 +651,7 @@ pub fn resolve_paths(
         hostname: hostname.to_owned(),
         data_dir,
         scratch_dir,
+        output_dir,
         target_dir,
         drives,
         features,

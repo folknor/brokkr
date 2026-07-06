@@ -190,6 +190,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
+            blessed: None,
             snapshot: HashMap::new(),
         }
     }
@@ -224,6 +225,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             HostConfig {
                 data: None,
                 scratch: None,
+                output: None,
                 target: None,
                 port: None,
                 drives: None,
@@ -286,6 +288,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             HostConfig {
                 data: None,
                 scratch: None,
+                output: None,
                 target: None,
                 port: None,
                 drives: None,
@@ -335,6 +338,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             HostConfig {
                 data: None,
                 scratch: None,
+                output: None,
                 target: None,
                 port: None,
                 drives: None,
@@ -438,6 +442,7 @@ xxhash = "feedface"
         let mut hc = HostConfig {
             data: None,
             scratch: None,
+            output: None,
             target: None,
             port: None,
             drives: None,
@@ -452,6 +457,7 @@ xxhash = "feedface"
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
+            blessed: None,
             snapshot: HashMap::new(),
         };
         ds.snapshot.insert(
@@ -476,6 +482,7 @@ xxhash = "feedface"
         let mut hc = HostConfig {
             data: None,
             scratch: None,
+            output: None,
             target: None,
             port: None,
             drives: None,
@@ -490,6 +497,7 @@ xxhash = "feedface"
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
+            blessed: None,
             snapshot: HashMap::new(),
         };
         ds.snapshot.insert(

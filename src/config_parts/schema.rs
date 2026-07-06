@@ -284,6 +284,23 @@ pub struct PmtilesEntry {
     pub xxhash: Option<String>,
 }
 
+/// The blessed reference archive for a dataset: a gate-passing (incl. human
+/// QA) PMTiles output that `regress` diffs the current build against. Written
+/// by `brokkr bless` and lives under `data/blessed/` (gitignored); the repo
+/// carries only this registration. `commit` is the source commit the archive
+/// was built at (derivable from the filename but kept for provenance).
+/// Singular per dataset - one pmtiles variant exists today; a map waits for a
+/// second one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct BlessedEntry {
+    pub file: String,
+    pub commit: String,
+    #[serde(alias = "sha256")]
+    pub xxhash: Option<String>,
+}
+
 /// A historical snapshot of a dataset - a different point-in-time capture
 /// of the same region. Snapshots are first-class for the `diff-snapshots`
 /// command and any future operation that takes a pair of snapshot refs.
@@ -332,6 +349,10 @@ pub struct Dataset {
     /// PMTiles archives keyed by variant name (e.g. "elivagar").
     #[serde(default)]
     pub pmtiles: HashMap<String, PmtilesEntry>,
+    /// The blessed reference archive for `regress` (singular). Written by
+    /// `brokkr bless`.
+    #[serde(default)]
+    pub blessed: Option<BlessedEntry>,
     /// Additional historical snapshots keyed by snapshot name (e.g. a date
     /// like "20260411"). The reserved name "base" is rejected at parse time
     /// because it's the CLI sentinel for the legacy top-level data.
@@ -345,6 +366,14 @@ pub struct Dataset {
 pub struct HostConfig {
     pub data: Option<String>,
     pub scratch: Option<String>,
+    /// Durable, commit-addressable tilegen output store (map-data projects).
+    /// Defaults to `data/tilegen`. Kept SEPARATE from `scratch` on purpose:
+    /// elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) at every run
+    /// start, and on some hosts `scratch` is configured to that same dir, so
+    /// renamed `<dataset>-<commit>.pmtiles` archives written into scratch were
+    /// destroyed by the next run. `output` is never wiped by a run; retention
+    /// bounds its growth instead.
+    pub output: Option<String>,
     pub target: Option<String>,
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
@@ -725,6 +754,10 @@ pub struct ResolvedPaths {
     pub hostname: String,
     pub data_dir: PathBuf,
     pub scratch_dir: PathBuf,
+    /// Durable tilegen output store (default `<root>/data/tilegen`). Distinct
+    /// from `scratch_dir` so run-to-run tmp wipes never destroy archives that
+    /// `--commit` resolution and `regress`/`bless` depend on.
+    pub output_dir: PathBuf,
     pub target_dir: PathBuf,
     pub drives: Option<DriveConfig>,
     pub features: Vec<String>,

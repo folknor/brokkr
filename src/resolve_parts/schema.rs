@@ -41,6 +41,15 @@ impl FileEntry for config::PmtilesEntry {
     }
 }
 
+impl FileEntry for config::BlessedEntry {
+    fn file(&self) -> &str {
+        &self.file
+    }
+    fn xxhash(&self) -> Option<&str> {
+        self.xxhash.as_deref()
+    }
+}
+
 /// Generic file resolver: lookup entry in map → join path → check exists → verify hash.
 fn resolve_entry_path<E: FileEntry>(
     entries: &HashMap<String, E>,
@@ -537,8 +546,35 @@ pub(crate) fn resolve_default_pmtiles_path(
     )
 }
 
+/// Resolve the blessed reference archive for a dataset (for `regress`).
+/// Looks up the singular `[<host>.datasets.<D>.blessed]` entry, joins its
+/// `file` under the data dir, checks existence, and verifies the recorded
+/// xxhash. Errors clearly when no blessed archive is registered.
+pub(crate) fn resolve_blessed_path(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let ds = get_dataset(dataset, paths)?;
+    let blessed = ds.blessed.as_ref().ok_or_else(|| {
+        DevError::Config(format!(
+            "dataset '{dataset}' has no blessed archive registered on {}; \
+             run `brokkr bless --dataset {dataset}` after a gate-passing build",
+            paths.hostname
+        ))
+    })?;
+    finalize_entry_path(
+        blessed,
+        &paths.data_dir,
+        "blessed archive",
+        ds.origin.as_deref(),
+        project_root,
+    )
+}
+
 /// Resolve a PMTiles file by --dataset/--commit/--file, per the
-/// `<scratch>/<dataset>-<commit>.pmtiles` naming convention tilegen produces.
+/// `<output>/<dataset>-<commit>.pmtiles` naming convention tilegen produces.
+/// `<output>` is the durable output dir (never wiped by a run), NOT scratch.
 /// `--file` skips resolution entirely. `--commit` defaults to the current
 /// HEAD short hash. Only reads the file; does not rebuild for historical
 /// commits (the current release binary can inspect a file built by any
@@ -561,7 +597,7 @@ pub(crate) fn resolve_pmtiles_by_commit(
         Some(c) => c.to_owned(),
         None => crate::git::collect(project_root)?.commit,
     };
-    let path = paths.scratch_dir.join(format!("{dataset}-{hash}.pmtiles"));
+    let path = paths.output_dir.join(format!("{dataset}-{hash}.pmtiles"));
     if !path.exists() {
         return Err(DevError::Config(format!(
             "no build for {hash}; run brokkr tilegen first (looked for {})",
