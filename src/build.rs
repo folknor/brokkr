@@ -206,9 +206,29 @@ pub fn cargo_build_observed(
 
     output::build_msg(&format!("cargo {}", arg_refs.join(" ")));
 
+    // Isolate worktree builds into their own target dir. On hosts that point
+    // every checkout at a shared cargo target dir (e.g. a parent
+    // `.cargo/config.toml` with `build.target-dir`), a `--commit` worktree
+    // build would otherwise write its artifacts and fingerprints into the SAME
+    // target the main tree reads from. Because the worktree's fingerprints
+    // post-date the main tree's source mtimes, a later main-tree build then
+    // judges everything "up to date" and re-links the stale worktree binary -
+    // benchmarking old code under the new commit's hash. Pinning
+    // `CARGO_TARGET_DIR` to a worktree-local path keeps the two builds' target
+    // trees apart; the env var overrides any inherited `build.target-dir`.
+    let target_override = crate::worktree::is_brokkr_worktree(project_root)
+        .then(|| project_root.join("target").display().to_string());
+    let env: Vec<(&str, &str)> = match target_override.as_deref() {
+        Some(dir) => {
+            output::build_msg(&format!("isolating worktree build target dir -> {dir}"));
+            vec![("CARGO_TARGET_DIR", dir)]
+        }
+        None => Vec::new(),
+    };
+
     let start = Instant::now();
     let captured =
-        output::run_captured_observed("cargo", &arg_refs, project_root, on_spawn, isolate_pg)?;
+        output::run_captured_observed("cargo", &arg_refs, project_root, &env, on_spawn, isolate_pg)?;
     let elapsed = start.elapsed();
 
     if !captured.status.success() {

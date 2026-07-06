@@ -41,8 +41,12 @@ All three take `--dataset`/`--commit`/`--file`, resolved by
 skips resolution; otherwise the path is
 `<output_dir>/<dataset>-<commit>.pmtiles` (the durable output store, default
 `data/tilegen`, NOT scratch), matching the naming convention
-`rename_elivagar_output()` (`src/elivagar/dispatch.rs`) uses after `tilegen`
-via `git rev-parse --short HEAD`. `--commit` defaults to current HEAD. These
+`rename_elivagar_output()` (`src/elivagar/dispatch.rs`) uses after `tilegen`:
+`git rev-parse --short HEAD` collected from the *build root* (the worktree's
+HEAD under `tilegen --commit <hash>`, else the main tree), so the archive name
+always names the commit whose code produced the tiles. `--commit` defaults to
+current HEAD. The durable store survives a routine `brokkr clean`; only the
+deep clean (`brokkr clean --worktrees`) reclaims it. These
 subcommands only read the file - the current release binary can inspect
 output built by any commit, so `--commit` picks which file to open, not
 which binary to build (no historical worktree rebuild, unlike `verify

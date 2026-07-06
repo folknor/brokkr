@@ -99,7 +99,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &ctx.paths.output_dir,
                 &ctx.paths.data_dir,
                 req.dataset,
-                req.project_root,
+                req.effective_build_root(),
             );
 
             let ms = crate::duration_ms(out.elapsed);
@@ -253,7 +253,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         &ctx.paths.output_dir,
         &ctx.paths.data_dir,
         req.dataset,
-        req.project_root,
+        req.effective_build_root(),
     );
 
     Ok(())
@@ -533,7 +533,7 @@ fn rename_elivagar_output(
     output_dir: &std::path::Path,
     data_dir: &std::path::Path,
     dataset: &str,
-    project_root: &std::path::Path,
+    git_root: &std::path::Path,
 ) {
     let output_files = command.output_files(scratch_dir);
     if output_files.is_empty() {
@@ -563,7 +563,12 @@ fn rename_elivagar_output(
         return;
     }
 
-    let commit = crate::git::collect(project_root)
+    // Provenance must name the commit whose code produced these tiles. For a
+    // `--commit <hash>` run that is the worktree's HEAD (`git_root`), NOT the
+    // main tree's HEAD - collecting from the main tree would stamp an
+    // unrelated commit onto an old build's output (and feed the same
+    // misattribution as a stale binary). Callers pass `effective_build_root()`.
+    let commit = crate::git::collect(git_root)
         .map(|g| g.commit)
         .unwrap_or_else(|_| "unknown".into());
 

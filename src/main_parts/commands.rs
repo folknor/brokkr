@@ -355,12 +355,15 @@ fn cmd_clean(
         }
     }
 
-    // Clean the durable tilegen output store (elivagar).
-    if project == Project::Elivagar {
-        clean_elivagar_outputs(&paths);
-    }
-
     if worktrees {
+        // Deep clean: `--worktrees` reclaims the expensive *persistent* state.
+        // The durable tilegen output store is elivagar's analog of piners'
+        // `runs.db` (the source of truth for `regress`/`bless`), so a routine
+        // `brokkr clean` spares it - retention already bounds its growth. Only
+        // the explicit deep clean wipes it, alongside the worktrees.
+        if project == Project::Elivagar {
+            clean_elivagar_outputs(&paths);
+        }
         let removed = worktree::purge_all(project_root)?;
         output::run_msg(&format!("removed {removed} worktree(s)"));
     } else {
@@ -378,9 +381,11 @@ fn cmd_clean(
 }
 
 /// Remove the durable tilegen output archives (`<dataset>-<commit>.pmtiles`)
-/// from the output store. They are reproducible (rerun tilegen), so `clean`
-/// reclaims their space; retention already bounds normal growth. Skipped when
-/// the output dir coincides with scratch (already wiped by the caller).
+/// from the output store. They are reproducible (rerun tilegen), so the deep
+/// clean (`brokkr clean --worktrees`) reclaims their space; retention already
+/// bounds normal growth, and a routine `brokkr clean` leaves them in place.
+/// Skipped when the output dir coincides with scratch (already wiped by the
+/// caller).
 fn clean_elivagar_outputs(paths: &config::ResolvedPaths) {
     if paths.output_dir == paths.scratch_dir || !paths.output_dir.exists() {
         return;

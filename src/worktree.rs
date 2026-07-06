@@ -14,6 +14,24 @@ use std::process::Command;
 use crate::error::DevError;
 use crate::output;
 
+/// Filename prefix for the retroactive-benchmark worktrees brokkr creates as
+/// siblings to the project root (`<parent>/.brokkr-worktree-<project>-<short>`).
+/// Single source of truth for the naming convention - `create`/`list` build on
+/// it and [`is_brokkr_worktree`] recognises it.
+pub const WORKTREE_PREFIX: &str = ".brokkr-worktree-";
+
+/// True when `path`'s final component names a brokkr-created worktree.
+///
+/// Used by [`crate::build::cargo_build_observed`] to decide whether to pin
+/// `CARGO_TARGET_DIR` to a worktree-local path: only builds inside one of our
+/// own retro-bench worktrees need that isolation, so ordinary main-tree builds
+/// (which may legitimately share a target dir via host config) are untouched.
+pub fn is_brokkr_worktree(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(WORKTREE_PREFIX))
+}
+
 /// A persistent git worktree checked out at a specific commit.
 ///
 /// Created on demand by `Worktree::create` and reused on subsequent runs at
@@ -54,7 +72,7 @@ impl Worktree {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("project");
-        let worktree_dir = parent.join(format!(".brokkr-worktree-{project_name}-{short}"));
+        let worktree_dir = parent.join(format!("{WORKTREE_PREFIX}{project_name}-{short}"));
 
         // Reuse path: if a worktree already exists at this path and its HEAD
         // matches the requested commit, skip remove + re-add.
@@ -127,7 +145,7 @@ pub fn list(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project");
-    let prefix = format!(".brokkr-worktree-{project_name}-");
+    let prefix = format!("{WORKTREE_PREFIX}{project_name}-");
 
     let entries = match std::fs::read_dir(parent) {
         Ok(e) => e,

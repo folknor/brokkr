@@ -187,10 +187,13 @@ pub fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<Captured
 /// immediately after `Command::spawn` returns. Lets callers (notably
 /// `cargo_build_observed`) publish the live PID into the lockfile so
 /// `brokkr kill --hard` during a long cargo build can SIGKILL cargo too.
+/// `env` adds variables on top of the inherited environment - the worktree
+/// build path uses it to pin `CARGO_TARGET_DIR`.
 pub fn run_captured_observed(
     program: &str,
     args: &[&str],
     cwd: &Path,
+    env: &[(&str, &str)],
     on_spawn: Option<&dyn Fn(u32)>,
     isolate_pg: bool,
 ) -> Result<CapturedOutput, DevError> {
@@ -198,7 +201,7 @@ pub fn run_captured_observed(
         program,
         args,
         cwd,
-        &[],
+        env,
         Duration::MAX,
         on_spawn,
         isolate_pg,
