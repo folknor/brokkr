@@ -50,7 +50,9 @@ deep clean (`brokkr clean --worktrees`) reclaims it. These
 subcommands only read the file - the current release binary can inspect
 output built by any commit, so `--commit` picks which file to open, not
 which binary to build (no historical worktree rebuild, unlike `verify
---commit`).
+--commit`). All three acquire the brokkr lock (non-blocking
+`acquire_cmd_lock`, like `regress`/`bless`) so an inspection can't read an
+archive a concurrent `tilegen` run is mid-write - it refuses instead.
 
 `brokkr verify pmtiles --geometry-stats` forwards `--geometry-stats` to
 `elivagar verify` (per-zoom ocean ring geometry statistics).
@@ -65,7 +67,8 @@ archive via `resolve_pmtiles_by_commit()` (durable output dir, by
 verified) or an explicit `--against <path>`. Flags `--tol`/`--max-moved`/
 `--max-examples`/`--svg-dump`/`--json` pass straight through. The wrapper
 streams the report live and propagates elivagar's exit code verbatim (0 =
-no accountable diff, 1 = regression / budget overrun) - it is a gate.
+no accountable diff, 1 = regression / budget overrun) - it is a gate. Like
+the inspection subcommands, it takes the non-blocking brokkr lock first.
 
 `brokkr bless` (`src/elivagar/bless.rs`) promotes a gate-passing output to
 the dataset's regress reference: it REFUSES a dirty tree (results.db and

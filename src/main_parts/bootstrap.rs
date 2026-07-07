@@ -843,14 +843,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
             dataset,
             commit,
             file,
-        } => elivagar::cmd::inspect(
-            &dev_config,
-            project,
-            &project_root,
-            &dataset,
-            commit.as_deref(),
-            file.as_deref(),
-        ),
+        } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "pmtiles-inspect")?;
+            elivagar::cmd::inspect(
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                commit.as_deref(),
+                file.as_deref(),
+            )
+        }
         Command::Diag {
             dataset,
             commit,
@@ -858,17 +861,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
             z,
             x,
             y,
-        } => elivagar::cmd::diag(
-            &dev_config,
-            project,
-            &project_root,
-            &dataset,
-            commit.as_deref(),
-            file.as_deref(),
-            z,
-            x,
-            y,
-        ),
+        } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "diag")?;
+            elivagar::cmd::diag(
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                commit.as_deref(),
+                file.as_deref(),
+                z,
+                x,
+                y,
+            )
+        }
         Command::Svg {
             dataset,
             commit,
@@ -880,21 +886,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
             height,
             layers,
             output,
-        } => elivagar::cmd::svg(
-            &dev_config,
-            project,
-            &project_root,
-            &dataset,
-            commit.as_deref(),
-            file.as_deref(),
-            z,
-            x,
-            y,
-            width,
-            height,
-            layers.as_deref(),
-            output.as_deref(),
-        ),
+        } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "svg")?;
+            elivagar::cmd::svg(
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                commit.as_deref(),
+                file.as_deref(),
+                z,
+                x,
+                y,
+                width,
+                height,
+                layers.as_deref(),
+                output.as_deref(),
+            )
+        }
         Command::Regress {
             dataset,
             commit,
@@ -905,20 +914,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
             max_examples,
             svg_dump,
             json,
-        } => elivagar::cmd::regress(
-            &dev_config,
-            project,
-            &project_root,
-            &dataset,
-            commit.as_deref(),
-            file.as_deref(),
-            against.as_deref(),
-            tol,
-            max_moved,
-            max_examples,
-            svg_dump.as_deref(),
-            json,
-        ),
+        } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "regress")?;
+            elivagar::cmd::regress(
+                &dev_config,
+                project,
+                &project_root,
+                &dataset,
+                commit.as_deref(),
+                file.as_deref(),
+                against.as_deref(),
+                tol,
+                max_moved,
+                max_examples,
+                svg_dump.as_deref(),
+                json,
+            )
+        }
         Command::Bless {
             dataset,
             commit,
