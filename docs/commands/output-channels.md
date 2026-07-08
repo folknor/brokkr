@@ -66,8 +66,8 @@ derived one. None of these apply on the no-kv `run_external_ok` path except
 | Harness fn | stdout | stderr kv -> results.db | FIFO -> sidecar.db | Used by |
 |---|---|---|---|---|
 | `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | all `--` run mode (no `--bench`) |
-| `run_external_ok` | captured, dropped | no | yes | every pbfhogg bench command |
-| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `tilegen` bench |
+| `run_external_ok` | captured, dropped | no | yes | every pbfhogg bench command + elivagar `tilegen` |
+| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
 | `run_hotpath_capture` | captured | via JSON report | yes | `--hotpath` / `--alloc`, both projects |
 
@@ -126,23 +126,27 @@ varies per command.
 
 | Command | BuildKind | Bench path | sidecar | stderr kv |
 |---|---|---|---|---|
-| tilegen | MainBinary | run_external_with_kv_raw | yes | **yes** |
+| tilegen | MainBinary | run_external_ok | yes | no |
 | pmtiles-writer | Example | run_internal / run_captured | no | no |
 | node-store | Example | run_internal / run_captured | no | no |
 | planetiler | NoBuild | external Java tool | no | no |
 | tilemaker | NoBuild | external C++ tool | no | no |
 
-`tilegen` is the one command in either project that feeds **both** DBs by
-both structured channels: counters to sidecar.db, stderr `key=value` (with a
-required `elapsed_ms=`/`total_ms=`) to results.db. The example micro-benches
-record only brokkr's wall-clock `elapsed_ms`; their stderr and any counters
-are discarded. The external baselines build no Rust binary at all.
+`tilegen` now behaves exactly like a pbfhogg command: brokkr's own best-of-N
+external wall-clock `elapsed_ms`, all metrics to sidecar.db as FIFO counters,
+stderr captured and discarded (no `elapsed_ms=` contract). It used to be the
+one command feeding results.db `kv` via stderr `key=value`; that moved to FIFO
+counters on the elivagar side (54f9b07). The example micro-benches record only
+brokkr's wall-clock `elapsed_ms`; their stderr and any counters are discarded.
+The external baselines build no Rust binary at all.
 
 ## Quick decision guide
 
-- Want a metric in `brokkr results`? Emit `key=value` on stderr **and** an
-  `elapsed_ms=` line - but only elivagar `tilegen` currently reads them. A
-  pbfhogg command would need to be moved onto `run_external_with_kv_raw`.
+- Want a metric in `brokkr results`? On the main bench surface, no command
+  routes runtime metrics into results.db `kv` anymore - they all use FIFO
+  counters -> sidecar.db. The stderr-kv path survives only on the
+  read/write/merge/`self` micro-benches (`run_external_with_kv_raw`), where a
+  metric needs a `key=value` line **and** a mandatory `elapsed_ms=`/`total_ms=`.
 - Want a metric in `brokkr sidecar`? Emit an `@name=value` counter to
   `BROKKR_MARKER_FIFO`. Works for every pbfhogg command and elivagar
   `tilegen` (any path that spawns the sidecar), in bench/hotpath/alloc modes.

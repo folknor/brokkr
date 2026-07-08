@@ -14,12 +14,12 @@ themselves, see `docs/commands/output-channels.md`.
 | Dispatch entry | `run_command_with_params` | `run_command` |
 | Per-command params | `CommandParams` (io flags, snapshot) | none |
 | Build kinds | one: `pbfhogg-cli` main binary | three: MainBinary / Example / NoBuild |
-| Bench harness path | uniform: `run_external_ok` | varies by build kind |
-| Bench timing source | brokkr external wall-clock | tilegen: self-reported stderr `elapsed_ms`; examples: external wall-clock |
-| stderr `key=value` -> results.db | never | tilegen only |
+| Bench harness path | uniform: `run_external_ok` | MainBinary `run_external_ok`; Example `run_internal`; NoBuild external |
+| Bench timing source | brokkr external wall-clock | brokkr external wall-clock (tilegen + examples) |
+| stderr `key=value` -> results.db | never | never |
 | I/O mode flags | `--direct-io` / `--io-uring` / `--compression` | none |
 | Output artifact lifecycle | `promote_artifact` + snapshots | `rename_elivagar_output` + durable output store (regress/bless) |
-| Run-specific metadata | - | `locations_on_ways` stderr detection |
+| Run-specific metadata | - | - |
 | External-tool baselines | none | planetiler (Java), tilemaker (C++) |
 
 ## 1. Dispatch entry point and parameters
@@ -59,22 +59,23 @@ captured and dropped; no stderr kv parsing.
 
 elivagar forks by build kind (`run_elivagar_bench`):
 
-- MainBinary -> `run_elivagar_wallclock` -> `run_external_with_kv_raw`.
-  Timing is the subprocess's **self-reported** `elapsed_ms` from stderr
-  (`types_run.rs:397-398`), not external wall-clock. stderr `key=value`
-  metrics land in results.db.
+- MainBinary -> `run_elivagar_wallclock` -> `run_external_ok`. **Same path
+  pbfhogg uses:** timing is brokkr's own best-of-N external wall-clock
+  (`elapsed_to_ms`), and stderr is captured and discarded. tilegen emits all
+  its metrics as FIFO sidecar counters (elivagar-side 54f9b07), so brokkr no
+  longer reads stderr - there is no `elapsed_ms=` contract. Runs are
+  distinguished purely by their recorded `cli_args` (the `--locations-on-ways`
+  flag lands in the subprocess argv when passed), exactly as pbfhogg does.
 - Example -> `run_elivagar_internal` -> `run_internal` + `run_captured`.
   The example self-iterates; brokkr times one external invocation via
-  external wall-clock (`elapsed_to_ms`, `dispatch.rs:323`) and stores only
-  `elapsed_ms` (`kv: vec![]`).
+  external wall-clock (`elapsed_to_ms`) and stores only `elapsed_ms`
+  (`kv: vec![]`).
 - NoBuild -> external-tool handling, outside this path.
 
-**This is the crux the "do run_pbfhogg_wallclock for elivagar too" idea
-targets:** pbfhogg's uniform external-wall-clock, best-of-N,
-`run_external_ok` path is simpler and mode-agnostic, whereas elivagar's
-tilegen depends on the binary self-reporting `elapsed_ms` on stderr (and
-erroring if it's absent). Unifying would mean giving elivagar a
-wall-clock path that doesn't require the stderr `elapsed_ms=` contract.
+The tilegen timing source used to be the crux divergence - it depended on the
+binary self-reporting `elapsed_ms` on stderr and erroring if it was absent.
+That's now gone: tilegen routes through the same `run_external_ok` wall-clock
+path as pbfhogg, so both are uniform, best-of-N, and mode-agnostic.
 
 ## 4. Output channels into the DBs
 
@@ -84,9 +85,10 @@ Consequence of #3, spelled out per command in
 - **sidecar.db** (`emit_counter`/markers via FIFO): every pbfhogg command and
   elivagar `tilegen`. **Not** elivagar examples (their `run_captured` path
   sets no `BROKKR_MARKER_FIFO`) nor the NoBuild tools.
-- **results.db `kv`** (stderr `key=value`): elivagar `tilegen` only. No
-  pbfhogg command reads stderr kv; pbfhogg metrics must go out as FIFO
-  counters instead.
+- **results.db `kv`** (stderr `key=value`): none. Neither pbfhogg nor elivagar
+  reads stderr kv into results.db anymore - all runtime metrics go out as FIFO
+  counters into sidecar.db instead. (tilegen used to be the sole exception via
+  `run_external_with_kv_raw`; it moved to `run_external_ok` + FIFO counters.)
 
 ## 5. I/O mode flags
 
@@ -113,11 +115,14 @@ store; only `clean --worktrees` reclaims it. See
 
 ## 7. Run-specific metadata
 
-elivagar's tilegen path scans stderr with
-`detect_locations_on_ways_stderr` and stamps
-`meta.locations_on_ways_detected` into the row metadata. pbfhogg has no
-comparable stderr-derived metadata step (its equivalent knobs are explicit
-CLI flags recorded in `cli_args`).
+Neither bench path derives metadata from stderr. tilegen's old
+`detect_locations_on_ways_stderr` -> `meta.locations_on_ways_detected` stamp
+was dropped when tilegen moved to `run_external_ok` (it no longer reads
+stderr); locations-on-ways is now distinguished by the `--locations-on-ways`
+flag in `cli_args`, matching how pbfhogg records its equivalent knobs.
+(elivagar's hotpath/alloc path still parses stderr for the stamp, since
+`run_hotpath_capture` returns stderr regardless - that's the one place the
+detection survives.)
 
 ## What they share
 
@@ -128,10 +133,14 @@ inherited stdio, no DB, no sidecar) and same `--hotpath`/`--alloc` path
 (`run_hotpath_capture`, JSON report into results.db). The divergences above
 are all in the bench-mode dispatch, not the shared plumbing.
 
-## Reconciliation candidates (not yet done)
+## Reconciliation history
 
-- Give elivagar a pbfhogg-style external-wall-clock bench path so tilegen
-  needn't self-report `elapsed_ms` on stderr.
-- Or, conversely, let pbfhogg commands opt into stderr-kv metrics
-  (`run_external_with_kv_raw`) so per-command counters can reach results.db
-  instead of only sidecar.db.
+- **Done:** tilegen now uses the pbfhogg-style external-wall-clock bench path
+  (`run_external_ok`), so it no longer self-reports `elapsed_ms` on stderr. The
+  elivagar binary emits its metrics as FIFO sidecar counters instead
+  (elivagar-side 54f9b07). This converged the timing source, the stderr->kv
+  channel, and the run-specific metadata rows (#3, #4, #7 above).
+- **Not done (and no longer needed for tilegen):** letting pbfhogg commands
+  opt into stderr-kv metrics. With tilegen off the stderr-kv path, no command
+  routes runtime metrics into results.db `kv` - they all use FIFO counters ->
+  sidecar.db.

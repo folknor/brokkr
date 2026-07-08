@@ -148,8 +148,8 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
 ///
 /// Uses `ElivagarCommand::build_config()` to determine how to build and
 /// `ElivagarCommand::build_args()` to get the argument vector. Tilegen uses
-/// `run_external_with_kv` (parses kv from stderr); micro-benchmarks use
-/// `run_internal` (examples handle their own iteration).
+/// `run_external_ok` (brokkr's own external wall-clock, pbfhogg-style);
+/// micro-benchmarks use `run_internal` (examples handle their own iteration).
 fn run_elivagar_bench(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::elivagar::commands::BuildKind;
 
@@ -165,8 +165,12 @@ fn run_elivagar_bench(req: &MeasureRequest, command: &ElivagarCommand) -> Result
 
 /// Elivagar wallclock benchmark for the main binary (Tilegen).
 ///
-/// Builds the main binary, runs via `run_external_with_kv`, parses kv metrics
-/// from stderr, detects `locations_on_ways`, and stores results.
+/// Builds the main binary and runs via `run_external_ok` - brokkr's own
+/// best-of-N external wall-clock, identical to the pbfhogg path. tilegen emits
+/// all metrics as FIFO counters (sidecar.db) as of the elivagar side's 54f9b07,
+/// so brokkr no longer reads stderr: there is no `elapsed_ms=` contract, and
+/// runs are distinguished purely by their recorded `cli_args` (the
+/// `--locations-on-ways` flag lands in the subprocess argv when passed).
 fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new(
@@ -208,7 +212,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         req.runs(),
     ));
 
-    let mut bench_config = BenchConfig {
+    let bench_config = BenchConfig {
         command: command.result_command().into(),
         mode: None,
         input_file: if command.needs_pbf() {
@@ -232,20 +236,12 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         metadata: command.metadata(),
     };
 
-    // Use kv parsing: elivagar emits timing/metrics to stderr.
-    // Sidecar monitoring runs automatically via run_external_with_kv_raw.
-    let (result, stderr) = ctx.harness.run_external_with_kv_raw(
-        &bench_config,
-        &ctx.binary,
-        &arg_refs,
-        req.project_root,
-    )?;
-    let detected = elivagar::detect_locations_on_ways_stderr(&stderr);
-    bench_config.metadata.push(KvPair::text(
-        "meta.locations_on_ways_detected",
-        detected.to_string(),
-    ));
-    ctx.harness.record_result(&bench_config, &result)?;
+    // pbfhogg-style: brokkr's own best-of-N external wall-clock. tilegen emits
+    // all metrics as FIFO counters (sidecar.db), so brokkr no longer reads its
+    // stderr - the human prose that remains there is captured and discarded.
+    // records internally + stores sidecar linked to the results uuid.
+    ctx.harness
+        .run_external_ok(&bench_config, &ctx.binary, &arg_refs, req.project_root, &[])?;
 
     rename_elivagar_output(
         command,
