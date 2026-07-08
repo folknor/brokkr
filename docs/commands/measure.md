@@ -80,7 +80,141 @@ child fails (OOM, signal, non-zero exit).
 Filter flags `--phase`, `--range`, `--where` compose with `--samples` and
 `--stat`; `--fields`/`--every`/`--head`/`--tail` only with `--samples`. A UUID
 is required except for `--compare`; the `dirty` pseudo-UUID resolves to the
-most recent failed/dirty-tree run.
+most recent failed/dirty-tree run (see "Run lifecycle" below for how it is
+set). `--bench N` stores **all N runs** in sidecar.db but marks
+`best_run_idx` (the run whose wall-clock matched the reported `elapsed_ms`);
+the default view and `--stat`/`--phase` read that best run unless another
+`run_idx` is selected.
+
+## Sample fields
+
+Each 100ms sample is assembled by `read_proc_metrics` from three files, and
+**all three reads must succeed or the whole sample is dropped** (a partial
+read at process exit would corrupt phase deltas). Field names below are the
+tokens accepted by `--fields`, `--where`, and `--stat`.
+
+| Field | Source | Meaning |
+|---|---|---|
+| `i` | - | sample index |
+| `t` | - | seconds since process start (always present in `--samples` JSON) |
+| `rss` | status `VmRSS` | resident set (kB) |
+| `anon` | status `RssAnon` | anonymous RSS (kB) - the usual "real memory" signal |
+| `file` | status `RssFile` | file-backed RSS (kB) |
+| `shmem` | status `RssShmem` | shared-memory RSS (kB) |
+| `swap` | status `VmSwap` | swapped-out (kB) |
+| `hwm` | status `VmHWM` | peak RSS high-water mark (kB), carried monotonically |
+| `vsize` | stat field 22 | virtual size (bytes) |
+| `utime`/`stime` | stat 14/15 | user/kernel CPU jiffies (decode via `_SC_CLK_TCK`) |
+| `threads` | stat field 20 | live thread count |
+| `minflt`/`majflt` | stat 10/12 | minor/major page faults (cumulative) |
+| `rchar`/`wchar` | io | bytes read/written via syscalls (cumulative) |
+| `rd`/`wr` | io `read_bytes`/`write_bytes` | bytes to/from the block layer |
+| `cwr` | io `cancelled_write_bytes` | writes cancelled before flush |
+| `syscr`/`syscw` | io | read/write syscall counts |
+| `vcs`/`nvcs` | status | voluntary / non-voluntary context switches |
+
+## Sample filters & projection
+
+Compose these with `--samples` (and, where noted, `--stat`):
+
+- `--fields rss,anon` - project to a subset (JSON always keeps `t`).
+- `--where "majflt>0"` - filter rows; operators `>`, `<`, `>=`, `<=`, `==`,
+  `!=` against any field above.
+- `--every N` - keep every Nth row (downsample).
+- `--tail N` then `--head M` - tail is applied first, so `--tail 100 --head 10`
+  is "last 100 rows, then the first 10 of those".
+- `--range 10.0..82.0` - seconds window; `--phase FOO` - restrict to a marker
+  phase (name-resolution rules above).
+- `--stat <field>` prints min/max/avg + p50/p95 (linear-interpolation
+  percentiles, matching `harness::percentile`).
+
+## Marker & counter rules
+
+The FIFO carries two line types (parsed in `SidecarFifo::drain`,
+`src/sidecar.rs`):
+
+- **Marker** - `<ts_us> <name>`. Assigned a monotonic `marker_idx` in arrival
+  order; the last name seen is also mirrored to a status file so `brokkr lock`
+  can show the live phase. Markers are point-in-time bookmarks - the protocol
+  itself knows nothing about spans or pairs.
+- **Counter** - `<ts_us> @<name>=<value>`. The value **must parse as `i64`**
+  or the line is silently dropped. `<ts_us>` that doesn't parse is skipped for
+  either type. Timestamps are microseconds since process start.
+
+How marker *names* are interpreted is per query mode - the raw protocol is
+convention-free, but individual views opt into naming conventions:
+
+| View | Marker interpretation |
+|---|---|
+| default summary / `--markers` / `--phase` | each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); `--phase FOO` matches exact, then `FOO_START`..`FOO_END`, then substring |
+| `--durations` | pairs `FOO_START` with the next `FOO_END`; unpaired starts render as standalone |
+| `--stalls` | sums `WAIT_<CATEGORY>_START`/`_END` pair durations per category as a fraction of wall |
+| `--stop` | three spellings resolve to one marker: verbatim `FOO_END`; `-FOO` -> `FOO_END`; bare `FOO` -> `FOO_END` (fallback prints a notice) |
+
+See the README "Sidecar conventions" section for the emitter-side contract.
+
+## How `brokkr sidecar` renders
+
+**JSONL is the default** for every view (machine/LLM consumption); `--human`
+switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
+
+- **Provenance header** (`print_run_info`) is written to **stderr** so it never
+  contaminates the stdout JSONL: run timestamp/PID/command/mode/dataset, git
+  commit + wall time, non-zero exit code (with signal name, e.g. SIGKILL/OOM),
+  and the recorded binary path + xxh128 with a live match-check against disk.
+- **Per-phase summary** (default view): a `summary` record then one `phase`
+  record per segment. Human table columns: Phase, Duration, Peak RSS, Peak
+  Anon, Peak Mflt, Disk Read, Disk Write, Avg Cores, plus an indented
+  continuation line (user/kern cores, majflt, minflt, vol_cs, nonvol_cs,
+  peak_threads). Phases with **zero in-phase samples** (shorter than the 100ms
+  cadence) are dropped from the table but kept in JSONL with `avg_cores: null`.
+- **Avg cores** decodes `utime+stime` jiffy deltas against
+  `sysconf(_SC_CLK_TCK)` (read at runtime, not assumed 100) over the phase's
+  sample span; too-short spans render `-` (table) / `null` (JSON).
+- **Deltas are clamped to >= 0** (`Running::delta`, `phase_stats`) because
+  cumulative `/proc` counters could regress if the process exits mid-read.
+- `--compare` aligns run B's phases to run A by name and appends a `delta_pct`
+  on duration. `--counters` prints `t=<sec> name=value` (human) or one JSON
+  object per counter.
+
+## Run lifecycle: sampling, stop, kill, OOM
+
+- **Sampling cadence** is a fixed 100ms (`SAMPLE_INTERVAL_US`), driven by
+  `clock_nanosleep(TIMER_ABSTIME, CLOCK_MONOTONIC)` so the ~30µs of /proc read
+  overhead per tick doesn't accumulate drift. Each tick reads
+  `/proc/<pid>/{stat,io,status}`.
+- **`--stop <marker>`** SIGKILLs the whole child **process group**
+  (`send_signal_pgrp`, so descendants are reaped too) the moment the marker
+  lands. That SIGKILL is *not* treated as a failure - `stopped_by_marker`
+  flags it and the run records normally, so you can bench one phase in
+  isolation.
+- **`brokkr kill` (SIGTERM)** is handled by a `SigtermGuard` scoped to the
+  sidecar window only (outside it, SIGTERM falls through to default terminate
+  - there's no child to reap during `cargo build`/`check`). On catch, the
+  child is killed, the **partial** sidecar data is flushed under a fresh
+  UUID + the `dirty` alias, and the run returns `Interrupted`.
+- **OOM / crash preservation**: sidecar data is stored even when the child is
+  OOM-killed, segfaults, or exits non-zero - the `/proc` trajectory up to the
+  kill is the whole point. Failed/dirty runs get a random UUID and update the
+  `dirty` latest pointer, so `brokkr sidecar dirty` / `brokkr results dirty`
+  always resolve the most recent unstored run. The child is also marked as the
+  kernel OOM killer's preferred target (`src/oom.rs`) so a memory blow-up
+  takes the benchmarked process, not the host.
+
+## Sidecar backup & rotation
+
+After each stored run (while the bench lock is still held), `backup_sidecar`
+snapshots sidecar.db to `$XDG_DATA_HOME/brokkr/sidecar-backups/` (falling back
+to `~/.local/share/...`), named `<project>-sidecar.db` with rotation - this is
+the one place the project name enters the sidecar path. It keeps
+`SIDECAR_BACKUP_COPIES` (3) generations: `.db` (newest), `.db.1`, `.db.2`.
+
+The sequence is crash-safe: SQLite's **online backup API** writes a
+self-contained DELETE-journal copy to a temp file, runs `quick_check`, fsyncs
+it, shifts older copies (`.1`->`.2`), hard-links the current primary to `.1`,
+then atomically renames the temp into the primary slot and fsyncs the
+directory. A failure before the final rename leaves the existing primary
+intact. Backup failure is logged but **non-fatal** to the run.
 
 ## Hotpath JSON contract
 
