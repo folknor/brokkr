@@ -148,8 +148,17 @@ convention-free, but individual views opt into naming conventions:
 |---|---|
 | default summary / `--markers` / `--phase` | each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); `--phase FOO` matches exact, then `FOO_START`..`FOO_END`, then substring |
 | `--durations` | pairs `FOO_START` with the next `FOO_END`; unpaired starts render as standalone |
-| `--stalls` | sums `WAIT_<CATEGORY>_START`/`_END` pair durations per category as a fraction of wall |
 | `--stop` | three spellings resolve to one marker: verbatim `FOO_END`; `-FOO` -> `FOO_END`; bare `FOO` -> `FOO_END` (fallback prints a notice) |
+
+Markers are reserved for the small set of **true phase boundaries** - a
+high-frequency span in the marker stream drowns every phase-oriented view at
+once (each marker is a boundary). Accumulated blocking time is a *counter*
+concept instead:
+
+| View | Counter interpretation |
+|---|---|
+| `--stalls` | rolls up `*_wait_ns` counters: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall`. The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
+| `--counters` | prints every counter point verbatim (`t=<sec> name=value`), no aggregation |
 
 See the README "Sidecar conventions" section for the emitter-side contract.
 

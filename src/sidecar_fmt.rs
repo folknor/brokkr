@@ -1149,98 +1149,97 @@ fn build_phases(
     phases
 }
 
-/// Sum `WAIT_<CATEGORY>_START`/`_END` pair durations by category and
-/// render as total ms + fraction of run wall-clock. Runs that predate
-/// the convention - no `WAIT_*` markers at all - print a clear message
-/// pointing at the conventions section of the README so users don't
-/// confuse "nothing instrumented" with "no stalls observed."
+/// Roll up cumulative `*_wait_ns` counters into per-category blocking time and
+/// render as total ms + fraction of run wall-clock. `*_wait_ns` counters are
+/// the stall-accounting channel; markers are reserved for the small set of
+/// true phase boundaries (a stall span in the marker stream breaks every
+/// phase-oriented view at once, since each marker is treated as a boundary).
 ///
-/// Pairing reuses the same `_START`/`_END` logic as `--durations`.
-/// Unpaired `WAIT_*_START` markers are silently ignored (consistent
-/// with `--durations` treating them as "no duration known"). We could
-/// surface them as truncated-stall hints but they're rare enough in
-/// practice to not justify the noise.
-pub(crate) fn print_stalls(
-    markers: &[sidecar::Marker],
-    wall_us: i64,
-    human: bool,
-) {
-    use std::collections::BTreeMap;
-
-    let mut totals_us: BTreeMap<String, i64> = BTreeMap::new();
-    let mut consumed = vec![false; markers.len()];
-
-    for (i, m) in markers.iter().enumerate() {
-        if consumed[i] {
-            continue;
-        }
-        let Some(base) = m.name.strip_suffix("_START") else {
+/// Each `*_wait_ns` counter is strictly monotonic (an atomic add per blocking
+/// event), so the category total is the MAX observed value per name - the same
+/// clamp-on-regress reasoning used for cumulative `/proc` counters. The
+/// category is the name with `_wait_ns` stripped.
+///
+/// The `% of wall` column can and does exceed 100%: for a counter accumulated
+/// across concurrent threads, `wait_ns / wall` is the average number of threads
+/// blocked in that category at any instant (e.g. 430% ~= 4.3 threads parked in
+/// decode-send). Single-threaded waits (a reader parked on a channel) read as
+/// clean sub-100% fractions.
+///
+/// Runs with no `*_wait_ns` counters print a pointer to the conventions
+/// section so users don't confuse "nothing instrumented" with "no stalls."
+/// Reduce raw `*_wait_ns` counter points to per-category totals. Each counter
+/// is strictly monotonic, so the total is the MAX value observed per name
+/// (robust to a final partial read the same way cumulative `/proc` deltas are
+/// clamped). The category is the name with `_wait_ns` stripped; non-`_wait_ns`
+/// counters are ignored.
+fn stall_totals_ns(counters: &[sidecar::Counter]) -> std::collections::BTreeMap<String, i64> {
+    let mut totals_ns = std::collections::BTreeMap::new();
+    for c in counters {
+        let Some(category) = c.name.strip_suffix("_wait_ns") else {
             continue;
         };
-        let Some(category) = base.strip_prefix("WAIT_") else {
-            continue;
-        };
-        consumed[i] = true;
-        let end_name = format!("{base}_END");
-        let end = markers[i + 1..]
-            .iter()
-            .enumerate()
-            .find(|(_, m2)| m2.name == end_name);
-        if let Some((j, end_m)) = end {
-            consumed[i + 1 + j] = true;
-            let dur_us = end_m.timestamp_us - m.timestamp_us;
-            *totals_us.entry(category.to_owned()).or_insert(0) += dur_us.max(0);
-        }
+        let entry = totals_ns.entry(category.to_owned()).or_insert(0);
+        *entry = (*entry).max(c.value);
     }
+    totals_ns
+}
 
-    if totals_us.is_empty() {
+pub(crate) fn print_stalls(counters: &[sidecar::Counter], wall_us: i64, human: bool) {
+    let totals_ns = stall_totals_ns(counters);
+
+    if totals_ns.is_empty() {
         crate::output::result_msg(
-            "no WAIT_* marker pairs in this run - see the \"Sidecar conventions\" \
+            "no *_wait_ns counters in this run - see the \"Sidecar conventions\" \
              section of brokkr's README for the stall-attribution convention",
         );
         return;
     }
 
     if human {
-        print_stalls_human(&totals_us, wall_us);
+        print_stalls_human(&totals_ns, wall_us);
     } else {
-        print_stalls_jsonl(&totals_us, wall_us);
+        print_stalls_jsonl(&totals_ns, wall_us);
     }
 }
 
-fn print_stalls_human(totals_us: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
-    println!("{:<24} {:>12} {:>10}", "Category", "Total", "% of wall");
-    println!("{}", "-".repeat(48));
-    let mut entries: Vec<(&String, &i64)> = totals_us.iter().collect();
+fn print_stalls_human(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
+    println!("{:<28} {:>12} {:>10}", "Category", "Total", "% of wall");
+    println!("{}", "-".repeat(52));
+    let mut entries: Vec<(&String, &i64)> = totals_ns.iter().collect();
     entries.sort_by(|a, b| b.1.cmp(a.1));
-    for (cat, total_us) in entries {
-        let ms = total_us / 1_000;
-        let pct = wall_pct(*total_us, wall_us);
-        let pct_str = pct.map_or_else(|| "-".to_owned(), |p| format!("{p:>6.2}%"));
-        println!("{cat:<24} {ms:>9}ms {pct_str:>10}");
+    for (cat, total_ns) in entries {
+        let total_str = format!("{}ms", total_ns / 1_000_000);
+        let pct = wall_pct(*total_ns, wall_us);
+        let pct_str = pct.map_or_else(|| "-".to_owned(), |p| format!("{p:.2}%"));
+        println!("{cat:<28} {total_str:>12} {pct_str:>10}");
     }
 }
 
-fn print_stalls_jsonl(totals_us: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
-    for (cat, total_us) in totals_us {
+fn print_stalls_jsonl(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
+    for (cat, total_ns) in totals_ns {
         let obj = serde_json::json!({
             "type": "stall",
             "category": cat,
-            "total_ms": total_us / 1_000,
-            "total_us": total_us,
+            "total_ms": total_ns / 1_000_000,
+            "total_ns": total_ns,
             "wall_us": wall_us,
-            "wall_fraction": wall_pct(*total_us, wall_us).map(|p| p / 100.0),
+            "wall_fraction": wall_pct(*total_ns, wall_us).map(|p| p / 100.0),
         });
         println!("{obj}");
     }
 }
 
+/// Percent of wall-clock a cumulative `*_wait_ns` total represents. `total_ns`
+/// is nanoseconds, `wall_us` microseconds - converted to a like-units ratio.
+/// Can exceed 100 for counters accumulated across concurrent threads.
 #[allow(clippy::cast_precision_loss)]
-fn wall_pct(numerator_us: i64, wall_us: i64) -> Option<f64> {
+fn wall_pct(total_ns: i64, wall_us: i64) -> Option<f64> {
     if wall_us <= 0 {
         return None;
     }
-    Some(numerator_us as f64 / wall_us as f64 * 100.0)
+    let wall_ns = wall_us as f64 * 1_000.0;
+    Some(total_ns as f64 / wall_ns * 100.0)
 }
 
 /// Print START/END marker pairs with duration + peak RSS and majflt from samples.
@@ -1266,3 +1265,51 @@ pub(crate) fn print_counters(counters: &[sidecar::Counter], human: bool) {
     }
 }
 
+
+#[cfg(test)]
+mod stall_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn counter(name: &str, value: i64) -> sidecar::Counter {
+        sidecar::Counter { timestamp_us: 0, name: name.to_owned(), value }
+    }
+
+    #[test]
+    fn rolls_up_max_per_name_and_strips_suffix() {
+        // Monotonic counter emitted repeatedly: the total is the MAX, not the
+        // sum of the emitted points.
+        let counters = vec![
+            counter("sort_chunk_write_wait_ns", 100),
+            counter("sort_chunk_write_wait_ns", 250),
+            counter("sort_chunk_write_wait_ns", 563_000_000),
+            counter("assemble_partition_batch_wait_ns", 1_868_000_000),
+            counter("tiles_written", 42), // not a wait counter -> ignored
+        ];
+        let totals = stall_totals_ns(&counters);
+        assert_eq!(totals.len(), 2, "non-wait counters must be ignored");
+        assert_eq!(totals["sort_chunk_write"], 563_000_000, "max, not sum");
+        assert_eq!(totals["assemble_partition_batch"], 1_868_000_000);
+    }
+
+    #[test]
+    fn wall_pct_exceeds_100_for_concurrent_waits() {
+        // 77s cumulative decode-wait over an 18s wall ~= 4.3 threads parked.
+        let pct = wall_pct(77_000_000_000, 18_000_000).unwrap();
+        assert!(pct > 400.0 && pct < 440.0, "got {pct}");
+        // Single-thread wait reads as a clean sub-100% fraction.
+        let single = wall_pct(1_800_000_000, 18_000_000).unwrap();
+        assert!((single - 10.0).abs() < 0.01, "got {single}");
+    }
+
+    #[test]
+    fn wall_pct_guards_zero_wall() {
+        assert!(wall_pct(1_000, 0).is_none());
+    }
+
+    #[test]
+    fn empty_when_no_wait_counters() {
+        let counters = vec![counter("tiles_written", 42)];
+        assert!(stall_totals_ns(&counters).is_empty());
+    }
+}

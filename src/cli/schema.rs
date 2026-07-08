@@ -1068,13 +1068,16 @@ Examples:
         #[arg(long, conflicts_with_all = ["samples", "markers", "durations", "stat", "compare", "stalls"])]
         counters: bool,
 
-        /// Sum durations of WAIT_* marker pairs by category.
+        /// Roll up cumulative `*_wait_ns` counters by category.
         ///
-        /// Convention: pbfhogg wraps blocking points in named spans whose
-        /// emission marker pair is `WAIT_<CATEGORY>_START` / `WAIT_<CATEGORY>_END`.
-        /// This view pairs them, groups by category, and reports total stall
-        /// time as a fraction of run wall-clock. Runs from before the
-        /// convention (no `WAIT_*` markers) produce an informative empty result.
+        /// Convention: a target accumulates blocking time per category into a
+        /// strictly-monotonic counter named `<category>_wait_ns` (one atomic add
+        /// per blocking event). This view takes the max per name, strips the
+        /// `_wait_ns` suffix for the category, and reports total stall time as a
+        /// fraction of run wall-clock - which can exceed 100% for waits summed
+        /// across concurrent threads (it's the avg threads parked in that
+        /// category). Runs with no `*_wait_ns` counters produce an informative
+        /// empty result.
         #[arg(long, conflicts_with_all = ["samples", "markers", "durations", "counters", "stat", "compare"])]
         stalls: bool,
 

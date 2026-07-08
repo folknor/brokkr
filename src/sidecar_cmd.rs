@@ -184,17 +184,15 @@ fn run_stalls(
 ) -> Result<(), DevError> {
     print_run_info(sdb, uuid_prefix);
     let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
-    if markers.is_empty() {
-        output::result_msg("no sidecar markers for this result");
-        return Ok(());
-    }
+    // Stalls roll up cumulative `*_wait_ns` counters (not markers - markers are
+    // reserved for phase boundaries). print_stalls handles the empty case.
+    let counters = sdb.query_counters(uuid_prefix, run_filter)?;
     let samples = sdb.query_samples(uuid_prefix, run_filter)?;
     let wall_us = samples
         .first()
         .zip(samples.last())
         .map_or(0, |(a, b)| b.timestamp_us - a.timestamp_us);
-    crate::sidecar_fmt::print_stalls(&markers, wall_us, q.human);
+    crate::sidecar_fmt::print_stalls(&counters, wall_us, q.human);
     Ok(())
 }
 

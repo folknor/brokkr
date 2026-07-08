@@ -281,7 +281,7 @@ brokkr sidecar <uuid> --samples --range 10.0..82.0            # time window filt
 brokkr sidecar <uuid> --markers                    # raw marker events (JSONL)
 brokkr sidecar <uuid> --durations                  # START/END pair timings
 brokkr sidecar <uuid> --counters                   # application counters
-brokkr sidecar <uuid> --stalls                     # WAIT_* stall attribution (see conventions below)
+brokkr sidecar <uuid> --stalls                     # *_wait_ns counter stall attribution (see conventions below)
 brokkr sidecar <uuid> --stat anon                  # min/max/avg/p50/p95 for a field
 brokkr sidecar <uuid> --stat anon --phase STAGE2   # per-phase stat
 brokkr sidecar --compare <uuid_a> <uuid_b>         # phase-aligned comparison
@@ -294,11 +294,11 @@ Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--s
 
 The FIFO protocol is convention-free - brokkr doesn't mandate any naming scheme on markers or counters. Two optional conventions unlock richer views when emitters adopt them:
 
-- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` (and `--stalls`, see below) to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. `--stop FOO_END` kills the child on the end marker verbatim; `--stop -FOO` and `--stop FOO` are shorthand aliases that resolve to `FOO_END` (the fallback form prints a one-line notice so the resolved name is visible).
+- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. `--stop FOO_END` kills the child on the end marker verbatim; `--stop -FOO` and `--stop FOO` are shorthand aliases that resolve to `FOO_END` (the fallback form prints a one-line notice so the resolved name is visible). **Markers are for the small set of true phase boundaries only** - a high-frequency span emitted as marker pairs drowns every phase-oriented view at once (each marker is treated as a boundary), so per-event blocking spans belong in counters, not markers (see below).
 
-- **`WAIT_<CATEGORY>_START` / `WAIT_<CATEGORY>_END` stall spans.** Wrap blocking points (channel sends, mutex waits, I/O backpressure) in marker pairs whose name begins `WAIT_`. `brokkr sidecar <uuid> --stalls` sums durations by category and reports them as a fraction of run wall-clock. Categories are free-form: `WAIT_WRITER`, `WAIT_PAYLOAD`, `WAIT_SPILL`, `WAIT_DECODE`, whatever names the blocking points the project wants to attribute. Runs from before a project adopts the convention produce a clear "no WAIT_* marker pairs" message rather than silent empty output.
+- **`<category>_wait_ns` stall counters.** Accumulated blocking time is a *counter* concept, not a marker one. Emit a strictly-monotonic counter named `<category>_wait_ns` - one atomic add of the blocked nanoseconds per blocking event (channel sends, mutex waits, I/O backpressure, one-shot joins). `brokkr sidecar <uuid> --stalls` takes the max value per name (monotonic, so max is the cumulative total), strips `_wait_ns` for the category, and reports each as ms + `% of wall`. The `%` can exceed 100 for a counter accumulated across concurrent threads - it's the average number of threads parked in that category at any instant (e.g. 430% ~= 4.3 threads in decode-send); single-threaded waits read as clean sub-100% fractions. The view spans projects: it rolls up pbfhogg's `pipeline_decoded_send_wait_ns`, `pipeline_raw_send_wait_ns`, ... alongside elivagar's `sort_chunk_write_wait_ns`, `assemble_partition_batch_wait_ns`, `pmtiles_write_wait_ns`, ... in one table. Runs with no `*_wait_ns` counters produce a clear "no *_wait_ns counters" message rather than silent empty output.
 
-Both conventions are additive - projects can opt in incrementally. Existing emissions keep working with no change, and the only required mechanical migration is whichever blocking points you want to instrument.
+Both conventions are additive - projects can opt in incrementally. Existing emissions keep working with no change, and the only required mechanical migration is whichever blocking points you want to instrument. (Historical note: `--stalls` originally paired `WAIT_<CATEGORY>_START`/`_END` markers; it moved to `*_wait_ns` counters so the marker stream stays reserved for phase boundaries and the stall view unifies with pbfhogg's existing wait counters. Brokkr no longer treats any `WAIT_`-prefixed marker specially.)
 
 See [`notes/sidecar.md`](notes/sidecar.md) for the scoped plan these conventions were introduced with; [`LLM.md`](LLM.md) has broader history.
 
