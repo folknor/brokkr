@@ -23,9 +23,7 @@ pub(crate) fn run_command(
     project::require(req.project, Project::Elivagar, command.id())?;
 
     if req.dry_run {
-        return Err(DevError::Config(
-            "--dry-run is not yet supported for elivagar commands".into(),
-        ));
+        return run_elivagar_dry_run(req, command);
     }
 
     // External tools (Planetiler, Tilemaker) keep their old dispatch path.
@@ -40,6 +38,62 @@ pub(crate) fn run_command(
             run_elivagar_hotpath(req, command)
         }
     }
+}
+
+/// Dry-run mode: validate config, path resolution, and argv construction
+/// without building or running. Mirrors pbfhogg's `run_pbfhogg_dry_run`.
+///
+/// Does: project bootstrap (cargo metadata only, no compile), host-path
+/// resolution, input-PBF resolution (requires the file to exist, same as
+/// pbfhogg's dry-run which hash-verifies its input), and arg-vector
+/// construction (catches `build_args` failures). Does NOT: cargo build, lock
+/// acquisition, or process execution.
+///
+/// Note: for `tilegen`, `build_args` creates the scratch + `tilegen_tmp` dirs
+/// as a side effect - they'd be created by any real run anyway, and a routine
+/// `brokkr clean` reclaims `tilegen_tmp`.
+fn run_elivagar_dry_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
+    // Resolve host paths without building (cargo metadata only, no compile).
+    let pi = crate::context::bootstrap(req.build_root)?;
+    let paths =
+        crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
+
+    // Resolve + report the input PBF for commands that need one.
+    let pbf_str = if command.needs_pbf() {
+        let (pbf_path, file_mb) =
+            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        output::run_msg(&format!(
+            "[dry-run] pbf: {} ({file_mb:.0} MB)",
+            pbf_path.display()
+        ));
+        pbf_path
+            .to_str()
+            .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?
+            .to_owned()
+    } else {
+        String::new()
+    };
+
+    // External tools construct their own argv elsewhere; there's nothing to
+    // validate here beyond the resolved input.
+    if command.is_external() {
+        output::run_msg(&format!(
+            "[dry-run] {} is an external tool (no Rust build)",
+            command.id()
+        ));
+        output::run_msg("[dry-run] ok");
+        return Ok(());
+    }
+
+    // Construct the arg vector (catches any build_args failures).
+    let args = command.build_args(&pbf_str, &paths.scratch_dir, &paths.data_dir)?;
+    output::run_msg(&format!(
+        "[dry-run] {} args: {}",
+        command.id(),
+        args.join(" ")
+    ));
+    output::run_msg("[dry-run] ok");
+    Ok(())
 }
 
 /// Elivagar run mode: build, run once, print timing. No DB storage.
