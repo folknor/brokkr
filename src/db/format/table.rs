@@ -106,17 +106,59 @@ fn common_uppercase_prefix<'a>(keys: impl IntoIterator<Item = &'a str>) -> Optio
     Some(prefix.to_owned())
 }
 
-/// Build a compact args summary from the row's `cli_args`, dropping
-/// the leading binary path, the subcommand token (already represented
-/// by the `command` column, possibly under a preset alias like
-/// `write` → `bench-write`), any absolute-path positional arguments
-/// (input/output/config files), and the `-o <output>` pair. What's
-/// left is the row's distinguishing flag set.
+/// Build a compact args summary of the row's *distinguishing* flags.
 ///
-/// Truncated to [`ARGS_MAX_WIDTH`] chars with a trailing `…` marker.
-/// Returns an empty string for rows without `cli_args` (older rows or
-/// internal-only commands).
-fn format_args_summary(cli_args: &str) -> String {
+/// Prefers `brokkr_args` - the invocation the user actually typed
+/// (`brokkr tilegen --bench 3 --dataset germany --variant locations`) -
+/// because the resolved `cli_args` are mostly scaffolding brokkr injects
+/// on every run (`--tmp-dir`, `--ocean`, `-o <output>`, the input path),
+/// which is invariant across rows and so carries no discriminating value.
+/// From `brokkr_args` we drop the leading `brokkr`, the subcommand token
+/// (already the `command` column) and `--dataset <x>` (already the
+/// `dataset` column). What's left - `--bench N`, `--variant <v>`,
+/// `--compress-sort-chunks <c>`, … - is exactly what separates one row
+/// from another.
+///
+/// Falls back to the legacy `cli_args` heuristic for rows written before
+/// `brokkr_args` was captured. Truncated to [`ARGS_MAX_WIDTH`] chars with
+/// a trailing `…`; empty for rows with neither source.
+fn format_args_summary(row: &StoredRow) -> String {
+    if !row.brokkr_args.is_empty() {
+        return truncate_args(&format_brokkr_args_summary(&row.brokkr_args));
+    }
+    truncate_args(&format_cli_args_summary(&row.cli_args))
+}
+
+/// Summarize `brokkr_args`, dropping the `brokkr` prefix, the subcommand
+/// token, and the `--dataset <x>` / `--dataset=<x>` pair (redundant with
+/// the dedicated columns).
+fn format_brokkr_args_summary(brokkr_args: &str) -> String {
+    let mut tokens = brokkr_args.split_whitespace();
+    // Drop the leading `brokkr` and the subcommand token (the latter is
+    // already represented by the `command` column).
+    tokens.next();
+    tokens.next();
+
+    let mut kept: Vec<&str> = Vec::new();
+    let mut iter = tokens.peekable();
+    while let Some(tok) = iter.next() {
+        // `--dataset <x>` / `--dataset=<x>` - already the `dataset` column.
+        if tok == "--dataset" {
+            iter.next();
+            continue;
+        }
+        if tok.starts_with("--dataset=") {
+            continue;
+        }
+        kept.push(tok);
+    }
+    kept.join(" ")
+}
+
+/// Legacy summary from the resolved `cli_args`, dropping the binary path,
+/// the subcommand token, absolute-path positionals, and the `-o <output>`
+/// pair. Retained for rows written before `brokkr_args` was captured.
+fn format_cli_args_summary(cli_args: &str) -> String {
     if cli_args.is_empty() {
         return String::new();
     }
@@ -143,10 +185,14 @@ fn format_args_summary(cli_args: &str) -> String {
         }
         kept.push(tok);
     }
+    kept.join(" ")
+}
 
-    let joined = kept.join(" ");
+/// Truncate a joined args string to [`ARGS_MAX_WIDTH`] chars, appending a
+/// trailing `…` marker when it overflows.
+fn truncate_args(joined: &str) -> String {
     if joined.chars().count() <= ARGS_MAX_WIDTH {
-        joined
+        joined.to_owned()
     } else {
         let mut out: String = joined.chars().take(ARGS_MAX_WIDTH - 1).collect();
         out.push('…');
@@ -192,7 +238,7 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
         if input_str.len() > w.input {
             w.input = input_str.len();
         }
-        let args_str = format_args_summary(&row.cli_args);
+        let args_str = format_args_summary(row);
         if args_str.chars().count() > w.args {
             w.args = args_str.chars().count();
         }
@@ -245,7 +291,7 @@ fn append_table_row(
     let uuid_short = short_uuid(&row.uuid);
     let elapsed_str = format_elapsed(row.elapsed_ms);
     let input_str = matcher.short_name(&row.input_file);
-    let args_str = format_args_summary(&row.cli_args);
+    let args_str = format_args_summary(row);
     write!(
         out,
         "{:<uuid_w$}  {:<ts_w$}  {:<cm_w$}  {:<cmd_w$}  {:<var_w$}  {:>el_w$}  {:<in_w$}  {:<args_w$}",
@@ -435,6 +481,73 @@ mod tests {
         // PMTiles files like `denmark-elivagar.pmtiles` collapse to the dataset.
         let result = format_input_with_empty("denmark-elivagar.pmtiles", Some(250.0));
         assert_eq!(result, "denmark (250 MB)");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_args_summary (brokkr_args / cli_args)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn brokkr_args_keeps_distinguishing_flags() {
+        // The two germany rows that motivated this: same resolved cli_args,
+        // but the brokkr invocation differs in --bench count and --variant.
+        // Those must survive; --dataset (dedicated column) must not.
+        assert_eq!(
+            format_brokkr_args_summary("brokkr tilegen --bench 3 --dataset germany"),
+            "--bench 3"
+        );
+        assert_eq!(
+            format_brokkr_args_summary(
+                "brokkr tilegen --bench 1 --dataset germany --variant locations"
+            ),
+            "--bench 1 --variant locations"
+        );
+    }
+
+    #[test]
+    fn brokkr_args_drops_dataset_both_spellings() {
+        assert_eq!(
+            format_brokkr_args_summary("brokkr tilegen --dataset=germany --variant locations"),
+            "--variant locations"
+        );
+        assert_eq!(
+            format_brokkr_args_summary(
+                "brokkr tilegen --dataset germany --compress-sort-chunks lz4"
+            ),
+            "--compress-sort-chunks lz4"
+        );
+    }
+
+    #[test]
+    fn brokkr_args_empty_when_only_scaffolding() {
+        // Nothing but the subcommand and dataset - no distinguishing knobs.
+        assert_eq!(
+            format_brokkr_args_summary("brokkr tilegen --dataset germany"),
+            ""
+        );
+    }
+
+    #[test]
+    fn cli_args_fallback_drops_paths_and_output() {
+        // Legacy path for rows written before brokkr_args was captured.
+        assert_eq!(
+            format_cli_args_summary(
+                "/cargo/release/elivagar run /data/germany.osm.pbf \
+                 -o /data/out.pmtiles --tmp-dir /data/tmp --ocean /data/w.shp"
+            ),
+            "--tmp-dir --ocean"
+        );
+        assert_eq!(format_cli_args_summary(""), "");
+    }
+
+    #[test]
+    fn truncate_args_marks_overflow() {
+        let short = "a".repeat(ARGS_MAX_WIDTH);
+        assert_eq!(truncate_args(&short), short);
+        let long = "a".repeat(ARGS_MAX_WIDTH + 5);
+        let out = truncate_args(&long);
+        assert_eq!(out.chars().count(), ARGS_MAX_WIDTH);
+        assert!(out.ends_with('…'));
     }
 
     // -----------------------------------------------------------------------
