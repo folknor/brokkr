@@ -63,7 +63,10 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
 }
 
 fn check_clean(workspace_root: &Path) -> bool {
-    // Exclude .brokkr/results.db (modified by benchmarks) and *.md (docs).
+    // Exclude .brokkr/results.db (modified by benchmarks), *.md (docs), and
+    // brokkr.toml (host-local dataset/snapshot registrations, e.g. mutated by
+    // `--as-snapshot`) - none of these change what the built binary does, so
+    // they shouldn't mark a measured run dirty.
     let unstaged = Command::new("git")
         .args([
             "diff",
@@ -72,6 +75,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             "--",
             ":(exclude).brokkr/results.db",
             ":(exclude)*.md",
+            ":(exclude)brokkr.toml",
         ])
         .current_dir(workspace_root)
         .output();
@@ -85,6 +89,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             "--",
             ":(exclude).brokkr/results.db",
             ":(exclude)*.md",
+            ":(exclude)brokkr.toml",
         ])
         .current_dir(workspace_root)
         .output();
@@ -97,6 +102,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             "--",
             ":(exclude).brokkr/",
             ":(exclude)*.md",
+            ":(exclude)brokkr.toml",
         ])
         .current_dir(workspace_root)
         .output();

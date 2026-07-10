@@ -71,8 +71,8 @@ no accountable diff, 1 = regression / budget overrun) - it is a gate. Like
 the inspection subcommands, it takes the non-blocking brokkr lock first.
 
 `brokkr bless` (`src/elivagar/bless.rs`) promotes a gate-passing output to
-the dataset's regress reference: it REFUSES a dirty tree (results.db and
-`*.md` excluded, matching bench discipline - a hash from uncommitted state
+the dataset's regress reference: it REFUSES a dirty tree (results.db, `*.md`,
+and brokkr.toml excluded, matching bench discipline - a hash from uncommitted state
 does not reproduce), copies the current archive to
 `data/blessed/<dataset>-<commit>.pmtiles` (gitignored), computes its xxh128,
 and writes the singular `[<host>.datasets.<D>.blessed]` entry into
