@@ -722,6 +722,13 @@ Examples:
         /// Read modes (comma-separated: sequential,parallel,pipelined,blobreader)
         #[arg(long, default_value = "sequential,parallel,pipelined,blobreader")]
         modes: String,
+        /// Snapshot key to read input from. Use `base` (or omit) for the
+        /// dataset's primary data; pass a key registered under
+        /// `[dataset.snapshot.<key>]` for a historical or re-encoded snapshot
+        /// (e.g. `repack --as-snapshot`). Lets pure decode throughput be
+        /// measured against blob count independent of any command layer.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// [pbfhogg] Write benchmark
     #[command(name = "write", display_order = 2)]
@@ -2390,6 +2397,15 @@ pub(crate) struct VerifyPbfArgs {
     /// Mutually exclusive with `--dataset` / `--variant`.
     #[arg(long, value_name = "PATH")]
     pub(crate) input: Option<std::path::PathBuf>,
+    /// Snapshot key to cross-validate. Use `base` (or omit) for the
+    /// dataset's primary data; pass a key registered under
+    /// `[dataset.snapshot.<key>]` for a historical or adversarial encoding
+    /// (e.g. one produced by `brokkr degrade --unsort --as-snapshot` or
+    /// `brokkr repack --as-snapshot`). Overrides only the PBF input; OSC
+    /// changes (for merge/derive-changes verifies) still resolve from the
+    /// dataset's primary chain. Mutually exclusive with `--input`.
+    #[arg(long, conflicts_with = "input")]
+    pub(crate) snapshot: Option<String>,
     /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
     #[arg(long)]
     pub(crate) direct_io: bool,
@@ -2481,6 +2497,11 @@ pub(crate) enum VerifyCommand {
         /// Path to a handcrafted input PBF (skips dataset resolution).
         #[arg(long, value_name = "PATH")]
         input: Option<std::path::PathBuf>,
+        /// Snapshot key to cross-validate (see `--snapshot` on other verify
+        /// subcommands). Overrides only the PBF input. Mutually exclusive
+        /// with `--input`.
+        #[arg(long, conflicts_with = "input")]
+        snapshot: Option<String>,
         /// Comma-separated starting IDs (forwarded to both pbfhogg and osmium)
         #[arg(long = "start-id", value_name = "IDS")]
         start_id: Option<String>,
@@ -2498,6 +2519,12 @@ pub(crate) enum VerifyCommand {
         /// Path to a handcrafted input PBF (skips dataset resolution).
         #[arg(long, value_name = "PATH")]
         input: Option<std::path::PathBuf>,
+        /// Snapshot key to cross-validate (see `--snapshot` on other verify
+        /// subcommands). Overrides only the PBF input; the OSC still
+        /// resolves from the dataset's primary chain. Mutually exclusive
+        /// with `--input`.
+        #[arg(long, conflicts_with = "input")]
+        snapshot: Option<String>,
         #[arg(long)]
         osc_seq: Option<String>,
     },

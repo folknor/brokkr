@@ -383,7 +383,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 },
             )
         }
-        Command::Read { mode, pbf, modes } => run_measured(
+        Command::Read {
+            mode,
+            pbf,
+            modes,
+            snapshot,
+        } => run_measured(
             &mode,
             &dev_config,
             project,
@@ -391,7 +396,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &pbf.dataset,
             &pbf.variant,
             &brokkr_args,
-            |req| pbfhogg::cmd::bench_read(req, &modes),
+            |req| pbfhogg::cmd::bench_read(req, &modes, snapshot.as_deref()),
         ),
         Command::Write {
             mode,

@@ -184,6 +184,30 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_ref_from_opt_none_is_base() {
+        assert!(matches!(SnapshotRef::from_opt(None).unwrap(), SnapshotRef::Base));
+    }
+
+    #[test]
+    fn snapshot_ref_from_opt_some_base_is_base() {
+        assert!(matches!(
+            SnapshotRef::from_opt(Some("base")).unwrap(),
+            SnapshotRef::Base
+        ));
+    }
+
+    #[test]
+    fn snapshot_ref_from_opt_some_named() {
+        let parsed = SnapshotRef::from_opt(Some("unsorted")).unwrap();
+        assert!(matches!(parsed, SnapshotRef::Named(ref s) if s == "unsorted"));
+    }
+
+    #[test]
+    fn snapshot_ref_from_opt_propagates_validation() {
+        assert!(SnapshotRef::from_opt(Some("bad key")).is_err());
+    }
+
+    #[test]
     fn resolve_snapshot_pbf_path_base_uses_legacy_table() {
         let dir = unique_test_dir("snap-base");
         std::fs::create_dir_all(&dir).expect("mkdir");

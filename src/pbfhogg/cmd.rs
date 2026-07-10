@@ -9,19 +9,22 @@ use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
 use crate::resolve::{
-    self, resolve_bbox, resolve_default_osc_path, resolve_pbf_path, resolve_pbf_with_size,
+    self, resolve_bbox, resolve_default_osc_path, resolve_pbf_with_size,
 };
 use crate::tools;
 
 /// Resolve a verify subcommand's input PBF: prefer `--input <PATH>`
-/// (canonicalised, validated to exist), fall back to dataset/variant
-/// resolution. Used by every verify variant that today takes
-/// `VerifyPbfArgs` so handcrafted fixtures can replace a configured
-/// dataset wholesale (request 3).
+/// (canonicalised, validated to exist), then a `--snapshot <key>` if given,
+/// finally fall back to primary dataset/variant resolution. Used by every
+/// verify variant that takes `VerifyPbfArgs` so handcrafted fixtures
+/// (`--input`) or registered snapshots (`--snapshot`, e.g. an adversarial
+/// encoding from `degrade`/`repack --as-snapshot`) can replace the primary
+/// data. `--input` and `--snapshot` are mutually exclusive at the CLI.
 fn resolve_verify_input(
     input: Option<&Path>,
     dataset: &str,
     variant: &str,
+    snapshot: Option<&str>,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
@@ -43,13 +46,42 @@ fn resolve_verify_input(
         })?;
         return Ok(canonical);
     }
-    resolve_pbf_path(dataset, variant, paths, project_root)
+    // `--snapshot base` / omitted → primary data (identical to the legacy
+    // `resolve_pbf_path`); a named key reads the snapshot's pbf table.
+    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot)?;
+    resolve::resolve_snapshot_pbf_path(dataset, &snapshot_ref, variant, paths, project_root)
 }
 
-pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), DevError> {
+/// Resolve the `read` benchmark's input PBF and its size, honouring an
+/// optional `--snapshot <key>`. `base`/omitted resolves the primary
+/// `--variant` (identical to `resolve_pbf_with_size`); a named key reads the
+/// snapshot's pbf table so pure decode throughput can be measured against a
+/// re-encoded corpus (e.g. a `repack --as-snapshot` at a different blob cap).
+fn resolve_read_pbf_with_size(
+    req: &MeasureRequest,
+    snapshot: Option<&str>,
+    paths: &config::ResolvedPaths,
+) -> Result<(PathBuf, f64), DevError> {
+    let snapshot_ref = resolve::SnapshotRef::from_opt(snapshot)?;
+    let pbf_path = resolve::resolve_snapshot_pbf_path(
+        req.dataset,
+        &snapshot_ref,
+        req.variant,
+        paths,
+        req.project_root,
+    )?;
+    let file_mb = resolve::file_size_mb(&pbf_path)?;
+    Ok((pbf_path, file_mb))
+}
+
+pub(crate) fn bench_read(
+    req: &MeasureRequest,
+    modes_str: &str,
+    snapshot: Option<&str>,
+) -> Result<(), DevError> {
     if req.dry_run {
         let paths = dry_run_paths(req)?;
-        let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        let _ = resolve_read_pbf_with_size(req, snapshot, &paths)?;
         let _ = super::bench_read::parse_modes(modes_str)?;
         output::run_msg("[dry-run] ok (bench read)");
         return Ok(());
@@ -70,8 +102,7 @@ pub(crate) fn bench_read(req: &MeasureRequest, modes_str: &str) -> Result<(), De
         req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
         &ctx.harness,
@@ -249,6 +280,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -259,6 +291,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -269,6 +302,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -284,6 +318,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -295,6 +330,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -305,6 +341,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -315,6 +352,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -325,6 +363,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -335,6 +374,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -362,6 +402,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -375,6 +416,7 @@ pub(crate) fn verify(
             dataset,
             variant,
             input,
+            snapshot,
             start_id,
             verbose,
         } => {
@@ -382,6 +424,7 @@ pub(crate) fn verify(
                 input.as_deref(),
                 &dataset,
                 &variant,
+                snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -397,12 +440,14 @@ pub(crate) fn verify(
             dataset,
             variant,
             input,
+            snapshot,
             osc_seq,
         } => {
             let pbf_path = resolve_verify_input(
                 input.as_deref(),
                 &dataset,
                 &variant,
+                snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;
@@ -421,6 +466,7 @@ pub(crate) fn verify(
                 pbf.input.as_deref(),
                 &pbf.dataset,
                 &pbf.variant,
+                pbf.snapshot.as_deref(),
                 &paths,
                 project_root,
             )?;

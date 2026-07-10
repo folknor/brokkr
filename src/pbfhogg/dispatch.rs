@@ -494,10 +494,7 @@ fn build_pbfhogg_context(
     // Parse the optional `--snapshot` flag from extra_params into a SnapshotRef.
     // None or "base" → SnapshotRef::Base (legacy top-level data, current
     // behavior preserved). Anything else → Named, validated.
-    let snapshot_ref = match extra_params.snapshot.as_deref() {
-        None => resolve::SnapshotRef::Base,
-        Some(s) => resolve::SnapshotRef::parse(s)?,
-    };
+    let snapshot_ref = resolve::SnapshotRef::from_opt(extra_params.snapshot.as_deref())?;
 
     // Resolve PBF via the snapshot-aware resolver. For Base this is identical
     // to the legacy `resolve_pbf_path`; for Named it reads the snapshot's

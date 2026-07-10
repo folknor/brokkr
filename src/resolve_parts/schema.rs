@@ -173,6 +173,16 @@ impl SnapshotRef {
         crate::config::validate_snapshot_key(s).map_err(DevError::Config)?;
         Ok(Self::Named(s.to_owned()))
     }
+
+    /// Parse an optional `--snapshot` CLI value into a `SnapshotRef`.
+    /// `None` (flag omitted) → `Base` (the dataset's primary data, current
+    /// behavior preserved). `Some(s)` parses `s` (`"base"` → `Base`).
+    pub(crate) fn from_opt(snapshot: Option<&str>) -> Result<Self, DevError> {
+        match snapshot {
+            None => Ok(Self::Base),
+            Some(s) => Self::parse(s),
+        }
+    }
 }
 
 /// Get the OSC HashMap for a snapshot ref. `Base` returns the dataset's

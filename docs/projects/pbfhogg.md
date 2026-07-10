@@ -19,8 +19,15 @@
 ## Verify subcommands
 
 Every verify subcommand that takes `--dataset` also accepts `--input <PATH>`
-to skip dataset resolution and use a handcrafted fixture; the two flags are
-mutually exclusive.
+to skip dataset resolution and use a handcrafted fixture, and `--snapshot
+<key>` to cross-validate a registered snapshot (e.g. an adversarial encoding
+from `degrade`/`repack --as-snapshot`) instead of the primary data. `--input`
+and `--snapshot` are mutually exclusive. `--snapshot` overrides only the PBF
+input; the OSC (for `merge` / `derive-changes` / `diff` verifies) still
+resolves from the dataset's primary chain, since degrade/repack snapshots
+share base's sequence and carry no OSC table of their own. Resolution is
+centralised in `resolve_verify_input` (`src/pbfhogg/cmd.rs`), which routes
+through `resolve_snapshot_pbf_path` for both the base and named cases.
 
 `verify_merge` parses the input OSC's delete set via `osc::parse_osc_file` and
 runs a strict `pbfhogg diff --format osc` between pbfhogg's and osmium's
@@ -54,7 +61,11 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
   which command is dispatching, so wiring a new pbfhogg command into the
   snapshot graph is just a matter of adding the field to its CLI variant in
   `src/cli.rs` and propagating it to `CommandParams.snapshot` in
-  `src/pbfhogg/cli_adapter.rs`.
+  `src/pbfhogg/cli_adapter.rs`. The `read` throughput benchmark and the
+  `verify` cross-validation suite accept `--snapshot` too (they resolve
+  outside `build_pbfhogg_context` but share `resolve_snapshot_pbf_path` via
+  `SnapshotRef::from_opt`); the synthetic `write`/`merge-bench`/etc. benches
+  do not.
 - `--as-snapshot <key>` / `--replace-snapshot` - (`repack` and `degrade` only)
   promote the final iteration's scratch artifact into the dataset graph as a
   new snapshot. `--replace-snapshot` allows overwriting an existing key;
