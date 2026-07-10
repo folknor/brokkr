@@ -10,7 +10,7 @@ use super::{
     verify_sort, verify_tags_filter,
 };
 use crate::error::DevError;
-use crate::output::verify_msg;
+use crate::output::{self, verify_summary};
 
 /// Elapsed milliseconds as u64 (truncation is safe - verify commands won't run for 584M years).
 #[allow(clippy::cast_possible_truncation)]
@@ -37,18 +37,26 @@ pub fn run(
     let mut passed: u32 = 0;
     let mut failed: u32 = 0;
     let mut skipped: u32 = 0;
-    let mut timings: Vec<(String, u64)> = Vec::new();
+    let mut total_ms: u64 = 0;
 
-    // Helper: run one verify command, track pass/fail and elapsed time.
+    // Suppress each subcommand's per-check detail (headers, inspect dumps,
+    // element diffs) so `verify all` collapses to one result line per check.
+    // A single `brokkr verify <cmd>` is unaffected (detail defaults on). Restored
+    // before we return. Summary lines use `verify_summary`, which ignores this.
+    output::set_verify_detail(false);
+
+    // Helper: run one verify command, track pass/fail and elapsed time, and
+    // emit a single result line. To debug a failure, re-run that one
+    // `brokkr verify <cmd>` for full (ungated) detail.
     let mut run_one = |name: &str, result: Result<(), DevError>, elapsed_ms: u64| {
-        timings.push((name.to_owned(), elapsed_ms));
+        total_ms += elapsed_ms;
         match result {
             Ok(()) => {
-                verify_msg(&format!("{name}: PASS ({elapsed_ms}ms)"));
+                verify_summary(&format!("{name}: PASS ({elapsed_ms}ms)"));
                 passed += 1;
             }
             Err(e) => {
-                verify_msg(&format!("{name} failed ({elapsed_ms}ms): {e}"));
+                verify_summary(&format!("{name}: FAIL ({elapsed_ms}ms): {e}"));
                 failed += 1;
             }
         }
@@ -56,22 +64,19 @@ pub fn run(
 
     // Helper: log a skipped command.
     let mut skip = |name: &str, reason: &str| {
-        verify_msg(&format!("{name}: SKIPPED ({reason})"));
+        verify_summary(&format!("{name}: SKIPPED ({reason})"));
         skipped += 1;
     };
 
     // 1. sort
-    verify_msg("========== sort ==========");
     let t = Instant::now();
     run_one("sort", verify_sort::run(harness, pbf, direct_io), elapsed_ms(&t));
 
     // 2. cat
-    verify_msg("========== cat ==========");
     let t = Instant::now();
     run_one("cat", verify_cat::run(harness, pbf, direct_io), elapsed_ms(&t));
 
     // 3. extract
-    verify_msg("========== extract ==========");
     if let Some(b) = bbox {
         let t = Instant::now();
         run_one("extract", verify_extract::run(harness, pbf, b, direct_io), elapsed_ms(&t));
@@ -80,7 +85,6 @@ pub fn run(
     }
 
     // 3b. multi-extract
-    verify_msg("========== multi-extract ==========");
     if let Some(b) = bbox {
         let t = Instant::now();
         run_one(
@@ -93,7 +97,6 @@ pub fn run(
     }
 
     // 4. tags-filter
-    verify_msg("========== tags-filter ==========");
     let t = Instant::now();
     run_one(
         "tags-filter",
@@ -102,7 +105,6 @@ pub fn run(
     );
 
     // 5. getid-removeid
-    verify_msg("========== getid-removeid ==========");
     let t = Instant::now();
     run_one(
         "getid-removeid",
@@ -111,7 +113,6 @@ pub fn run(
     );
 
     // 6. add-locations-to-ways
-    verify_msg("========== add-locations-to-ways ==========");
     let t = Instant::now();
     run_one(
         "add-locations-to-ways",
@@ -120,7 +121,6 @@ pub fn run(
     );
 
     // 7. check-refs
-    verify_msg("========== check-refs ==========");
     let t = Instant::now();
     run_one(
         "check-refs",
@@ -129,16 +129,9 @@ pub fn run(
     );
 
     // 8. apply-changes
-    verify_msg("========== apply-changes ==========");
     if let Some(osc_path) = osc {
         // Best-effort osmosis setup - merge works without it.
-        let osmosis = match crate::tools::ensure_osmosis(data_dir, project_root) {
-            Ok(tools) => Some(tools),
-            Err(e) => {
-                verify_msg(&format!("osmosis not available (non-fatal): {e}"));
-                None
-            }
-        };
+        let osmosis = crate::tools::ensure_osmosis(data_dir, project_root).ok();
         let t = Instant::now();
         run_one(
             "apply-changes",
@@ -150,7 +143,6 @@ pub fn run(
     }
 
     // 9. diff --format osc
-    verify_msg("========== diff --format osc ==========");
     if let Some(osc_path) = osc {
         let t = Instant::now();
         run_one(
@@ -163,7 +155,6 @@ pub fn run(
     }
 
     // 10. renumber
-    verify_msg("========== renumber ==========");
     let t = Instant::now();
     run_one(
         "renumber",
@@ -172,7 +163,6 @@ pub fn run(
     );
 
     // 11. diff
-    verify_msg("========== diff ==========");
     if let Some(osc_path) = osc {
         let t = Instant::now();
         run_one("diff", verify_diff::run(harness, pbf, osc_path), elapsed_ms(&t));
@@ -180,15 +170,14 @@ pub fn run(
         skip("diff", "no --osc provided");
     }
 
+    // Restore detail for any later work in this process.
+    output::set_verify_detail(true);
+
     // Summary
     let total = passed + failed + skipped;
-    let total_ms: u64 = timings.iter().map(|(_, ms)| ms).sum();
-    verify_msg(&format!(
-        "===== all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ({total_ms}ms) ====="
+    verify_summary(&format!(
+        "all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ({total_ms}ms)"
     ));
-    for (name, ms) in &timings {
-        verify_msg(&format!("  {name}: {ms}ms"));
-    }
 
     if failed > 0 {
         return Err(DevError::Verify(format!(

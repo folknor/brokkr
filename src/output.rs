@@ -24,11 +24,24 @@ pub fn is_quiet() -> bool {
 // All output goes to stdout (stderr reserved for panics only).
 // Prefix column is 10 chars wide: "[tag]" + padding to align the message.
 //
-// Quiet mode split: `run_msg`, `verify_msg`, and `download_msg` always print
-// because they represent user-facing actions that should be visible even in
-// non-verbose mode. The others (`build_msg`, `bench_msg`, `result_msg`,
-// `hotpath_msg`) are suppressed in quiet mode because they are internal
-// progress messages. Errors are never suppressed.
+// Quiet mode split: `run_msg` and `download_msg` always print because they
+// represent user-facing actions that should be visible even in non-verbose
+// mode. The others (`build_msg`, `bench_msg`, `result_msg`, `hotpath_msg`)
+// are suppressed in quiet mode because they are internal progress messages.
+// `verify_msg` has its own gate (see `VERIFY_DETAIL`). Errors are never
+// suppressed.
+
+// --- Verify detail gate ---
+// `verify_msg` carries the per-subcommand detail (section headers, inspect
+// dumps, element diffs). `verify all` turns this off so its output collapses
+// to one summary line per check (emitted via `verify_summary`, which is never
+// gated), instead of tens of thousands of lines. A single `brokkr verify
+// <cmd>` leaves it on (the default) for full debugging detail.
+static VERIFY_DETAIL: AtomicBool = AtomicBool::new(true);
+
+pub fn set_verify_detail(on: bool) {
+    VERIFY_DETAIL.store(on, Ordering::Relaxed);
+}
 
 pub fn build_msg(msg: &str) {
     if !is_quiet() {
@@ -53,6 +66,15 @@ pub fn bench_msg(msg: &str) {
 }
 
 pub fn verify_msg(msg: &str) {
+    if VERIFY_DETAIL.load(Ordering::Relaxed) {
+        println!("[verify]  {msg}");
+    }
+}
+
+/// Verify summary line - always printed, even when per-command detail is
+/// suppressed (used by `verify all` for its one-line-per-check results and the
+/// final tally).
+pub fn verify_summary(msg: &str) {
     println!("[verify]  {msg}");
 }
 
