@@ -22,12 +22,21 @@ Every verify subcommand that takes `--dataset` also accepts `--input <PATH>`
 to skip dataset resolution and use a handcrafted fixture, and `--snapshot
 <key>` to cross-validate a registered snapshot (e.g. an adversarial encoding
 from `degrade`/`repack --as-snapshot`) instead of the primary data. `--input`
-and `--snapshot` are mutually exclusive. `--snapshot` overrides only the PBF
-input; the OSC (for `merge` / `derive-changes` / `diff` verifies) still
-resolves from the dataset's primary chain, since degrade/repack snapshots
-share base's sequence and carry no OSC table of their own. Resolution is
-centralised in `resolve_verify_input` (`src/pbfhogg/cmd.rs`), which routes
-through `resolve_snapshot_pbf_path` for both the base and named cases.
+and `--snapshot` are mutually exclusive. PBF resolution is centralised in
+`resolve_verify_input` (`src/pbfhogg/cmd.rs`), which routes through
+`resolve_snapshot_pbf_path` for both the base and named cases.
+
+OSC resolution for the change-consuming verifies (`merge` / `derive-changes`
+/ `diff`) is snapshot-aware via `resolve_verify_osc`: a named snapshot that
+carries its own `osc` table (a point-in-time snapshot) is diffed against
+*that* chain; an encoding-only snapshot (degrade/repack has no OSC table)
+falls back to the dataset's primary chain - the logically-correct diff stream,
+since such snapshots are same-sequence re-encodings of the base PBF. Which
+chain resolved is narrated to stderr (`[verify] osc: snapshot-scoped (<key>)`
+vs `[verify] osc: base fallback (<key> has no osc table)`), but only when
+`--snapshot` was actually passed. Even a deliberately misaligned OSC is still
+a valid tool-vs-tool check - both pbfhogg and osmium apply the same changes to
+the same input - so the fallback never invalidates the cross-check.
 
 `verify_merge` parses the input OSC's delete set via `osc::parse_osc_file` and
 runs a strict `pbfhogg diff --format osc` between pbfhogg's and osmium's
