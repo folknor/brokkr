@@ -172,11 +172,13 @@ fn verify_pbfhogg_vs_osmium(
     //   diff.created_* = osmium-only (carve-out candidates)
     //   diff.deleted_* = pbfhogg-only (always failures)
     //   diff.modified_* = content mismatches (always failures)
+    // NB: no `--suppress-common` here - pbfhogg rejects it alongside
+    // `--format osc` (the OSC diff only emits differing elements anyway, so
+    // it would be redundant even if accepted).
     let captured = harness.run_pbfhogg(&[
         "diff",
         "--format",
         "osc",
-        "--suppress-common",
         "-o",
         &diff_path_str,
         &pbfhogg_str,

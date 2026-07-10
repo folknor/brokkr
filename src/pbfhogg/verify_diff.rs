@@ -43,8 +43,15 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     let pbfhogg_summary = String::from_utf8_lossy(&captured.stderr);
 
     // osmium diff - exits non-zero when differences exist, so do NOT check_exit.
-    verify_msg("--- osmium diff ---");
-    let captured = harness.run_tool("osmium", &["diff", &pbf_str, &new_pbf_str, "--summary"])?;
+    // `--suppress-common` (osmium's -c) is required to match pbfhogg's `-c`
+    // above: without it osmium prints every object (common ones included),
+    // making the line-count comparison meaningless (it emitted ~all of
+    // denmark against pbfhogg's changes-only output). `--summary` prints its
+    // stats on stderr, which we capture separately below.
+    let captured = harness.run_tool(
+        "osmium",
+        &["diff", "--suppress-common", &pbf_str, &new_pbf_str, "--summary"],
+    )?;
 
     fs::write(outdir.join("osmium-diff.txt"), &captured.stdout)?;
     fs::write(outdir.join("osmium-summary.txt"), &captured.stderr)?;
