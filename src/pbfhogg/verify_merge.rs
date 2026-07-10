@@ -135,7 +135,12 @@ pub fn run(
     let osmium_sorted = outdir.join("osmium-sorted.osm.pbf");
     let osmium_sorted_str = osmium_sorted.display().to_string();
     verify_msg("--- pbfhogg sort (normalise osmium output for merge-join diff) ---");
-    let captured = harness.run_pbfhogg(&["sort", &osmium_out_str, "-o", &osmium_sorted_str])?;
+    // `--force`: osmium's output never carries blob-level indexdata, which
+    // pbfhogg sort requires by default. With --force it decodes payloads to
+    // scan IDs (slower pass 1) but produces content-identical output, so the
+    // cross-check's independence is untouched.
+    let captured =
+        harness.run_pbfhogg(&["sort", "--force", &osmium_out_str, "-o", &osmium_sorted_str])?;
     harness.check_exit(&captured, "pbfhogg sort (normalise osmium output)")?;
 
     // --- Strict pbfhogg-vs-osmium element diff (with delete-set tolerance) ---

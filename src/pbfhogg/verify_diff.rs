@@ -69,21 +69,162 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
         verify_msg(&format!("  {line}"));
     }
 
-    let pbfhogg_lines = pbfhogg_diff.lines().count();
-    let osmium_lines = osmium_diff.lines().count();
+    // Raw line counts are informational only: pbfhogg emits one line per
+    // modify (`*n.. v5 -> v6`) while osmium emits a -/+ pair, so the totals
+    // are structurally unequal even when the tools agree. The gate below is
+    // a per-class comparison of the two summaries instead.
+    verify_msg("=== output line counts (informational) ===");
+    verify_msg(&format!("  pbfhogg: {} lines", pbfhogg_diff.lines().count()));
+    verify_msg(&format!("  osmium:  {} lines", osmium_diff.lines().count()));
 
-    verify_msg("=== output line counts ===");
-    verify_msg(&format!("  pbfhogg: {pbfhogg_lines} lines"));
-    verify_msg(&format!("  osmium:  {osmium_lines} lines"));
+    compare_diff_classes(&pbfhogg_summary, &osmium_summary)
+}
 
-    if pbfhogg_lines == osmium_lines {
-        verify_msg("  PASS (line counts match)");
-    } else {
-        verify_msg("  FAIL (line counts differ)");
+/// Cross-check pbfhogg's `{c} created, {m} modified, {d} deleted` summary
+/// against osmium's `left=.. right=..` summary.
+///
+/// osmium pairs objects by (type, id, version, timestamp), and a modified
+/// element changes version on both sides, so osmium counts it as a left-only
+/// (old version) + right-only (new version) entry rather than "different".
+/// Ignoring a small deviation D (pbfhogg's documented version-comparison
+/// difference), the counts reconcile as:
+///
+/// ```text
+///   left  = deleted + modified + D
+///   right = created + modified + D
+/// ```
+///
+/// We solve D from each side and require the two to agree (structural
+/// consistency), be non-negative, and stay within a small self-calibrating
+/// ceiling - so the check tolerates the documented deviation without
+/// hard-coding its value, but still catches a genuine class-count regression.
+fn compare_diff_classes(pbfhogg_summary: &str, osmium_summary: &str) -> Result<(), DevError> {
+    let Some((created, modified, deleted)) = parse_pbfhogg_diff_summary(pbfhogg_summary) else {
         return Err(DevError::Verify(format!(
-            "diff line count mismatch: pbfhogg={pbfhogg_lines}, osmium={osmium_lines}"
+            "diff verify: could not parse pbfhogg summary: {:?}",
+            pbfhogg_summary.lines().next().unwrap_or("")
+        )));
+    };
+    let Some((left, right)) = parse_osmium_diff_summary(osmium_summary) else {
+        return Err(DevError::Verify(format!(
+            "diff verify: could not parse osmium summary: {:?}",
+            osmium_summary.lines().next().unwrap_or("")
+        )));
+    };
+
+    // i128 so an osmium count smaller than pbfhogg's classes yields a negative
+    // deviation (a real failure) rather than an unsigned-underflow panic.
+    let d_left = i128::from(left) - i128::from(deleted) - i128::from(modified);
+    let d_right = i128::from(right) - i128::from(created) - i128::from(modified);
+    let changes = created + modified + deleted;
+    // Generous sanity ceiling: 1% of the total changes, floor 64. The real
+    // check is d_left == d_right; this only rejects a gross symmetric blow-up.
+    let bound = i128::from((changes / 100).max(64));
+
+    verify_msg("=== per-class change comparison ===");
+    verify_msg(&format!(
+        "  pbfhogg: {created} created, {modified} modified, {deleted} deleted"
+    ));
+    verify_msg(&format!("  osmium:  left={left}, right={right}"));
+    verify_msg(&format!(
+        "  version-comparison deviation: D_left={d_left}, D_right={d_right} (bound {bound})"
+    ));
+
+    if d_left != d_right {
+        verify_msg("  FAIL (osmium left/right do not reconcile with pbfhogg classes)");
+        return Err(DevError::Verify(format!(
+            "diff per-class mismatch: D_left={d_left} != D_right={d_right} \
+             (pbfhogg {created}/{modified}/{deleted} c/m/d vs osmium left={left} right={right})"
+        )));
+    }
+    if d_left < 0 {
+        verify_msg("  FAIL (osmium reports fewer changes than pbfhogg's classes)");
+        return Err(DevError::Verify(format!(
+            "diff per-class mismatch: negative deviation D={d_left}"
+        )));
+    }
+    if d_left > bound {
+        verify_msg("  FAIL (deviation exceeds sanity bound)");
+        return Err(DevError::Verify(format!(
+            "diff per-class mismatch: deviation D={d_left} exceeds bound {bound} \
+             ({changes} total changes)"
         )));
     }
 
+    verify_msg(&format!(
+        "  PASS (classes reconcile; version-comparison deviation D={d_left} within {bound})"
+    ));
     Ok(())
+}
+
+/// Parse pbfhogg's diff summary into `(created, modified, deleted)`.
+/// Handles both `"Files are identical (N common elements)"` (all zero) and
+/// `"{total} differences: {c} created, {m} modified, {d} deleted ({common} common)"`.
+fn parse_pbfhogg_diff_summary(text: &str) -> Option<(u64, u64, u64)> {
+    if text.contains("Files are identical") {
+        return Some((0, 0, 0));
+    }
+    // The count for each class is the whitespace token immediately before the
+    // class keyword (e.g. `5589 created`).
+    let num_before = |kw: &str| -> Option<u64> {
+        let idx = text.find(kw)?;
+        text[..idx].split_whitespace().last()?.parse::<u64>().ok()
+    };
+    Some((
+        num_before("created")?,
+        num_before("modified")?,
+        num_before("deleted")?,
+    ))
+}
+
+/// Parse osmium's `--summary` line into `(left, right)`.
+/// Format: `"Summary: left=4746 right=9092 same=.. different=.."`.
+fn parse_osmium_diff_summary(text: &str) -> Option<(u64, u64)> {
+    let field = |kw: &str| -> Option<u64> {
+        let idx = text.find(kw)?;
+        let rest = &text[idx + kw.len()..];
+        rest.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u64>()
+            .ok()
+    };
+    Some((field("left=")?, field("right=")?))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{parse_osmium_diff_summary, parse_pbfhogg_diff_summary};
+
+    #[test]
+    fn parse_pbfhogg_summary_standard() {
+        let s = "10321 differences: 5589 created, 3489 modified, 1243 deleted (59147550 common)";
+        assert_eq!(parse_pbfhogg_diff_summary(s), Some((5589, 3489, 1243)));
+    }
+
+    #[test]
+    fn parse_pbfhogg_summary_identical() {
+        let s = "Files are identical (59152282 common elements)";
+        assert_eq!(parse_pbfhogg_diff_summary(s), Some((0, 0, 0)));
+    }
+
+    #[test]
+    fn parse_osmium_summary_standard() {
+        let s = "Summary: left=4746 right=9092 same=59147536 different=0";
+        assert_eq!(parse_osmium_diff_summary(s), Some((4746, 9092)));
+    }
+
+    #[test]
+    fn denmark_numbers_reconcile() {
+        // The documented decomposition: D=14 on both sides.
+        let (created, modified, deleted) =
+            parse_pbfhogg_diff_summary("10321 differences: 5589 created, 3489 modified, 1243 deleted (0 common)").unwrap();
+        let (left, right) =
+            parse_osmium_diff_summary("Summary: left=4746 right=9092 same=0 different=0").unwrap();
+        let d_left = i128::from(left) - i128::from(deleted) - i128::from(modified);
+        let d_right = i128::from(right) - i128::from(created) - i128::from(modified);
+        assert_eq!(d_left, 14);
+        assert_eq!(d_right, 14);
+    }
 }
