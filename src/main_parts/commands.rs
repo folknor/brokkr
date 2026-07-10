@@ -685,6 +685,7 @@ fn cmd_verify(
     build_root: Option<&Path>,
     verify: VerifyCommand,
     features: &[String],
+    verbose: bool,
 ) -> Result<(), DevError> {
     match verify {
         // ----- elivagar verify variants -----
@@ -729,6 +730,7 @@ fn cmd_verify(
                 build_root,
                 verify,
                 features,
+                verbose,
             )
         }
     }

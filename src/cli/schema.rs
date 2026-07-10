@@ -1267,7 +1267,9 @@ Examples:
     /// Cross-validate output against reference tools
     #[command(display_order = 11)]
     Verify {
-        /// Print full build/verify output
+        /// Stream every check's full detail. Default is quiet on pass (one
+        /// result line per check) and loud on fail (the failing check's
+        /// detail is replayed). `-v` also shows build output.
         #[arg(long, short = 'v')]
         verbose: bool,
 

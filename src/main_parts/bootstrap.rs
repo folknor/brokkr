@@ -817,6 +817,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     build_root,
                     verify,
                     &features,
+                    verbose,
                 )
             })
         }

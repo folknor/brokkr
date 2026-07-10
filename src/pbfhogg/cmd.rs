@@ -326,6 +326,7 @@ pub(crate) fn verify(
     build_root: Option<&Path>,
     verify: VerifyCommand,
     features: &[String],
+    verbose: bool,
 ) -> Result<(), DevError> {
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -333,7 +334,47 @@ pub(crate) fn verify(
     let harness =
         super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
 
-    match verify {
+    // `all` runs the whole suite and prints its own per-check results + banner,
+    // so it manages the quiet/verbose behaviour itself rather than being
+    // wrapped in a single `run_check`.
+    if let VerifyCommand::All { pbf, osc_seq, bbox } = &verify {
+        let pbf_path = resolve_verify_input(
+            pbf.input.as_deref(),
+            &pbf.dataset,
+            &pbf.variant,
+            pbf.snapshot.as_deref(),
+            &paths,
+            project_root,
+        )?;
+        let osc_resolved = resolve_verify_osc(
+            &pbf.dataset,
+            pbf.snapshot.as_deref(),
+            osc_seq.as_deref(),
+            &paths,
+            project_root,
+        )
+        .ok();
+        if let Some((_, scope)) = &osc_resolved {
+            narrate_osc_scope(pbf.snapshot.as_deref(), *scope);
+        }
+        let osc_path = osc_resolved.map(|(p, _)| p);
+        let bbox_str = resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths).ok();
+        return super::verify_all::run(
+            &harness,
+            &pbf_path,
+            osc_path.as_deref(),
+            bbox_str.as_deref(),
+            &paths.data_dir,
+            project_root,
+            pbf.direct_io,
+            &pbf.dataset,
+            verbose,
+        );
+    }
+
+    // Every individual check runs under the pass-quiet / fail-loud wrapper.
+    let name = verify_name(&verify);
+    super::verify::run_check(name, verbose, || match verify {
         VerifyCommand::Sort { pbf } => {
             let pbf_path = resolve_verify_input(
                 pbf.input.as_deref(),
@@ -528,48 +569,37 @@ pub(crate) fn verify(
             narrate_osc_scope(snapshot.as_deref(), scope);
             super::verify_diff::run(&harness, &pbf_path, &osc_path)
         }
-        VerifyCommand::All {
-            pbf,
-            osc_seq,
-            bbox,
-        } => {
-            let pbf_path = resolve_verify_input(
-                pbf.input.as_deref(),
-                &pbf.dataset,
-                &pbf.variant,
-                pbf.snapshot.as_deref(),
-                &paths,
-                project_root,
-            )?;
-            let osc_resolved = resolve_verify_osc(
-                &pbf.dataset,
-                pbf.snapshot.as_deref(),
-                osc_seq.as_deref(),
-                &paths,
-                project_root,
-            )
-            .ok();
-            if let Some((_, scope)) = &osc_resolved {
-                narrate_osc_scope(pbf.snapshot.as_deref(), *scope);
-            }
-            let osc_path = osc_resolved.map(|(p, _)| p);
-            let bbox_str = resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths).ok();
-            super::verify_all::run(
-                &harness,
-                &pbf_path,
-                osc_path.as_deref(),
-                bbox_str.as_deref(),
-                &paths.data_dir,
-                project_root,
-                pbf.direct_io,
-                &pbf.dataset,
-            )
-        }
+        // `all` is handled before this match (it manages its own output).
+        VerifyCommand::All { .. } => unreachable!("verify all handled above"),
         // Elivagar and nidhogg variants are handled above in cmd_verify().
         VerifyCommand::ElivVerify { .. }
         | VerifyCommand::Batch { .. }
         | VerifyCommand::NidGeocode { .. }
         | VerifyCommand::Readonly { .. } => unreachable!(),
+    })
+}
+
+/// The result-line name for a pbfhogg verify subcommand (matches the labels
+/// used by `verify all`).
+fn verify_name(verify: &VerifyCommand) -> &'static str {
+    match verify {
+        VerifyCommand::Sort { .. } => "sort",
+        VerifyCommand::Cat { .. } => "cat",
+        VerifyCommand::Extract { .. } => "extract",
+        VerifyCommand::MultiExtract { .. } => "multi-extract",
+        VerifyCommand::TagsFilter { .. } => "tags-filter",
+        VerifyCommand::GetidRemoveid { .. } => "getid-removeid",
+        VerifyCommand::AddLocationsToWays { .. } => "add-locations-to-ways",
+        VerifyCommand::CheckRefs { .. } => "check-refs",
+        VerifyCommand::Merge { .. } => "apply-changes",
+        VerifyCommand::DeriveChanges { .. } => "diff --format osc",
+        VerifyCommand::Renumber { .. } => "renumber",
+        VerifyCommand::Diff { .. } => "diff",
+        VerifyCommand::All { .. } => "all",
+        VerifyCommand::ElivVerify { .. }
+        | VerifyCommand::Batch { .. }
+        | VerifyCommand::NidGeocode { .. }
+        | VerifyCommand::Readonly { .. } => "verify",
     }
 }
 

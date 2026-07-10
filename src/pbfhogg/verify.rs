@@ -242,6 +242,43 @@ impl VerifyHarness {
 // Free functions
 // ---------------------------------------------------------------------------
 
+/// Run a single verify check with "quiet on pass, loud on fail" output.
+///
+/// Unless `verbose`, the check's `verify_msg` detail is captured and replayed
+/// only if it fails; a passing check prints just a one-line `PASS` summary.
+/// With `verbose`, detail streams live. Either way a one-line result is
+/// printed. On failure this returns `DevError::ExitCode(1)` (the failure has
+/// already been reported here, so `main` exits non-zero without re-printing).
+pub(crate) fn run_check<F>(name: &str, verbose: bool, f: F) -> Result<(), DevError>
+where
+    F: FnOnce() -> Result<(), DevError>,
+{
+    let start = std::time::Instant::now();
+    if !verbose {
+        crate::output::verify_buffer_begin();
+    }
+    let result = f();
+    let ms = start.elapsed().as_millis();
+    match &result {
+        Ok(()) => {
+            if !verbose {
+                crate::output::verify_buffer_discard();
+            }
+            crate::output::verify_summary(&format!("{name}: PASS ({ms}ms)"));
+            Ok(())
+        }
+        Err(e) => {
+            if !verbose {
+                // Replay the captured detail so the failure is debuggable
+                // without re-running the check.
+                crate::output::verify_buffer_flush();
+            }
+            crate::output::verify_summary(&format!("{name}: FAIL ({ms}ms): {e}"));
+            Err(DevError::ExitCode(1))
+        }
+    }
+}
+
 /// Check whether an executable exists on `PATH`.
 pub fn which_exists(name: &str) -> bool {
     std::process::Command::new("which")

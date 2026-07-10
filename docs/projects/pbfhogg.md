@@ -18,6 +18,18 @@
 
 ## Verify subcommands
 
+**Output model.** Every verify check runs "quiet on pass, loud on fail" via
+`verify::run_check`: by default a check's detail (`verify_msg` output - section
+headers, inspect dumps, element diffs) is captured into a buffer and only
+replayed if the check fails; a passing check prints just a one-line
+`<name>: PASS (<ms>ms)` summary. `-v`/`--verbose` skips the buffer so detail
+streams live even on pass. `verify all` applies this per check, so its default
+output is one line per check plus a final tally, and only failing checks spew.
+The buffer lives in `output.rs` (`verify_buffer_begin/flush/discard`, fed by
+`verify_msg`); one-line results use `verify_summary`, which bypasses it. On
+failure `run_check` returns `DevError::ExitCode(1)` so `main` exits non-zero
+without re-printing an error it already reported.
+
 Every verify subcommand that takes `--dataset` also accepts `--input <PATH>`
 to skip dataset resolution and use a handcrafted fixture, and `--snapshot
 <key>` to cross-validate a registered snapshot (e.g. an adversarial encoding

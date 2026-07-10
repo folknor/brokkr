@@ -3,26 +3,32 @@
 use std::path::Path;
 use std::time::Instant;
 
-use super::verify::VerifyHarness;
+use super::verify::{run_check, VerifyHarness};
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
     verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
     verify_sort, verify_tags_filter,
 };
 use crate::error::DevError;
-use crate::output::{self, verify_summary};
+use crate::output::verify_summary;
 
-/// Elapsed milliseconds as u64 (truncation is safe - verify commands won't run for 584M years).
-#[allow(clippy::cast_possible_truncation)]
-fn elapsed_ms(t: &Instant) -> u64 {
-    t.elapsed().as_millis() as u64
+/// Tally a check's outcome into `(passed, failed)`. Kept a free function (not
+/// a closure) so it doesn't hold a mutable borrow of the counters across the
+/// suite - the final banner reads them directly.
+fn tally(counts: &mut (u32, u32), result: &Result<(), DevError>) {
+    match result {
+        Ok(()) => counts.0 += 1,
+        Err(_) => counts.1 += 1,
+    }
 }
 
 /// Run all verify commands sequentially.
 ///
-/// Each command is wrapped so that a failure is logged but does not prevent
-/// the remaining commands from running. Returns `Err` when one or more
-/// commands failed; individual failures are reported inline via `verify_msg`.
+/// Each check runs under [`run_check`], so a failure is reported (with its
+/// detail replayed unless `verbose`) but does not stop the remaining checks.
+/// Passing checks print a single line; failures replay their captured detail.
+/// Returns `Err(ExitCode(1))` when one or more checks failed - the per-check
+/// lines and the banner have already reported everything.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
@@ -33,156 +39,112 @@ pub fn run(
     project_root: &Path,
     direct_io: bool,
     dataset: &str,
+    verbose: bool,
 ) -> Result<(), DevError> {
-    let mut passed: u32 = 0;
-    let mut failed: u32 = 0;
+    let suite_start = Instant::now();
+    let mut counts = (0u32, 0u32); // (passed, failed)
     let mut skipped: u32 = 0;
-    let mut total_ms: u64 = 0;
-
-    // Suppress each subcommand's per-check detail (headers, inspect dumps,
-    // element diffs) so `verify all` collapses to one result line per check.
-    // A single `brokkr verify <cmd>` is unaffected (detail defaults on). Restored
-    // before we return. Summary lines use `verify_summary`, which ignores this.
-    output::set_verify_detail(false);
-
-    // Helper: run one verify command, track pass/fail and elapsed time, and
-    // emit a single result line. To debug a failure, re-run that one
-    // `brokkr verify <cmd>` for full (ungated) detail.
-    let mut run_one = |name: &str, result: Result<(), DevError>, elapsed_ms: u64| {
-        total_ms += elapsed_ms;
-        match result {
-            Ok(()) => {
-                verify_summary(&format!("{name}: PASS ({elapsed_ms}ms)"));
-                passed += 1;
-            }
-            Err(e) => {
-                verify_summary(&format!("{name}: FAIL ({elapsed_ms}ms): {e}"));
-                failed += 1;
-            }
-        }
-    };
-
-    // Helper: log a skipped command.
-    let mut skip = |name: &str, reason: &str| {
-        verify_summary(&format!("{name}: SKIPPED ({reason})"));
-        skipped += 1;
-    };
 
     // 1. sort
-    let t = Instant::now();
-    run_one("sort", verify_sort::run(harness, pbf, direct_io), elapsed_ms(&t));
+    tally(&mut counts, &run_check("sort", verbose, || {
+        verify_sort::run(harness, pbf, direct_io)
+    }));
 
     // 2. cat
-    let t = Instant::now();
-    run_one("cat", verify_cat::run(harness, pbf, direct_io), elapsed_ms(&t));
+    tally(&mut counts, &run_check("cat", verbose, || {
+        verify_cat::run(harness, pbf, direct_io)
+    }));
 
     // 3. extract
     if let Some(b) = bbox {
-        let t = Instant::now();
-        run_one("extract", verify_extract::run(harness, pbf, b, direct_io), elapsed_ms(&t));
+        tally(&mut counts, &run_check("extract", verbose, || {
+            verify_extract::run(harness, pbf, b, direct_io)
+        }));
     } else {
-        skip("extract", "no --bbox provided");
+        verify_summary("extract: SKIPPED (no --bbox provided)");
+        skipped += 1;
     }
 
     // 3b. multi-extract
     if let Some(b) = bbox {
-        let t = Instant::now();
-        run_one(
-            "multi-extract",
-            verify_multi_extract::run(harness, pbf, b, 5, direct_io),
-            elapsed_ms(&t),
-        );
+        tally(&mut counts, &run_check("multi-extract", verbose, || {
+            verify_multi_extract::run(harness, pbf, b, 5, direct_io)
+        }));
     } else {
-        skip("multi-extract", "no --bbox provided");
+        verify_summary("multi-extract: SKIPPED (no --bbox provided)");
+        skipped += 1;
     }
 
     // 4. tags-filter
-    let t = Instant::now();
-    run_one(
-        "tags-filter",
-        verify_tags_filter::run(harness, pbf, direct_io),
-        elapsed_ms(&t),
-    );
+    tally(&mut counts, &run_check("tags-filter", verbose, || {
+        verify_tags_filter::run(harness, pbf, direct_io)
+    }));
 
     // 5. getid-removeid
-    let t = Instant::now();
-    run_one(
-        "getid-removeid",
-        verify_getid_removeid::run(harness, pbf, direct_io),
-        elapsed_ms(&t),
-    );
+    tally(&mut counts, &run_check("getid-removeid", verbose, || {
+        verify_getid_removeid::run(harness, pbf, direct_io)
+    }));
 
     // 6. add-locations-to-ways
-    let t = Instant::now();
-    run_one(
-        "add-locations-to-ways",
-        verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io),
-        elapsed_ms(&t),
-    );
+    tally(&mut counts, &run_check("add-locations-to-ways", verbose, || {
+        verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io)
+    }));
 
     // 7. check-refs
-    let t = Instant::now();
-    run_one(
-        "check-refs",
-        verify_check_refs::run(harness, pbf, direct_io),
-        elapsed_ms(&t),
-    );
+    tally(&mut counts, &run_check("check-refs", verbose, || {
+        verify_check_refs::run(harness, pbf, direct_io)
+    }));
 
     // 8. apply-changes
     if let Some(osc_path) = osc {
-        // Best-effort osmosis setup - merge works without it.
+        // Best-effort osmosis setup - merge works without it. Done outside
+        // run_check so any setup output isn't captured as check detail.
         let osmosis = crate::tools::ensure_osmosis(data_dir, project_root).ok();
-        let t = Instant::now();
-        run_one(
-            "apply-changes",
-            verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io),
-            elapsed_ms(&t),
-        );
+        tally(&mut counts, &run_check("apply-changes", verbose, || {
+            verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
+        }));
     } else {
-        skip("apply-changes", "no --osc provided");
+        verify_summary("apply-changes: SKIPPED (no --osc provided)");
+        skipped += 1;
     }
 
     // 9. diff --format osc
     if let Some(osc_path) = osc {
-        let t = Instant::now();
-        run_one(
-            "diff --format osc",
-            verify_derive_changes::run(harness, pbf, osc_path, direct_io),
-            elapsed_ms(&t),
-        );
+        tally(&mut counts, &run_check("diff --format osc", verbose, || {
+            verify_derive_changes::run(harness, pbf, osc_path, direct_io)
+        }));
     } else {
-        skip("diff --format osc", "no --osc provided");
+        verify_summary("diff --format osc: SKIPPED (no --osc provided)");
+        skipped += 1;
     }
 
     // 10. renumber
-    let t = Instant::now();
-    run_one(
-        "renumber",
-        verify_renumber::run(harness, pbf, dataset, None, false),
-        elapsed_ms(&t),
-    );
+    tally(&mut counts, &run_check("renumber", verbose, || {
+        verify_renumber::run(harness, pbf, dataset, None, false)
+    }));
 
     // 11. diff
     if let Some(osc_path) = osc {
-        let t = Instant::now();
-        run_one("diff", verify_diff::run(harness, pbf, osc_path), elapsed_ms(&t));
+        tally(&mut counts, &run_check("diff", verbose, || {
+            verify_diff::run(harness, pbf, osc_path)
+        }));
     } else {
-        skip("diff", "no --osc provided");
+        verify_summary("diff: SKIPPED (no --osc provided)");
+        skipped += 1;
     }
 
-    // Restore detail for any later work in this process.
-    output::set_verify_detail(true);
-
     // Summary
+    let (passed, failed) = counts;
     let total = passed + failed + skipped;
+    let total_ms = suite_start.elapsed().as_millis();
     verify_summary(&format!(
         "all done: {passed} passed, {failed} failed, {skipped} skipped out of {total} ({total_ms}ms)"
     ));
 
     if failed > 0 {
-        return Err(DevError::Verify(format!(
-            "{failed} verify command(s) failed"
-        )));
+        // Failures were already reported per-check + in the banner; exit
+        // non-zero without main re-printing an error.
+        return Err(DevError::ExitCode(1));
     }
     Ok(())
 }

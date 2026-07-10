@@ -3,6 +3,7 @@ use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -31,16 +32,38 @@ pub fn is_quiet() -> bool {
 // `verify_msg` has its own gate (see `VERIFY_DETAIL`). Errors are never
 // suppressed.
 
-// --- Verify detail gate ---
+// --- Verify detail buffer ---
 // `verify_msg` carries the per-subcommand detail (section headers, inspect
-// dumps, element diffs). `verify all` turns this off so its output collapses
-// to one summary line per check (emitted via `verify_summary`, which is never
-// gated), instead of tens of thousands of lines. A single `brokkr verify
-// <cmd>` leaves it on (the default) for full debugging detail.
-static VERIFY_DETAIL: AtomicBool = AtomicBool::new(true);
+// dumps, element diffs). By default each verify check runs "quiet on pass,
+// loud on fail": the detail is captured into a buffer and only replayed if
+// the check fails; on success it's discarded and just a one-line summary
+// prints. `-v`/`--verbose` skips the buffer so detail streams live.
+//
+// `None` = live (print immediately). `Some(vec)` = capturing into the buffer.
+// verify holds an exclusive process lock, so the Mutex is uncontended.
+static VERIFY_BUFFER: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
-pub fn set_verify_detail(on: bool) {
-    VERIFY_DETAIL.store(on, Ordering::Relaxed);
+/// Start capturing `verify_msg` detail into the buffer (drops any prior).
+pub fn verify_buffer_begin() {
+    *VERIFY_BUFFER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+}
+
+/// Stop capturing and discard the buffered detail (the pass path).
+pub fn verify_buffer_discard() {
+    *VERIFY_BUFFER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// Stop capturing and print the buffered detail (the fail path).
+pub fn verify_buffer_flush() {
+    let buffered = VERIFY_BUFFER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(lines) = buffered {
+        for line in lines {
+            println!("{line}");
+        }
+    }
 }
 
 pub fn build_msg(msg: &str) {
@@ -66,14 +89,18 @@ pub fn bench_msg(msg: &str) {
 }
 
 pub fn verify_msg(msg: &str) {
-    if VERIFY_DETAIL.load(Ordering::Relaxed) {
-        println!("[verify]  {msg}");
+    let line = format!("[verify]  {msg}");
+    let mut guard = VERIFY_BUFFER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match guard.as_mut() {
+        Some(buf) => buf.push(line),
+        None => println!("{line}"),
     }
 }
 
-/// Verify summary line - always printed, even when per-command detail is
-/// suppressed (used by `verify all` for its one-line-per-check results and the
-/// final tally).
+/// Verify summary line - always printed immediately, bypassing the detail
+/// buffer (used for each check's one-line PASS/FAIL result and the final tally).
 pub fn verify_summary(msg: &str) {
     println!("[verify]  {msg}");
 }
