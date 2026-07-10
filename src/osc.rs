@@ -17,11 +17,10 @@
 //! we never parse user-authored XML.
 
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 
 use crate::error::DevError;
 
@@ -61,25 +60,36 @@ impl OscDiff {
     }
 }
 
-/// Parse an OSC file from disk. `.gz` extension triggers transparent
-/// gzip decompression; everything else is treated as plain XML.
+/// Parse an OSC file from disk. Gzip is detected by magic bytes (not the
+/// filename): pbfhogg's `diff --format osc` always gzips its output regardless
+/// of the chosen extension, so a `.osc` file can still be gzip-compressed.
+///
+/// Decompression goes through `MultiGzDecoder`, not `GzDecoder`, because that
+/// OSC is a concatenation of independently-gzipped members (pbfhogg splices
+/// the create/modify/delete sections). Plain `GzDecoder` stops silently at the
+/// first member boundary and would yield a truncated-but-valid-looking OSC.
 pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
-    let mut file = File::open(path).map_err(|e| {
+    let bytes = std::fs::read(path).map_err(|e| {
         DevError::Verify(format!("cannot open OSC {}: {e}", path.display()))
     })?;
-    let mut buf = String::new();
-    let is_gz = path.extension().is_some_and(|e| e == "gz");
-    if is_gz {
-        let mut decoder = GzDecoder::new(file);
-        decoder.read_to_string(&mut buf).map_err(|e| {
+    Ok(parse_osc_text(&decode_osc_bytes(&bytes, path)?))
+}
+
+/// Decompress OSC bytes to XML text. Gzip is detected by magic bytes and
+/// decoded with `MultiGzDecoder` (handles pbfhogg's spliced multi-member
+/// stream); anything else is treated as plain UTF-8 XML.
+fn decode_osc_bytes(bytes: &[u8], path: &Path) -> Result<String, DevError> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut s = String::new();
+        MultiGzDecoder::new(bytes).read_to_string(&mut s).map_err(|e| {
             DevError::Verify(format!("cannot decompress OSC {}: {e}", path.display()))
         })?;
+        Ok(s)
     } else {
-        file.read_to_string(&mut buf).map_err(|e| {
-            DevError::Verify(format!("cannot read OSC {}: {e}", path.display()))
-        })?;
+        String::from_utf8(bytes.to_vec()).map_err(|e| {
+            DevError::Verify(format!("OSC {} is not valid UTF-8: {e}", path.display()))
+        })
     }
-    Ok(parse_osc_text(&buf))
 }
 
 /// Section the parser is currently inside. `None` means "between
@@ -297,6 +307,43 @@ mod tests {
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![400]);
         assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![500]);
         assert_eq!(diff.deleted_relations.iter().copied().collect::<Vec<_>>(), vec![600]);
+    }
+
+    #[test]
+    fn decodes_multi_member_gzip_osc() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        // pbfhogg's `diff --format osc` splices independently-gzipped
+        // fragments; emulate a two-member stream. A plain GzDecoder would stop
+        // after the first member - MultiGzDecoder must return both.
+        let gz = |s: &str| {
+            let mut e = GzEncoder::new(Vec::new(), Compression::default());
+            e.write_all(s.as_bytes()).unwrap();
+            e.finish().unwrap()
+        };
+        let mut multi = gz(r#"<osmChange><create><node id="1" version="1"/></create>"#);
+        multi.extend(gz(r#"<delete><way id="2" version="3"/></delete></osmChange>"#));
+        assert_eq!(&multi[..2], &[0x1f, 0x8b], "gzip magic");
+
+        // Detected as gzip by magic even with a bare `.osc` name (the bug).
+        let text = decode_osc_bytes(&multi, Path::new("pbfhogg-vs-osmium.osc")).unwrap();
+        assert!(text.contains(r#"node id="1""#), "first member missing: {text}");
+        assert!(
+            text.contains(r#"way id="2""#),
+            "second member missing - GzDecoder truncation? {text}"
+        );
+
+        let diff = parse_osc_text(&text);
+        assert_eq!(diff.created_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[test]
+    fn plain_text_osc_passes_through() {
+        let text = decode_osc_bytes(SAMPLE.as_bytes(), Path::new("x.osc")).unwrap();
+        assert_eq!(text, SAMPLE);
     }
 
     #[test]
