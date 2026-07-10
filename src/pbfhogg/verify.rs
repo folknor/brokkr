@@ -126,24 +126,52 @@ impl VerifyHarness {
         }
     }
 
-    /// Check whether a PBF is marked as sorted (Sort.Type_then_ID).
+    /// Check whether a PBF's elements are actually in sorted order.
     ///
-    /// Runs `pbfhogg inspect <pbf>` and searches for the sort marker in
-    /// stdout. Prints a PASS/FAIL message and returns the result.
+    /// Runs `pbfhogg inspect --extended <pbf>` and reads the computed
+    /// `Ordered: yes|no` line (derived from ordering segments + ID
+    /// monotonicity), NOT the header `Sort.Type_then_ID` optional feature.
+    /// The header is only a claim - a blob-level stamp that can be blind to
+    /// intra-blob disorder - so a degraded/unsorted file can carry the flag
+    /// while its elements are out of order. We trust the computed order and
+    /// report the header only for context. Prints a PASS/FAIL message and
+    /// returns the result.
     pub fn check_sorted(&self, label: &str, pbf: &Path) -> Result<bool, DevError> {
         let pbf_str = pbf.display().to_string();
-        let captured = self.run_pbfhogg(&["inspect", &pbf_str])?;
+        let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str])?;
 
         let stdout = String::from_utf8_lossy(&captured.stdout);
-        let sorted = stdout.contains("Sort.Type_then_ID");
+        let has_flag = stdout.contains("Sort.Type_then_ID");
 
-        if sorted {
-            output::verify_msg(&format!("  {label}: sorted (Sort.Type_then_ID) PASS"));
-        } else {
-            output::verify_msg(&format!("  {label}: NOT sorted FAIL"));
+        match parse_ordered(&stdout) {
+            Some(true) => {
+                output::verify_msg(&format!("  {label}: ordered (element order verified) PASS"));
+                Ok(true)
+            }
+            Some(false) => {
+                let hint = if has_flag {
+                    " - header declares Sort.Type_then_ID but element order disagrees"
+                } else {
+                    ""
+                };
+                output::verify_msg(&format!(
+                    "  {label}: NOT ordered (inspect Ordered: no){hint} FAIL"
+                ));
+                Ok(false)
+            }
+            None => {
+                // No `Ordered:` line (older pbfhogg without --extended support):
+                // fall back to the header feature so the check still runs.
+                if has_flag {
+                    output::verify_msg(&format!(
+                        "  {label}: sorted (Sort.Type_then_ID header; order not computed) PASS"
+                    ));
+                } else {
+                    output::verify_msg(&format!("  {label}: NOT sorted FAIL"));
+                }
+                Ok(has_flag)
+            }
         }
-
-        Ok(sorted)
     }
 
     /// Compare the sort flag between a pbfhogg-produced PBF and a reference PBF.
@@ -222,4 +250,51 @@ pub fn which_exists(name: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// Parse the `Ordered:` line emitted by `pbfhogg inspect --extended`.
+///
+/// Returns `Some(true)` for `Ordered:  yes`, `Some(false)` for `Ordered: no`,
+/// and `None` when no such line is present (e.g. plain, non-extended output).
+/// The per-kind `(monotonic: yes|no)` id-range lines are deliberately ignored
+/// - the top-level `Ordered:` value already folds in monotonicity.
+fn parse_ordered(inspect_text: &str) -> Option<bool> {
+    for line in inspect_text.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("Ordered:") {
+            return Some(rest.trim() == "yes");
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ordered;
+
+    #[test]
+    fn parse_ordered_yes() {
+        let text = "Features: Sort.Type_then_ID\nOrdered:  yes\nTimestamps: ..\n";
+        assert_eq!(parse_ordered(text), Some(true));
+    }
+
+    #[test]
+    fn parse_ordered_no() {
+        // The degraded-unsorted case: header still claims the feature, but the
+        // computed order says no. check_sorted must trust this line.
+        let text = "Features: Sort.Type_then_ID\nOrdered:  no\n";
+        assert_eq!(parse_ordered(text), Some(false));
+    }
+
+    #[test]
+    fn parse_ordered_absent() {
+        // Plain (non-extended) inspect has no Ordered: line.
+        let text = "Features: Sort.Type_then_ID\nElements: 100 total\n";
+        assert_eq!(parse_ordered(text), None);
+    }
+
+    #[test]
+    fn parse_ordered_ignores_monotonic_lines() {
+        let text = "Ordered:  no\nID ranges:\n  Nodes:  1 .. 9   (monotonic: yes)\n";
+        assert_eq!(parse_ordered(text), Some(false));
+    }
 }

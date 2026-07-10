@@ -125,6 +125,19 @@ pub fn run(
     // --- Sort check ---
     harness.check_sorted("pbfhogg apply-changes", &pbfhogg_out)?;
 
+    // pbfhogg diff (the deep-compare below) is a merge-join and requires both
+    // inputs to declare the Sort.Type_then_ID optional feature. pbfhogg's
+    // apply-changes output does; osmium's is content-sorted but doesn't stamp
+    // the feature, so pbfhogg diff otherwise dies with "New PBF is not sorted".
+    // Normalise osmium's output through `pbfhogg sort` first - a passthrough +
+    // flag stamp on already-sorted content - so the compare sees two sorted
+    // inputs. Content is unchanged, so the element diff is unaffected.
+    let osmium_sorted = outdir.join("osmium-sorted.osm.pbf");
+    let osmium_sorted_str = osmium_sorted.display().to_string();
+    verify_msg("--- pbfhogg sort (normalise osmium output for merge-join diff) ---");
+    let captured = harness.run_pbfhogg(&["sort", &osmium_out_str, "-o", &osmium_sorted_str])?;
+    harness.check_exit(&captured, "pbfhogg sort (normalise osmium output)")?;
+
     // --- Strict pbfhogg-vs-osmium element diff (with delete-set tolerance) ---
     //
     // Cross-validation needs more than equal element counts. We diff
@@ -135,7 +148,7 @@ pub fn run(
     // `<delete>` section aren't bugs - both behaviours are spec-allowed.
     // Anything else (osmium-only IDs not in the delete set, pbfhogg-only
     // elements, or content-level `<modify>` differences) fails verify.
-    verify_pbfhogg_vs_osmium(harness, osc, &pbfhogg_out, &osmium_out, &outdir)?;
+    verify_pbfhogg_vs_osmium(harness, osc, &pbfhogg_out, &osmium_sorted, &outdir)?;
 
     Ok(())
 }
