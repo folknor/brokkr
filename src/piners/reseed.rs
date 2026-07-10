@@ -253,6 +253,10 @@ fn stamp_one(id: &str, rel_dir: &Path, corpus_root: &Path) -> Result<Pin, DevErr
                 path.display()
             )));
         }
+        // Probe files are not LFS today, but the guard is cheap insurance: a
+        // pointer stamped as a probe hash would poison the pin exactly as a
+        // feed pointer would.
+        crate::piners::lfs::ensure_materialized(path)?;
     }
 
     // Content-only stamp; the caller carries the hand-maintained fields
@@ -316,14 +320,7 @@ fn restamp_feeds(
     let mut out = BTreeMap::new();
     for (name, group) in feeds {
         let mut stamped = group.clone();
-        for (role, pin) in [
-            ("primary", Some(&mut stamped.primary)),
-            ("warmup", stamped.warmup.as_mut()),
-            ("lower", stamped.lower.as_mut()),
-        ]
-        .into_iter()
-        .filter_map(|(role, pin)| pin.map(|p| (role, p)))
-        {
+        for (role, pin) in stamped.roles_mut() {
             let abs = corpus_root.join(&pin.path);
             if !abs.exists() {
                 return Err(DevError::Config(format!(
@@ -331,6 +328,10 @@ fn restamp_feeds(
                     abs.display()
                 )));
             }
+            // Refuse to stamp a Git-LFS pointer's hash: that would pin the
+            // 134-byte stub and poison every future verify. The one LFS feed
+            // is the base group; the guard is a no-op for plaintext feeds.
+            crate::piners::lfs::ensure_materialized(&abs)?;
             pin.xxh128 = preflight::compute_xxh128(&abs)?;
         }
         out.insert(name.clone(), stamped);
@@ -564,7 +565,7 @@ mod tests {
         let mut feeds = BTreeMap::new();
         feeds.insert(
             "eth-15m".to_owned(),
-            FeedGroup {
+            FeedGroup::Roles {
                 primary: FilePin {
                     path: "data/15m.csv".into(),
                     xxh128: "stale".into(),
@@ -575,12 +576,46 @@ mod tests {
         );
 
         let stamped = restamp_feeds(&feeds, &root).unwrap();
-        assert_ne!(stamped["eth-15m"].primary.xxh128, "stale");
-        assert_eq!(stamped["eth-15m"].primary.xxh128.len(), 32);
+        assert_ne!(stamped["eth-15m"].roles()[0].1.xxh128, "stale");
+        assert_eq!(stamped["eth-15m"].roles()[0].1.xxh128.len(), 32);
 
-        feeds.get_mut("eth-15m").unwrap().primary.path = "data/missing.csv".into();
+        match feeds.get_mut("eth-15m").unwrap() {
+            FeedGroup::Roles { primary, .. } => primary.path = "data/missing.csv".into(),
+            _ => unreachable!(),
+        }
         let err = restamp_feeds(&feeds, &root).unwrap_err();
         std::fs::remove_dir_all(&root).ok();
         assert!(format!("{err:?}").contains("missing.csv"));
+    }
+
+    #[test]
+    fn restamp_feeds_rehashes_a_single_base_group() {
+        let root =
+            std::env::temp_dir().join(format!("brokkr_piners_base_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/ohlcv_1m.csv"), b"timestamp,o,h,l,c,v\n1,2,3,4,5,6\n")
+            .unwrap();
+
+        let mut feeds = BTreeMap::new();
+        feeds.insert(
+            "eth-15m-2025".to_owned(),
+            FeedGroup::Base {
+                base: FilePin {
+                    path: "data/ohlcv_1m.csv".into(),
+                    xxh128: "stale".into(),
+                },
+            },
+        );
+
+        let stamped = restamp_feeds(&feeds, &root).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+        match &stamped["eth-15m-2025"] {
+            FeedGroup::Base { base } => {
+                assert_ne!(base.xxh128, "stale");
+                assert_eq!(base.xxh128.len(), 32);
+            }
+            _ => unreachable!(),
+        }
     }
 }

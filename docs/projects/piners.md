@@ -18,7 +18,7 @@ paths or re-checking hashes). Schema:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "corpus_root": "/abs/path/to/corpus",
   "probes": [{
     "probe": "<id>", "probe_dir": "vendor/pineforge-engine/validation/<id>",
@@ -27,7 +27,10 @@ paths or re-checking hashes). Schema:
     "keywords": ["magnifier"], "feed": "eth-15m-2025",
     "bar_budget": 38000, "ohlcv_start_ms": 1700000000000, "tv_trades_csv_tz": "America/New_York"
   }],
-  "feeds": { "eth-15m-2025": { "primary": "/abs/...", "warmup": "/abs/...", "lower": "/abs/..." } }
+  "feeds": {
+    "eth-15m-2025":  { "base": "/abs/.../ohlcv_ETH-USDT-USDT_1m.csv" },
+    "eth-15m-bench": { "primary": "/abs/...", "warmup": "/abs/...", "lower": "/abs/..." }
+  }
 }
 ```
 
@@ -38,6 +41,18 @@ harness ignores `pine`/`csv`/`keywords` (already verified; a record). `feeds`
 holds the selection's referenced feed groups, roles resolved absolute;
 per-probe `feed` names a group, and the overrides appear only when pinned
 (their semantics: `docs/commands/corpus.md`).
+
+**Feed group forms (`version` 3).** A group's role map takes one of two
+shapes, and the harness must branch on which. **Role form** - keys among
+`primary`/`warmup`/`lower`, each already at chart TF, consumed as-is.
+**Single-base form** - exactly one key, `base` (a `base` role, no `primary`):
+the only committed input is a lower-TF base feed (1m OHLCV) the harness
+aggregates locally to the chart-TF primary/warmup and uses directly as the
+magnifier/lower source. `base` is additive, so the bump to `version = 3` is the
+load-bearing signal: a harness that cannot aggregate must hard-reject on
+`version != 3` rather than treat a 1m `base` as a chart-TF `primary`. brokkr
+guarantees the bytes behind every feed path are materialized, not a Git-LFS
+pointer (see the Git-LFS guard in `docs/commands/corpus.md`; `src/piners/lfs.rs`).
 
 ## The harness contract
 

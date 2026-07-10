@@ -45,14 +45,20 @@ any depth and under any tree naming (`validation/`, `strategies/`, flat).
 Probes are pinned in the registry (`registry_dir`), two file kinds:
 
 - `pins.toml` - the canonical, verified universe. `[feeds.<name>]` groups
-  (hash-pinned OHLCV feeds: `primary` plus optional `warmup`/`lower`),
-  `[roots]` (root-prefix -> feed assignments, consumed by reseed), and one
-  `[probes.<id>]` table per probe:
+  (hash-pinned OHLCV feeds, two forms below), `[roots]` (root-prefix -> feed
+  assignments, consumed by reseed), and one `[probes.<id>]` table per probe:
 
   ```toml
+  # single-base form: one committed 1m base feed the harness aggregates to the
+  # chart TF (and uses directly as the magnifier/lower source). Its only input.
   [feeds.eth-15m-2025]
-  primary = { path = "vendor/pineforge-engine/data/..15m.csv", xxh128 = "<hex>" }
-  warmup  = { path = "vendor/pineforge-engine/data/..warmup6m.csv", xxh128 = "<hex>" }
+  base = { path = "vendor/pineforge-engine/data/ohlcv_ETH-USDT-USDT_1m.csv", xxh128 = "<hex>" }
+
+  # role form (legacy): chart-TF primary plus optional warmup/lower, consumed as-is.
+  [feeds.eth-15m-bench]
+  primary = { path = "vendor/pineforge-benchmarks-assets/..ETHUSDT_15.csv", xxh128 = "<hex>" }
+  warmup  = { path = "vendor/pineforge-benchmarks-assets/..warmup6m.csv", xxh128 = "<hex>" }
+
   [roots]
   "vendor/pineforge-engine" = { feed = "eth-15m-2025" }
   [probes.magnifier-tick-dist-endpoints-01]
@@ -61,6 +67,13 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   pine = { path = "vendor/pineforge-engine/validation/<id>/strategy.pine", xxh128 = "<hex>" }
   csv  = { path = "vendor/pineforge-engine/validation/<id>/tv_trades.csv", xxh128 = "<hex>" }
   ```
+
+  A feed group is either **single-base** (exactly `base`, the only committed
+  input - a lower-TF feed the harness aggregates locally) or **role** (`primary`
+  required, optional `warmup`/`lower`, consumed at chart TF as-is). Setting both
+  `base` and `primary`, or `base` alongside `warmup`/`lower`, is a parse error.
+  brokkr carries the base path+hash into the manifest (as a `base` role) and
+  bumps the manifest version; all chart-TF aggregation stays harness-side.
 
   All `path`s (probe and feed) are relative to `corpus_root`. `xxh128` is
   brokkr's standard file hash (`preflight::compute_xxh128`, 32 lowercase hex,
@@ -140,11 +153,21 @@ real wall (a ~60s full corpus summed to ~320s), producing false refusals.
 
 ## Verification (the content gate)
 
-Each selected probe's two files - plus the `primary`/`warmup`/`lower` of
-every feed group the selection references - are resolved under
-`corpus_root` and hashed before any build. A missing path or hash mismatch
-is a hard error (registry lying or the corpus drifted) - no
+Each selected probe's two files - plus every role (`primary`/`warmup`/`lower`,
+or the single `base`) of every feed group the selection references - are
+resolved under `corpus_root` and hashed before any build. A missing path or
+hash mismatch is a hard error (registry lying or the corpus drifted) - no
 `--allow-drift`; re-stamp with `--reseed` or fix the tree.
+
+**Git-LFS guard.** The `pineforge-engine` submodule routes its 1m base feed
+through Git LFS, so a checkout without an LFS smudge leaves a pointer file, not
+the real bytes. Before hashing *any* pinned file, brokkr sniffs its first bytes
+and hard-errors on a Git-LFS pointer with a `git lfs pull` instruction naming
+the owning submodule - hashing the pointer would fail verify against the real
+digest, or (on `--reseed`) poison the pin with the 134-byte stub's hash. The
+check is scoped and cheap (a no-op for the plaintext bench feed) and runs
+*before* the runtime ceiling, so the large one-time fetch is an out-of-band
+pre-warm that never counts against the 270s wall (`src/piners/lfs.rs`).
 
 ## The expected-disposition gate
 

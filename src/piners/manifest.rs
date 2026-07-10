@@ -5,7 +5,7 @@
 //! The harness consumes the manifest only - it never re-resolves paths or
 //! re-checks hashes.
 //!
-//! Schema (the harness's contract, version 2): a top-level absolute
+//! Schema (the harness's contract, version 3): a top-level absolute
 //! `corpus_root`, and per-probe a `probe_dir` plus the two pinned files,
 //! all expressed **relative to `corpus_root`**. Each entry also carries
 //! the explicit canonical `probe` id (the `pins.toml` key). The harness
@@ -20,6 +20,16 @@
 //! and each probe carries its `feed` group name plus the optional
 //! `bar_budget` / `ohlcv_start_ms` / `tv_trades_csv_tz` overrides when
 //! pinned. Harness behavior on these is piners' side of the contract.
+//!
+//! Version 3 addition: a feed group may take the *single-base* form, emitted
+//! as one `base` role (`{"<group>": {"base": "/abs/ohlcv_1m.csv"}}`) instead
+//! of `primary`/`warmup`/`lower`. The only committed input for such a group
+//! is a lower-timeframe base the harness aggregates locally to the chart
+//! timeframe (and uses directly as the magnifier/lower source). The version
+//! bump is load-bearing: an older harness must hard-reject this manifest
+//! rather than consume a `base` feed as if it were already at chart TF. The
+//! role names are the only carrier - a group with a `base` role and no
+//! `primary` is the single-base form.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,12 +82,14 @@ pub struct Manifest {
     pub corpus_root: PathBuf,
     pub probes: Vec<ManifestProbe>,
     /// The selection's referenced feed groups: group name -> role
-    /// (`primary`/`warmup`/`lower`) -> absolute path.
+    /// (`primary`/`warmup`/`lower`, or the single `base`) -> absolute path.
     pub feeds: BTreeMap<String, BTreeMap<String, PathBuf>>,
 }
 
-/// Current manifest schema version.
-const MANIFEST_VERSION: u32 = 2;
+/// Current manifest schema version. Bumped to 3 when the single-base feed
+/// form landed, so a harness that predates it hard-rejects rather than
+/// mistaking a `base` (lower-TF) feed for a chart-TF `primary`.
+const MANIFEST_VERSION: u32 = 3;
 
 impl Manifest {
     /// Build a manifest from the verified probe set. `corpus_root` is the
@@ -170,7 +182,7 @@ mod tests {
             ..Registry::default()
         };
         let m = Manifest::build(Path::new("/abs/corpus"), &[verified("probe-01")], &registry);
-        assert_eq!(m.version, 2);
+        assert_eq!(m.version, 3);
         assert_eq!(m.corpus_root, PathBuf::from("/abs/corpus"));
         let p = &m.probes[0];
         assert_eq!(p.probe, "probe-01");
@@ -202,7 +214,7 @@ mod tests {
         let mut feeds = BTreeMap::new();
         feeds.insert(
             "eth-15m".to_owned(),
-            FeedGroup {
+            FeedGroup::Roles {
                 primary: FilePin {
                     path: "data/15m.csv".into(),
                     xxh128: "f0".into(),
@@ -217,7 +229,7 @@ mod tests {
         // An unreferenced group must NOT land in the manifest.
         feeds.insert(
             "unused".to_owned(),
-            FeedGroup {
+            FeedGroup::Roles {
                 primary: FilePin {
                     path: "data/other.csv".into(),
                     xxh128: "f2".into(),
@@ -256,10 +268,57 @@ mod tests {
     }
 
     #[test]
+    fn emits_single_base_feed_group_as_base_role() {
+        let mut pin = Pin::new(
+            FilePin {
+                path: "validation/probe-01/strategy.pine".into(),
+                xxh128: "aa".into(),
+            },
+            FilePin {
+                path: "validation/probe-01/tv_trades.csv".into(),
+                xxh128: "bb".into(),
+            },
+        );
+        pin.feed = Some("eth-15m-2025".to_owned());
+        let mut pins = BTreeMap::new();
+        pins.insert("probe-01".to_owned(), pin);
+
+        let mut feeds = BTreeMap::new();
+        feeds.insert(
+            "eth-15m-2025".to_owned(),
+            FeedGroup::Base {
+                base: FilePin {
+                    path: "vendor/engine/data/ohlcv_1m.csv".into(),
+                    xxh128: "b0".into(),
+                },
+            },
+        );
+        let registry = Registry {
+            pins,
+            feeds,
+            ..Registry::default()
+        };
+
+        let m = Manifest::build(Path::new("/abs/corpus"), &[verified("probe-01")], &registry);
+        let group = &m.feeds["eth-15m-2025"];
+        // Exactly one role, `base`, resolved absolute; no primary/warmup/lower.
+        assert_eq!(group.len(), 1);
+        assert_eq!(
+            group["base"],
+            PathBuf::from("/abs/corpus/vendor/engine/data/ohlcv_1m.csv")
+        );
+
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"version\":3"));
+        assert!(json.contains("\"base\":"));
+        assert!(!json.contains("\"primary\""));
+    }
+
+    #[test]
     fn serializes_with_expected_keys() {
         let m = Manifest::build(Path::new("/c"), &[verified("p")], &Registry::default());
         let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("\"version\":2"));
+        assert!(json.contains("\"version\":3"));
         assert!(json.contains("\"corpus_root\""));
         assert!(json.contains("\"probe\":\"p\""));
         assert!(json.contains("\"probe_dir\""));

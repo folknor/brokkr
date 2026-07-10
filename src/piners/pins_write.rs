@@ -34,8 +34,10 @@ const PROBE_FIELDS: [&str; 7] = [
     "csv",
 ];
 
-/// Field order inside a `[feeds.<name>]` group.
-const FEED_FIELDS: [&str; 3] = ["primary", "warmup", "lower"];
+/// Field order inside a `[feeds.<name>]` group. `base` is the single-base
+/// form; `primary`/`warmup`/`lower` the role form. The two forms never
+/// coexist, so this ordering only ever sorts one of them.
+const FEED_FIELDS: [&str; 4] = ["base", "primary", "warmup", "lower"];
 
 /// Render the new pin state into `existing` (the current `pins.toml` text;
 /// `None` on bootstrap), preserving comments and formatting of everything
@@ -102,11 +104,28 @@ fn sync_section<T>(
     Ok(())
 }
 
-/// Stamp a `[feeds.<name>]` group's fields in place.
+/// Stamp a `[feeds.<name>]` group's fields in place. Each arm clears the keys
+/// of the *other* form so a group that switched forms (e.g. `primary` -> a
+/// single `base`) does not leave stale keys behind.
 fn fill_feed(table: &mut Table, group: &FeedGroup) -> Result<(), DevError> {
-    set_value(table, "primary", pin_value(&group.primary)?);
-    sync_opt(table, "warmup", group.warmup.as_ref().map(pin_value).transpose()?);
-    sync_opt(table, "lower", group.lower.as_ref().map(pin_value).transpose()?);
+    match group {
+        FeedGroup::Roles {
+            primary,
+            warmup,
+            lower,
+        } => {
+            set_value(table, "primary", pin_value(primary)?);
+            sync_opt(table, "warmup", warmup.as_ref().map(pin_value).transpose()?);
+            sync_opt(table, "lower", lower.as_ref().map(pin_value).transpose()?);
+            sync_opt(table, "base", None);
+        }
+        FeedGroup::Base { base } => {
+            set_value(table, "base", pin_value(base)?);
+            sync_opt(table, "primary", None);
+            sync_opt(table, "warmup", None);
+            sync_opt(table, "lower", None);
+        }
+    }
     sort_fields(table, &FEED_FIELDS);
     Ok(())
 }
@@ -304,12 +323,11 @@ mod tests {
     #[test]
     fn fresh_render_is_canonical_and_round_trips() {
         let mut feeds = BTreeMap::new();
-        let mut group = FeedGroup {
+        let group = FeedGroup::Roles {
             primary: file_pin("vendor/engine/data/15m.csv", "f0"),
             warmup: None,
-            lower: None,
+            lower: Some(file_pin("vendor/engine/data/1m.csv", "f2")),
         };
-        group.lower = Some(file_pin("vendor/engine/data/1m.csv", "f2"));
         feeds.insert("eth-15m".to_owned(), group);
         let mut roots = BTreeMap::new();
         roots.insert(
@@ -339,7 +357,12 @@ mod tests {
         assert!(text.find("expected").unwrap() < text.find("pine").unwrap());
 
         let data = reparse(&text);
-        assert_eq!(data.feeds["eth-15m"].lower.as_ref().unwrap().xxh128, "f2");
+        match &data.feeds["eth-15m"] {
+            FeedGroup::Roles { lower, .. } => {
+                assert_eq!(lower.as_ref().unwrap().xxh128, "f2");
+            }
+            other => panic!("expected role form, got {other:?}"),
+        }
         assert_eq!(data.roots["vendor/engine"].feed, "eth-15m");
         let p = &data.probes["alpha-01"];
         assert_eq!(p.expected.as_deref(), Some("accepted"));
@@ -375,7 +398,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let mut feeds = BTreeMap::new();
         feeds.insert(
             "eth-15m".to_owned(),
-            FeedGroup {
+            FeedGroup::Roles {
                 primary: file_pin("data/15m.csv", "f-new"),
                 warmup: None,
                 lower: None,
@@ -424,7 +447,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let data = reparse(&text);
         assert_eq!(data.probes["alpha-01"].expected.as_deref(), Some("byte_exact"));
         assert_eq!(data.probes["mid-05"].expected, None);
-        assert_eq!(data.feeds["eth-15m"].primary.xxh128, "f-new");
+        assert_eq!(data.feeds["eth-15m"].roles()[0].1.xxh128, "f-new");
         assert_eq!(data.roots["vendor/engine"].feed, "eth-15m");
     }
 
@@ -448,6 +471,52 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         // Untouched neighbours keep their bytes.
         assert!(text.contains("expected = \"accepted\" # blessed 2026-05"));
         assert!(text.contains("# zulu is on its way out"));
+    }
+
+    #[test]
+    fn single_base_feed_group_round_trips() {
+        let mut feeds = BTreeMap::new();
+        feeds.insert(
+            "eth-15m-2025".to_owned(),
+            FeedGroup::Base {
+                base: file_pin("vendor/engine/data/ohlcv_1m.csv", "b0"),
+            },
+        );
+        let text =
+            render_pins(None, &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+        assert!(text.contains("base = { path ="));
+        assert!(!text.contains("primary"));
+        match &reparse(&text).feeds["eth-15m-2025"] {
+            FeedGroup::Base { base } => assert_eq!(base.xxh128, "b0"),
+            other => panic!("expected base form, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn switching_a_group_to_base_form_clears_role_keys() {
+        // A group pinned in role form is re-stamped as single-base: the stale
+        // primary/warmup/lower keys must not survive.
+        let existing = "\
+[feeds.eth-15m]
+primary = { path = \"data/15m.csv\", xxh128 = \"f0\" }
+warmup = { path = \"data/15m_warmup.csv\", xxh128 = \"f1\" }
+";
+        let mut feeds = BTreeMap::new();
+        feeds.insert(
+            "eth-15m".to_owned(),
+            FeedGroup::Base {
+                base: file_pin("data/ohlcv_1m.csv", "b0"),
+            },
+        );
+        let text =
+            render_pins(Some(existing), &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+        assert!(!text.contains("primary"));
+        assert!(!text.contains("warmup"));
+        assert!(text.contains("base = { path ="));
+        assert!(matches!(
+            reparse(&text).feeds["eth-15m"],
+            FeedGroup::Base { .. }
+        ));
     }
 
     #[test]

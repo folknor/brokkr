@@ -63,31 +63,142 @@ pub struct FilePin {
     pub xxh128: String,
 }
 
-/// One hash-pinned OHLCV feed group: the primary feed plus optional
-/// warmup/lower companions. A probe's TV export was taken against one
-/// specific feed, so the feed files are pinned oracles like `pine`/`csv` -
+/// One hash-pinned OHLCV feed group. A probe's TV export was taken against
+/// one specific feed, so the feed files are pinned oracles like `pine`/`csv` -
 /// the same pine + csv against the wrong feed gates as a fake regression.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+///
+/// Two mutually exclusive forms, selected per group:
+///
+/// - [`FeedGroup::Roles`] (legacy role form): a chart-timeframe `primary`
+///   feed plus optional `warmup`/`lower` companions, consumed by the harness
+///   as-is (`primary` is already at chart TF).
+/// - [`FeedGroup::Base`] (single-base form): the only committed input is a
+///   lower-timeframe `base` feed the harness aggregates locally to the chart
+///   timeframe (and uses directly as the magnifier/lower source). No separate
+///   `lower` is meaningful - the base *is* the 1m feed.
+///
+/// The form travels into the manifest verbatim (role names as keys), and the
+/// bumped manifest version lets the harness tell a base group it must
+/// aggregate from role feeds it consumes directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedGroup {
+    /// The legacy role form: `primary` (chart TF) plus optional companions.
+    Roles {
+        primary: FilePin,
+        warmup: Option<FilePin>,
+        lower: Option<FilePin>,
+    },
+    /// The single-base form: one lower-TF `base` feed, aggregated by consumers.
+    Base { base: FilePin },
+}
+
+/// Raw `[feeds.<name>]` shape before form validation: all four keys optional,
+/// unknown keys rejected. [`FeedGroup`]'s `Deserialize` reduces this to one of
+/// the two legal forms, so a typo or an illegal mix errors at parse time.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FeedGroup {
-    pub primary: FilePin,
+struct FeedGroupRaw {
     #[serde(default)]
-    pub warmup: Option<FilePin>,
+    primary: Option<FilePin>,
     #[serde(default)]
-    pub lower: Option<FilePin>,
+    warmup: Option<FilePin>,
+    #[serde(default)]
+    lower: Option<FilePin>,
+    #[serde(default)]
+    base: Option<FilePin>,
+}
+
+impl FeedGroupRaw {
+    /// Reduce the raw table to a validated [`FeedGroup`], or a message naming
+    /// what is wrong (fed through `serde::de::Error::custom`).
+    fn into_group(self) -> Result<FeedGroup, String> {
+        match (self.base, self.primary) {
+            (Some(base), None) => {
+                if self.warmup.is_some() || self.lower.is_some() {
+                    return Err(
+                        "a base feed group must not also set `warmup`/`lower`: its only \
+                         input is the `base` feed, which consumers aggregate and also use \
+                         directly as the lower/magnifier source"
+                            .to_owned(),
+                    );
+                }
+                Ok(FeedGroup::Base { base })
+            }
+            (None, Some(primary)) => Ok(FeedGroup::Roles {
+                primary,
+                warmup: self.warmup,
+                lower: self.lower,
+            }),
+            (Some(_), Some(_)) => Err(
+                "a feed group sets both `base` and `primary`; pick one form - `base` (a \
+                 single lower-TF feed the consumer aggregates) or `primary`/`warmup`/`lower` \
+                 (chart-TF role feeds consumed as-is)"
+                    .to_owned(),
+            ),
+            (None, None) => Err(
+                "a feed group must set either `base` (single-base form) or `primary` (role \
+                 form)"
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FeedGroup {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        FeedGroupRaw::deserialize(deserializer)?
+            .into_group()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl FeedGroup {
-    /// The present (role, pin) pairs, primary first.
+    /// The present (role, pin) pairs. For a role group: `primary` first, then
+    /// any `warmup`/`lower`. For a base group: the single `base` role. This is
+    /// the shared iteration surface for verification, re-stamping, and the
+    /// manifest - all of which treat a feed group as its set of named roles.
     pub fn roles(&self) -> Vec<(&'static str, &FilePin)> {
-        let mut roles = vec![("primary", &self.primary)];
-        if let Some(w) = &self.warmup {
-            roles.push(("warmup", w));
+        match self {
+            FeedGroup::Roles {
+                primary,
+                warmup,
+                lower,
+            } => {
+                let mut roles = vec![("primary", primary)];
+                if let Some(w) = warmup {
+                    roles.push(("warmup", w));
+                }
+                if let Some(l) = lower {
+                    roles.push(("lower", l));
+                }
+                roles
+            }
+            FeedGroup::Base { base } => vec![("base", base)],
         }
-        if let Some(l) = &self.lower {
-            roles.push(("lower", l));
+    }
+
+    /// [`FeedGroup::roles`] with mutable pins, for re-stamping hashes in place.
+    pub fn roles_mut(&mut self) -> Vec<(&'static str, &mut FilePin)> {
+        match self {
+            FeedGroup::Roles {
+                primary,
+                warmup,
+                lower,
+            } => {
+                let mut roles: Vec<(&'static str, &mut FilePin)> = vec![("primary", primary)];
+                if let Some(w) = warmup {
+                    roles.push(("warmup", w));
+                }
+                if let Some(l) = lower {
+                    roles.push(("lower", l));
+                }
+                roles
+            }
+            FeedGroup::Base { base } => vec![("base", base)],
         }
-        roles
     }
 }
 
@@ -402,6 +513,11 @@ fn verify_one(
             abs.display()
         )]));
     }
+    // Refuse an unmaterialized Git-LFS pointer before hashing: hashing the
+    // pointer bytes would compare a 134-byte stub against the real feed's
+    // digest (a spurious mismatch), or - worse, on reseed - stamp the pointer
+    // hash into the pin. Cheap sniff, no-op for plaintext files.
+    crate::piners::lfs::ensure_materialized(&abs)?;
     let origin = format!("{subject} ({label})");
     preflight::verify_file_hash(&abs, &file.xxh128, project_root, Some(&origin))?;
     Ok(())
@@ -445,7 +561,7 @@ mod tests {
     }
 
     fn feed_group(primary: &str) -> FeedGroup {
-        FeedGroup {
+        FeedGroup::Roles {
             primary: FilePin {
                 path: PathBuf::from(primary),
                 xxh128: "ff".into(),
@@ -547,11 +663,66 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
             r.pins["beta-02"].tv_trades_csv_tz.as_deref(),
             Some("America/New_York")
         );
-        assert_eq!(r.feeds["eth-15m"].primary.xxh128, "f0");
-        assert_eq!(r.feeds["eth-15m"].warmup.as_ref().unwrap().xxh128, "f1");
+        let roles = r.feeds["eth-15m"].roles();
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles[0].0, "primary");
+        assert_eq!(roles[0].1.xxh128, "f0");
+        assert_eq!(roles[1].0, "warmup");
+        assert_eq!(roles[1].1.xxh128, "f1");
         assert_eq!(r.roots["vendor/engine"].feed, "eth-15m");
         assert_eq!(r.keywords["ema"], vec!["alpha-01".to_owned()]);
         assert!(r.lint().is_ok());
+    }
+
+    #[test]
+    fn parses_single_base_feed_group() {
+        let data: PinsData = toml::from_str(
+            r#"
+[feeds.eth-15m-2025]
+base = { path = "vendor/engine/data/ohlcv_1m.csv", xxh128 = "b0" }
+"#,
+        )
+        .unwrap();
+        match &data.feeds["eth-15m-2025"] {
+            FeedGroup::Base { base } => assert_eq!(base.xxh128, "b0"),
+            other => panic!("expected a base group, got {other:?}"),
+        }
+        // A base group exposes exactly the `base` role for verify/manifest.
+        let roles = data.feeds["eth-15m-2025"].roles();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].0, "base");
+    }
+
+    #[test]
+    fn base_and_primary_together_is_rejected() {
+        let err = toml::from_str::<PinsData>(
+            r#"
+[feeds.bad]
+base = { path = "a.csv", xxh128 = "b0" }
+primary = { path = "b.csv", xxh128 = "f0" }
+"#,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("both `base` and `primary`"));
+    }
+
+    #[test]
+    fn base_with_lower_is_rejected() {
+        let err = toml::from_str::<PinsData>(
+            r#"
+[feeds.bad]
+base = { path = "a.csv", xxh128 = "b0" }
+lower = { path = "l.csv", xxh128 = "f0" }
+"#,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("must not also set"));
+    }
+
+    #[test]
+    fn empty_feed_group_is_rejected() {
+        let err = toml::from_str::<PinsData>("[feeds.bad]\n").unwrap_err();
+        assert!(format!("{err}").contains("either `base`"));
     }
 
     #[test]
