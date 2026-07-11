@@ -106,9 +106,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         req.build_root,
         &build_cfg,
         lock_command,
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 

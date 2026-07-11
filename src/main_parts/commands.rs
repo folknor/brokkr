@@ -756,9 +756,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         &hotpath_features,
         true,
         "hotpath",
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 

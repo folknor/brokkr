@@ -68,9 +68,7 @@ fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
         &feat_refs,
         true,
         &format!("run {}", "nid-ingest"),
-        true,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        true,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -120,9 +118,7 @@ fn run_nidhogg_ingest_bench(
         &feat_refs,
         true,
         &format!("bench {}", command.id()),
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -215,9 +211,7 @@ fn run_nidhogg_hotpath(
         &hotpath_features,
         true,
         &format!("hotpath {}", command.id()),
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 

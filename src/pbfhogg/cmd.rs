@@ -156,9 +156,7 @@ pub(crate) fn bench_read(
         &feat_refs,
         true,
         "bench read",
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
@@ -193,9 +191,7 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         &feat_refs,
         true,
         "bench write",
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -253,9 +249,7 @@ pub(crate) fn bench_merge(
         &all_features,
         true,
         "bench merge",
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =
@@ -293,9 +287,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.project_root,
         req.build_root,
         "bench all",
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
     let (pbf_path, file_mb) =

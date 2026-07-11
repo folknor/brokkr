@@ -149,41 +149,12 @@ fn lock_path() -> Result<PathBuf, DevError> {
     Ok(dir.join("brokkr.lock"))
 }
 
-/// Acquire an exclusive non-blocking lock on the global lock file.
+/// Acquire an exclusive lock on the global lock file, blocking until free.
 ///
-/// On success, writes PID + context to the lock file.
-/// On `EWOULDBLOCK`, reads the file to report who holds the lock.
+/// If the lock is held, prints a waiting message describing the holder and
+/// blocks until it is released. On success, writes PID + context to the
+/// lock file.
 pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
-    let path = lock_path()?;
-    let c_path = path_to_cstring(&path)?;
-    let fd = open_lock_file(&c_path)?;
-
-    match try_flock(fd) {
-        Ok(()) => {
-            // SAFETY: `fd` is a valid open file descriptor returned by `open_lock_file`,
-            // and we take unique ownership here - it is not used elsewhere.
-            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-            let state = build_state(ctx);
-            rewrite_from_state(owned.as_raw_fd(), &state);
-            Ok(LockGuard {
-                fd: owned,
-                state: Mutex::new(state),
-            })
-        }
-        Err(held_by) => {
-            // flock failed - close the fd before returning the error.
-            // SAFETY: same as above - valid fd, unique ownership.
-            let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-            Err(held_by)
-        }
-    }
-}
-
-/// Acquire an exclusive blocking lock on the global lock file.
-///
-/// If the lock is held, prints a waiting message and blocks until it is
-/// released. On success, writes PID + context to the lock file.
-pub fn acquire_blocking(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     let c_path = path_to_cstring(&path)?;
     let fd = open_lock_file(&c_path)?;
@@ -457,37 +428,6 @@ fn open_lock_file(c_path: &std::ffi::CString) -> Result<RawFd, DevError> {
     }
 
     Ok(fd)
-}
-
-/// Try a non-blocking exclusive flock. Returns `Ok(())` on success, or a
-/// `DevError::Lock` describing the holder on `EWOULDBLOCK`.
-fn try_flock(fd: RawFd) -> Result<(), DevError> {
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-
-    if ret == 0 {
-        return Ok(());
-    }
-
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        let info = read_lock_contents(fd);
-        match info {
-            Some(info) => {
-                let uptime = process_uptime_str(info.pid)
-                    .map(|u| format!(", running {u}"))
-                    .unwrap_or_default();
-                Err(DevError::Lock(format!(
-                    "already locked by PID {} - {} {} ({}{})",
-                    info.pid, info.project, info.command, info.project_root, uptime
-                )))
-            }
-            None => Err(DevError::Lock(
-                "already locked by unknown process".into(),
-            )),
-        }
-    } else {
-        Err(DevError::Lock(format!("flock failed: {err}")))
-    }
 }
 
 /// Build the initial `LockState` for a freshly-acquired lock. Captures the

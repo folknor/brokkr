@@ -55,10 +55,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 
 use cli::{Cli, Command, VerifyCommand};
-use context::{
-    acquire_cmd_lock, acquire_cmd_lock_blocking, acquire_cmd_lock_opt,
-    acquire_cmd_lock_opt_blocking, bootstrap, bootstrap_config, with_worktree,
-};
+use context::{acquire_cmd_lock, acquire_cmd_lock_opt, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;
 use request::{CorpusQuery, ResultsQuery, SidecarQuery};

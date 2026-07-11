@@ -24,12 +24,11 @@ Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
 `CARGO_TARGET_TMPDIR`); when absent, cwd is the project root.
 
-Both `check` and `test` acquire the global per-user lock **blocking**: if
-another brokkr invocation (e.g. a bench run) holds it, the command prints
-`[lock] waiting for …` and waits until released, then proceeds - rather than
-failing with `lock: already locked`. So a concurrent lock never produces an
-error to handle; just let the command wait. (Bench/measure commands still
-fail fast unless `--wait` is given.)
+Like every locked brokkr command, `check` and `test` acquire the global
+per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
+holds it, the command prints `[lock] waiting for …` and waits until released,
+then proceeds - rather than failing with `lock: already locked`. So a
+concurrent lock never produces an error to handle; just let the command wait.
 
 Flags:
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`

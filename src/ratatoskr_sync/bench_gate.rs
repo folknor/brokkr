@@ -106,7 +106,6 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         Project::Ratatoskr,
         "sync-bench",
         req.force,
-        false,
         None,
     )?
     .with_brokkr_args(req.brokkr_args.clone())

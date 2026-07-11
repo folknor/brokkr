@@ -1717,10 +1717,6 @@ Examples:
         /// Run even if the git tree is dirty (results will not be stored)
         #[arg(long)]
         force: bool,
-
-        /// Wait for the lock instead of failing immediately
-        #[arg(long)]
-        wait: bool,
     },
 
     // ----- ratatoskr-only commands (display_order = 60) -----
@@ -2326,10 +2322,6 @@ pub(crate) struct ModeArgs {
     /// Run even if the git tree is dirty (results will not be stored)
     #[arg(long)]
     pub(crate) force: bool,
-
-    /// Wait for the lock instead of failing immediately
-    #[arg(long)]
-    pub(crate) wait: bool,
 
     /// Validate argv, config, and path resolution without building or running.
     /// Short-circuits after path/arg-vector construction. Skips cargo build,

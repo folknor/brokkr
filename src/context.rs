@@ -15,6 +15,11 @@ use crate::worktree;
 /// processes should call this to prevent concurrent brokkr invocations
 /// from corrupting shared state. The returned guard is held (and the
 /// lock released) until the caller drops it.
+///
+/// Blocks until the lock is free. If another brokkr holds it, this prints
+/// `[lock] waiting for …` then proceeds once released - so no command ever
+/// exits with a confusing `lock: already locked` error that an agent might
+/// "handle" by bypassing the tool or inventing a polling loop.
 pub(crate) fn acquire_cmd_lock(
     project: Project,
     project_root: &Path,
@@ -36,35 +41,6 @@ pub(crate) fn acquire_cmd_lock_opt(
         command,
         project_root: &project_root.display().to_string(),
     })
-}
-
-/// Acquire the global lock, blocking until it is free instead of failing.
-///
-/// Used by quick validation commands (`check` / `test`) that an agent runs
-/// constantly. If a bench run (or any other brokkr) holds the lock, blocking
-/// here prints `[lock] waiting for …` then proceeds once released - so the
-/// command never exits with a confusing `lock: already locked` error that an
-/// agent might "handle" by bypassing the tool or inventing a polling loop.
-pub(crate) fn acquire_cmd_lock_opt_blocking(
-    project: Option<Project>,
-    project_root: &Path,
-    command: &str,
-) -> Result<lockfile::LockGuard, DevError> {
-    lockfile::acquire_blocking(&lockfile::LockContext {
-        project: project.map_or("brokkr", Project::name),
-        command,
-        project_root: &project_root.display().to_string(),
-    })
-}
-
-/// As [`acquire_cmd_lock_opt_blocking`], but for commands that always run
-/// inside a detected project.
-pub(crate) fn acquire_cmd_lock_blocking(
-    project: Project,
-    project_root: &Path,
-    command: &str,
-) -> Result<lockfile::LockGuard, DevError> {
-    acquire_cmd_lock_opt_blocking(Some(project), project_root, command)
 }
 
 /// Resolve project info (target_dir) using cargo metadata.
@@ -117,7 +93,6 @@ impl HarnessContext {
         build_root: Option<&Path>,
         lock_command: &str,
         force: bool,
-        wait: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         let (paths, effective, db_root) =
@@ -129,7 +104,6 @@ impl HarnessContext {
             project,
             lock_command,
             force,
-            wait,
             stop_marker,
         )?;
         Ok(Self { paths, harness })
@@ -176,7 +150,6 @@ impl BenchContext {
         default_features: bool,
         lock_command: &str,
         force: bool,
-        wait: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         let build_config = if features.is_empty() && default_features {
@@ -194,7 +167,6 @@ impl BenchContext {
             &build_config,
             lock_command,
             force,
-            wait,
             stop_marker,
         )
     }
@@ -215,23 +187,17 @@ impl BenchContext {
         build_config: &build::BuildConfig,
         lock_command: &str,
         force: bool,
-        wait: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         let (paths, effective_build_root, db_root) =
             resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         // Acquire the lock BEFORE building so concurrent brokkr invocations
         // block here instead of competing for CPU during cargo build.
-        let lock_ctx = lockfile::LockContext {
+        let lock = lockfile::acquire(&lockfile::LockContext {
             project: project.name(),
             command: lock_command,
             project_root: &project_root.display().to_string(),
-        };
-        let lock = if wait {
-            lockfile::acquire_blocking(&lock_ctx)?
-        } else {
-            lockfile::acquire(&lock_ctx)?
-        };
+        })?;
         let cargo_features = if build_config.features.is_empty() {
             None
         } else {

@@ -116,9 +116,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &feat_refs,
                 true,
                 &format!("run {}", command.id()),
-                true,
-                req.wait,
-                req.stop_marker.map(str::to_owned),
+                true,                req.stop_marker.map(str::to_owned),
             )?
             .with_request(req);
 
@@ -236,9 +234,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         &feat_refs,
         true,
         &format!("bench {}", command.id()),
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -323,9 +319,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         req.project_root,
         req.build_root,
         &format!("bench {}", command.id()),
-        req.force,
-        req.wait,
-        req.stop_marker.map(str::to_owned),
+        req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
 
@@ -423,9 +417,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 &hotpath_features,
                 true,
                 &format!("hotpath {}", command.id()),
-                req.force,
-                req.wait,
-                req.stop_marker.map(str::to_owned),
+                req.force,                req.stop_marker.map(str::to_owned),
             )?
             .with_request(req);
 
@@ -502,9 +494,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 req.project_root,
                 req.build_root,
                 &format!("hotpath {}", command.id()),
-                req.force,
-                req.wait,
-                req.stop_marker.map(str::to_owned),
+                req.force,                req.stop_marker.map(str::to_owned),
             )?
             .with_request(req);
 
