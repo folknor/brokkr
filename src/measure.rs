@@ -154,6 +154,11 @@ pub struct CommandParams {
     /// (BlobHeader field 5 way-member bitmaps, Way field 20 shared-node pins).
     /// pbfhogg hard-errors on invalid combinations, so brokkr only forwards.
     pub inject_prepass: bool,
+    /// `--force-altw` for `add-locations-to-ways`. Appends `--force` to the
+    /// pbfhogg child, skipping its indexdata requirement so raw / non-indexed
+    /// input reaches the decode-all fallback. Named to disambiguate from
+    /// brokkr's own dirty-tree `--force`, mirroring `--force-repack`.
+    pub force_altw: bool,
     /// `--locations-on-ways` for `apply-changes`.
     pub locations_on_ways: bool,
     /// `--snapshot <key>`.

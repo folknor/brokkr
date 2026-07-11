@@ -487,6 +487,13 @@ Examples:
         /// design, so `brokkr verify add-locations-to-ways` refuses this flag.
         #[arg(long)]
         inject_prepass: bool,
+        /// Pass `--force` through to pbfhogg's `add-locations-to-ways`
+        /// (skips the indexdata requirement, forcing the full decode-all
+        /// fallback on raw / non-indexed input). Named `--force-altw` to
+        /// disambiguate from brokkr's own per-subcommand `--force`
+        /// dirty-tree override, mirroring `--force-repack`.
+        #[arg(long)]
+        force_altw: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one

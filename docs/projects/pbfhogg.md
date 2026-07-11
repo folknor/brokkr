@@ -134,6 +134,15 @@ compare pairs automatically, no suffix required.
   405), so there is no reference tool to cross-validate against. Run flag-off
   verify for the element semantics; enriched correctness is covered by
   pbfhogg's own oracle-roundtrip + backend-parity suite.
+- `--force-altw` - (`add-locations-to-ways` only) appends `--force` to the
+  pbfhogg child (`src/pbfhogg/commands.rs`, `AddLocationsToWays` arm), skipping
+  its indexdata requirement so raw / non-indexed input reaches the decode-all
+  fallback path. Named to disambiguate from brokkr's own per-subcommand
+  `--force` dirty-tree override, mirroring `--force-repack`. Composes with
+  `--inject-prepass`, `--index-type`, `--compression`, and the measurement
+  modes. brokkr does no validation of its own - pbfhogg owns the semantics. The
+  intended cell: `brokkr add-locations-to-ways --dataset europe --variant raw
+  --index-type sparse --compression zstd:1 --force-altw --bench 3`.
 - `--locations-on-ways` - (`apply-changes` only) passes through to the child
   pbfhogg invocation.
 

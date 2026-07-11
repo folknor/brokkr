@@ -713,6 +713,9 @@ impl PbfhoggCommand {
                 if ctx.params.inject_prepass {
                     args.push("--inject-prepass".into());
                 }
+                if ctx.params.force_altw {
+                    args.push("--force".into());
+                }
                 Ok(args)
             }
             Self::TimeFilter => {
@@ -1256,6 +1259,36 @@ mod tests {
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
         assert!(args.contains(&String::from("--inject-prepass")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_forwards_force_altw() {
+        let mut ctx = test_ctx();
+        ctx.params.force_altw = true;
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(args.contains(&String::from("--force")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_omits_force_altw_by_default() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.contains(&String::from("--force")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_force_altw_composes_with_inject_prepass() {
+        // The intended verdict cell: raw input reaches the decode-all
+        // fallback (--force) while emitting the injected-prepass extensions.
+        let mut ctx = test_ctx();
+        ctx.params.inject_prepass = true;
+        ctx.params.force_altw = true;
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(args.contains(&String::from("--inject-prepass")));
+        assert!(args.contains(&String::from("--force")));
     }
 
     #[test]
