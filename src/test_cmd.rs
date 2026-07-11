@@ -23,6 +23,12 @@
 //! ceiling only makes sense for one isolated test, it is gated: each
 //! sweep is enumerated with libtest `--list` first, and `<NAME>` matching
 //! more than one test in any sweep is a hard error before anything runs.
+//!
+//! `--sweep <LABEL>` narrows the resolved profile's sweep set to the one
+//! matching sweep (e.g. `--sweep all`), instead of running every sweep the
+//! profile lists. An unknown label is a hard error listing the available
+//! ones. Combined with `--timeout`, this is the usual way to iterate on a
+//! single hung test without paying for the other sweeps' rebuilds.
 
 use std::io::Write;
 use std::path::Path;
@@ -106,10 +112,12 @@ pub fn run(
     raw: bool,
     profile_override: Option<bool>,
     timeout: Option<u64>,
+    sweep_filter: Option<&str>,
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
     let ceiling = timeout.map_or(test_runner::TEST_TIMEOUT, Duration::from_secs);
     let sweeps = decide_sweeps(dev_config.test.as_ref(), &dev_config.check)?;
+    let sweeps = select_sweep(sweeps, sweep_filter)?;
     let multi = sweeps.len() > 1;
 
     let pkg = resolve_package(package, dev_config, project)?;
@@ -458,6 +466,27 @@ fn decide_sweeps(
         s.name_filters.clear();
     }
     Ok(sweeps)
+}
+
+/// Narrow the resolved sweep set to a single `--sweep <label>`. Passing
+/// `None` keeps every sweep. An unknown label is a hard error that lists
+/// the labels actually available, so a typo can't silently run nothing.
+fn select_sweep(
+    sweeps: Vec<ResolvedSweep>,
+    filter: Option<&str>,
+) -> Result<Vec<ResolvedSweep>, DevError> {
+    let Some(label) = filter else {
+        return Ok(sweeps);
+    };
+    let available: Vec<&str> = sweeps.iter().map(|s| s.label.as_str()).collect();
+    if let Some(pos) = sweeps.iter().position(|s| s.label == label) {
+        // Preserve the matched sweep only; index is valid by construction.
+        return Ok(vec![sweeps.into_iter().nth(pos).expect("matched sweep")]);
+    }
+    Err(DevError::Config(format!(
+        "--sweep {label} matches no sweep in the resolved profile; available: {}",
+        available.join(", ")
+    )))
 }
 
 /// Run one `cargo test` invocation. Prints the `[test]` footer and returns

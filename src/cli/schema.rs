@@ -1640,6 +1640,11 @@ Examples:
         /// running. Without this flag the ceiling is the standard 20s.
         #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..=280))]
         timeout: Option<u64>,
+        /// Run only the named sweep from the resolved `default_profile`
+        /// (e.g. `--sweep all` or `--sweep consumer`), instead of every
+        /// sweep the profile lists. Errors if no sweep carries that label.
+        #[arg(long, value_name = "LABEL")]
+        sweep: Option<String>,
     },
     /// [litehtml/sluggrs] List fixtures/snapshots and approval state
     #[command(display_order = 50)]
