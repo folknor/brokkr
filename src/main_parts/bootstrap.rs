@@ -797,8 +797,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Invalidate { uuid, commit, force } => {
             invalidate_cmd::cmd_invalidate(&project_root, uuid.as_deref(), commit.as_deref(), force)
         }
-        Command::Clean { worktrees } => {
+        Command::Clean { worktrees, cargo } => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
+            if let Some(pkg) = cargo {
+                let pkg = pkg.unwrap_or_else(|| project.name().to_owned());
+                cargo_clean_package(&project_root, &pkg)?;
+            }
             cmd_clean(&dev_config, project, &project_root, worktrees)
         }
         Command::Verify {

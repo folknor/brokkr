@@ -380,6 +380,24 @@ fn cmd_clean(
     Ok(())
 }
 
+/// `brokkr clean --cargo [PKG]`: wipe the project's own build artifacts
+/// (all profiles) while keeping dependency artifacts cached - the fix for
+/// stale incremental-build state (e.g. phantom undefined-symbol linker
+/// errors).
+fn cargo_clean_package(project_root: &Path, pkg: &str) -> Result<(), DevError> {
+    output::run_msg(&format!("cargo clean -p {pkg}"));
+    let captured = output::run_captured("cargo", &["clean", "-p", pkg], project_root)?;
+    captured.check_success("cargo clean")?;
+    // cargo clean reports "Removed N files, X total" on stderr.
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    if let Some(summary) = stderr.trim().lines().last()
+        && !summary.is_empty()
+    {
+        output::run_msg(summary.trim());
+    }
+    Ok(())
+}
+
 /// Remove the durable tilegen output archives (`<dataset>-<commit>.pmtiles`)
 /// from the output store. They are reproducible (rerun tilegen), so the deep
 /// clean (`brokkr clean --worktrees`) reclaims their space; retention already

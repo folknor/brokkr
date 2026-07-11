@@ -1143,6 +1143,14 @@ Examples:
         /// (sibling `.brokkr-worktree-<project>-*` dirs created by --commit).
         #[arg(long)]
         worktrees: bool,
+
+        /// Also run `cargo clean -p <PKG>` - wipe this project's own build
+        /// artifacts (all profiles) while keeping dependency artifacts
+        /// cached. The fix for stale-incremental linker failures. PKG
+        /// defaults to the brokkr.toml project name; pass a value to clean
+        /// a different package (e.g. `--cargo pbfhogg-cli`).
+        #[arg(long, num_args = 0..=1, value_name = "PKG")]
+        cargo: Option<Option<String>>,
     },
     /// Show lock status (who holds the benchmark lock)
     #[command(display_order = 6)]
