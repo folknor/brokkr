@@ -47,6 +47,22 @@ pub struct BenchResult {
     pub hotpath: Option<HotpathData>,
 }
 
+/// Sidecar payload collected during a benched run but not yet persisted.
+///
+/// The kv-parsing harness path (`run_external_with_kv_raw`) hands stderr back
+/// to the caller for post-processing before `record_result` mints the run's
+/// UUID. It therefore returns the sidecar data here instead of storing it
+/// eagerly, and the caller flushes it under the recorded UUID via
+/// `commit_sidecar`. Storing eagerly (the pre-fix behaviour) passed `None` for
+/// the UUID, so every success-path store landed under the `dirty` alias and
+/// `brokkr sidecar <uuid>` found nothing for the recorded row - and, with N
+/// modes per invocation, each mode clobbered the previous `dirty`.
+pub struct PendingSidecar {
+    runs: Vec<crate::sidecar::SidecarData>,
+    best_run_idx: usize,
+    info: crate::db::sidecar::RunInfo,
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -397,21 +413,24 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
-        let (best, _stderr) = self.run_external_with_kv_raw(config, program, args, cwd)?;
-        self.record_result(config, &best)?;
+        let (best, _stderr, pending) = self.run_external_with_kv_raw(config, program, args, cwd)?;
+        let uuid = self.record_result(config, &best)?;
+        self.commit_sidecar(uuid.as_deref(), &pending)?;
         Ok(best)
     }
 
     /// Like `run_external_with_kv` but does NOT record - returns the best
-    /// result and the raw stderr from the best run. Caller is responsible for
-    /// calling `record_result` after any post-processing.
+    /// result, the raw stderr from the best run, and the collected sidecar
+    /// payload. The caller must call `record_result` (after any stderr
+    /// post-processing) and then `commit_sidecar` with the resulting UUID, so
+    /// the sidecar rows land under the recorded row rather than `dirty`.
     pub fn run_external_with_kv_raw(
         &self,
         config: &BenchConfig,
         program: &Path,
         args: &[&str],
         cwd: &Path,
-    ) -> Result<(BenchResult, Vec<u8>), DevError> {
+    ) -> Result<(BenchResult, Vec<u8>, PendingSidecar), DevError> {
         let scratch_dir = &self.db_dir;
         use crate::sidecar;
 
@@ -490,9 +509,13 @@ impl BenchHarness {
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
         let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
-        self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info))?;
+        let pending = PendingSidecar {
+            runs: sidecar_runs,
+            best_run_idx,
+            info,
+        };
 
-        Ok((best, best_stderr))
+        Ok((best, best_stderr, pending))
     }
 
     // -----------------------------------------------------------------------
@@ -543,6 +566,18 @@ impl BenchHarness {
             dataset: config.input_file.clone(),
             exit_code,
         }
+    }
+
+    /// Persist a deferred sidecar payload under the recorded UUID. Pass the
+    /// `Option<String>` returned by `record_result` (as a `&str`); `None`
+    /// (dirty tree, so no row was inserted) routes the rows to the `dirty`
+    /// alias, matching `store_sidecar`'s own fallback.
+    pub fn commit_sidecar(
+        &self,
+        uuid: Option<&str>,
+        pending: &PendingSidecar,
+    ) -> Result<(), DevError> {
+        self.store_sidecar(uuid, &pending.runs, pending.best_run_idx, Some(&pending.info))
     }
 
     /// Store sidecar data in the separate sidecar.db.
