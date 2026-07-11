@@ -262,10 +262,12 @@ impl Command {
                 mode,
                 pbf,
                 index_type,
+                inject_prepass,
                 snapshot,
             } => {
                 let params = CommandParams {
                     index_type: index_type.clone(),
+                    inject_prepass: *inject_prepass,
                     snapshot: snapshot.clone(),
                     ..Default::default()
                 };

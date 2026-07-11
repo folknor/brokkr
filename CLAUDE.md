@@ -22,7 +22,7 @@ Install: `cargo install --path ~/Programs/brokkr`
 
 ## Detailed docs
 
-These files are not auto-loaded - read them on demand based on what the user asks. All `./docs/*` files must be 200 lines or less. Don't `wc` them before reading - just Read them.
+These files are not auto-loaded - read them on demand based on what the user asks. Don't `wc` them before reading - just Read them.
 
 - `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, the `[gremlins]` exclude list, `[[check]]`, `[test]` profiles, `[litehtml]`, or `[ratatoskr]` blocks.
 - `docs/brokkr.toml.datasets.md` - **read when** the user asks about `[<host>.datasets.*]` (pbf/osc/pmtiles entries) or the variant-selection CLI flags (`--variant`, `--osc-seq`, `--tiles`, `--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`, `--compression`, `--locations-on-ways`) - map-data projects only (pbfhogg/elivagar/nidhogg).

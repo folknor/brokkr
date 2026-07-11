@@ -710,6 +710,9 @@ impl PbfhoggCommand {
                     args.push("--index-type".into());
                     args.push(it.clone());
                 }
+                if ctx.params.inject_prepass {
+                    args.push("--inject-prepass".into());
+                }
                 Ok(args)
             }
             Self::TimeFilter => {
@@ -1224,6 +1227,35 @@ mod tests {
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(args.contains(&String::from("--index-type")));
         assert!(args.contains(&String::from("external")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_forwards_inject_prepass() {
+        let mut ctx = test_ctx();
+        ctx.params.inject_prepass = true;
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(args.contains(&String::from("--inject-prepass")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_omits_inject_prepass_by_default() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(!args.contains(&String::from("--inject-prepass")));
+    }
+
+    #[test]
+    fn add_locations_to_ways_inject_prepass_composes_with_index_type() {
+        let mut ctx = test_ctx();
+        ctx.params.index_type = Some("external".into());
+        ctx.params.inject_prepass = true;
+        let cmd = PbfhoggCommand::AddLocationsToWays;
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        assert!(args.contains(&String::from("--index-type")));
+        assert!(args.contains(&String::from("external")));
+        assert!(args.contains(&String::from("--inject-prepass")));
     }
 
     #[test]

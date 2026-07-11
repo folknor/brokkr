@@ -479,6 +479,14 @@ Examples:
         /// Index type (dense, sparse, external; default: hash)
         #[arg(long)]
         index_type: Option<String>,
+        /// Emit the injected-prepass wire extensions (BlobHeader field 5
+        /// way-member bitmaps, Way field 20 shared-node pins; declared via
+        /// the `pbfhogg.WayMembers-v1` / `pbfhogg.SharedNodePins-v1` header
+        /// feature strings). Forwarded verbatim to pbfhogg, which hard-errors
+        /// on invalid combinations. Enriched output is osmium-incompatible by
+        /// design, so `brokkr verify add-locations-to-ways` refuses this flag.
+        #[arg(long)]
+        inject_prepass: bool,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot (e.g. one
@@ -2471,6 +2479,15 @@ pub(crate) enum VerifyCommand {
         /// Which index modes to verify. `all` runs hash, sparse, dense, external.
         #[arg(long, value_enum, default_value = "all")]
         mode: AltwMode,
+        /// Accepted only so the refusal is explicit: enriched (injected-prepass)
+        /// output is osmium-incompatible by design (BlobHeader field 5 headers
+        /// run ~1-8 KB; libosmium 2.23 rejects any BlobHeader over 127 bytes,
+        /// their issue 405). brokkr cannot cross-validate it against osmium, so
+        /// passing this flag errors with a pointer to flag-off verify. Enriched
+        /// correctness is covered by pbfhogg's own oracle-roundtrip + backend
+        /// parity suite.
+        #[arg(long)]
+        inject_prepass: bool,
     },
     /// [pbfhogg] Cross-validate check --refs against osmium check-refs
     #[command(display_order = 6)]

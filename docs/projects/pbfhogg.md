@@ -97,20 +97,65 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
 
 ## I/O and compression flags
 
-pbfhogg-specific flags that adjust cargo features and binary args:
+pbfhogg-specific flags that adjust cargo features and binary args. Note on
+result rows: post-v13 the `mode` column (formerly `variant`) carries only the
+measurement mode (`bench`/`hotpath`/`alloc`). These axis flags are **not**
+folded into a variant suffix anymore - they live in the `cli_args` /
+`brokkr_args` columns and are what the `brokkr results` table's `args` column
+renders and what `brokkr results --compare` keys its pairs on. So a flag-on run
+and its flag-off baseline at the same commit are distinct rows / distinct
+compare pairs automatically, no suffix required.
 
 - `--direct-io` - enable O_DIRECT I/O. Adds `linux-direct-io` cargo feature,
-  `--direct-io` binary flag, `+direct-io` variant suffix.
+  `--direct-io` binary flag.
 - `--io-uring` - enable io_uring I/O. Adds `linux-io-uring` cargo feature,
-  `--io-uring` binary flag, `+uring` variant suffix. Runs io_uring preflight
-  checks before building. Only supported by `apply-changes`, `sort`,
-  `cat-dedupe`, `diff-osc`, `repack`, and `degrade`; brokkr rejects it for
-  other commands before building.
+  `--io-uring` binary flag. Runs io_uring preflight checks before building.
+  Only supported by `apply-changes`, `sort`, `cat-dedupe`, `diff-osc`,
+  `repack`, and `degrade`; brokkr rejects it for other commands before
+  building.
 - `--compression <spec>` - output compression passed through to the binary.
-  Values: `zlib:N` (1-9), `zstd:N`, `none`. Adds
-  `+zstd1`/`+zlib6`/`+nocompress` variant suffix. No cargo features required.
+  Values: `zlib:N` (1-9), `zstd:N`, `none`. No cargo features required.
+- `--inject-prepass` - (`add-locations-to-ways` only) emit the injected-prepass
+  wire extensions (BlobHeader field 5 way-member bitmaps, Way field 20
+  shared-node pins; declared via the `pbfhogg.WayMembers-v1` /
+  `pbfhogg.SharedNodePins-v1` header feature strings). Forwarded verbatim to
+  the pbfhogg child (`src/pbfhogg/commands.rs`, `AddLocationsToWays` arm), no
+  cargo features. Composes with `--index-type sparse|external|auto`,
+  `--bench`/`--hotpath`/`--alloc`, `--commit`, `--compression`, `--snapshot`,
+  and the I/O flags. pbfhogg hard-errors on invalid combinations (e.g. sparse
+  without indexdata), so brokkr does no validation of its own beyond
+  forwarding. The producer's four counters (`altw_member_ways`,
+  `altw_pinned_refs`, `altw_field5_bytes`, `altw_field20_ways_emitted`) ride
+  the existing sidecar FIFO counter channel and show up in
+  `brokkr sidecar --counters` unchanged. **`brokkr verify
+  add-locations-to-ways --inject-prepass` is refused** (nonzero exit, no diff
+  run): enriched output is osmium-incompatible by design (field-5 headers run
+  ~1-8 KB; libosmium 2.23 rejects any BlobHeader over 127 bytes, their issue
+  405), so there is no reference tool to cross-validate against. Run flag-off
+  verify for the element semantics; enriched correctness is covered by
+  pbfhogg's own oracle-roundtrip + backend-parity suite.
 - `--locations-on-ways` - (`apply-changes` only) passes through to the child
   pbfhogg invocation.
+
+### Durable enriched output (re-enrichment workflow)
+
+`add-locations-to-ways` writes to scratch and cleans up after every
+run/bench iteration - the output does not survive by design. To produce an
+enriched file that survives (e.g. to register as a dataset's `locations`
+variant for elivagar's `tilegen --variant locations`), run the producer
+through the raw passthrough, which does no cleanup:
+
+```
+brokkr passthrough add-locations-to-ways <input.osm.pbf> \
+  -o <durable/out.osm.pbf> --index-type external --inject-prepass \
+  --compression zlib:6
+```
+
+then register the file manually in `brokkr.toml` under
+`pbf.locations` with a `brokkr env` xxhash. (There is no `--as-snapshot`
+promotion for `add-locations-to-ways`: that machinery routes into the
+`snapshot` graph under `pbf.indexed`, which is the wrong target for a
+top-level `locations` variant.)
 
 ## download command
 

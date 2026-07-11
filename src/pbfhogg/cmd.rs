@@ -364,6 +364,30 @@ pub(crate) fn verify(
         );
     }
 
+    // Enriched (injected-prepass) output is osmium-incompatible by design:
+    // BlobHeader field-5 headers run ~1-8 KB and libosmium 2.23 rejects any
+    // BlobHeader over 127 bytes (their issue 405). There is no reference tool
+    // to cross-validate against, so we refuse the flag up-front rather than let
+    // the check report a false failure. Enriched-output correctness is covered
+    // inside pbfhogg's own suite (oracle roundtrip + backend parity).
+    if let VerifyCommand::AddLocationsToWays { inject_prepass: true, .. } = &verify {
+        output::verify_msg(
+            "add-locations-to-ways --inject-prepass emits osmium-incompatible wire \
+             extensions (BlobHeader field 5 > 127 bytes; libosmium 2.23 issue 405); \
+             enriched output cannot be osmium-verified.",
+        );
+        output::verify_msg(
+            "flag-off `brokkr verify add-locations-to-ways` covers the element \
+             semantics; enriched correctness is covered by pbfhogg's own oracle \
+             roundtrip + backend-parity suite.",
+        );
+        return Err(DevError::Config(
+            "verify add-locations-to-ways --inject-prepass: enriched output cannot be \
+             osmium-verified"
+                .into(),
+        ));
+    }
+
     // Every individual check runs under the pass-quiet / fail-loud wrapper.
     let name = verify_name(&verify);
     super::verify::run_check(name, verbose, || match verify {
@@ -439,7 +463,7 @@ pub(crate) fn verify(
             )?;
             super::verify_getid_removeid::run(&harness, &pbf_path, pbf.direct_io)
         }
-        VerifyCommand::AddLocationsToWays { pbf, mode } => {
+        VerifyCommand::AddLocationsToWays { pbf, mode, inject_prepass: _ } => {
             let pbf_path = resolve_verify_input(
                 pbf.input.as_deref(),
                 &pbf.dataset,

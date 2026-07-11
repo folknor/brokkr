@@ -149,6 +149,11 @@ pub struct CommandParams {
     pub bbox: Option<String>,
     /// `--index-type <mode>` for `add-locations-to-ways`.
     pub index_type: Option<String>,
+    /// `--inject-prepass` for `add-locations-to-ways`. Forwarded verbatim to
+    /// the pbfhogg child, which emits the injected-prepass wire extensions
+    /// (BlobHeader field 5 way-member bitmaps, Way field 20 shared-node pins).
+    /// pbfhogg hard-errors on invalid combinations, so brokkr only forwards.
+    pub inject_prepass: bool,
     /// `--locations-on-ways` for `apply-changes`.
     pub locations_on_ways: bool,
     /// `--snapshot <key>`.
