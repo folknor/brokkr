@@ -546,11 +546,50 @@ pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<Passthrough
     cmd.args(args);
     crate::oom::protect_child(&mut cmd);
 
-    let status = cmd.status().map_err(|e| DevError::Subprocess {
+    // A passthrough child (elivagar `regress`, elivagar run-mode dispatch) is a
+    // real, long-running workload with no sidecar window around it. Historically
+    // this used a bare `cmd.status()`, which left brokkr with the default
+    // SIGTERM disposition: a `brokkr kill` (SIGTERM to brokkr's PID only) then
+    // terminated brokkr and orphaned the child, which kept running. Install a
+    // `SigtermGuard` and spawn+poll instead so a `brokkr kill` (or terminal
+    // ctrl-C) reaches the child. The child stays in brokkr's process group -
+    // not isolated - so a terminal SIGINT still hits it directly, and the guard
+    // covers the `brokkr kill` case where only brokkr's PID is signalled.
+    let _guard = crate::shutdown::SigtermGuard::install();
+    let mut child = cmd.spawn().map_err(|e| DevError::Subprocess {
         program: program.to_owned(),
         code: None,
         stderr: e.to_string(),
     })?;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if crate::shutdown::is_shutdown_requested() {
+                    // `brokkr kill` (SIGTERM) or ctrl-C reached us. Forward
+                    // SIGTERM to the child (single-PID: it shares brokkr's PG),
+                    // give it a brief budget, then SIGKILL, and surface the run
+                    // as interrupted so main's cleanup path handles scratch.
+                    forward_sigterm_then_kill(&mut child, false);
+                    child.wait().map_err(|e| DevError::Subprocess {
+                        program: program.to_owned(),
+                        code: None,
+                        stderr: e.to_string(),
+                    })?;
+                    return Err(DevError::Interrupted);
+                }
+                std::thread::sleep(DEADLINE_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(DevError::Subprocess {
+                    program: program.to_owned(),
+                    code: None,
+                    stderr: e.to_string(),
+                });
+            }
+        }
+    };
 
     let elapsed = start.elapsed();
 
