@@ -183,6 +183,14 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
             {
                 crate::output::lock_msg(&summary);
             }
+            // The lines above are a one-shot snapshot: we block in a single
+            // flock() below and never re-read the holder's stats while waiting.
+            // Point at `brokkr lock`, which re-samples (live progress, child
+            // PID, mock servers, last marker) on every invocation, so a waiter
+            // who wants a fresh view has an honest place to get one.
+            crate::output::lock_msg(
+                "these numbers won't update here - run 'brokkr lock' in another shell for a live view",
+            );
 
             // Block until the lock is released. Retry on EINTR.
             loop {
