@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::build;
 use crate::error::DevError;
+use crate::lockfile::LockGuard;
 use crate::output;
 
 #[allow(clippy::too_many_arguments)]
@@ -25,6 +26,7 @@ pub fn run(
     max_examples: usize,
     svg_dump: Option<&Path>,
     json: bool,
+    lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
     let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
     let binary_str = binary.display().to_string();
@@ -58,7 +60,7 @@ pub fn run(
 
     output::run_msg(&format!("{binary_str} {}", args.join(" ")));
 
-    let out = output::run_passthrough_timed(&binary_str, &args)?;
+    let out = output::run_passthrough_timed(&binary_str, &args, lock)?;
     if out.code != 0 {
         // Propagate the gate verdict verbatim (the report went to stdout).
         return Err(DevError::ExitCode(out.code));

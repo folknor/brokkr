@@ -195,6 +195,7 @@ fn cmd_run(
     features: &[String],
     args: &[String],
     opts: &RunOptions,
+    lock: Option<&lockfile::LockGuard>,
 ) -> Result<(), DevError> {
     if opts.runs == 0 {
         return Err(DevError::Config("--runs must be >= 1".into()));
@@ -234,7 +235,7 @@ fn cmd_run(
         let binary_str = binary.display().to_string();
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         output::run_msg(&format!("{binary_str} {}", args.join(" ")));
-        let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+        let out = output::run_passthrough_timed(&binary_str, &arg_refs, lock)?;
         if out.code != 0 {
             return Err(DevError::ExitCode(out.code));
         }

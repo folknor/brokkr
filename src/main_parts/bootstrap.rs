@@ -693,7 +693,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 runs,
                 no_build,
             };
-            cmd_run(&dev_config, project, &project_root, &features, &args, &opts)
+            cmd_run(
+                &dev_config,
+                project,
+                &project_root,
+                &features,
+                &args,
+                &opts,
+                Some(&_lock),
+            )
         }
         Command::Results {
             query,
@@ -938,6 +946,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 max_examples,
                 svg_dump.as_deref(),
                 json,
+                Some(&_lock),
             )
         }
         Command::Bless {

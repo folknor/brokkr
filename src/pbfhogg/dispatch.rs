@@ -230,7 +230,7 @@ fn run_pbfhogg_run(
     let binary_str = ctx.binary.display().to_string();
     output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
 
-    let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+    let out = output::run_passthrough_timed(&binary_str, &arg_refs, Some(ctx.harness.lock()))?;
 
     if out.code != 0 && !command.ok_exit_codes().contains(&out.code) {
         cleanup_output(command, &cmd_ctx, ArgMode::Bench);

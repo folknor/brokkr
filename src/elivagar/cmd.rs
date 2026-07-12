@@ -221,6 +221,7 @@ pub(crate) fn regress(
     max_examples: usize,
     svg_dump: Option<&Path>,
     json: bool,
+    lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "regress")?;
     let pi = bootstrap(None)?;
@@ -248,6 +249,7 @@ pub(crate) fn regress(
         max_examples,
         svg_dump,
         json,
+        lock,
     )
 }
 

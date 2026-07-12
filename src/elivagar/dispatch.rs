@@ -136,7 +136,8 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
             let binary_str = ctx.binary.display().to_string();
             output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
 
-            let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+            let out =
+                output::run_passthrough_timed(&binary_str, &arg_refs, Some(ctx.harness.lock()))?;
 
             if out.code != 0 {
                 for path in command.output_files(&ctx.paths.scratch_dir) {
@@ -179,7 +180,10 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
 
             output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
 
-            let out = output::run_passthrough_timed(&binary_str, &arg_refs)?;
+            // The Example run-mode path builds directly with no BenchContext,
+            // so no lock is held - nothing to register the child PID against.
+            // Graceful `brokkr kill` / ctrl-C still reach it via the guard.
+            let out = output::run_passthrough_timed(&binary_str, &arg_refs, None)?;
 
             if out.code != 0 {
                 return Err(DevError::ExitCode(out.code));

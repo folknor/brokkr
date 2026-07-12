@@ -86,7 +86,7 @@ fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
     let args = ["ingest", pbf_str, &output_str];
     output::run_msg(&format!("{binary_str} {}", args.join(" ")));
 
-    let out = output::run_passthrough_timed(&binary_str, &args)?;
+    let out = output::run_passthrough_timed(&binary_str, &args, Some(ctx.harness.lock()))?;
 
     // Clean up ingest output.
     std::fs::remove_dir_all(&output_dir).ok();

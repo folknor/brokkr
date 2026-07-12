@@ -538,7 +538,11 @@ pub fn spawn_captured(
 /// If the process is killed by a signal (e.g. OOM killer SIGKILL), returns a
 /// `DevError::Subprocess` with the signal number instead of silently mapping
 /// to exit code 1.
-pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<PassthroughOutput, DevError> {
+pub fn run_passthrough_timed(
+    program: &str,
+    args: &[&str],
+    lock: Option<&crate::lockfile::LockGuard>,
+) -> Result<PassthroughOutput, DevError> {
     use std::os::unix::process::ExitStatusExt;
 
     let start = Instant::now();
@@ -561,6 +565,13 @@ pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<Passthrough
         code: None,
         stderr: e.to_string(),
     })?;
+    // Publish the child PID into the lockfile so `brokkr kill --hard` (which
+    // reads child_pid from the lock file rather than holding the Child handle)
+    // can SIGKILL it, and `brokkr lock` can show it. Cleared on every exit path
+    // below so a recycled PID can't be killed after this returns.
+    if let Some(lock) = lock {
+        lock.set_child_pid(child.id());
+    }
 
     let status = loop {
         match child.try_wait() {
@@ -572,16 +583,18 @@ pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<Passthrough
                     // give it a brief budget, then SIGKILL, and surface the run
                     // as interrupted so main's cleanup path handles scratch.
                     forward_sigterm_then_kill(&mut child, false);
-                    child.wait().map_err(|e| DevError::Subprocess {
-                        program: program.to_owned(),
-                        code: None,
-                        stderr: e.to_string(),
-                    })?;
+                    let _reaped = child.wait();
+                    if let Some(lock) = lock {
+                        lock.clear_child_pid();
+                    }
                     return Err(DevError::Interrupted);
                 }
                 std::thread::sleep(DEADLINE_POLL_INTERVAL);
             }
             Err(e) => {
+                if let Some(lock) = lock {
+                    lock.clear_child_pid();
+                }
                 return Err(DevError::Subprocess {
                     program: program.to_owned(),
                     code: None,
@@ -590,6 +603,9 @@ pub fn run_passthrough_timed(program: &str, args: &[&str]) -> Result<Passthrough
             }
         }
     };
+    if let Some(lock) = lock {
+        lock.clear_child_pid();
+    }
 
     let elapsed = start.elapsed();
 
