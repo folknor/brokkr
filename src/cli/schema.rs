@@ -10,8 +10,14 @@ pub(crate) enum AltwMode {
     All,
 }
 
+/// Version banner: semver plus the short git hash (with a `-dirty` suffix for
+/// an unclean tree) and the UTC build time, stamped at compile time by
+/// `build.rs`. e.g. `0.1.0 (abc123def 2026-07-12 12:34:56 UTC)`. Fed to clap's
+/// `--version` so a stale installed `brokkr` names the commit it was built from.
+const LONG_VERSION: &str = env!("BROKKR_LONG_VERSION");
+
 #[derive(Parser)]
-#[command(name = "brokkr", about = "Shared development tooling", version)]
+#[command(name = "brokkr", about = "Shared development tooling", version = LONG_VERSION)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
