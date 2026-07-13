@@ -233,6 +233,59 @@ impl BenchHarness {
         Ok(best)
     }
 
+    /// Internal timing like [`run_internal`](Self::run_internal), but the
+    /// closure additionally hands back the `SidecarData` collected during each
+    /// run (as returned by [`run_hotpath_capture`]), and that data is persisted
+    /// to sidecar.db under the recorded results UUID.
+    ///
+    /// `run_internal` alone discards sidecar data - it has no store step. This
+    /// is the hotpath/alloc counterpart to `run_external_ok`'s sidecar storage,
+    /// so `brokkr sidecar <uuid>` works for `--hotpath`/`--alloc` runs too. The
+    /// sidecar payload for the best-of-N run (lowest `elapsed_ms`, matching
+    /// [`pick_best`]) is flagged as `best_run_idx`. `program` supplies the
+    /// binary path for sidecar provenance ([`build_run_info`](Self::build_run_info)).
+    pub fn run_hotpath<F>(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        f: F,
+    ) -> Result<BenchResult, DevError>
+    where
+        F: Fn(usize) -> Result<(BenchResult, crate::sidecar::SidecarData), DevError>,
+    {
+        let start_epoch = wall_clock_epoch();
+        let mut best: Option<BenchResult> = None;
+        let mut best_run_idx: usize = 0;
+        let mut sidecar_runs: Vec<crate::sidecar::SidecarData> =
+            Vec::with_capacity(config.runs);
+        let total = clamp_u32(config.runs);
+
+        for i in 0..config.runs {
+            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            self.lock.set_progress(clamp_u32(i + 1), total);
+            let (result, sidecar) = f(i)?;
+            sidecar_runs.push(sidecar);
+            // Track the best run's index consistently with `pick_best`, which
+            // only replaces on a strict improvement (keeps current on ties).
+            if best.as_ref().is_none_or(|b| result.elapsed_ms < b.elapsed_ms) {
+                best_run_idx = i;
+            }
+            best = Some(pick_best(best, result));
+        }
+
+        let best =
+            best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+
+        let uuid = self.record_result(config, &best)?;
+        // pid is unknown here (the child was reaped inside the closure); 0 is
+        // the sentinel. exit_code is 0 since a failing run would have errored
+        // out of the closure before reaching this point.
+        let info = self.build_run_info(config, program, start_epoch, 0, Some(0));
+        self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
+
+        Ok(best)
+    }
+
     /// External timing: run subprocess N times with sidecar monitoring.
     ///
     /// The sidecar samples `/proc` metrics at 100ms intervals and reads phase

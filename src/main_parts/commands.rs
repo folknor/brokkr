@@ -802,8 +802,8 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
         metadata: vec![],
     };
 
-    ctx.harness.run_internal(&config, |_i| {
-        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &[],
             &ctx.paths.scratch_dir,
@@ -813,7 +813,7 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
             req.stop_marker,
             Some(ctx.harness.lock()),
         )?;
-        Ok(result)
+        Ok((result, sidecar))
     })?;
 
     Ok(())

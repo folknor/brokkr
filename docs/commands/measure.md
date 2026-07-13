@@ -41,7 +41,13 @@ timing contract `--bench` needs. The build-config seam both paths share is
 `BenchHarness` (in `src/harness.rs`) provides:
 - Exclusive lockfile (prevents parallel bench/verify/hotpath runs)
 - SQLite result storage with git commit, hostname, env snapshot
-- `run_internal(config, closure)` - in-process timing (N runs, min/avg/max)
+- `run_internal(config, closure)` - in-process timing (N runs, min/avg/max).
+  Does **not** store sidecar data (no store step).
+- `run_hotpath(config, program, closure)` - like `run_internal`, but the
+  closure also returns the `SidecarData` from `run_hotpath_capture`, which is
+  persisted to sidecar.db under the recorded UUID. This is what makes
+  `brokkr sidecar <uuid>` work for `--hotpath`/`--alloc`; the raw
+  `run_hotpath_capture` returns the data but stores nothing.
 - `run_external(config, binary, args)` - subprocess timing
 - `run_distribution(config, closure)` - distribution timing
   (min/p50/p95/max)
@@ -57,8 +63,10 @@ bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits.
 Results DB (`.brokkr/results.db`) stays small and git-tracked.
 
 Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`,
-`run_external_with_kv`, `run_hotpath_capture` - all sidecar-enabled),
-`src/db/sidecar.rs` (`SidecarDb`).
+`run_external_with_kv`, `run_hotpath_capture` - all sidecar-enabled; the
+hotpath/alloc data reaches sidecar.db via the `run_hotpath` wrapper, since
+`run_hotpath_capture` itself only returns the payload), `src/db/sidecar.rs`
+(`SidecarDb`).
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named
 pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer

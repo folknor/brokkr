@@ -252,8 +252,8 @@ fn run_nidhogg_hotpath(
 
     let binary_str = ctx.binary.display().to_string();
 
-    ctx.harness.run_internal(&config, |_i| {
-        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &args,
             &ctx.paths.scratch_dir,
@@ -263,7 +263,7 @@ fn run_nidhogg_hotpath(
             req.stop_marker,
             Some(ctx.harness.lock()),
         )?;
-        Ok(result)
+        Ok((result, sidecar))
     })?;
 
     std::fs::remove_dir_all(&output_dir).ok();

@@ -69,7 +69,7 @@ derived one. None of these apply on the no-kv `run_external_ok` path except
 | `run_external_ok` | captured, dropped | no | yes | every pbfhogg bench command + elivagar `tilegen` |
 | `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
-| `run_hotpath_capture` | captured | via JSON report | yes | `--hotpath` / `--alloc`, both projects |
+| `run_hotpath_capture` (stored via `run_hotpath`) | captured | via JSON report | yes | `--hotpath` / `--alloc`, all projects |
 
 Two consequences worth internalizing:
 

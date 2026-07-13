@@ -449,9 +449,9 @@ fn run_pbfhogg_hotpath(
     let project_root = req.project_root.to_path_buf();
 
     let ok_codes = command.ok_exit_codes();
-    ctx.harness.run_internal(&config, |_i| {
+    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
         output::hotpath_msg(command.id());
-        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &subprocess_args,
             &scratch_dir,
@@ -461,7 +461,7 @@ fn run_pbfhogg_hotpath(
             req.stop_marker,
             Some(ctx.harness.lock()),
         )?;
-        Ok(result)
+        Ok((result, sidecar))
     })?;
 
     promote_artifact(command, &cmd_ctx, ArgMode::Hotpath, &ctx.paths, req.project_root)?;

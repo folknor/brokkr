@@ -458,8 +458,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 metadata,
             };
 
-            ctx.harness.run_internal(&config, |_i| {
-                let (mut result, stderr, _sidecar) = harness::run_hotpath_capture(
+            ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+                let (mut result, stderr, sidecar) = harness::run_hotpath_capture(
                     &binary_str,
                     &arg_refs,
                     &ctx.paths.scratch_dir,
@@ -473,7 +473,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     "meta.locations_on_ways_detected",
                     elivagar::detect_locations_on_ways_stderr(&stderr).to_string(),
                 ));
-                Ok(result)
+                Ok((result, sidecar))
             })?;
 
             // Clean up output files.
@@ -534,8 +534,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 metadata,
             };
 
-            ctx.harness.run_internal(&config, |_i| {
-                let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+            ctx.harness.run_hotpath(&config, &binary, |_i| {
+                let (result, _stderr, sidecar) = harness::run_hotpath_capture(
                     &binary_str,
                     &arg_refs,
                     &ctx.paths.scratch_dir,
@@ -545,7 +545,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                     req.stop_marker,
                     Some(ctx.harness.lock()),
                 )?;
-                Ok(result)
+                Ok((result, sidecar))
             })?;
 
             Ok(())

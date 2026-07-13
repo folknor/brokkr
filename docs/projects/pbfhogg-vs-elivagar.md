@@ -130,8 +130,10 @@ Same `BenchContext`/`HarnessContext` bootstrap, same `results.db` +
 `sidecar.db` at `<db_root>/.brokkr/`, same per-user lock, same worktree
 lifecycle for retroactive benchmarking, same run mode (`run_passthrough_timed`,
 inherited stdio, no DB, no sidecar) and same `--hotpath`/`--alloc` path
-(`run_hotpath_capture`, JSON report into results.db). The divergences above
-are all in the bench-mode dispatch, not the shared plumbing.
+(`run_hotpath` wrapping `run_hotpath_capture`: the function-level JSON report
+into results.db, plus the `/proc` trajectory + FIFO counters into sidecar.db,
+so `brokkr sidecar <uuid>` works for hotpath/alloc runs too). The divergences
+above are all in the bench-mode dispatch, not the shared plumbing.
 
 ## Reconciliation history
 

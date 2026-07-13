@@ -174,8 +174,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     ];
     let scratch_dir = ctx.paths.scratch_dir.clone();
     let project_root = req.project_root.to_path_buf();
-    ctx.harness.run_internal(&config, |_i| {
-        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &subprocess_args,
             &scratch_dir,
@@ -185,7 +185,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
             req.stop_marker,
             Some(ctx.harness.lock()),
         )?;
-        Ok(result)
+        Ok((result, sidecar))
     })?;
 
     Ok(())

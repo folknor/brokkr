@@ -102,8 +102,8 @@ pub fn run(
         metadata: vec![],
     };
 
-    harness.run_internal(&config, |_i| {
-        let (result, _stderr, _sidecar) = harness::run_hotpath_capture(
+    harness.run_hotpath(&config, binary, |_i| {
+        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             binary_str,
             &[],
             scratch_dir,
@@ -113,7 +113,7 @@ pub fn run(
             None,
             Some(harness.lock()),
         )?;
-        Ok(result)
+        Ok((result, sidecar))
     })?;
 
     Ok(())
