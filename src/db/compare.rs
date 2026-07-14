@@ -14,7 +14,8 @@ pub struct CompareFilter<'a> {
     pub command: Option<&'a str>,
     pub mode: Option<&'a str>,
     pub dataset: Option<&'a str>,
-    /// Invocation substrings that must be present (AND).
+    /// Invocation substrings that must be present (AND). "Invocation" spans
+    /// `cli_args`, `brokkr_args`, and the captured env - see `push_grep_clauses`.
     pub grep: &'a [String],
     /// Invocation substrings that exclude a row (any hit).
     pub grep_v: &'a [String],

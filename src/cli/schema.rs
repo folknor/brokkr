@@ -1001,16 +1001,19 @@ runs). The corpus run store has its own command - see `brokkr corpus-results`."
         #[arg(long, value_parser = validate_meta_filter)]
         env: Vec<String>,
 
-        /// Substring match against either the subprocess invocation
-        /// (`cli_args`) or the brokkr invocation (`brokkr_args`). Repeatable -
-        /// each `--grep` must match (AND). `git log --grep` style. E.g.
-        /// `--grep apply-changes --grep zstd:1 --grep uring` to find
-        /// apply-changes runs that used both zstd:1 and io_uring.
+        /// Substring match against the run's invocation: the subprocess
+        /// invocation (`cli_args`), the brokkr invocation (`brokkr_args`), or a
+        /// captured env var as `NAME=VALUE`. Repeatable - each `--grep` must
+        /// match (AND). `git log --grep` style. E.g. `--grep apply-changes
+        /// --grep zstd:1 --grep uring` to find apply-changes runs that used
+        /// both zstd:1 and io_uring, or `--grep LAYER_STATS=1` for an
+        /// env-gated arm. Use `--env` for an exact key=value match.
         #[arg(long)]
         grep: Vec<String>,
 
         /// Inverse of `--grep`: exclude rows whose invocation contains the
-        /// term. Repeatable - a row is excluded if it matches ANY term.
+        /// term, across the same three sources (`cli_args`, `brokkr_args`,
+        /// captured env). Repeatable - a row is excluded if it matches ANY term.
         /// Composes with `--grep`. The A/B case: `--grep apply-changes
         /// --grep-v uring` selects the arm distinguished only by an absent
         /// flag, which `--grep` alone cannot express.

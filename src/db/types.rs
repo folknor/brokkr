@@ -268,13 +268,13 @@ pub struct QueryFilter {
     /// with `meta.format = "osc"` in the run_kv table). Multiple filters AND
     /// together. Rows missing the key are silently excluded.
     pub meta: Vec<(String, String)>,
-    /// Substring matches against `cli_args` OR `brokkr_args` (the two
-    /// literal-invocation columns). Like `git log --grep`, repeatable:
-    /// each term must match the row (AND); within a term, either column
-    /// can supply the hit.
+    /// Substring matches against the row's invocation: `cli_args`,
+    /// `brokkr_args`, or a captured env var rendered as `NAME=VALUE`. Like
+    /// `git log --grep`, repeatable: each term must match the row (AND);
+    /// within a term, any of the three sources can supply the hit.
     pub grep: Vec<String>,
-    /// Negative substring matches against `cli_args` OR `brokkr_args`.
-    /// A row is excluded when ANY term matches either column - the dual of
+    /// Negative substring matches against the same three invocation sources.
+    /// A row is excluded when ANY term matches any source - the dual of
     /// [`grep`](Self::grep)'s AND, and the only way to select on the
     /// *absence* of a flag (e.g. the OFF arm of an A/B).
     pub grep_v: Vec<String>,

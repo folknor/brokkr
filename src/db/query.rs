@@ -191,22 +191,54 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
     })
 }
 
-/// Append the `--grep` / `--grep-v` WHERE clauses, binding two params per term.
+/// One `--grep` term's match expression: true when the term appears anywhere in
+/// the row's invocation. Binds three params, appended to `params`.
 ///
-/// Shared by [`build_query_sql`] and `query_compare` so the two can't drift -
-/// they previously disagreed about whether `--grep` applied at all.
+/// "Invocation" is the three places a user can put something when launching a
+/// run: the brokkr argv (`brokkr_args`), the subprocess argv (`cli_args`), and
+/// the env assignments that prefix the command line. The env lives in run_kv
+/// under `env.<NAME>` rather than in any argv column, so it needs the EXISTS
+/// subquery - without it `--grep LAYER_STATS` missed rows that plainly ran with
+/// `ELIVAGAR_LAYER_STATS=1`, since an env var is never echoed into argv.
 ///
-/// - `grep` ANDs: each term must appear in `cli_args` OR `brokkr_args`.
-/// - `grep_v` excludes on any hit. Note the De Morgan flip: "this term appears
-///   nowhere" is `NOT (cli matches OR brokkr matches)`, i.e. both columns must
-///   miss. Two ORed negations would instead keep rows that merely hide the term
-///   in the other column.
+/// Each captured var is matched as the `NAME=VALUE` text the user would have
+/// typed, with the storage-level `env.` prefix stripped: `--grep LAYER_STATS`
+/// and `--grep LAYER_STATS=1` both hit, `--grep env` doesn't hit every row that
+/// captured anything.
 ///
 /// `instr`, not `LIKE '%'||?||'%'`: these terms are documented as literal
 /// substrings, but LIKE treats `%` and `_` in the *term* as wildcards - so
 /// `--grep io_uring` would also match `io-uring`, a different axis. instr is a
 /// literal search and needs no escaping. COALESCE because `instr(NULL, x)` is
 /// NULL rather than 0, which would drop rows from the negated clause.
+fn grep_match_expr(params: &mut Vec<String>, term: &str) -> String {
+    params.push(term.to_owned());
+    let i = params.len();
+    params.push(term.to_owned());
+    let j = params.len();
+    params.push(term.to_owned());
+    let k = params.len();
+    format!(
+        "(instr(COALESCE(cli_args, ''), ?{i}) > 0 \
+          OR instr(COALESCE(brokkr_args, ''), ?{j}) > 0 \
+          OR EXISTS (SELECT 1 FROM run_kv WHERE run_kv.run_id = runs.id \
+             AND run_kv.key LIKE 'env.%' \
+             AND instr(substr(run_kv.key, 5) || '=' \
+                       || COALESCE(run_kv.value_text, run_kv.value_int, \
+                                   run_kv.value_real, ''), ?{k}) > 0))"
+    )
+}
+
+/// Append the `--grep` / `--grep-v` WHERE clauses.
+///
+/// Shared by [`build_query_sql`] and `query_compare` so the two can't drift -
+/// they previously disagreed about whether `--grep` applied at all.
+///
+/// - `grep` ANDs: each term must match the row's invocation.
+/// - `grep_v` excludes on any hit. Note the De Morgan flip: "this term appears
+///   nowhere" is `NOT (cli matches OR brokkr matches OR env matches)`, i.e.
+///   every source must miss. Negating the sources separately and ORing them
+///   would instead keep rows that merely hide the term in another source.
 pub(super) fn push_grep_clauses(
     clauses: &mut Vec<String>,
     params: &mut Vec<String>,
@@ -214,24 +246,12 @@ pub(super) fn push_grep_clauses(
     grep_v: &[String],
 ) {
     for g in grep {
-        params.push(g.clone());
-        let i = params.len();
-        params.push(g.clone());
-        let j = params.len();
-        clauses.push(format!(
-            "(instr(COALESCE(cli_args, ''), ?{i}) > 0 \
-              OR instr(COALESCE(brokkr_args, ''), ?{j}) > 0)"
-        ));
+        let expr = grep_match_expr(params, g);
+        clauses.push(expr);
     }
     for g in grep_v {
-        params.push(g.clone());
-        let i = params.len();
-        params.push(g.clone());
-        let j = params.len();
-        clauses.push(format!(
-            "NOT (instr(COALESCE(cli_args, ''), ?{i}) > 0 \
-                  OR instr(COALESCE(brokkr_args, ''), ?{j}) > 0)"
-        ));
+        let expr = grep_match_expr(params, g);
+        clauses.push(format!("NOT {expr}"));
     }
 }
 
@@ -1357,6 +1377,94 @@ mod tests {
             rows.is_empty(),
             "every row matches at least one --grep-v term, so all are excluded"
         );
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    #[test]
+    fn query_grep_reaches_captured_env() {
+        let (dir, db_path) = test_db("query_grep_env");
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        // An env-gated A/B: the flag is set in the environment, so it appears
+        // in *neither* argv column. This is the case --grep used to miss.
+        // Rows are otherwise identical, so `elapsed_ms` stands in as an id -
+        // `query` doesn't hydrate children, so `captured_env` is empty here.
+        let make_row = |elapsed_ms: i64, env: Option<(&str, &str)>| RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("bench tilegen"),
+            mode: Some(String::from("release")),
+            input_file: None,
+            input_mb: None,
+            elapsed_ms,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: crate::build::CargoProfile::Release,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: Some(String::from("tilegen --zoom 14")),
+            brokkr_args: Some(String::from("brokkr tilegen --bench 3")),
+            project: String::from("test"),
+            stop_marker: None,
+            kv: env
+                .map(|(k, v)| vec![KvPair::text(format!("env.{k}"), v)])
+                .unwrap_or_default(),
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        };
+
+        // Row 1: the ON arm. Row 2: explicit OFF baseline. Row 3: no capture.
+        db.insert(&make_row(101, Some(("ELIVAGAR_LAYER_STATS", "1"))))
+            .unwrap();
+        db.insert(&make_row(102, Some(("ELIVAGAR_LAYER_STATS", "0"))))
+            .unwrap();
+        db.insert(&make_row(103, None)).unwrap();
+
+        let grep = |terms: Vec<String>, not: Vec<String>| {
+            db.query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: terms,
+                grep_v: not,
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap()
+        };
+
+        // The bare var name finds both arms - neither argv column mentions it.
+        let rows = grep(vec!["LAYER_STATS".into()], Vec::new());
+        assert_eq!(rows.len(), 2, "--grep must reach env.* keys in run_kv");
+
+        // NAME=VALUE selects one arm, since the var is matched as typed.
+        let rows = grep(vec!["ELIVAGAR_LAYER_STATS=1".into()], Vec::new());
+        assert_eq!(rows.len(), 1, "--grep NAME=VALUE selects the ON arm");
+        assert_eq!(rows[0].elapsed_ms, 101);
+
+        // grep_v's De Morgan flip: a term absent from every source, including
+        // the env, excludes only the rows that actually carry it.
+        let rows = grep(Vec::new(), vec!["LAYER_STATS=1".into()]);
+        assert_eq!(rows.len(), 2, "--grep-v must exclude only the ON arm");
+
+        // Composes with the argv columns: the term hits brokkr_args, the
+        // exclusion hits the env.
+        let rows = grep(vec!["tilegen".into()], vec!["LAYER_STATS".into()]);
+        assert_eq!(rows.len(), 1, "only the uncaptured row survives");
+        assert_eq!(rows[0].elapsed_ms, 103);
+
+        // The `env.` storage prefix is stripped before matching, so it isn't
+        // itself greppable - otherwise every captured row would match `env`.
+        let rows = grep(vec!["env.".into()], Vec::new());
+        assert!(rows.is_empty(), "the env. key prefix must not be greppable");
 
         drop(db);
         cleanup(&dir, &db_path);
