@@ -24,6 +24,7 @@ pub fn run(
     runs: usize,
     _data_dir: &Path,
     _scratch_dir: &Path,
+    opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
@@ -31,19 +32,6 @@ pub fn run(
         &build::BuildConfig::release_with_owned_features(None, &paths.features),
         project_root,
     )?;
-    let opts = super::PipelineOpts {
-        no_ocean: false,
-        force_sorted: false,
-        allow_unsafe_flat_index: false,
-        tile_format: None,
-        tile_compression: None,
-        compress_sort_chunks: None,
-        in_memory: false,
-        locations_on_ways: false,
-        fanout_cap_default: None,
-        fanout_cap: None,
-        polygon_simplify_factor: None,
-    };
     bench_self::run(
         harness,
         &binary,
@@ -54,8 +42,7 @@ pub fn run(
         &paths.scratch_dir,
         project_root,
         None,
-        None,
-        &opts,
+        opts,
     )?;
 
     // 2. bench planetiler -- comparison baseline

@@ -43,8 +43,11 @@ pub enum ElivagarCommand<'a> {
     /// ocean_ms, phase3_ms, phase4_ms, features, tiles, output_bytes).
     Tilegen {
         opts: &'a PipelineOpts<'a>,
+        /// Resume from a checkpoint. Per-invocation, not part of the contract:
+        /// `execution.resumed_from` sits in provenance's diagnostic group, and
+        /// elivagar validates the checkpoint's input identity and producer
+        /// config against the current run itself.
         skip_to: Option<&'a str>,
-        compression_level: Option<u32>,
     },
 
     /// PMTiles writer micro-benchmark.
@@ -209,11 +212,7 @@ impl<'a> ElivagarCommand<'a> {
         data_dir: &Path,
     ) -> Result<Vec<String>, DevError> {
         match self {
-            Self::Tilegen {
-                opts,
-                skip_to,
-                compression_level,
-            } => {
+            Self::Tilegen { opts, skip_to } => {
                 std::fs::create_dir_all(scratch_dir)?;
 
                 let output_path = scratch_dir.join("bench-self-output.pmtiles");
@@ -236,11 +235,11 @@ impl<'a> ElivagarCommand<'a> {
                     args.push("--skip-to".into());
                     args.push((*phase).into());
                 }
-                if let Some(level) = compression_level {
+                if let Some(level) = opts.tilegen.compression_level {
                     args.push("--compression-level".into());
                     args.push(level.to_string());
                 }
-                opts.push_args(&mut args, data_dir);
+                opts.push_args(&mut args, data_dir)?;
 
                 Ok(args)
             }

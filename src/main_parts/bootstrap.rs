@@ -435,38 +435,21 @@ fn run(cli: Cli) -> Result<(), DevError> {
             mode,
             dataset,
             variant,
-
             skip_to,
-            compression_level,
-            no_ocean,
-            force_sorted,
-            allow_unsafe_flat_index,
-            tile_format,
-            tile_compression,
-            compress_sort_chunks,
-            in_memory,
-            locations_on_ways,
-            fanout_cap_default,
-            fanout_cap,
-            polygon_simplify_factor,
         } => {
+            // The whole pipeline contract comes from the named block; the two
+            // input assertions come from the variant that has the property.
+            let tilegen = elivagar::resolve_tilegen(&dev_config, elivagar::DEFAULT_TILEGEN)?;
+            let (locations_on_ways, force_sorted) =
+                elivagar::input_assertions(&dev_config, &dataset, &variant);
             let opts = elivagar::PipelineOpts {
-                no_ocean,
-                force_sorted,
-                allow_unsafe_flat_index,
-                tile_format: tile_format.as_deref(),
-                tile_compression: tile_compression.as_deref(),
-                compress_sort_chunks: compress_sort_chunks.as_deref(),
-                in_memory,
+                tilegen,
                 locations_on_ways,
-                fanout_cap_default,
-                fanout_cap: fanout_cap.as_deref(),
-                polygon_simplify_factor,
+                force_sorted,
             };
             let cmd = elivagar::commands::ElivagarCommand::Tilegen {
                 opts: &opts,
                 skip_to: skip_to.as_deref(),
-                compression_level,
             };
             run_measured(
                 &mode,

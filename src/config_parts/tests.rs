@@ -206,8 +206,8 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             "indexed".into(),
             PbfEntry {
                 file: "dk-indexed.osm.pbf".into(),
-                xxhash: None,
                 seq: Some(4704),
+                ..Default::default()
             },
         );
         let mut host_ds = HashMap::new();
@@ -231,6 +231,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: host_ds,
+                tilegen: HashMap::new(),
             },
         );
         let config = make_config(hosts);
@@ -256,6 +257,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 file: "dk-raw.osm.pbf".into(),
                 xxhash: Some("aaa".into()),
                 seq: Some(4704),
+                ..Default::default()
             },
         );
         pbf.insert(
@@ -263,15 +265,14 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             PbfEntry {
                 file: "dk-indexed.osm.pbf".into(),
                 xxhash: Some("bbb".into()),
-                seq: None,
+                ..Default::default()
             },
         );
         pbf.insert(
             "locations".into(),
             PbfEntry {
                 file: "dk-locations.osm.pbf".into(),
-                xxhash: None,
-                seq: None,
+                ..Default::default()
             },
         );
         let mut host_ds = HashMap::new();
@@ -294,6 +295,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: host_ds,
+                tilegen: HashMap::new(),
             },
         );
         let config = make_config(hosts);
@@ -344,6 +346,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 drives: None,
                 features: Vec::new(),
                 datasets: host_ds,
+                tilegen: HashMap::new(),
             },
         );
         let config = make_config(hosts);
@@ -448,6 +451,7 @@ xxhash = "feedface"
             drives: None,
             features: Vec::new(),
             datasets: HashMap::new(),
+            tilegen: HashMap::new(),
         };
         let mut ds = Dataset {
             origin: None,
@@ -488,6 +492,7 @@ xxhash = "feedface"
             drives: None,
             features: Vec::new(),
             datasets: HashMap::new(),
+            tilegen: HashMap::new(),
         };
         let mut ds = Dataset {
             origin: None,
@@ -873,6 +878,121 @@ debug = true
         assert_eq!(
             consumer.cargo_feature_args(),
             vec!["--no-default-features", "--features", "commands"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // [<host>.tilegen.<name>] ocean statements
+    // -----------------------------------------------------------------------
+
+    fn hosts_with_ocean(ocean: &[&str]) -> HashMap<String, HostConfig> {
+        let mut tilegen = HashMap::new();
+        tilegen.insert(
+            "default".into(),
+            TilegenConfig {
+                ocean: ocean.iter().map(|s| (*s).to_owned()).collect(),
+                ..Default::default()
+            },
+        );
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "myhost".into(),
+            HostConfig {
+                data: None,
+                scratch: None,
+                output: None,
+                target: None,
+                port: None,
+                drives: None,
+                features: Vec::new(),
+                datasets: HashMap::new(),
+                tilegen,
+            },
+        );
+        hosts
+    }
+
+    const LOW: &str = "z0-z7:simplified.shp";
+    const HIGH: &str = "z8-z14:full.shp";
+    const ALL: &str = "z0-z14:full.shp";
+    const ARTIFACT: &str = "ocean-tiles.pmtiles";
+
+    #[test]
+    fn ocean_accepts_the_two_legal_partitions() {
+        assert!(validate_tilegen(&hosts_with_ocean(&[LOW, HIGH])).is_ok());
+        assert!(validate_tilegen(&hosts_with_ocean(&[ALL])).is_ok());
+        assert!(validate_tilegen(&hosts_with_ocean(&[LOW, HIGH, ARTIFACT])).is_ok());
+        assert!(validate_tilegen(&hosts_with_ocean(&[ALL, ARTIFACT])).is_ok());
+    }
+
+    /// Omitting `ocean` entirely is the statement elivagar's removed
+    /// `--no-ocean` used to make, so it must stay legal.
+    #[test]
+    fn ocean_absent_means_no_ocean() {
+        assert!(validate_tilegen(&hosts_with_ocean(&[])).is_ok());
+    }
+
+    /// The z7/z8 split is the only one `ocean::selected_pass_grid` implements.
+    /// A partial partition must be refused rather than quietly served at z7.
+    #[test]
+    fn ocean_rejects_a_partial_partition() {
+        let err = validate_tilegen(&hosts_with_ocean(&[LOW])).unwrap_err();
+        assert!(format!("{err}").contains("partition z0-z14 exactly"));
+
+        let err = validate_tilegen(&hosts_with_ocean(&[HIGH])).unwrap_err();
+        assert!(format!("{err}").contains("partition z0-z14 exactly"));
+    }
+
+    #[test]
+    fn ocean_rejects_an_unimplemented_band() {
+        let err = validate_tilegen(&hosts_with_ocean(&["z0-z5:simplified.shp"])).unwrap_err();
+        assert!(format!("{err}").contains("z0-z5"));
+    }
+
+    #[test]
+    fn ocean_rejects_overlapping_bands() {
+        let err = validate_tilegen(&hosts_with_ocean(&[ALL, LOW, HIGH])).unwrap_err();
+        assert!(format!("{err}").contains("partition z0-z14 exactly"));
+    }
+
+    #[test]
+    fn ocean_rejects_a_band_named_twice() {
+        let err = validate_tilegen(&hosts_with_ocean(&[LOW, "z0-z7:other.shp", HIGH])).unwrap_err();
+        assert!(format!("{err}").contains("named twice"));
+    }
+
+    /// The artifact is a cache over the shapefiles, not a substitute: an
+    /// extract computes its boundary band from them, and the artifact's key is
+    /// validated by re-hashing them.
+    #[test]
+    fn ocean_rejects_a_lone_artifact() {
+        let err = validate_tilegen(&hosts_with_ocean(&[ARTIFACT])).unwrap_err();
+        assert!(format!("{err}").contains("cannot stand alone"));
+    }
+
+    #[test]
+    fn ocean_rejects_two_artifacts() {
+        let err =
+            validate_tilegen(&hosts_with_ocean(&[LOW, HIGH, ARTIFACT, "other.pmtiles"])).unwrap_err();
+        assert!(format!("{err}").contains("at most one"));
+    }
+
+    #[test]
+    fn ocean_rejects_a_shapefile_without_a_band() {
+        let err = validate_tilegen(&hosts_with_ocean(&["full.shp"])).unwrap_err();
+        assert!(format!("{err}").contains("needs a zoom band prefix"));
+    }
+
+    #[test]
+    fn ocean_spec_round_trips_its_band() {
+        assert_eq!(OceanSpec::parse(LOW).unwrap().file(), "simplified.shp");
+        assert_eq!(
+            OceanSpec::parse(LOW).unwrap().render("/data/simplified.shp"),
+            "z0-z7:/data/simplified.shp"
+        );
+        assert_eq!(
+            OceanSpec::parse(ARTIFACT).unwrap().render("/data/ocean-tiles.pmtiles"),
+            "/data/ocean-tiles.pmtiles"
         );
     }
 }

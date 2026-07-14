@@ -26,7 +26,6 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
     skip_to: Option<&str>,
-    compression_level: Option<u32>,
     opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
@@ -62,11 +61,11 @@ pub fn run(
         args.push("--skip-to".into());
         args.push(phase.into());
     }
-    if let Some(level) = compression_level {
+    if let Some(level) = opts.tilegen.compression_level {
         args.push("--compression-level".into());
         args.push(level.to_string());
     }
-    opts.push_args(&mut args, data_dir);
+    opts.push_args(&mut args, data_dir)?;
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
@@ -74,9 +73,10 @@ pub fn run(
         "elivagar pipeline: {basename} ({file_mb:.0} MB), {runs} run(s)"
     ));
 
-    // All the pipeline tuning options (skip_to, compression_level, opts
-    // flags like --no-ocean, --force-sorted, etc.) are in cli_args and
-    // brokkr_args - no need to mirror them here. Metadata is empty;
+    // The pipeline contract (skip_to plus everything the tilegen block
+    // expands to, ocean inputs included) lands in cli_args verbatim - no need
+    // to mirror it here, and `brokkr results --grep` selects on it. Metadata
+    // is empty;
     // locations_on_ways_detected is attached below from stderr.
     let metadata: Vec<KvPair> = Vec::new();
 

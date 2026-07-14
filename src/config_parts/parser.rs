@@ -43,6 +43,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let gremlins = parse_gremlins(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
+    validate_tilegen(&hosts)?;
 
     Ok((
         project,
@@ -496,6 +497,85 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
                         )));
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate every `[<host>.tilegen.<name>]` block's ocean statement.
+///
+/// These rules are elivagar's, enforced here so a bad block fails at parse
+/// time - before a build, let alone a planet-scale run - and names the field.
+/// The partition rule is not arbitrary: `ocean::selected_pass_grid` implements
+/// one split, at z7/z8, and nowhere else, so a `z0-z5` request is rejected
+/// rather than accepted and quietly served at z7. The alternative is a false
+/// statement in the recorded invocation, which is the failure this whole
+/// config exists to prevent.
+fn validate_tilegen(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError> {
+    for (host, hc) in hosts {
+        for (name, tg) in &hc.tilegen {
+            let at = format!("{host}.tilegen.{name}");
+            let specs = tg
+                .ocean_specs()
+                .map_err(|e| DevError::Config(format!("{at}.ocean: {e}")))?;
+
+            let mut bands: BTreeSet<&'static str> = BTreeSet::new();
+            let mut artifacts = 0usize;
+            for spec in &specs {
+                if spec.file().is_empty() {
+                    return Err(DevError::Config(format!("{at}.ocean: file name is empty")));
+                }
+                let band = match spec {
+                    OceanSpec::ShapefileAll(_) => "z0-z14",
+                    OceanSpec::ShapefileLow(_) => "z0-z7",
+                    OceanSpec::ShapefileHigh(_) => "z8-z14",
+                    OceanSpec::Artifact(_) => {
+                        artifacts += 1;
+                        continue;
+                    }
+                };
+                if !bands.insert(band) {
+                    return Err(DevError::Config(format!(
+                        "{at}.ocean: band {band} named twice"
+                    )));
+                }
+            }
+
+            if artifacts > 1 {
+                return Err(DevError::Config(format!(
+                    "{at}.ocean: {artifacts} .pmtiles artifacts named, expected at most one"
+                )));
+            }
+
+            // Absent/empty is a legal statement: it means no ocean.
+            if bands.is_empty() {
+                if artifacts > 0 {
+                    // The artifact is a cache over the shapefiles, not a
+                    // substitute. An extract computes its boundary band near
+                    // the bbox edge from the shapefiles and takes only the
+                    // interior from the artifact, and the artifact's key is
+                    // validated by re-hashing the shapefiles it claims to have
+                    // been built from - so both sides must be present for the
+                    // check to mean anything.
+                    return Err(DevError::Config(format!(
+                        "{at}.ocean: a .pmtiles artifact is a cache over the shapefiles, \
+                         not a substitute, and cannot stand alone; name the shapefiles \
+                         it was built from too"
+                    )));
+                }
+                continue;
+            }
+
+            let all: BTreeSet<&str> = ["z0-z14"].into_iter().collect();
+            let split: BTreeSet<&str> = ["z0-z7", "z8-z14"].into_iter().collect();
+            if bands != all && bands != split {
+                let got: Vec<&str> = bands.iter().copied().collect();
+                return Err(DevError::Config(format!(
+                    "{at}.ocean: shapefiles must partition z0-z14 exactly - either a \
+                     single z0-z14 or the z0-z7 + z8-z14 pair, got {}",
+                    got.join(" + ")
+                )));
             }
         }
     }

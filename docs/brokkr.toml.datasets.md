@@ -10,6 +10,14 @@ host-scoped - they live under `[<hostname>.datasets.<name>]`, never a global
 - `pbf.<variant>` - PBF file entries keyed by variant name (e.g. `raw`,
   `indexed`, `locations`). Each has `file`, optional `xxhash` (XXH128),
   optional `seq`. `sha256` is accepted as an alias during migration.
+  Two optional booleans assert properties of the file itself, both default
+  `false`: `locations_on_ways` (node coordinates are embedded in ways) and
+  `force_sorted` (nodes are monotonic, so the compact node store is safe).
+  Elivagar reads both from the PBF header and `brokkr tilegen` only forces
+  what the header fails to declare, so the normal case leaves them unset.
+  They live here rather than in a `[<host>.tilegen.<name>]` block because they
+  describe the input, not the pipeline - a block would otherwise have to know
+  which variant it was about to be run against.
 - `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
   `file`, optional `xxhash`. `sha256` accepted as alias.
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.

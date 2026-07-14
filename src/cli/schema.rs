@@ -782,6 +782,12 @@ Examples:
 
     // ----- elivagar commands (display_order = 3) -----
     /// [elivagar] Full tile generation pipeline
+    ///
+    /// Pipeline configuration lives entirely in `[<host>.tilegen.default]` in
+    /// brokkr.toml - ocean inputs, tile format, budgets, geometry. There are
+    /// no override flags: either it is explicit in the block, or it is not
+    /// set. What remains here is the input axis (dataset/variant), the
+    /// measurement mode, and the per-invocation resume point.
     #[command(name = "tilegen", display_order = 3)]
     Tilegen {
         #[command(flatten)]
@@ -792,45 +798,9 @@ Examples:
         /// PBF variant to use
         #[arg(long, default_value = "raw")]
         variant: String,
-        /// Resume from checkpoint: ocean or sort
+        /// Resume from checkpoint: ocean, sort or assemble
         #[arg(long)]
         skip_to: Option<String>,
-        /// Gzip compression level 0-10
-        #[arg(long)]
-        compression_level: Option<u32>,
-        /// Skip ocean processing
-        #[arg(long)]
-        no_ocean: bool,
-        /// Force compact node store even without PBF sort header
-        #[arg(long)]
-        force_sorted: bool,
-        /// Bypass elivagar flat-index safety guardrails (unsafe)
-        #[arg(long)]
-        allow_unsafe_flat_index: bool,
-        /// Tile output format (mvt or mlt)
-        #[arg(long)]
-        tile_format: Option<String>,
-        /// Tile compression (gzip or brotli)
-        #[arg(long)]
-        tile_compression: Option<String>,
-        /// Compress sort chunks (lz4 or snappy)
-        #[arg(long)]
-        compress_sort_chunks: Option<String>,
-        /// Keep tile blob in memory
-        #[arg(long)]
-        in_memory: bool,
-        /// Input PBF has locations on ways
-        #[arg(long)]
-        locations_on_ways: bool,
-        /// Default fanout cap for all layers
-        #[arg(long)]
-        fanout_cap_default: Option<u32>,
-        /// Per-layer fanout caps (comma-separated layer=N pairs)
-        #[arg(long)]
-        fanout_cap: Option<String>,
-        /// Polygon simplification factor (default 1.0, range 0.1-10.0)
-        #[arg(long)]
-        polygon_simplify_factor: Option<f64>,
     },
     /// [elivagar] PMTiles writer micro-benchmark
     #[command(name = "pmtiles-writer", display_order = 3)]

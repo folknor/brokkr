@@ -256,7 +256,15 @@ pub struct ProfileDef {
 }
 
 /// A single PBF file entry (one variant like raw, indexed, locations).
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `locations_on_ways` and `force_sorted` are assertions about *this file*,
+/// not about a pipeline config: one says the PBF carries node coordinates
+/// embedded in ways, the other that its nodes are monotonic. Elivagar reads
+/// both from the PBF header and the flags only force what the header fails to
+/// declare, so they belong with the variant that has the property rather than
+/// in a `[<host>.tilegen.<name>]` block - a block would otherwise have to know
+/// which variant it was about to be run against.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct PbfEntry {
@@ -264,6 +272,12 @@ pub struct PbfEntry {
     #[serde(alias = "sha256")]
     pub xxhash: Option<String>,
     pub seq: Option<u64>,
+    /// Force `--locations-on-ways` when the PBF header does not declare it.
+    #[serde(default)]
+    pub locations_on_ways: bool,
+    /// Force the compact node store without the PBF sort header.
+    #[serde(default)]
+    pub force_sorted: bool,
 }
 
 /// A single OSC diff file entry, keyed by sequence number.
@@ -360,6 +374,130 @@ pub struct Dataset {
     pub snapshot: HashMap<String, Snapshot>,
 }
 
+/// One ocean input, in elivagar's `--ocean` spec spelling.
+///
+/// Shapefiles name the zoom band they serve; the artifact is a bare path. The
+/// band is part of the statement rather than implied by the flag name, so the
+/// recorded invocation says what coverage it claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OceanSpec {
+    /// `z0-z14:<file.shp>` - one shapefile serves every zoom.
+    ShapefileAll(String),
+    /// `z0-z7:<file.shp>` - the pre-generalized low-zoom shapefile.
+    ShapefileLow(String),
+    /// `z8-z14:<file.shp>` - the full-resolution shapefile.
+    ShapefileHigh(String),
+    /// `<file.pmtiles>` - the precomputed world-ocean artifact.
+    Artifact(String),
+}
+
+impl OceanSpec {
+    /// Parse one brokkr.toml `ocean` entry.
+    ///
+    /// Paths are bare (relative to the host's `data` dir) here; the `data/`
+    /// prefix in elivagar's own docs belongs to raw shell invocations. Every
+    /// other path in brokkr.toml resolves against `data`, and a `data/`-
+    /// prefixed one would silently break on a host whose data dir is not
+    /// literally `data`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.split_once(':') {
+            Some(("z0-z14", f)) => Ok(Self::ShapefileAll(f.to_owned())),
+            Some(("z0-z7", f)) => Ok(Self::ShapefileLow(f.to_owned())),
+            Some(("z8-z14", f)) => Ok(Self::ShapefileHigh(f.to_owned())),
+            Some((band, _)) => Err(format!(
+                "unknown zoom band '{band}': elivagar implements one split, at \
+                 z7/z8, so the only accepted bands are z0-z14, z0-z7 and z8-z14"
+            )),
+            None if raw.ends_with(".pmtiles") => Ok(Self::Artifact(raw.to_owned())),
+            None if raw.ends_with(".shp") => Err(format!(
+                "shapefile '{raw}' needs a zoom band prefix (z0-z14:, z0-z7: or z8-z14:)"
+            )),
+            None => Err(format!(
+                "'{raw}' is neither a zoom-banded shapefile nor a .pmtiles artifact"
+            )),
+        }
+    }
+
+    /// The bare path this spec names.
+    pub fn file(&self) -> &str {
+        match self {
+            Self::ShapefileAll(f)
+            | Self::ShapefileLow(f)
+            | Self::ShapefileHigh(f)
+            | Self::Artifact(f) => f,
+        }
+    }
+
+    /// Re-render as an elivagar `--ocean` value, with `file` substituted.
+    pub fn render(&self, file: &str) -> String {
+        match self {
+            Self::ShapefileAll(_) => format!("z0-z14:{file}"),
+            Self::ShapefileLow(_) => format!("z0-z7:{file}"),
+            Self::ShapefileHigh(_) => format!("z8-z14:{file}"),
+            Self::Artifact(_) => file.to_owned(),
+        }
+    }
+}
+
+/// A named elivagar tilegen contract: `[<host>.tilegen.<name>]`.
+///
+/// This is the whole of what a tilegen run is configured by. Nothing is
+/// inferred from the filesystem and there are no override flags - a run's
+/// behaviour is a function of the named block and its input, and of nothing
+/// else. brokkr used to auto-detect the ocean shapefiles from `data/`, which
+/// meant two runs of the same binary on the same PBF could produce different
+/// ocean geometry with nothing in the recorded invocation saying which; on
+/// 2026-07-14 a denmark archive was blessed as the regress baseline while
+/// `ocean-tiles.pmtiles` was absent, and every gate passed.
+///
+/// Ordering matters here: `BTreeMap` (not `HashMap`) keeps the expanded argv
+/// byte-identical across runs of the same block, which is what lets
+/// `brokkr results --grep` select an arm off `cli_args`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct TilegenConfig {
+    /// Ocean inputs. Absent or empty means no ocean - the same statement
+    /// elivagar's removed `--no-ocean` used to make.
+    #[serde(default)]
+    pub ocean: Vec<String>,
+    /// Gzip level 0-10. A *base*: elivagar clamps low zooms up and caps
+    /// z13/z14 down, per `config.tile.compression_policy` in provenance.
+    pub compression_level: Option<u32>,
+    pub tile_format: Option<String>,
+    pub tile_compression: Option<String>,
+    pub compress_sort_chunks: Option<String>,
+    #[serde(default)]
+    pub in_memory: bool,
+    /// `-j`. A host tuning knob, not part of the comparability contract -
+    /// `reference/metadata.md` bars thread counts from the provenance block
+    /// because same-commit builds must be byte-identical.
+    pub threads: Option<u32>,
+    /// Sizes accept `256M`, `1G`, or raw bytes.
+    pub sort_budget: Option<String>,
+    pub way_budget: Option<String>,
+    pub assemble_budget: Option<String>,
+    /// Polygon layers getting shared-edge seam reconciliation, layer -> maxzoom.
+    #[serde(default)]
+    pub seam_reconcile_layers: BTreeMap<String, u32>,
+    /// Default fanout cap for all polygon layers. 0 or absent = uncapped.
+    pub fanout_cap_default: Option<u32>,
+    /// Per-layer fanout caps; take precedence over the default.
+    #[serde(default)]
+    pub fanout_caps: BTreeMap<String, u32>,
+    pub polygon_simplify_factor: Option<f64>,
+    /// Expert debugging only; may cause severe IO/RSS degradation.
+    #[serde(default)]
+    pub allow_unsafe_flat_index: bool,
+}
+
+impl TilegenConfig {
+    /// Parse the `ocean` entries into specs.
+    pub fn ocean_specs(&self) -> Result<Vec<OceanSpec>, String> {
+        self.ocean.iter().map(|s| OceanSpec::parse(s)).collect()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
@@ -382,6 +520,11 @@ pub struct HostConfig {
     pub features: Vec<String>,
     #[serde(default)]
     pub datasets: HashMap<String, Dataset>,
+    /// Named elivagar tilegen contracts (map-data projects). `tilegen` selects
+    /// `default`; there is no override flag, and no block is an error rather
+    /// than an implicit bare run.
+    #[serde(default)]
+    pub tilegen: HashMap<String, TilegenConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

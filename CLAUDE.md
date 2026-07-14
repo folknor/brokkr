@@ -37,7 +37,7 @@ Install: `cargo install --path ~/Programs/brokkr`
 
 These files are not auto-loaded - read them on demand based on what the user asks. Don't `wc` them before reading - just Read them.
 
-- `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, the `[gremlins]` exclude list, `[[check]]`, `[test]` profiles, `[litehtml]`, or `[ratatoskr]` blocks.
+- `docs/brokkr.toml.md` - **read when** the user asks about config fields, host sections, the `[gremlins]` exclude list, `[[check]]`, `[test]` profiles, `[litehtml]`, `[ratatoskr]`, or `[<host>.tilegen.*]` blocks (the elivagar tilegen contract: ocean inputs, budgets, geometry - `brokkr tilegen` has no override flags).
 - `docs/brokkr.toml.datasets.md` - **read when** the user asks about `[<host>.datasets.*]` (pbf/osc/pmtiles entries) or the variant-selection CLI flags (`--variant`, `--osc-seq`, `--tiles`, `--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`, `--compression`, `--locations-on-ways`) - map-data projects only (pbfhogg/elivagar/nidhogg).
 - `docs/commands/deps.md` - **read when** the user asks about `brokkr deps` - the dependency-audit command (any Rust+git repo, not project-gated): the phase model, the `duplicate_version`/`git_dependency`/`path_dependency`/`outdated`/`stale` phases, focus mode (`brokkr deps <pkg>`), the `ccu --json` shell-out, exit codes, or the planned `advisory` phase.
 - `docs/commands/check.md` - **read when** working on `brokkr check` or `brokkr test`, the gremlins/clippy/test pipeline, sweep selection, profile resolution, libtest filters, or the `BROKKR_TEST_BIN_DIR` contract.

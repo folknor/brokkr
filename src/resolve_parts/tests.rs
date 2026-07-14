@@ -218,8 +218,7 @@ mod tests {
             "indexed".into(),
             PbfEntry {
                 file: "planet-base.osm.pbf".into(),
-                xxhash: None,
-                seq: None,
+                ..Default::default()
             },
         );
         let mut datasets = HashMap::new();
@@ -257,8 +256,7 @@ mod tests {
             "raw".into(),
             PbfEntry {
                 file: "planet-20260411.osm.pbf".into(),
-                xxhash: None,
-                seq: None,
+                ..Default::default()
             },
         );
         let mut ds = empty_dataset();
@@ -301,8 +299,7 @@ mod tests {
             "raw".into(),
             PbfEntry {
                 file: "planet-20260411.osm.pbf".into(),
-                xxhash: None,
-                seq: None,
+                ..Default::default()
             },
         );
         let mut ds = empty_dataset();
@@ -348,8 +345,7 @@ mod tests {
             "indexed".into(),
             PbfEntry {
                 file: "planet-base.osm.pbf".into(),
-                xxhash: None,
-                seq: None,
+                ..Default::default()
             },
         );
         let mut datasets = HashMap::new();
@@ -656,8 +652,7 @@ mod tests {
             String::from("raw"),
             PbfEntry {
                 file: String::from("raw.osm.pbf"),
-                xxhash: None,
-                seq: None,
+                ..Default::default()
             },
         );
         let mut datasets = HashMap::new();

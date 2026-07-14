@@ -21,6 +21,38 @@
 
 See `docs/brokkr.toml.md` for the dataset structure and shared variant flags.
 
+## tilegen: the contract lives in brokkr.toml
+
+`brokkr tilegen`'s CLI surface is the *input* axis only - `--dataset`,
+`--variant`, the measurement mode, and `--skip-to` (a per-invocation resume
+point, not part of the contract). Everything that configures the pipeline -
+ocean inputs, tile format/compression, memory budgets, geometry, threads -
+comes from `[<host>.tilegen.default]` in brokkr.toml. There are no override
+flags: either it is explicit in the block, or it is not set. See
+`docs/brokkr.toml.md` for the full key list and the ocean partition rules.
+
+`resolve_tilegen()` / `input_assertions()` (`src/elivagar/mod.rs`) resolve the
+block and the per-variant input assertions off `DevConfig`, mirroring
+`config::host_features` in resolving the hostname themselves.
+`PipelineOpts::push_args()` expands the block into argv; the maps are
+`BTreeMap`, so identical config yields byte-identical `cli_args`.
+
+This replaced `detect_ocean()`/`push_ocean_args()`, which stat'd `data/` for
+the two shapefiles and passed whichever existed (and never passed the
+`.pmtiles` artifact at all - elivagar auto-detected that itself). A run's
+meaning therefore lived in the filesystem rather than the invocation: two runs
+of the same binary on the same PBF produced different ocean geometry with
+nothing in `cli_args` saying which, so no bench row could be classified after
+the fact as artifact-active or computed. On 2026-07-14 a denmark archive was
+built, verified and blessed as the regress baseline while
+`data/ocean-tiles.pmtiles` was missing; it took the computed path throughout
+and every gate passed. `bench all`'s self arm shared the same path and the
+same defect.
+
+An A/B arm is a sibling block, not a flag - drop the `.pmtiles` line and
+`brokkr results --grep-v ocean-tiles` selects the computed arm off `cli_args`,
+which is the "arm defined by an absent flag" case `--grep-v` exists for.
+
 ## download-ocean
 
 Fetches the ocean polygon dataset used by tile generation. Follows a similar
