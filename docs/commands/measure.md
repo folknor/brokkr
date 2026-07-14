@@ -9,6 +9,8 @@ brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
 
 - No flag - build, run once, print timing. Acquires lockfile, no DB storage.
 - `--bench` - full benchmark: lockfile, 3 runs (or N), best-of-N stored in DB.
+  All N per-iteration walls are stored too (`run_iterations`), in execution
+  order - see "Per-iteration walls" below.
 - `--hotpath` - function-level timing via hotpath feature. 1 run (or N).
 - `--alloc` - per-function allocation tracking via hotpath-alloc feature. 1
   run (or N).
@@ -54,6 +56,53 @@ timing contract `--bench` needs. The build-config seam both paths share is
 
 Results in `.brokkr/results.db` per project (gitignored).
 
+## Per-iteration walls
+
+`--bench N` reports best-of-N, but stores every iteration's wall in the
+`run_iterations` table (`run_id`, `run_idx`, `elapsed_ms`) and renders them on
+`brokkr results <uuid>`:
+
+```
+elapsed  9m 52s (best of 3: 592200 / 611400 / 634100 ms)
+```
+
+The walls are listed **in execution order and never sorted**, because the order
+is the signal:
+
+- iteration 1 fastest, 3 slowest -> drift *under* the run (e.g. SLC-cache
+  exhaustion on a scratch-heavy cell)
+- iteration 1 slowest, 2/3 faster -> cold page cache on the first pass
+
+Those are opposite diagnoses. This is why the walls do **not** live in
+`run_distribution` (min/p50/p95/max): sorting the samples discards the ordering,
+and a p50 cannot tell the two apart.
+
+Collected by every harness loop (`run_internal`, `run_hotpath`,
+`run_external_ok`, `run_external_with_kv_raw`, `run_distribution`) and attached
+to the best-of-N `BenchResult` before recording. Single-run modes leave it
+empty, and rows recorded before schema v16 have no iteration data - those walls
+were discarded at measure time and cannot be reconstructed from `elapsed_ms`.
+
+## What ran before
+
+Every stored row also records its predecessor as `prev.*` kv pairs:
+`prev.command`, `prev.uuid`, `prev.input_file`, `prev.gap_seconds`, read from
+the most recent row in the same results DB.
+
+`prev.gap_seconds` is measured from the previous run's timestamp to **the moment
+this run started**, not to the moment it was recorded. Rows are timestamped when
+inserted (i.e. when that run finished), and the row is written after the last
+iteration - so reading the clock at record time would count this run's own
+duration as idle time, and a 10-minute cell launched straight after its
+predecessor would report a ~10-minute gap and look cache-cold. The harness
+stamps the start of its measurement loop for exactly this reason.
+
+This is the cheapest available proxy for page-cache state. A cell that reads the
+same file its predecessor just read starts warm and reports a wall the code
+didn't earn; `prev.gap_seconds` + `prev.input_file` together usually distinguish
+"this baseline was warm" from "this baseline was fast". Best-effort: a lookup
+failure records nothing rather than failing the run.
+
 ## Sidecar profiler
 
 The sidecar is always-on for all measured modes. It samples `/proc/{pid}/stat`,
@@ -80,8 +129,9 @@ child fails (OOM, signal, non-zero exit).
 `--human` for a table). View selectors are mutually exclusive:
 - `--samples` - raw JSONL /proc samples
 - `--markers` - raw JSONL marker events
-- `--durations` - START/END pair timings
-- `--counters` - application counters
+- `--durations` - START/END pair timings. In `--human`, repeated span names
+  collapse to one aggregate row each (JSONL stays one object per span).
+- `--counters` - application counters; `--grep <SUBSTR>` filters by name
 - `--stat <field>` - min/max/avg/p50/p95
 - `--compare <a> <b>` - phase-aligned
 
@@ -155,7 +205,7 @@ convention-free, but individual views opt into naming conventions:
 | View | Marker interpretation |
 |---|---|
 | default summary / `--markers` / `--phase` | each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); `--phase FOO` matches exact, then `FOO_START`..`FOO_END`, then substring |
-| `--durations` | pairs `FOO_START` with the next `FOO_END`; unpaired starts render as standalone |
+| `--durations` | pairs `FOO_START` with the next `FOO_END`; unpaired starts render as standalone. `--human` collapses names seen more than once into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Collapsing is **off under `--run all`**: markers carry no `run_idx`, so a once-per-run phase would otherwise look like a repeated span and be aggregated away. JSONL is unaffected (one object per span) |
 | `--stop` | three spellings resolve to one marker: verbatim `FOO_END`; `-FOO` -> `FOO_END`; bare `FOO` -> `FOO_END` (fallback prints a notice) |
 
 Markers are reserved for the small set of **true phase boundaries** - a
@@ -166,7 +216,7 @@ concept instead:
 | View | Counter interpretation |
 |---|---|
 | `--stalls` | rolls up `*_wait_ns` counters: max value per name (strictly-monotonic, so max == cumulative total), category = name minus the `_wait_ns` suffix, reported as ms + `% of wall`. The `%` can exceed 100 for waits accumulated across concurrent threads (it's the avg threads parked in that category; single-threaded waits read as clean sub-100%). Unifies both projects - it picks up pbfhogg's `pipeline_*_wait_ns` and elivagar's `sort_chunk_write_wait_ns` etc. in one table. |
-| `--counters` | prints every counter point verbatim (`t=<sec> name=value`), no aggregation |
+| `--counters` | prints every counter point verbatim (`t=<sec> name=value`), no aggregation. `--grep <SUBSTR>` keeps only counters whose name contains the substring, and composes with `--phase`; a run emitting a progress counter every 64 blobs otherwise buries the lines that matter |
 
 See the README "Sidecar conventions" section for the emitter-side contract.
 

@@ -137,6 +137,14 @@ pub struct RunRow {
     pub project: String,
     pub stop_marker: Option<String>,
     pub kv: Vec<KvPair>,
+    /// Per-iteration wall times in execution order (index = `run_idx`), as
+    /// measured by the `--bench N` loop. Empty for single-run modes and for
+    /// harness paths with no meaningful per-iteration wall.
+    ///
+    /// Ordered, and stored ordered: see [`Distribution`] for the sorted
+    /// summary, which is a different question. `elapsed_ms` is the best of
+    /// these; keeping them lets a reader see drift *within* one row.
+    pub iterations: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -184,6 +192,11 @@ pub struct StoredRow {
     /// change *what* ran, not just metadata. Empty for the vast majority
     /// of historical rows predating the capture feature.
     pub captured_env: BTreeMap<String, String>,
+    /// Per-iteration wall times in execution order (index = `run_idx`).
+    /// Empty for single-run modes and for every row recorded before the
+    /// v15->v16 schema bump - those walls were discarded at measure time and
+    /// cannot be reconstructed from `elapsed_ms`.
+    pub iterations: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -213,6 +226,31 @@ impl StoredRow {
     }
 }
 
+/// The run recorded immediately before this one, as captured at record time.
+///
+/// Cheap answer to "what state was the machine in when this row was recorded".
+/// A benchmark's wall time depends heavily on what ran just before it: a cell
+/// reading a 92 GB file four minutes after another cell read the same file
+/// finds the headers warm in the page cache and reports a wall that the code
+/// had nothing to do with. Storing the predecessor makes that visible from the
+/// row alone instead of requiring a reconstruction of the suite's ordering.
+///
+/// `input_file` is what it read, and the caller turns `timestamp_epoch` into a
+/// gap - together they say whether this run could plausibly have inherited a
+/// warm cache.
+pub struct PreviousRun {
+    pub uuid: String,
+    pub command: String,
+    pub input_file: Option<String>,
+    /// The previous run's recorded timestamp as a Unix epoch. Deliberately
+    /// raw rather than a pre-computed gap: rows are timestamped when they are
+    /// *inserted*, i.e. when that run finished, and the gap that matters is
+    /// measured to the moment the current run *started*. Computing it here
+    /// against `now` would silently fold the current run's own duration into
+    /// the answer.
+    pub timestamp_epoch: i64,
+}
+
 /// Filters for querying stored rows.
 #[derive(Default)]
 pub struct QueryFilter {
@@ -235,6 +273,11 @@ pub struct QueryFilter {
     /// each term must match the row (AND); within a term, either column
     /// can supply the hit.
     pub grep: Vec<String>,
+    /// Negative substring matches against `cli_args` OR `brokkr_args`.
+    /// A row is excluded when ANY term matches either column - the dual of
+    /// [`grep`](Self::grep)'s AND, and the only way to select on the
+    /// *absence* of a flag (e.g. the OFF arm of an A/B).
+    pub grep_v: Vec<String>,
     /// Captured-env filters as `(key, value)` pairs. The key is the bare
     /// env var name without the `env.` prefix (e.g. `("PBFHOGG_USE_NEW_PATH",
     /// "1")` matches rows where the captured var equals `"1"`). Multiple
@@ -339,6 +382,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         }

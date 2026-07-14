@@ -173,7 +173,11 @@ fn run_durations(
         output::result_msg("no sidecar markers for this result");
         return Ok(());
     }
-    print_marker_durations(&markers, q.human);
+    // Only collapse repeated names within a single run. `--run all` concatenates
+    // every run's markers and `Marker` carries no run_idx, so a once-per-run
+    // phase would look like a repeated span and get aggregated away.
+    let collapse = run_filter.is_some();
+    print_marker_durations(&markers, q.human, collapse);
     Ok(())
 }
 
@@ -207,6 +211,13 @@ fn run_counters(
     if counters.is_empty() {
         output::result_msg("no counters for this result");
         return Ok(());
+    }
+    if let Some(ref needle) = q.grep {
+        counters.retain(|c| c.name.contains(needle.as_str()));
+        if counters.is_empty() {
+            output::result_msg(&format!("no counters matching '{needle}'"));
+            return Ok(());
+        }
     }
     if let Some(ref phase_name) = q.phase {
         let markers = sdb.query_markers(uuid_prefix, run_filter)?;

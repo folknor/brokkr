@@ -155,6 +155,7 @@ pub fn run(
             Ok(BenchResult {
                 elapsed_ms: result.elapsed_ms,
                 kv: result.kv.clone(),
+                iterations: Vec::new(),
                 distribution: None,
                 hotpath: None,
             })

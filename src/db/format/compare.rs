@@ -25,17 +25,7 @@ pub fn format_compare(
     for pair in &pairs {
         append_compare_row(&mut out, pair, &widths);
         out.push('\n');
-        // Skip the env annotation when the pair is one-sided - the row
-        // already shows `--` for the missing side's elapsed, so a
-        // trailing "env: X=1 vs (unset)" would just duplicate that
-        // signal and add noise on pairs where env isn't the
-        // interesting axis at all.
-        if pair.a_ms.is_some() && pair.b_ms.is_some()
-            && let Some(annotation) = format_env_diff(&pair.a_env, &pair.b_env)
-        {
-            out.push_str(&annotation);
-            out.push('\n');
-        }
+        append_pair_annotations(&mut out, pair);
     }
 
     // Append hotpath diff tables for pairs that have hotpath data on both sides.
@@ -116,6 +106,56 @@ struct ComparisonPair {
     /// line; differing pairs get a per-pair annotation.
     a_env: std::collections::BTreeMap<String, String>,
     b_env: std::collections::BTreeMap<String, String>,
+    /// Host conditions on each side, annotated like `a_env`/`b_env` when
+    /// they differ.
+    a_host: HostEnv,
+    b_host: HostEnv,
+}
+
+/// The host-condition fields of a row, pulled out for pairwise diffing.
+///
+/// These are recorded per run but were previously only visible in the
+/// single-result view, so `--compare A B` could report a delta while silently
+/// omitting that the two runs saw different amounts of free memory - which is
+/// frequently the actual cause. Available memory in particular has been
+/// observed to track wall time better than the commit under test does.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct HostEnv {
+    memory_mb: Option<i64>,
+    governor: String,
+    kernel: String,
+}
+
+/// The per-side fields a `ComparisonPair` is assembled from, pre-computed once
+/// per row so the pairing loop below stays a pairing loop.
+struct RowData {
+    elapsed_ms: i64,
+    hotpath: Option<HotpathData>,
+    output_bytes: Option<i64>,
+    peak_rss_mb: Option<f64>,
+    rewrite_pct: Option<f64>,
+    blobs: Option<String>,
+    input_display: String,
+    captured_env: std::collections::BTreeMap<String, String>,
+    host: HostEnv,
+}
+
+fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
+    RowData {
+        elapsed_ms: row.elapsed_ms,
+        hotpath: row.hotpath.clone(),
+        output_bytes: find_output_bytes(&row.kv),
+        peak_rss_mb: row.peak_rss_mb,
+        rewrite_pct: compute_rewrite_pct(&row.kv),
+        blobs: format_blob_counts(&row.kv),
+        input_display: format_input(&row.input_file, row.input_mb, matcher),
+        captured_env: row.captured_env.clone(),
+        host: HostEnv {
+            memory_mb: row.avail_memory_mb,
+            governor: row.cpu_governor.clone(),
+            kernel: row.kernel.clone(),
+        },
+    }
 }
 
 fn build_comparison_pairs(
@@ -125,27 +165,6 @@ fn build_comparison_pairs(
 ) -> Vec<ComparisonPair> {
     use std::collections::HashMap;
 
-    struct RowData {
-        elapsed_ms: i64,
-        hotpath: Option<HotpathData>,
-        output_bytes: Option<i64>,
-        peak_rss_mb: Option<f64>,
-        rewrite_pct: Option<f64>,
-        blobs: Option<String>,
-        input_display: String,
-        captured_env: std::collections::BTreeMap<String, String>,
-    }
-
-    let row_data = |row: &StoredRow| RowData {
-        elapsed_ms: row.elapsed_ms,
-        hotpath: row.hotpath.clone(),
-        output_bytes: find_output_bytes(&row.kv),
-        peak_rss_mb: row.peak_rss_mb,
-        rewrite_pct: compute_rewrite_pct(&row.kv),
-        blobs: format_blob_counts(&row.kv),
-        input_display: format_input(&row.input_file, row.input_mb, matcher),
-        captured_env: row.captured_env.clone(),
-    };
     let row_key = |row: &StoredRow| {
         pair_key(
             &row.command,
@@ -164,7 +183,7 @@ fn build_comparison_pairs(
         let key = row_key(row);
         if let std::collections::hash_map::Entry::Vacant(e) = a_map.entry(key.clone()) {
             keys.push(key);
-            e.insert(row_data(row));
+            e.insert(make_row_data(row, matcher));
         }
     }
     for row in rows_b {
@@ -173,7 +192,7 @@ fn build_comparison_pairs(
             if !a_map.contains_key(&key) {
                 keys.push(key.clone());
             }
-            e.insert(row_data(row));
+            e.insert(make_row_data(row, matcher));
         }
     }
 
@@ -202,6 +221,8 @@ fn build_comparison_pairs(
                 .as_ref()
                 .map(|r| r.captured_env.clone())
                 .unwrap_or_default();
+            let a_host = a.as_ref().map(|r| r.host.clone()).unwrap_or_default();
+            let b_host = b.as_ref().map(|r| r.host.clone()).unwrap_or_default();
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
@@ -219,9 +240,31 @@ fn build_comparison_pairs(
                 input_display,
                 a_env,
                 b_env,
+                a_host,
+                b_host,
             }
         })
         .collect()
+}
+
+/// Append the per-pair `env:` / `host:` annotation lines under a compare row.
+///
+/// Both are skipped when the pair is one-sided - the row already shows `--` for
+/// the missing side's elapsed, so "env: X=1 vs (unset)" would just duplicate
+/// that signal, and with no B elapsed there is nothing for the host conditions
+/// to explain.
+fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
+    if pair.a_ms.is_none() || pair.b_ms.is_none() {
+        return;
+    }
+    if let Some(annotation) = format_env_diff(&pair.a_env, &pair.b_env) {
+        out.push_str(&annotation);
+        out.push('\n');
+    }
+    if let Some(annotation) = format_host_diff(&pair.a_host, &pair.b_host) {
+        out.push_str(&annotation);
+        out.push('\n');
+    }
 }
 
 /// Format a per-pair env annotation when A and B captured different
@@ -253,6 +296,70 @@ fn format_env_diff(
         return None;
     }
     Some(format!("  env: {}", parts.join(", ")))
+}
+
+/// Format a per-pair host-condition annotation when A and B ran under
+/// different conditions. Returns `None` when they match.
+///
+/// Only differing fields are listed, so the common case (same box, same
+/// governor, same kernel) prints nothing but a memory line. Memory is the
+/// field that usually differs and the one most worth seeing: when two runs of
+/// the same command disagree, "how much RAM was free" is the first question,
+/// and the answer has repeatedly turned out to be the whole story.
+///
+/// Governor and kernel are near-constant in practice, so a difference in
+/// either is worth shouting about - it invalidates the comparison outright.
+fn format_host_diff(a: &HostEnv, b: &HostEnv) -> Option<String> {
+    if a == b {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+
+    match (a.memory_mb, b.memory_mb) {
+        (Some(am), Some(bm)) if am != bm => {
+            let delta = bm - am;
+            #[allow(clippy::cast_precision_loss)]
+            let pct = if am == 0 {
+                0.0
+            } else {
+                (delta as f64 / am as f64) * 100.0
+            };
+            parts.push(format!(
+                "memory {am} MB vs {bm} MB ({delta:+} MB, {pct:+.1}%)"
+            ));
+        }
+        // One side predates the column (or wasn't recorded). There's no delta
+        // to compute, but the asymmetry is still worth showing - staying silent
+        // would claim the hosts matched when we simply don't know.
+        (Some(am), None) => parts.push(format!("memory {am} MB vs (unknown)")),
+        (None, Some(bm)) => parts.push(format!("memory (unknown) vs {bm} MB")),
+        _ => {}
+    }
+    if a.governor != b.governor {
+        parts.push(format!(
+            "governor {} vs {}",
+            display_or_unknown(&a.governor),
+            display_or_unknown(&b.governor)
+        ));
+    }
+    if a.kernel != b.kernel {
+        parts.push(format!(
+            "kernel {} vs {}",
+            display_or_unknown(&a.kernel),
+            display_or_unknown(&b.kernel)
+        ));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("  host: {}", parts.join(", ")))
+}
+
+/// Render an empty host field as `(unknown)` - older rows predate the
+/// column, and a bare `vs` with a blank side reads as a formatting bug.
+fn display_or_unknown(s: &str) -> &str {
+    if s.is_empty() { "(unknown)" } else { s }
 }
 
 /// Build the dedup/pair key for the compare view.
@@ -654,6 +761,7 @@ mod tests {
             stop_marker: String::new(),
             kv: vec![],
             captured_env: std::collections::BTreeMap::new(),
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         }
@@ -966,6 +1074,90 @@ mod tests {
 
         assert_eq!(p.a_blobs.as_deref(), Some("1200pt/100rw"));
         assert_eq!(p.b_blobs.as_deref(), Some("1210pt/90rw"));
+    }
+
+    #[test]
+    fn format_compare_surfaces_memory_delta() {
+        // The motivating case: same command, same commit-under-test shape,
+        // but the two runs saw very different amounts of free memory. The
+        // compare view used to report only the wall delta, leaving the
+        // environmental cause invisible.
+        let mut a = row("read", "buffered", "planet.pbf", 19000);
+        a.commit = String::from("abc1234");
+        a.avail_memory_mb = Some(24780);
+        let mut b = row("read", "buffered", "planet.pbf", 25500);
+        b.commit = String::from("def5678");
+        b.avail_memory_mb = Some(22221);
+
+        let output = format_compare(
+            "abc1234",
+            &[a],
+            "def5678",
+            &[b],
+            10,
+            &DatasetMatcher::empty(),
+        );
+        assert!(
+            output.contains("host:"),
+            "differing host conditions should be annotated, got:\n{output}"
+        );
+        assert!(
+            output.contains("24780 MB vs 22221 MB"),
+            "both sides' memory should be shown, got:\n{output}"
+        );
+        assert!(
+            output.contains("-2559 MB"),
+            "the delta is the point - it should be spelled out, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn format_compare_quiet_when_host_matches() {
+        let mut a = row("read", "buffered", "planet.pbf", 19000);
+        a.commit = String::from("abc1234");
+        a.avail_memory_mb = Some(24780);
+        a.cpu_governor = String::from("performance");
+        let mut b = row("read", "buffered", "planet.pbf", 19500);
+        b.commit = String::from("def5678");
+        b.avail_memory_mb = Some(24780);
+        b.cpu_governor = String::from("performance");
+
+        let output = format_compare(
+            "abc1234",
+            &[a],
+            "def5678",
+            &[b],
+            10,
+            &DatasetMatcher::empty(),
+        );
+        assert!(
+            !output.contains("host:"),
+            "identical host conditions should add no line, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn format_compare_flags_governor_change() {
+        let mut a = row("read", "buffered", "planet.pbf", 19000);
+        a.commit = String::from("abc1234");
+        a.cpu_governor = String::from("performance");
+        let mut b = row("read", "buffered", "planet.pbf", 25500);
+        b.commit = String::from("def5678");
+        b.cpu_governor = String::from("powersave");
+
+        let output = format_compare(
+            "abc1234",
+            &[a],
+            "def5678",
+            &[b],
+            10,
+            &DatasetMatcher::empty(),
+        );
+        assert!(
+            output.contains("governor performance vs powersave"),
+            "a governor change invalidates the comparison and must be \
+             visible, got:\n{output}"
+        );
     }
 
     #[test]

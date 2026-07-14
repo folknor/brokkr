@@ -1039,6 +1039,14 @@ runs). The corpus run store has its own command - see `brokkr corpus-results`."
         #[arg(long)]
         grep: Vec<String>,
 
+        /// Inverse of `--grep`: exclude rows whose invocation contains the
+        /// term. Repeatable - a row is excluded if it matches ANY term.
+        /// Composes with `--grep`. The A/B case: `--grep apply-changes
+        /// --grep-v uring` selects the arm distinguished only by an absent
+        /// flag, which `--grep` alone cannot express.
+        #[arg(long = "grep-v")]
+        grep_v: Vec<String>,
+
         /// Maximum number of results to show
         #[arg(long, short = 'n', default_value = "20")]
         limit: usize,
@@ -1132,6 +1140,13 @@ Examples:
         /// --stat, or --counters.
         #[arg(long, requires = "phased_view")]
         phase: Option<String>,
+
+        /// Keep only counters whose name contains this substring (e.g.
+        /// `--grep s1a_`). Requires --counters. A run emitting a progress
+        /// counter every 64 blobs otherwise buries the ~30 lines that
+        /// matter under a full dump.
+        #[arg(long, requires = "counters", value_name = "SUBSTR")]
+        grep: Option<String>,
 
         /// Filter samples by time range in seconds (e.g. "10.0..82.0"). Requires --samples or --stat.
         #[arg(long, requires = "sample_view")]

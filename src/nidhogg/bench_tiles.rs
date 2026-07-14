@@ -322,6 +322,7 @@ fn run_lifecycle(
     Ok(BenchResult {
         elapsed_ms,
         kv,
+        iterations: Vec::new(),
         distribution: None,
         hotpath: None,
     })

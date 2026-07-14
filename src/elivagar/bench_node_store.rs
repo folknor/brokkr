@@ -85,6 +85,7 @@ pub fn run(
                 KvPair::int("nodes_millions", nodes_millions as i64),
                 KvPair::int("internal_runs", runs as i64),
             ],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         })

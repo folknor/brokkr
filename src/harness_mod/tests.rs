@@ -272,6 +272,7 @@ mod tests {
         let candidate = BenchResult {
             elapsed_ms: 500,
             kv: vec![],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };
@@ -287,12 +288,14 @@ mod tests {
         let current = BenchResult {
             elapsed_ms: 100,
             kv: vec![],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };
         let candidate = BenchResult {
             elapsed_ms: 200,
             kv: vec![],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };
@@ -305,12 +308,14 @@ mod tests {
         let current = BenchResult {
             elapsed_ms: 300,
             kv: vec![],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };
         let candidate = BenchResult {
             elapsed_ms: 150,
             kv: vec![],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };
@@ -324,12 +329,14 @@ mod tests {
         let current = BenchResult {
             elapsed_ms: 100,
             kv: vec![KvPair::text("tag", "first")],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };
         let candidate = BenchResult {
             elapsed_ms: 100,
             kv: vec![KvPair::text("tag", "second")],
+            iterations: vec![],
             distribution: None,
             hotpath: None,
         };

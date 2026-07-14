@@ -120,9 +120,13 @@ pub(crate) fn cmd_results(
         let (rows_a, rows_b) = results_db.query_compare(
             commit_a,
             commit_b,
-            q.command.as_deref(),
-            q.mode.as_deref(),
-            q.dataset.as_deref(),
+            &db::CompareFilter {
+                command: q.command.as_deref(),
+                mode: q.mode.as_deref(),
+                dataset: q.dataset.as_deref(),
+                grep: &q.grep,
+                grep_v: &q.grep_v,
+            },
         )?;
         let table = db::format_compare(commit_a, &rows_a, commit_b, &rows_b, q.top, &matcher);
         println!("{table}");
@@ -152,6 +156,7 @@ pub(crate) fn cmd_results(
         meta: meta_pairs,
         env: env_pairs,
         grep: q.grep.clone(),
+        grep_v: q.grep_v.clone(),
         limit: q.limit,
     };
     let rows = results_db.query(&filter)?;

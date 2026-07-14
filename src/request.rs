@@ -17,6 +17,10 @@ pub(crate) struct ResultsQuery {
     /// (unified `--grep`, à la `git log --grep`). Multiple terms AND
     /// together - each must match the row.
     pub(crate) grep: Vec<String>,
+    /// Negative `--grep-v`: a row is excluded when any term matches either
+    /// invocation column. ORs together (any hit excludes), which is the
+    /// natural dual of `grep`'s AND.
+    pub(crate) grep_v: Vec<String>,
     pub(crate) limit: usize,
     pub(crate) top: usize,
 }
@@ -69,6 +73,8 @@ pub(crate) struct SidecarQuery {
     pub(crate) human: bool,
     pub(crate) run: Option<String>,
     pub(crate) phase: Option<String>,
+    /// Substring filter on counter names, for the `--counters` view.
+    pub(crate) grep: Option<String>,
     pub(crate) range: Option<String>,
     pub(crate) where_cond: Option<String>,
     pub(crate) fields: Vec<String>,

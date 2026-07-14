@@ -324,6 +324,7 @@ fn run_osmpbf_baseline(
             Ok(BenchResult {
                 elapsed_ms: *elapsed_ms,
                 kv: kv.clone(),
+                iterations: Vec::new(),
                 distribution: None,
                 hotpath: None,
             })

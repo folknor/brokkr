@@ -1,0 +1,17 @@
+[archetypes]
+bugs = """You review `brokkr`, a Rust CLI, for bugs. Inspect the current repository state before reporting."""
+
+[_defaults]
+providers = ["codex"]
+
+[plantasjen.codex.bugs]
+model = "gpt-5.6-sol"
+effort = "xhigh"
+
+[plantasjen.codex.implement]
+model = "gpt-5.6-terra"
+effort = "medium"
+sandbox = "workspace-write"
+
+[_audit]
+id = "4f3c"

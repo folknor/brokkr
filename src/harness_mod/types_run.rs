@@ -43,6 +43,18 @@ pub struct BenchConfig {
 pub struct BenchResult {
     pub elapsed_ms: i64,
     pub kv: Vec<KvPair>,
+    /// Per-iteration wall times in execution order, filled in by the harness
+    /// `run_*` loops on the aggregate best-of-N result they return.
+    ///
+    /// Always empty on the `BenchResult` a per-iteration closure hands back -
+    /// one iteration doesn't have a list of iterations. The loop collects each
+    /// iteration's `elapsed_ms` as it goes and attaches the vector to the
+    /// winner before recording, so `elapsed_ms` is the best of `iterations`.
+    ///
+    /// Ordering is the payload: `--bench N` reports the minimum, which hides
+    /// whether the run drifted (iteration 3 slowest) or started cold
+    /// (iteration 1 slowest). Never sort this.
+    pub iterations: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -94,6 +106,17 @@ pub struct BenchHarness {
     /// env-gated code paths (A/B feature flags set from the shell) be
     /// distinguished across result rows.
     env_kv: Vec<crate::db::KvPair>,
+    /// Unix epoch at which the current measurement loop began its first
+    /// iteration; 0 until a `run_*` loop sets it.
+    ///
+    /// `prev.gap_seconds` has to be measured to the moment this run *started*,
+    /// but it is written by `build_row` during `record_result` - which happens
+    /// after every iteration has finished. Reading the clock there would fold
+    /// this run's own duration into the gap, so a 10-minute cell launched
+    /// immediately after its predecessor would report a ~10-minute gap and
+    /// wrongly look cache-cold. A `Cell` because the `run_*` methods take
+    /// `&self`.
+    measure_start_epoch: std::cell::Cell<i64>,
 }
 
 impl BenchHarness {
@@ -167,6 +190,7 @@ impl BenchHarness {
             brokkr_args: None,
             measure_mode: None,
             env_kv: Vec::new(),
+            measure_start_epoch: std::cell::Cell::new(0),
         })
     }
 
@@ -216,18 +240,22 @@ impl BenchHarness {
     where
         F: Fn(usize) -> Result<BenchResult, DevError>,
     {
+        self.mark_measure_start();
         let mut best: Option<BenchResult> = None;
+        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
             self.lock.set_progress(clamp_u32(i + 1), total);
             let result = f(i)?;
+            walls.push(result.elapsed_ms);
             best = Some(pick_best(best, result));
         }
 
-        let best =
+        let mut best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+        best.iterations = walls;
 
         self.record_result(config, &best)?;
         Ok(best)
@@ -254,8 +282,10 @@ impl BenchHarness {
         F: Fn(usize) -> Result<(BenchResult, crate::sidecar::SidecarData), DevError>,
     {
         let start_epoch = wall_clock_epoch();
+        self.measure_start_epoch.set(start_epoch);
         let mut best: Option<BenchResult> = None;
         let mut best_run_idx: usize = 0;
+        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<crate::sidecar::SidecarData> =
             Vec::with_capacity(config.runs);
         let total = clamp_u32(config.runs);
@@ -265,6 +295,7 @@ impl BenchHarness {
             self.lock.set_progress(clamp_u32(i + 1), total);
             let (result, sidecar) = f(i)?;
             sidecar_runs.push(sidecar);
+            walls.push(result.elapsed_ms);
             // Track the best run's index consistently with `pick_best`, which
             // only replaces on a strict improvement (keeps current on ties).
             if best.as_ref().is_none_or(|b| result.elapsed_ms < b.elapsed_ms) {
@@ -273,8 +304,9 @@ impl BenchHarness {
             best = Some(pick_best(best, result));
         }
 
-        let best =
+        let mut best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+        best.iterations = walls;
 
         let uuid = self.record_result(config, &best)?;
         // pid is unknown here (the child was reaped inside the closure); 0 is
@@ -318,12 +350,14 @@ impl BenchHarness {
         use crate::sidecar;
 
         let start_epoch = wall_clock_epoch();
+        self.measure_start_epoch.set(start_epoch);
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
         let fifo_path_str = fifo.path_str()?.to_owned();
 
         let mut best_ms: Option<i64> = None;
         let mut best_run_idx: usize = 0;
         let mut last_pid: u32 = 0;
+        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
         let total = clamp_u32(config.runs);
@@ -389,6 +423,10 @@ impl BenchHarness {
                 }
             }
 
+            // Recorded only past the failure checks above, so `walls` holds
+            // one entry per iteration that actually completed.
+            walls.push(ms);
+
             if best_ms.is_none_or(|best| ms < best) {
                 best_ms = Some(ms);
                 best_run_idx = i;
@@ -403,6 +441,7 @@ impl BenchHarness {
         let bench_result = BenchResult {
             elapsed_ms,
             kv: Vec::new(),
+            iterations: walls,
             distribution: None,
             hotpath: None,
         };
@@ -419,6 +458,7 @@ impl BenchHarness {
     where
         F: Fn(usize) -> Result<i64, DevError>,
     {
+        self.mark_measure_start();
         let mut samples = Vec::with_capacity(config.runs);
         let total = clamp_u32(config.runs);
 
@@ -428,6 +468,11 @@ impl BenchHarness {
             let ms = f(i)?;
             samples.push(ms);
         }
+
+        // Snapshot execution order before sorting: the percentiles below are a
+        // sorted summary, which answers a different question than "did the
+        // walls trend up or down across the run".
+        let walls = samples.clone();
 
         samples.sort_unstable();
 
@@ -448,6 +493,7 @@ impl BenchHarness {
         let result = BenchResult {
             elapsed_ms: min,
             kv: Vec::new(),
+            iterations: walls,
             distribution: Some(dist),
             hotpath: None,
         };
@@ -488,6 +534,7 @@ impl BenchHarness {
         use crate::sidecar;
 
         let start_epoch = wall_clock_epoch();
+        self.measure_start_epoch.set(start_epoch);
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
         let fifo_path_str = fifo.path_str()?.to_owned();
 
@@ -495,6 +542,7 @@ impl BenchHarness {
         let mut best_stderr: Vec<u8> = Vec::new();
         let mut best_run_idx: usize = 0;
         let mut last_pid: u32 = 0;
+        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
         let total = clamp_u32(config.runs);
@@ -546,6 +594,9 @@ impl BenchHarness {
             }
 
             let result = parse_kv_stderr(&captured.stderr)?;
+            // Self-reported elapsed_ms from stderr, matching what this path
+            // stores as the run's elapsed - not the external wall clock.
+            walls.push(result.elapsed_ms);
             let is_new_best = best
                 .as_ref()
                 .is_none_or(|b| result.elapsed_ms < b.elapsed_ms);
@@ -558,8 +609,9 @@ impl BenchHarness {
 
         drop(fifo);
 
-        let best =
+        let mut best =
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+        best.iterations = walls;
 
         let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
         let pending = PendingSidecar {
@@ -596,6 +648,12 @@ impl BenchHarness {
             force_emit_result_lines(config, result, &self.git);
             Ok(None)
         }
+    }
+
+    /// Record that measurement is starting now. For the loops that don't
+    /// already compute a `start_epoch` for sidecar provenance.
+    fn mark_measure_start(&self) {
+        self.measure_start_epoch.set(wall_clock_epoch());
     }
 
     /// Build a `RunInfo` from harness state for sidecar provenance.
@@ -704,6 +762,7 @@ impl BenchHarness {
         // Env capture comes before result kv so runtime counters win on
         // the unlikely key collision (env.foo vs a runtime env.foo).
         kv.extend(self.env_kv.iter().cloned());
+        kv.extend(previous_run_kv(&self.db, self.measure_start_epoch.get()));
         let mut peak_rss_mb: Option<f64> = None;
         for pair in &result.kv {
             if pair.key == "peak_rss_kb" {
@@ -754,8 +813,57 @@ impl BenchHarness {
             project: self.project.name().to_owned(),
             stop_marker: self.stop_marker.clone(),
             kv,
+            iterations: result.iterations.clone(),
             distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),
         }
     }
+}
+
+/// Describe the run recorded just before this one as `prev.*` kv pairs.
+///
+/// Records what the machine was doing immediately beforehand, which is the
+/// cheapest available proxy for page-cache state: a cell that reads the same
+/// file its predecessor just read starts warm, and reports a wall the code
+/// didn't earn. `prev.gap_s` and `prev.input_file` together are usually enough
+/// to tell "this baseline was warm" from "this baseline was fast".
+///
+/// Must be called before the current row is inserted, or it describes the
+/// current run. Provenance is best-effort: a lookup failure yields no pairs
+/// rather than failing a benchmark that otherwise succeeded.
+///
+/// `measure_start_epoch` is when this run began; the gap is measured to that,
+/// not to now, because "now" is after every iteration has run and would count
+/// this run's own duration as idle time. Falls back to the current clock when
+/// it is 0 (a caller that recorded a result without going through a `run_*`
+/// loop), which is the same reading as before the loop for an instant record.
+fn previous_run_kv(db: &ResultsDb, measure_start_epoch: i64) -> Vec<KvPair> {
+    let Ok(Some(prev)) = db.previous_run() else {
+        return Vec::new();
+    };
+    let start = if measure_start_epoch > 0 {
+        measure_start_epoch
+    } else {
+        wall_clock_epoch()
+    };
+    // `prev.gap_seconds`, not `prev.gap_s`: the single-result view renders kv
+    // keys with underscores as spaces, and "prev.gap s" reads as a typo.
+    // Clamped at 0 - a backwards system clock shouldn't record a negative gap.
+    let gap_seconds = (start - prev.timestamp_epoch).max(0);
+    let mut kv = vec![
+        KvPair::text("prev.command", prev.command),
+        KvPair::int("prev.gap_seconds", gap_seconds),
+    ];
+    if !prev.uuid.is_empty() {
+        // Short form, matching what `brokkr results` prints and accepts as a
+        // prefix - so the recorded value is directly pasteable.
+        kv.push(KvPair::text(
+            "prev.uuid",
+            &prev.uuid[..8.min(prev.uuid.len())],
+        ));
+    }
+    if let Some(input) = prev.input_file {
+        kv.push(KvPair::text("prev.input_file", input));
+    }
+    kv
 }

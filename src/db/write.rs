@@ -27,9 +27,10 @@ impl ResultsDb {
     }
 
     /// Delete every run whose uuid starts with `uuid_prefix`, along with all
-    /// FK children (`run_distribution`, `run_kv`, `hotpath_functions`,
-    /// `hotpath_threads`). FK cascade isn't active (no `PRAGMA foreign_keys`),
-    /// so children are deleted explicitly in one transaction.
+    /// FK children (`run_distribution`, `run_iterations`, `run_kv`,
+    /// `hotpath_functions`, `hotpath_threads`). FK cascade isn't active (no
+    /// `PRAGMA foreign_keys`), so children are deleted explicitly in one
+    /// transaction.
     ///
     /// Returns the number of `runs` rows removed.
     pub fn delete_by_uuid_prefix(&self, uuid_prefix: &str) -> Result<usize, DevError> {
@@ -42,6 +43,7 @@ impl ResultsDb {
         };
         for id in &ids {
             tx.execute("DELETE FROM run_distribution WHERE run_id = ?1", rusqlite::params![id])?;
+            tx.execute("DELETE FROM run_iterations WHERE run_id = ?1", rusqlite::params![id])?;
             tx.execute("DELETE FROM run_kv WHERE run_id = ?1", rusqlite::params![id])?;
             tx.execute("DELETE FROM hotpath_functions WHERE run_id = ?1", rusqlite::params![id])?;
             tx.execute("DELETE FROM hotpath_threads WHERE run_id = ?1", rusqlite::params![id])?;
@@ -101,6 +103,14 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
                 dist.p95_ms,
                 dist.max_ms
             ],
+        )?;
+    }
+
+    // Per-iteration walls, in execution order.
+    for (run_idx, elapsed_ms) in row.iterations.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO run_iterations (run_id, run_idx, elapsed_ms) VALUES (?1, ?2, ?3)",
+            rusqlite::params![run_id, i64::try_from(run_idx).unwrap_or(i64::MAX), elapsed_ms],
         )?;
     }
 
@@ -226,6 +236,7 @@ mod tests {
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -240,6 +251,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 10,
             })

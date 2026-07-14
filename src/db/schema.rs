@@ -10,6 +10,25 @@ use crate::error::DevError;
 // Schema DDL
 // ---------------------------------------------------------------------------
 
+/// DDL for the per-iteration wall table. Referenced by both [`SCHEMA`] (fresh
+/// databases) and the v15->v16 migration (existing ones) so the two can't drift.
+///
+/// `--bench N` reports best-of-N, but the *ordering* of the N walls is the drift
+/// signal: iteration 1 faster than iteration 3 on a scratch-heavy run is the
+/// SLC-cache-exhaustion signature, while iteration 1 slower than 2/3 is the
+/// cold-page-cache signature. Those are opposite diagnoses, so this is
+/// deliberately not `run_distribution`: min/p50/p95/max sorts the samples and
+/// throws the ordering - the entire signal - away. `run_idx` is the 0-based
+/// iteration number as executed.
+pub(super) const RUN_ITERATIONS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS run_iterations (
+    run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_idx     INTEGER NOT NULL,
+    elapsed_ms  INTEGER NOT NULL,
+    PRIMARY KEY (run_id, run_idx)
+);
+";
+
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS runs (
     id              INTEGER PRIMARY KEY,
@@ -136,6 +155,7 @@ impl ResultsDb {
         // by the time CREATE INDEX runs.
         migrate::run_migrations(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(RUN_ITERATIONS_DDL)?;
         // For fresh databases run_migrations was a no-op, so ensure
         // user_version reflects the schema we just created.
         conn.pragma_update(None, "user_version", migrate::SCHEMA_VERSION)?;

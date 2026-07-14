@@ -10,7 +10,11 @@ binary itself never knows what mode it runs under. This file is the map.
 
 - `.brokkr/results.db` - **tracked in git**, kept small. One row per bench
   run: `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of
-  arbitrary `key=value` metrics. Queried with `brokkr results`.
+  arbitrary `key=value` metrics. Queried with `brokkr results`. Two things
+  brokkr records itself rather than receiving over a transport channel: the
+  per-iteration walls of a `--bench N` run (`run_iterations`, in execution
+  order) and the `prev.*` kv pairs naming the previously-recorded run. Neither
+  comes from the binary - see `docs/commands/measure.md`.
 - `.brokkr/sidecar.db` - **gitignored** (split out of results.db in schema
   v8->v9). Per-run `/proc` sample trajectories, phase markers, and
   application counters. Queried with `brokkr sidecar <uuid>`.

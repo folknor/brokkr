@@ -113,7 +113,7 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
     if !row.mode.is_empty() {
         fields.push(("mode".into(), row.mode.clone()));
     }
-    fields.push(("elapsed".into(), format_elapsed(row.elapsed_ms)));
+    fields.push(("elapsed".into(), format_elapsed_with_iterations(row)));
     if !row.input_file.is_empty() {
         let input = match row.input_mb {
             Some(mb) => format!("{} ({mb:.0} MB)", row.input_file),
@@ -122,6 +122,29 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
         fields.push(("input".into(), input));
     }
     fields
+}
+
+/// Render `elapsed`, appending the per-iteration walls when the row has more
+/// than one - e.g. `9m 52s (best of 3: 592200 / 611400 / 634100 ms)`.
+///
+/// The walls are listed in execution order, never sorted: a monotonic climb
+/// across iterations reads as drift under the run (SLC-cache exhaustion on a
+/// scratch-heavy cell), while a slow first iteration followed by fast ones
+/// reads as a cold page cache. Sorting would erase the distinction, and those
+/// are opposite diagnoses.
+///
+/// A single iteration adds nothing over `elapsed_ms`, so it stays quiet.
+fn format_elapsed_with_iterations(row: &StoredRow) -> String {
+    let best = format_elapsed(row.elapsed_ms);
+    if row.iterations.len() < 2 {
+        return best;
+    }
+    let walls: Vec<String> = row.iterations.iter().map(i64::to_string).collect();
+    format!(
+        "{best} (best of {}: {} ms)",
+        row.iterations.len(),
+        walls.join(" / ")
+    )
 }
 
 /// Captured env block - first-class axis for env-gated code paths.

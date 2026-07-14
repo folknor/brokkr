@@ -82,6 +82,7 @@ pub fn run(
                 KvPair::int("tiles", tiles as i64),
                 KvPair::int("internal_runs", runs as i64),
             ],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         })

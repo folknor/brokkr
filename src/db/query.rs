@@ -3,8 +3,8 @@
 use super::ResultsDb;
 use super::schema::SELECT_COLS;
 use super::{
-    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, QueryFilter,
-    StoredRow,
+    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
+    QueryFilter, StoredRow,
 };
 use crate::error::DevError;
 
@@ -24,6 +24,35 @@ impl ResultsDb {
             load_children(&self.conn, row)?;
         }
         Ok(result)
+    }
+
+    /// The most recently recorded run in this database, or `None` when it is
+    /// empty. Call *before* inserting the current run, or it returns itself.
+    ///
+    /// Deliberately unfiltered: the question is "what last touched this
+    /// machine", not "what last ran with these flags", and the results DB is
+    /// already scoped to one project by its path. Ordered by `id` rather than
+    /// `timestamp` because `timestamp` has one-second resolution and two runs
+    /// can share it; `id` is the true insertion order.
+    pub fn previous_run(&self) -> Result<Option<PreviousRun>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uuid, command, input_file, \
+                    CAST(strftime('%s', timestamp) AS INTEGER) \
+             FROM runs ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok(PreviousRun {
+                uuid: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                command: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                input_file: row.get::<_, Option<String>>(2)?,
+                timestamp_epoch: row.get::<_, Option<i64>>(3)?.unwrap_or_default(),
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(prev)) => Ok(Some(prev)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
     }
 
     /// Query rows with optional filters. Commit matches by prefix (LIKE).
@@ -66,6 +95,7 @@ pub(super) fn load_children(
     row: &mut StoredRow,
 ) -> Result<(), DevError> {
     row.distribution = load_distribution(conn, row.id)?;
+    row.iterations = load_iterations(conn, row.id)?;
     let mut kv = load_kv(conn, row.id)?;
     // Promote `env.*` entries to a first-class `captured_env` field.
     // They're still stored in run_kv (no migration needed), but every
@@ -155,9 +185,54 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
             .unwrap_or_default(),
         kv: Vec::new(),
         captured_env: std::collections::BTreeMap::new(),
+        iterations: Vec::new(),
         distribution: None,
         hotpath: None,
     })
+}
+
+/// Append the `--grep` / `--grep-v` WHERE clauses, binding two params per term.
+///
+/// Shared by [`build_query_sql`] and `query_compare` so the two can't drift -
+/// they previously disagreed about whether `--grep` applied at all.
+///
+/// - `grep` ANDs: each term must appear in `cli_args` OR `brokkr_args`.
+/// - `grep_v` excludes on any hit. Note the De Morgan flip: "this term appears
+///   nowhere" is `NOT (cli matches OR brokkr matches)`, i.e. both columns must
+///   miss. Two ORed negations would instead keep rows that merely hide the term
+///   in the other column.
+///
+/// `instr`, not `LIKE '%'||?||'%'`: these terms are documented as literal
+/// substrings, but LIKE treats `%` and `_` in the *term* as wildcards - so
+/// `--grep io_uring` would also match `io-uring`, a different axis. instr is a
+/// literal search and needs no escaping. COALESCE because `instr(NULL, x)` is
+/// NULL rather than 0, which would drop rows from the negated clause.
+pub(super) fn push_grep_clauses(
+    clauses: &mut Vec<String>,
+    params: &mut Vec<String>,
+    grep: &[String],
+    grep_v: &[String],
+) {
+    for g in grep {
+        params.push(g.clone());
+        let i = params.len();
+        params.push(g.clone());
+        let j = params.len();
+        clauses.push(format!(
+            "(instr(COALESCE(cli_args, ''), ?{i}) > 0 \
+              OR instr(COALESCE(brokkr_args, ''), ?{j}) > 0)"
+        ));
+    }
+    for g in grep_v {
+        params.push(g.clone());
+        let i = params.len();
+        params.push(g.clone());
+        let j = params.len();
+        clauses.push(format!(
+            "NOT (instr(COALESCE(cli_args, ''), ?{i}) > 0 \
+                  OR instr(COALESCE(brokkr_args, ''), ?{j}) > 0)"
+        ));
+    }
 }
 
 fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
@@ -185,19 +260,7 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
         params.push(d.clone());
         clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
     }
-    // Each --grep term must match the row (AND). Each term separately can
-    // land in cli_args OR brokkr_args (substring). `--grep apply-changes
-    // --grep zstd:1` finds rows where *both* tokens appear somewhere across
-    // the two invocation columns.
-    for g in &filter.grep {
-        params.push(g.clone());
-        let i = params.len();
-        params.push(g.clone());
-        let j = params.len();
-        clauses.push(format!(
-            "(cli_args LIKE '%'||?{i}||'%' OR brokkr_args LIKE '%'||?{j}||'%')"
-        ));
-    }
+    push_grep_clauses(&mut clauses, &mut params, &filter.grep, &filter.grep_v);
     // Metadata filters: each becomes an EXISTS subquery against run_kv. The
     // user passes key without the `meta.` prefix (e.g. `--meta format=osc`),
     // and we look up `key = 'meta.<key>'` in run_kv. Rows missing the key are
@@ -261,6 +324,20 @@ fn load_distribution(
         Some(Err(e)) => Err(e.into()),
         None => Ok(None),
     }
+}
+
+/// Load per-iteration walls ordered by `run_idx`, i.e. back into the order the
+/// iterations actually ran. The ordering is the whole point of the table, so
+/// the ORDER BY is load-bearing rather than cosmetic.
+fn load_iterations(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<i64>, DevError> {
+    let mut stmt = conn
+        .prepare("SELECT elapsed_ms FROM run_iterations WHERE run_id = ?1 ORDER BY run_idx")?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| row.get::<_, i64>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevError> {
@@ -622,6 +699,7 @@ mod tests {
             project: String::from("test"),
             stop_marker: None,
             kv,
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -650,6 +728,7 @@ mod tests {
                 dataset: None,
                 meta: vec![("format".into(), "osc".into())],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -664,6 +743,7 @@ mod tests {
                 dataset: None,
                 meta: vec![("format".into(), "default".into())],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -679,6 +759,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -720,6 +801,7 @@ mod tests {
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -739,6 +821,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -754,6 +837,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -769,6 +853,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -785,6 +870,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -805,6 +891,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -843,6 +930,7 @@ mod tests {
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -860,6 +948,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -875,6 +964,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -890,6 +980,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -936,6 +1027,9 @@ mod tests {
                 KvPair::int("elapsed_ms", 500),
                 KvPair::text("threads.rss_bytes", "1024"),
             ],
+            // Deliberately not ascending: the round-trip must preserve
+            // execution order, not helpfully sort it.
+            iterations: vec![500, 700, 600],
             distribution: Some(Distribution {
                 samples: 5,
                 min_ms: 100,
@@ -977,6 +1071,14 @@ mod tests {
         let rows = db.query_by_uuid(&short).expect("query_by_uuid");
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
+
+        // Per-iteration walls, in execution order.
+        assert_eq!(
+            r.iterations,
+            vec![500, 700, 600],
+            "iterations must round-trip in execution order - sorting them \
+             would erase the drift signal they exist to carry"
+        );
 
         // Distribution.
         let dist = r
@@ -1042,6 +1144,7 @@ mod tests {
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -1074,6 +1177,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: vec!["zstd".into()],
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -1089,6 +1193,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: vec!["zstd".into(), "uring".into()],
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -1114,6 +1219,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: vec!["zstd:1".into(), "io-uring".into()],
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
@@ -1129,11 +1235,128 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: vec!["direct-io".into(), "zstd".into()],
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 50,
             })
             .unwrap();
         assert!(rows.is_empty(), "no row has both direct-io and zstd");
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    #[test]
+    fn query_grep_v_excludes_and_composes() {
+        let (dir, db_path) = test_db("query_grep_v");
+        let db = ResultsDb::open(&db_path).expect("open");
+
+        let make_row = |cli: &str, brokkr: &str| RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("bench apply-changes"),
+            mode: Some(String::from("release")),
+            input_file: None,
+            input_mb: None,
+            elapsed_ms: 100,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: crate::build::CargoProfile::Release,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: Some(String::from(cli)),
+            brokkr_args: Some(String::from(brokkr)),
+            project: String::from("test"),
+            stop_marker: None,
+            kv: vec![],
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        };
+
+        // Row 1: zstd + uring (the ON arm).
+        db.insert(&make_row(
+            "apply-changes --compression zstd:1",
+            "brokkr apply-changes --io-uring",
+        ))
+        .unwrap();
+        // Row 2: zstd, no uring (the OFF arm - distinguished only by absence).
+        db.insert(&make_row(
+            "apply-changes --compression zstd:3",
+            "brokkr apply-changes",
+        ))
+        .unwrap();
+        // Row 3: uring, no zstd.
+        db.insert(&make_row(
+            "apply-changes --direct-io",
+            "brokkr apply-changes --io-uring",
+        ))
+        .unwrap();
+
+        // Exclusion reaches into brokkr_args, not just cli_args: rows 1 and 3
+        // carry `uring` only there.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: Vec::new(),
+                grep_v: vec!["uring".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "--grep-v uring must exclude rows 1 and 3");
+        assert!(
+            rows[0].cli_args.contains("zstd:3"),
+            "the surviving row is the one with no uring anywhere"
+        );
+
+        // The motivating case: select the OFF arm of an A/B, which --grep
+        // alone cannot express because the arm is defined by an absent flag.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: vec!["zstd".into()],
+                grep_v: vec!["uring".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "--grep zstd --grep-v uring isolates the OFF arm"
+        );
+        assert!(rows[0].cli_args.contains("zstd:3"));
+
+        // Multiple --grep-v terms OR together: any hit excludes.
+        let rows = db
+            .query(&QueryFilter {
+                commit: None,
+                command: None,
+                mode: None,
+                dataset: None,
+                meta: vec![],
+                grep: Vec::new(),
+                grep_v: vec!["zstd".into(), "direct-io".into()],
+                env: Vec::new(),
+                limit: 50,
+            })
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "every row matches at least one --grep-v term, so all are excluded"
+        );
 
         drop(db);
         cleanup(&dir, &db_path);

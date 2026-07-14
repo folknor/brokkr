@@ -265,6 +265,8 @@ pub fn run_hotpath_capture(
         BenchResult {
             elapsed_ms: ms,
             kv,
+            // Single capture - the enclosing run_hotpath loop owns the list.
+            iterations: Vec::new(),
             distribution: None,
             hotpath,
         },
@@ -383,6 +385,8 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
     Ok(BenchResult {
         elapsed_ms,
         kv,
+        // One iteration's parse - the enclosing loop owns the list.
+        iterations: Vec::new(),
         distribution: None,
         hotpath: None,
     })

@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 15;
+pub(super) const SCHEMA_VERSION: i64 = 16;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -61,6 +61,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 15 {
         migrate_v14_to_v15(conn)?;
+    }
+    if current < 16 {
+        migrate_v15_to_v16(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -680,6 +683,18 @@ fn migrate_v14_to_v15(conn: &rusqlite::Connection) -> Result<(), DevError> {
     Ok(())
 }
 
+/// Migration v15 -> v16: add the `run_iterations` table.
+///
+/// Pure table addition, so there is nothing to backfill: the per-iteration
+/// walls of historical `--bench N` rows were never stored (the harness kept
+/// only the minimum), and a best-of-N value can't be un-collapsed into the N
+/// walls that produced it. Pre-v16 rows therefore carry no iteration data and
+/// render exactly as before.
+fn migrate_v15_to_v16(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    conn.execute_batch(super::schema::RUN_ITERATIONS_DDL)?;
+    Ok(())
+}
+
 /// Parse existing extra/metadata JSON and insert into child tables.
 fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError> {
     let mut stmt = conn.prepare(
@@ -980,6 +995,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 10,
             })
@@ -1058,6 +1074,7 @@ mod tests {
                 dataset: None,
                 meta: vec![],
                 grep: Vec::new(),
+                grep_v: Vec::new(),
                 env: Vec::new(),
                 limit: 10,
             })

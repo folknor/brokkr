@@ -739,7 +739,24 @@ fn print_phase_summary_jsonl(
 /// Matches markers by stripping the `_START`/`_END` suffix to find pairs.
 /// For unpaired markers (standalone), prints the timestamp only. JSONL by
 /// default; `human` renders the fixed-width table.
-pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool) {
+/// Render `_START`/`_END` pair timings.
+///
+/// JSONL stays one object per span - it's the machine-readable view and must
+/// remain lossless. The `--human` table collapses repeated span names into one
+/// aggregate row each, the same way [`print_phase_summary`] drops zero-sample
+/// phases from the table while keeping them in JSONL: the table is for reading,
+/// and a few hundred rows of 0-3 ms spans is not readable.
+///
+/// `collapse` must be false when the markers span more than one run. Collapsing
+/// keys on how often a name appears, and [`sidecar::Marker`] carries no
+/// `run_idx` - so under `--run all` an ordinary once-per-run phase appears N
+/// times, looks like a high-frequency event, and would be aggregated into a
+/// single row, destroying exactly the per-run timings that view exists to show.
+pub(crate) fn print_marker_durations(
+    markers: &[sidecar::Marker],
+    human: bool,
+    collapse: bool,
+) {
     // Build a map of base_name -> (start_us, end_us).
     let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
 
@@ -775,7 +792,7 @@ pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool) {
     }
 
     if human {
-        print_marker_durations_human(&pairs, &standalone);
+        print_marker_durations_human(&pairs, &standalone, collapse);
     } else {
         print_marker_durations_jsonl(&pairs, &standalone);
     }
@@ -814,32 +831,187 @@ fn print_marker_durations_jsonl(
     }
 }
 
+/// Span names partitioned by how often each was seen, plus the spans themselves.
+///
+/// `singles` and `repeats` both preserve first-appearance order.
+struct DurationGroups<'a> {
+    /// Names seen exactly once - phase boundaries, rendered as table rows.
+    singles: Vec<&'a str>,
+    /// Names seen more than once - events, rendered as one aggregate row each.
+    repeats: Vec<&'a str>,
+    spans: std::collections::HashMap<&'a str, Vec<(i64, Option<i64>)>>,
+}
+
+/// Split span names into those seen once and those that repeat.
+///
+/// A name emitted once per run is a phase boundary and belongs in the table.
+/// A name emitted hundreds of times is an event, and printing one row each
+/// buries the handful of phase rows the reader came for - a few hundred
+/// `WAIT_P2_SEND` spans of 0-3 ms turn an 8-line answer into a 153 KB dump.
+/// Both are legitimate `_START`/`_END` pairs, so the split is on observed
+/// cardinality, not on any naming convention: nothing here knows what `WAIT_`
+/// means, and a future high-frequency span gets collapsed for free.
+fn group_duration_pairs(pairs: &[(String, i64, Option<i64>)]) -> DurationGroups<'_> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut spans: std::collections::HashMap<&str, Vec<(i64, Option<i64>)>> =
+        std::collections::HashMap::new();
+    for (name, start_us, end_us) in pairs {
+        if !spans.contains_key(name.as_str()) {
+            order.push(name.as_str());
+        }
+        spans
+            .entry(name.as_str())
+            .or_default()
+            .push((*start_us, *end_us));
+    }
+    let singles: Vec<&str> = order
+        .iter()
+        .copied()
+        .filter(|n| spans.get(n).is_some_and(|v| v.len() == 1))
+        .collect();
+    let repeats: Vec<&str> = order
+        .iter()
+        .copied()
+        .filter(|n| spans.get(n).is_some_and(|v| v.len() > 1))
+        .collect();
+    DurationGroups {
+        singles,
+        repeats,
+        spans,
+    }
+}
+
+/// One aggregate line per repeated span name, slowest total first.
+///
+/// `--stalls` remains the right view for accumulated blocking time (it rolls
+/// up `*_wait_ns` counters); this is only here so that a run which emits
+/// high-frequency spans as markers still has a readable `--durations` table.
+fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
+    if groups.repeats.is_empty() {
+        return;
+    }
+    if had_singles {
+        println!();
+    }
+    println!("Repeated spans (collapsed; see --stalls for accumulated wait time):");
+
+    // Accumulate in microseconds and only convert for display. Truncating each
+    // span to whole milliseconds first would silently discard sub-millisecond
+    // time, and these spans are routinely 0-3 ms: 500 spans of 900us each
+    // would report a total of 0ms rather than 450ms - precisely backwards for
+    // a view whose job is to show where the time went.
+    struct Agg<'a> {
+        name: &'a str,
+        count: usize,
+        unpaired: usize,
+        total_us: i64,
+        min_us: i64,
+        max_us: i64,
+    }
+
+    let mut aggs: Vec<Agg<'_>> = Vec::new();
+    for &name in &groups.repeats {
+        let Some(spans) = groups.spans.get(name) else {
+            continue;
+        };
+        let mut total_us = 0i64;
+        let mut min_us = i64::MAX;
+        let mut max_us = 0i64;
+        let mut unpaired = 0usize;
+        for (start_us, end_us) in spans {
+            let Some(end) = end_us else {
+                unpaired += 1;
+                continue;
+            };
+            let dur_us = end - start_us;
+            total_us += dur_us;
+            min_us = min_us.min(dur_us);
+            max_us = max_us.max(dur_us);
+        }
+        aggs.push(Agg {
+            name,
+            count: spans.len(),
+            unpaired,
+            total_us,
+            min_us: if min_us == i64::MAX { 0 } else { min_us },
+            max_us,
+        });
+    }
+    aggs.sort_by_key(|a| std::cmp::Reverse(a.total_us));
+
+    #[allow(clippy::cast_precision_loss)]
+    for agg in &aggs {
+        let paired = agg.count - agg.unpaired;
+        let avg_ms = if paired == 0 {
+            0.0
+        } else {
+            agg.total_us as f64 / paired as f64 / 1_000.0
+        };
+        let label = format!("{} x{}", agg.name, agg.count);
+        print!(
+            "  {label:<38} total {:>9.1}ms  min {:>6.1}ms  avg {:>7.1}ms  max {:>6.1}ms",
+            agg.total_us as f64 / 1_000.0,
+            agg.min_us as f64 / 1_000.0,
+            avg_ms,
+            agg.max_us as f64 / 1_000.0
+        );
+        if agg.unpaired > 0 {
+            print!("  ({} with no end)", agg.unpaired);
+        }
+        println!();
+    }
+}
+
+/// One `Phase / Start / End / Duration` row.
+fn print_duration_row(name: &str, start_us: i64, end_us: Option<i64>) {
+    let start_ms = start_us / 1_000;
+    match end_us {
+        Some(end) => {
+            let dur_ms = (end - start_us) / 1_000;
+            let end_ms = end / 1_000;
+            println!("{name:<32} {start_ms:>9}ms {end_ms:>9}ms {dur_ms:>9}ms");
+        }
+        None => {
+            println!("{name:<32} {start_ms:>9}ms {:>12} {:>12}", "(no end)", "-");
+        }
+    }
+}
+
 fn print_marker_durations_human(
     pairs: &[(String, i64, Option<i64>)],
     standalone: &[&sidecar::Marker],
+    collapse: bool,
 ) {
-    if !pairs.is_empty() {
+    let groups = group_duration_pairs(pairs);
+    // Nothing to gain from the collapsed layout when no name actually repeats.
+    let collapsing = collapse && !groups.repeats.is_empty();
+
+    let rows_shown = if collapsing {
+        !groups.singles.is_empty()
+    } else {
+        !pairs.is_empty()
+    };
+
+    if rows_shown {
         println!(
             "{:<32} {:>12} {:>12} {:>12}",
             "Phase", "Start", "End", "Duration"
         );
         println!("{}", "-".repeat(71));
+    }
+
+    if collapsing {
+        for name in &groups.singles {
+            // Each singleton name has exactly one span by construction.
+            let Some((start_us, end_us)) = groups.spans.get(name).and_then(|v| v.first()) else {
+                continue;
+            };
+            print_duration_row(name, *start_us, *end_us);
+        }
+        print_repeated_spans(&groups, rows_shown);
+    } else {
         for (name, start_us, end_us) in pairs {
-            match end_us {
-                Some(end) => {
-                    let dur_ms = (end - start_us) / 1_000;
-                    let start_ms = start_us / 1_000;
-                    let end_ms = end / 1_000;
-                    println!("{name:<32} {start_ms:>9}ms {end_ms:>9}ms {dur_ms:>9}ms");
-                }
-                None => {
-                    let start_ms = start_us / 1_000;
-                    println!(
-                        "{name:<32} {:>9}ms {:>12} {:>12}",
-                        start_ms, "(no end)", "-"
-                    );
-                }
-            }
+            print_duration_row(name, *start_us, *end_us);
         }
     }
 

@@ -14,6 +14,19 @@ Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs,
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
 
+## Code review (`review`)
+
+`review` fans a code review out to fresh AI sessions. Config is `.review.toml` in the repo root: `[archetypes]` (name = priming prompt), `[_defaults].providers`, and `--profile` overrides scoped `[<host>.<provider>.<profile>]`. This repo currently defines the `bugs` archetype against the `codex` provider, with `bugs` and `implement` profiles for the `plantasjen` host.
+
+```
+echo "Please review the unstaged changes and report your findings." | review bugs --profile bugs
+```
+
+- **Piping into `review` is the one sanctioned exception to the no-`|` bash rule above.**
+- **Keep the piped prompt to one line.** The archetype prime already tells the session to inspect the current repository state, and each run starts fresh and fetches the code itself. A long prompt that summarises the diff and pre-states where the bugs probably are defeats the point - the session's value is that it reaches its own conclusions, and a reviewer told what to think tends to agree. Say what to look at, not what to find.
+- Each run is a fresh session; the printed session ID resumes it via `--session` while the cache is warm.
+- `--dry-run` prints the assembled prompt instead of sending it.
+
 ## How it works
 
 Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr|piners"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
@@ -102,7 +115,7 @@ For details, read the linked docs.
 - `deps` - dependency audit of `Cargo.lock` / `cargo metadata` (any Rust+git repo, not project-gated). Phases: duplicate versions (with blame), git deps, out-of-workspace path deps, plus informational outdated/stale via `ccu --json`. `brokkr deps <pkg>` is focus mode (chain trace). Supports `--json`, `--limit`, `--all`, `--no-fail`. Exit 1 on offline findings. See `docs/commands/deps.md`.
 - `env` - hostname, kernel, governor, memory, drives, tool versions, dataset status.
 - `wc [threshold]` - list tracked `.rs` files with more than `threshold` lines (default 800), largest first. Works in any project.
-- `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`. Uniform across all projects (piners included, for its hotpath/alloc runs).
+- `results` - query the results database (`.brokkr/results.db`). Bare `brokkr results` shows a table of the last `-n` results (default 20). Supports `--commit`, `--compare`, `--command`, `--variant`, `-n`, `--top`, `--grep`/`--grep-v` (substring match on the invocation columns; `--grep` ANDs, `--grep-v` excludes on any hit - the way to select an A/B arm defined by an *absent* flag). `brokkr results <uuid>` shows per-iteration walls for `--bench N` rows and the `prev.*` provenance of what ran before it; `--compare A B` annotates pairs whose host conditions (memory/governor/kernel) differed. Uniform across all projects (piners included, for its hotpath/alloc runs).
 - `corpus-results` - **[piners]** query the corpus run store (`.brokkr/piners/corpus/runs.db`) written by `brokkr corpus`, with the corpus flags (`--probe`/`--diffs`/`--trend`/`--run`/`--runtimes`/`--where`/`--sql`/`--full`). The query sibling of `corpus`; split out of `results` once piners gained benchmark runs. See `docs/projects/piners.md`.
 - `lint-corpus` / `lint-results` - **[piners]** the differential-lint corpus: run `.pine` snippets through piners (dirty tree) and pine-lint offline, diff diagnostics on `(line,col,severity)`, gate on a pinned agreement disposition. `--reanchor` refreshes the TV anchor via `pine-lint --tv`; `--bless` stamps dispositions. `lint-results` queries `.brokkr/piners/lint/runs.db`. See `docs/commands/lint-corpus.md`.
 - `clean [--worktrees] [--cargo [PKG]]` - remove scratch/temp files. `--cargo` additionally runs `cargo clean -p <PKG>` (PKG defaults to the brokkr.toml project name) - wipes the project's own build artifacts across all profiles while keeping dependency caches, the fix for stale-incremental linker failures (phantom undefined `anon.*.llvm.*` symbols). On elivagar projects wipes `tilegen_tmp` (scratch); the durable tilegen output archives (`<output>/<dataset>-<commit>.pmtiles`, reproducible; retention bounds normal growth) are **spared by a routine clean** and only reclaimed by the deep clean (`--worktrees`), since they are the source of truth for `regress`/`bless`. On ratatoskr projects also wipes `.brokkr/ratatoskr/` (run-N artefact dirs left by failed runs, plus `mock/` dirs from `mock-serve`). On piners projects removes the `.brokkr/piners/corpus/run-N/` dirs but **spares `runs.db`** (the corpus run store is the source of truth). `--worktrees` also purges all persistent benchmark worktrees (and, on elivagar, the durable output archives).

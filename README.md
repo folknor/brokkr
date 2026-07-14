@@ -43,7 +43,7 @@ Every measurable command supports these flags:
 | Flag | Behavior |
 |------|----------|
 | *(none)* | Build, run once, print timing. No DB storage. |
-| `--bench` | Full benchmark: lockfile, 3 runs, best-of-N stored in DB |
+| `--bench` | Full benchmark: lockfile, 3 runs, best-of-N stored in DB (all N per-iteration walls stored too, in execution order) |
 | `--bench N` | Same but N runs |
 | `--hotpath` | Function-level timing via hotpath feature (1 run) |
 | `--hotpath N` | Same but N runs |
@@ -288,13 +288,13 @@ brokkr sidecar --compare <uuid_a> <uuid_b>         # phase-aligned comparison
 brokkr sidecar dirty --stat anon                   # inspect last failed/dirty run
 ```
 
-Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--stat`; `--phase` also composes with `--counters`.
+Filter flags (`--phase`, `--range`, `--where`) compose with `--samples` and `--stat`; `--phase` also composes with `--counters`. `--grep <SUBSTR>` filters `--counters` by counter name, and composes with `--phase`.
 
 ### Sidecar conventions
 
 The FIFO protocol is convention-free - brokkr doesn't mandate any naming scheme on markers or counters. Two optional conventions unlock richer views when emitters adopt them:
 
-- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. `--stop FOO_END` kills the child on the end marker verbatim; `--stop -FOO` and `--stop FOO` are shorthand aliases that resolve to `FOO_END` (the fallback form prints a one-line notice so the resolved name is visible). **Markers are for the small set of true phase boundaries only** - a high-frequency span emitted as marker pairs drowns every phase-oriented view at once (each marker is treated as a boundary), so per-event blocking spans belong in counters, not markers (see below).
+- **`FOO_START` / `FOO_END` marker pairs.** Used by `--durations` to derive per-span timing. Brokkr pairs a `FOO_START` with the next `FOO_END` of the same base name; unpaired starts render as standalone markers. In `--human`, span names seen more than once collapse into a single aggregate row (`NAME xN  total …  min/avg/max`) so a high-frequency span can't bury the phase rows; the JSONL form stays one object per span. The split is on observed cardinality, not on the name. `--stop FOO_END` kills the child on the end marker verbatim; `--stop -FOO` and `--stop FOO` are shorthand aliases that resolve to `FOO_END` (the fallback form prints a one-line notice so the resolved name is visible). **Markers are for the small set of true phase boundaries only** - a high-frequency span emitted as marker pairs drowns every phase-oriented view at once (each marker is treated as a boundary), so per-event blocking spans belong in counters, not markers (see below).
 
 - **`<category>_wait_ns` stall counters.** Accumulated blocking time is a *counter* concept, not a marker one. Emit a strictly-monotonic counter named `<category>_wait_ns` - one atomic add of the blocked nanoseconds per blocking event (channel sends, mutex waits, I/O backpressure, one-shot joins). `brokkr sidecar <uuid> --stalls` takes the max value per name (monotonic, so max is the cumulative total), strips `_wait_ns` for the category, and reports each as ms + `% of wall`. The `%` can exceed 100 for a counter accumulated across concurrent threads - it's the average number of threads parked in that category at any instant (e.g. 430% ~= 4.3 threads in decode-send); single-threaded waits read as clean sub-100% fractions. The view spans projects: it rolls up pbfhogg's `pipeline_decoded_send_wait_ns`, `pipeline_raw_send_wait_ns`, ... alongside elivagar's `sort_chunk_write_wait_ns`, `assemble_partition_batch_wait_ns`, `pmtiles_write_wait_ns`, ... in one table. Runs with no `*_wait_ns` counters produce a clear "no *_wait_ns counters" message rather than silent empty output.
 
@@ -314,6 +314,7 @@ brokkr results --commit a65a                        # filter by commit
 brokkr results --mode hotpath                       # filter by measurement mode
 brokkr results --grep pipelined                     # substring-match cli_args + brokkr_args
 brokkr results --grep apply-changes --grep uring --grep zstd:1   # stack --grep: AND across terms
+brokkr results --grep apply-changes --grep-v uring  # exclude: the arm WITHOUT io_uring
 brokkr results --dataset europe                     # filter by dataset (substring on input file)
 brokkr results --command tags-filter --dataset eu   # combine filters
 brokkr results --meta merged_cache=miss             # filter by runtime-observation metadata key
@@ -332,13 +333,17 @@ Columns that drive the filters:
 
 Use `--grep` for anything that's a flag/axis (`--grep zstd:1`, `--grep 'snapshot 20260411'`, `--grep 'index-type external'`). Use `--meta` for genuine runtime observations.
 
+`--grep-v` is the negative form: repeatable, and a row is excluded if it matches **any** term (`--grep` ANDs, `--grep-v` ORs). It's the only way to select an A/B arm defined by an *absent* flag - `--grep uring` finds the ON arm, but the OFF arm has no distinguishing token to match, so it needs `--grep-v uring`. Both are literal substring matches (`%` and `_` are not wildcards), and both apply to `--compare` as well as the row listing.
+
+`brokkr results <uuid>` additionally shows what a table row can't: the per-iteration walls of a `--bench N` run in execution order, and the `prev.*` pairs naming what ran immediately before. `--compare A B` annotates a pair with a `host:` line when the two runs saw different available memory, governor, or kernel.
+
 The `dataset` column in the output table is the first dash-separated component of the input filename - `europe-20260301-seq4714-with-indexdata.osm.pbf` renders as `europe`. This is a display heuristic: filtering via `--dataset` always substring-matches the full `input_file` column, so filters still work even when the short name collapses distinct datasets (e.g. a hypothetical `europe-west` would display as `europe`). The full filename and size are shown in the single-result detail view (`brokkr results <uuid>`) as the `input` field. See TODO.md for the proper fix.
 
 The compare view shows timing, output size, peak RSS, rewrite ratio, and blob distribution columns as applicable. Hotpath comparisons include function-level timing diffs.
 
 ### Invalidating results
 
-A benchmark run under the wrong pretences (wrong dataset, wrong features, wrong git state, interrupted sidecar, …) produces numbers that will skew every future comparison. `brokkr invalidate` hard-deletes such runs from both `.brokkr/results.db` (runs + `run_distribution` + `run_kv` + `hotpath_functions` + `hotpath_threads`) and `.brokkr/sidecar.db` (samples, markers, summary, counters, meta, and any `sidecar_latest` pointer rows like `dirty` that resolve to a deleted UUID).
+A benchmark run under the wrong pretences (wrong dataset, wrong features, wrong git state, interrupted sidecar, …) produces numbers that will skew every future comparison. `brokkr invalidate` hard-deletes such runs from both `.brokkr/results.db` (runs + `run_distribution` + `run_iterations` + `run_kv` + `hotpath_functions` + `hotpath_threads`) and `.brokkr/sidecar.db` (samples, markers, summary, counters, meta, and any `sidecar_latest` pointer rows like `dirty` that resolve to a deleted UUID).
 
 Dry-run by default - the command prints each matched UUID and tags whether sidecar data is present, then exits. Pass `-f` / `--force` to actually delete.
 

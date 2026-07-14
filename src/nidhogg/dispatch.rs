@@ -176,6 +176,7 @@ fn run_nidhogg_ingest_bench(
         Ok(harness::BenchResult {
             elapsed_ms: ms,
             kv: vec![],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         })

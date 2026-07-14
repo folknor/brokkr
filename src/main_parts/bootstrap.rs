@@ -713,6 +713,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             meta,
             env,
             grep,
+            grep_v,
             limit,
             top,
         } => {
@@ -726,6 +727,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 meta,
                 env,
                 grep,
+                grep_v,
                 limit,
                 top,
             };
@@ -774,6 +776,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             human,
             run,
             phase,
+            grep,
             range,
             r#where,
             fields,
@@ -793,6 +796,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 human,
                 run,
                 phase,
+                grep,
                 range,
                 where_cond: r#where,
                 fields,

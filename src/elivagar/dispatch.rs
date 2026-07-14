@@ -372,6 +372,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         Ok(crate::harness::BenchResult {
             elapsed_ms: ms,
             kv: vec![],
+            iterations: Vec::new(),
             distribution: None,
             hotpath: None,
         })
