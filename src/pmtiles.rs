@@ -22,6 +22,8 @@ const MAGIC: &[u8; 7] = b"PMTiles";
 struct Header {
     root_dir_offset: u64,
     root_dir_length: u64,
+    metadata_offset: u64,
+    metadata_length: u64,
     leaf_dirs_offset: u64,
     leaf_dirs_length: u64,
     data_length: u64,
@@ -45,8 +47,8 @@ fn parse_header(buf: &[u8; HEADER_SIZE]) -> Result<Header, DevError> {
     Ok(Header {
         root_dir_offset: u64_le(buf, 8),
         root_dir_length: u64_le(buf, 16),
-        // 24: metadata_offset (unused)
-        // 32: metadata_length (unused)
+        metadata_offset: u64_le(buf, 24),
+        metadata_length: u64_le(buf, 32),
         leaf_dirs_offset: u64_le(buf, 40),
         leaf_dirs_length: u64_le(buf, 48),
         // 56: data_offset (unused)
@@ -466,6 +468,34 @@ fn pick_spread<T: Copy>(items: &[T], count: usize) -> Vec<T> {
     (0..count)
         .map(|i| items[i * (len - 1) / (count - 1)])
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Metadata
+// ---------------------------------------------------------------------------
+
+/// Read and parse a PMTiles v3 archive's metadata JSON.
+///
+/// The metadata section carries `internal_compression`, the same as the
+/// directories - not `tile_compression`.
+pub fn read_metadata(path: &Path) -> Result<serde_json::Value, DevError> {
+    let mut file =
+        File::open(path).map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
+
+    let mut header_buf = [0u8; HEADER_SIZE];
+    file.read_exact(&mut header_buf)
+        .map_err(|e| DevError::Config(format!("{}: failed to read header: {e}", path.display())))?;
+    let header = parse_header(&header_buf)?;
+
+    if header.metadata_length == 0 {
+        return Ok(serde_json::Value::Null);
+    }
+
+    let compressed = read_range(&mut file, header.metadata_offset, header.metadata_length)?;
+    let raw = decompress(&compressed, header.internal_compression)?;
+
+    serde_json::from_slice(&raw)
+        .map_err(|e| DevError::Config(format!("{}: metadata is not valid JSON: {e}", path.display())))
 }
 
 // ---------------------------------------------------------------------------
