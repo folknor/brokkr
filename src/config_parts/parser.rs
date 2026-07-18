@@ -41,6 +41,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     validate_check_against_test(&check, test.as_ref())?;
     let capture_env = parse_capture_env(table)?;
     let gremlins = parse_gremlins(table)?;
+    let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
     validate_tilegen(&hosts)?;
@@ -58,8 +59,21 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             test,
             capture_env,
             gremlins,
+            disable_toolchain,
         },
     ))
+}
+
+/// Parse the optional top-level `disable_toolchain = true`. Absent is `false`.
+fn parse_disable_toolchain(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<bool, DevError> {
+    match table.get("disable_toolchain") {
+        None => Ok(false),
+        Some(value) => value.as_bool().ok_or_else(|| {
+            DevError::Config("disable_toolchain must be a boolean".into())
+        }),
+    }
 }
 
 /// Parse the optional top-level `capture_env = ["PBFHOGG*", "MALLOC_CONF"]`
@@ -140,6 +154,7 @@ fn parse_hosts(
             || key == "test"
             || key == "capture_env"
             || key == "gremlins"
+            || key == "disable_toolchain"
         {
             continue;
         }

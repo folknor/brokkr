@@ -58,7 +58,28 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`.
+`gremlins`, `disable_toolchain`.
+
+## `disable_toolchain`
+
+```toml
+disable_toolchain = true
+```
+
+Top-level boolean (default `false`). When set, brokkr moves the project's
+`rust-toolchain.toml` (or the legacy bare `rust-toolchain`) aside for the
+duration of every command, so rustup ignores the pin and falls back to its
+normal default. brokkr picks no replacement toolchain - it only disables the
+file. The file lives in the code tree (the working directory / build root),
+which is where cargo runs; combined with the parent-directory `brokkr.toml`
+lookup, this is the setup for driving a foreign checkout whose pinned toolchain
+you don't have or don't want.
+
+The file is restored when the command exits normally, on error, or on a
+cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
+non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disabled`;
+the next brokkr run in that directory adopts the leftover and restores it.
+Worktree builds (`--commit`) are a separate checkout and keep their own pin.
 
 ## `[gremlins]` section
 

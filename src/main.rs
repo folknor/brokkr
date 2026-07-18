@@ -44,6 +44,7 @@ mod sidecar_fmt;
 mod sluggrs;
 mod test_cmd;
 mod test_runner;
+mod toolchain;
 mod tools;
 mod wc;
 mod worktree;

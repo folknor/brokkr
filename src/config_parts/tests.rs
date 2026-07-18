@@ -31,6 +31,7 @@ mod tests {
             test: None,
             capture_env: Vec::new(),
             gremlins: None,
+            disable_toolchain: false,
         }
     }
 

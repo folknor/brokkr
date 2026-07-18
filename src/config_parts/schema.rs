@@ -39,6 +39,13 @@ pub struct DevConfig {
     /// docs) that legitimately carries gremlin characters. `None` when the
     /// project has no `[gremlins]` section. See [`GremlinsConfig`].
     pub gremlins: Option<GremlinsConfig>,
+    /// Top-level `disable_toolchain = true`: move the project's
+    /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
+    /// duration of every brokkr command, so rustup ignores the pin and falls
+    /// back to its default. For driving a foreign checkout whose pinned
+    /// toolchain we don't have or don't want. `false` by default. See
+    /// [`crate::toolchain`].
+    pub disable_toolchain: bool,
 }
 
 /// `[gremlins]` section: tuning for the `brokkr check` gremlin scanner.

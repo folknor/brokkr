@@ -153,6 +153,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if let Command::Fmt { args } = &cli.command {
         return cmd_fmt(args);
     }
+
+    // When `disable_toolchain` is set, move the project's rust-toolchain file
+    // aside for the rest of this command so rustup ignores the pin. Held in a
+    // local for the whole of `run`, so it is restored on every unwinding exit
+    // path (return, error, cooperative interrupt). The file lives in the code
+    // tree (build root / cwd), not the config dir. This peeks the config once;
+    // per-command detection still happens below.
+    let _toolchain = match project::detect_optional()? {
+        Some(d) if d.config.disable_toolchain => {
+            Some(toolchain::DisabledToolchain::activate(&d.build_root)?)
+        }
+        _ => None,
+    };
+
     if let Command::Run { args } = &cli.command {
         // `run` builds and runs the code, so it anchors on the build root
         // (cwd), not the config dir. Detection is only consulted for the

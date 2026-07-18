@@ -170,6 +170,7 @@ pub fn require(current: Project, expected: Project, command: &str) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::find_config_dir;
     use std::fs;
 
