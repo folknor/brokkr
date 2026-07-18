@@ -241,15 +241,22 @@ impl BenchContext {
 
 /// Run a closure with an optional git worktree for retroactive benchmarking.
 ///
+/// `parent_build_root` is the code tree to build/git against when it differs
+/// from `project_root` - i.e. `Some(cwd)` when `brokkr.toml` was found one
+/// level up, `None` in the common case where the config dir *is* the code
+/// tree. It is the default handed to `f` when no commit is requested, and the
+/// git repo a requested worktree is created from.
+///
 /// When `commit` is `Some`, creates (or reuses) a worktree at that commit and
 /// passes `Some(&worktree_path)` as `build_root` to the closure. When `None`,
-/// just calls `f(None)`.
+/// calls `f(parent_build_root)`.
 ///
 /// Worktrees persist across runs so the cargo `target/` inside survives.
 /// Reuse is automatic when the same commit is requested again. Run
 /// `brokkr clean --worktrees` to garbage collect.
 pub(crate) fn with_worktree<F, T>(
     project_root: &Path,
+    parent_build_root: Option<&Path>,
     commit: Option<&str>,
     dry_run: bool,
     f: F,
@@ -257,21 +264,24 @@ pub(crate) fn with_worktree<F, T>(
 where
     F: FnOnce(Option<&Path>) -> Result<T, DevError>,
 {
+    // The git repo a worktree is cut from: the code tree (cwd) when the
+    // config lives one level up, otherwise the project root itself.
+    let git_root = parent_build_root.unwrap_or(project_root);
     match commit {
         Some(hash) if dry_run => {
             output::bench_msg(&format!(
                 "[dry-run] skipping worktree creation for {hash}"
             ));
-            f(None)
+            f(parent_build_root)
         }
         Some(hash) => {
-            let wt = worktree::Worktree::create(project_root, hash)?;
+            let wt = worktree::Worktree::create(git_root, hash)?;
             output::bench_msg(&format!(
                 "benchmarking commit {} ({})",
                 wt.commit, wt.subject,
             ));
             f(Some(&wt.path))
         }
-        None => f(None),
+        None => f(parent_build_root),
     }
 }

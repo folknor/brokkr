@@ -17,23 +17,35 @@ where
     let mm = resolve_mode(mode)?;
     let features = resolve_features(dev_config, &mode.features);
     output::set_quiet(!mode.verbose);
-    context::with_worktree(project_root, mode.commit.as_deref(), mode.dry_run, |build_root| {
-        let req = measure::MeasureRequest {
-            dev_config,
-            project,
-            project_root,
-            build_root,
-            dataset,
-            variant,
-            features: &features,
-            force: mode.force,
-            mode: mm,
-            brokkr_args,
-            dry_run: mode.dry_run,
-            stop_marker: mode.stop.as_deref(),
-        };
-        f(&req)
-    })
+    // When brokkr.toml lives one level up, `project_root` is the config dir
+    // and the code tree is cwd; build/git must run against cwd. `None` in the
+    // common case (config in cwd), where behaviour is unchanged.
+    let cwd = std::env::current_dir()
+        .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
+    let parent_build_root = (cwd != *project_root).then_some(cwd.as_path());
+    context::with_worktree(
+        project_root,
+        parent_build_root,
+        mode.commit.as_deref(),
+        mode.dry_run,
+        |build_root| {
+            let req = measure::MeasureRequest {
+                dev_config,
+                project,
+                project_root,
+                build_root,
+                dataset,
+                variant,
+                features: &features,
+                force: mode.force,
+                mode: mm,
+                brokkr_args,
+                dry_run: mode.dry_run,
+                stop_marker: mode.stop.as_deref(),
+            };
+            f(&req)
+        },
+    )
 }
 
 /// Build the canonical brokkr invocation string from `std::env::args()`.
@@ -87,8 +99,8 @@ fn main() {
             output::lock_msg("interrupted - running scratch cleanup");
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
-            if let Ok((project, dev_config, project_root)) = project::detect()
-                && let Err(e) = cmd_clean(&dev_config, project, &project_root, false)
+            if let Ok(d) = project::detect()
+                && let Err(e) = cmd_clean(&d.config, d.project, &d.project_root, false)
             {
                 output::error(&format!("cleanup failed: {e}"));
             }
@@ -142,16 +154,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
         return cmd_fmt(args);
     }
     if let Command::Run { args } = &cli.command {
+        // `run` builds and runs the code, so it anchors on the build root
+        // (cwd), not the config dir. Detection is only consulted for the
+        // project label on the lock.
         let (project, project_root) = match project::detect_optional()? {
-            Some((p, _, root)) => (Some(p), root),
+            Some(d) => (Some(d.project), d.build_root),
             None => (None, std::env::current_dir()?),
         };
         let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
         return cmd_cargo_run(args);
     }
     if let Command::Wc { threshold } = &cli.command {
+        // `wc` lists source files in the code tree (cwd).
         let project_root = match project::detect_optional()? {
-            Some((_, _, root)) => root,
+            Some(d) => d.build_root,
             None => std::env::current_dir()?,
         };
         return wc::run(&project_root, *threshold);
@@ -164,8 +180,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
         focus,
     } = cli.command
     {
+        // `deps` audits the code tree's Cargo.lock / metadata (cwd).
         let project_root = match project::detect_optional()? {
-            Some((_, _, root)) => root,
+            Some(d) => d.build_root,
             None => std::env::current_dir()?,
         };
         return deps::run(
@@ -193,15 +210,19 @@ fn run(cli: Cli) -> Result<(), DevError> {
         args,
     } = cli.command
     {
+        // `check` builds, scans, and diffs the code tree, so it anchors on
+        // the build root (cwd). The config values it uses ([[check]] sweeps,
+        // dependency rules, gremlin excludes) come from wherever brokkr.toml
+        // was found, in cwd or one level up.
         let (project, check_entries, dependency_rules, test_cfg, gremlins_cfg, project_root) =
             match project::detect_optional()? {
-                Some((p, cfg, root)) => (
-                    Some(p),
-                    cfg.check,
-                    cfg.dependency_rules,
-                    cfg.test,
-                    cfg.gremlins,
-                    root,
+                Some(d) => (
+                    Some(d.project),
+                    d.config.check,
+                    d.config.dependency_rules,
+                    d.config.test,
+                    d.config.gremlins,
+                    d.build_root,
                 ),
                 None => (None, Vec::new(), Vec::new(), None, None, std::env::current_dir()?),
             };
@@ -227,7 +248,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
         );
     }
 
-    let (project, dev_config, project_root) = project::detect()?;
+    let detection = project::detect()?;
+    let project = detection.project;
+    let dev_config = detection.config;
+    // The config dir (brokkr.toml's directory). Anchors data/ and .brokkr/.
+    // Commands that build/git against the code tree derive the build root
+    // (cwd) themselves - see `run_measured`.
+    let project_root = detection.project_root;
     let brokkr_args = capture_brokkr_args();
 
     // Pbfhogg measured commands: 28 commands → single dispatch path.
@@ -807,7 +834,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             let features = resolve_features(&dev_config, &[]);
             output::set_quiet(!verbose);
-            with_worktree(&project_root, commit.as_deref(), false, |build_root| {
+            let cwd = std::env::current_dir()
+                .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
+            let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
+            with_worktree(&project_root, parent_build_root, commit.as_deref(), false, |build_root| {
                 cmd_verify(
                     &dev_config,
                     project,

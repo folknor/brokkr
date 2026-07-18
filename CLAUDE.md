@@ -29,7 +29,9 @@ echo "Please review the unstaged changes and report your findings." | review bug
 
 ## How it works
 
-Invoked as `brokkr` from any project root. Reads `./brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr|piners"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
+Invoked as `brokkr` from any project root. Reads `brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr|piners"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
+
+`brokkr.toml` is looked up in the working directory, or one level up (its immediate parent) if absent there. The one-level-up form is for driving a checkout that isn't ours: the config and everything brokkr owns (`data/`, `.brokkr/` with `results.db`) live in the parent, keeping the foreign repo clean, while git and cargo still run against the working directory. Detection splits these as `project_root` (config dir - data/`.brokkr`) vs `build_root` (cwd - git/cargo); they coincide in the common case (config in cwd). See `src/project.rs`.
 
 Install: `cargo install --path ~/Programs/brokkr`
 

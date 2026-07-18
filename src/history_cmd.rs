@@ -69,9 +69,11 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
 
         // Try to detect project and git info - these are optional.
         let (project_name, commit_hash, dirty) = match project::detect() {
-            Ok((project, _config, project_root)) => match git::collect(&project_root) {
+            // Git info describes the code under test, so collect it from the
+            // build root (cwd), not the config dir.
+            Ok(d) => match git::collect(&d.build_root) {
                 Ok(gi) => (
-                    Some(project.name().to_owned()),
+                    Some(d.project.name().to_owned()),
                     if gi.commit.is_empty() {
                         None
                     } else {
@@ -79,7 +81,7 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
                     },
                     Some(!gi.is_clean),
                 ),
-                Err(_) => (Some(project.name().to_owned()), None, None),
+                Err(_) => (Some(d.project.name().to_owned()), None, None),
             },
             Err(_) => (None, None, None),
         };
