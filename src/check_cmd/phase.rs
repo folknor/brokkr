@@ -412,6 +412,11 @@ fn run_clippy_phase(
         // which made bulk triage by rule impossible in text mode.
         let mut args: Vec<String> = vec![
             "clippy".into(),
+            // Keep checking independent branches of the graph after a unit
+            // fails, instead of cargo's default fail-fast (which stops
+            // scheduling new work at the first error and hides every lint
+            // queued behind it).
+            "--keep-going".into(),
             "--all-targets".into(),
             "--message-format=json".into(),
         ];
@@ -420,6 +425,15 @@ fn run_clippy_phase(
             args.push("--package".into());
             args.push(pkg.into());
         }
+        // Cap lints at `warn` so a deny-level lint no longer aborts its
+        // crate's compile: the crate still produces its .rmeta, so every
+        // downstream crate is checked too, and one run surfaces every lint
+        // across the whole workspace. Genuine (non-lint) compile errors are
+        // unaffected and still fail. brokkr recovers the intent: it treats
+        // every surfaced lint as a hard failure (see `event_to_clippy` and
+        // the gate below), so nothing is silently downgraded.
+        args.push("--".into());
+        args.push("--cap-lints=warn".into());
 
         if !json {
             output::run_msg(&format!("cargo {}", args.join(" ")));
@@ -435,67 +449,50 @@ fn run_clippy_phase(
         });
     }
 
+    // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
+    // the pass/fail decision is brokkr's own: any clippy diagnostic is a
+    // failure, whatever its (capped) level. `any_failed` still catches genuine
+    // non-lint compile errors, and the parse-failure case where cargo died
+    // without emitting parseable diagnostics.
     let any_failed = results.iter().any(|r| !r.success);
+    let any_diag = results.iter().any(|r| {
+        cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", None)
+            .iter()
+            .any(|e| matches!(e, cargo_json::CheckEvent::Diagnostic(_)))
+    });
+    let failed = any_failed || any_diag;
 
     if json {
         emit_json_clippy(&results);
-        if any_failed {
+        if failed {
             return Err(DevError::Build("clippy failed".into()));
         }
         return Ok(());
     }
 
-    if any_failed {
-        if raw {
-            for r in &results {
-                if multi {
-                    output::error(&format!("[{}]", r.label));
-                }
-                output::error(&raw_clippy_text(r));
-            }
-        } else {
-            output::error(&format_clippy_capped_multi(
-                &results,
-                project_root,
-                limit,
-                all,
-                multi,
-            ));
-        }
-        return Err(DevError::Build("clippy failed".into()));
+    if !failed {
+        // Clean: cap-lints leaves nothing to report when there are no lints.
+        return Ok(());
     }
 
     if raw {
         for r in &results {
-            let text = raw_clippy_text(r);
-            if !text.is_empty() {
-                if multi {
-                    println!("[{}]", r.label);
-                }
-                print!("{text}");
+            if multi {
+                output::error(&format!("[{}]", r.label));
             }
+            output::error(&raw_clippy_text(r));
         }
-        return Ok(());
+        return Err(DevError::Build("clippy failed".into()));
     }
 
-    // Success path: surface any warnings the parser extracted across all sweeps.
-    let any_diag_or_failed = results.iter().any(|r| {
-        let events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", None);
-        let has_diag = events.iter().any(|e| matches!(e, cargo_json::CheckEvent::Diagnostic(_)));
-        let parse_failed = !r.success && events.is_empty();
-        has_diag || parse_failed
-    });
-    if any_diag_or_failed {
-        output::warn(&format_clippy_capped_multi(
-            &results,
-            project_root,
-            limit,
-            all,
-            multi,
-        ));
-    }
-
-    Ok(())
+    output::error(&format_clippy_capped_multi(
+        &results,
+        project_root,
+        limit,
+        all,
+        multi,
+    ));
+    Err(DevError::Build("clippy failed".into()))
 }
 
 /// Reconstruct cargo's terminal-style output for `--raw` mode.
@@ -635,7 +632,7 @@ fn format_clippy_capped_multi(
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
         .map(|r| {
-            let parse = parse_clippy_from_json(&r.stdout, !r.success);
+            let parse = parse_clippy_from_json(&r.stdout, !r.success, true);
             (r.label.clone(), parse)
         })
         .collect();
@@ -722,12 +719,16 @@ fn format_clippy_capped_multi(
 /// ordered errors-first, then warnings (stable within each). When cargo
 /// failed and emitted no compiler-message events, sets `parse_failed` so
 /// callers can fall back to dumping the raw streams.
-fn parse_clippy_from_json(stdout: &str, sweep_failed: bool) -> cargo_filter::ClippyParse {
+fn parse_clippy_from_json(
+    stdout: &str,
+    sweep_failed: bool,
+    gate: bool,
+) -> cargo_filter::ClippyParse {
     let events = cargo_json::parse_cargo_diagnostics(stdout, "clippy", None);
     let mut diagnostics: Vec<cargo_filter::ClippyDiagnostic> = events
         .iter()
         .filter_map(|e| match e {
-            cargo_json::CheckEvent::Diagnostic(d) => Some(event_to_clippy(d)),
+            cargo_json::CheckEvent::Diagnostic(d) => Some(event_to_clippy(d, gate)),
             _ => None,
         })
         .collect();
@@ -754,11 +755,16 @@ fn parse_clippy_from_json(stdout: &str, sweep_failed: bool) -> cargo_filter::Cli
 /// label first ("expected `i32`, found `&str`"), then from a child note
 /// that mentions both "expected" and "found" - matching the two shapes
 /// the old text scraper handled.
-fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagnostic {
-    let is_error = d.level == "error";
+fn event_to_clippy(d: &cargo_json::DiagnosticEvent, gate: bool) -> cargo_filter::ClippyDiagnostic {
+    // Under the gate, every surfaced lint is a hard failure: brokkr ran clippy
+    // with `--cap-lints=warn` only to complete the graph, so a diagnostic that
+    // arrived at the capped `warning` level is really a deny. Restore `error`
+    // for both the flag and the rendered header.
+    let is_error = gate || d.level == "error";
+    let level = if is_error { "error" } else { d.level.as_str() };
     let header = match &d.code {
-        Some(c) => format!("{}[{}]", d.level, c),
-        None => d.level.clone(),
+        Some(c) => format!("{level}[{c}]"),
+        None => level.to_string(),
     };
     let location = match (&d.file, d.line, d.column) {
         (Some(f), Some(l), Some(c)) => Some(format!("{f}:{l}:{c}")),
@@ -846,7 +852,16 @@ fn emit_json_clippy(results: &[SweepResult]) {
 
     for r in results {
         let label_for_tag = if multi { Some(r.label.as_str()) } else { None };
-        let events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", label_for_tag);
+        let mut events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", label_for_tag);
+        // Same gate as the text path: a capped `warning` is really a deny, so
+        // promote it to `error` before counting and emitting.
+        for e in &mut events {
+            if let cargo_json::CheckEvent::Diagnostic(d) = e
+                && d.level == "warning"
+            {
+                d.level = "error".into();
+            }
+        }
         let mut errors = 0usize;
         let mut warnings = 0usize;
         for e in &events {
@@ -901,7 +916,9 @@ fn emit_json_clippy(results: &[SweepResult]) {
     }
 
     for (label, errors, warnings, success) in per_sweep_counts {
-        let status = if success { "ok" } else { "failed" };
+        // cap-lints lets a lint-only sweep exit 0, but any surfaced (promoted)
+        // error is still a failure in brokkr's gate.
+        let status = if success && errors == 0 { "ok" } else { "failed" };
         cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
             cargo_json::DiagnosticSummaryEvent {
                 tool: "clippy",

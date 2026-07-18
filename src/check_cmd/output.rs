@@ -701,7 +701,7 @@ warning: z [too_many_lines]
             9,
         ));
 
-        let parsed = parse_clippy_from_json(&input, false);
+        let parsed = parse_clippy_from_json(&input, false, false);
         assert!(!parsed.parse_failed);
         assert_eq!(parsed.diagnostics.len(), 2);
         for d in &parsed.diagnostics {
@@ -712,7 +712,7 @@ warning: z [too_many_lines]
     #[test]
     fn json_to_clippy_uses_primary_label_for_detail() {
         let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/foo.rs","line_start":20,"column_start":5,"line_end":20,"column_end":10,"is_primary":true,"label":"expected `i32`, found `&str`"}],"children":[],"rendered":"rendered"}}"#;
-        let parsed = parse_clippy_from_json(input, false);
+        let parsed = parse_clippy_from_json(input, false, false);
         assert_eq!(parsed.diagnostics.len(), 1);
         let d = &parsed.diagnostics[0];
         assert_eq!(d.header, "error[E0308]");
@@ -725,7 +725,7 @@ warning: z [too_many_lines]
     #[test]
     fn json_to_clippy_falls_back_to_child_note_for_detail() {
         let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/lib.rs","line_start":42,"column_start":12,"line_end":42,"column_end":15,"is_primary":true,"label":"arguments to this function are incorrect"}],"children":[{"level":"note","message":"expected reference `&Vec<u8>`\n   found reference `&Vec<i32>`","spans":[]}],"rendered":"rendered"}}"#;
-        let parsed = parse_clippy_from_json(input, false);
+        let parsed = parse_clippy_from_json(input, false, false);
         assert_eq!(parsed.diagnostics.len(), 1);
         let d = &parsed.diagnostics[0];
         assert!(
@@ -748,7 +748,7 @@ warning: z [too_many_lines]
             10,
             5,
         );
-        let parsed = parse_clippy_from_json(&input, false);
+        let parsed = parse_clippy_from_json(&input, false, false);
         assert_eq!(parsed.diagnostics.len(), 1);
         assert_eq!(parsed.diagnostics[0].header, "warning");
     }
@@ -772,16 +772,38 @@ warning: z [too_many_lines]
             2,
             2,
         ));
-        let parsed = parse_clippy_from_json(&input, false);
+        let parsed = parse_clippy_from_json(&input, false, false);
         assert_eq!(parsed.diagnostics.len(), 2);
         assert!(parsed.diagnostics[0].is_error);
         assert!(!parsed.diagnostics[1].is_error);
     }
 
     #[test]
+    fn gate_promotes_capped_warning_to_error() {
+        // Under `--cap-lints=warn` a deny lint arrives at `warning` level; the
+        // gate restores it to `error` for both the flag and the header, so
+        // brokkr counts and displays it as the failure it is.
+        let input = json_compiler_message(
+            "warning",
+            Some("clippy::manual_string_new"),
+            "empty String is being created manually",
+            "src/a.rs",
+            3,
+            5,
+        );
+        let parsed = parse_clippy_from_json(&input, false, true);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(parsed.diagnostics[0].is_error);
+        assert_eq!(
+            parsed.diagnostics[0].header,
+            "error[clippy::manual_string_new]"
+        );
+    }
+
+    #[test]
     fn json_to_clippy_sets_parse_failed_when_sweep_failed_with_no_events() {
         // cargo crashed before producing any compiler-message events.
-        let parsed = parse_clippy_from_json("", true);
+        let parsed = parse_clippy_from_json("", true, false);
         assert!(parsed.parse_failed);
         assert!(parsed.diagnostics.is_empty());
     }
@@ -790,7 +812,7 @@ warning: z [too_many_lines]
     fn json_to_clippy_no_parse_failed_when_sweep_succeeded() {
         // Empty stdout but successful exit (clean compile). Not a parse
         // failure - just nothing to report.
-        let parsed = parse_clippy_from_json("", false);
+        let parsed = parse_clippy_from_json("", false, false);
         assert!(!parsed.parse_failed);
         assert!(parsed.diagnostics.is_empty());
     }

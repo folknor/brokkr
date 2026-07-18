@@ -116,7 +116,8 @@ fn to_rgba(
         png::ColorType::Rgb => {
             let pixel_count = buf.len() / 3;
             let mut rgba = Vec::with_capacity(pixel_count * 4);
-            for chunk in buf.chunks_exact(3) {
+            let (chunks, _rem) = buf.as_chunks::<3>();
+            for chunk in chunks {
                 rgba.extend_from_slice(chunk);
                 rgba.push(255);
             }
@@ -132,7 +133,8 @@ fn to_rgba(
         png::ColorType::GrayscaleAlpha => {
             let pixel_count = buf.len() / 2;
             let mut rgba = Vec::with_capacity(pixel_count * 4);
-            for chunk in buf.chunks_exact(2) {
+            let (chunks, _rem) = buf.as_chunks::<2>();
+            for chunk in chunks {
                 let g = chunk[0];
                 rgba.extend_from_slice(&[g, g, g, chunk[1]]);
             }

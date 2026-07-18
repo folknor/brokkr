@@ -57,6 +57,27 @@ warning keeps its lint code in the header, even for repeats of the same rule
 which is why the JSON ingestion path was needed; see `src/cargo_filter.rs`
 module header).
 
+The invocation is `cargo clippy --keep-going --all-targets
+--message-format=json <sweep features> -- --cap-lints=warn`. The last two
+flags make a single run surface **every** lint across a whole workspace,
+instead of the "one error per run" treadmill you get on a large multi-crate
+graph:
+
+- `--cap-lints=warn` caps every lint at warn level, so a deny-level lint no
+  longer aborts its crate's compile. The crate still produces its `.rmeta`,
+  which means every crate *downstream* of a linty one is checked too - the
+  whole dependency graph completes in one pass. (Genuine, non-lint compile
+  errors are unaffected: they still fail the crate, and `--keep-going` then
+  keeps checking the independent branches of the graph rather than stopping
+  at the first failure.)
+- Because a capped lint lets cargo exit 0, pass/fail is brokkr's own decision,
+  not cargo's exit status: **any clippy diagnostic fails the check.** brokkr
+  treats a capped `warning` as the deny it really is - `event_to_clippy` and
+  `emit_json_clippy` promote it back to `error` for counting, the header, and
+  the JSON `level`/`status`, so the output never misleads with "0 errors, N
+  warnings" while failing. The `--raw` escape hatch still dumps clippy's own
+  rendered text verbatim (which shows the capped `warning:` wording).
+
 Gremlin phase runs first and fails the check if any banned Unicode character
 is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
 untracked-not-gitignored, so new plan docs are caught before staging) - see
