@@ -393,8 +393,9 @@ struct GremlinsRaw {
 ///
 /// Validates each `exclude` entry (no empty strings - a blank prefix would
 /// match every path and silently disable the whole scan - and no absolute
-/// paths), parses `allow`/`ban` `U+XXXX` codepoints into char sets, and
-/// rejects a codepoint listed in both.
+/// paths), and parses `allow`/`ban` `U+XXXX` codepoints into char sets. A
+/// codepoint listed in both is allowed - `allow` wins at scan time, so
+/// allow-listing exceptions to a banned range is the intended usage.
 fn parse_gremlins(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<GremlinsConfig>, DevError> {
@@ -423,17 +424,11 @@ fn parse_gremlins(
 
     let allow = parse_codepoint_set("allow", &raw.allow)?;
     let ban = parse_codepoint_set("ban", &raw.ban)?;
-    // Catch a codepoint listed on both sides, including a singleton that falls
-    // inside the other side's range. Range-vs-range overlap is left to the
-    // author.
-    for c in allow.singles.iter().chain(ban.singles.iter()) {
-        if allow.contains(*c) && ban.contains(*c) {
-            return Err(DevError::Config(format!(
-                "[gremlins]: U+{:04X} is listed in both `allow` and `ban`.",
-                *c as u32
-            )));
-        }
-    }
+    // A codepoint appearing in both `allow` and `ban` is NOT an error: the
+    // scanner's `gremlin_name` resolves `allow` before `ban` (allow wins over
+    // everything), so `ban = ["U+2000..U+206F"]` + `allow = ["U+2011"]` - ban a
+    // block, keep one character - is the canonical, semantically-valid form.
+    // Rejecting the overlap here would be stricter than the runtime it guards.
 
     Ok(Some(GremlinsConfig {
         disable: raw.disable,

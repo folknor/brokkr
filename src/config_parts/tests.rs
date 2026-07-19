@@ -98,17 +98,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_gremlins_rejects_reversed_range_and_range_singleton_overlap() {
-        // Reversed bounds.
+    fn parse_gremlins_rejects_reversed_range_but_allows_range_singleton_overlap() {
+        // Reversed bounds are still a hard error.
         let bad: toml::map::Map<String, toml::Value> =
             toml::from_str("[gremlins]\nban = [\"U+04FF..U+0400\"]\n").unwrap();
         assert!(parse_gremlins(&bad).is_err());
-        // A singleton in `allow` that falls inside a `ban` range.
+        // A singleton in `allow` that falls inside a `ban` range is now VALID:
+        // `allow` wins over `ban` at scan time, so config load must accept it
+        // (this is the canonical "ban a block, allow-list exceptions" config).
         let overlap: toml::map::Map<String, toml::Value> = toml::from_str(
             "[gremlins]\nallow = [\"U+0450\"]\nban = [\"U+0400..U+04FF\"]\n",
         )
         .unwrap();
-        assert!(parse_gremlins(&overlap).is_err());
+        let cfg = parse_gremlins(&overlap).unwrap().unwrap();
+        assert!(cfg.allow.contains('\u{0450}'));
+        assert!(cfg.ban.contains('\u{0450}'));
     }
 
     #[test]
@@ -146,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_gremlins_rejects_bad_codepoint_and_overlap() {
+    fn parse_gremlins_rejects_bad_codepoint_but_allows_overlap() {
         // Not U+XXXX form.
         let table: toml::map::Map<String, toml::Value> =
             toml::from_str("[gremlins]\nban = [\"2011\"]\n").unwrap();
@@ -157,11 +161,13 @@ mod tests {
             toml::from_str("[gremlins]\nallow = [\"U+ZZZZ\"]\n").unwrap();
         assert!(parse_gremlins(&table).is_err());
 
-        // A codepoint in both lists.
+        // A codepoint in both lists is accepted: `allow` wins at scan time,
+        // so this is not a contradiction the parser should reject.
         let table: toml::map::Map<String, toml::Value> =
             toml::from_str("[gremlins]\nallow = [\"U+2011\"]\nban = [\"U+2011\"]\n").unwrap();
-        let err = parse_gremlins(&table).unwrap_err().to_string();
-        assert!(err.contains("both"), "got: {err}");
+        let cfg = parse_gremlins(&table).unwrap().unwrap();
+        assert!(cfg.allow.contains('\u{2011}'));
+        assert!(cfg.ban.contains('\u{2011}'));
     }
 
     #[test]

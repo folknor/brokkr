@@ -503,7 +503,7 @@ fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, s
         ));
     }
 
-    if parsed.failures.is_empty() && diag_events.is_empty() && !success {
+    if needs_synthetic_test_failure(parsed.failures.is_empty(), errors, parsed.suites, success) {
         cargo_json::emit_parse_error("test", stdout, stderr);
     }
 
@@ -522,6 +522,30 @@ fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, s
             },
         ));
     }
+}
+
+/// Whether the JSON test path must synthesize a failure `Diagnostic`.
+///
+/// A failing sweep (`!success`) must always leave a failure signal in the
+/// JSON stream, or a consumer reading only the summaries sees `"ok"` while
+/// `brokkr check` exits non-zero (finding 2A). The gate keys on the *error*
+/// count rather than on whether any `diag_events` were emitted: warning-level
+/// diagnostics produce a `DiagnosticSummary{status:"ok"}`, which does NOT
+/// signal failure, so their presence must not suppress the synthetic
+/// parse-error. When error diagnostics exist (`errors > 0`) a
+/// `status:"failed"` `DiagnosticSummary` already carries the signal, and when
+/// a suite was parsed (`suites > 0`) a `TestSummary` does - so neither needs
+/// the fallback.
+///
+/// The trigger stays anchored on `!success` with no parseable
+/// failures/suites, so a genuinely passing run is never flipped to failed.
+fn needs_synthetic_test_failure(
+    failures_empty: bool,
+    errors: usize,
+    suites: usize,
+    success: bool,
+) -> bool {
+    !success && failures_empty && errors == 0 && suites == 0
 }
 
 fn emit_json_test_hung(sweep_label: Option<&str>, hung: &test_runner::HungTest) {
@@ -570,6 +594,23 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+
+    #[test]
+    fn synthetic_test_failure_survives_compile_warnings() {
+        // Finding 2A: a failing sweep (`!success`) that produced only compile
+        // *warnings* (warnings raise `diag_events` but leave `errors == 0`)
+        // and printed no parseable `test result:` line (`suites == 0`) must
+        // still get a synthetic failure signal - warnings must NOT suppress it.
+        assert!(needs_synthetic_test_failure(true, 0, 0, false));
+        // A genuinely passing run is never flipped to failed.
+        assert!(!needs_synthetic_test_failure(true, 0, 0, true));
+        // Error diagnostics already emit a `DiagnosticSummary{status:"failed"}`.
+        assert!(!needs_synthetic_test_failure(true, 3, 0, false));
+        // A parsed suite already emits a `TestSummary`.
+        assert!(!needs_synthetic_test_failure(true, 0, 2, false));
+        // Real test failures already emit `TestFailure` events.
+        assert!(!needs_synthetic_test_failure(false, 0, 0, false));
+    }
 
     #[test]
     fn decide_active_sweeps_legacy_default_when_nothing_configured() {

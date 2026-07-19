@@ -568,10 +568,7 @@ fn run_one(
     let parsed = cargo_filter::parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
 
     let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
-    let has_compile_error = stderr_lines.iter().any(|l| {
-        let t = l.trim_start();
-        t.starts_with("error[") || (t.starts_with("error:") && !t.contains("test run failed"))
-    });
+    let has_compile_error = stderr_lines.iter().any(|l| stderr_indicates_compile_error(l));
 
     // Display the test-runtime wall: total minus the cargo build phase
     // (which the `[test] test binaries built in ...s` line already
@@ -820,6 +817,17 @@ fn is_test_phase_noise(line: &str) -> bool {
         || t.starts_with("error: test failed, to rerun pass")
 }
 
+/// True for a genuine rustc compile error on stderr. Excludes cargo's
+/// test-failure line (`error: test failed, to rerun pass ...`) - that
+/// signals a *test* failure/crash, not a build failure, and a hard-crashing
+/// test (SIGABRT/stack-overflow) that never prints `test result:` must not be
+/// mislabeled `BUILD FAILED`. Cargo emits "test failed" (no "run"), so match
+/// that substring, mirroring `is_test_phase_noise`.
+fn stderr_indicates_compile_error(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("error[") || (t.starts_with("error:") && !t.contains("test failed"))
+}
+
 /// Cargo's per-suite launch line: `Running unittests src/lib.rs
 /// (<target>/debug/deps/foo-abc123)` or `Running tests/bar.rs (...)`.
 /// Matched by shape (trailing parenthesized path under `deps/`) rather
@@ -926,6 +934,22 @@ mod tests {
         ));
         assert!(!is_test_phase_noise("note: something else entirely"));
         assert!(!is_test_phase_noise("error: a genuine test eprintln"));
+    }
+
+    #[test]
+    fn compile_error_detector_ignores_cargo_test_failure_line() {
+        // Cargo's test-failure line is a hard-crash/failure signal, not a
+        // build failure - must NOT be classified as a compile error.
+        assert!(!stderr_indicates_compile_error(
+            "error: test failed, to rerun pass '--bin foo'"
+        ));
+        // A real rustc error still counts.
+        assert!(stderr_indicates_compile_error(
+            "error: cannot find value `x` in this scope"
+        ));
+        assert!(stderr_indicates_compile_error(
+            "error[E0425]: cannot find value `x` in this scope"
+        ));
     }
 
     #[test]

@@ -274,6 +274,11 @@ fn declared_deps(table: &Table, out: &mut std::collections::BTreeSet<String>) {
             for (dep, _) in child {
                 out.insert(dep.to_string());
             }
+        } else if k == "workspace" {
+            // `[workspace.dependencies]` is an inheritance-definition table, not
+            // the package's own deps - do not descend into it. Legitimate
+            // `[target.'cfg(...)'.dependencies]` live under `target`, not here.
+            continue;
         } else {
             declared_deps(child, out);
         }
@@ -879,6 +884,31 @@ mod tests {
         let mut out2 = Vec::new();
         check_adapter_group(&manifests2, cfg.adapter_group.as_ref().unwrap(), &mut out2);
         assert!(out2.is_empty(), "{out2:?}");
+    }
+
+    #[test]
+    fn workspace_root_package_is_not_charged_workspace_deps() {
+        // A single Cargo.toml that is BOTH the workspace root (holding the
+        // adapter group under `[workspace.dependencies]`) AND a package named in
+        // `forbidden_in`. Its own `[dependencies]` are clean, so declaring the
+        // adapter crate at the workspace level must NOT count as the package
+        // depending on it.
+        let cfg = ManifestConfig {
+            adapter_group: Some(AdapterGroup {
+                marker: "Adapter dependencies".into(),
+                forbidden_in: vec!["nautilus-core".into()],
+            }),
+            ..Default::default()
+        };
+        let root = "[package]\nname = \"nautilus-core\"\n\n\
+                    [dependencies]\nserde = \"1\"\n\n\
+                    [workspace]\nmembers = [\"a\"]\n\n[workspace.dependencies]\n\
+                    serde = \"1\"\n\n# Adapter dependencies\ndydx-proto = \"1\"\n";
+        let manifests =
+            vec![(PathBuf::from("Cargo.toml"), root.parse::<DocumentMut>().unwrap())];
+        let mut out = Vec::new();
+        check_adapter_group(&manifests, cfg.adapter_group.as_ref().unwrap(), &mut out);
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]

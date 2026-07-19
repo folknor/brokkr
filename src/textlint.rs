@@ -454,10 +454,17 @@ fn marker_suppresses(rule: &Compiled, lines: &[&str], i: usize) -> bool {
 /// The section name inside a TOML section header (`[deps]` -> `deps`,
 /// `[[bin]]` -> `bin`), or `None` for a non-header line.
 fn toml_section(trimmed: &str) -> Option<String> {
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+    if !trimmed.starts_with('[') {
         return None;
     }
-    let inner = trimmed.trim_start_matches('[').trim_end_matches(']').trim();
+    // Strip a trailing `# comment` (and surrounding whitespace) so a legal
+    // `[section] # note` header is recognized. Cut at the first `#` (a `#` in a
+    // header name is not valid TOML), then the closing `]` in what remains ends
+    // the header; anything after it is ignored.
+    let before_comment = trimmed.split('#').next().unwrap_or(trimmed);
+    let end = before_comment.rfind(']')?;
+    let head = &before_comment[..=end];
+    let inner = head.trim_start_matches('[').trim_end_matches(']').trim();
     if inner.is_empty() {
         return None;
     }
@@ -542,6 +549,16 @@ mod tests {
         // Only the `tokio` under [dependencies] (line 2) fires; the one under
         // [dev-dependencies] (line 5) is out of section.
         assert_eq!(run(r, src), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn in_toml_section_recognizes_header_with_trailing_comment() {
+        let mut r = rule("^bar");
+        r.in_toml_section = Some("dev-dependencies".into());
+        let src = "[dependencies]\nbar = \"1\"\n\n[dev-dependencies] # workspace test deps\nbar = \"1\"\n";
+        // The `bar` under the commented [dev-dependencies] header (line 5) fires;
+        // the one under [dependencies] (line 2) is out of section.
+        assert_eq!(run(r, src), vec![(5, "r".into())]);
     }
 
     #[test]
@@ -730,6 +747,11 @@ mod tests {
         assert_eq!(toml_section("[dependencies]").as_deref(), Some("dependencies"));
         assert_eq!(toml_section("[[bin]]").as_deref(), Some("bin"));
         assert_eq!(toml_section("tokio = \"1\""), None);
+        // A trailing `# comment` after the closing `]` is ignored.
+        assert_eq!(
+            toml_section("[dev-dependencies] # workspace test deps").as_deref(),
+            Some("dev-dependencies")
+        );
     }
 
     #[test]

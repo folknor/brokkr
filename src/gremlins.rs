@@ -128,21 +128,56 @@ pub fn fix(
 fn fix_content(content: &str, allow: &CodepointSet) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut count = 0usize;
+    // Track the current line so a deletion that empties the tail of a line does
+    // not leave trailing whitespace behind (which fails `git diff --check` and
+    // trailing-whitespace hooks). We rstrip only lines we actually edited, and
+    // only strip spaces/tabs - never the `\r` of a CRLF ending or mid-line runs.
+    let mut line_start = 0usize;
+    let mut line_edited = false;
     for c in content.chars() {
-        // Fast path: printable ASCII and the usual whitespace never need fixing.
+        if c == '\n' {
+            if line_edited {
+                // Preserve a CRLF `\r` while stripping spaces/tabs before it.
+                let had_cr = out.ends_with('\r');
+                if had_cr {
+                    out.pop();
+                }
+                rstrip_line_tail(&mut out, line_start);
+                if had_cr {
+                    out.push('\r');
+                }
+            }
+            out.push('\n');
+            line_start = out.len();
+            line_edited = false;
+            continue;
+        }
+        // Fast path: printable ASCII, tab and CR never need fixing.
         let cp = c as u32;
-        if (0x20..0x7F).contains(&cp) || cp == 0x09 || cp == 0x0A || cp == 0x0D {
+        if (0x20..0x7F).contains(&cp) || cp == 0x09 || cp == 0x0D {
             out.push(c);
             continue;
         }
         if let Some(r) = replacement(c, allow) {
             out.push_str(r);
             count += 1;
+            line_edited = true;
         } else {
             out.push(c);
         }
     }
+    // Final line with no trailing newline.
+    if line_edited {
+        rstrip_line_tail(&mut out, line_start);
+    }
     (out, count)
+}
+
+/// Truncate trailing spaces/tabs from the current line (the tail of `out`
+/// starting at `line_start`), leaving any `\r` and mid-line whitespace intact.
+fn rstrip_line_tail(out: &mut String, line_start: usize) {
+    let kept = out[line_start..].trim_end_matches([' ', '\t']).len();
+    out.truncate(line_start + kept);
 }
 
 const GREMLINS: &[(char, &str)] = &[
@@ -605,6 +640,35 @@ mod tests {
         let (fixed, count) = fix_str("done \u{2705}\u{FE0F} ship \u{1F680} ok\n");
         assert_eq!(count, 3);
         assert_eq!(fixed, "done [x] ship  ok\n");
+    }
+
+    #[test]
+    fn fix_rstrips_trailing_whitespace_left_by_a_deletion() {
+        // Deleting a trailing emoji must not leave the preceding space behind
+        // (else `git diff --check` / trailing-whitespace hooks fail).
+        let (fixed, count) = fix_str("// note \u{1F680}\n");
+        assert_eq!(count, 1);
+        assert_eq!(fixed, "// note\n");
+
+        // CRLF endings survive: strip the space, keep the `\r`.
+        let (fixed, count) = fix_str("// note \u{1F680}\r\n");
+        assert_eq!(count, 1);
+        assert_eq!(fixed, "// note\r\n");
+
+        // Final line with no trailing newline is handled too.
+        let (fixed, count) = fix_str("tail \u{1F680}");
+        assert_eq!(count, 1);
+        assert_eq!(fixed, "tail");
+
+        // Mid-line whitespace exposed by a deletion is NOT touched.
+        let (fixed, count) = fix_str("a \u{1F680} b\n");
+        assert_eq!(count, 1);
+        assert_eq!(fixed, "a  b\n");
+
+        // A line we did not edit keeps its pre-existing trailing whitespace.
+        let (fixed, count) = fix_str("clean   \n");
+        assert_eq!(count, 0);
+        assert_eq!(fixed, "clean   \n");
     }
 
     #[test]
