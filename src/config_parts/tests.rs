@@ -99,6 +99,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_check_rejects_packages_and_test_exclude_together() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"x\"\npackages = [\"a\"]\ntest_exclude_packages = [\"b\"]\n",
+        )
+        .unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
     fn capture_env_matcher() {
         let patterns = vec!["PBFHOGG*".to_owned(), "MALLOC_CONF".to_owned()];
         assert!(matches_capture("PBFHOGG_USE_NEW_PATH", &patterns));

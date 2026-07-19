@@ -175,6 +175,7 @@ pub(crate) fn decide_active_sweeps(
             cargo_test_filters: Vec::new(),
             name_filters: Vec::new(),
             env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }]);
     }
 
@@ -209,6 +210,7 @@ pub(crate) fn decide_active_sweeps(
         cargo_test_filters: Vec::new(),
         name_filters: Vec::new(),
         env: std::collections::BTreeMap::new(),
+        ..Default::default()
     }])
 }
 

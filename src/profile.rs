@@ -18,7 +18,7 @@ use crate::config::{CheckEntry, ProfileDef, TestConfig};
 use crate::error::DevError;
 
 /// One sweep to execute, after profile resolution + check-entry lookup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedSweep {
     /// Display label - the `[[check]]` entry's `name`.
     pub label: String,
@@ -33,6 +33,10 @@ pub struct ResolvedSweep {
     /// `-p <pkg>`. From the `[[check]]` entry's `packages`. Needed for
     /// `--features` to be valid in a virtual workspace.
     pub packages: Vec<String>,
+    /// Packages to omit from the test invocation, emitted as
+    /// `--workspace --exclude <pkg>`. From the `[[check]]` entry's
+    /// `test_exclude_packages`. Test phase only; clippy stays workspace-wide.
+    pub test_exclude_packages: Vec<String>,
     /// `--include-ignored`, `--test-threads=N`, `--skip` flags emitted
     /// after `--` to libtest. Derived from the merged profile.
     pub libtest_args: Vec<String>,
@@ -66,6 +70,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         cargo_feature_args: entry.cargo_feature_args(),
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
+        test_exclude_packages: entry.test_exclude_packages.clone(),
         libtest_args: Vec::new(),
         cargo_test_filters: Vec::new(),
         name_filters: Vec::new(),
@@ -219,6 +224,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         cargo_feature_args: entry.cargo_feature_args(),
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
+        test_exclude_packages: entry.test_exclude_packages.clone(),
         libtest_args,
         cargo_test_filters,
         name_filters: profile.only.clone(),
@@ -420,6 +426,24 @@ env = { HIGH_PRECISION = "1" }
     }
 
     #[test]
+    fn sweep_carries_test_exclude_packages() {
+        let (checks, _cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "ws"
+test_exclude_packages = ["nautilus-pyo3", "nautilus-python"]
+"#,
+        );
+        let s = sweep_from_check_entry(&checks[0]);
+        assert_eq!(
+            s.test_exclude_packages,
+            vec!["nautilus-pyo3", "nautilus-python"]
+        );
+        // Clippy scoping (`packages`) stays empty - excludes are test-only.
+        assert!(s.packages.is_empty());
+    }
+
+    #[test]
     fn resolve_unknown_profile_errors() {
         let (checks, cfg) = parse_fragment(
             r#"
@@ -531,6 +555,7 @@ tests = ["cli_x"]
             cargo_test_filters: Vec::new(),
             name_filters: vec!["tier2::".into()],
             env: BTreeMap::new(),
+            ..Default::default()
         };
         assert_eq!(s.libtest_argv(), vec!["--include-ignored", "tier2::"]);
     }

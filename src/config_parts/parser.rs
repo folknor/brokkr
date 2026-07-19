@@ -464,6 +464,22 @@ fn parse_check(
                 )));
             }
         }
+        for pkg in &entry.test_exclude_packages {
+            if pkg.trim().is_empty() {
+                return Err(DevError::Config(format!(
+                    "[[check]] entry '{}' has a blank string in `test_exclude_packages`.",
+                    entry.name
+                )));
+            }
+        }
+        if !entry.packages.is_empty() && !entry.test_exclude_packages.is_empty() {
+            return Err(DevError::Config(format!(
+                "[[check]] entry '{}' sets both `packages` (-p scoping) and \
+                 `test_exclude_packages` (--workspace --exclude); they are \
+                 mutually exclusive test-selection modes.",
+                entry.name
+            )));
+        }
         for key in entry.env.keys() {
             if key.trim().is_empty() {
                 return Err(DevError::Config(format!(

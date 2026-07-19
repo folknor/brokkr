@@ -239,6 +239,13 @@ env = { HIGH_PRECISION = "1" }
   rejects `--features` at the workspace root, so the sweep must name the
   package(s) the features belong to. Distinct from `build_packages`, which
   only pre-builds CLI binaries; `packages` scopes the check itself.
+- `test_exclude_packages` (optional, default `[]`) - packages to omit from
+  the **test phase only**, emitted as `cargo test --workspace --exclude <pkg>`.
+  Clippy still runs workspace-wide. For a workspace member whose test binary
+  can't link in this environment (e.g. it needs a system library the build
+  host lacks) and would otherwise fail the whole test phase. Mutually exclusive
+  with `packages` (you can't both `-p`-select and `--workspace`-exclude);
+  setting both is a parse error.
 - `env` (optional, default `{}`) - environment variables exported to *every*
   cargo subprocess the sweep runs: clippy, the test-phase pre-build, and the
   test run. Use it to pin a build-affecting toggle (e.g. a codegen flag whose

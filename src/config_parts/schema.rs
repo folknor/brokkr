@@ -188,6 +188,15 @@ pub struct CheckEntry {
     /// which only pre-builds CLI binaries for the test phase.
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Packages to omit from the **test phase** of this sweep, emitted as
+    /// `cargo test --workspace --exclude <pkg>`. Clippy is left workspace-wide
+    /// (unscoped) - only tests are trimmed. For workspace members that can't
+    /// link a test binary in this environment (e.g. a crate whose test
+    /// executable needs a system library absent on the build host), which
+    /// would otherwise fail the whole test phase. Mutually exclusive with
+    /// `packages` (you can't both select `-p` and exclude from `--workspace`).
+    #[serde(default)]
+    pub test_exclude_packages: Vec<String>,
     /// Environment variables exported to every cargo subprocess this sweep
     /// runs - clippy, the test-phase pre-build, and the test run. Lets a
     /// sweep pin a build-affecting var (e.g. a codegen toggle) so

@@ -115,6 +115,16 @@ fn run_one_test_sweep(
         args.push("-p".into());
         args.push(pkg.clone());
     }
+    // Or, exclude packages from the whole workspace (test phase only). Parse
+    // rejects setting both `packages` and `test_exclude_packages`, so these
+    // two loops never both emit. `--exclude` requires `--workspace`.
+    if !sweep.test_exclude_packages.is_empty() {
+        args.push("--workspace".into());
+        for pkg in &sweep.test_exclude_packages {
+            args.push("--exclude".into());
+            args.push(pkg.clone());
+        }
+    }
     for f in &sweep.cargo_feature_args {
         args.push(f.clone());
     }
