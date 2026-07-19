@@ -54,19 +54,16 @@ Capping and scoping (clippy + gremlins):
   - `--all` shows everything, sorted by (level, lint code, file, line)
     so every hit of a single rule clumps together for bulk triage.
 
-Output mode flags (mutually exclusive):
+Output mode:
   - `--raw`: reconstruct cargo's terminal-style output by concatenating
     each diagnostic's `rendered` field (full source annotations and
-    help suggestions). One cargo invocation, no separate non-JSON pass.
-  - `--json`: emit NDJSON diagnostic and summary events on stdout, no
-    prefixed log output.
+    help suggestions).
 
 Examples:
   brokkr check                                     # gremlins + clippy + all tests
   brokkr check --all                               # bulk-triage view, sorted by lint
   brokkr check --fix-gremlins                      # rewrite banned chars before checking
   brokkr check --raw                               # full terminal-style cargo output
-  brokkr check --json                              # NDJSON for downstream tooling
   brokkr check -- --test read_paths                # run one test file
   brokkr check -- -- --ignored                     # run ignored tests
   brokkr check -- --test read_paths -- --ignored   # one file, ignored only
@@ -99,17 +96,12 @@ Examples:
 
         /// Reconstruct cargo's terminal-style output (full source
         /// annotations, help suggestions) by concatenating each
-        /// diagnostic's `rendered` field. One cargo invocation, no
-        /// separate non-JSON pass.
-        #[arg(long, conflicts_with = "json")]
+        /// diagnostic's `rendered` field.
+        #[arg(long)]
         raw: bool,
 
-        /// Emit NDJSON diagnostics and summaries on stdout
-        #[arg(long, conflicts_with = "raw")]
-        json: bool,
-
         /// Maximum diagnostics printed per phase (gremlins, clippy). Ignored
-        /// with `--raw`, `--json`, or `--all`.
+        /// with `--raw` or `--all`.
         #[arg(long, default_value_t = 20)]
         limit: usize,
 

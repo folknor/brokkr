@@ -35,14 +35,13 @@ pub(crate) fn build_test_env(
 /// Build one binary package with the sweep's feature flags. Errors
 /// surface compile failures the same way the test phase does: filter
 /// the stderr through `cargo_filter::filter_clippy` (or pass it
-/// through raw). JSON mode emits a `parse_error` synthetic Diagnostic.
+/// through raw).
 fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
     package: &str,
     project_env: &[(String, String)],
     raw: bool,
-    json: bool,
 ) -> Result<(), DevError> {
     let mut args: Vec<String> = vec!["build".into()];
     for f in &sweep.cargo_feature_args {
@@ -51,13 +50,11 @@ fn run_sweep_pre_build(
     args.push("--package".into());
     args.push(package.into());
 
-    if !json {
-        output::run_msg(&format!(
-            "cargo {} (sweep build: {})",
-            args.join(" "),
-            sweep.label
-        ));
-    }
+    output::run_msg(&format!(
+        "cargo {} (sweep build: {})",
+        args.join(" "),
+        sweep.label
+    ));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_full = merged_env(&sweep.env, project_env);
@@ -72,10 +69,7 @@ fn run_sweep_pre_build(
     }
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    if json {
-        cargo_json::emit_parse_error("test-build", &stdout, &stderr);
-    } else if raw {
+    if raw {
         if !stderr.is_empty() {
             output::error(&stderr);
         }
@@ -121,7 +115,6 @@ fn run_one_test_sweep(
     extra_args: &[String],
     project_env: &[(String, String)],
     raw: bool,
-    json: bool,
     doctests: bool,
     multi: bool,
     timings: Option<&mut Vec<TestTiming>>,
@@ -157,9 +150,6 @@ fn run_one_test_sweep(
     }
     for c in cargo_extra {
         args.push(c.clone());
-    }
-    if json {
-        args.push("--message-format=json".into());
     }
     // Exclude doctests unless the project opted in (`[test] doctests = true`).
     // nextest - and therefore every brokkr-managed project's CI - never runs
@@ -228,14 +218,12 @@ fn run_one_test_sweep(
         }
     }
 
-    if !json {
-        let line = if multi {
-            format!("cargo {} (sweep: {})", args.join(" "), sweep.label)
-        } else {
-            format!("cargo {}", args.join(" "))
-        };
-        output::run_msg(&line);
-    }
+    let line = if multi {
+        format!("cargo {} (sweep: {})", args.join(" "), sweep.label)
+    } else {
+        format!("cargo {}", args.join(" "))
+    };
+    output::run_msg(&line);
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_full = merged_env(&sweep.env, project_env);
@@ -243,7 +231,6 @@ fn run_one_test_sweep(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let json_mode = json;
 
     // Serial => the watchdog runner; parallel => the whole-sweep-timeout
     // runner. Both reduce to (captured, optional hung test, timed_out, per-test
@@ -258,12 +245,10 @@ fn run_one_test_sweep(
             |_| {},
             |_| {},
             move |elapsed| {
-                if !json_mode {
-                    println!(
-                        "[test]    test binaries built in {:.1}s; running tests (parallel)",
-                        elapsed.as_secs_f64()
-                    );
-                }
+                println!(
+                    "[test]    test binaries built in {:.1}s; running tests (parallel)",
+                    elapsed.as_secs_f64()
+                );
             },
         )?;
         let hung = match run.outcome {
@@ -280,12 +265,10 @@ fn run_one_test_sweep(
             |_| {},
             |_| {},
             move |elapsed| {
-                if !json_mode {
-                    println!(
-                        "[test]    test binaries built in {:.1}s; running tests",
-                        elapsed.as_secs_f64()
-                    );
-                }
+                println!(
+                    "[test]    test binaries built in {:.1}s; running tests",
+                    elapsed.as_secs_f64()
+                );
             },
         )?;
         let hung = match run.outcome {
@@ -307,40 +290,19 @@ fn run_one_test_sweep(
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    let label_for_tag = if multi { Some(sweep.label.as_str()) } else { None };
 
     if timed_out {
-        if json {
-            emit_json_test_sweep(label_for_tag, &stdout, &stderr, false);
-        } else {
-            output::error(&format!(
-                "sweep '{}' exceeded the parallel test timeout ({}s) and was killed",
-                sweep.label,
-                test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
-            ));
-        }
+        output::error(&format!(
+            "sweep '{}' exceeded the parallel test timeout ({}s) and was killed",
+            sweep.label,
+            test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
+        ));
         return Ok(false);
     }
 
     if let Some(hung) = hung {
-        if json {
-            emit_json_test_hung(label_for_tag, &hung);
-        } else {
-            output::error(&test_runner::format_hung_test(&hung, project_root));
-        }
+        output::error(&test_runner::format_hung_test(&hung, project_root));
         return Ok(false);
-    }
-
-    if json {
-        emit_json_test_sweep(label_for_tag, &stdout, &stderr, captured.status.success());
-        if !captured.status.success() {
-            return Ok(false);
-        }
-        // JSON consumers can read the TestSummary event, but `brokkr check`
-        // still owns the exit code - and a zero-test run must be non-zero.
-        let stdout_lines: Vec<&str> = stdout.lines().collect();
-        let parsed = cargo_filter::parse_test_output(&stdout_lines);
-        return Ok(!zero_test_run(&parsed));
     }
 
     if !captured.status.success() {
@@ -396,34 +358,6 @@ fn run_one_test_sweep(
     Ok(true)
 }
 
-/// True if a line looks like cargo's `--message-format=json` output.
-///
-/// Cargo's JSON events always begin with `{"reason":"..."`. A test
-/// that writes a brace-leading line (`println!("{...}")`, panics with
-/// a message starting in `{`) used to be misrouted into the JSON
-/// parser by a bare `line.starts_with('{')` check, where it failed
-/// to deserialize and was silently dropped.
-fn is_cargo_json_line(line: &str) -> bool {
-    line.starts_with("{\"reason\":")
-}
-
-/// Status string for a `TestSummary` JSON event.
-///
-/// Classifies as `"failed"` when there were real test failures *or*
-/// when `zero_test_run` is true (every test filtered out, parse
-/// failure). The latter used to emit `"ok"` while the brokkr process
-/// itself exited non-zero, leaving JSON consumers unable to trust the
-/// status field - reading the counts (`passed+failed+ignored == 0`
-/// with `filtered_out > 0`) still distinguishes a zero-run from a
-/// genuine test failure.
-fn json_test_status(parsed: &cargo_filter::ParsedTestResults) -> &'static str {
-    if parsed.failed > 0 || zero_test_run(parsed) {
-        "failed"
-    } else {
-        "ok"
-    }
-}
-
 /// True when a successful `cargo test` run actually validated nothing.
 ///
 /// Two distinct shapes:
@@ -445,124 +379,6 @@ fn zero_test_run(p: &cargo_filter::ParsedTestResults) -> bool {
     }
     let total = p.passed + p.failed + p.ignored;
     total == 0 && p.filtered_out > 0
-}
-
-/// JSON path for one test invocation. `sweep_label` is `Some(name)`
-/// in multi-sweep runs so downstream consumers can split per-sweep
-/// counts; `None` collapses to the legacy single-sweep shape.
-fn emit_json_test_sweep(sweep_label: Option<&str>, stdout: &str, stderr: &str, success: bool) {
-    let mut json_lines: Vec<&str> = Vec::new();
-    let mut test_lines: Vec<&str> = Vec::new();
-    for line in stdout.lines() {
-        // B6: a test that does `println!("{...}")` (or panics with a
-        // brace-prefixed message) produces a line that starts with `{`
-        // but isn't cargo JSON. Match the cargo-emitted shape exactly
-        // (`{"reason":"..."`) so test output stays in `test_lines`.
-        if is_cargo_json_line(line) {
-            json_lines.push(line);
-        } else {
-            test_lines.push(line);
-        }
-    }
-
-    let json_text = json_lines.join("\n");
-    let diag_events = cargo_json::parse_cargo_diagnostics(&json_text, "test", sweep_label);
-    let mut errors = 0usize;
-    let mut warnings = 0usize;
-    for event in &diag_events {
-        if let cargo_json::CheckEvent::Diagnostic(d) = event {
-            match d.level.as_str() {
-                "error" => errors += 1,
-                "warning" => warnings += 1,
-                _ => {}
-            }
-        }
-        cargo_json::emit(event);
-    }
-    if errors > 0 || warnings > 0 {
-        let diag_status = if errors > 0 { "failed" } else { "ok" };
-        cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
-            cargo_json::DiagnosticSummaryEvent {
-                tool: "test",
-                sweep: sweep_label.map(str::to_owned),
-                status: diag_status,
-                errors,
-                warnings,
-            },
-        ));
-    }
-
-    let parsed = cargo_filter::parse_test_output(&test_lines);
-    for f in &parsed.failures {
-        cargo_json::emit(&cargo_json::CheckEvent::TestFailure(
-            cargo_json::TestFailureEvent {
-                name: f.name.clone(),
-                location: f.location.clone(),
-                message: f.message.clone(),
-            },
-        ));
-    }
-
-    if needs_synthetic_test_failure(parsed.failures.is_empty(), errors, parsed.suites, success) {
-        cargo_json::emit_parse_error("test", stdout, stderr);
-    }
-
-    if parsed.suites > 0 {
-        let test_status = json_test_status(&parsed);
-        cargo_json::emit(&cargo_json::CheckEvent::TestSummary(
-            cargo_json::TestSummaryEvent {
-                status: test_status,
-                sweep: sweep_label.map(str::to_owned),
-                passed: parsed.passed,
-                failed: parsed.failed,
-                ignored: parsed.ignored,
-                filtered_out: parsed.filtered_out,
-                suites: parsed.suites,
-                duration_seconds: parsed.duration.map(|d| (d * 100.0).round() / 100.0),
-            },
-        ));
-    }
-}
-
-/// Whether the JSON test path must synthesize a failure `Diagnostic`.
-///
-/// A failing sweep (`!success`) must always leave a failure signal in the
-/// JSON stream, or a consumer reading only the summaries sees `"ok"` while
-/// `brokkr check` exits non-zero (finding 2A). The gate keys on the *error*
-/// count rather than on whether any `diag_events` were emitted: warning-level
-/// diagnostics produce a `DiagnosticSummary{status:"ok"}`, which does NOT
-/// signal failure, so their presence must not suppress the synthetic
-/// parse-error. When error diagnostics exist (`errors > 0`) a
-/// `status:"failed"` `DiagnosticSummary` already carries the signal, and when
-/// a suite was parsed (`suites > 0`) a `TestSummary` does - so neither needs
-/// the fallback.
-///
-/// The trigger stays anchored on `!success` with no parseable
-/// failures/suites, so a genuinely passing run is never flipped to failed.
-fn needs_synthetic_test_failure(
-    failures_empty: bool,
-    errors: usize,
-    suites: usize,
-    success: bool,
-) -> bool {
-    !success && failures_empty && errors == 0 && suites == 0
-}
-
-fn emit_json_test_hung(sweep_label: Option<&str>, hung: &test_runner::HungTest) {
-    cargo_json::emit(&cargo_json::CheckEvent::TestHung(
-        cargo_json::TestHungEvent {
-            sweep: sweep_label.map(str::to_owned),
-            name: hung.test.clone(),
-            elapsed_seconds: (hung.elapsed.as_secs_f64() * 10.0).round() / 10.0,
-            snapshot_dir: hung.snapshot_dir.display().to_string(),
-            cargo_pid: hung.cargo_pid,
-            test_pids: hung.test_pids.clone(),
-            snapshot_pid: hung.snapshot_pid,
-            wchan: hung.wchan.clone(),
-            stack: hung.stack.clone(),
-            snapshot_error: hung.snapshot_error.clone(),
-        },
-    ));
 }
 
 /// Combine the sweep's profile-defined env with the project's
@@ -594,23 +410,6 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
-
-    #[test]
-    fn synthetic_test_failure_survives_compile_warnings() {
-        // Finding 2A: a failing sweep (`!success`) that produced only compile
-        // *warnings* (warnings raise `diag_events` but leave `errors == 0`)
-        // and printed no parseable `test result:` line (`suites == 0`) must
-        // still get a synthetic failure signal - warnings must NOT suppress it.
-        assert!(needs_synthetic_test_failure(true, 0, 0, false));
-        // A genuinely passing run is never flipped to failed.
-        assert!(!needs_synthetic_test_failure(true, 0, 0, true));
-        // Error diagnostics already emit a `DiagnosticSummary{status:"failed"}`.
-        assert!(!needs_synthetic_test_failure(true, 3, 0, false));
-        // A parsed suite already emits a `TestSummary`.
-        assert!(!needs_synthetic_test_failure(true, 0, 2, false));
-        // Real test failures already emit `TestFailure` events.
-        assert!(!needs_synthetic_test_failure(false, 0, 0, false));
-    }
 
     #[test]
     fn decide_active_sweeps_legacy_default_when_nothing_configured() {
@@ -1147,20 +946,6 @@ warning: z [too_many_lines]
     }
 
     #[test]
-    fn is_cargo_json_line_matches_cargo_shape_only() {
-        // The real cargo wrapper.
-        assert!(is_cargo_json_line(
-            r#"{"reason":"compiler-message","package_id":"x"}"#
-        ));
-        // A test's println!("{}", val) - looks like JSON but isn't.
-        assert!(!is_cargo_json_line(r#"{name: "foo"}"#));
-        // A panic message starting with `{`.
-        assert!(!is_cargo_json_line("{some-debug-output}"));
-        // Plain text.
-        assert!(!is_cargo_json_line("running 1 test"));
-    }
-
-    #[test]
     fn build_test_env_emits_absolute_paths() {
         // B8: CARGO_TARGET_TMPDIR used to be the literal string
         // "target/tmp", which only resolves correctly when the cargo
@@ -1231,31 +1016,6 @@ warning: z [too_many_lines]
     #[test]
     fn zero_test_run_does_not_flag_normal_pass() {
         assert!(!zero_test_run(&parsed(12, 0, 0, 3, 1)));
-    }
-
-    #[test]
-    fn json_test_status_failed_on_zero_run() {
-        // Reviewer-flagged: an all-filtered-out sweep used to emit
-        // `"status":"ok"` here while the brokkr process exited
-        // non-zero. Both conditions now agree on `"failed"`.
-        assert_eq!(json_test_status(&parsed(0, 0, 0, 5, 1)), "failed");
-    }
-
-    #[test]
-    fn json_test_status_failed_on_real_failure() {
-        assert_eq!(json_test_status(&parsed(2, 1, 0, 0, 1)), "failed");
-    }
-
-    #[test]
-    fn json_test_status_ok_on_normal_pass() {
-        assert_eq!(json_test_status(&parsed(12, 0, 0, 3, 1)), "ok");
-    }
-
-    #[test]
-    fn json_test_status_ok_on_empty_suite() {
-        // Package with no tests defined -> `0 passed; 0 filtered out`.
-        // Not a wrong run, status stays `ok`.
-        assert_eq!(json_test_status(&parsed(0, 0, 0, 0, 1)), "ok");
     }
 
     #[test]

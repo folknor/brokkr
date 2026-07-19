@@ -53,7 +53,6 @@ pub(crate) fn cmd_check(
     package: Option<&str>,
     profile_name: Option<&str>,
     raw: bool,
-    json: bool,
     limit: usize,
     all: bool,
     fix_gremlins: bool,
@@ -74,20 +73,19 @@ pub(crate) fn cmd_check(
     // (not just the test phase) still funnels through the summary line below,
     // reporting the same total wall time a passing run does.
     let mut run_phases = || -> Result<(), DevError> {
-        run_gremlins(project_root, gremlins_cfg, json, limit, all, fix_gremlins)?;
-        run_style(project_root, style_cfg, gremlins_cfg, json, limit, all)?;
-        run_header(project_root, header_cfg, json, limit, all)?;
-        run_textlint(project_root, textlint_rules, json, limit, all)?;
-        run_manifest(project_root, manifest_cfg, json, limit, all)?;
-        run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
-        run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
+        run_gremlins(project_root, gremlins_cfg, limit, all, fix_gremlins)?;
+        run_style(project_root, style_cfg, gremlins_cfg, limit, all)?;
+        run_header(project_root, header_cfg, limit, all)?;
+        run_textlint(project_root, textlint_rules, limit, all)?;
+        run_manifest(project_root, manifest_cfg, limit, all)?;
+        run_dependency_rules(project_root, dependency_rules, limit, all)?;
+        run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all)?;
         run_test_phase(
             project,
             project_root,
             &active_sweeps,
             package,
             raw,
-            json,
             doctests,
             extra_args,
             timings.then_some(&mut collected_timings),
@@ -96,22 +94,15 @@ pub(crate) fn cmd_check(
     let outcome = run_phases();
 
     if timings {
-        emit_timings(&collected_timings, limit, all, json, active_sweeps.len() > 1);
+        emit_timings(&collected_timings, limit, all, active_sweeps.len() > 1);
     }
 
     match outcome {
         Ok(()) => {
-            if !json {
-                output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
-            }
+            output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
             Ok(())
         }
-        Err(e) => {
-            if json {
-                // JSON mode already emitted per-phase `failed` summaries; keep
-                // the machine stream clean and let the error propagate.
-                return Err(e);
-            }
+        Err(_) => {
             // The failing phase already printed its detail above; add the
             // symmetric summary line and exit non-zero without main echoing a
             // second, timing-less `[error]` line.
@@ -143,20 +134,7 @@ pub(crate) struct TestTiming {
     pub(crate) elapsed: std::time::Duration,
 }
 
-fn emit_timings(timings: &[TestTiming], limit: usize, all: bool, json: bool, multi_sweep: bool) {
-    if json {
-        for t in timings {
-            cargo_json::emit(&cargo_json::CheckEvent::TestTiming(
-                cargo_json::TestTimingEvent {
-                    sweep: multi_sweep.then(|| t.sweep.clone()),
-                    name: t.name.clone(),
-                    elapsed_seconds: (t.elapsed.as_secs_f64() * 1000.0).round() / 1000.0,
-                },
-            ));
-        }
-        return;
-    }
-
+fn emit_timings(timings: &[TestTiming], limit: usize, all: bool, multi_sweep: bool) {
     if timings.is_empty() {
         output::run_msg("timings: no tests ran");
         return;
@@ -281,7 +259,6 @@ fn effective_profile_name(
 fn run_gremlins(
     project_root: &Path,
     config: Option<&GremlinsConfig>,
-    json: bool,
     limit: usize,
     all: bool,
     fix: bool,
@@ -289,56 +266,27 @@ fn run_gremlins(
     // `[gremlins] disable = true` skips the whole phase - both the scan and
     // `--fix-gremlins`.
     if config.is_some_and(|c| c.disable) {
-        if !json {
-            output::run_msg("gremlins: disabled by config");
-        }
+        output::run_msg("gremlins: disabled by config");
         return Ok(());
     }
 
     if fix {
         let fixed = gremlins::fix(project_root, config)?;
-        if !json {
-            let total: usize = fixed.iter().map(|f| f.count).sum();
-            if total == 0 {
-                output::run_msg("fix-gremlins: nothing to fix");
-            } else {
-                output::run_msg(&format!(
-                    "fix-gremlins: rewrote {total} char(s) across {} file(s)",
-                    fixed.len()
-                ));
-                for f in &fixed {
-                    output::run_msg(&format!("  {} ({})", f.path.display(), f.count));
-                }
+        let total: usize = fixed.iter().map(|f| f.count).sum();
+        if total == 0 {
+            output::run_msg("fix-gremlins: nothing to fix");
+        } else {
+            output::run_msg(&format!(
+                "fix-gremlins: rewrote {total} char(s) across {} file(s)",
+                fixed.len()
+            ));
+            for f in &fixed {
+                output::run_msg(&format!("  {} ({})", f.path.display(), f.count));
             }
         }
     }
 
     let found = gremlins::scan(project_root, config)?;
-
-    if json {
-        for g in &found {
-            cargo_json::emit(&cargo_json::CheckEvent::Gremlin(
-                cargo_json::GremlinEvent {
-                    file: g.path.display().to_string(),
-                    line: g.line,
-                    column: g.column,
-                    codepoint: format!("U+{:04X}", g.codepoint),
-                    name: g.name,
-                },
-            ));
-        }
-        let status = if found.is_empty() { "ok" } else { "failed" };
-        cargo_json::emit(&cargo_json::CheckEvent::GremlinSummary(
-            cargo_json::GremlinSummaryEvent {
-                status,
-                found: found.len(),
-            },
-        ));
-        if !found.is_empty() {
-            return Err(DevError::Build("gremlins found".into()));
-        }
-        return Ok(());
-    }
 
     if found.is_empty() {
         output::run_msg("zero gremlins!");
@@ -422,7 +370,6 @@ fn run_style(
     project_root: &Path,
     style_cfg: Option<&StyleConfig>,
     gremlins_cfg: Option<&GremlinsConfig>,
-    json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
@@ -435,50 +382,30 @@ fn run_style(
 
     let violations = crate::style::scan(project_root, gremlins_cfg)?;
 
-    if json {
-        for v in &violations {
-            cargo_json::emit(&cargo_json::CheckEvent::Style(cargo_json::StyleEvent {
-                file: v.file.display().to_string(),
-                line: v.line,
-                keyword: v.keyword,
-            }));
-        }
-        cargo_json::emit(&cargo_json::CheckEvent::StyleSummary(
-            cargo_json::StyleSummaryEvent {
-                status: if violations.is_empty() { "ok" } else { "failed" },
-                violations: violations.len(),
-            },
-        ));
-    }
-
     if violations.is_empty() {
-        if !json {
-            output::run_msg("style: ok");
-        }
+        output::run_msg("style: ok");
         return Ok(());
     }
 
-    if !json {
-        output::run_msg("style: blank line above control flow (Rust)");
-        let total = violations.len();
-        let (displayed, trailer) =
-            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
-        let mut msg = format!("style: {total} violation(s)\n");
-        for v in &displayed {
-            msg.push_str("  ");
-            msg.push_str(&crate::style::format_one(v));
-            msg.push('\n');
-        }
-        if let Some(t) = trailer {
-            msg.push_str("  ");
-            msg.push_str(&t);
-            msg.push('\n');
-        }
-        msg.push_str(
-            "  hint: add a blank line above the construct, or share an identifier with the line above",
-        );
-        output::error(&msg);
+    output::run_msg("style: blank line above control flow (Rust)");
+    let total = violations.len();
+    let (displayed, trailer) =
+        scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
+    let mut msg = format!("style: {total} violation(s)\n");
+    for v in &displayed {
+        msg.push_str("  ");
+        msg.push_str(&crate::style::format_one(v));
+        msg.push('\n');
     }
+    if let Some(t) = trailer {
+        msg.push_str("  ");
+        msg.push_str(&t);
+        msg.push('\n');
+    }
+    msg.push_str(
+        "  hint: add a blank line above the construct, or share an identifier with the line above",
+    );
+    output::error(&msg);
 
     Err(DevError::Build("style check failed".into()))
 }
@@ -488,7 +415,6 @@ fn run_style(
 fn run_header(
     project_root: &Path,
     header_cfg: Option<&HeaderConfig>,
-    json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
@@ -500,45 +426,27 @@ fn run_header(
 
     let violations = crate::header::scan(project_root, cfg, year)?;
 
-    if json {
-        for v in &violations {
-            cargo_json::emit(&cargo_json::CheckEvent::Header(cargo_json::HeaderEvent {
-                file: v.file.display().to_string(),
-            }));
-        }
-        cargo_json::emit(&cargo_json::CheckEvent::HeaderSummary(
-            cargo_json::HeaderSummaryEvent {
-                status: if violations.is_empty() { "ok" } else { "failed" },
-                violations: violations.len(),
-            },
-        ));
-    }
-
     if violations.is_empty() {
-        if !json {
-            output::run_msg("header: ok");
-        }
+        output::run_msg("header: ok");
         return Ok(());
     }
 
-    if !json {
-        output::run_msg(&format!("header: require `{expected}`"));
-        let total = violations.len();
-        let (displayed, trailer) =
-            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
-        let mut msg = format!("header: {total} violation(s)\n");
-        for v in &displayed {
-            msg.push_str("  ");
-            msg.push_str(&crate::header::format_one(v, &expected));
-            msg.push('\n');
-        }
-        if let Some(t) = trailer {
-            msg.push_str("  ");
-            msg.push_str(&t);
-            msg.push('\n');
-        }
-        output::error(msg.trim_end());
+    output::run_msg(&format!("header: require `{expected}`"));
+    let total = violations.len();
+    let (displayed, trailer) =
+        scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
+    let mut msg = format!("header: {total} violation(s)\n");
+    for v in &displayed {
+        msg.push_str("  ");
+        msg.push_str(&crate::header::format_one(v, &expected));
+        msg.push('\n');
     }
+    if let Some(t) = trailer {
+        msg.push_str("  ");
+        msg.push_str(&t);
+        msg.push('\n');
+    }
+    output::error(msg.trim_end());
 
     Err(DevError::Build("header check failed".into()))
 }
@@ -548,7 +456,6 @@ fn run_header(
 fn run_textlint(
     project_root: &Path,
     rules: &[TextlintRule],
-    json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
@@ -558,47 +465,27 @@ fn run_textlint(
 
     let violations = crate::textlint::scan(project_root, rules)?;
 
-    if json {
-        for v in &violations {
-            cargo_json::emit(&cargo_json::CheckEvent::Textlint(cargo_json::TextlintEvent {
-                file: v.file.display().to_string(),
-                line: v.line,
-                rule: v.rule.clone(),
-            }));
-        }
-        cargo_json::emit(&cargo_json::CheckEvent::TextlintSummary(
-            cargo_json::TextlintSummaryEvent {
-                status: if violations.is_empty() { "ok" } else { "failed" },
-                violations: violations.len(),
-            },
-        ));
-    }
-
     if violations.is_empty() {
-        if !json {
-            output::run_msg("textlint: ok");
-        }
+        output::run_msg("textlint: ok");
         return Ok(());
     }
 
-    if !json {
-        output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
-        let total = violations.len();
-        let (displayed, trailer) =
-            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
-        let mut msg = format!("textlint: {total} violation(s)\n");
-        for v in &displayed {
-            msg.push_str("  ");
-            msg.push_str(&crate::textlint::format_one(v));
-            msg.push('\n');
-        }
-        if let Some(t) = trailer {
-            msg.push_str("  ");
-            msg.push_str(&t);
-            msg.push('\n');
-        }
-        output::error(msg.trim_end());
+    output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
+    let total = violations.len();
+    let (displayed, trailer) =
+        scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
+    let mut msg = format!("textlint: {total} violation(s)\n");
+    for v in &displayed {
+        msg.push_str("  ");
+        msg.push_str(&crate::textlint::format_one(v));
+        msg.push('\n');
     }
+    if let Some(t) = trailer {
+        msg.push_str("  ");
+        msg.push_str(&t);
+        msg.push('\n');
+    }
+    output::error(msg.trim_end());
 
     Err(DevError::Build("textlint failed".into()))
 }
@@ -608,7 +495,6 @@ fn run_textlint(
 fn run_manifest(
     project_root: &Path,
     manifest_cfg: Option<&ManifestConfig>,
-    json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
@@ -618,46 +504,27 @@ fn run_manifest(
 
     let violations = crate::manifest::scan(project_root, cfg)?;
 
-    if json {
-        for v in &violations {
-            cargo_json::emit(&cargo_json::CheckEvent::Manifest(cargo_json::ManifestEvent {
-                file: v.file.display().to_string(),
-                rule: v.rule,
-            }));
-        }
-        cargo_json::emit(&cargo_json::CheckEvent::ManifestSummary(
-            cargo_json::ManifestSummaryEvent {
-                status: if violations.is_empty() { "ok" } else { "failed" },
-                violations: violations.len(),
-            },
-        ));
-    }
-
     if violations.is_empty() {
-        if !json {
-            output::run_msg("manifest: ok");
-        }
+        output::run_msg("manifest: ok");
         return Ok(());
     }
 
-    if !json {
-        output::run_msg("manifest: Cargo.toml conventions");
-        let total = violations.len();
-        let (displayed, trailer) =
-            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
-        let mut msg = format!("manifest: {total} violation(s)\n");
-        for v in &displayed {
-            msg.push_str("  ");
-            msg.push_str(&crate::manifest::format_one(v));
-            msg.push('\n');
-        }
-        if let Some(t) = trailer {
-            msg.push_str("  ");
-            msg.push_str(&t);
-            msg.push('\n');
-        }
-        output::error(msg.trim_end());
+    output::run_msg("manifest: Cargo.toml conventions");
+    let total = violations.len();
+    let (displayed, trailer) =
+        scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
+    let mut msg = format!("manifest: {total} violation(s)\n");
+    for v in &displayed {
+        msg.push_str("  ");
+        msg.push_str(&crate::manifest::format_one(v));
+        msg.push('\n');
     }
+    if let Some(t) = trailer {
+        msg.push_str("  ");
+        msg.push_str(&t);
+        msg.push('\n');
+    }
+    output::error(msg.trim_end());
 
     Err(DevError::Build("manifest check failed".into()))
 }
@@ -665,7 +532,6 @@ fn run_manifest(
 fn run_dependency_rules(
     project_root: &Path,
     rules: &[DependencyRule],
-    json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
@@ -673,70 +539,36 @@ fn run_dependency_rules(
         return Ok(());
     }
 
-    if !json {
-        output::run_msg("cargo metadata --format-version 1 --no-deps (dependency rules)");
-    }
+    output::run_msg("cargo metadata --format-version 1 --no-deps (dependency rules)");
     let report = dependency_rules::check(project_root, rules)?;
 
-    if json {
-        for violation in &report.violations {
-            cargo_json::emit(&cargo_json::CheckEvent::DependencyViolation(
-                cargo_json::DependencyViolationEvent {
-                    rule: violation.rule.clone(),
-                    from: violation.from.clone(),
-                    to: violation.to.clone(),
-                    alias: violation.alias.clone(),
-                    kind: violation.kind.as_str(),
-                    target: violation.target.clone(),
-                    optional: violation.optional,
-                },
-            ));
-        }
-        cargo_json::emit(&cargo_json::CheckEvent::DependencySummary(
-            cargo_json::DependencySummaryEvent {
-                status: if report.violations.is_empty() {
-                    "ok"
-                } else {
-                    "failed"
-                },
-                rules: report.rules,
-                packages: report.packages,
-                violations: report.violations.len(),
-            },
-        ));
-    }
-
     if report.violations.is_empty() {
-        if !json {
-            output::run_msg(&format!(
-                "dependency rules: ok ({} rule(s), {} workspace package(s))",
-                report.rules, report.packages,
-            ));
-        }
+        output::run_msg(&format!(
+            "dependency rules: ok ({} rule(s), {} workspace package(s))",
+            report.rules, report.packages,
+        ));
         return Ok(());
     }
 
-    if !json {
-        let total = report.violations.len();
-        let displayed = if all || total <= limit {
-            &report.violations[..]
-        } else {
-            &report.violations[..limit]
-        };
-        let mut msg = format!("dependency rules: {total} violation(s)\n");
-        for violation in displayed {
-            msg.push_str("  ");
-            msg.push_str(&dependency_rules::format_violation(violation));
-            msg.push('\n');
-        }
-        if displayed.len() < total {
-            msg.push_str(&format!(
-                "  +{} more (--all to see)\n",
-                total - displayed.len()
-            ));
-        }
-        output::error(msg.trim_end());
+    let total = report.violations.len();
+    let displayed = if all || total <= limit {
+        &report.violations[..]
+    } else {
+        &report.violations[..limit]
+    };
+    let mut msg = format!("dependency rules: {total} violation(s)\n");
+    for violation in displayed {
+        msg.push_str("  ");
+        msg.push_str(&dependency_rules::format_violation(violation));
+        msg.push('\n');
     }
+    if displayed.len() < total {
+        msg.push_str(&format!(
+            "  +{} more (--all to see)\n",
+            total - displayed.len()
+        ));
+    }
+    output::error(msg.trim_end());
 
     Err(DevError::Build("dependency rules failed".into()))
 }
@@ -747,7 +579,6 @@ fn run_clippy_phase(
     sweeps: &[ResolvedSweep],
     package: Option<&str>,
     raw: bool,
-    json: bool,
     limit: usize,
     all: bool,
 ) -> Result<(), DevError> {
@@ -791,9 +622,7 @@ fn run_clippy_phase(
         args.push("--".into());
         args.push("--cap-lints=warn".into());
 
-        if !json {
-            output::run_msg(&format!("cargo {}", args.join(" ")));
-        }
+        output::run_msg(&format!("cargo {}", args.join(" ")));
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         // Apply the sweep's env to the clippy build too, so a build-affecting
@@ -825,19 +654,9 @@ fn run_clippy_phase(
     // without emitting parseable diagnostics.
     let any_failed = results.iter().any(|r| !r.success);
     let any_diag = results.iter().any(|r| {
-        cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", None)
-            .iter()
-            .any(|e| matches!(e, cargo_json::CheckEvent::Diagnostic(_)))
+        !cargo_json::parse_cargo_diagnostics(&r.stdout).is_empty()
     });
     let failed = any_failed || any_diag;
-
-    if json {
-        emit_json_clippy(&results);
-        if failed {
-            return Err(DevError::Build("clippy failed".into()));
-        }
-        return Ok(());
-    }
 
     if !failed {
         // Clean: cap-lints leaves nothing to report when there are no lints.
@@ -875,13 +694,10 @@ fn run_clippy_phase(
 /// the "cargo crashed and emitted non-JSON" case where the stderr / stdout
 /// dump is the only useful thing left.
 fn raw_clippy_text(r: &SweepResult) -> String {
-    let events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", None);
+    let events = cargo_json::parse_cargo_diagnostics(&r.stdout);
     let rendered: Vec<&str> = events
         .iter()
-        .filter_map(|e| match e {
-            cargo_json::CheckEvent::Diagnostic(d) => d.rendered.as_deref(),
-            _ => None,
-        })
+        .filter_map(|d| d.rendered.as_deref())
         .collect();
 
     if rendered.is_empty() {
@@ -1093,13 +909,10 @@ fn parse_clippy_from_json(
     sweep_failed: bool,
     gate: bool,
 ) -> cargo_filter::ClippyParse {
-    let events = cargo_json::parse_cargo_diagnostics(stdout, "clippy", None);
+    let events = cargo_json::parse_cargo_diagnostics(stdout);
     let mut diagnostics: Vec<cargo_filter::ClippyDiagnostic> = events
         .iter()
-        .filter_map(|e| match e {
-            cargo_json::CheckEvent::Diagnostic(d) => Some(event_to_clippy(d, gate)),
-            _ => None,
-        })
+        .map(|d| event_to_clippy(d, gate))
         .collect();
 
     // Errors first, then warnings; each half keeps discovery order.
@@ -1210,119 +1023,6 @@ fn parse_location(location: Option<&str>) -> (String, u64, u64) {
     (file, line, col)
 }
 
-/// JSON path: parse each sweep, dedup events across sweeps merging the
-/// `sweeps` field, emit deduped diagnostics, then one summary per sweep.
-fn emit_json_clippy(results: &[SweepResult]) {
-    // Per-sweep parse + sweep-tagged events, plus per-sweep counts.
-    let multi = results.len() > 1;
-    let mut all_events: Vec<cargo_json::CheckEvent> = Vec::new();
-    let mut per_sweep_counts: Vec<(String, usize, usize, bool)> =
-        Vec::with_capacity(results.len());
-
-    for r in results {
-        let label_for_tag = if multi { Some(r.label.as_str()) } else { None };
-        let mut events = cargo_json::parse_cargo_diagnostics(&r.stdout, "clippy", label_for_tag);
-        // Same gate as the text path: a capped `warning` is really a deny, so
-        // promote it to `error` before counting and emitting.
-        for e in &mut events {
-            if let cargo_json::CheckEvent::Diagnostic(d) = e
-                && d.level == "warning"
-            {
-                d.level = "error".into();
-            }
-        }
-        let mut errors = 0usize;
-        let mut warnings = 0usize;
-        for e in &events {
-            if let cargo_json::CheckEvent::Diagnostic(d) = e {
-                match d.level.as_str() {
-                    "error" => errors += 1,
-                    "warning" => warnings += 1,
-                    _ => {}
-                }
-            }
-        }
-        if events.is_empty() && !r.success {
-            cargo_json::emit_parse_error("clippy", &r.stdout, &r.stderr);
-            errors += 1;
-        }
-        per_sweep_counts.push((r.label.clone(), errors, warnings, r.success));
-        all_events.extend(events);
-    }
-
-    // Dedup Diagnostic events by (level, code, file, line, column, message),
-    // merging the `sweeps` field. Non-Diagnostic events pass through unchanged.
-    let mut order: Vec<JsonDiagKey> = Vec::new();
-    let mut by_key: HashMap<JsonDiagKey, cargo_json::DiagnosticEvent> = HashMap::new();
-    let mut other: Vec<cargo_json::CheckEvent> = Vec::new();
-
-    for e in all_events {
-        match e {
-            cargo_json::CheckEvent::Diagnostic(d) => {
-                let key = JsonDiagKey::from(&d);
-                if let Some(existing) = by_key.get_mut(&key) {
-                    for s in &d.sweeps {
-                        if !existing.sweeps.contains(s) {
-                            existing.sweeps.push(s.clone());
-                        }
-                    }
-                } else {
-                    order.push(key.clone());
-                    by_key.insert(key, d);
-                }
-            }
-            other_event => other.push(other_event),
-        }
-    }
-
-    for k in order {
-        if let Some(d) = by_key.remove(&k) {
-            cargo_json::emit(&cargo_json::CheckEvent::Diagnostic(d));
-        }
-    }
-    for e in other {
-        cargo_json::emit(&e);
-    }
-
-    for (label, errors, warnings, success) in per_sweep_counts {
-        // cap-lints lets a lint-only sweep exit 0, but any surfaced (promoted)
-        // error is still a failure in brokkr's gate.
-        let status = if success && errors == 0 { "ok" } else { "failed" };
-        cargo_json::emit(&cargo_json::CheckEvent::DiagnosticSummary(
-            cargo_json::DiagnosticSummaryEvent {
-                tool: "clippy",
-                sweep: if multi { Some(label) } else { None },
-                status,
-                errors,
-                warnings,
-            },
-        ));
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct JsonDiagKey {
-    level: String,
-    code: Option<String>,
-    file: Option<String>,
-    line: Option<u64>,
-    column: Option<u64>,
-    message: String,
-}
-
-impl From<&cargo_json::DiagnosticEvent> for JsonDiagKey {
-    fn from(d: &cargo_json::DiagnosticEvent) -> Self {
-        JsonDiagKey {
-            level: d.level.clone(),
-            code: d.code.clone(),
-            file: d.file.clone(),
-            line: d.line,
-            column: d.column,
-            message: d.message.clone(),
-        }
-    }
-}
-
 /// Split `brokkr check`'s trailing args into a cargo-level slice and a
 /// libtest-level slice on the first literal `--`. With no separator,
 /// every token is cargo-level. Documented shapes:
@@ -1350,7 +1050,6 @@ fn run_test_phase(
     sweeps: &[ResolvedSweep],
     package: Option<&str>,
     raw: bool,
-    json: bool,
     doctests: bool,
     extra_args: &[String],
     mut timings: Option<&mut Vec<TestTiming>>,
@@ -1367,7 +1066,7 @@ fn run_test_phase(
 
     for sweep in sweeps {
         for pkg in &sweep.build_packages {
-            run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, json)?;
+            run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw)?;
         }
 
         let success = run_one_test_sweep(
@@ -1377,7 +1076,6 @@ fn run_test_phase(
             extra_args,
             &project_env,
             raw,
-            json,
             doctests,
             multi,
             timings.as_deref_mut(),

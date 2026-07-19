@@ -1078,8 +1078,9 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
     };
 
     format!(
-        "test {} did not finish within {}s after libtest started it\n  per-test timeout: cargo build time excluded\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
+        "test {} ran {}s, exceeding the {}s per-test timeout, after libtest started it\n  per-test timeout: cargo build time excluded\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
         hung.test,
+        hung.elapsed.as_secs(),
         hung.ceiling.as_secs(),
         hung.cargo_pid,
         child_text,
