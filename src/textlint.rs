@@ -72,6 +72,7 @@ struct Compiled {
     table_row_only: bool,
     skip_after: Option<Regex>,
     only_if_file_matches: Option<Regex>,
+    only_if_file_matches_above: bool,
     region: Option<lex::Region>,
     join_wrapped_use: bool,
     except_above: Option<Window>,
@@ -122,6 +123,12 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
                 rule.name
             )));
         }
+        if rule.only_if_file_matches_above && rule.only_if_file_matches.is_none() {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?}: only_if_file_matches_above needs only_if_file_matches to be set",
+                rule.name
+            )));
+        }
         let region = match &rule.region {
             Some(r) => Some(lex::Region::parse(r).ok_or_else(|| {
                 DevError::Config(format!(
@@ -149,6 +156,7 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             table_row_only: rule.table_row_only,
             skip_after,
             only_if_file_matches,
+            only_if_file_matches_above: rule.only_if_file_matches_above,
             region,
             join_wrapped_use: rule.join_wrapped_use,
             except_above,
@@ -217,12 +225,15 @@ fn applies(c: &Compiled, rel: &Path) -> bool {
 fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<TextlintViolation>) {
     let lines: Vec<&str> = content.lines().collect();
     // File-scope precondition: a rule with `only_if_file_matches` fires only in
-    // files where some line matches it. Computed once per file per rule.
+    // files where some line matches it. Computed once per file per rule. When
+    // `only_if_file_matches_above` is set the precondition is position-sensitive
+    // (at-or-above each candidate) so it cannot be precomputed - it passes the
+    // file gate here and is re-checked per match below.
     let file_ok: Vec<bool> = rules
         .iter()
         .map(|r| match &r.only_if_file_matches {
-            Some(re) => lines.iter().any(|l| re.is_match(l)),
-            None => true,
+            Some(re) if !r.only_if_file_matches_above => lines.iter().any(|l| re.is_match(l)),
+            _ => true,
         })
         .collect();
     // Lexical regions, tokenized once per file, only when a rule needs scoping.
@@ -274,6 +285,11 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             if !rule.pattern.is_match(&hay) {
                 continue;
             }
+            // Position-sensitive precondition: the import must appear at or
+            // above this match line, not merely somewhere in the file.
+            if !precondition_above_ok(rule, &lines, i) {
+                continue;
+            }
             if marker_suppresses(rule, &lines, i) {
                 continue;
             }
@@ -298,36 +314,56 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
     // Whole-`use`-statement pass: reconstruct wrapped imports once, then match
     // each join rule against the joined text.
     if rules.iter().any(|r| r.join_wrapped_use) {
-        let stmts = lex::use_statements(content);
-        for (ri, rule) in rules.iter().enumerate() {
-            if !rule.join_wrapped_use || !file_ok[ri] {
+        scan_use_statements(rel, content, &lines, rules, &file_ok, out);
+    }
+}
+
+/// The whole-`use`-statement pass of `scan_file`: reconstruct each wrapped
+/// import onto one line (via the lexer) and match every `join_wrapped_use` rule
+/// against the joined text, applying the same predicate/gate ladder as the
+/// per-line pass but anchored at the statement's physical span.
+fn scan_use_statements(
+    rel: &Path,
+    content: &str,
+    lines: &[&str],
+    rules: &[&Compiled],
+    file_ok: &[bool],
+    out: &mut Vec<TextlintViolation>,
+) {
+    let stmts = lex::use_statements(content);
+    for (ri, rule) in rules.iter().enumerate() {
+        if !rule.join_wrapped_use || !file_ok[ri] {
+            continue;
+        }
+        for st in &stmts {
+            if !rule.pattern.is_match(&st.joined) {
                 continue;
             }
-            for st in &stmts {
-                if !rule.pattern.is_match(&st.joined) {
-                    continue;
-                }
-                // `allow_marker` matches on any physical line of the statement
-                // (plus the `allow_marker_above` window at its start).
-                if use_marker_suppresses(rule, &lines, st) {
-                    continue;
-                }
-                if rule.except.iter().any(|r| r.is_match(&st.joined)) {
-                    continue;
-                }
-                // Context-window gates anchor the above-window to the
-                // statement's first physical line, the below-window to its last.
-                if context_suppresses(rule, &lines, st.start_line, st.end_line) {
-                    continue;
-                }
-                out.push(TextlintViolation {
-                    file: rel.to_path_buf(),
-                    line: st.start_line + 1,
-                    rule: rule.name.clone(),
-                    message: rule.message.clone(),
-                    content: cap(&st.joined),
-                });
+            // Position-sensitive precondition anchors at the statement's first
+            // physical line.
+            if !precondition_above_ok(rule, lines, st.start_line) {
+                continue;
             }
+            // `allow_marker` matches on any physical line of the statement
+            // (plus the `allow_marker_above` window at its start).
+            if use_marker_suppresses(rule, lines, st) {
+                continue;
+            }
+            if rule.except.iter().any(|r| r.is_match(&st.joined)) {
+                continue;
+            }
+            // Context-window gates anchor the above-window to the statement's
+            // first physical line, the below-window to its last.
+            if context_suppresses(rule, lines, st.start_line, st.end_line) {
+                continue;
+            }
+            out.push(TextlintViolation {
+                file: rel.to_path_buf(),
+                line: st.start_line + 1,
+                rule: rule.name.clone(),
+                message: rule.message.clone(),
+                content: cap(&st.joined),
+            });
         }
     }
 }
@@ -379,6 +415,24 @@ fn window_hit(w: &Window, lines: &[&str], anchor: usize, above: bool) -> bool {
         start..end
     };
     lines[range].iter().any(|l| w.re.is_match(l))
+}
+
+/// Whether `rule`'s position-sensitive precondition holds for a match anchored
+/// at line index `anchor`. Only meaningful when `only_if_file_matches_above` is
+/// set (otherwise the whole-file gate already ran in `file_ok`); it requires the
+/// `only_if_file_matches` regex to hit at or above the anchor - lines
+/// `[0, anchor]`, inclusive, mirroring the upstream hook's `sed -n "1,<line>p"`.
+/// Returns `true` (does not gate) when the modifier is off.
+fn precondition_above_ok(rule: &Compiled, lines: &[&str], anchor: usize) -> bool {
+    if !rule.only_if_file_matches_above {
+        return true;
+    }
+    let Some(re) = &rule.only_if_file_matches else {
+        return true;
+    };
+    lines
+        .get(..=anchor)
+        .is_some_and(|window| window.iter().any(|l| re.is_match(l)))
 }
 
 /// Whether `rule`'s allow-marker suppresses the match at line index `i`: on the
@@ -438,6 +492,7 @@ mod tests {
             table_row_only: false,
             skip_after: None,
             only_if_file_matches: None,
+            only_if_file_matches_above: false,
             region: None,
             join_wrapped_use: false,
             except_above: None,
@@ -557,6 +612,39 @@ mod tests {
         // Condition absent -> the rule does not fire at all.
         let without = "let t = Instant::now();\n";
         assert!(run(r, without).is_empty());
+    }
+
+    #[test]
+    fn only_if_file_matches_above_ignores_imports_below_the_match() {
+        let mut r = rule("TcpStream::connect");
+        r.only_if_file_matches = Some("use\\s+tokio::[^;]*\\bnet\\b".into());
+        r.only_if_file_matches_above = true;
+        // The seam-correct call on line 1 with the tokio::net import only *below*
+        // it (inside a test module) is not armed -> no violation. The whole-file
+        // variant would wrongly flag it.
+        let src = "let s = TcpStream::connect(addr);\nmod tests {\n    use tokio::net::TcpListener;\n}\n";
+        assert!(run(r.clone(), src).is_empty());
+        // The whole-file (position-blind) variant does flag it.
+        let mut blind = r.clone();
+        blind.only_if_file_matches_above = false;
+        assert_eq!(run(blind, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn only_if_file_matches_above_arms_when_import_precedes_the_match() {
+        let mut r = rule("TcpStream::connect");
+        r.only_if_file_matches = Some("use\\s+tokio::[^;]*\\bnet\\b".into());
+        r.only_if_file_matches_above = true;
+        // Import above the call -> armed, and the call is flagged.
+        let src = "use tokio::net::TcpStream;\nlet s = TcpStream::connect(addr);\n";
+        assert_eq!(run(r, src), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn only_if_file_matches_above_without_base_is_a_config_error() {
+        let mut r = rule("x");
+        r.only_if_file_matches_above = true;
+        assert!(compile(&[r]).is_err());
     }
 
     #[test]

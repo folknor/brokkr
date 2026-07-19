@@ -251,6 +251,15 @@ pub struct TextlintRule {
     /// Optional.
     #[serde(default)]
     pub only_if_file_matches: Option<String>,
+    /// Restrict `only_if_file_matches` to lines at or above each candidate match
+    /// (mirroring the upstream hook's `sed -n "1,<line>p"`), instead of scanning
+    /// the whole file. The precondition is then evaluated per match: an import
+    /// that only appears *below* the match line - e.g. a `use tokio::net::...`
+    /// inside a test module further down - no longer arms the rule for correct
+    /// production code above it. Requires `only_if_file_matches`. Off by default
+    /// (whole-file scan).
+    #[serde(default)]
+    pub only_if_file_matches_above: bool,
     /// Lexical region the `pattern` is scoped to: `code`, `string`, or
     /// `comment`. Rust files only (tokenized with `rustc_lexer`). Off = match
     /// the whole line. `code` never flags a pattern quoted in a comment/string;
@@ -315,6 +324,16 @@ pub struct ManifestConfig {
     /// Globs for manifests excused from every check. Empty by default.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Globs for manifests excused from the *structural* checks only (the same
+    /// set a `cargo-fuzz = true` stub skips: `section_order`,
+    /// `crate_type_order`, `package_field_order`, `lints_workspace_required`,
+    /// and the `[[bin]]`/`[[example]]` flag checks). Unlike `exclude` (which
+    /// skips the file entirely), a manifest listed here is still content-checked;
+    /// notably `sort_dependencies` still runs. For a placeholder crate whose
+    /// section layout is deliberately non-conventional but whose deps should
+    /// still be sorted. Empty by default.
+    #[serde(default)]
+    pub shape_exclude: Vec<String>,
     /// Require dependency keys to be sorted within each blank-line-separated
     /// group of a `[dependencies]` / `[dev-dependencies]` /
     /// `[build-dependencies]` / `[workspace.dependencies]` table (target-cfg

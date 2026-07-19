@@ -70,6 +70,7 @@ pub fn scan(
     };
     let paths = globs::build_set(path_globs, "[manifest] paths")?;
     let exclude = globs::build_set(&cfg.exclude, "[manifest] exclude")?;
+    let shape_exclude = globs::build_set(&cfg.shape_exclude, "[manifest] shape_exclude")?;
     for g in &cfg.version_align {
         if !matches!(g.granularity.as_str(), "" | "major" | "minor") {
             return Err(DevError::Config(format!(
@@ -96,7 +97,7 @@ pub fn scan(
 
     let mut out = Vec::new();
     for (rel, doc) in &manifests {
-        check_document(rel, doc, cfg, &mut out);
+        check_document(rel, doc, cfg, globs::matches(&shape_exclude, rel), &mut out);
     }
     // A workspace-level check needs every manifest at once (the root defines the
     // group, members are checked against it).
@@ -164,6 +165,7 @@ fn check_document(
     rel: &Path,
     doc: &DocumentMut,
     cfg: &ManifestConfig,
+    shape_excluded: bool,
     out: &mut Vec<ManifestViolation>,
 ) {
     // Dependency-content checks (1, 10, 8) apply to every manifest.
@@ -178,8 +180,10 @@ fn check_document(
     }
     // The section/target-shape checks (2-6) describe a crate's own structure,
     // which is moot for a cargo-fuzz stub (its own tiny standalone workspace) -
-    // the hook exempts those.
-    if is_cargo_fuzz(doc) {
+    // the hook exempts those, as does an explicit `shape_exclude` glob (a
+    // placeholder crate whose layout is deliberately non-conventional but whose
+    // deps still sort).
+    if is_cargo_fuzz(doc) || shape_excluded {
         return;
     }
     if !cfg.section_order.is_empty() {
@@ -526,7 +530,16 @@ struct DepGroup {
 fn dependency_groups(table: &Table) -> Vec<DepGroup> {
     let mut groups: Vec<DepGroup> = Vec::new();
     let mut cur = DepGroup::default();
-    for (key, _) in table {
+    for (key, item) in table {
+        // A `[dependencies.<name>]` dotted sub-section is an `Item::Table`, not
+        // an inline entry. TOML grammar forces it physically after the whole
+        // inline table, so it can never sort into the inline sequence - it is
+        // its own single-entry group, never compared. Skip it (an inline-table
+        // value like `foo = { version = "1" }` is `Item::Value`, not a table,
+        // and stays in the sequence).
+        if item.is_table() {
+            continue;
+        }
         let prefix = table
             .key(key)
             .and_then(|k| k.leaf_decor().prefix())
@@ -568,9 +581,17 @@ mod tests {
     }
 
     fn run_doc(cfg: &ManifestConfig, src: &str) -> Vec<(&'static str, String)> {
+        run_doc_shape(cfg, src, false)
+    }
+
+    fn run_doc_shape(
+        cfg: &ManifestConfig,
+        src: &str,
+        shape_excluded: bool,
+    ) -> Vec<(&'static str, String)> {
         let doc: DocumentMut = src.parse().unwrap();
         let mut out = Vec::new();
-        check_document(Path::new("Cargo.toml"), &doc, cfg, &mut out);
+        check_document(Path::new("Cargo.toml"), &doc, cfg, shape_excluded, &mut out);
         out.iter().map(|v| (v.rule, v.message.clone())).collect()
     }
 
@@ -628,6 +649,25 @@ mod tests {
         assert_eq!(violations(src).len(), 1);
     }
 
+    #[test]
+    fn dotted_section_deps_are_not_ordered_against_the_inline_table() {
+        // TOML grammar forces every `[dependencies.<name>]` section physically
+        // after the inline table, so `nautilus-common` (which sorts before
+        // `tokio`) cannot precede it - no edit satisfies an ordering check, so
+        // dotted sections must not participate in the inline group's order.
+        let src = "[dependencies]\ndotenvy = \"1\"\nlog = \"1\"\ntokio = \"1\"\n\n\
+                   [dependencies.nautilus-common]\nversion = \"1\"\n";
+        assert!(violations(src).is_empty(), "{:?}", violations(src));
+    }
+
+    #[test]
+    fn inline_table_dep_values_are_still_ordered() {
+        // An inline-table *value* (`tokio = { ... }`) is an `Item::Value`, not a
+        // dotted section, so it stays in the ordered sequence.
+        let src = "[dependencies]\ntokio = { version = \"1\" }\nanyhow = \"1\"\n";
+        assert_eq!(violations(src).len(), 1);
+    }
+
     fn order_cfg() -> ManifestConfig {
         ManifestConfig {
             section_order: ["package", "lib", "features", "dependencies"]
@@ -640,6 +680,24 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn shape_exclude_skips_structural_checks_but_keeps_sort() {
+        let mut cfg = order_cfg();
+        cfg.sort_dependencies = true;
+        // `features` before `lib` trips section-order; `tokio` before `anyhow`
+        // trips sort-dependencies.
+        let src = "[package]\nname = \"x\"\n[features]\n[lib]\n\n\
+                   [dependencies]\ntokio = \"1\"\nanyhow = \"1\"\n";
+        // Shape-excluded: the structural violation is gone, the sort one stays.
+        let excluded = run_doc_shape(&cfg, src, true);
+        assert_eq!(excluded.len(), 1, "{excluded:?}");
+        assert_eq!(excluded[0].0, "sort-dependencies");
+        // Not excluded: both fire.
+        let full = run_doc_shape(&cfg, src, false);
+        assert!(full.iter().any(|(r, _)| *r == "section-order"), "{full:?}");
+        assert!(full.iter().any(|(r, _)| *r == "sort-dependencies"), "{full:?}");
     }
 
     #[test]

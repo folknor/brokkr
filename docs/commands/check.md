@@ -176,7 +176,10 @@ forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
 `allow_marker` (+ `allow_marker_above = N` for a marker up to N lines above),
 `except`, `in_toml_section`, `table_row_only`, `skip_after` (a regex past which
 the rest of a file is exempt, e.g. to ignore a test module),
-`only_if_file_matches` (a file-scope precondition regex), `region`
+`only_if_file_matches` (a file-scope precondition regex; add
+`only_if_file_matches_above = true` to require the precondition at or above each
+match rather than anywhere in the file, so an import below the match - e.g.
+inside a test module - no longer arms the rule), `region`
 (`code`/`string`/`comment` - scope the pattern to a lexical region of a Rust
 file, tokenized with `rustc_lexer`, so a rule never fires on a match quoted in
 a comment or string), `join_wrapped_use` (match against whole `use ...;`
@@ -200,8 +203,13 @@ Manifest phase runs next, only when a `[manifest]` section enables a check
 (off by default, inert otherwise). It parses each `Cargo.toml` matching
 `[manifest].paths` (minus `exclude`) with `toml_edit` and enforces structural
 conventions - today `sort_dependencies` (dependency keys sorted within each
-blank-line group). JSON mode emits `manifest`/`manifest_summary`. See
-`src/manifest.rs`.
+blank-line group; `[dependencies.<name>]` dotted sections, which TOML forces
+physically after the inline table, are their own group and never ordered against
+it). `shape_exclude` globs excuse a manifest from the structural checks only
+(section/crate-type/package-field order, `[lints] workspace`, bin/example flags
+- the same set a `cargo-fuzz = true` stub skips) while still sort-checking it;
+`exclude` skips the file entirely. JSON mode emits `manifest`/`manifest_summary`.
+See `src/manifest.rs`.
 
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads
