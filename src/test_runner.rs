@@ -21,6 +21,14 @@ use crate::ratatoskr::process::snapshot_proc;
 pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
+/// Whole-sweep wall-clock ceiling for a parallel test sweep. Once libtest runs
+/// tests concurrently its output interleaves, so the per-test hang watchdog
+/// (which attributes a stall to a named test from sequential markers) is
+/// impossible; a parallel sweep gets this single coarse timeout instead.
+/// Generous - a real parallel workspace suite runs in minutes - so it only
+/// trips on a genuinely wedged run.
+pub(crate) const PARALLEL_SWEEP_TIMEOUT: Duration = Duration::from_secs(1800);
+
 pub(crate) struct LibtestRun {
     pub(crate) captured: CapturedOutput,
     pub(crate) outcome: LibtestOutcome,
@@ -189,6 +197,139 @@ where
         build_elapsed,
         completed,
     })
+}
+
+/// Outcome of a parallel (non-watchdog) test sweep.
+pub(crate) struct ParallelRun {
+    pub captured: CapturedOutput,
+    /// True when the whole-sweep timeout was hit and the process group killed.
+    pub timed_out: bool,
+}
+
+/// Run `cargo test` for a sweep that opted into parallel execution. Unlike
+/// [`streaming_run_libtest`] there is no `--test-threads=1` enforcement and no
+/// per-test hang watchdog - just streaming output and a single whole-sweep
+/// wall-clock `timeout` that kills the cargo process group if exceeded (or on a
+/// cooperative `brokkr kill` / Ctrl-C).
+pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    timeout: Duration,
+    forward_stdout_line: Out,
+    forward_stderr_line: Err,
+    on_build_finished: Fin,
+) -> Result<ParallelRun, DevError>
+where
+    Out: FnMut(&str) + Send + 'static,
+    Err: FnMut(&str) + Send + 'static,
+    Fin: FnOnce(Duration) + Send + 'static,
+{
+    let start = Instant::now();
+    let mut child = spawn_cargo_process_group(args, cwd, env)?;
+    // Spawned with `process_group(0)`, so the child's pid is its pgid.
+    let cargo_pid = child.id();
+
+    let Some(stdout_pipe) = child.stdout.take() else {
+        return Err(DevError::Build("cargo stdout was not piped".into()));
+    };
+    let Some(stderr_pipe) = child.stderr.take() else {
+        return Err(DevError::Build("cargo stderr was not piped".into()));
+    };
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    let stdout_buf_t = Arc::clone(&stdout_buf);
+    let stdout_thread = thread::spawn(move || {
+        drain_plain(stdout_pipe, &stdout_buf_t, forward_stdout_line);
+    });
+    let stderr_buf_t = Arc::clone(&stderr_buf);
+    let stderr_thread = thread::spawn(move || {
+        drain_stderr(
+            stderr_pipe,
+            &stderr_buf_t,
+            forward_stderr_line,
+            start,
+            on_build_finished,
+        );
+    });
+
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                let overtime = start.elapsed() >= timeout;
+                if overtime || crate::shutdown::is_shutdown_requested() {
+                    timed_out = overtime;
+                    kill_process_group(cargo_pid).ok();
+                    let status = child.wait().map_err(|e| DevError::Subprocess {
+                        program: "cargo".into(),
+                        code: None,
+                        stderr: e.to_string(),
+                    })?;
+                    break status;
+                }
+                thread::sleep(WATCHDOG_POLL);
+            }
+            Err(e) => {
+                return Err(DevError::Subprocess {
+                    program: "cargo".into(),
+                    code: None,
+                    stderr: e.to_string(),
+                });
+            }
+        }
+    };
+
+    stdout_thread.join().ok();
+    stderr_thread.join().ok();
+
+    let elapsed = start.elapsed();
+    let stdout = clone_buffer(&stdout_buf, "stdout")?;
+    let stderr = clone_buffer(&stderr_buf, "stderr")?;
+    Ok(ParallelRun {
+        captured: CapturedOutput {
+            status,
+            stdout,
+            stderr,
+            elapsed,
+        },
+        timed_out,
+    })
+}
+
+/// Line-buffered pipe drain with no watchdog marker parsing - the parallel
+/// runner just captures and forwards.
+fn drain_plain<F>(mut pipe: ChildStdout, buf: &Mutex<Vec<u8>>, mut forward_line: F)
+where
+    F: FnMut(&str),
+{
+    let mut read_buf = [0_u8; 4096];
+    let mut line = Vec::<u8>::new();
+    while let Ok(n) = pipe.read(&mut read_buf) {
+        if n == 0 {
+            break;
+        }
+        if let Ok(mut out) = buf.lock() {
+            out.extend_from_slice(&read_buf[..n]);
+        }
+        for &byte in &read_buf[..n] {
+            if byte == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                forward_line(&String::from_utf8_lossy(&line));
+                line.clear();
+            } else {
+                line.push(byte);
+            }
+        }
+    }
+    if !line.is_empty() {
+        forward_line(&String::from_utf8_lossy(&line));
+    }
 }
 
 fn spawn_cargo_process_group(

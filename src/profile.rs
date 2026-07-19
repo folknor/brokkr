@@ -37,6 +37,13 @@ pub struct ResolvedSweep {
     /// `--workspace --exclude <pkg>`. From the `[[check]]` entry's
     /// `test_exclude_packages`. Test phase only; clippy stays workspace-wide.
     pub test_exclude_packages: Vec<String>,
+    /// The profile's resolved `test_threads`, carried raw so the check test
+    /// phase can decide serial vs parallel: `None`/`Some(1)` run under the
+    /// per-test watchdog (`--test-threads=1`); `Some(0)` runs at libtest's
+    /// default parallelism; `Some(n>=2)` runs `--test-threads=n`. The last two
+    /// bypass the watchdog for a whole-sweep timeout. `brokkr test` ignores
+    /// this and is always serial.
+    pub test_threads: Option<u32>,
     /// `--include-ignored`, `--test-threads=N`, `--skip` flags emitted
     /// after `--` to libtest. Derived from the merged profile.
     pub libtest_args: Vec<String>,
@@ -75,6 +82,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         cargo_test_filters: Vec::new(),
         name_filters: Vec::new(),
         env: entry.env.clone(),
+        test_threads: None,
     }
 }
 
@@ -194,12 +202,13 @@ fn collect_extends_chain<'a>(
 }
 
 fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> ResolvedSweep {
+    // `test_threads` is NOT pushed into `libtest_args` here. It is carried raw
+    // on the sweep so each consumer applies its own policy: the check test
+    // phase turns it into `--test-threads=N` (or a parallel run), while
+    // `brokkr test` ignores it and forces `--test-threads=1`.
     let mut libtest_args: Vec<String> = Vec::new();
     if profile.include_ignored {
         libtest_args.push("--include-ignored".into());
-    }
-    if let Some(n) = profile.test_threads {
-        libtest_args.push(format!("--test-threads={n}"));
     }
     for s in &profile.skip {
         libtest_args.push("--skip".into());
@@ -229,6 +238,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         cargo_test_filters,
         name_filters: profile.only.clone(),
         env,
+        test_threads: profile.test_threads,
     }
 }
 
@@ -378,9 +388,12 @@ env = { BROKKR_TEST_PLATFORM = "1" }
             "got: {:?}",
             r[0].libtest_args
         );
+        // test_threads is carried raw on the sweep, not pushed into
+        // libtest_args (consumers apply their own thread policy).
+        assert_eq!(r[0].test_threads, Some(1));
         assert!(
-            r[0].libtest_args.contains(&"--test-threads=1".into()),
-            "got: {:?}",
+            !r[0].libtest_args.iter().any(|a| a.starts_with("--test-threads")),
+            "test_threads must not be pushed into libtest_args: {:?}",
             r[0].libtest_args
         );
         assert_eq!(r[0].env.get("BROKKR_TEST_PLATFORM").map(String::as_str), Some("1"));
@@ -441,6 +454,24 @@ test_exclude_packages = ["nautilus-pyo3", "nautilus-python"]
         );
         // Clippy scoping (`packages`) stays empty - excludes are test-only.
         assert!(s.packages.is_empty());
+    }
+
+    #[test]
+    fn resolve_carries_parallel_test_threads() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "all"
+features = ["a"]
+
+[test.profiles.fast]
+sweeps = ["all"]
+test_threads = 8
+"#,
+        );
+        let r = resolve(&cfg, &checks, "fast").unwrap();
+        assert_eq!(r[0].test_threads, Some(8));
+        assert!(!r[0].libtest_args.iter().any(|a| a.starts_with("--test-threads")));
     }
 
     #[test]

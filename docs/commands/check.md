@@ -14,11 +14,31 @@ Gremlins + dependency rules + clippy + tests. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
-to libtest after the enforced `--test-threads=1` (e.g.
+to libtest after the default `--test-threads=1` (e.g.
 `brokkr check -- -- --ignored`). With no separator, every token is
 cargo-level. The test phase also fails on a successful `cargo test` that ran
 zero tests (suites=0, or filters excluded everything) so a too-narrow
 profile/filter combo can't silently green-light a check.
+
+### Serial vs parallel test sweeps
+
+By default the test phase runs each sweep serial (`--test-threads=1`) under
+the per-test hang watchdog (see below), which needs libtest's sequential
+output to attribute a stall to a named test. A profile can opt a sweep into
+parallel execution with `test_threads`:
+
+- unset or `test_threads = 1` - serial, per-test watchdog (the default; nothing
+  changes for existing projects).
+- `test_threads = 0` - libtest's default parallelism (num_cpus).
+- `test_threads = N` (>= 2) - `--test-threads=N`.
+
+A parallel sweep gives up per-test hang attribution (impossible once output
+interleaves) and instead runs under a single whole-sweep wall-clock ceiling
+(30 min); exceeding it kills the cargo process group and fails the sweep. This
+is for large workspaces where serial execution is dominated by a few
+wall-clock-heavy tests (live/network/multi-second lifecycle) that parallelism
+hides. `brokkr test` is unaffected - it is always serial regardless of the
+profile's `test_threads`.
 
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's

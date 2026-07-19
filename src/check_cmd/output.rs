@@ -142,11 +142,12 @@ fn run_one_test_sweep(
         args.push("--message-format=json".into());
     }
 
-    // Anything that has to land after `--` is libtest's. The watchdog
-    // requires sequential libtest output, so `--test-threads=1` is the
-    // default unless the profile already set it. Libtest pass-through
-    // (post `-- --` tokens) stays after the enforced thread setting;
-    // overriding test threads to anything but 1 is rejected.
+    // Thread policy. A serial sweep (`test_threads` unset or 1) runs under the
+    // per-test hang watchdog, which requires `--test-threads=1`. A sweep whose
+    // profile set `test_threads` to 0 (libtest default parallelism) or >=2 runs
+    // in parallel - no watchdog, one whole-sweep timeout instead.
+    let parallel = matches!(sweep.test_threads, Some(n) if n != 1);
+
     let mut libtest_args = Vec::new();
     for s in &sweep.libtest_args {
         libtest_args.push(s.clone());
@@ -154,15 +155,24 @@ fn run_one_test_sweep(
     for n in &sweep.name_filters {
         libtest_args.push(n.clone());
     }
-    if test_runner::effective_test_threads(&libtest_args)?.is_none() {
+    if parallel {
+        // Some(0) leaves the flag off (libtest default); Some(n>=2) sets n.
+        if let Some(n) = sweep.test_threads
+            && n >= 2
+        {
+            libtest_args.push(format!("--test-threads={n}"));
+        }
+    } else if test_runner::effective_test_threads(&libtest_args)?.is_none() {
         libtest_args.push("--test-threads=1".into());
     }
     for e in libtest_extra {
         libtest_args.push(e.clone());
     }
-    if test_runner::effective_test_threads(&libtest_args)? != Some(1) {
+    if !parallel && test_runner::effective_test_threads(&libtest_args)? != Some(1) {
         return Err(DevError::Config(
-            "brokkr check watchdog requires --test-threads=1; remove the override or run the test outside brokkr check".into(),
+            "brokkr check watchdog requires --test-threads=1; set `test_threads` in \
+             the profile to run this sweep in parallel, or drop the --test-threads \
+             override".into(),
         ));
     }
 
@@ -190,25 +200,54 @@ fn run_one_test_sweep(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let json_mode = json;
-    let run = test_runner::streaming_run_libtest(
-        &arg_refs,
-        project_root,
-        &env_refs,
-        test_runner::TEST_TIMEOUT,
-        |_| {},
-        |_| {},
-        move |elapsed| {
-            if !json_mode {
-                println!(
-                    "[test]    test binaries built in {:.1}s; running tests",
-                    elapsed.as_secs_f64()
-                );
-            }
-        },
-    )?;
-    let captured = run.captured;
+
+    // Serial => the watchdog runner; parallel => the whole-sweep-timeout
+    // runner. Both reduce to (captured, optional hung test, timed_out, per-test
+    // timings) so the reporting below is shared.
+    let (captured, hung, timed_out, completed) = if parallel {
+        let run = test_runner::run_libtest_parallel(
+            &arg_refs,
+            project_root,
+            &env_refs,
+            test_runner::PARALLEL_SWEEP_TIMEOUT,
+            |_| {},
+            |_| {},
+            move |elapsed| {
+                if !json_mode {
+                    println!(
+                        "[test]    test binaries built in {:.1}s; running tests (parallel)",
+                        elapsed.as_secs_f64()
+                    );
+                }
+            },
+        )?;
+        (run.captured, None, run.timed_out, Vec::new())
+    } else {
+        let run = test_runner::streaming_run_libtest(
+            &arg_refs,
+            project_root,
+            &env_refs,
+            test_runner::TEST_TIMEOUT,
+            |_| {},
+            |_| {},
+            move |elapsed| {
+                if !json_mode {
+                    println!(
+                        "[test]    test binaries built in {:.1}s; running tests",
+                        elapsed.as_secs_f64()
+                    );
+                }
+            },
+        )?;
+        let hung = match run.outcome {
+            LibtestOutcome::HungTest(h) => Some(h),
+            LibtestOutcome::Completed => None,
+        };
+        (run.captured, hung, false, run.completed)
+    };
+
     if let Some(out) = timings {
-        for (name, elapsed) in run.completed {
+        for (name, elapsed) in completed {
             out.push(TestTiming {
                 sweep: sweep.label.clone(),
                 name,
@@ -221,7 +260,20 @@ fn run_one_test_sweep(
     let stderr = String::from_utf8_lossy(&captured.stderr);
     let label_for_tag = if multi { Some(sweep.label.as_str()) } else { None };
 
-    if let LibtestOutcome::HungTest(hung) = run.outcome {
+    if timed_out {
+        if json {
+            emit_json_test_sweep(label_for_tag, &stdout, &stderr, false);
+        } else {
+            output::error(&format!(
+                "sweep '{}' exceeded the parallel test timeout ({}s) and was killed",
+                sweep.label,
+                test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
+            ));
+        }
+        return Ok(false);
+    }
+
+    if let Some(hung) = hung {
         if json {
             emit_json_test_hung(label_for_tag, &hung);
         } else {
