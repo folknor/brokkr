@@ -762,6 +762,7 @@ mod tests {
             test_endpoint_env_graph: None,
             test_endpoint_env_gmail: Some("RATATOSKR_TEST_GMAIL_ENDPOINT".into()),
             test_endpoint_env_caldav: Some("RATATOSKR_TEST_CALDAV_ENDPOINT".into()),
+            test_endpoint_env_carddav: Some("RATATOSKR_TEST_CARDDAV_ENDPOINT".into()),
             test_endpoint_env_people: Some("RATATOSKR_TEST_PEOPLE_ENDPOINT".into()),
             test_endpoint_env_gcal: Some("RATATOSKR_TEST_GCAL_ENDPOINT".into()),
             sync_script_dir: None,
@@ -777,6 +778,7 @@ mod tests {
             graph: 1004,
             gmail: 1005,
             caldav: 1006,
+            carddav: 1009,
             people: 1007,
             gcal: 1008,
         }
@@ -794,6 +796,7 @@ mod tests {
                 "RATATOSKR_TEST_IMAP_ENDPOINT",
                 "RATATOSKR_TEST_GMAIL_ENDPOINT",
                 "RATATOSKR_TEST_CALDAV_ENDPOINT",
+                "RATATOSKR_TEST_CARDDAV_ENDPOINT",
                 "RATATOSKR_TEST_PEOPLE_ENDPOINT",
                 "RATATOSKR_TEST_GCAL_ENDPOINT",
             ]
