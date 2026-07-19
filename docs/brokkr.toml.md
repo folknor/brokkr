@@ -242,6 +242,15 @@ sort_dependencies = true    # keys sorted within each blank-line dependency grou
   `[dev-dependencies]` / `[build-dependencies]` / `[workspace.dependencies]`
   table (target-cfg variants included). A blank line resets the ordering, so
   intentionally grouped manifests pass.
+- `section_order` (list; empty = off) - required relative order of top-level
+  sections. Only sections both present and listed are constrained; a listed
+  section appearing before an earlier-listed one is a violation.
+- `crate_type_order` (list; empty = off) - required relative order of
+  `[lib] crate-type` entries, e.g. `["rlib", "staticlib", "cdylib"]`.
+
+`section_order` and `crate_type_order` (and the later structural checks) skip a
+`cargo-fuzz = true` crate (its `[package.metadata]`), matching the hook's
+standalone-fuzz-workspace exemption.
 
 See `src/manifest.rs`.
 

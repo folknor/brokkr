@@ -261,6 +261,17 @@ pub struct ManifestConfig {
     /// variants included). Off by default.
     #[serde(default)]
     pub sort_dependencies: bool,
+    /// Required relative order of top-level sections. Only sections present and
+    /// named here are constrained (others may appear anywhere); a listed
+    /// section appearing before an earlier-listed one is a violation. Empty =
+    /// off. `cargo-fuzz = true` crates are exempt.
+    #[serde(default)]
+    pub section_order: Vec<String>,
+    /// Required relative order of `[lib] crate-type` entries (e.g.
+    /// `["rlib", "staticlib", "cdylib"]`). Only listed values are constrained.
+    /// Empty = off. `cargo-fuzz = true` crates are exempt.
+    #[serde(default)]
+    pub crate_type_order: Vec<String>,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must

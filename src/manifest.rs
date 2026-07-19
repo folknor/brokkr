@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Table};
+use toml_edit::{DocumentMut, Item, Table};
 
 use crate::config::ManifestConfig;
 use crate::error::DevError;
@@ -97,6 +97,94 @@ fn check_document(
     if cfg.sort_dependencies {
         check_sorted_dependencies(rel, doc.as_table(), out);
     }
+    // Checks that describe a crate's own structure are moot for a cargo-fuzz
+    // stub (its own tiny standalone workspace), which the hook exempts.
+    if is_cargo_fuzz(doc) {
+        return;
+    }
+    if !cfg.section_order.is_empty() {
+        check_section_order(rel, doc, &cfg.section_order, out);
+    }
+    if !cfg.crate_type_order.is_empty() {
+        check_crate_type_order(rel, doc, &cfg.crate_type_order, out);
+    }
+}
+
+/// A `cargo-fuzz` crate declares `[package.metadata] cargo-fuzz = true`.
+fn is_cargo_fuzz(doc: &DocumentMut) -> bool {
+    doc.get("package")
+        .and_then(Item::as_table)
+        .and_then(|p| p.get("metadata"))
+        .and_then(Item::as_table)
+        .and_then(|m| m.get("cargo-fuzz"))
+        .and_then(Item::as_bool)
+        == Some(true)
+}
+
+/// Flag any listed top-level section that appears before an earlier-listed one.
+/// Sections absent from `order` are unconstrained.
+fn check_section_order(
+    rel: &Path,
+    doc: &DocumentMut,
+    order: &[String],
+    out: &mut Vec<ManifestViolation>,
+) {
+    let rank = |name: &str| order.iter().position(|s| s == name);
+    let mut max_rank = 0usize;
+    let mut max_name = "";
+    for (name, _) in doc.as_table() {
+        let Some(r) = rank(name) else {
+            continue;
+        };
+        if r < max_rank {
+            out.push(ManifestViolation {
+                file: rel.to_path_buf(),
+                rule: "section-order",
+                message: format!("[{name}] section should come before [{max_name}]"),
+            });
+        } else {
+            max_rank = r;
+            max_name = name;
+        }
+    }
+}
+
+/// Flag `[lib] crate-type` entries that are out of the required relative order.
+fn check_crate_type_order(
+    rel: &Path,
+    doc: &DocumentMut,
+    order: &[String],
+    out: &mut Vec<ManifestViolation>,
+) {
+    let Some(arr) = doc
+        .get("lib")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get("crate-type"))
+        .and_then(Item::as_array)
+    else {
+        return;
+    };
+    let rank = |name: &str| order.iter().position(|s| s == name);
+    let mut max_rank = 0usize;
+    let mut max_name = String::new();
+    for v in arr {
+        let Some(name) = v.as_str() else {
+            continue;
+        };
+        let Some(r) = rank(name) else {
+            continue;
+        };
+        if r < max_rank {
+            out.push(ManifestViolation {
+                file: rel.to_path_buf(),
+                rule: "crate-type-order",
+                message: format!("crate-type `{name}` should come before `{max_name}`"),
+            });
+        } else {
+            max_rank = r;
+            max_name = name.to_string();
+        }
+    }
 }
 
 /// Walk every dependency table (at any depth) and require each blank-line
@@ -153,6 +241,13 @@ mod tests {
         out.iter().map(|v| v.message.clone()).collect()
     }
 
+    fn run_doc(cfg: &ManifestConfig, src: &str) -> Vec<(&'static str, String)> {
+        let doc: DocumentMut = src.parse().unwrap();
+        let mut out = Vec::new();
+        check_document(Path::new("Cargo.toml"), &doc, cfg, &mut out);
+        out.iter().map(|v| (v.rule, v.message.clone())).collect()
+    }
+
     #[test]
     fn sorted_dependencies_pass() {
         let src = "[dependencies]\nanyhow = \"1\"\nserde = \"1\"\ntokio = \"1\"\n";
@@ -205,5 +300,56 @@ mod tests {
     fn workspace_dependencies_are_checked() {
         let src = "[workspace.dependencies]\nb = \"1\"\na = \"1\"\n";
         assert_eq!(violations(src).len(), 1);
+    }
+
+    fn order_cfg() -> ManifestConfig {
+        ManifestConfig {
+            section_order: ["package", "lib", "features", "dependencies"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            crate_type_order: ["rlib", "staticlib", "cdylib"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn section_order_pass_and_fail() {
+        let good = "[package]\nname = \"x\"\n[features]\n[dependencies]\n";
+        assert!(run_doc(&order_cfg(), good).is_empty());
+        // features declared before lib -> lib is out of order.
+        let bad = "[package]\nname = \"x\"\n[features]\n[lib]\n";
+        let v = run_doc(&order_cfg(), bad);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, "section-order");
+        assert!(v[0].1.contains("[lib]"), "{v:?}");
+    }
+
+    #[test]
+    fn crate_type_order_flags_reversed() {
+        let bad = "[package]\nname = \"x\"\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n";
+        let v = run_doc(&order_cfg(), bad);
+        assert!(v.iter().any(|(r, _)| *r == "crate-type-order"), "{v:?}");
+        let good = "[package]\nname = \"x\"\n[lib]\ncrate-type = [\"rlib\", \"cdylib\"]\n";
+        assert!(
+            !run_doc(&order_cfg(), good)
+                .iter()
+                .any(|(r, _)| *r == "crate-type-order")
+        );
+    }
+
+    #[test]
+    fn cargo_fuzz_crate_is_exempt_from_structure_checks() {
+        // A reversed crate-type would fail crate-type-order, but a cargo-fuzz
+        // stub is exempt from the structural checks.
+        let src = "[package]\nname = \"x\"\n\n[package.metadata]\ncargo-fuzz = true\n\n\
+                   [lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n";
+        assert!(run_doc(&order_cfg(), src).is_empty());
+        // Sanity: without the cargo-fuzz marker the same manifest is flagged.
+        let plain = "[package]\nname = \"x\"\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n";
+        assert!(!run_doc(&order_cfg(), plain).is_empty());
     }
 }
