@@ -24,7 +24,8 @@ use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
-    CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, StyleConfig, TestConfig, TextlintRule,
+    CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig, StyleConfig,
+    TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -46,6 +47,7 @@ pub(crate) fn cmd_check(
     style_cfg: Option<&StyleConfig>,
     header_cfg: Option<&HeaderConfig>,
     textlint_rules: &[TextlintRule],
+    manifest_cfg: Option<&ManifestConfig>,
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
@@ -76,6 +78,7 @@ pub(crate) fn cmd_check(
         run_style(project_root, style_cfg, gremlins_cfg, json, limit, all)?;
         run_header(project_root, header_cfg, json, limit, all)?;
         run_textlint(project_root, textlint_rules, json, limit, all)?;
+        run_manifest(project_root, manifest_cfg, json, limit, all)?;
         run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
         run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
         run_test_phase(
@@ -557,6 +560,66 @@ fn run_textlint(
     }
 
     Err(DevError::Build("textlint failed".into()))
+}
+
+/// The `[manifest]` phase: native structural `Cargo.toml` conventions. Inert
+/// unless the project has a `[manifest]` section with at least one check on.
+fn run_manifest(
+    project_root: &Path,
+    manifest_cfg: Option<&ManifestConfig>,
+    json: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
+    let Some(cfg) = manifest_cfg else {
+        return Ok(());
+    };
+
+    let violations = crate::manifest::scan(project_root, cfg)?;
+
+    if json {
+        for v in &violations {
+            cargo_json::emit(&cargo_json::CheckEvent::Manifest(cargo_json::ManifestEvent {
+                file: v.file.display().to_string(),
+                rule: v.rule,
+            }));
+        }
+        cargo_json::emit(&cargo_json::CheckEvent::ManifestSummary(
+            cargo_json::ManifestSummaryEvent {
+                status: if violations.is_empty() { "ok" } else { "failed" },
+                violations: violations.len(),
+            },
+        ));
+    }
+
+    if violations.is_empty() {
+        if !json {
+            output::run_msg("manifest: ok");
+        }
+        return Ok(());
+    }
+
+    if !json {
+        output::run_msg("manifest: Cargo.toml conventions");
+        let total = violations.len();
+        let displayed = if all || total <= limit {
+            &violations[..]
+        } else {
+            &violations[..limit]
+        };
+        let mut msg = format!("manifest: {total} violation(s)\n");
+        for v in displayed {
+            msg.push_str("  ");
+            msg.push_str(&crate::manifest::format_one(v));
+            msg.push('\n');
+        }
+        if displayed.len() < total {
+            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        }
+        output::error(msg.trim_end());
+    }
+
+    Err(DevError::Build("manifest check failed".into()))
 }
 
 fn run_dependency_rules(

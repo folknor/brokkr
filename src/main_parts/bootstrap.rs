@@ -237,6 +237,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             style_cfg,
             header_cfg,
             textlint_rules,
+            manifest_cfg,
             project_root,
         ) = match project::detect_optional()? {
             Some(d) => (
@@ -248,6 +249,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 d.config.style,
                 d.config.header,
                 d.config.textlint,
+                d.config.manifest,
                 d.build_root,
             ),
             None => (
@@ -259,6 +261,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 None,
                 None,
                 Vec::new(),
+                None,
                 std::env::current_dir()?,
             ),
         };
@@ -273,6 +276,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             style_cfg.as_ref(),
             header_cfg.as_ref(),
             &textlint_rules,
+            manifest_cfg.as_ref(),
             &features,
             no_default_features,
             package.as_deref(),

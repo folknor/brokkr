@@ -26,6 +26,22 @@ pub enum CheckEvent {
     HeaderSummary(HeaderSummaryEvent),
     Textlint(TextlintEvent),
     TextlintSummary(TextlintSummaryEvent),
+    Manifest(ManifestEvent),
+    ManifestSummary(ManifestSummaryEvent),
+}
+
+/// One `[manifest]` structural violation.
+#[derive(Serialize)]
+pub struct ManifestEvent {
+    pub file: String,
+    pub rule: &'static str,
+}
+
+/// Closing tally for the `[manifest]` phase.
+#[derive(Serialize)]
+pub struct ManifestSummaryEvent {
+    pub status: &'static str,
+    pub violations: usize,
 }
 
 /// One `[header]` missing/stale-header violation.

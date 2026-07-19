@@ -44,6 +44,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let style = parse_style(table)?;
     let header = parse_header(table)?;
     let textlint = parse_textlint(table)?;
+    let manifest = parse_manifest(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -65,9 +66,24 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             style,
             header,
             textlint,
+            manifest,
             disable_toolchain,
         },
     ))
+}
+
+/// Parse the optional `[manifest]` section. Absent -> `None`.
+fn parse_manifest(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<ManifestConfig>, DevError> {
+    let Some(value) = table.get("manifest") else {
+        return Ok(None);
+    };
+    let cfg: ManifestConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[manifest]: {e}")))?;
+    Ok(Some(cfg))
 }
 
 /// Parse the optional `[header]` section. Absent -> `None`. Requires a
@@ -245,6 +261,7 @@ fn parse_hosts(
             || key == "style"
             || key == "header"
             || key == "textlint"
+            || key == "manifest"
             || key == "disable_toolchain"
         {
             continue;

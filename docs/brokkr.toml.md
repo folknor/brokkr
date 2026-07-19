@@ -217,7 +217,33 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
   in that file is exempt - the matching line itself is still checked). For
   "don't fire inside the test module": `skip_after = '^#\[cfg\(test\)\]'`.
 
-No arbitrary multiline matching. See `src/textlint.rs`.
+No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
+statements). See `src/textlint.rs` and `src/lex.rs`.
+
+## `[manifest]` section
+
+Native structural `Cargo.toml` conventions (the manifest phase), on the
+`[style]` model - discrete named toggles, not a rule DSL. Each check reads a
+manifest with `toml_edit`, so it sees structure a value-only parse discards
+(blank-line groups, key order). Inert unless a check is enabled; absent = the
+phase is skipped.
+
+```toml
+[manifest]
+paths = ["**/Cargo.toml"]   # default when omitted
+exclude = ["fuzz/**"]
+sort_dependencies = true    # keys sorted within each blank-line dependency group
+```
+
+- `paths` / `exclude` - globs for the manifests checked (default
+  `["**/Cargo.toml"]`) and any excused from every check.
+- `sort_dependencies` (default `false`) - dependency keys must be alphabetical
+  within each blank-line-separated group of a `[dependencies]` /
+  `[dev-dependencies]` / `[build-dependencies]` / `[workspace.dependencies]`
+  table (target-cfg variants included). A blank line resets the ordering, so
+  intentionally grouped manifests pass.
+
+See `src/manifest.rs`.
 
 ## Datasets and variant-selection flags
 

@@ -184,6 +184,13 @@ statements, reconstructing a rustfmt-wrapped import onto one line first). JSON
 mode emits `textlint`/`textlint_summary`. The generic engine behind most
 grep-style convention hooks; see `src/textlint.rs`.
 
+Manifest phase runs next, only when a `[manifest]` section enables a check
+(off by default, inert otherwise). It parses each `Cargo.toml` matching
+`[manifest].paths` (minus `exclude`) with `toml_edit` and enforces structural
+conventions - today `sort_dependencies` (dependency keys sorted within each
+blank-line group). JSON mode emits `manifest`/`manifest_summary`. See
+`src/manifest.rs`.
+
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads
 `cargo metadata --no-deps` and fails on configured direct dependency boundary

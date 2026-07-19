@@ -50,6 +50,10 @@ pub struct DevConfig {
     /// `brokkr check`. Empty when the project defines no `[[textlint]]`
     /// entries. See [`TextlintRule`].
     pub textlint: Vec<TextlintRule>,
+    /// `[manifest]` config: native structural `Cargo.toml` conventions
+    /// (dependency ordering, ...) run by `brokkr check`. `None` when the
+    /// project has no `[manifest]` section. See [`ManifestConfig`].
+    pub manifest: Option<ManifestConfig>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -235,6 +239,28 @@ pub struct TextlintRule {
     /// Rust-only. Off by default.
     #[serde(default)]
     pub join_wrapped_use: bool,
+}
+
+/// `[manifest]` section: native structural `Cargo.toml` conventions checked by
+/// `brokkr check` on the `[style]` model - discrete named toggles, not a rule
+/// DSL. Inert unless at least one check is enabled. Each check reads a manifest
+/// with `toml_edit` (comment- and order-preserving), so it can see structure a
+/// value-only parse discards (blank-line groups, key order).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestConfig {
+    /// Globs for the manifests to check. Empty = `["**/Cargo.toml"]`.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Globs for manifests excused from every check. Empty by default.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Require dependency keys to be sorted within each blank-line-separated
+    /// group of a `[dependencies]` / `[dev-dependencies]` /
+    /// `[build-dependencies]` / `[workspace.dependencies]` table (target-cfg
+    /// variants included). Off by default.
+    #[serde(default)]
+    pub sort_dependencies: bool,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must

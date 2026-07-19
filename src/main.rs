@@ -24,6 +24,7 @@ mod invalidate_cmd;
 mod litehtml;
 mod lex;
 mod lockfile;
+mod manifest;
 mod measure;
 mod nidhogg;
 mod oom;
