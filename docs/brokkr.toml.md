@@ -191,6 +191,14 @@ name = "consumer"
 no_default_features = true
 features = ["commands"]
 build_packages = ["pbfhogg-cli"]
+
+# Virtual workspace (no root package): scope with `packages` so `--features`
+# is legal, and pin a build-affecting var for the whole sweep with `env`.
+[[check]]
+name = "core"
+packages = ["nautilus-core", "nautilus-common"]
+features = ["high-precision"]
+env = { HIGH_PRECISION = "1" }
 ```
 
 - `name` (required) - label surfaced in output and the key profiles use to
@@ -206,6 +214,18 @@ build_packages = ["pbfhogg-cli"]
   integration tests invoke a separate CLI workspace member, otherwise
   `cargo test -p <lib>` leaves the binary in whatever state it was last built
   and the consumer-sweep contract goes unverified.
+- `packages` (optional, default `[]`) - packages the sweep is scoped to,
+  emitted as `-p <pkg>` on both `cargo clippy` and `cargo test`. Required to
+  use `features` in a **virtual workspace** (one with no root package): cargo
+  rejects `--features` at the workspace root, so the sweep must name the
+  package(s) the features belong to. Distinct from `build_packages`, which
+  only pre-builds CLI binaries; `packages` scopes the check itself.
+- `env` (optional, default `{}`) - environment variables exported to *every*
+  cargo subprocess the sweep runs: clippy, the test-phase pre-build, and the
+  test run. Use it to pin a build-affecting toggle (e.g. a codegen flag whose
+  drift you'd otherwise catch only in `git status`) so `brokkr check` is
+  reproducible without exporting it by hand. Merged under a referencing
+  profile's `env`, with the entry winning on a key collision.
 
 The legacy `[check]` table form (with `consumer_features`) is rejected at
 parse time with a migration message - move the flags into a `[[check]]` entry.

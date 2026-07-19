@@ -1159,12 +1159,14 @@ mod tests {
                 features: vec!["test-hooks".into(), "linux-direct-io".into()],
                 no_default_features: false,
                 build_packages: vec!["pbfhogg-cli".into()],
+                ..Default::default()
             },
             CheckEntry {
                 name: "consumer".into(),
                 features: vec!["commands".into()],
                 no_default_features: true,
                 build_packages: vec!["pbfhogg-cli".into()],
+                ..Default::default()
             },
         ];
         let sweeps = decide_sweeps(None, &entries).unwrap();
@@ -1197,12 +1199,14 @@ sweeps = ["all", "consumer"]
                 features: vec!["a".into()],
                 no_default_features: false,
                 build_packages: vec!["pbfhogg-cli".into()],
+                ..Default::default()
             },
             CheckEntry {
                 name: "consumer".into(),
                 features: vec!["commands".into()],
                 no_default_features: true,
                 build_packages: vec!["pbfhogg-cli".into()],
+                ..Default::default()
             },
         ];
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
@@ -1233,6 +1237,7 @@ env = { BROKKR_TEST_PLATFORM = "1", FOO = "bar" }
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         }];
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
         assert_eq!(sweeps.len(), 1);
@@ -1267,6 +1272,7 @@ include_ignored = false
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         }];
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
         assert_eq!(sweeps.len(), 1);

@@ -757,6 +757,7 @@ features = ["a"]
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         }];
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -848,6 +849,7 @@ debug = true
             features: Vec::new(),
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         };
         assert!(bare.cargo_feature_args().is_empty());
 
@@ -857,6 +859,7 @@ debug = true
             features: vec!["a".into(), "b".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(feats.cargo_feature_args(), vec!["--features", "a,b"]);
 
@@ -866,6 +869,7 @@ debug = true
             features: Vec::new(),
             no_default_features: true,
             build_packages: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(nd.cargo_feature_args(), vec!["--no-default-features"]);
 
@@ -875,6 +879,7 @@ debug = true
             features: vec!["commands".into()],
             no_default_features: true,
             build_packages: vec!["pbfhogg-cli".into()],
+            ..Default::default()
         };
         assert_eq!(
             consumer.cargo_feature_args(),

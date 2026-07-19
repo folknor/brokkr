@@ -29,6 +29,10 @@ pub struct ResolvedSweep {
     /// resolved `[[check]]` entry. `cargo build --release -p <pkg>`
     /// with the same feature args.
     pub build_packages: Vec<String>,
+    /// Packages to scope the clippy / test invocation to, emitted as
+    /// `-p <pkg>`. From the `[[check]]` entry's `packages`. Needed for
+    /// `--features` to be valid in a virtual workspace.
+    pub packages: Vec<String>,
     /// `--include-ignored`, `--test-threads=N`, `--skip` flags emitted
     /// after `--` to libtest. Derived from the merged profile.
     pub libtest_args: Vec<String>,
@@ -61,10 +65,11 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         label: entry.name.clone(),
         cargo_feature_args: entry.cargo_feature_args(),
         build_packages: entry.build_packages.clone(),
+        packages: entry.packages.clone(),
         libtest_args: Vec::new(),
         cargo_test_filters: Vec::new(),
         name_filters: Vec::new(),
-        env: BTreeMap::new(),
+        env: entry.env.clone(),
     }
 }
 
@@ -202,14 +207,22 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         cargo_test_filters.push(t.clone());
     }
 
+    // Profile env is the base; the entry's own env overlays it so a
+    // sweep-specific var wins on a key collision.
+    let mut env = profile.env.clone();
+    for (k, v) in &entry.env {
+        env.insert(k.clone(), v.clone());
+    }
+
     ResolvedSweep {
         label: entry.name.clone(),
         cargo_feature_args: entry.cargo_feature_args(),
         build_packages: entry.build_packages.clone(),
+        packages: entry.packages.clone(),
         libtest_args,
         cargo_test_filters,
         name_filters: profile.only.clone(),
-        env: profile.env.clone(),
+        env,
     }
 }
 
@@ -247,6 +260,7 @@ mod tests {
             features: vec!["commands".into()],
             no_default_features: true,
             build_packages: vec!["pbfhogg-cli".into()],
+            ..Default::default()
         };
         let s = sweep_from_check_entry(&entry);
         assert_eq!(s.label, "consumer");
@@ -367,6 +381,45 @@ env = { BROKKR_TEST_PLATFORM = "1" }
     }
 
     #[test]
+    fn resolve_carries_packages_and_merges_entry_env_over_profile() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "core"
+features = ["high-precision"]
+packages = ["nautilus-core", "nautilus-common"]
+env = { HIGH_PRECISION = "1", SHARED = "entry" }
+
+[test.profiles.p]
+sweeps = ["core"]
+env = { SHARED = "profile", ONLY_PROFILE = "1" }
+"#,
+        );
+        let r = resolve(&cfg, &checks, "p").unwrap();
+        assert_eq!(r[0].packages, vec!["nautilus-core", "nautilus-common"]);
+        // Entry env present, profile-only env present, and the entry wins the
+        // `SHARED` collision.
+        assert_eq!(r[0].env.get("HIGH_PRECISION").map(String::as_str), Some("1"));
+        assert_eq!(r[0].env.get("ONLY_PROFILE").map(String::as_str), Some("1"));
+        assert_eq!(r[0].env.get("SHARED").map(String::as_str), Some("entry"));
+    }
+
+    #[test]
+    fn sweep_from_check_entry_carries_packages_and_env() {
+        let (checks, _cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "core"
+packages = ["nautilus-core"]
+env = { HIGH_PRECISION = "1" }
+"#,
+        );
+        let s = sweep_from_check_entry(&checks[0]);
+        assert_eq!(s.packages, vec!["nautilus-core"]);
+        assert_eq!(s.env.get("HIGH_PRECISION").map(String::as_str), Some("1"));
+    }
+
+    #[test]
     fn resolve_unknown_profile_errors() {
         let (checks, cfg) = parse_fragment(
             r#"
@@ -473,6 +526,7 @@ tests = ["cli_x"]
             label: "x".into(),
             cargo_feature_args: Vec::new(),
             build_packages: Vec::new(),
+            packages: Vec::new(),
             libtest_args: vec!["--include-ignored".into()],
             cargo_test_filters: Vec::new(),
             name_filters: vec!["tier2::".into()],

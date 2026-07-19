@@ -109,6 +109,12 @@ fn run_one_test_sweep(
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
 
     let mut args: Vec<String> = vec!["test".into()];
+    // Scope to the sweep's packages (`-p <pkg>`) so `--features` is valid in a
+    // virtual workspace, mirroring the clippy phase.
+    for pkg in &sweep.packages {
+        args.push("-p".into());
+        args.push(pkg.clone());
+    }
     for f in &sweep.cargo_feature_args {
         args.push(f.clone());
     }
@@ -477,6 +483,7 @@ mod tests {
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: vec!["pbfhogg-cli".into()],
+            ..Default::default()
         }];
         let sweeps = decide_active_sweeps(
             &entries,
@@ -500,6 +507,7 @@ mod tests {
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         }];
         let sweeps = decide_active_sweeps(&entries, None, None, &[], true).unwrap();
         assert_eq!(sweeps.len(), 1);
@@ -515,12 +523,14 @@ mod tests {
                 features: vec!["a".into(), "b".into()],
                 no_default_features: false,
                 build_packages: vec!["pbfhogg-cli".into()],
+                ..Default::default()
             },
             CheckEntry {
                 name: "consumer".into(),
                 features: vec!["commands".into()],
                 no_default_features: true,
                 build_packages: vec!["pbfhogg-cli".into()],
+                ..Default::default()
             },
         ];
         let sweeps = decide_active_sweeps(&entries, None, None, &[], false).unwrap();
@@ -548,6 +558,7 @@ include_ignored = false
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: vec!["pbfhogg-cli".into()],
+            ..Default::default()
         }];
         let sweeps =
             decide_active_sweeps(&entries, Some(&test_cfg), None, &[], false).unwrap();
@@ -574,6 +585,7 @@ include_ignored = true
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         }];
         let sweeps =
             decide_active_sweeps(&entries, Some(&test_cfg), Some("full"), &[], false).unwrap();
@@ -588,6 +600,7 @@ include_ignored = true
             features: vec!["a".into()],
             no_default_features: false,
             build_packages: Vec::new(),
+            ..Default::default()
         }];
         let err = decide_active_sweeps(&entries, None, Some("tier1"), &[], false)
             .unwrap_err()

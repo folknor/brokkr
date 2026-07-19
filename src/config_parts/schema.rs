@@ -154,7 +154,7 @@ where
 /// feature flags before the test phase, so `tests/cli_*.rs`
 /// `CliInvoker` calls hit a binary built for the sweep's feature set
 /// (request 2: CLI binary feature parity).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckEntry {
     pub name: String,
@@ -164,6 +164,22 @@ pub struct CheckEntry {
     pub no_default_features: bool,
     #[serde(default)]
     pub build_packages: Vec<String>,
+    /// Packages to scope the sweep's `cargo clippy` / `cargo test`
+    /// invocation to, emitted as `-p <pkg>` per entry. Required to use
+    /// `features` in a virtual workspace (one with no root package):
+    /// cargo rejects `--features` at the root, so the sweep must name the
+    /// package(s) the features belong to. Distinct from `build_packages`,
+    /// which only pre-builds CLI binaries for the test phase.
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// Environment variables exported to every cargo subprocess this sweep
+    /// runs - clippy, the test-phase pre-build, and the test run. Lets a
+    /// sweep pin a build-affecting var (e.g. a codegen toggle) so
+    /// `brokkr check` is reproducible without the caller exporting it by
+    /// hand. Merged under any profile `env`, with the entry winning on a
+    /// key collision.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 impl CheckEntry {

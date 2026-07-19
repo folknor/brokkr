@@ -170,6 +170,7 @@ pub(crate) fn decide_active_sweeps(
             label: "default".into(),
             cargo_feature_args: feature_args,
             build_packages: Vec::new(),
+            packages: Vec::new(),
             libtest_args: Vec::new(),
             cargo_test_filters: Vec::new(),
             name_filters: Vec::new(),
@@ -203,6 +204,7 @@ pub(crate) fn decide_active_sweeps(
         label: "all-features".into(),
         cargo_feature_args: vec!["--all-features".into()],
         build_packages: Vec::new(),
+        packages: Vec::new(),
         libtest_args: Vec::new(),
         cargo_test_filters: Vec::new(),
         name_filters: Vec::new(),
@@ -420,6 +422,12 @@ fn run_clippy_phase(
             "--all-targets".into(),
             "--message-format=json".into(),
         ];
+        // Scope to the sweep's packages (`-p <pkg>`) so `--features` is valid
+        // in a virtual workspace, where cargo rejects features at the root.
+        for pkg in &sweep.packages {
+            args.push("-p".into());
+            args.push(pkg.clone());
+        }
         args.extend(sweep.cargo_feature_args.iter().cloned());
         if let Some(pkg) = package {
             args.push("--package".into());
@@ -440,7 +448,20 @@ fn run_clippy_phase(
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let captured = output::run_captured("cargo", &arg_refs, project_root)?;
+        // Apply the sweep's env to the clippy build too, so a build-affecting
+        // var (codegen toggle, etc.) is set consistently across every phase -
+        // clippy, the test pre-build, and the test run - not just the tests.
+        let env_owned: Vec<(String, String)> = sweep
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let env_refs: Vec<(&str, &str)> = env_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let captured =
+            output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
         results.push(SweepResult {
             label: sweep.label.clone(),
             stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),

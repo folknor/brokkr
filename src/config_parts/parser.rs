@@ -392,6 +392,22 @@ fn parse_check(
                 entry.name
             )));
         }
+        for pkg in &entry.packages {
+            if pkg.trim().is_empty() {
+                return Err(DevError::Config(format!(
+                    "[[check]] entry '{}' has a blank string in `packages`.",
+                    entry.name
+                )));
+            }
+        }
+        for key in entry.env.keys() {
+            if key.trim().is_empty() {
+                return Err(DevError::Config(format!(
+                    "[[check]] entry '{}' has a blank `env` key.",
+                    entry.name
+                )));
+            }
+        }
     }
     Ok(entries)
 }
