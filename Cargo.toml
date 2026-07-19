@@ -22,6 +22,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 png = "0.18"
 regex = "1"
 globset = "0.4"
+rustc_lexer = "0.1.0"
 
 [lints.clippy]
 uninlined_format_args = "deny"

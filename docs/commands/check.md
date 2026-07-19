@@ -175,10 +175,12 @@ forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
 `exclude` globs); a match is a violation, subject to bounded modifiers:
 `allow_marker` (+ `allow_marker_above = N` for a marker up to N lines above),
 `except`, `in_toml_section`, `table_row_only`, `skip_after` (a regex past which
-the rest of a file is exempt, e.g. to ignore a test module), and
-`only_if_file_matches` (a file-scope precondition regex). JSON mode emits
-`textlint`/`textlint_summary`. The generic engine behind most grep-style
-convention hooks; see `src/textlint.rs`.
+the rest of a file is exempt, e.g. to ignore a test module),
+`only_if_file_matches` (a file-scope precondition regex), and `region`
+(`code`/`string`/`comment` - scope the pattern to a lexical region of a Rust
+file, tokenized with `rustc_lexer`, so a rule never fires on a match quoted in
+a comment or string). JSON mode emits `textlint`/`textlint_summary`. The
+generic engine behind most grep-style convention hooks; see `src/textlint.rs`.
 
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads

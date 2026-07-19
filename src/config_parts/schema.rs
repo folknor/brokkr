@@ -219,6 +219,14 @@ pub struct TextlintRule {
     /// Optional.
     #[serde(default)]
     pub only_if_file_matches: Option<String>,
+    /// Lexical region the `pattern` is scoped to: `code`, `string`, or
+    /// `comment`. Rust files only (tokenized with `rustc_lexer`). Off = match
+    /// the whole line. `code` never flags a pattern quoted in a comment/string;
+    /// `string` targets message text (e.g. a `", got"` phrasing rule). Only
+    /// `pattern` is scoped - `allow_marker`, `except`, and the reported line
+    /// stay the physical line. Optional.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must

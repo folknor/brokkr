@@ -198,6 +198,11 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
 - `only_if_file_matches` (regex; the rule fires only in files where some line
   matches it) - a cheap import-awareness stand-in, e.g. flag bare
   `Instant::now()` only where the file imports `Instant`.
+- `region` (`code` / `string` / `comment`; Rust files, tokenized with
+  `rustc_lexer`) scopes where `pattern` may match: `code` never flags a pattern
+  quoted in a comment or string, `string` targets message text (a `", got"`
+  phrasing rule). Only `pattern` is scoped; markers/`except`/reporting stay on
+  the physical line.
 - `except` (regexes; a line matching any is exempt) - the way to allow one
   specific form of an otherwise-forbidden pattern.
 - `in_toml_section` (only consider lines while the last-seen `[section]` header

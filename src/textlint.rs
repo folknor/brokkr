@@ -20,9 +20,11 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+use std::borrow::Cow;
+
 use crate::config::TextlintRule;
 use crate::error::DevError;
-use crate::{globs, gremlins};
+use crate::{globs, gremlins, lex};
 
 /// One forbidden-pattern hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ struct Compiled {
     table_row_only: bool,
     skip_after: Option<Regex>,
     only_if_file_matches: Option<Regex>,
+    region: Option<lex::Region>,
 }
 
 const DISPLAY_CAP: usize = 200;
@@ -105,6 +108,16 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
                 rule.name
             )));
         }
+        let region = match &rule.region {
+            Some(r) => Some(lex::Region::parse(r).ok_or_else(|| {
+                DevError::Config(format!(
+                    "[[textlint]] {:?}: unknown region {r:?}; expected \"code\", \"string\", \
+                     or \"comment\"",
+                    rule.name
+                ))
+            })?),
+            None => None,
+        };
         out.push(Compiled {
             name: rule.name.clone(),
             pattern,
@@ -118,6 +131,7 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             table_row_only: rule.table_row_only,
             skip_after,
             only_if_file_matches,
+            region,
         });
     }
     Ok(out)
@@ -165,6 +179,12 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             None => true,
         })
         .collect();
+    // Lexical regions, tokenized once per file, only when a rule needs scoping.
+    let base = content.as_ptr() as usize;
+    let regions: Option<Vec<lex::Region>> = rules
+        .iter()
+        .any(|r| r.region.is_some())
+        .then(|| lex::classify(content));
     let mut section: Option<String> = None;
     // Per-rule "past the skip_after boundary" latch, indexed alongside `rules`.
     let mut skipping = vec![false; rules.len()];
@@ -191,7 +211,16 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             {
                 continue;
             }
-            if !rule.pattern.is_match(raw) {
+            // Scope the pattern to a lexical region when asked; markers,
+            // `except`, and the reported line all stay the physical line.
+            let hay: Cow<'_, str> = match (rule.region, &regions) {
+                (Some(target), Some(regs)) => {
+                    let offset = raw.as_ptr() as usize - base;
+                    Cow::Owned(lex::mask_line(raw, offset, regs, target))
+                }
+                _ => Cow::Borrowed(raw),
+            };
+            if !rule.pattern.is_match(&hay) {
                 continue;
             }
             if marker_suppresses(rule, &lines, i) {
@@ -268,6 +297,7 @@ mod tests {
             table_row_only: false,
             skip_after: None,
             only_if_file_matches: None,
+            region: None,
         }
     }
 
@@ -377,6 +407,42 @@ mod tests {
         // Condition absent -> the rule does not fire at all.
         let without = "let t = Instant::now();\n";
         assert!(run(r, without).is_empty());
+    }
+
+    #[test]
+    fn region_code_ignores_matches_in_strings_and_comments() {
+        let mut r = rule("todo");
+        r.region = Some("code".into());
+        // Only the bare `todo` identifier (line 3) is code; the quoted and
+        // commented occurrences are masked out.
+        let src = "let s = \"todo later\";\n// todo: nope\nlet todo = 1;\n";
+        assert_eq!(run(r, src), vec![(3, "r".into())]);
+    }
+
+    #[test]
+    fn region_string_targets_message_text_only() {
+        let mut r = rule(", got");
+        r.region = Some("string".into());
+        // The `, got` inside the message string fires; the one in a comment
+        // and the one in a code expression do not.
+        let src = "// x, got y\nlet e = \"expected a, got b\";\nfoo(a, got);\n";
+        assert_eq!(run(r, src), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn region_comment_targets_comments_only() {
+        let mut r = rule("FIXME");
+        r.region = Some("comment".into());
+        let src = "let FIXME = 1; // FIXME real\n";
+        // Only the comment occurrence is flagged, not the identifier.
+        assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn unknown_region_is_a_config_error() {
+        let mut r = rule("x");
+        r.region = Some("doc".into());
+        assert!(compile(&[r]).is_err());
     }
 
     #[test]

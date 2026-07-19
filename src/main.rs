@@ -22,6 +22,7 @@ mod history_cmd;
 mod hotpath_fmt;
 mod invalidate_cmd;
 mod litehtml;
+mod lex;
 mod lockfile;
 mod measure;
 mod nidhogg;
