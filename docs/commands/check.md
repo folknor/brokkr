@@ -2,7 +2,7 @@
 
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
-full validation pass (gremlins + dependency rules + clippy + tests); `test`
+full validation pass (gremlins + style + dependency rules + clippy + tests); `test`
 runs one named cargo test against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
@@ -10,7 +10,7 @@ section, profiles) see `docs/brokkr.toml.md`.
 
 ## `brokkr check`
 
-Gremlins + dependency rules + clippy + tests. Trailing args after
+Gremlins + style + dependency rules + clippy + tests. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -118,6 +118,17 @@ legitimately carries typographic punctuation, BOMs, and the like. Matching is
 by path prefix on the git-relative path, so `docs/manual` covers
 `docs/manual/` and everything beneath it but not a sibling `docs/manual-extra`.
 Empty and absolute entries are rejected at parse time.
+
+Style phase runs next, only when `[style]` enables a rule (off by default, so
+it is inert for every project that does not opt in). The one current rule,
+`rust_blank_line_above_control_flow`, requires a blank line above
+`if`/`match`/`for`/`while`/`loop`/`spawn` constructs, with an exemption ladder
+(first expression in a block, comment/attribute above, string continuation,
+shared identifier with the line above or the first body line, plus per-keyword
+carve-outs: else-if chains, expression position, loop labels, `.spawn` method
+chains). It scans tracked `.rs` files, honouring `[gremlins].exclude`. JSON
+mode emits `style` and `style_summary` events. Ported from nautilus_trader's
+`check_formatting_rs` hook; see `src/style.rs`.
 
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads

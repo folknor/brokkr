@@ -228,7 +228,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // the build root (cwd). The config values it uses ([[check]] sweeps,
         // dependency rules, gremlin excludes) come from wherever brokkr.toml
         // was found, in cwd or one level up.
-        let (project, check_entries, dependency_rules, test_cfg, gremlins_cfg, project_root) =
+        let (project, check_entries, dependency_rules, test_cfg, gremlins_cfg, style_cfg, project_root) =
             match project::detect_optional()? {
                 Some(d) => (
                     Some(d.project),
@@ -236,9 +236,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     d.config.dependency_rules,
                     d.config.test,
                     d.config.gremlins,
+                    d.config.style,
                     d.build_root,
                 ),
-                None => (None, Vec::new(), Vec::new(), None, None, std::env::current_dir()?),
+                None => (None, Vec::new(), Vec::new(), None, None, None, std::env::current_dir()?),
             };
         let _lock = acquire_cmd_lock_opt(project, &project_root, "check")?;
         return check_cmd::cmd_check(
@@ -248,6 +249,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &dependency_rules,
             test_cfg.as_ref(),
             gremlins_cfg.as_ref(),
+            style_cfg.as_ref(),
             &features,
             no_default_features,
             package.as_deref(),

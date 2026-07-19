@@ -20,6 +20,23 @@ pub enum CheckEvent {
     TestSummary(TestSummaryEvent),
     Gremlin(GremlinEvent),
     GremlinSummary(GremlinSummaryEvent),
+    Style(StyleEvent),
+    StyleSummary(StyleSummaryEvent),
+}
+
+/// One `[style]` blank-line violation.
+#[derive(Serialize)]
+pub struct StyleEvent {
+    pub file: String,
+    pub line: usize,
+    pub keyword: &'static str,
+}
+
+/// Closing tally for the `[style]` phase.
+#[derive(Serialize)]
+pub struct StyleSummaryEvent {
+    pub status: &'static str,
+    pub violations: usize,
 }
 
 /// Per-test wall-clock timing observed by the libtest watchdog tracker.

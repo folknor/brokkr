@@ -39,6 +39,10 @@ pub struct DevConfig {
     /// docs) that legitimately carries gremlin characters. `None` when the
     /// project has no `[gremlins]` section. See [`GremlinsConfig`].
     pub gremlins: Option<GremlinsConfig>,
+    /// `[style]` config: opt-in native Rust style checks run by `brokkr
+    /// check`. `None` when the project has no `[style]` section. See
+    /// [`StyleConfig`].
+    pub style: Option<StyleConfig>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -93,6 +97,26 @@ impl GremlinsConfig {
             let dir = Path::new(dir.trim_end_matches('/'));
             rel == dir || rel.starts_with(dir)
         })
+    }
+}
+
+/// `[style]` section: opt-in native Rust style checks for `brokkr check`.
+///
+/// Every knob defaults to `false`, so a project that omits `[style]` (or lists
+/// it empty) runs no style checks and sees no behaviour change. Currently one
+/// rule; the section exists to grow more.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StyleConfig {
+    /// Require a blank line above `if`/`match`/`for`/`while`/`loop`/`spawn`
+    /// constructs, honouring the exemption ladder in [`crate::style`].
+    pub rust_blank_line_above_control_flow: bool,
+}
+
+impl StyleConfig {
+    /// True when no rule in the section is enabled - the phase can short out.
+    pub fn is_empty(&self) -> bool {
+        !self.rust_blank_line_above_control_flow
     }
 }
 

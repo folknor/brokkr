@@ -23,7 +23,7 @@ use std::path::Path;
 use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
-use crate::config::{CheckEntry, DependencyRule, GremlinsConfig, TestConfig};
+use crate::config::{CheckEntry, DependencyRule, GremlinsConfig, StyleConfig, TestConfig};
 use crate::dependency_rules;
 use crate::error::DevError;
 use crate::gremlins;
@@ -41,6 +41,7 @@ pub(crate) fn cmd_check(
     dependency_rules: &[DependencyRule],
     test_cfg: Option<&TestConfig>,
     gremlins_cfg: Option<&GremlinsConfig>,
+    style_cfg: Option<&StyleConfig>,
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
@@ -57,6 +58,7 @@ pub(crate) fn cmd_check(
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
 
     run_gremlins(project_root, gremlins_cfg, json, limit, all, fix_gremlins)?;
+    run_style(project_root, style_cfg, gremlins_cfg, json, limit, all)?;
     run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
     run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
     let mut collected_timings: Vec<TestTiming> = Vec::new();
@@ -323,6 +325,77 @@ fn run_gremlins(
     msg.push_str("  hint: rerun with `brokkr check --fix-gremlins` to rewrite all banned chars in place\n");
     output::error(msg.trim_end());
     Err(DevError::Build("gremlins found".into()))
+}
+
+/// The `[style]` phase: opt-in native Rust style checks. Currently the single
+/// blank-line-above-control-flow rule. Inert unless the project enables a rule
+/// in `[style]`. Reuses the `[gremlins].exclude` list to skip vendored dirs.
+fn run_style(
+    project_root: &Path,
+    style_cfg: Option<&StyleConfig>,
+    gremlins_cfg: Option<&GremlinsConfig>,
+    json: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
+    let Some(cfg) = style_cfg else {
+        return Ok(());
+    };
+    if !cfg.rust_blank_line_above_control_flow {
+        return Ok(());
+    }
+
+    if !json {
+        output::run_msg("style: blank line above control flow (Rust)");
+    }
+    let violations = crate::style::scan(project_root, gremlins_cfg)?;
+
+    if json {
+        for v in &violations {
+            cargo_json::emit(&cargo_json::CheckEvent::Style(cargo_json::StyleEvent {
+                file: v.file.display().to_string(),
+                line: v.line,
+                keyword: v.keyword,
+            }));
+        }
+        cargo_json::emit(&cargo_json::CheckEvent::StyleSummary(
+            cargo_json::StyleSummaryEvent {
+                status: if violations.is_empty() { "ok" } else { "failed" },
+                violations: violations.len(),
+            },
+        ));
+    }
+
+    if violations.is_empty() {
+        if !json {
+            output::run_msg("style: ok");
+        }
+        return Ok(());
+    }
+
+    if !json {
+        let total = violations.len();
+        let displayed = if all || total <= limit {
+            &violations[..]
+        } else {
+            &violations[..limit]
+        };
+        let mut msg = format!("style: {total} violation(s)\n");
+        for v in displayed {
+            msg.push_str("  ");
+            msg.push_str(&crate::style::format_one(v));
+            msg.push('\n');
+        }
+        if displayed.len() < total {
+            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        }
+        msg.push_str(
+            "  hint: add a blank line above the construct, or share an identifier with the line above",
+        );
+        output::error(&msg);
+    }
+
+    Err(DevError::Build("style check failed".into()))
 }
 
 fn run_dependency_rules(

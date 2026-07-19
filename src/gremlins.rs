@@ -104,7 +104,7 @@ pub fn fix(
     config: Option<&GremlinsConfig>,
 ) -> Result<Vec<FixSummary>, DevError> {
     let allow = allow_set(config);
-    let files = scannable_files(project_root)?;
+    let files = tracked_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
         if !is_scannable(rel) || is_excluded(rel, config) {
@@ -204,7 +204,7 @@ pub fn scan(
 ) -> Result<Vec<Gremlin>, DevError> {
     let allow = allow_set(config);
     let ban = ban_set(config);
-    let files = scannable_files(project_root)?;
+    let files = tracked_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
         if !is_scannable(rel) || is_excluded(rel, config) {
@@ -331,7 +331,9 @@ fn is_scannable(rel: &Path) -> bool {
     SCANNED_EXTENSIONS.contains(&ext)
 }
 
-fn scannable_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
+/// Tracked plus untracked-not-ignored files, via `git ls-files`. Shared with
+/// the `[style]` check (`src/style.rs`), which filters this list to `.rs`.
+pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
     let output = Command::new("git")
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .current_dir(project_root)

@@ -58,7 +58,7 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`, `disable_toolchain`.
+`gremlins`, `style`, `disable_toolchain`.
 
 ## `disable_toolchain`
 
@@ -114,6 +114,26 @@ ban = ["U+2011"]                                   # flag these codepoints
 rejected at parse time. The `U+XXXX` form keeps `brokkr.toml` itself free of
 literal, possibly-invisible gremlin characters. Omit the section to scan
 everything with the built-in set (the default).
+
+## `[style]` section
+
+Opt-in native Rust style checks run by `brokkr check` (the style phase, after
+gremlins). Every knob defaults to `false`, so omitting `[style]` - or listing
+it with nothing enabled - runs no style checks and changes no behaviour.
+
+```toml
+[style]
+rust_blank_line_above_control_flow = true
+```
+
+`rust_blank_line_above_control_flow` requires a blank line above
+`if`/`match`/`for`/`while`/`loop`/`spawn` constructs in tracked `.rs` files,
+skipping `[gremlins].exclude` directories. It honours an exemption ladder
+(first expression in a block, comment/attribute above, string continuation,
+an identifier shared with the line above or the first body line, plus
+per-keyword carve-outs for else-if chains, expression position, loop labels,
+and `.spawn` method chains). Ported from nautilus_trader's `check_formatting_rs`
+convention hook; see `src/style.rs` and `docs/commands/check.md`.
 
 ## Datasets and variant-selection flags
 
