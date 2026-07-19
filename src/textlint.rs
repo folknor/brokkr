@@ -475,6 +475,13 @@ fn toml_section(trimmed: &str) -> Option<String> {
     // the header; anything after it is ignored.
     let before_comment = trimmed.split('#').next().unwrap_or(trimmed);
     let end = before_comment.rfind(']')?;
+    // A real header has nothing but optional whitespace after the closing `]`
+    // (the comment was already stripped above). Reject lines that merely start
+    // with `[` and contain a `]`: `[foo] bar`, a markdown link `[label]: url`,
+    // or a slice-pattern arm `[a, b] => ...` are not TOML section headers.
+    if !before_comment[end + 1..].trim().is_empty() {
+        return None;
+    }
     let head = &before_comment[..=end];
     let inner = head.trim_start_matches('[').trim_end_matches(']').trim();
     if inner.is_empty() {
@@ -784,6 +791,12 @@ mod tests {
             toml_section("[dev-dependencies] # workspace test deps").as_deref(),
             Some("dev-dependencies")
         );
+        // A line that merely starts with `[` and contains a `]` is NOT a header:
+        // arbitrary trailing text, a markdown reference link, or a slice-pattern
+        // match arm must leave the `in_toml_section` latch untouched.
+        assert_eq!(toml_section("[foo] bar"), None);
+        assert_eq!(toml_section("[label]: http://example.com"), None);
+        assert_eq!(toml_section("[a, b] => process(),"), None);
     }
 
     #[test]

@@ -177,9 +177,21 @@ fn fix_content(content: &str, allow: &CodepointSet) -> (String, usize) {
             continue;
         }
         if let Some(r) = replacement(c, allow) {
-            out.push_str(r);
             count += 1;
-            line_edited = true;
+            if r == "\n" {
+                // A line/paragraph separator (U+2028/U+2029) transliterates to a
+                // newline. Treat it as a real line boundary - the current line
+                // was edited by the replacement, so rstrip it, then reset the
+                // per-line tracking - otherwise the next (unedited) line would
+                // inherit `line_edited` and be wrongly rstripped.
+                rstrip_line_tail(&mut out, line_start);
+                out.push('\n');
+                line_start = out.len();
+                line_edited = false;
+            } else {
+                out.push_str(r);
+                line_edited = true;
+            }
         } else {
             out.push(c);
         }
@@ -696,6 +708,14 @@ mod tests {
         let (fixed, count) = fix_str("clean   \n");
         assert_eq!(count, 0);
         assert_eq!(fixed, "clean   \n");
+    }
+
+    #[test]
+    fn fix_separator_does_not_leak_line_tracking() {
+        // A U+2028 line separator transliterates to a newline. The edited line
+        // before it is rstripped; the following UNEDITED line keeps its trailing
+        // whitespace (no leak of line_edited across the injected boundary).
+        assert_eq!(fix_str("foo   \u{2028}clean   \n"), ("foo\nclean   \n".to_owned(), 1));
     }
 
     #[test]

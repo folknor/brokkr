@@ -314,7 +314,10 @@ fn has_plain_assign(s: &str) -> bool {
         if next == Some(b'>') || next == Some(b'=') {
             continue;
         }
-        if matches!(prev, Some(b'=') | Some(b'!') | Some(b'<') | Some(b'>')) {
+        // `Some(b'.')` skips the `=` in an inclusive-range pattern `..=` so a
+        // wrapped range or-pattern (`'0'..='9' | 'a'..='f'`) isn't read as an
+        // assignment and wrongly un-exempted.
+        if matches!(prev, Some(b'=') | Some(b'!') | Some(b'<') | Some(b'>') | Some(b'.')) {
             continue;
         }
         return true;
@@ -610,6 +613,15 @@ mod tests {
         // A genuine match or-pattern arm ending in `=>` above an indented `if`
         // stays exempt (no regression).
         let src = "fn f() {\n    match z {\n        Foo | Bar =>\n        if y {}\n    }\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn inclusive_range_or_pattern_arm_is_exempt() {
+        // Regression (d026e96): the `=` in `..=` must not be read as a plain
+        // assignment, or a wrapped numeric inclusive-range or-pattern above an
+        // if-guard line gets falsely flagged.
+        let src = "fn f() {\n    match n {\n        0..=9 | 20..=29\n        if odd => {}\n    }\n}\n";
         assert!(violations(src).is_empty());
     }
 

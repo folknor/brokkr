@@ -724,7 +724,6 @@ fn raw_clippy_text(r: &SweepResult) -> String {
 
 struct SweepResult {
     label: String,
-    #[allow(dead_code)] // text path doesn't read stdout; JSON path does
     stdout: String,
     stderr: String,
     success: bool,
