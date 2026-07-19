@@ -85,6 +85,39 @@ fn parse_manifest(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("[manifest]: {e}")))?;
+    if let Some(ag) = &cfg.adapter_group {
+        // The engine's `labelled_group_keys` finds the group whose header
+        // comment `contains(marker)`, and `contains("")` is always true - a
+        // blank marker binds to the *first* comment-labelled group in the
+        // manifest rather than the intended one. Reject it here.
+        if ag.marker.trim().is_empty() {
+            return Err(DevError::Config(
+                "[manifest.adapter_group] has an empty `marker` - it would match \
+                 the first comment-labelled dependency group rather than the \
+                 intended one. Name a substring of the group's header comment."
+                    .into(),
+            ));
+        }
+        // With an empty `forbidden_in`, `check_adapter_group` skips every
+        // manifest (`forbidden_in.iter().any(...)` is always false), so the
+        // whole check is a guaranteed no-op. Reject it as pointless config.
+        if ag.forbidden_in.is_empty() {
+            return Err(DevError::Config(
+                "[manifest.adapter_group] has an empty `forbidden_in` - the check \
+                 would never flag anything. List the package names that must not \
+                 depend on the adapter group."
+                    .into(),
+            ));
+        }
+        for pkg in &ag.forbidden_in {
+            if pkg.trim().is_empty() {
+                return Err(DevError::Config(
+                    "[manifest.adapter_group] has a blank string in `forbidden_in`."
+                        .into(),
+                ));
+            }
+        }
+    }
     Ok(Some(cfg))
 }
 
@@ -636,6 +669,15 @@ fn parse_check(
                 )));
             }
         }
+        for pkg in &entry.build_packages {
+            if pkg.trim().is_empty() {
+                return Err(DevError::Config(format!(
+                    "[[check]] entry '{}' has a blank string in `build_packages` \
+                     (would become `cargo build --package \"\"`).",
+                    entry.name
+                )));
+            }
+        }
         if !entry.packages.is_empty() && !entry.test_exclude_packages.is_empty() {
             return Err(DevError::Config(format!(
                 "[[check]] entry '{}' sets both `packages` (-p scoping) and \
@@ -694,11 +736,30 @@ fn validate_check_against_test(
     let Some(t) = test else {
         return Ok(());
     };
+    // `default_profile` must name an existing profile - catch a typo at load
+    // time instead of at `brokkr check` time. (Checked even when `profiles` is
+    // empty: a `default_profile` set with no profiles defined is always wrong.)
+    if let Some(default) = &t.default_profile
+        && !t.profiles.contains_key(default.as_str())
+    {
+        return Err(DevError::Config(format!(
+            "[test].default_profile = '{default}' names no `[test.profiles.*]` entry."
+        )));
+    }
     if t.profiles.is_empty() {
         return Ok(());
     }
     let names: BTreeSet<&str> = check.iter().map(|e| e.name.as_str()).collect();
     for (profile_name, def) in &t.profiles {
+        // A profile's `extends` target must itself be a defined profile.
+        if let Some(parent) = &def.extends
+            && !t.profiles.contains_key(parent.as_str())
+        {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{profile_name}] extends '{parent}', \
+                 but no `[test.profiles.*]` entry with that name exists."
+            )));
+        }
         let Some(sweeps) = &def.sweeps else {
             continue;
         };

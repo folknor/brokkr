@@ -785,6 +785,50 @@ features = ["a"]
     }
 
     #[test]
+    fn parse_check_rejects_blank_build_packages() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+build_packages = [""]
+"#,
+        );
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("build_packages"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_rejects_empty_adapter_marker() {
+        let table = root_table(
+            r#"
+project = "ratatoskr"
+[manifest]
+[manifest.adapter_group]
+marker = ""
+forbidden_in = ["core"]
+"#,
+        );
+        let err = parse_manifest(&table).unwrap_err().to_string();
+        assert!(err.contains("empty `marker`"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_rejects_empty_forbidden_in() {
+        let table = root_table(
+            r#"
+project = "ratatoskr"
+[manifest]
+[manifest.adapter_group]
+marker = "Adapter dependencies"
+forbidden_in = []
+"#,
+        );
+        let err = parse_manifest(&table).unwrap_err().to_string();
+        assert!(err.contains("forbidden_in"), "got: {err}");
+    }
+
+    #[test]
     fn parse_check_rejects_features_all_sentinel() {
         // The `features = "all"` shorthand is gone - explicit lists only.
         // serde rejects with a type-mismatch error, which is loud enough
@@ -900,6 +944,47 @@ features = ["a"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("'consumer'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_check_against_test_catches_typoed_default_profile() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+default_profile = "teir1"
+[test.profiles.tier1]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("teir1"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_check_against_test_catches_dangling_extends() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.tier1]
+extends = "nope"
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'nope'"), "got: {err}");
     }
 
     #[test]
