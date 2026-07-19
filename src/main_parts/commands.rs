@@ -739,7 +739,7 @@ fn cmd_verify(
         }
         VerifyCommand::Readonly { dataset } => {
             project::require(project, Project::Nidhogg, "verify readonly")?;
-            nidhogg::cmd::verify_readonly(dev_config, project, project_root, &dataset, features)
+            nidhogg::cmd::verify_readonly(dev_config, project, project_root, build_root, &dataset, features)
         }
         // ----- pbfhogg verify variants -----
         _ => {

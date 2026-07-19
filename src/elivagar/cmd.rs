@@ -94,14 +94,14 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
 
 pub(crate) fn compare_tiles(
     project: Project,
-    project_root: &Path,
+    build_root: &Path,
     file_a: &str,
     file_b: &str,
     sample: Option<usize>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "compare-tiles")?;
     let pi = bootstrap(None)?;
-    super::compare_tiles::run(&pi.target_dir, project_root, file_a, file_b, sample)
+    super::compare_tiles::run(&pi.target_dir, build_root, file_a, file_b, sample)
 }
 
 pub(crate) fn download_ocean(

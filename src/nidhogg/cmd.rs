@@ -338,6 +338,7 @@ pub(crate) fn verify_readonly(
     dev_config: &config::DevConfig,
     _project: Project,
     project_root: &Path,
+    build_root: Option<&Path>,
     dataset: &str,
     features: &[String],
 ) -> Result<(), DevError> {
@@ -350,7 +351,7 @@ pub(crate) fn verify_readonly(
         .to_string();
 
     let build_config = build_config_with_features(Some("nidhogg"), features);
-    let binary = build::cargo_build(&build_config, project_root)?;
+    let binary = build::cargo_build(&build_config, build_root.unwrap_or(project_root))?;
     let bbox = resolve_bbox(None, dataset, &paths)?;
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)
 }

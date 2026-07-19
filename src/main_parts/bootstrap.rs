@@ -927,7 +927,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             file_a,
             file_b,
             sample,
-        } => elivagar::cmd::compare_tiles(project, &project_root, &file_a, &file_b, sample),
+        } => elivagar::cmd::compare_tiles(project, &build_root, &file_a, &file_b, sample),
         Command::PmtilesInspect {
             dataset,
             commit,
