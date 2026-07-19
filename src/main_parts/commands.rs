@@ -188,10 +188,12 @@ fn print_run_timing(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     features: &[String],
     args: &[String],
     opts: &RunOptions,
@@ -210,9 +212,9 @@ fn cmd_run(
     };
     let build_start = Instant::now();
     let binary = if opts.no_build {
-        build::resolve_existing_binary(&build_config, project_root)?
+        build::resolve_existing_binary(&build_config, build_root)?
     } else {
-        build::cargo_build(&build_config, project_root)?
+        build::cargo_build(&build_config, build_root)?
     };
     let build_ms = if opts.no_build {
         0
@@ -385,9 +387,9 @@ fn cmd_clean(
 /// (all profiles) while keeping dependency artifacts cached - the fix for
 /// stale incremental-build state (e.g. phantom undefined-symbol linker
 /// errors).
-fn cargo_clean_package(project_root: &Path, pkg: &str) -> Result<(), DevError> {
+fn cargo_clean_package(build_root: &Path, pkg: &str) -> Result<(), DevError> {
     output::run_msg(&format!("cargo clean -p {pkg}"));
-    let captured = output::run_captured("cargo", &["clean", "-p", pkg], project_root)?;
+    let captured = output::run_captured("cargo", &["clean", "-p", pkg], build_root)?;
     captured.check_success("cargo clean")?;
     // cargo clean reports "Removed N files, X total" on stderr.
     let stderr = String::from_utf8_lossy(&captured.stderr);

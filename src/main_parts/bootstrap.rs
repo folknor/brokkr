@@ -761,6 +761,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &features,
                 &args,
                 &opts,
@@ -877,7 +878,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             if let Some(pkg) = cargo {
                 let pkg = pkg.unwrap_or_else(|| project.name().to_owned());
-                cargo_clean_package(&project_root, &pkg)?;
+                cargo_clean_package(&build_root, &pkg)?;
             }
             cmd_clean(&dev_config, project, &project_root, worktrees)
         }
@@ -915,6 +916,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &region,
                 osc_seq,
                 as_snapshot.as_deref(),
@@ -937,6 +939,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &dataset,
                 commit.as_deref(),
                 file.as_deref(),
@@ -955,6 +958,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &dataset,
                 commit.as_deref(),
                 file.as_deref(),
@@ -980,6 +984,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &dataset,
                 commit.as_deref(),
                 file.as_deref(),
@@ -1008,6 +1013,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &dataset,
                 commit.as_deref(),
                 file.as_deref(),
@@ -1030,6 +1036,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &dataset,
                 commit.as_deref(),
                 file.as_deref(),
@@ -1055,6 +1062,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 data_dir.as_deref(),
                 &dataset,
                 tiles.as_deref(),
@@ -1070,6 +1078,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 &variant,
                 &dataset,
                 &features,
@@ -1078,7 +1087,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Update { args } => {
             let _lock = acquire_cmd_lock(project, &project_root, "update")?;
             let features = resolve_features(&dev_config, &[]);
-            nidhogg::cmd::update(project, &project_root, &args, &features)
+            nidhogg::cmd::update(project, &project_root, &build_root, &args, &features)
         }
         Command::Query { json } => {
             nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref())

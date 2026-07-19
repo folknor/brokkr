@@ -624,6 +624,7 @@ pub(crate) fn download(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     region: &str,
     osc_seq: Option<u64>,
     as_snapshot: Option<&str>,
@@ -645,5 +646,6 @@ pub(crate) fn download(
         &paths.hostname,
         &paths.data_dir,
         project_root,
+        build_root,
     )
 }

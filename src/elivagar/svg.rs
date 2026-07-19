@@ -13,7 +13,7 @@ use crate::output;
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pmtiles_path: &Path,
-    project_root: &Path,
+    build_root: &Path,
     z: u8,
     x: u32,
     y: u32,
@@ -22,7 +22,7 @@ pub fn run(
     layers: Option<&str>,
     output_path: Option<&Path>,
 ) -> Result<(), DevError> {
-    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
     let z_str = z.to_string();
@@ -45,7 +45,7 @@ pub fn run(
         args.push(o);
     }
 
-    let captured = output::run_captured(&binary_str, &args, project_root)?;
+    let captured = output::run_captured(&binary_str, &args, build_root)?;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     if !stdout.is_empty() {

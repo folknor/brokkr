@@ -594,7 +594,7 @@ pub(crate) fn resolve_pmtiles_by_commit(
     commit: Option<&str>,
     file: Option<&str>,
     paths: &config::ResolvedPaths,
-    project_root: &Path,
+    build_root: &Path,
 ) -> Result<PathBuf, DevError> {
     if let Some(f) = file {
         let p = PathBuf::from(f);
@@ -605,7 +605,7 @@ pub(crate) fn resolve_pmtiles_by_commit(
     }
     let hash = match commit {
         Some(c) => c.to_owned(),
-        None => crate::git::collect(project_root)?.commit,
+        None => crate::git::collect(build_root)?.commit,
     };
     let path = paths.output_dir.join(format!("{dataset}-{hash}.pmtiles"));
     if !path.exists() {

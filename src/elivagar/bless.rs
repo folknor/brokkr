@@ -22,6 +22,7 @@ use crate::resolve::resolve_pmtiles_by_commit;
 
 pub fn run(
     project_root: &Path,
+    build_root: &Path,
     paths: &config::ResolvedPaths,
     dataset: &str,
     commit: Option<&str>,
@@ -29,7 +30,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     // Refuse to bless from a dirty tree: the recorded commit would not
     // reproduce the archive. results.db and *.md are excluded (bench discipline).
-    let git = crate::git::collect(project_root)?;
+    let git = crate::git::collect(build_root)?;
     if !git.is_clean {
         return Err(DevError::Config(
             "refusing to bless from a dirty working tree (results.db and *.md \
@@ -42,7 +43,7 @@ pub fn run(
     let source_commit = commit.map(str::to_owned).unwrap_or(git.commit);
 
     // Resolve the archive to bless exactly as `regress` would pick it.
-    let source = resolve_pmtiles_by_commit(dataset, commit, file, paths, project_root)?;
+    let source = resolve_pmtiles_by_commit(dataset, commit, file, paths, build_root)?;
 
     // Copy into the durable, non-wiped `data/blessed/` store.
     let rel_file = format!("blessed/{dataset}-{source_commit}.pmtiles");

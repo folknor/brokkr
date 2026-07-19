@@ -9,6 +9,7 @@ pub fn run(
     hostname: &str,
     data_dir: &Path,
     project_root: &Path,
+    build_root: &Path,
 ) -> Result<(), DevError> {
     // Resolve region first to get dataset_key, then look up existing dataset,
     // then re-resolve with dataset context (so origin field can override source).
@@ -28,6 +29,7 @@ pub fn run(
             hostname,
             data_dir,
             project_root,
+            build_root,
         );
     }
 
@@ -41,6 +43,7 @@ pub fn run(
             hostname,
             data_dir,
             project_root,
+            build_root,
         );
     }
 
@@ -141,7 +144,7 @@ pub fn run(
 
         let binary = build::cargo_build(
             &build::BuildConfig::release(Some("pbfhogg-cli")),
-            project_root,
+            build_root,
         )?;
         let binary_str = binary.display().to_string();
         let cat_input_str = cat_input.display().to_string();
@@ -240,7 +243,7 @@ pub fn run(
 /// the snapshot key is already registered. Files use snapshot-specific names
 /// (`{dataset}-{snapshot_key}.osm.pbf` etc.) so they don't collide with the
 /// dataset's primary files on disk.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run_as_snapshot(
     resolved: &ResolvedDownload,
     snap_key: &str,
@@ -249,6 +252,7 @@ fn run_as_snapshot(
     hostname: &str,
     data_dir: &Path,
     project_root: &Path,
+    build_root: &Path,
 ) -> Result<(), DevError> {
     let source = &resolved.source;
     let dataset_key = &resolved.dataset_key;
@@ -325,7 +329,7 @@ fn run_as_snapshot(
         output::download_msg("  generating indexed PBF via cat");
         let binary = build::cargo_build(
             &build::BuildConfig::release(Some("pbfhogg-cli")),
-            project_root,
+            build_root,
         )?;
         let binary_str = binary.display().to_string();
         let cat_input_str = pbf_dest.display().to_string();
@@ -523,6 +527,7 @@ fn run_refresh(
     hostname: &str,
     data_dir: &Path,
     project_root: &Path,
+    build_root: &Path,
 ) -> Result<(), DevError> {
     let source = &resolved.source;
     let dataset_key = &resolved.dataset_key;
@@ -683,7 +688,7 @@ fn run_refresh(
     output::download_msg("  generating indexed PBF via cat");
     let binary = build::cargo_build(
         &build::BuildConfig::release(Some("pbfhogg-cli")),
-        project_root,
+        build_root,
     )?;
     let binary_str = binary.display().to_string();
     let cat_input_str = new_pbf_dest.display().to_string();

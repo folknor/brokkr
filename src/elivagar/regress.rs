@@ -39,7 +39,7 @@ pub const REFUSED: i32 = 2;
 pub fn run(
     current: &Path,
     blessed: &Path,
-    project_root: &Path,
+    build_root: &Path,
     tol: i32,
     max_moved: u64,
     max_examples: usize,
@@ -49,7 +49,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     gate_contract(current, blessed)?;
 
-    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?;
     let binary_str = binary.display().to_string();
 
     let current_str = current.display().to_string();

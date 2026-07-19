@@ -9,8 +9,8 @@ use crate::build;
 use crate::error::DevError;
 use crate::output;
 
-pub fn run(pmtiles_path: &Path, project_root: &Path, z: u8, x: u32, y: u32) -> Result<(), DevError> {
-    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+pub fn run(pmtiles_path: &Path, build_root: &Path, z: u8, x: u32, y: u32) -> Result<(), DevError> {
+    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
     let z_str = z.to_string();
@@ -18,7 +18,7 @@ pub fn run(pmtiles_path: &Path, project_root: &Path, z: u8, x: u32, y: u32) -> R
     let y_str = y.to_string();
 
     let args = ["diag", &pmtiles_str, "-z", &z_str, "-x", &x_str, "-y", &y_str];
-    let captured = output::run_captured(&binary_str, &args, project_root)?;
+    let captured = output::run_captured(&binary_str, &args, build_root)?;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     if !stdout.is_empty() {

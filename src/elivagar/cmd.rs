@@ -152,6 +152,7 @@ pub(crate) fn inspect(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     dataset: &str,
     commit: Option<&str>,
     file: Option<&str>,
@@ -159,8 +160,8 @@ pub(crate) fn inspect(
     project::require(project, Project::Elivagar, "pmtiles-inspect")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
-    super::inspect::run(&pmtiles_path, project_root)
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
+    super::inspect::run(&pmtiles_path, build_root)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,6 +169,7 @@ pub(crate) fn diag(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     dataset: &str,
     commit: Option<&str>,
     file: Option<&str>,
@@ -178,8 +180,8 @@ pub(crate) fn diag(
     project::require(project, Project::Elivagar, "diag")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
-    super::diag::run(&pmtiles_path, project_root, z, x, y)
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
+    super::diag::run(&pmtiles_path, build_root, z, x, y)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -187,6 +189,7 @@ pub(crate) fn svg(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     dataset: &str,
     commit: Option<&str>,
     file: Option<&str>,
@@ -201,10 +204,10 @@ pub(crate) fn svg(
     project::require(project, Project::Elivagar, "svg")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
     super::svg::run(
         &pmtiles_path,
-        project_root,
+        build_root,
         z,
         x,
         y,
@@ -224,6 +227,7 @@ pub(crate) fn regress(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     dataset: &str,
     commit: Option<&str>,
     file: Option<&str>,
@@ -238,7 +242,7 @@ pub(crate) fn regress(
     project::require(project, Project::Elivagar, "regress")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let current = resolve_pmtiles_by_commit(dataset, commit, file, &paths, project_root)?;
+    let current = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
     let blessed = match against {
         Some(p) => {
             let path = std::path::PathBuf::from(p);
@@ -255,7 +259,7 @@ pub(crate) fn regress(
     super::regress::run(
         &current,
         &blessed,
-        project_root,
+        build_root,
         tol,
         max_moved,
         max_examples,
@@ -273,6 +277,7 @@ pub(crate) fn bless(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     dataset: &str,
     commit: Option<&str>,
     file: Option<&str>,
@@ -280,5 +285,5 @@ pub(crate) fn bless(
     project::require(project, Project::Elivagar, "bless")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    super::bless::run(project_root, &paths, dataset, commit, file)
+    super::bless::run(project_root, build_root, &paths, dataset, commit, file)
 }

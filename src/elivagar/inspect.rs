@@ -10,12 +10,12 @@ use crate::build;
 use crate::error::DevError;
 use crate::output;
 
-pub fn run(pmtiles_path: &Path, project_root: &Path) -> Result<(), DevError> {
-    let binary = build::cargo_build(&build::BuildConfig::release(None), project_root)?;
+pub fn run(pmtiles_path: &Path, build_root: &Path) -> Result<(), DevError> {
+    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
 
-    let captured = output::run_captured(&binary_str, &["inspect", &pmtiles_str], project_root)?;
+    let captured = output::run_captured(&binary_str, &["inspect", &pmtiles_str], build_root)?;
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     if !stdout.is_empty() {

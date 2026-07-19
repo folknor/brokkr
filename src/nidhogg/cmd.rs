@@ -37,10 +37,12 @@ fn build_config_with_features(package: Option<&str>, features: &[String]) -> bui
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn serve(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     data_dir: Option<&str>,
     dataset: &str,
     tiles_variant: Option<&str>,
@@ -72,7 +74,7 @@ pub(crate) fn serve(
 
     let port = resolve_port(dev_config);
     let build_config = build_config_with_features(Some("nidhogg"), features);
-    let binary = build::cargo_build(&build_config, project_root)?;
+    let binary = build::cargo_build(&build_config, build_root)?;
     super::server::serve(
         &binary,
         data_dir_str.as_deref(),
@@ -149,6 +151,7 @@ pub(crate) fn ingest(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     variant: &str,
     dataset: &str,
     features: &[String],
@@ -161,20 +164,21 @@ pub(crate) fn ingest(
     let data_dir = resolve_nidhogg_data_dir(dataset, &paths)?;
 
     let build_config = build_config_with_features(Some("nidhogg"), features);
-    let binary = build::cargo_build(&build_config, project_root)?;
+    let binary = build::cargo_build(&build_config, build_root)?;
     super::ingest::run(&binary, &pbf_path, &data_dir, project_root)
 }
 
 pub(crate) fn update(
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     args: &[String],
     features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "update")?;
     let mut config = build_config_with_features(Some("nidhogg"), features);
     config.bin = Some("nidhogg-update".into());
-    let binary = build::cargo_build(&config, project_root)?;
+    let binary = build::cargo_build(&config, build_root)?;
     super::update::run(&binary, args, project_root)
 }
 
