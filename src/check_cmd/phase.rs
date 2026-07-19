@@ -58,48 +58,78 @@ pub(crate) fn cmd_check(
     timings: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
+    let started = std::time::Instant::now();
     let active_sweeps =
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
 
-    run_gremlins(project_root, gremlins_cfg, json, limit, all, fix_gremlins)?;
-    run_style(project_root, style_cfg, gremlins_cfg, json, limit, all)?;
-    run_header(project_root, header_cfg, json, limit, all)?;
-    run_textlint(project_root, textlint_rules, json, limit, all)?;
-    run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
-    run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
     let mut collected_timings: Vec<TestTiming> = Vec::new();
     // Doctests are excluded by default (nextest, hence CI, never runs them);
     // an explicit `[test] doctests = true` opts back in. Absent `[test]`,
     // the honest default is off.
     let doctests = test_cfg.is_some_and(|c| c.doctests);
-    let test_result = run_test_phase(
-        project,
-        project_root,
-        &active_sweeps,
-        package,
-        raw,
-        json,
-        doctests,
-        extra_args,
-        timings.then_some(&mut collected_timings),
-    );
-    match test_result {
+
+    // Run every phase behind one closure so a failure from *any* of them
+    // (not just the test phase) still funnels through the summary line below,
+    // reporting the same total wall time a passing run does.
+    let mut run_phases = || -> Result<(), DevError> {
+        run_gremlins(project_root, gremlins_cfg, json, limit, all, fix_gremlins)?;
+        run_style(project_root, style_cfg, gremlins_cfg, json, limit, all)?;
+        run_header(project_root, header_cfg, json, limit, all)?;
+        run_textlint(project_root, textlint_rules, json, limit, all)?;
+        run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
+        run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
+        run_test_phase(
+            project,
+            project_root,
+            &active_sweeps,
+            package,
+            raw,
+            json,
+            doctests,
+            extra_args,
+            timings.then_some(&mut collected_timings),
+        )
+    };
+    let outcome = run_phases();
+
+    if timings {
+        emit_timings(&collected_timings, limit, all, json, active_sweeps.len() > 1);
+    }
+
+    match outcome {
         Ok(()) => {
             if !json {
-                output::result_msg("check passed");
-            }
-            if timings {
-                emit_timings(&collected_timings, limit, all, json, active_sweeps.len() > 1);
+                output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
             }
             Ok(())
         }
         Err(e) => {
-            if timings {
-                emit_timings(&collected_timings, limit, all, json, active_sweeps.len() > 1);
+            if json {
+                // JSON mode already emitted per-phase `failed` summaries; keep
+                // the machine stream clean and let the error propagate.
+                return Err(e);
             }
-            Err(e)
+            // The failing phase already printed its detail above; add the
+            // symmetric summary line and exit non-zero without main echoing a
+            // second, timing-less `[error]` line.
+            output::error(&format!("check failed in {}", fmt_wall(started.elapsed())));
+            Err(DevError::ExitCode(1))
         }
     }
+}
+
+/// Format a wall-clock duration as a compact `1m23s` (or `8.4s` under a
+/// minute) for the `brokkr check` summary line.
+fn fmt_wall(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    // Whole seconds straight from the duration - no float->int cast to trip
+    // the truncation/sign-loss lints, and sub-second precision is noise at
+    // this scale anyway.
+    let total = d.as_secs();
+    format!("{}m{:02}s", total / 60, total % 60)
 }
 
 /// One test timing observation, tagged with its sweep label so the merged
