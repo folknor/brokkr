@@ -20,6 +20,20 @@
 //! `*.brokkr-disabled` sidecar from a prior aborted run and restores it on the
 //! next drop, so the foreign repo returns to normal the next time brokkr runs
 //! there.
+//!
+//! A `--commit` run builds in a persistent worktree rather than the live build
+//! root, so [`with_worktree`](crate::context::with_worktree) activates a second
+//! guard on the worktree path when `disable_toolchain` is set - otherwise the
+//! commit's own committed pin would be honoured there.
+//!
+//! ## Known limitation
+//!
+//! Activation happens once at the top of a command, *before* the per-command
+//! file lock is taken. Two brokkr invocations started against the same tree at
+//! nearly the same instant can therefore race on the single toolchain file
+//! before the lock serialises them. This is a narrow window in an opt-in
+//! feature; the lock already serialises the far larger build/run body, and the
+//! sidecar-adoption path above heals any half-moved state on the next run.
 
 use std::path::{Path, PathBuf};
 

@@ -259,6 +259,7 @@ pub(crate) fn with_worktree<F, T>(
     parent_build_root: Option<&Path>,
     commit: Option<&str>,
     dry_run: bool,
+    disable_toolchain: bool,
     f: F,
 ) -> Result<T, DevError>
 where
@@ -280,6 +281,17 @@ where
                 "benchmarking commit {} ({})",
                 wt.commit, wt.subject,
             ));
+            // The worktree is a fresh checkout of `hash`, which may carry its
+            // own committed rust-toolchain pin. The command-level guard only
+            // disabled the pin in the live build root, not here, so disable it
+            // in the worktree too - otherwise `disable_toolchain` silently fails
+            // to hold for --commit builds. Restored on drop before the worktree
+            // is reused/inspected.
+            let _tc = if disable_toolchain {
+                Some(crate::toolchain::DisabledToolchain::activate(&wt.path)?)
+            } else {
+                None
+            };
             f(Some(&wt.path))
         }
         None => f(parent_build_root),
