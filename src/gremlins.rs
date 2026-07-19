@@ -85,6 +85,24 @@ fn replacement(c: char, allow: &CodepointSet) -> Option<&'static str> {
         '\u{274C}' => "[-]",                           // U+274C dropped / not done
         '\u{2610}' => "[ ]",                           // U+2610 unchecked
         '\u{2717}' | '\u{2715}' => "[ ]",              // U+2717 U+2715 declined / no
+        '\u{2714}' => "[x]",                           // U+2714 heavy check / done
+        // Dingbat circled digits (three families: negative, sans-serif, and
+        // negative sans-serif) transliterate to the digit they depict rather
+        // than being deleted like decorative pictographs.
+        '\u{2776}' | '\u{2780}' | '\u{278A}' => "1",
+        '\u{2777}' | '\u{2781}' | '\u{278B}' => "2",
+        '\u{2778}' | '\u{2782}' | '\u{278C}' => "3",
+        '\u{2779}' | '\u{2783}' | '\u{278D}' => "4",
+        '\u{277A}' | '\u{2784}' | '\u{278E}' => "5",
+        '\u{277B}' | '\u{2785}' | '\u{278F}' => "6",
+        '\u{277C}' | '\u{2786}' | '\u{2790}' => "7",
+        '\u{277D}' | '\u{2787}' | '\u{2791}' => "8",
+        '\u{277E}' | '\u{2788}' | '\u{2792}' => "9",
+        '\u{277F}' | '\u{2789}' | '\u{2793}' => "10",
+        // Heavy math signs -> the ASCII operator they depict.
+        '\u{2795}' => "+",  // heavy plus
+        '\u{2796}' => "-",  // heavy minus
+        '\u{2797}' => "/",  // heavy division
         // Colored circles used as calendar legend, not status.
         '\u{1F535}' => "(blue)",
         '\u{1F7E2}' => "(green)",
@@ -678,6 +696,21 @@ mod tests {
         let (fixed, count) = fix_str("clean   \n");
         assert_eq!(count, 0);
         assert_eq!(fixed, "clean   \n");
+    }
+
+    #[test]
+    fn fix_transliterates_sane_pictographs() {
+        // Dingbat circled digits -> their digit, across all three families.
+        assert_eq!(fix_str("step \u{2777}\n"), ("step 2\n".to_owned(), 1)); // U+2777 neg-circled 2
+        assert_eq!(fix_str("\u{2789} items\n"), ("10 items\n".to_owned(), 1)); // U+2789 sans-serif circled 10
+        assert_eq!(fix_str("\u{278A} first\n"), ("1 first\n".to_owned(), 1)); // U+278A neg-sans-serif 1
+        // Heavy math signs -> the ASCII operator.
+        assert_eq!(fix_str("a \u{2795} b\n"), ("a + b\n".to_owned(), 1)); // U+2795 heavy plus
+        // Heavy check joins the done/checked family.
+        assert_eq!(fix_str("\u{2714} ok\n"), ("[x] ok\n".to_owned(), 1)); // U+2714 heavy check
+        // A decorative emoji still has no ASCII form -> deleted (category C),
+        // and the trailing space it left is rstripped.
+        assert_eq!(fix_str("boom \u{1F680}\n"), ("boom\n".to_owned(), 1)); // U+1F680 rocket
     }
 
     #[test]
