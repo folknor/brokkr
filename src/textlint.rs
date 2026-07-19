@@ -223,6 +223,12 @@ fn applies(c: &Compiled, rel: &Path) -> bool {
 }
 
 fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<TextlintViolation>) {
+    // Strip a single leading UTF-8 BOM so a rule anchored to the start of line 1
+    // (e.g. `^use `) matches its first physical line. `strip_prefix` returns a
+    // subslice of the same allocation, so classify/line-iteration/offset all stay
+    // internally consistent as long as they read this one slice. Line numbers are
+    // unaffected: the BOM precedes line 1's text.
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     let lines: Vec<&str> = content.lines().collect();
     // File-scope precondition: a rule with `only_if_file_matches` fires only in
     // files where some line matches it. Computed once per file per rule. When
@@ -522,6 +528,13 @@ mod tests {
     #[test]
     fn forbids_a_pattern() {
         assert_eq!(run(rule("todo!"), "let x = 1;\ntodo!();\n"), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn leading_bom_does_not_mis_anchor_line_one() {
+        // A file starting with U+FEFF must not shift line 1's first character:
+        // a `^use ` rule fires on line 1. Before the BOM strip it silently missed.
+        assert_eq!(run(rule("^use "), "\u{FEFF}use foo;\n"), vec![(1, "r".into())]);
     }
 
     #[test]

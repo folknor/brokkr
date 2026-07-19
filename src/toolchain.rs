@@ -66,6 +66,15 @@ impl DisabledToolchain {
             let orig = dir.join(name);
             let aside = dir.join(format!("{name}{SUFFIX}"));
             if orig.exists() {
+                // Both-exist case: a stale sidecar from a prior hard-killed run
+                // sits next to a current original (rustup/the user recreated the
+                // real file since). The stale sidecar no longer matches anything;
+                // its original was superseded. Remove it (best-effort) before we
+                // move the current `orig` into its place, so the CURRENT file
+                // becomes the restore target rather than being silently clobbered.
+                if aside.exists() {
+                    std::fs::remove_file(&aside).ok();
+                }
                 std::fs::rename(&orig, &aside).map_err(|e| {
                     DevError::Config(format!(
                         "disable_toolchain: cannot move {} aside: {e}",
@@ -163,6 +172,26 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(dir.join("rust-toolchain.toml")).unwrap(), "a");
         assert_eq!(fs::read_to_string(dir.join("rust-toolchain")).unwrap(), "b");
+    }
+
+    #[test]
+    fn stale_sidecar_beside_current_original_is_not_clobbered() {
+        let dir = tmpdir("both_present");
+        // A current original plus a stale sidecar from a prior aborted run.
+        let toml = dir.join("rust-toolchain.toml");
+        let aside = dir.join(format!("rust-toolchain.toml{SUFFIX}"));
+        fs::write(&toml, "current").unwrap();
+        fs::write(&aside, "stale").unwrap();
+
+        {
+            let _guard = DisabledToolchain::activate(&dir).unwrap();
+            // Disabled during the run: original moved aside.
+            assert!(!toml.exists());
+            assert!(aside.exists());
+        }
+        // Restored to the CURRENT file, no sidecar remnant.
+        assert_eq!(fs::read_to_string(&toml).unwrap(), "current");
+        assert!(!aside.exists());
     }
 
     #[test]

@@ -389,10 +389,10 @@ mod tests {
     }
 
     #[test]
-    fn optional_false_requires_the_dep_be_optional() {
+    fn optional_false_matches_only_non_optional_deps() {
         // `optional = false` matches only non-optional deps: `db` (optional
-        // false) trips, `service-state` (optional true) does not - i.e. "if
-        // present it must be optional".
+        // false) trips, `service-state` (optional true) does not - i.e. the
+        // rule fires on deps that are declared non-optional.
         let db = vec![app_rule("db", Vec::new(), Some(false))];
         assert_eq!(check_metadata(metadata(), &db).unwrap().violations.len(), 1);
 

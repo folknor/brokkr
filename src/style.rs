@@ -84,6 +84,11 @@ fn cap(s: &str) -> String {
 }
 
 fn scan_content(rel: &Path, content: &str, out: &mut Vec<StyleViolation>) {
+    // Strip a single leading UTF-8 BOM so line 1's text starts at the real
+    // first token; `strip_prefix` returns a subslice of the same allocation, so
+    // the pointer-offset bookkeeping below stays internally consistent. Line
+    // numbers are unaffected - the BOM precedes line 1's text.
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     let lines: Vec<&str> = content.lines().collect();
     // Lexical regions for the whole file, tokenized once, so a keyword that
     // lives inside a string literal or a comment is blanked before detection
@@ -190,9 +195,11 @@ fn is_exempt(kw: &str, trimmed: &str, prev: &str, body: Option<&str>) -> bool {
     // (c) comment or attribute attached to the construct.
     if prev_trim.starts_with("//")
         || prev_trim.starts_with("* ")
+        || prev_end == "*"
         || prev_trim.starts_with("*/")
         || prev_trim.starts_with("/*")
         || prev_trim.starts_with("#[")
+        || prev_trim.starts_with("#![")
     {
         return true;
     }
@@ -263,9 +270,18 @@ fn ends_with_any(s: &str, chars: &[char]) -> bool {
 }
 
 /// A multi-alternative match pattern: `alnum | alnum` (with optional spaces),
-/// but not a `||` boolean.
+/// but not a `||` boolean and not a bitwise-or expression/statement.
+///
+/// A match or-pattern arm ends with `=>` (or is a bare pattern continuation
+/// involving `|`); a bitwise-or is an assignment/expression - it contains a
+/// lone `=` (not `=>`) and/or ends with `;`. `let mask = a | b;` must NOT be
+/// treated as a match arm, or a following construct is wrongly exempted.
 fn is_match_guard(prev_trim: &str) -> bool {
     if prev_trim.contains("||") {
+        return false;
+    }
+    let prev_end = prev_trim.trim_end();
+    if !prev_end.ends_with("=>") && (prev_end.ends_with(';') || has_plain_assign(prev_end)) {
         return false;
     }
     let chars: Vec<char> = prev_trim.chars().collect();
@@ -281,6 +297,27 @@ fn is_match_guard(prev_trim: &str) -> bool {
         {
             return true;
         }
+    }
+    false
+}
+
+/// Whether `s` contains a plain assignment `=` - excluding `=>`, `==`, `!=`,
+/// `<=`, `>=`. Used to tell a bitwise-or expression from a match or-pattern.
+fn has_plain_assign(s: &str) -> bool {
+    let b = s.as_bytes();
+    for i in 0..b.len() {
+        if b[i] != b'=' {
+            continue;
+        }
+        let next = b.get(i + 1).copied();
+        let prev = if i > 0 { Some(b[i - 1]) } else { None };
+        if next == Some(b'>') || next == Some(b'=') {
+            continue;
+        }
+        if matches!(prev, Some(b'=') | Some(b'!') | Some(b'<') | Some(b'>')) {
+            continue;
+        }
+        return true;
     }
     false
 }
@@ -556,5 +593,60 @@ mod tests {
         assert_eq!(violations(src), vec![("for", 3)]);
         let src2 = "fn f() {\n    let a = compute();\n    if y {\n        g();\n    }\n}\n";
         assert_eq!(violations(src2), vec![("if", 3)]);
+    }
+
+    // ---- Fix #1: is_match_guard must not over-match bitwise-or. ----
+
+    #[test]
+    fn bitwise_or_above_if_is_flagged() {
+        // `let mask = a | b;` is a bitwise-or statement, NOT a match arm, so the
+        // following `if` still needs a blank line (false-negative regression).
+        let src = "fn f() {\n    let mask = a | b;\n    if c {\n        g();\n    }\n}\n";
+        assert_eq!(violations(src), vec![("if", 3)]);
+    }
+
+    #[test]
+    fn match_or_pattern_arm_above_if_is_exempt() {
+        // A genuine match or-pattern arm ending in `=>` above an indented `if`
+        // stays exempt (no regression).
+        let src = "fn f() {\n    match z {\n        Foo | Bar =>\n        if y {}\n    }\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    // ---- Fix #2: bare `*` comment line and `#![...]` inner attribute. ----
+
+    #[test]
+    fn bare_star_block_comment_line_above_is_ok() {
+        // A block-comment continuation line that is a bare `*` (no trailing
+        // space) exempts the construct below it.
+        let src = "fn f() {\n    let x = 1;\n    /*\n     *\n     */\n    if y {}\n}\n";
+        assert!(violations(src).is_empty());
+        // Directly below a bare `*` line specifically.
+        let src2 = "fn f() {\n    let x = 1;\n    *\n    if y {}\n}\n";
+        assert!(violations(src2).is_empty());
+    }
+
+    #[test]
+    fn inner_attribute_above_is_ok() {
+        // `#![...]` inner attribute exempts the construct below, like `#[...]`.
+        let src = "fn f() {\n    let x = 1;\n    #![allow(dead_code)]\n    if y {}\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    // ---- Fix #3: leading UTF-8 BOM must not mis-anchor line 1. ----
+
+    #[test]
+    fn leading_bom_does_not_hide_first_line_construct() {
+        // With a BOM ahead of `if x {`, line 1 must still be classified as a
+        // control-flow construct (first line of file -> exempt, but detected,
+        // not silently skipped as non-matching text).
+        let src = "\u{FEFF}if x {\n    y\n}\n";
+        // First line is exempt (nothing above), so no violation - the point is
+        // that detection is not derailed by the BOM.
+        assert!(violations(src).is_empty());
+        // And a BOM'd file whose first-line construct has a non-blank line
+        // above it (a second construct) is still scanned correctly.
+        let src2 = "\u{FEFF}let a = compute();\nif y {\n    g();\n}\n";
+        assert_eq!(violations(src2), vec![("if", 2)]);
     }
 }
