@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use crate::config::GremlinsConfig;
 use crate::error::DevError;
 use crate::gremlins;
+use crate::lex;
 
 /// One missing-blank-line violation: a control-flow line that needs a blank
 /// line above it and does not have one, and does not qualify for any exemption.
@@ -84,8 +85,20 @@ fn cap(s: &str) -> String {
 
 fn scan_content(rel: &Path, content: &str, out: &mut Vec<StyleViolation>) {
     let lines: Vec<&str> = content.lines().collect();
+    // Lexical regions for the whole file, tokenized once, so a keyword that
+    // lives inside a string literal or a comment is blanked before detection
+    // and never read as a control-flow construct. Mirrors textlint's masking:
+    // `offset` is each physical line's byte position within `content`, derived
+    // by pointer arithmetic (which accounts for the `\n`/`\r\n` terminator that
+    // `content.lines()` drops).
+    let regions = lex::classify(content);
+    let base = content.as_ptr() as usize;
     for (i, raw) in lines.iter().enumerate() {
-        let trimmed = raw.trim_start();
+        // Detect on a CODE-masked view (string/comment bytes blanked); report
+        // the original text.
+        let offset = raw.as_ptr() as usize - base;
+        let masked = lex::mask_line(raw, offset, &regions, lex::Region::Code);
+        let trimmed = masked.trim_start();
         let Some(kw) = control_flow_keyword(trimmed) else {
             continue;
         };
@@ -102,7 +115,7 @@ fn scan_content(rel: &Path, content: &str, out: &mut Vec<StyleViolation>) {
             file: rel.to_path_buf(),
             line: i + 1,
             keyword: kw,
-            content: cap(trimmed),
+            content: cap(raw.trim_start()),
             prev: cap(prev.trim_start()),
         });
     }
@@ -511,5 +524,37 @@ mod tests {
     fn first_line_of_file_is_exempt() {
         let src = "if cfg!(test) {}\n";
         assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn keyword_inside_string_literal_is_not_flagged() {
+        // A multi-line string continuation line begins (after indent) with a
+        // control-flow keyword; the lexer marks it as Str, so it is masked out.
+        let src = "fn f() {\n    let s = \"\n    for x\n    \";\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn keyword_inside_block_comment_body_is_not_flagged() {
+        // Plain-prose block-comment body lines starting with `for`/`if` are
+        // Comment bytes and must be blanked before detection.
+        let src = "fn f() {\n    let x = 1;\n    /*\n    for a\n    if this happens then\n    */\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn spawn_inside_string_literal_is_not_flagged() {
+        let src = "fn f() {\n    let q = w;\n    let s = \"a.spawn(b)\";\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn genuine_control_flow_still_flags_after_masking() {
+        // No strings/comments in play: a bare `for`/`if` with a non-blank,
+        // non-comment, unrelated line above must still be flagged.
+        let src = "fn f() {\n    let a = compute();\n    for x in items {\n        g();\n    }\n}\n";
+        assert_eq!(violations(src), vec![("for", 3)]);
+        let src2 = "fn f() {\n    let a = compute();\n    if y {\n        g();\n    }\n}\n";
+        assert_eq!(violations(src2), vec![("if", 3)]);
     }
 }
