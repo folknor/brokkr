@@ -269,6 +269,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
     // Commands that build/git against the code tree derive the build root
     // (cwd) themselves - see `run_measured`.
     let project_root = detection.project_root;
+    // The code tree (cwd), where cargo and git run. Coincides with
+    // `project_root` in the common case (config in cwd) and differs only under
+    // the one-level-up layout used to drive a foreign checkout.
+    let build_root = detection.build_root;
     let brokkr_args = capture_brokkr_args();
 
     // Pbfhogg measured commands: 28 commands → single dispatch path.
@@ -1073,8 +1077,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
                 )),
                 _ => {
+                    // The lock lives in the config dir (.brokkr); cargo runs
+                    // against the code tree (build_root), which differs under
+                    // the one-level-up layout.
                     let _lock = acquire_cmd_lock(project, &project_root, "test")?;
-                    test_cmd::run(&dev_config, project, &project_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
+                    test_cmd::run(&dev_config, project, &build_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
                 }
             }
         }
