@@ -69,8 +69,12 @@ Single crate, single binary. No workspace.
 - `src/main.rs` - `main()`, command dispatch, `run_measured()`, `resolve_mode()`
 - `src/cli/` - CLI definition (clap derive), split into `schema.rs` (`Cli`, `Command` incl. `Command::Deps` and all measurable commands, `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`) and `validation.rs` (clap value parsers). All commands are top-level - no subcommand enums for litehtml/sluggrs
 - `src/cargo_filter.rs` - Formatter primitives (`ClippyDiagnostic`, `ClippyParse`) plus the legacy text-output parser still used as a fallback by the test-phase build-error path. See the module header for why the JSON path replaced text scraping
-- `src/cargo_json.rs` - JSON event model and parser for `check`. `CheckEvent` enum (Diagnostic, TestFailure, TestHung, DiagnosticSummary, TestSummary, Gremlin, GremlinSummary) serialized as NDJSON
-- `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked + untracked-not-gitignored) for invisible/deceptive Unicode
+- `src/cargo_json.rs` - JSON event model and parser for `check`. `CheckEvent` enum (Diagnostic, TestFailure, TestHung, DiagnosticSummary, TestSummary, Gremlin/GremlinSummary, Style/StyleSummary, Header/HeaderSummary, Textlint/TextlintSummary, Dependency*) serialized as NDJSON
+- `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked + untracked-not-gitignored) for invisible/deceptive Unicode. Exposes `tracked_files()` (shared file walk) and `CodepointSet` (allow/ban singletons + ranges)
+- `src/style.rs` - `[style]` native check: blank line above `if`/`match`/`for`/`while`/`loop`/`spawn`. Ported from nautilus's `check_formatting_rs`. Opt-in
+- `src/header.rs` - `[header]` check: required file header with a current-year (`{year}`) requirement via libc `gmtime`. Ported from `check_copyright_year`
+- `src/textlint.rs` - `[[textlint]]` engine: declarative forbid-a-regex-on-a-line rules with bounded predicates (`allow_marker`, `except`, `in_toml_section`, `table_row_only`). The generic engine for grep-style convention hooks
+- `src/globs.rs` - `globset` wrapper for the path-glob lists shared by `header`/`textlint`
 - `src/scope.rs` - Scope + limit helpers. `changed_files()` computes files modified on the current branch via git merge-base; `partition()` sorts diagnostics scoped-first; `format_trailer()` builds the overflow summary
 - `src/measure.rs` - `MeasureMode` (Run/Bench/Hotpath/Alloc), `MeasureRequest`, `CommandContext`
 - `src/{pbfhogg,elivagar,nidhogg}/dispatch.rs` - Per-project dispatch (split from the old unified `src/dispatch.rs` in 0313f74). Pbfhogg exposes `run_command_with_params()`; elivagar and nidhogg expose `run_command()`. Pbfhogg and elivagar use `BenchContext` for build+harness; nidhogg delegates to per-module functions

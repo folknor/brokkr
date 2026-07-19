@@ -19,11 +19,10 @@
 //! strings) and box-drawing / geometric shapes (U+2500..=25FF, used for tree
 //! and table output).
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::GremlinsConfig;
+use crate::config::{CodepointSet, GremlinsConfig};
 use crate::error::DevError;
 
 /// One gremlin occurrence.
@@ -58,8 +57,8 @@ pub struct FixSummary {
 /// Mechanical replacement for a gremlin char. Empty string means delete.
 /// Returns `None` for non-gremlin chars and for any char in `allow` (a
 /// config-permitted codepoint is left untouched by `--fix-gremlins`).
-fn replacement(c: char, allow: &HashSet<char>) -> Option<&'static str> {
-    if allow.contains(&c) {
+fn replacement(c: char, allow: &CodepointSet) -> Option<&'static str> {
+    if allow.contains(c) {
         return None;
     }
     Some(match c {
@@ -126,7 +125,7 @@ pub fn fix(
     Ok(out)
 }
 
-fn fix_content(content: &str, allow: &HashSet<char>) -> (String, usize) {
+fn fix_content(content: &str, allow: &CodepointSet) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut count = 0usize;
     for c in content.chars() {
@@ -220,12 +219,12 @@ pub fn scan(
 }
 
 /// The config's `allow` set, or an empty set when there is no `[gremlins]`.
-fn allow_set(config: Option<&GremlinsConfig>) -> HashSet<char> {
+fn allow_set(config: Option<&GremlinsConfig>) -> CodepointSet {
     config.map(|c| c.allow.clone()).unwrap_or_default()
 }
 
 /// The config's `ban` set, or an empty set when there is no `[gremlins]`.
-fn ban_set(config: Option<&GremlinsConfig>) -> HashSet<char> {
+fn ban_set(config: Option<&GremlinsConfig>) -> CodepointSet {
     config.map(|c| c.ban.clone()).unwrap_or_default()
 }
 
@@ -233,8 +232,8 @@ fn scan_content(
     rel: &Path,
     content: &str,
     out: &mut Vec<Gremlin>,
-    allow: &HashSet<char>,
-    ban: &HashSet<char>,
+    allow: &CodepointSet,
+    ban: &CodepointSet,
 ) {
     let mut line = 1usize;
     let mut col = 1usize;
@@ -268,16 +267,16 @@ fn scan_content(
 /// Label for a codepoint flagged only because it is in the config `ban` list.
 const BANNED_BY_CONFIG: &str = "BANNED CODEPOINT (config `ban`)";
 
-fn gremlin_name(c: char, allow: &HashSet<char>, ban: &HashSet<char>) -> Option<&'static str> {
+fn gremlin_name(c: char, allow: &CodepointSet, ban: &CodepointSet) -> Option<&'static str> {
     // Config `allow` wins over everything: a permitted codepoint is never a
     // gremlin, even if it is in the built-in set.
-    if allow.contains(&c) {
+    if allow.contains(c) {
         return None;
     }
     // Config `ban` flags a codepoint the built-in set would otherwise pass -
     // checked before the ASCII fast path so even an out-of-place ASCII char
     // can be banned.
-    if ban.contains(&c) {
+    if ban.contains(c) {
         return Some(BANNED_BY_CONFIG);
     }
     // Fast path: printable ASCII plus tab/LF/CR are the overwhelmingly common
@@ -371,13 +370,19 @@ mod tests {
 
     fn scan_str(s: &str) -> Vec<Gremlin> {
         let mut out = Vec::new();
-        scan_content(Path::new("t.rs"), s, &mut out, &HashSet::new(), &HashSet::new());
+        scan_content(
+            Path::new("t.rs"),
+            s,
+            &mut out,
+            &CodepointSet::default(),
+            &CodepointSet::default(),
+        );
         out
     }
 
     /// `fix_content` with no `allow` overrides - the default banned set.
     fn fix_str(s: &str) -> (String, usize) {
-        fix_content(s, &HashSet::new())
+        fix_content(s, &CodepointSet::default())
     }
 
     #[test]
@@ -614,8 +619,11 @@ mod tests {
     fn allow_unbans_a_default_gremlin() {
         // U+2019 (right single quote) is a built-in gremlin; `allow` exempts it
         // from both the scan and the fix.
-        let allow: HashSet<char> = ['\u{2019}'].into_iter().collect();
-        let ban = HashSet::new();
+        let allow = CodepointSet {
+            singles: ['\u{2019}'].into_iter().collect(),
+            ranges: Vec::new(),
+        };
+        let ban = CodepointSet::default();
         let mut out = Vec::new();
         scan_content(Path::new("t.rs"), "it\u{2019}s\n", &mut out, &allow, &ban);
         assert!(out.is_empty(), "allowed U+2019 must not be flagged");
@@ -628,8 +636,11 @@ mod tests {
     fn ban_flags_an_extra_codepoint_but_fix_leaves_it() {
         // U+2011 (non-breaking hyphen) is NOT in the built-in set; `ban` flags
         // it. The fix has no ASCII mapping for it, so it is left in place.
-        let allow = HashSet::new();
-        let ban: HashSet<char> = ['\u{2011}'].into_iter().collect();
+        let allow = CodepointSet::default();
+        let ban = CodepointSet {
+            singles: ['\u{2011}'].into_iter().collect(),
+            ranges: Vec::new(),
+        };
         let mut out = Vec::new();
         scan_content(Path::new("t.rs"), "non\u{2011}break\n", &mut out, &allow, &ban);
         assert_eq!(out.len(), 1);

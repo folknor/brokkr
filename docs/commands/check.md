@@ -2,7 +2,8 @@
 
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
-full validation pass (gremlins + style + dependency rules + clippy + tests); `test`
+full validation pass (gremlins + style + header + textlint + dependency rules +
+clippy + tests); `test`
 runs one named cargo test against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
@@ -10,7 +11,7 @@ section, profiles) see `docs/brokkr.toml.md`.
 
 ## `brokkr check`
 
-Gremlins + style + dependency rules + clippy + tests. Trailing args after
+Gremlins + style + header + textlint + dependency rules + clippy + tests. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -129,6 +130,19 @@ carve-outs: else-if chains, expression position, loop labels, `.spawn` method
 chains). It scans tracked `.rs` files, honouring `[gremlins].exclude`. JSON
 mode emits `style` and `style_summary` events. Ported from nautilus_trader's
 `check_formatting_rs` hook; see `src/style.rs`.
+
+Header phase runs next, only when a `[header]` section is present. A file
+matching `[header].paths` (minus `exempt`) must contain `[header].pattern` with
+`{year}` expanded to the current UTC year; a missing header or a stale year
+fails. JSON mode emits `header`/`header_summary`. Ported from
+`check_copyright_year`; see `src/header.rs`.
+
+Textlint phase runs next, only when `[[textlint]]` rules exist. Each rule
+forbids a linear-time regex `pattern` on lines of files matching `paths`; a
+match is a violation, subject to bounded modifiers (`allow_marker`, `except`,
+`in_toml_section`, `table_row_only`). JSON mode emits `textlint`/
+`textlint_summary`. The generic engine behind most grep-style convention hooks;
+see `src/textlint.rs`.
 
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads

@@ -125,13 +125,35 @@ pub fn check_metadata(
     let mut violations = Vec::new();
     for rule in rules {
         let forbidden: BTreeSet<&str> = rule.forbid.iter().map(String::as_str).collect();
-        for from in &rule.from {
-            let Some(pkg) = by_name.get(from.as_str()) else {
-                return Err(DevError::Config(format!(
-                    "[[dependency_rule]] references package '{from}' in `from`, \
-                     but cargo metadata has no workspace package with that name"
-                )));
-            };
+        let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
+
+        // Resolve the `from` set. `"*"` expands to every workspace package;
+        // otherwise each named package is looked up. `except` drops packages
+        // from either form.
+        let from_pkgs: Vec<&CargoPackage> = if rule.from.iter().any(|f| f == "*") {
+            workspace_packages
+                .iter()
+                .copied()
+                .filter(|pkg| !except.contains(pkg.name.as_str()))
+                .collect()
+        } else {
+            let mut pkgs = Vec::new();
+            for from in &rule.from {
+                if except.contains(from.as_str()) {
+                    continue;
+                }
+                let Some(pkg) = by_name.get(from.as_str()) else {
+                    return Err(DevError::Config(format!(
+                        "[[dependency_rule]] references package '{from}' in `from`, \
+                         but cargo metadata has no workspace package with that name"
+                    )));
+                };
+                pkgs.push(*pkg);
+            }
+            pkgs
+        };
+
+        for pkg in from_pkgs {
             for dep in &pkg.dependencies {
                 if !forbidden.contains(dep.name.as_str()) {
                     continue;
@@ -229,6 +251,7 @@ mod tests {
             name: Some("app-db-boundary".into()),
             from: vec!["app".into()],
             forbid: vec!["db".into()],
+            except: Vec::new(),
         }];
         let report = check_metadata(metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 1);
@@ -244,6 +267,7 @@ mod tests {
             name: None,
             from: vec!["app".into()],
             forbid: vec!["db".into(), "service-state".into()],
+            except: Vec::new(),
         }];
         let report = check_metadata(metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 2);
@@ -258,8 +282,30 @@ mod tests {
             name: None,
             from: vec!["missing".into()],
             forbid: vec!["db".into()],
+            except: Vec::new(),
         }];
         let err = check_metadata(metadata(), &rules).unwrap_err().to_string();
         assert!(err.contains("missing"), "got: {err}");
+    }
+
+    #[test]
+    fn wildcard_from_scans_all_workspace_packages_minus_except() {
+        // Only `app` depends on `db`. `from = "*"` scans every workspace
+        // package and flags it; `except = ["app"]` then clears it.
+        let rules = vec![DependencyRule {
+            name: None,
+            from: vec!["*".into()],
+            forbid: vec!["db".into()],
+            except: Vec::new(),
+        }];
+        assert_eq!(check_metadata(metadata(), &rules).unwrap().violations.len(), 1);
+
+        let excepted = vec![DependencyRule {
+            name: None,
+            from: vec!["*".into()],
+            forbid: vec!["db".into()],
+            except: vec!["app".into()],
+        }];
+        assert!(check_metadata(metadata(), &excepted).unwrap().violations.is_empty());
     }
 }

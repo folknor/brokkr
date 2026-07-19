@@ -23,7 +23,9 @@ use std::path::Path;
 use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
-use crate::config::{CheckEntry, DependencyRule, GremlinsConfig, StyleConfig, TestConfig};
+use crate::config::{
+    CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, StyleConfig, TestConfig, TextlintRule,
+};
 use crate::dependency_rules;
 use crate::error::DevError;
 use crate::gremlins;
@@ -42,6 +44,8 @@ pub(crate) fn cmd_check(
     test_cfg: Option<&TestConfig>,
     gremlins_cfg: Option<&GremlinsConfig>,
     style_cfg: Option<&StyleConfig>,
+    header_cfg: Option<&HeaderConfig>,
+    textlint_rules: &[TextlintRule],
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
@@ -59,6 +63,8 @@ pub(crate) fn cmd_check(
 
     run_gremlins(project_root, gremlins_cfg, json, limit, all, fix_gremlins)?;
     run_style(project_root, style_cfg, gremlins_cfg, json, limit, all)?;
+    run_header(project_root, header_cfg, json, limit, all)?;
+    run_textlint(project_root, textlint_rules, json, limit, all)?;
     run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
     run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
     let mut collected_timings: Vec<TestTiming> = Vec::new();
@@ -396,6 +402,132 @@ fn run_style(
     }
 
     Err(DevError::Build("style check failed".into()))
+}
+
+/// The `[header]` phase: a required file header whose year must be current.
+/// Inert unless the project has a `[header]` section.
+fn run_header(
+    project_root: &Path,
+    header_cfg: Option<&HeaderConfig>,
+    json: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
+    let Some(cfg) = header_cfg else {
+        return Ok(());
+    };
+    let year = crate::header::current_utc_year();
+    let expected = crate::header::expand(&cfg.pattern, year);
+
+    if !json {
+        output::run_msg(&format!("header: require `{expected}`"));
+    }
+    let violations = crate::header::scan(project_root, cfg, year)?;
+
+    if json {
+        for v in &violations {
+            cargo_json::emit(&cargo_json::CheckEvent::Header(cargo_json::HeaderEvent {
+                file: v.file.display().to_string(),
+            }));
+        }
+        cargo_json::emit(&cargo_json::CheckEvent::HeaderSummary(
+            cargo_json::HeaderSummaryEvent {
+                status: if violations.is_empty() { "ok" } else { "failed" },
+                violations: violations.len(),
+            },
+        ));
+    }
+
+    if violations.is_empty() {
+        if !json {
+            output::run_msg("header: ok");
+        }
+        return Ok(());
+    }
+
+    if !json {
+        let total = violations.len();
+        let displayed = if all || total <= limit {
+            &violations[..]
+        } else {
+            &violations[..limit]
+        };
+        let mut msg = format!("header: {total} violation(s)\n");
+        for v in displayed {
+            msg.push_str("  ");
+            msg.push_str(&crate::header::format_one(v, &expected));
+            msg.push('\n');
+        }
+        if displayed.len() < total {
+            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        }
+        output::error(msg.trim_end());
+    }
+
+    Err(DevError::Build("header check failed".into()))
+}
+
+/// The `[[textlint]]` phase: declarative forbid-a-pattern line rules. Inert
+/// unless the project defines `[[textlint]]` entries.
+fn run_textlint(
+    project_root: &Path,
+    rules: &[TextlintRule],
+    json: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    if !json {
+        output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
+    }
+    let violations = crate::textlint::scan(project_root, rules)?;
+
+    if json {
+        for v in &violations {
+            cargo_json::emit(&cargo_json::CheckEvent::Textlint(cargo_json::TextlintEvent {
+                file: v.file.display().to_string(),
+                line: v.line,
+                rule: v.rule.clone(),
+            }));
+        }
+        cargo_json::emit(&cargo_json::CheckEvent::TextlintSummary(
+            cargo_json::TextlintSummaryEvent {
+                status: if violations.is_empty() { "ok" } else { "failed" },
+                violations: violations.len(),
+            },
+        ));
+    }
+
+    if violations.is_empty() {
+        if !json {
+            output::run_msg("textlint: ok");
+        }
+        return Ok(());
+    }
+
+    if !json {
+        let total = violations.len();
+        let displayed = if all || total <= limit {
+            &violations[..]
+        } else {
+            &violations[..limit]
+        };
+        let mut msg = format!("textlint: {total} violation(s)\n");
+        for v in displayed {
+            msg.push_str("  ");
+            msg.push_str(&crate::textlint::format_one(v));
+            msg.push('\n');
+        }
+        if displayed.len() < total {
+            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        }
+        output::error(msg.trim_end());
+    }
+
+    Err(DevError::Build("textlint failed".into()))
 }
 
 fn run_dependency_rules(

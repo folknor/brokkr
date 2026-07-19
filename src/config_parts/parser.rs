@@ -42,6 +42,8 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let capture_env = parse_capture_env(table)?;
     let gremlins = parse_gremlins(table)?;
     let style = parse_style(table)?;
+    let header = parse_header(table)?;
+    let textlint = parse_textlint(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -61,9 +63,75 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             capture_env,
             gremlins,
             style,
+            header,
+            textlint,
             disable_toolchain,
         },
     ))
+}
+
+/// Parse the optional `[header]` section. Absent -> `None`. Requires a
+/// non-empty `paths` list and `pattern`.
+fn parse_header(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<HeaderConfig>, DevError> {
+    let Some(value) = table.get("header") else {
+        return Ok(None);
+    };
+    let cfg: HeaderConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[header]: {e}")))?;
+    if cfg.paths.is_empty() {
+        return Err(DevError::Config(
+            "[header] requires a non-empty `paths` list".into(),
+        ));
+    }
+    if cfg.pattern.trim().is_empty() {
+        return Err(DevError::Config("[header] requires a non-empty `pattern`".into()));
+    }
+    Ok(Some(cfg))
+}
+
+/// Parse the optional `[[textlint]]` array of rules. Absent -> empty. Each rule
+/// needs a `name`, `pattern`, and non-empty `paths`.
+fn parse_textlint(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<TextlintRule>, DevError> {
+    let Some(value) = table.get("textlint") else {
+        return Ok(Vec::new());
+    };
+    if value.is_table() {
+        return Err(DevError::Config(
+            "[textlint] (table form) is not supported. Use one or more \
+             `[[textlint]]` array-of-table entries."
+                .into(),
+        ));
+    }
+    let rules: Vec<TextlintRule> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[textlint]]: {e}")))?;
+    for rule in &rules {
+        if rule.name.trim().is_empty() {
+            return Err(DevError::Config(
+                "[[textlint]] entry has empty `name`".into(),
+            ));
+        }
+        if rule.pattern.is_empty() {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?} has empty `pattern`",
+                rule.name
+            )));
+        }
+        if rule.paths.is_empty() {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?} has empty `paths`",
+                rule.name
+            )));
+        }
+    }
+    Ok(rules)
 }
 
 /// Parse the optional `[style]` section. Absent - or present but with no rule
@@ -175,6 +243,8 @@ fn parse_hosts(
             || key == "capture_env"
             || key == "gremlins"
             || key == "style"
+            || key == "header"
+            || key == "textlint"
             || key == "disable_toolchain"
         {
             continue;
@@ -319,8 +389,11 @@ fn parse_gremlins(
 
     let allow = parse_codepoint_set("allow", &raw.allow)?;
     let ban = parse_codepoint_set("ban", &raw.ban)?;
-    for c in &allow {
-        if ban.contains(c) {
+    // Catch a codepoint listed on both sides, including a singleton that falls
+    // inside the other side's range. Range-vs-range overlap is left to the
+    // author.
+    for c in allow.singles.iter().chain(ban.singles.iter()) {
+        if allow.contains(*c) && ban.contains(*c) {
             return Err(DevError::Config(format!(
                 "[gremlins]: U+{:04X} is listed in both `allow` and `ban`.",
                 *c as u32
@@ -336,15 +409,41 @@ fn parse_gremlins(
     }))
 }
 
-/// Parse a `[gremlins]` `allow`/`ban` list of `U+XXXX` strings into a char set.
-fn parse_codepoint_set(field: &str, entries: &[String]) -> Result<HashSet<char>, DevError> {
-    let mut out = HashSet::new();
+/// Parse a `[gremlins]` `allow`/`ban` list into a [`CodepointSet`]. Each entry
+/// is either a `U+XXXX` singleton or a `U+AAAA..U+BBBB` range (both ends
+/// inclusive; `..=` is also accepted).
+fn parse_codepoint_set(field: &str, entries: &[String]) -> Result<CodepointSet, DevError> {
+    let mut out = CodepointSet::default();
     for entry in entries {
-        let c = parse_codepoint(entry)
-            .map_err(|msg| DevError::Config(format!("[gremlins].{field}: {msg}")))?;
-        out.insert(c);
+        if entry.contains("..") {
+            let range = parse_codepoint_range(entry)
+                .map_err(|msg| DevError::Config(format!("[gremlins].{field}: {msg}")))?;
+            out.ranges.push(range);
+        } else {
+            let c = parse_codepoint(entry)
+                .map_err(|msg| DevError::Config(format!("[gremlins].{field}: {msg}")))?;
+            out.singles.insert(c);
+        }
     }
     Ok(out)
+}
+
+/// Parse a `U+AAAA..U+BBBB` (or `..=`) codepoint range. Both ends inclusive;
+/// the low end must not exceed the high end.
+fn parse_codepoint_range(s: &str) -> Result<std::ops::RangeInclusive<u32>, String> {
+    let t = s.trim();
+    let (lo_s, hi_s) = t
+        .split_once("..=")
+        .or_else(|| t.split_once(".."))
+        .ok_or_else(|| format!("{t:?}: malformed range, expected U+AAAA..U+BBBB"))?;
+    let lo = parse_codepoint(lo_s)? as u32;
+    let hi = parse_codepoint(hi_s)? as u32;
+    if lo > hi {
+        return Err(format!(
+            "{t:?}: range start U+{lo:04X} is greater than end U+{hi:04X}"
+        ));
+    }
+    Ok(lo..=hi)
 }
 
 /// Parse one `U+XXXX` token into a `char`. Accepts a case-insensitive `U+`

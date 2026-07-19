@@ -32,6 +32,8 @@ mod tests {
             capture_env: Vec::new(),
             gremlins: None,
             style: None,
+            header: None,
+            textlint: Vec::new(),
             disable_toolchain: false,
         }
     }
@@ -75,9 +77,36 @@ mod tests {
         .unwrap();
         let cfg = parse_gremlins(&table).unwrap().unwrap();
         assert!(cfg.disable);
-        assert!(cfg.allow.contains(&'\u{2019}'));
+        assert!(cfg.allow.contains('\u{2019}'));
         // Case-insensitive `u+` prefix accepted.
-        assert!(cfg.ban.contains(&'\u{2011}'));
+        assert!(cfg.ban.contains('\u{2011}'));
+    }
+
+    #[test]
+    fn parse_gremlins_ban_range() {
+        // The whole Cyrillic block, inclusive of both ends.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nban = [\"U+0400..U+04FF\"]\n").unwrap();
+        let cfg = parse_gremlins(&table).unwrap().unwrap();
+        assert!(cfg.ban.contains('\u{0400}'));
+        assert!(cfg.ban.contains('\u{04FF}'));
+        assert!(cfg.ban.contains('\u{0450}'));
+        assert!(!cfg.ban.contains('\u{03FF}'));
+        assert!(!cfg.ban.contains('\u{0500}'));
+    }
+
+    #[test]
+    fn parse_gremlins_rejects_reversed_range_and_range_singleton_overlap() {
+        // Reversed bounds.
+        let bad: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nban = [\"U+04FF..U+0400\"]\n").unwrap();
+        assert!(parse_gremlins(&bad).is_err());
+        // A singleton in `allow` that falls inside a `ban` range.
+        let overlap: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[gremlins]\nallow = [\"U+0450\"]\nban = [\"U+0400..U+04FF\"]\n",
+        )
+        .unwrap();
+        assert!(parse_gremlins(&overlap).is_err());
     }
 
     #[test]

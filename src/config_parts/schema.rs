@@ -43,6 +43,13 @@ pub struct DevConfig {
     /// check`. `None` when the project has no `[style]` section. See
     /// [`StyleConfig`].
     pub style: Option<StyleConfig>,
+    /// `[header]` config: a required file header with a current-year check.
+    /// `None` when the project has no `[header]` section. See [`HeaderConfig`].
+    pub header: Option<HeaderConfig>,
+    /// `[[textlint]]` rules: declarative forbid-a-pattern line checks run by
+    /// `brokkr check`. Empty when the project defines no `[[textlint]]`
+    /// entries. See [`TextlintRule`].
+    pub textlint: Vec<TextlintRule>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -81,11 +88,34 @@ pub struct GremlinsConfig {
     /// gremlins. Empty / unset means scan everything.
     pub exclude: Vec<String>,
     /// Codepoints removed from the effective banned set (scan skips, fix
-    /// leaves alone).
-    pub allow: HashSet<char>,
+    /// leaves alone). Singletons and ranges.
+    pub allow: CodepointSet,
     /// Codepoints added to the banned set beyond the built-in list. Detected
-    /// by the scan; not auto-rewritten by `--fix-gremlins`.
-    pub ban: HashSet<char>,
+    /// by the scan; not auto-rewritten by `--fix-gremlins`. Singletons and
+    /// ranges.
+    pub ban: CodepointSet,
+}
+
+/// A set of Unicode codepoints: individual codepoints plus inclusive ranges.
+/// Backs the `[gremlins]` `allow`/`ban` lists, which accept both `U+XXXX`
+/// singletons and `U+AAAA..U+BBBB` ranges (both ends inclusive). Ranges are
+/// kept as ranges rather than expanded, so banning a whole plane costs a
+/// bounds check, not a million-entry set.
+#[derive(Debug, Clone, Default)]
+pub struct CodepointSet {
+    pub singles: HashSet<char>,
+    pub ranges: Vec<std::ops::RangeInclusive<u32>>,
+}
+
+impl CodepointSet {
+    /// Whether `c` is covered by a listed singleton or range.
+    pub fn contains(&self, c: char) -> bool {
+        if self.singles.contains(&c) {
+            return true;
+        }
+        let cp = c as u32;
+        self.ranges.iter().any(|r| r.contains(&cp))
+    }
 }
 
 impl GremlinsConfig {
@@ -120,23 +150,80 @@ impl StyleConfig {
     }
 }
 
+/// `[header]` section: a required file header whose year must be current.
+///
+/// A file matching `paths` (and not `exempt`) must contain `pattern`, with
+/// `{year}` expanded to the current UTC year. A missing header and a stale
+/// year both fail the same check. See [`crate::header`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderConfig {
+    /// Globs for files that must carry the header (e.g. `crates/**/*.rs`).
+    pub paths: Vec<String>,
+    /// The required header text. `{year}` expands to the current UTC year.
+    pub pattern: String,
+    /// Globs for files excused from the check. Empty by default.
+    #[serde(default)]
+    pub exempt: Vec<String>,
+}
+
+/// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching
+/// `paths`, with bounded predicates and inline/regex exceptions. See
+/// [`crate::textlint`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextlintRule {
+    /// Human label surfaced in violation output.
+    pub name: String,
+    /// The forbidden pattern (a linear-time `regex`). A match is a violation.
+    pub pattern: String,
+    /// Globs for the files this rule scans.
+    pub paths: Vec<String>,
+    /// Message shown for each violation.
+    pub message: String,
+    /// Inline escape hatch: a line containing this literal substring (typically
+    /// an author's `// allow-...` comment) is skipped. Optional.
+    #[serde(default)]
+    pub allow_marker: Option<String>,
+    /// Lines matching any of these regexes are exempt. Optional.
+    #[serde(default)]
+    pub except: Vec<String>,
+    /// Region predicate: only consider lines while the last-seen TOML section
+    /// header (`[section]`) equals this. Optional; for `Cargo.toml` rules.
+    #[serde(default)]
+    pub in_toml_section: Option<String>,
+    /// Line predicate: only consider markdown table rows (trimmed line starts
+    /// with `|`). Off by default.
+    #[serde(default)]
+    pub table_row_only: bool,
+}
+
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must
 /// not exist.
 ///
-/// `from` names one or more workspace packages. `forbid` names package
-/// dependencies that are illegal for those packages. Both accept either
-/// a single string or an array of strings in TOML.
+/// `from` names one or more workspace packages, or the wildcard `"*"` for
+/// every workspace package. `forbid` names package dependencies that are
+/// illegal for those packages - typically an external crate you want to keep
+/// out of a boundary (e.g. `forbid = "tokio"` for sync core crates). `except`
+/// removes packages from the `from` set, which pairs with `from = "*"` to
+/// express "no crate may depend on X, except these". `from`, `forbid`, and
+/// `except` each accept a single string or an array of strings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyRule {
     /// Optional human label surfaced in violation output.
     pub name: Option<String>,
-    /// Workspace package(s) whose direct dependency list is checked.
+    /// Workspace package(s) whose direct dependency list is checked, or `"*"`
+    /// for all workspace packages.
     #[serde(deserialize_with = "string_or_vec")]
     pub from: Vec<String>,
     /// Package names that may not appear in `from`'s direct dependencies.
     #[serde(deserialize_with = "string_or_vec")]
     pub forbid: Vec<String>,
+    /// Workspace packages to drop from the `from` set (mainly for
+    /// `from = "*"`). Empty by default.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub except: Vec<String>,
 }
 
 fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>

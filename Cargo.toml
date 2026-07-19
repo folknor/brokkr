@@ -20,6 +20,8 @@ rusqlite = { version = "0.40.0", features = ["bundled", "backup"] }
 xxhash-rust = { version = "0.8.16", features = ["xxh3"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 png = "0.18"
+regex = "1"
+globset = "0.4"
 
 [lints.clippy]
 uninlined_format_args = "deny"

@@ -22,6 +22,38 @@ pub enum CheckEvent {
     GremlinSummary(GremlinSummaryEvent),
     Style(StyleEvent),
     StyleSummary(StyleSummaryEvent),
+    Header(HeaderEvent),
+    HeaderSummary(HeaderSummaryEvent),
+    Textlint(TextlintEvent),
+    TextlintSummary(TextlintSummaryEvent),
+}
+
+/// One `[header]` missing/stale-header violation.
+#[derive(Serialize)]
+pub struct HeaderEvent {
+    pub file: String,
+}
+
+/// Closing tally for the `[header]` phase.
+#[derive(Serialize)]
+pub struct HeaderSummaryEvent {
+    pub status: &'static str,
+    pub violations: usize,
+}
+
+/// One `[[textlint]]` violation.
+#[derive(Serialize)]
+pub struct TextlintEvent {
+    pub file: String,
+    pub line: usize,
+    pub rule: String,
+}
+
+/// Closing tally for the `[[textlint]]` phase.
+#[derive(Serialize)]
+pub struct TextlintSummaryEvent {
+    pub status: &'static str,
+    pub violations: usize,
 }
 
 /// One `[style]` blank-line violation.

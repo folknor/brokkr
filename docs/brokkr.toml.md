@@ -58,7 +58,7 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`, `style`, `disable_toolchain`.
+`gremlins`, `style`, `header`, `textlint`, `disable_toolchain`.
 
 ## `disable_toolchain`
 
@@ -110,10 +110,13 @@ ban = ["U+2011"]                                   # flag these codepoints
   rewrite banned chars - the scan flags them and you fix them by hand.
 
 `allow` and `ban` entries are `U+XXXX` codepoint strings (case-insensitive
-`U+` prefix, 1-6 hex digits); a bad token or a codepoint listed in both is
-rejected at parse time. The `U+XXXX` form keeps `brokkr.toml` itself free of
-literal, possibly-invisible gremlin characters. Omit the section to scan
-everything with the built-in set (the default).
+`U+` prefix, 1-6 hex digits) or inclusive ranges `U+AAAA..U+BBBB` (both ends
+included; `..=` also accepted). Ranges let you ban a whole block cheaply, e.g.
+`ban = ["U+0400..U+04FF"]` for Cyrillic. A bad token, a reversed range, or a
+codepoint listed on both sides is rejected at parse time. The `U+XXXX` form
+keeps `brokkr.toml` itself free of literal, possibly-invisible gremlin
+characters. Omit the section to scan everything with the built-in set (the
+default).
 
 ## `[style]` section
 
@@ -134,6 +137,53 @@ an identifier shared with the line above or the first body line, plus
 per-keyword carve-outs for else-if chains, expression position, loop labels,
 and `.spawn` method chains). Ported from nautilus_trader's `check_formatting_rs`
 convention hook; see `src/style.rs` and `docs/commands/check.md`.
+
+## `[header]` section
+
+A required file header whose year must be current (the header phase). A file
+matching `paths` (and not `exempt`) must contain `pattern`, with `{year}`
+expanded to the current UTC year; a missing header and a stale year both fail.
+Absent by default.
+
+```toml
+[header]
+paths = ["crates/**/*.rs"]
+pattern = "Copyright (C) 2015-{year}"
+exempt = ["**/examples/**", "**/core/rust/**"]
+```
+
+`paths`/`exempt` are globs (`**` matches any directories). The current year
+comes from libc `gmtime` (no date-crate dependency). Ported from
+nautilus_trader's `check_copyright_year` hook; see `src/header.rs`.
+
+## `[[textlint]]` array
+
+Declarative "forbid a regex on a line" rules (the textlint phase) - the generic
+engine behind most grep-style convention hooks. Each entry scans files matching
+`paths`; a line matching `pattern` is a violation. Empty by default.
+
+```toml
+[[textlint]]
+name = "no-todo-macro"
+pattern = "todo!\\("
+paths = ["crates/**/*.rs"]
+message = "finish or file an issue instead of todo!()"
+
+[[textlint]]
+name = "tokio-only-in-dev-deps"
+pattern = "^tokio\\b"
+paths = ["**/Cargo.toml"]
+message = "tokio belongs in [dev-dependencies]"
+in_toml_section = "dependencies"   # only while the last-seen [section] matches
+```
+
+Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
+`paths`, `message`, plus optional bounded modifiers - `allow_marker` (a line
+containing this literal, e.g. an author's `// allow-...` comment, is skipped),
+`except` (regexes; a line matching any is exempt), `in_toml_section` (only
+consider lines while the last-seen `[section]` header equals this), and
+`table_row_only` (only markdown table rows). No arbitrary multiline matching.
+See `src/textlint.rs`.
 
 ## Datasets and variant-selection flags
 
@@ -297,10 +347,21 @@ forbid = "rusqlite"
 
 - `name` (optional) - label surfaced in violation output.
 - `from` (required) - workspace package name, or an array of names, whose
-  direct dependency list is checked.
+  direct dependency list is checked. The wildcard `"*"` means every workspace
+  package - use it to ban an external crate across the whole workspace.
 - `forbid` (required) - package name, or array of package names, that may not
   appear in those direct dependencies. This can name workspace crates or
   external crates.
+- `except` (optional) - workspace packages to drop from the `from` set. Pairs
+  with `from = "*"` to express "no crate may depend on X, except these".
+
+```toml
+[[dependency_rule]]
+name = "openssl-only-in-tls-adapter"
+from = "*"
+forbid = "openssl"
+except = ["tls-adapter"]
+```
 
 Rules are intentionally direct-edge checks: `app -> db` is rejected when `db`
 appears in `app`'s manifest dependencies. Transitive architectural constraints
