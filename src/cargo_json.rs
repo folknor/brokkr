@@ -276,17 +276,6 @@ pub fn parse_cargo_diagnostics(
             .unwrap_or("unknown")
             .to_string();
 
-        // Skip "aborting due to N previous errors" meta-diagnostics.
-        if level == "error" {
-            let text = msg
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if text.contains("aborting due to") || text.contains("could not compile") {
-                continue;
-            }
-        }
-
         let code = msg
             .get("code")
             .and_then(|c| c.get("code"))
@@ -298,6 +287,25 @@ pub fn parse_cargo_diagnostics(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Whether this compiler-message carries any spans. rustc's summary
+        // and meta-noise messages ("N warnings emitted", "generated N
+        // warnings", "aborting due to N previous errors") always arrive with
+        // an empty `spans` array and a null `code`.
+        let spans_empty = msg
+            .get("spans")
+            .and_then(|s| s.as_array())
+            .is_none_or(Vec::is_empty);
+
+        // Skip rustc/cargo summary + meta-noise diagnostics. The old text
+        // scraper filtered these (`cargo_filter::is_meta_noise`); the JSON
+        // path must do the same or the phantom, location-less messages inflate
+        // the lint count (3 lints reported as "4 errors"). A real lint/error
+        // always carries a primary span or a diagnostic code, so gating on
+        // `spans_empty && code.is_none()` cannot drop a genuine finding.
+        if is_summary_noise(&message, spans_empty, code.is_some()) {
+            continue;
+        }
 
         // Primary span for file/line/column.
         let primary_span = msg
@@ -379,6 +387,43 @@ pub fn parse_cargo_diagnostics(
     }
 
     events
+}
+
+/// Classify a compiler-message as a rustc/cargo summary or meta-noise line
+/// that should not become a real `Diagnostic`.
+///
+/// Ported from the text-scraper's `cargo_filter::is_meta_noise`. These
+/// messages arrive with no primary span and no diagnostic `code`, so the
+/// caller gates on `spans_empty && !has_code` before matching message shape -
+/// a genuine lint/error always carries a span or a code and is never dropped.
+/// Matching is on message *shape* (substring patterns), never exact strings,
+/// so `1 warning emitted` / `12 warnings emitted` / localized crate names all
+/// fall through.
+fn is_summary_noise(message: &str, spans_empty: bool, has_code: bool) -> bool {
+    if !spans_empty || has_code {
+        return false;
+    }
+    // "N warning(s) emitted"
+    if message.contains("emitted") && message.contains("warning") {
+        return true;
+    }
+    // "`crate` (lib) generated N warning(s)"
+    if message.contains("generated") && message.contains("warning") {
+        return true;
+    }
+    // "aborting due to N previous error(s)"
+    if message.contains("aborting due to") {
+        return true;
+    }
+    // "could not compile `crate` ..."
+    if message.contains("could not compile") {
+        return true;
+    }
+    // "build failed, waiting for other jobs to finish..."
+    if message.contains("build failed") {
+        return true;
+    }
+    false
 }
 
 // --- Emitter ---
@@ -506,6 +551,35 @@ mod tests {
         let input = r#"{"reason":"compiler-message","message":{"level":"error","code":null,"message":"aborting due to 3 previous errors","spans":[],"children":[],"rendered":"error: aborting"}}"#;
         let events = parse_cargo_diagnostics(input, "clippy", None);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn real_clippy_warning_produces_one_diagnostic() {
+        // A genuine lint: has both spans and a code -> must survive.
+        let input = sample_compiler_message("warning", "clippy::needless_return", "unneeded return statement", "src/a.rs", 7);
+        let events = parse_cargo_diagnostics(&input, "clippy", None);
+        assert_eq!(events.len(), 1);
+        let CheckEvent::Diagnostic(d) = &events[0] else {
+            panic!("expected Diagnostic event");
+        };
+        assert_eq!(d.code.as_deref(), Some("clippy::needless_return"));
+        assert_eq!(d.file.as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn skips_warnings_emitted_summary() {
+        // rustc's "N warnings emitted": empty spans, null code -> zero diagnostics.
+        let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":null,"message":"2 warnings emitted","spans":[],"children":[],"rendered":"warning: 2 warnings emitted"}}"#;
+        let events = parse_cargo_diagnostics(input, "clippy", None);
+        assert!(events.is_empty(), "expected the summary line to be filtered, got {} event(s)", events.len());
+    }
+
+    #[test]
+    fn skips_generated_warnings_summary() {
+        // cargo's per-crate roll-up: "`crate` (lib) generated N warnings".
+        let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":null,"message":"`brokkr` (lib) generated 3 warnings","spans":[],"children":[],"rendered":"warning: `brokkr` (lib) generated 3 warnings"}}"#;
+        let events = parse_cargo_diagnostics(input, "clippy", None);
+        assert!(events.is_empty(), "expected the generated-warnings roll-up to be filtered, got {} event(s)", events.len());
     }
 
     #[test]

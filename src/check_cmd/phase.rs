@@ -371,6 +371,50 @@ fn run_gremlins(
     Err(DevError::Build("gremlins found".into()))
 }
 
+/// Apply the same scope-first prioritisation the gremlins/clippy phases use to a
+/// native phase's violation list. Under `--all` everything is shown and there is
+/// no trailer; otherwise the list is partitioned so every hit in a branch-changed
+/// file (per `scope::changed_files`) is shown in full and only unscoped overflow
+/// is capped at `limit`, returning the shared `+N in unchanged files` trailer.
+/// `get_path` maps a violation to the file it belongs to.
+///
+/// `changed_files` is computed here rather than once in `cmd_check` so the git
+/// call is paid only when a phase actually has violations to display. The native
+/// phases fail fast (`?` in `run_phases`), so at most one of them ever reaches
+/// this per invocation - there is no double-compute to avoid.
+fn scope_limit<T>(
+    violations: Vec<T>,
+    project_root: &Path,
+    limit: usize,
+    all: bool,
+    get_path: impl Fn(&T) -> &Path,
+) -> (Vec<T>, Option<String>) {
+    // In `--all` mode nothing is capped, so skip the git call entirely.
+    let changed = if all {
+        None
+    } else {
+        scope::changed_files(project_root)
+    };
+    scope_limit_with(violations, limit, all, get_path, changed.as_ref())
+}
+
+/// Pure core of [`scope_limit`] with the branch-changed file set injected, so the
+/// scope-first ordering can be exercised without a live git repo.
+fn scope_limit_with<T>(
+    violations: Vec<T>,
+    limit: usize,
+    all: bool,
+    get_path: impl Fn(&T) -> &Path,
+    changed: Option<&std::collections::HashSet<std::path::PathBuf>>,
+) -> (Vec<T>, Option<String>) {
+    if all {
+        return (violations, None);
+    }
+    let part = scope::partition(violations, get_path, limit, changed);
+    let trailer = scope::format_trailer(part.hidden_unscoped);
+    (part.displayed, trailer)
+}
+
 /// The `[style]` phase: opt-in native Rust style checks. Currently the single
 /// blank-line-above-control-flow rule. Inert unless the project enables a rule
 /// in `[style]`. Reuses the `[gremlins].exclude` list to skip vendored dirs.
@@ -417,19 +461,18 @@ fn run_style(
     if !json {
         output::run_msg("style: blank line above control flow (Rust)");
         let total = violations.len();
-        let displayed = if all || total <= limit {
-            &violations[..]
-        } else {
-            &violations[..limit]
-        };
+        let (displayed, trailer) =
+            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
         let mut msg = format!("style: {total} violation(s)\n");
-        for v in displayed {
+        for v in &displayed {
             msg.push_str("  ");
             msg.push_str(&crate::style::format_one(v));
             msg.push('\n');
         }
-        if displayed.len() < total {
-            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        if let Some(t) = trailer {
+            msg.push_str("  ");
+            msg.push_str(&t);
+            msg.push('\n');
         }
         msg.push_str(
             "  hint: add a blank line above the construct, or share an identifier with the line above",
@@ -481,19 +524,18 @@ fn run_header(
     if !json {
         output::run_msg(&format!("header: require `{expected}`"));
         let total = violations.len();
-        let displayed = if all || total <= limit {
-            &violations[..]
-        } else {
-            &violations[..limit]
-        };
+        let (displayed, trailer) =
+            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
         let mut msg = format!("header: {total} violation(s)\n");
-        for v in displayed {
+        for v in &displayed {
             msg.push_str("  ");
             msg.push_str(&crate::header::format_one(v, &expected));
             msg.push('\n');
         }
-        if displayed.len() < total {
-            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        if let Some(t) = trailer {
+            msg.push_str("  ");
+            msg.push_str(&t);
+            msg.push('\n');
         }
         output::error(msg.trim_end());
     }
@@ -542,19 +584,18 @@ fn run_textlint(
     if !json {
         output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
         let total = violations.len();
-        let displayed = if all || total <= limit {
-            &violations[..]
-        } else {
-            &violations[..limit]
-        };
+        let (displayed, trailer) =
+            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
         let mut msg = format!("textlint: {total} violation(s)\n");
-        for v in displayed {
+        for v in &displayed {
             msg.push_str("  ");
             msg.push_str(&crate::textlint::format_one(v));
             msg.push('\n');
         }
-        if displayed.len() < total {
-            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        if let Some(t) = trailer {
+            msg.push_str("  ");
+            msg.push_str(&t);
+            msg.push('\n');
         }
         output::error(msg.trim_end());
     }
@@ -602,19 +643,18 @@ fn run_manifest(
     if !json {
         output::run_msg("manifest: Cargo.toml conventions");
         let total = violations.len();
-        let displayed = if all || total <= limit {
-            &violations[..]
-        } else {
-            &violations[..limit]
-        };
+        let (displayed, trailer) =
+            scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
         let mut msg = format!("manifest: {total} violation(s)\n");
-        for v in displayed {
+        for v in &displayed {
             msg.push_str("  ");
             msg.push_str(&crate::manifest::format_one(v));
             msg.push('\n');
         }
-        if displayed.len() < total {
-            msg.push_str(&format!("  +{} more (--all to see)\n", total - displayed.len()));
+        if let Some(t) = trailer {
+            msg.push_str("  ");
+            msg.push_str(&t);
+            msg.push('\n');
         }
         output::error(msg.trim_end());
     }
@@ -1348,5 +1388,58 @@ fn run_test_phase(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod scope_limit_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn style_violation(file: &str) -> crate::style::StyleViolation {
+        crate::style::StyleViolation {
+            file: PathBuf::from(file),
+            line: 1,
+            keyword: "if",
+            content: String::new(),
+            prev: String::new(),
+        }
+    }
+
+    #[test]
+    fn scope_first_retains_changed_file_violation_past_limit() {
+        // One violation in a branch-changed file (`b.rs`) sorts last in file-walk
+        // order, behind enough unscoped hits to overflow limit=2. Scope-first must
+        // still surface it in full, capping only the unscoped overflow.
+        let violations = vec![
+            style_violation("a.rs"),
+            style_violation("c.rs"),
+            style_violation("d.rs"),
+            style_violation("b.rs"),
+        ];
+        let changed: HashSet<PathBuf> = ["b.rs"].iter().map(PathBuf::from).collect();
+        let (displayed, trailer) =
+            scope_limit_with(violations, 2, false, |v| v.file.as_path(), Some(&changed));
+
+        // Scoped `b.rs` is retained (ahead of the capped unscoped tail), 2 unscoped
+        // shown, the last unscoped hidden into the trailer.
+        let shown: Vec<&str> = displayed
+            .iter()
+            .map(|v| v.file.to_str().unwrap())
+            .collect();
+        assert!(shown.contains(&"b.rs"));
+        assert_eq!(displayed.len(), 3); // 1 scoped + 2 unscoped
+        assert_eq!(trailer.unwrap(), "+1 in unchanged files (--all to see)");
+    }
+
+    #[test]
+    fn all_shows_everything_without_trailer() {
+        let violations = vec![style_violation("a.rs"), style_violation("b.rs")];
+        let (displayed, trailer) =
+            scope_limit_with(violations, 1, true, |v| v.file.as_path(), None);
+        assert_eq!(displayed.len(), 2);
+        assert!(trailer.is_none());
+    }
 }
 
