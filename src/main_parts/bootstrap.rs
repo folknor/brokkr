@@ -195,9 +195,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
     } = cli.command
     {
         // `deps` audits the code tree's Cargo.lock / metadata (cwd).
-        let project_root = match project::detect_optional()? {
-            Some(d) => d.build_root,
-            None => std::env::current_dir()?,
+        let (project_root, workspace_dep_ignore) = match project::detect_optional()? {
+            Some(d) => (
+                d.build_root,
+                d.config
+                    .deps
+                    .map(|c| c.workspace_dep_ignore)
+                    .unwrap_or_default(),
+            ),
+            None => (std::env::current_dir()?, Vec::new()),
         };
         return deps::run(
             &project_root,
@@ -207,6 +213,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 all,
                 no_fail,
                 focus,
+                workspace_dep_ignore,
             },
         );
     }

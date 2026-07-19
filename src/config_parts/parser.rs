@@ -45,6 +45,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let header = parse_header(table)?;
     let textlint = parse_textlint(table)?;
     let manifest = parse_manifest(table)?;
+    let deps = parse_deps(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -67,6 +68,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             header,
             textlint,
             manifest,
+            deps,
             disable_toolchain,
         },
     ))
@@ -83,6 +85,20 @@ fn parse_manifest(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("[manifest]: {e}")))?;
+    Ok(Some(cfg))
+}
+
+/// Parse the optional `[deps]` section. Absent -> `None`.
+fn parse_deps(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<DepsConfig>, DevError> {
+    let Some(value) = table.get("deps") else {
+        return Ok(None);
+    };
+    let cfg: DepsConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[deps]: {e}")))?;
     Ok(Some(cfg))
 }
 
@@ -262,6 +278,7 @@ fn parse_hosts(
             || key == "header"
             || key == "textlint"
             || key == "manifest"
+            || key == "deps"
             || key == "disable_toolchain"
         {
             continue;

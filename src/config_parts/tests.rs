@@ -35,6 +35,7 @@ mod tests {
             header: None,
             textlint: Vec::new(),
             manifest: None,
+            deps: None,
             disable_toolchain: false,
         }
     }

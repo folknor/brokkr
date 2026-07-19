@@ -289,6 +289,20 @@ exemption. The dependency-content checks (`sort_dependencies`, cargo-machete,
 
 See `src/manifest.rs`.
 
+## `[deps]` section
+
+Tuning for the `brokkr deps` audit (optional; `deps` runs in any Rust+git repo).
+
+```toml
+[deps]
+workspace_dep_ignore = ["lychee", "cargo-*", "backtest"]
+```
+
+- `workspace_dep_ignore` - workspace-dependency names the unused-workspace-dep
+  phase must not flag even when no member inherits them (dev tools, top-level
+  members whose use cargo metadata can't attribute). An entry ending in `*` is
+  a prefix glob. See `docs/commands/deps.md`.
+
 ## Datasets and variant-selection flags
 
 Host-scoped `[<host>.datasets.<name>]` tables (pbf/osc/pmtiles entries) and the

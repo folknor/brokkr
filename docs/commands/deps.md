@@ -142,6 +142,19 @@ workspace is usually a dev shortcut (forgot to publish a fork) or a hand-
 patched dependency that wouldn't reproduce on a clean checkout. Emits
 `PathDependency` with the resolved manifest path.
 
+### workspace_dep [v1]
+
+Every `[workspace.dependencies]` entry in the root manifest should be inherited
+(`dep = { workspace = true }`) by some member; one nobody uses is dead weight.
+Workspace inheritance is a manifest concept `cargo metadata` does not surface,
+so this phase reads the TOML directly - the root for the declarations, each
+member (via its metadata `manifest_path`) for its `workspace = true` uses -
+while metadata still supplies the workspace root and member list. Emits
+`UnusedWorkspaceDep` (an offline finding: counts toward the exit-1 tally). The
+`[deps].workspace_dep_ignore` list exempts names that are legitimately
+unreferenced (dev tools, top-level members); an entry ending in `*` is a prefix
+glob (`cargo-*`). See `src/deps/workspace_dep.rs`.
+
 ### native_code [v1]
 
 Lists dependencies that pull non-Rust code into the build. **Not**

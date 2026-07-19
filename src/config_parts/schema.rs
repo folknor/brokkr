@@ -54,6 +54,9 @@ pub struct DevConfig {
     /// (dependency ordering, ...) run by `brokkr check`. `None` when the
     /// project has no `[manifest]` section. See [`ManifestConfig`].
     pub manifest: Option<ManifestConfig>,
+    /// `[deps]` config: tuning for the `brokkr deps` audit. `None` when the
+    /// project has no `[deps]` section. See [`DepsConfig`].
+    pub deps: Option<DepsConfig>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -316,6 +319,17 @@ pub struct AdapterGroup {
     /// Package names that must not depend on any crate in that group.
     #[serde(default)]
     pub forbidden_in: Vec<String>,
+}
+
+/// `[deps]` section: tuning for the `brokkr deps` audit.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DepsConfig {
+    /// Workspace-dependency names the unused-workspace-dep phase should not
+    /// flag even when no member references them - dev tools and top-level
+    /// members whose use cargo metadata does not attribute. Empty by default.
+    #[serde(default)]
+    pub workspace_dep_ignore: Vec<String>,
 }
 
 /// One `[[manifest.version_align]]` group.
