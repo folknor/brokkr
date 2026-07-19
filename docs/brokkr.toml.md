@@ -85,16 +85,35 @@ Worktree builds (`--commit`) are a separate checkout and keep their own pin.
 
 ```toml
 [gremlins]
+disable = false                                    # skip the phase entirely
 exclude = ["docs/reference-manual", "vendor/upstream-docs"]
+allow = ["U+2019"]                                 # un-ban these codepoints
+ban = ["U+2011"]                                   # flag these codepoints
 ```
 
-Directories the `brokkr check` gremlin scanner skips (both the scan and
-`--fix-gremlins`) - for vendored material from an outside source that
-legitimately carries typographic punctuation, BOMs, and bidi marks. Entries
-are project-root-relative directories matched by path prefix on the
-git-relative path: `docs/manual` covers `docs/manual/` and below, but not a
-sibling `docs/manual-extra`. Empty/absolute entries are rejected at parse
-time. Omit the section to scan everything (the default).
+- `disable` (default `false`) - skip the whole gremlin phase, both the scan
+  and `--fix-gremlins`. The escape hatch for driving a foreign checkout whose
+  Unicode you don't want brokkr to police or edit.
+- `exclude` - directories the scanner skips (both the scan and
+  `--fix-gremlins`) - for vendored material from an outside source that
+  legitimately carries typographic punctuation, BOMs, and bidi marks. Entries
+  are project-root-relative directories matched by path prefix on the
+  git-relative path: `docs/manual` covers `docs/manual/` and below, but not a
+  sibling `docs/manual-extra`. Empty/absolute entries are rejected at parse
+  time.
+- `allow` - codepoints to remove from the built-in banned set. The scan skips
+  them and `--fix-gremlins` leaves them in place, even though they are normally
+  gremlins (e.g. permit `U+2019` if a repo deliberately uses curly
+  apostrophes).
+- `ban` - codepoints to flag beyond the built-in set. **Scan-only**: brokkr has
+  no ASCII mapping for an arbitrary codepoint, so `--fix-gremlins` does not
+  rewrite banned chars - the scan flags them and you fix them by hand.
+
+`allow` and `ban` entries are `U+XXXX` codepoint strings (case-insensitive
+`U+` prefix, 1-6 hex digits); a bad token or a codepoint listed in both is
+rejected at parse time. The `U+XXXX` form keeps `brokkr.toml` itself free of
+literal, possibly-invisible gremlin characters. Omit the section to scan
+everything with the built-in set (the default).
 
 ## Datasets and variant-selection flags
 

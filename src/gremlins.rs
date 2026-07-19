@@ -19,6 +19,7 @@
 //! strings) and box-drawing / geometric shapes (U+2500..=25FF, used for tree
 //! and table output).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,8 +56,12 @@ pub struct FixSummary {
 }
 
 /// Mechanical replacement for a gremlin char. Empty string means delete.
-/// Returns `None` for non-gremlin chars.
-fn replacement(c: char) -> Option<&'static str> {
+/// Returns `None` for non-gremlin chars and for any char in `allow` (a
+/// config-permitted codepoint is left untouched by `--fix-gremlins`).
+fn replacement(c: char, allow: &HashSet<char>) -> Option<&'static str> {
+    if allow.contains(&c) {
+        return None;
+    }
     Some(match c {
         // Zero-width / invisible / bidi / control noise → delete
         '\u{0003}' | '\u{000B}' | '\u{200B}' | '\u{200C}' | '\u{200D}'
@@ -98,6 +103,7 @@ pub fn fix(
     project_root: &Path,
     config: Option<&GremlinsConfig>,
 ) -> Result<Vec<FixSummary>, DevError> {
+    let allow = allow_set(config);
     let files = scannable_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
@@ -108,7 +114,7 @@ pub fn fix(
         let Ok(content) = std::fs::read_to_string(&abs) else {
             continue;
         };
-        let (fixed, count) = fix_content(&content);
+        let (fixed, count) = fix_content(&content, &allow);
         if count > 0 {
             std::fs::write(&abs, fixed).map_err(DevError::Io)?;
             out.push(FixSummary {
@@ -120,7 +126,7 @@ pub fn fix(
     Ok(out)
 }
 
-fn fix_content(content: &str) -> (String, usize) {
+fn fix_content(content: &str, allow: &HashSet<char>) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut count = 0usize;
     for c in content.chars() {
@@ -130,7 +136,7 @@ fn fix_content(content: &str) -> (String, usize) {
             out.push(c);
             continue;
         }
-        if let Some(r) = replacement(c) {
+        if let Some(r) = replacement(c, allow) {
             out.push_str(r);
             count += 1;
         } else {
@@ -196,6 +202,8 @@ pub fn scan(
     project_root: &Path,
     config: Option<&GremlinsConfig>,
 ) -> Result<Vec<Gremlin>, DevError> {
+    let allow = allow_set(config);
+    let ban = ban_set(config);
     let files = scannable_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
@@ -206,12 +214,28 @@ pub fn scan(
         let Ok(content) = std::fs::read_to_string(&abs) else {
             continue;
         };
-        scan_content(rel, &content, &mut out);
+        scan_content(rel, &content, &mut out, &allow, &ban);
     }
     Ok(out)
 }
 
-fn scan_content(rel: &Path, content: &str, out: &mut Vec<Gremlin>) {
+/// The config's `allow` set, or an empty set when there is no `[gremlins]`.
+fn allow_set(config: Option<&GremlinsConfig>) -> HashSet<char> {
+    config.map(|c| c.allow.clone()).unwrap_or_default()
+}
+
+/// The config's `ban` set, or an empty set when there is no `[gremlins]`.
+fn ban_set(config: Option<&GremlinsConfig>) -> HashSet<char> {
+    config.map(|c| c.ban.clone()).unwrap_or_default()
+}
+
+fn scan_content(
+    rel: &Path,
+    content: &str,
+    out: &mut Vec<Gremlin>,
+    allow: &HashSet<char>,
+    ban: &HashSet<char>,
+) {
     let mut line = 1usize;
     let mut col = 1usize;
     for c in content.chars() {
@@ -228,7 +252,7 @@ fn scan_content(rel: &Path, content: &str, out: &mut Vec<Gremlin>) {
         if c == '\r' {
             continue;
         }
-        if let Some(name) = gremlin_name(c) {
+        if let Some(name) = gremlin_name(c, allow, ban) {
             out.push(Gremlin {
                 path: rel.to_path_buf(),
                 line,
@@ -241,7 +265,21 @@ fn scan_content(rel: &Path, content: &str, out: &mut Vec<Gremlin>) {
     }
 }
 
-fn gremlin_name(c: char) -> Option<&'static str> {
+/// Label for a codepoint flagged only because it is in the config `ban` list.
+const BANNED_BY_CONFIG: &str = "BANNED CODEPOINT (config `ban`)";
+
+fn gremlin_name(c: char, allow: &HashSet<char>, ban: &HashSet<char>) -> Option<&'static str> {
+    // Config `allow` wins over everything: a permitted codepoint is never a
+    // gremlin, even if it is in the built-in set.
+    if allow.contains(&c) {
+        return None;
+    }
+    // Config `ban` flags a codepoint the built-in set would otherwise pass -
+    // checked before the ASCII fast path so even an out-of-place ASCII char
+    // can be banned.
+    if ban.contains(&c) {
+        return Some(BANNED_BY_CONFIG);
+    }
     // Fast path: printable ASCII plus tab/LF/CR are the overwhelmingly common
     // case and never gremlins. Everything else falls through to the table,
     // including low-range control chars (U+0003, U+000B).
@@ -331,8 +369,13 @@ mod tests {
 
     fn scan_str(s: &str) -> Vec<Gremlin> {
         let mut out = Vec::new();
-        scan_content(Path::new("t.rs"), s, &mut out);
+        scan_content(Path::new("t.rs"), s, &mut out, &HashSet::new(), &HashSet::new());
         out
+    }
+
+    /// `fix_content` with no `allow` overrides - the default banned set.
+    fn fix_str(s: &str) -> (String, usize) {
+        fix_content(s, &HashSet::new())
     }
 
     #[test]
@@ -437,7 +480,7 @@ mod tests {
 
     #[test]
     fn fix_content_rewrites_known_gremlins() {
-        let (fixed, count) = fix_content(
+        let (fixed, count) = fix_str(
             "x\u{2014}y \u{201C}hi\u{201D} \u{00A0}end\u{200B}\n",
         );
         assert_eq!(count, 5);
@@ -450,7 +493,7 @@ mod tests {
         // U+2713 U+2717 U+2715) map to ASCII tokens; U+26A0 carries a
         // trailing U+FE0F variation selector that is still deleted, so it
         // collapses cleanly to "[~]".
-        let (fixed, count) = fix_content(
+        let (fixed, count) = fix_str(
             "\u{2705} \u{26A0}\u{FE0F} \u{274C} \u{2611} \u{2610} \u{2713} \u{2717} \u{2715}\n",
         );
         assert_eq!(count, 9);
@@ -460,21 +503,21 @@ mod tests {
     #[test]
     fn fix_content_maps_calendar_circles() {
         let (fixed, count) =
-            fix_content("\u{1F535}\u{1F7E2}\u{1F7E1}\u{1F534}\n");
+            fix_str("\u{1F535}\u{1F7E2}\u{1F7E1}\u{1F534}\n");
         assert_eq!(count, 4);
         assert_eq!(fixed, "(blue)(green)(yellow)(red)\n");
     }
 
     #[test]
     fn fix_content_is_noop_when_clean() {
-        let (fixed, count) = fix_content("fn main() {\n    println!(\"ok\");\n}\n");
+        let (fixed, count) = fix_str("fn main() {\n    println!(\"ok\");\n}\n");
         assert_eq!(count, 0);
         assert_eq!(fixed, "fn main() {\n    println!(\"ok\");\n}\n");
     }
 
     #[test]
     fn fix_content_preserves_unrelated_unicode() {
-        let (fixed, count) = fix_content("// café\n");
+        let (fixed, count) = fix_str("// café\n");
         assert_eq!(count, 0);
         assert_eq!(fixed, "// café\n");
     }
@@ -552,7 +595,7 @@ mod tests {
         // A non-status emoji (U+1F680) has no ASCII equivalent and is
         // deleted; the status marker U+2705 now maps to a token, its
         // U+FE0F is deleted.
-        let (fixed, count) = fix_content("done \u{2705}\u{FE0F} ship \u{1F680} ok\n");
+        let (fixed, count) = fix_str("done \u{2705}\u{FE0F} ship \u{1F680} ok\n");
         assert_eq!(count, 3);
         assert_eq!(fixed, "done [x] ship  ok\n");
     }
@@ -560,8 +603,38 @@ mod tests {
     #[test]
     fn fix_preserves_arrows_and_box_drawing() {
         let input = "a \u{2192} b \u{250C}\u{2500}\u{2518}\n";
-        let (fixed, count) = fix_content(input);
+        let (fixed, count) = fix_str(input);
         assert_eq!(count, 0);
         assert_eq!(fixed, input);
+    }
+
+    #[test]
+    fn allow_unbans_a_default_gremlin() {
+        // U+2019 (right single quote) is a built-in gremlin; `allow` exempts it
+        // from both the scan and the fix.
+        let allow: HashSet<char> = ['\u{2019}'].into_iter().collect();
+        let ban = HashSet::new();
+        let mut out = Vec::new();
+        scan_content(Path::new("t.rs"), "it\u{2019}s\n", &mut out, &allow, &ban);
+        assert!(out.is_empty(), "allowed U+2019 must not be flagged");
+        let (fixed, count) = fix_content("it\u{2019}s\n", &allow);
+        assert_eq!(count, 0, "allowed char must not be rewritten");
+        assert_eq!(fixed, "it\u{2019}s\n");
+    }
+
+    #[test]
+    fn ban_flags_an_extra_codepoint_but_fix_leaves_it() {
+        // U+2011 (non-breaking hyphen) is NOT in the built-in set; `ban` flags
+        // it. The fix has no ASCII mapping for it, so it is left in place.
+        let allow = HashSet::new();
+        let ban: HashSet<char> = ['\u{2011}'].into_iter().collect();
+        let mut out = Vec::new();
+        scan_content(Path::new("t.rs"), "non\u{2011}break\n", &mut out, &allow, &ban);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].codepoint, 0x2011);
+        assert_eq!(out[0].name, BANNED_BY_CONFIG);
+        let (fixed, count) = fix_content("non\u{2011}break\n", &allow);
+        assert_eq!(count, 0);
+        assert_eq!(fixed, "non\u{2011}break\n");
     }
 }

@@ -249,23 +249,38 @@ fn parse_piners(
     Ok(Some(config))
 }
 
+/// The `[gremlins]` section exactly as it appears in TOML, before `allow`/`ban`
+/// codepoint strings are parsed into char sets.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GremlinsRaw {
+    #[serde(default)]
+    disable: bool,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    ban: Vec<String>,
+}
+
 /// Parse the optional `[gremlins]` section from the root table.
 ///
-/// Validates each `exclude` entry: no empty strings (a blank prefix would
-/// match every path and silently disable the whole scan) and no absolute
-/// paths (exclusions are project-root-relative to match the git-relative
-/// paths the scanner walks).
+/// Validates each `exclude` entry (no empty strings - a blank prefix would
+/// match every path and silently disable the whole scan - and no absolute
+/// paths), parses `allow`/`ban` `U+XXXX` codepoints into char sets, and
+/// rejects a codepoint listed in both.
 fn parse_gremlins(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<GremlinsConfig>, DevError> {
     let Some(value) = table.get("gremlins") else {
         return Ok(None);
     };
-    let config: GremlinsConfig = value
+    let raw: GremlinsRaw = value
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("gremlins: {e}")))?;
-    for entry in &config.exclude {
+    for entry in &raw.exclude {
         if entry.trim().is_empty() {
             return Err(DevError::Config(
                 "[gremlins].exclude contains an empty string - a blank prefix \
@@ -280,7 +295,56 @@ fn parse_gremlins(
             )));
         }
     }
-    Ok(Some(config))
+
+    let allow = parse_codepoint_set("allow", &raw.allow)?;
+    let ban = parse_codepoint_set("ban", &raw.ban)?;
+    for c in &allow {
+        if ban.contains(c) {
+            return Err(DevError::Config(format!(
+                "[gremlins]: U+{:04X} is listed in both `allow` and `ban`.",
+                *c as u32
+            )));
+        }
+    }
+
+    Ok(Some(GremlinsConfig {
+        disable: raw.disable,
+        exclude: raw.exclude,
+        allow,
+        ban,
+    }))
+}
+
+/// Parse a `[gremlins]` `allow`/`ban` list of `U+XXXX` strings into a char set.
+fn parse_codepoint_set(field: &str, entries: &[String]) -> Result<HashSet<char>, DevError> {
+    let mut out = HashSet::new();
+    for entry in entries {
+        let c = parse_codepoint(entry)
+            .map_err(|msg| DevError::Config(format!("[gremlins].{field}: {msg}")))?;
+        out.insert(c);
+    }
+    Ok(out)
+}
+
+/// Parse one `U+XXXX` token into a `char`. Accepts a case-insensitive `U+`
+/// prefix followed by 1-6 hex digits. Rejects anything else so the config
+/// itself stays ASCII (no literal, possibly-invisible gremlin characters in
+/// `brokkr.toml`).
+fn parse_codepoint(s: &str) -> Result<char, String> {
+    let t = s.trim();
+    let hex = t
+        .strip_prefix("U+")
+        .or_else(|| t.strip_prefix("u+"))
+        .ok_or_else(|| {
+            format!("{t:?} must be a codepoint in U+XXXX form, e.g. \"U+2011\"")
+        })?;
+    if hex.is_empty() || hex.len() > 6 {
+        return Err(format!("{t:?}: expected 1-6 hex digits after `U+`"));
+    }
+    let cp = u32::from_str_radix(hex, 16)
+        .map_err(|_| format!("{t:?}: {hex:?} is not hexadecimal"))?;
+    char::from_u32(cp)
+        .ok_or_else(|| format!("{t:?}: U+{cp:04X} is not a valid Unicode scalar value"))
 }
 
 /// Parse the optional `[[dependency_rule]]` array of tables.

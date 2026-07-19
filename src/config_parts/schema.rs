@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::de::{self, SeqAccess, Visitor};
@@ -50,22 +50,38 @@ pub struct DevConfig {
 
 /// `[gremlins]` section: tuning for the `brokkr check` gremlin scanner.
 ///
-/// Today the only knob is `exclude`, a list of directories (relative to
-/// the project root) whose files are skipped by both the scan and the
-/// `--fix-gremlins` rewrite. Intended for vendored content from an
-/// outside source that ships its own typographic punctuation, BOMs, and
-/// other characters the scanner would otherwise flag.
+/// Knobs:
+/// - `disable` - skip the gremlin phase entirely (scan and `--fix-gremlins`).
+///   The escape hatch for driving a foreign checkout whose Unicode we don't
+///   want to police.
+/// - `exclude` - directories (relative to the project root) skipped by both
+///   the scan and the `--fix-gremlins` rewrite. Intended for vendored content
+///   from an outside source that ships its own typographic punctuation, BOMs,
+///   and other characters the scanner would otherwise flag. Matching is by
+///   path prefix on the git-relative path: `docs/manual` excludes
+///   `docs/manual` and everything under `docs/manual/`, but not a sibling
+///   `docs/manual-extra`.
+/// - `allow` - codepoints to un-ban: the scan skips them and `--fix-gremlins`
+///   leaves them alone, even though they are in the built-in banned set.
+/// - `ban` - codepoints to flag beyond the built-in set. Scan-only: brokkr
+///   has no ASCII mapping for an arbitrary codepoint, so `--fix-gremlins`
+///   does not rewrite them.
 ///
-/// Matching is by path prefix on the git-relative path: an entry
-/// `docs/manual` excludes `docs/manual` itself and everything under
-/// `docs/manual/`, but not a sibling like `docs/manual-extra`.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+/// The parsed `allow`/`ban` sets are built once at config load from
+/// `U+XXXX` strings; see `parse_gremlins` in the parser.
+#[derive(Debug, Clone, Default)]
 pub struct GremlinsConfig {
+    /// Skip the whole gremlin phase when true.
+    pub disable: bool,
     /// Directories (project-root-relative) to skip when scanning for
     /// gremlins. Empty / unset means scan everything.
-    #[serde(default)]
     pub exclude: Vec<String>,
+    /// Codepoints removed from the effective banned set (scan skips, fix
+    /// leaves alone).
+    pub allow: HashSet<char>,
+    /// Codepoints added to the banned set beyond the built-in list. Detected
+    /// by the scan; not auto-rewritten by `--fix-gremlins`.
+    pub ban: HashSet<char>,
 }
 
 impl GremlinsConfig {

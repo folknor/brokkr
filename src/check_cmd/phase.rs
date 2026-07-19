@@ -238,6 +238,15 @@ fn run_gremlins(
     all: bool,
     fix: bool,
 ) -> Result<(), DevError> {
+    // `[gremlins] disable = true` skips the whole phase - both the scan and
+    // `--fix-gremlins`.
+    if config.is_some_and(|c| c.disable) {
+        if !json {
+            output::run_msg("gremlins: disabled by config");
+        }
+        return Ok(());
+    }
+
     if fix {
         let fixed = gremlins::fix(project_root, config)?;
         if !json {

@@ -39,6 +39,7 @@ mod tests {
     fn gremlins_exclude_matches_dir_prefix() {
         let cfg = GremlinsConfig {
             exclude: vec!["docs/manual".to_owned(), "vendor/".to_owned()],
+            ..Default::default()
         };
         // The directory itself and anything beneath it are excluded.
         assert!(cfg.is_excluded(Path::new("docs/manual")));
@@ -63,6 +64,38 @@ mod tests {
             toml::from_str("[gremlins]\nexclude = [\"docs/manual\"]\n").unwrap();
         let cfg = parse_gremlins(&table).unwrap().unwrap();
         assert_eq!(cfg.exclude, vec!["docs/manual".to_owned()]);
+    }
+
+    #[test]
+    fn parse_gremlins_disable_allow_ban() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[gremlins]\ndisable = true\nallow = [\"U+2019\"]\nban = [\"u+2011\"]\n",
+        )
+        .unwrap();
+        let cfg = parse_gremlins(&table).unwrap().unwrap();
+        assert!(cfg.disable);
+        assert!(cfg.allow.contains(&'\u{2019}'));
+        // Case-insensitive `u+` prefix accepted.
+        assert!(cfg.ban.contains(&'\u{2011}'));
+    }
+
+    #[test]
+    fn parse_gremlins_rejects_bad_codepoint_and_overlap() {
+        // Not U+XXXX form.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nban = [\"2011\"]\n").unwrap();
+        assert!(parse_gremlins(&table).is_err());
+
+        // Non-hex.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nallow = [\"U+ZZZZ\"]\n").unwrap();
+        assert!(parse_gremlins(&table).is_err());
+
+        // A codepoint in both lists.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[gremlins]\nallow = [\"U+2011\"]\nban = [\"U+2011\"]\n").unwrap();
+        let err = parse_gremlins(&table).unwrap_err().to_string();
+        assert!(err.contains("both"), "got: {err}");
     }
 
     #[test]
