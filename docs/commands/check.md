@@ -179,10 +179,22 @@ the rest of a file is exempt, e.g. to ignore a test module),
 `only_if_file_matches` (a file-scope precondition regex), `region`
 (`code`/`string`/`comment` - scope the pattern to a lexical region of a Rust
 file, tokenized with `rustc_lexer`, so a rule never fires on a match quoted in
-a comment or string), and `join_wrapped_use` (match against whole `use ...;`
-statements, reconstructing a rustfmt-wrapped import onto one line first). JSON
-mode emits `textlint`/`textlint_summary`. The generic engine behind most
-grep-style convention hooks; see `src/textlint.rs`.
+a comment or string), `join_wrapped_use` (match against whole `use ...;`
+statements, reconstructing a rustfmt-wrapped import onto one line first), and
+the four **context-window gates** `except_above` / `except_below` /
+`require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
+A gate filters a match by the raw physical lines around it: all four have the
+same behavior - the match is suppressed iff `pattern` is found within `lines`
+lines in that direction (excluding the match line, clamped at the file edges) -
+and the names differ only to document intent (`except_above` reads for a
+preceding `#[cfg(...)]` exemption, `require_below` for a required token like
+`biased;` that must follow a `tokio::select!`). Multiple gates AND together
+(the violation stands only when every window is clear). Windows read raw text -
+no region masking, no `use`-joining - so because the test is per-line, write
+context patterns fragment-tolerant (match `madsim`, not a full single-line
+attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. JSON mode emits
+`textlint`/`textlint_summary`. The generic engine behind most grep-style
+convention hooks; see `src/textlint.rs`.
 
 Manifest phase runs next, only when a `[manifest]` section enables a check
 (off by default, inert otherwise). It parses each `Cargo.toml` matching

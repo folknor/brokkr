@@ -49,6 +49,15 @@ pub fn format_one(v: &TextlintViolation) -> String {
     )
 }
 
+/// A compiled context-window gate: scan `lines` raw physical lines above/below
+/// a match for `re`; a hit suppresses the match. The direction and which anchor
+/// it counts from live in the call site, not here - all four gate orientations
+/// share this one "is the pattern present in the window" test.
+struct Window {
+    lines: usize,
+    re: Regex,
+}
+
 /// A rule with its regexes and glob set compiled once, up front.
 struct Compiled {
     name: String,
@@ -65,6 +74,10 @@ struct Compiled {
     only_if_file_matches: Option<Regex>,
     region: Option<lex::Region>,
     join_wrapped_use: bool,
+    except_above: Option<Window>,
+    except_below: Option<Window>,
+    require_above: Option<Window>,
+    require_below: Option<Window>,
 }
 
 const DISPLAY_CAP: usize = 200;
@@ -119,6 +132,10 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             })?),
             None => None,
         };
+        let except_above = compile_window(&rule.except_above, &rule.name, "except_above")?;
+        let except_below = compile_window(&rule.except_below, &rule.name, "except_below")?;
+        let require_above = compile_window(&rule.require_above, &rule.name, "require_above")?;
+        let require_below = compile_window(&rule.require_below, &rule.name, "require_below")?;
         out.push(Compiled {
             name: rule.name.clone(),
             pattern,
@@ -134,9 +151,36 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             only_if_file_matches,
             region,
             join_wrapped_use: rule.join_wrapped_use,
+            except_above,
+            except_below,
+            require_above,
+            require_below,
         });
     }
     Ok(out)
+}
+
+/// Compile one optional context-window gate, rejecting a zero-line window (the
+/// window would be empty and the gate a no-op) and an invalid regex.
+fn compile_window(
+    win: &Option<crate::config::ContextWindow>,
+    rule_name: &str,
+    field: &str,
+) -> Result<Option<Window>, DevError> {
+    let Some(win) = win else {
+        return Ok(None);
+    };
+    if win.lines < 1 {
+        return Err(DevError::Config(format!(
+            "[[textlint]] {rule_name:?}: {field}.lines must be >= 1"
+        )));
+    }
+    let re = Regex::new(&win.pattern).map_err(|e| {
+        DevError::Config(format!(
+            "[[textlint]] {rule_name:?}: invalid {field} pattern: {e}"
+        ))
+    })?;
+    Ok(Some(Window { lines: win.lines, re }))
 }
 
 /// Scan tracked files against every rule, one pass per file.
@@ -236,6 +280,11 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             if rule.except.iter().any(|r| r.is_match(raw)) {
                 continue;
             }
+            // Context-window gates: for a physical-line match both anchors are
+            // the match line itself.
+            if context_suppresses(rule, &lines, i, i) {
+                continue;
+            }
             out.push(TextlintViolation {
                 file: rel.to_path_buf(),
                 line: i + 1,
@@ -266,6 +315,11 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
                 if rule.except.iter().any(|r| r.is_match(&st.joined)) {
                     continue;
                 }
+                // Context-window gates anchor the above-window to the
+                // statement's first physical line, the below-window to its last.
+                if context_suppresses(rule, &lines, st.start_line, st.end_line) {
+                    continue;
+                }
                 out.push(TextlintViolation {
                     file: rel.to_path_buf(),
                     line: st.start_line + 1,
@@ -288,6 +342,43 @@ fn use_marker_suppresses(rule: &Compiled, lines: &[&str], st: &lex::UseStmt) -> 
     lines
         .get(start..=st.end_line.min(lines.len().saturating_sub(1)))
         .is_some_and(|window| window.iter().any(|l| l.contains(marker)))
+}
+
+/// Whether any configured context-window gate suppresses this match. All four
+/// gates share one test - the match is suppressed iff the gate's pattern is
+/// found in its window - so any hit suppresses (the gates AND together for the
+/// reporter: the violation stands only when every window is clear). The
+/// above-windows count from `above_anchor`, the below-windows from
+/// `below_anchor`; for a physical-line match the two coincide, while a joined
+/// `use` statement anchors above to its first line and below to its last.
+/// Windows read raw physical line text - no region masking, no `use`-joining.
+fn context_suppresses(
+    rule: &Compiled,
+    lines: &[&str],
+    above_anchor: usize,
+    below_anchor: usize,
+) -> bool {
+    let above = |w: &Option<Window>| w.as_ref().is_some_and(|w| window_hit(w, lines, above_anchor, true));
+    let below = |w: &Option<Window>| w.as_ref().is_some_and(|w| window_hit(w, lines, below_anchor, false));
+    above(&rule.except_above)
+        || above(&rule.require_above)
+        || below(&rule.except_below)
+        || below(&rule.require_below)
+}
+
+/// Whether `w.re` matches any raw line in the window of `w.lines` lines on one
+/// side of `anchor`, excluding the anchor line itself and clamped at the file
+/// boundaries. `above` scans `[anchor-N, anchor-1]`; otherwise `[anchor+1,
+/// anchor+N]`.
+fn window_hit(w: &Window, lines: &[&str], anchor: usize, above: bool) -> bool {
+    let range = if above {
+        anchor.saturating_sub(w.lines)..anchor
+    } else {
+        let start = (anchor + 1).min(lines.len());
+        let end = (anchor + 1 + w.lines).min(lines.len());
+        start..end
+    };
+    lines[range].iter().any(|l| w.re.is_match(l))
 }
 
 /// Whether `rule`'s allow-marker suppresses the match at line index `i`: on the
@@ -349,7 +440,15 @@ mod tests {
             only_if_file_matches: None,
             region: None,
             join_wrapped_use: false,
+            except_above: None,
+            except_below: None,
+            require_above: None,
+            require_below: None,
         }
+    }
+
+    fn win(lines: usize, pattern: &str) -> crate::config::ContextWindow {
+        crate::config::ContextWindow { lines, pattern: pattern.into() }
     }
 
     #[test]
@@ -543,5 +642,109 @@ mod tests {
         assert_eq!(toml_section("[dependencies]").as_deref(), Some("dependencies"));
         assert_eq!(toml_section("[[bin]]").as_deref(), Some("bin"));
         assert_eq!(toml_section("tokio = \"1\""), None);
+    }
+
+    #[test]
+    fn except_above_suppresses_when_pattern_in_window() {
+        let mut r = rule("std::thread::spawn");
+        r.except_above = Some(win(15, "cfg\\(test\\)"));
+        // The `#[cfg(test)]` two lines above is within the 15-line window.
+        let src = "#[cfg(test)]\nmod tests {\n    std::thread::spawn(f);\n}\n";
+        assert!(run(r, src).is_empty());
+    }
+
+    #[test]
+    fn except_above_outside_window_still_flags() {
+        let mut r = rule("std::thread::spawn");
+        // Window of 1: the cfg attribute two lines up is out of reach.
+        r.except_above = Some(win(1, "cfg\\(test\\)"));
+        let src = "#[cfg(test)]\nlet x = 1;\nstd::thread::spawn(f);\n";
+        assert_eq!(run(r, src), vec![(3, "r".into())]);
+    }
+
+    #[test]
+    fn require_below_flags_unless_token_follows() {
+        let mut r = rule("tokio::select!\\s*\\{");
+        r.require_below = Some(win(3, "biased;"));
+        // `biased;` within 3 lines below -> the select! is disciplined, no hit.
+        let ok = "tokio::select! {\n    biased;\n    a = f() => {}\n}\n";
+        assert!(run(r.clone(), ok).is_empty());
+        // No `biased;` below -> the opener stands as a violation at its line.
+        let bad = "tokio::select! {\n    a = f() => {}\n    b = g() => {}\n}\n";
+        assert_eq!(run(r, bad), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn window_excludes_the_match_line() {
+        let mut r = rule("select");
+        // The required token sits only on the match line; the below-window
+        // (which excludes it) is clear, so the violation must still stand.
+        r.require_below = Some(win(2, "select"));
+        let src = "select x\ny;\nz;\n";
+        assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn windows_clamp_at_file_boundaries() {
+        // A match on the first line with an above-window, and a match on the
+        // last line with a below-window: neither over-runs the buffer.
+        let mut top = rule("top");
+        top.except_above = Some(win(5, "nope"));
+        assert_eq!(run(top, "top here\n"), vec![(1, "r".into())]);
+
+        let mut bottom = rule("bottom");
+        bottom.require_below = Some(win(5, "nope"));
+        assert_eq!(run(bottom, "a;\nbottom here\n"), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn gates_or_together_any_hit_suppresses() {
+        let mut base = rule("select");
+        base.except_above = Some(win(1, "cfg"));
+        base.require_below = Some(win(1, "biased"));
+        // cfg above -> suppressed.
+        assert!(run(base.clone(), "cfg here\nselect {\n").is_empty());
+        // biased below -> suppressed.
+        assert!(run(base.clone(), "select {\nbiased;\n").is_empty());
+        // Neither window hits -> the violation stands.
+        assert_eq!(run(base, "x;\nselect {\ny;\n"), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn join_wrapped_use_anchors_above_to_first_line() {
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        // The marker one line above the `use` opener is inside a 1-line
+        // above-window anchored to the statement's first physical line.
+        r.except_above = Some(win(1, "allow-import"));
+        let src = "// allow-import\nuse tracing::{\n    warn,\n};\n";
+        assert!(run(r, src).is_empty());
+    }
+
+    #[test]
+    fn join_wrapped_use_anchors_below_to_last_line() {
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        // The token one line below the closing `};` is inside a 1-line
+        // below-window anchored to the statement's last physical line - proving
+        // the below-anchor is the end, not the start (a start-anchored window
+        // would land inside the block and miss it).
+        r.require_below = Some(win(1, "import-ok"));
+        let src = "use tracing::{\n    warn,\n};\n// import-ok\n";
+        assert!(run(r, src).is_empty());
+    }
+
+    #[test]
+    fn zero_line_window_is_a_config_error() {
+        let mut r = rule("x");
+        r.require_below = Some(win(0, "y"));
+        assert!(compile(&[r]).is_err());
+    }
+
+    #[test]
+    fn invalid_window_pattern_is_a_config_error() {
+        let mut r = rule("x");
+        r.except_above = Some(win(3, "["));
+        assert!(compile(&[r]).is_err());
     }
 }

@@ -174,6 +174,31 @@ pub struct HeaderConfig {
     pub exempt: Vec<String>,
 }
 
+/// A context-window gate on a `[[textlint]]` match: filter an already-produced
+/// pattern hit by the raw physical lines around it. `lines` is the window depth
+/// N (must be >= 1); `pattern` is a regex matched against each raw line in the
+/// window (`is_match` per line, no region filtering, no `use`-joining).
+///
+/// All four gate fields (`except_above` / `except_below` / `require_above` /
+/// `require_below`) have the same behavior: the match is suppressed iff the
+/// pattern is found in the window; the names differ only to document intent.
+///
+/// Because the check is per-line, a context pattern that only matches a full
+/// single-line attribute can miss a rustfmt-wrapped one
+/// (`#[cfg(\n    not(madsim)\n)]`). Write context patterns fragment-tolerant
+/// (match `madsim` or `cfg\(test\)`, not the whole attribute) so a wrapped
+/// attribute still suppresses within the window. This is the same per-line
+/// blindness as the upstream awk hooks, so parity holds.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextWindow {
+    /// Window depth: how many physical lines above/below the match to scan.
+    /// Must be >= 1 (validated when the rule compiles).
+    pub lines: usize,
+    /// Regex matched against each raw physical line in the window.
+    pub pattern: String,
+}
+
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching
 /// `paths`, with bounded predicates and inline/regex exceptions. See
 /// [`crate::textlint`].
@@ -242,6 +267,38 @@ pub struct TextlintRule {
     /// Rust-only. Off by default.
     #[serde(default)]
     pub join_wrapped_use: bool,
+    /// Context gate: suppress the match iff `pattern` is found within `lines`
+    /// physical lines *above* it (excluding the match line, clamped at the file
+    /// top). All four gates have the same behavior: the match is suppressed iff
+    /// the pattern is found in the window; the names differ only to document
+    /// intent. Reads raw physical text (no region/join). Optional. Its customer
+    /// is a preceding `#[cfg(...)]` attribute exempting the site - write the
+    /// pattern fragment-tolerant so a rustfmt-wrapped attribute still matches.
+    #[serde(default)]
+    pub except_above: Option<ContextWindow>,
+    /// Context gate: suppress the match iff `pattern` is found within `lines`
+    /// physical lines *below* it (excluding the match line, clamped at the file
+    /// bottom). All four gates have the same behavior: the match is suppressed
+    /// iff the pattern is found in the window; the names differ only to document
+    /// intent. Reads raw physical text (no region/join). Optional.
+    #[serde(default)]
+    pub except_below: Option<ContextWindow>,
+    /// Context gate: suppress the match iff `pattern` is found within `lines`
+    /// physical lines *above* it (excluding the match line, clamped at the file
+    /// top). All four gates have the same behavior: the match is suppressed iff
+    /// the pattern is found in the window; the names differ only to document
+    /// intent. Reads raw physical text (no region/join). Optional.
+    #[serde(default)]
+    pub require_above: Option<ContextWindow>,
+    /// Context gate: suppress the match iff `pattern` is found within `lines`
+    /// physical lines *below* it (excluding the match line, clamped at the file
+    /// bottom). All four gates have the same behavior: the match is suppressed
+    /// iff the pattern is found in the window; the names differ only to document
+    /// intent. Reads raw physical text (no region/join). Optional. Its customer
+    /// is a required token that must follow the match (e.g. `biased;` inside a
+    /// `tokio::select!` block), a violation unless it appears in the window.
+    #[serde(default)]
+    pub require_below: Option<ContextWindow>,
 }
 
 /// `[manifest]` section: native structural `Cargo.toml` conventions checked by
