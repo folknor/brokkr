@@ -164,8 +164,13 @@ are stripped, including the per-suite `Running <target> (.../deps/...)`
 launch lines, standalone `ok`/`FAILED` verdict lines, the duplicate
 empty `failures:` header, the `RUST_BACKTRACE` hint, and cargo's
 `to rerun pass ...` suggestion), then prints a `[test]` footer per run: `PASS`,
-`FAIL`, `BUILD FAILED`, or `SKIP` (name didn't match in that sweep, usually
-`#[cfg(feature = "...")]`-gated). The `FAIL` footer cites the panic message
+`FAIL`, `BUILD FAILED`, or `SKIP`. A sweep `SKIP`s either because the name
+didn't match in it (usually `#[cfg(feature = "...")]`-gated) or because the
+`-p` target is out of the sweep's package scope - the sweep declares a
+`packages` list the target isn't in, or lists the target in
+`test_exclude_packages`. The latter is decided *before* the build, so a
+target that doesn't carry the sweep's features is skipped rather than
+force-built into a guaranteed `BUILD FAILED`. The `FAIL` footer cites the panic message
 and location, recovered from the stderr stream since `--nocapture` produces
 no captured failure blocks. Exit code: non-zero if any run was
 `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed

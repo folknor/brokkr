@@ -141,6 +141,20 @@ pub fn run(
             println!("[test]    sweep: {}", sweep.label);
         }
 
+        // A sweep scopes itself to a package set. When it declares a
+        // `packages` list and the `-p` target isn't in it (or the target is
+        // in the sweep's `test_exclude_packages`), that package doesn't carry
+        // this sweep's features - forcing the build would fail on a foreign
+        // feature (e.g. `-p nautilus-hyperliquid` under an ffi sweep it isn't
+        // a member of). Skip the sweep like the zero-tests-matched case; other
+        // sweeps still get their chance to run the test.
+        if let Some(reason) = sweep_skip_reason(sweep, &pkg) {
+            let label = if multi { format!(" [{}]", sweep.label) } else { String::new() };
+            println!("[test]    SKIP {pkg}::{name}{label} - {reason}");
+            reports.push(RunReport::bare(Outcome::NoMatch));
+            continue;
+        }
+
         // Merge profile-declared env onto the project's always-set vars.
         // Profile env wins on collision so a profile can shadow defaults
         // when it really needs to (request 3 / B3: brokkr test was
@@ -425,6 +439,24 @@ fn resolve_package(
         "'brokkr test' needs a cargo package for '-p'. This project ({project}) has no built-in default. \
          Pass `-p <pkg>` on the command line, or set `[test] default_package = \"...\"` in brokkr.toml."
     )))
+}
+
+/// Whether a sweep should skip the `-p <pkg>` target entirely, and why.
+///
+/// A sweep with a non-empty `packages` list only applies to those packages;
+/// a target outside it doesn't carry the sweep's features, so building it
+/// would fail on a feature it doesn't declare. `test_exclude_packages` carves
+/// a package out of an otherwise-workspace-wide sweep. Either way the sweep is
+/// skipped (SKIP/NoMatch) rather than force-built. `None` means the target is
+/// in scope and the sweep runs.
+fn sweep_skip_reason(sweep: &ResolvedSweep, pkg: &str) -> Option<&'static str> {
+    if sweep.test_exclude_packages.iter().any(|p| p == pkg) {
+        return Some("package excluded from this sweep (test_exclude_packages)");
+    }
+    if !sweep.packages.is_empty() && !sweep.packages.iter().any(|p| p == pkg) {
+        return Some("package not in this sweep's packages list");
+    }
+    None
 }
 
 fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), DevError> {
@@ -1356,5 +1388,49 @@ benches::throughput: benchmark
     fn aggregate_exit_passes_on_all_pass() {
         let outcomes = [Outcome::Pass, Outcome::Pass];
         assert!(aggregate_exit(&outcomes, "f", "n").is_ok());
+    }
+
+    #[test]
+    fn sweep_skip_reason_none_when_no_packages_list() {
+        // A workspace-wide sweep (empty packages) covers every target.
+        let sweep = ResolvedSweep::default();
+        assert!(sweep_skip_reason(&sweep, "nautilus-hyperliquid").is_none());
+    }
+
+    #[test]
+    fn sweep_skip_reason_skips_target_outside_packages_list() {
+        // The reported case: an ffi/live sweep lists only its member packages;
+        // `-p nautilus-hyperliquid` isn't one, so it must SKIP rather than
+        // force a build of a feature the package doesn't declare.
+        let sweep = ResolvedSweep {
+            packages: vec!["nautilus-core".into(), "nautilus-common".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            sweep_skip_reason(&sweep, "nautilus-hyperliquid"),
+            Some("package not in this sweep's packages list")
+        );
+    }
+
+    #[test]
+    fn sweep_skip_reason_runs_target_inside_packages_list() {
+        let sweep = ResolvedSweep {
+            packages: vec!["nautilus-core".into(), "nautilus-hyperliquid".into()],
+            ..Default::default()
+        };
+        assert!(sweep_skip_reason(&sweep, "nautilus-hyperliquid").is_none());
+    }
+
+    #[test]
+    fn sweep_skip_reason_skips_excluded_target() {
+        // An otherwise-workspace-wide sweep carving the target out.
+        let sweep = ResolvedSweep {
+            test_exclude_packages: vec!["nautilus-pyo3".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            sweep_skip_reason(&sweep, "nautilus-pyo3"),
+            Some("package excluded from this sweep (test_exclude_packages)")
+        );
     }
 }
