@@ -192,7 +192,12 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
 - `exclude` (globs; files matching are excused, checked after `paths`) - for
   docs that deliberately show the forbidden pattern, or `tests/` trees.
 - `allow_marker` (a line containing this literal, e.g. an author's
-  `// allow-...` comment, is skipped).
+  `// allow-...` comment, is skipped). `allow_marker_above = N` widens it to
+  also suppress when the marker is on one of the N lines above (0 = same line
+  only; for markers a wrapped construct pushes off the offending line).
+- `only_if_file_matches` (regex; the rule fires only in files where some line
+  matches it) - a cheap import-awareness stand-in, e.g. flag bare
+  `Instant::now()` only where the file imports `Instant`.
 - `except` (regexes; a line matching any is exempt) - the way to allow one
   specific form of an otherwise-forbidden pattern.
 - `in_toml_section` (only consider lines while the last-seen `[section]` header

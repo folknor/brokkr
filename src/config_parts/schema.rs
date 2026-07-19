@@ -190,6 +190,12 @@ pub struct TextlintRule {
     /// an author's `// allow-...` comment) is skipped. Optional.
     #[serde(default)]
     pub allow_marker: Option<String>,
+    /// Widen `allow_marker` to also suppress a match when the marker appears on
+    /// one of the N lines *above* it (0 = same line only, the default). For
+    /// markers a rustfmt-wrapped construct pushes off the offending line, e.g.
+    /// `// log-period-ok` within 3 lines. Requires `allow_marker`.
+    #[serde(default)]
+    pub allow_marker_above: usize,
     /// Lines matching any of these regexes are exempt. Optional.
     #[serde(default)]
     pub except: Vec<String>,
@@ -207,6 +213,12 @@ pub struct TextlintRule {
     /// rules that should not fire inside test modules. Optional.
     #[serde(default)]
     pub skip_after: Option<String>,
+    /// File-scope precondition: the rule only fires in files where at least one
+    /// line matches this regex. Expresses "flag bare `Instant::now()` only in
+    /// files that import `Instant`" - a cheap stand-in for import-awareness.
+    /// Optional.
+    #[serde(default)]
+    pub only_if_file_matches: Option<String>,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must

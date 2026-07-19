@@ -172,11 +172,13 @@ fails. JSON mode emits `header`/`header_summary`. Ported from
 
 Textlint phase runs next, only when `[[textlint]]` rules exist. Each rule
 forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
-`exclude` globs); a match is a violation, subject to bounded modifiers
-(`allow_marker`, `except`, `in_toml_section`, `table_row_only`, and `skip_after`
-- a regex past which the rest of a file is exempt, e.g. to ignore a test
-module). JSON mode emits `textlint`/`textlint_summary`. The generic engine
-behind most grep-style convention hooks; see `src/textlint.rs`.
+`exclude` globs); a match is a violation, subject to bounded modifiers:
+`allow_marker` (+ `allow_marker_above = N` for a marker up to N lines above),
+`except`, `in_toml_section`, `table_row_only`, `skip_after` (a regex past which
+the rest of a file is exempt, e.g. to ignore a test module), and
+`only_if_file_matches` (a file-scope precondition regex). JSON mode emits
+`textlint`/`textlint_summary`. The generic engine behind most grep-style
+convention hooks; see `src/textlint.rs`.
 
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads

@@ -55,10 +55,12 @@ struct Compiled {
     exclude: globset::GlobSet,
     message: String,
     allow_marker: Option<String>,
+    allow_marker_above: usize,
     except: Vec<Regex>,
     in_toml_section: Option<String>,
     table_row_only: bool,
     skip_after: Option<Regex>,
+    only_if_file_matches: Option<Regex>,
 }
 
 const DISPLAY_CAP: usize = 200;
@@ -88,6 +90,21 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             })?),
             None => None,
         };
+        let only_if_file_matches = match &rule.only_if_file_matches {
+            Some(p) => Some(Regex::new(p).map_err(|e| {
+                DevError::Config(format!(
+                    "[[textlint]] {:?}: invalid only_if_file_matches pattern: {e}",
+                    rule.name
+                ))
+            })?),
+            None => None,
+        };
+        if rule.allow_marker_above > 0 && rule.allow_marker.is_none() {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?}: allow_marker_above needs allow_marker to be set",
+                rule.name
+            )));
+        }
         out.push(Compiled {
             name: rule.name.clone(),
             pattern,
@@ -95,10 +112,12 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             exclude,
             message: rule.message.clone(),
             allow_marker: rule.allow_marker.clone(),
+            allow_marker_above: rule.allow_marker_above,
             except,
             in_toml_section: rule.in_toml_section.clone(),
             table_row_only: rule.table_row_only,
             skip_after,
+            only_if_file_matches,
         });
     }
     Ok(out)
@@ -136,16 +155,26 @@ fn applies(c: &Compiled, rel: &Path) -> bool {
 }
 
 fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<TextlintViolation>) {
+    let lines: Vec<&str> = content.lines().collect();
+    // File-scope precondition: a rule with `only_if_file_matches` fires only in
+    // files where some line matches it. Computed once per file per rule.
+    let file_ok: Vec<bool> = rules
+        .iter()
+        .map(|r| match &r.only_if_file_matches {
+            Some(re) => lines.iter().any(|l| re.is_match(l)),
+            None => true,
+        })
+        .collect();
     let mut section: Option<String> = None;
     // Per-rule "past the skip_after boundary" latch, indexed alongside `rules`.
     let mut skipping = vec![false; rules.len()];
-    for (i, raw) in content.lines().enumerate() {
+    for (i, raw) in lines.iter().copied().enumerate() {
         let trimmed = raw.trim();
         if let Some(s) = toml_section(trimmed) {
             section = Some(s);
         }
         for (ri, rule) in rules.iter().enumerate() {
-            if skipping[ri] {
+            if !file_ok[ri] || skipping[ri] {
                 continue;
             }
             // Arm the latch on the boundary line so every *following* line is
@@ -165,7 +194,7 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             if !rule.pattern.is_match(raw) {
                 continue;
             }
-            if rule.allow_marker.as_deref().is_some_and(|m| raw.contains(m)) {
+            if marker_suppresses(rule, &lines, i) {
                 continue;
             }
             if rule.except.iter().any(|r| r.is_match(raw)) {
@@ -180,6 +209,22 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             });
         }
     }
+}
+
+/// Whether `rule`'s allow-marker suppresses the match at line index `i`: on the
+/// line itself, or within `allow_marker_above` lines above it.
+fn marker_suppresses(rule: &Compiled, lines: &[&str], i: usize) -> bool {
+    let Some(marker) = rule.allow_marker.as_deref() else {
+        return false;
+    };
+    if lines[i].contains(marker) {
+        return true;
+    }
+    if rule.allow_marker_above > 0 {
+        let start = i.saturating_sub(rule.allow_marker_above);
+        return lines[start..i].iter().any(|l| l.contains(marker));
+    }
+    false
 }
 
 /// The section name inside a TOML section header (`[deps]` -> `deps`,
@@ -217,10 +262,12 @@ mod tests {
             exclude: Vec::new(),
             message: "m".into(),
             allow_marker: None,
+            allow_marker_above: 0,
             except: Vec::new(),
             in_toml_section: None,
             table_row_only: false,
             skip_after: None,
+            only_if_file_matches: None,
         }
     }
 
@@ -292,6 +339,51 @@ mod tests {
 }
 ";
         assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn allow_marker_above_suppresses_within_window() {
+        let mut r = rule("panic!");
+        r.allow_marker = Some("allow-panic".into());
+        r.allow_marker_above = 2;
+        // Marker two lines above the match -> suppressed.
+        assert!(run(r, "// allow-panic\nlet x = 1;\npanic!();\n").is_empty());
+
+        let mut r2 = rule("panic!");
+        r2.allow_marker = Some("allow-panic".into());
+        r2.allow_marker_above = 1;
+        // Marker three lines above but window is only 1 -> still flagged.
+        assert_eq!(
+            run(r2, "// allow-panic\na;\nb;\npanic!();\n"),
+            vec![(4, "r".into())]
+        );
+    }
+
+    #[test]
+    fn allow_marker_above_zero_is_same_line_only() {
+        let mut r = rule("panic!");
+        r.allow_marker = Some("allow-panic".into());
+        // Default window 0: a marker on the line above does not suppress.
+        assert_eq!(run(r, "// allow-panic\npanic!();\n"), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn only_if_file_matches_gates_the_whole_file() {
+        let mut r = rule("Instant::now\\(\\)");
+        r.only_if_file_matches = Some("use std::time::Instant".into());
+        // Condition present -> the bare call is flagged.
+        let with = "use std::time::Instant;\nlet t = Instant::now();\n";
+        assert_eq!(run(r.clone(), with), vec![(2, "r".into())]);
+        // Condition absent -> the rule does not fire at all.
+        let without = "let t = Instant::now();\n";
+        assert!(run(r, without).is_empty());
+    }
+
+    #[test]
+    fn allow_marker_above_without_marker_is_a_config_error() {
+        let mut r = rule("panic!");
+        r.allow_marker_above = 3;
+        assert!(compile(&[r]).is_err());
     }
 
     #[test]
