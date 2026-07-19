@@ -356,9 +356,6 @@ fn run_style(
         return Ok(());
     }
 
-    if !json {
-        output::run_msg("style: blank line above control flow (Rust)");
-    }
     let violations = crate::style::scan(project_root, gremlins_cfg)?;
 
     if json {
@@ -385,6 +382,7 @@ fn run_style(
     }
 
     if !json {
+        output::run_msg("style: blank line above control flow (Rust)");
         let total = violations.len();
         let displayed = if all || total <= limit {
             &violations[..]
@@ -424,9 +422,6 @@ fn run_header(
     let year = crate::header::current_utc_year();
     let expected = crate::header::expand(&cfg.pattern, year);
 
-    if !json {
-        output::run_msg(&format!("header: require `{expected}`"));
-    }
     let violations = crate::header::scan(project_root, cfg, year)?;
 
     if json {
@@ -451,6 +446,7 @@ fn run_header(
     }
 
     if !json {
+        output::run_msg(&format!("header: require `{expected}`"));
         let total = violations.len();
         let displayed = if all || total <= limit {
             &violations[..]
@@ -485,9 +481,6 @@ fn run_textlint(
         return Ok(());
     }
 
-    if !json {
-        output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
-    }
     let violations = crate::textlint::scan(project_root, rules)?;
 
     if json {
@@ -514,6 +507,7 @@ fn run_textlint(
     }
 
     if !json {
+        output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
         let total = violations.len();
         let displayed = if all || total <= limit {
             &violations[..]
