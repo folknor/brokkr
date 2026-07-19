@@ -76,6 +76,105 @@ pub fn mask_line(line: &str, offset: usize, regions: &[Region], target: Region) 
     out
 }
 
+/// One `use ...;` statement, its physical-line span, and a single-line
+/// reconstruction with comments stripped and whitespace collapsed - so a
+/// pattern can match a rustfmt-wrapped import that no single physical line
+/// carries in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseStmt {
+    /// 0-based first physical line (the `use` keyword).
+    pub start_line: usize,
+    /// 0-based last physical line (the terminating `;`).
+    pub end_line: usize,
+    /// The statement from `use` to `;`, comments removed, whitespace runs
+    /// (including the line wraps) collapsed to single spaces.
+    pub joined: String,
+}
+
+/// Reconstruct every `use ...;` statement in `src`. `use` is reserved, so an
+/// `Ident` token reading `use` is always the keyword (never in a string or
+/// comment - those tokenize as other kinds), which makes this robust without a
+/// parser. Bracket depth is tracked so the terminating `;` is the statement's
+/// own, not one inside its `{...}` group.
+pub fn use_statements(src: &str) -> Vec<UseStmt> {
+    let regions = classify(src);
+    let mut line_starts = vec![0usize];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let line_of = |off: usize| line_starts.partition_point(|&s| s <= off).saturating_sub(1);
+
+    // (start, len, kind) for every token, in order.
+    let mut toks: Vec<(usize, usize, TokenKind)> = Vec::new();
+    let mut off = 0usize;
+    for t in tokenize(src) {
+        toks.push((off, t.len, t.kind));
+        off += t.len;
+    }
+
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let (start, len, kind) = toks[i];
+        if kind == TokenKind::Ident && &src[start..start + len] == "use" {
+            // Scan to the depth-0 `;`.
+            let mut depth: i32 = 0;
+            let mut j = i + 1;
+            let mut end: Option<usize> = None;
+            while j < toks.len() {
+                let (ts, tl, tk) = toks[j];
+                match tk {
+                    TokenKind::OpenBrace | TokenKind::OpenParen | TokenKind::OpenBracket => {
+                        depth += 1;
+                    }
+                    TokenKind::CloseBrace | TokenKind::CloseParen | TokenKind::CloseBracket => {
+                        depth -= 1;
+                    }
+                    TokenKind::Semi if depth == 0 => {
+                        end = Some(ts + tl);
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if let Some(end) = end {
+                out.push(UseStmt {
+                    start_line: line_of(start),
+                    end_line: line_of(end - 1),
+                    joined: join_range(src, &regions, start, end),
+                });
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Flatten `src[start..end]` to one line: comment bytes and whitespace runs
+/// become a single space, code is verbatim (so `foo::bar` stays adjacent).
+fn join_range(src: &str, regions: &[Region], start: usize, end: usize) -> String {
+    let mut joined = String::new();
+    let mut prev_space = false;
+    for (k, ch) in src[start..end].char_indices() {
+        let drop = ch.is_whitespace() || regions.get(start + k).copied() == Some(Region::Comment);
+        if drop {
+            if !prev_space {
+                joined.push(' ');
+                prev_space = true;
+            }
+        } else {
+            joined.push(ch);
+            prev_space = false;
+        }
+    }
+    joined.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -123,6 +222,44 @@ mod tests {
         // The `//` inside a raw string must NOT be seen as a comment.
         let slashes = src.find("//").unwrap();
         assert_eq!(regs[slashes], Region::Str);
+    }
+
+    #[test]
+    fn use_statement_single_line() {
+        let s = use_statements("use tracing::info;\n");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].start_line, 0);
+        assert_eq!(s[0].end_line, 0);
+        assert_eq!(s[0].joined, "use tracing::info;");
+    }
+
+    #[test]
+    fn use_statement_wrapped_across_lines_is_joined() {
+        // rustfmt-style wrap: the full path is on no single physical line.
+        let src = "use tracing::{\n    info,\n    warn,\n};\nfn f() {}\n";
+        let s = use_statements(src);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].start_line, s[0].end_line), (0, 3));
+        assert_eq!(s[0].joined, "use tracing::{ info, warn, };");
+        // `use tracing::` and the imported names are matchable on one line.
+        assert!(s[0].joined.contains("use tracing::"));
+        assert!(s[0].joined.contains("warn"));
+    }
+
+    #[test]
+    fn use_statement_semicolon_inside_braces_is_not_the_end() {
+        // A `;`-free brace group; the terminating `;` is the statement's own.
+        let src = "use a::{b, c};\nlet x = 1;\n";
+        let s = use_statements(src);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].joined, "use a::{b, c};");
+        assert_eq!(s[0].end_line, 0);
+    }
+
+    #[test]
+    fn use_keyword_in_string_or_comment_is_not_a_statement() {
+        let src = "let s = \"use x::y;\";\n// use a::b;\n";
+        assert!(use_statements(src).is_empty());
     }
 
     #[test]

@@ -227,6 +227,14 @@ pub struct TextlintRule {
     /// stay the physical line. Optional.
     #[serde(default)]
     pub region: Option<String>,
+    /// Match `pattern` against whole `use ...;` statements instead of physical
+    /// lines: a rustfmt-wrapped import is reconstructed onto one line (comments
+    /// stripped) before matching, so patterns like `use tracing::.*warn` catch
+    /// a multi-line `use` block. The violation is reported at the `use` line,
+    /// and `allow_marker` matches on any physical line of the statement.
+    /// Rust-only. Off by default.
+    #[serde(default)]
+    pub join_wrapped_use: bool,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must

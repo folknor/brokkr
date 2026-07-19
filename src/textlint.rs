@@ -64,6 +64,7 @@ struct Compiled {
     skip_after: Option<Regex>,
     only_if_file_matches: Option<Regex>,
     region: Option<lex::Region>,
+    join_wrapped_use: bool,
 }
 
 const DISPLAY_CAP: usize = 200;
@@ -132,6 +133,7 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             skip_after,
             only_if_file_matches,
             region,
+            join_wrapped_use: rule.join_wrapped_use,
         });
     }
     Ok(out)
@@ -197,6 +199,11 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             if !file_ok[ri] || skipping[ri] {
                 continue;
             }
+            // Whole-`use`-statement rules are handled in the join pass below,
+            // not per physical line (a single-line `use` is one 1-line join).
+            if rule.join_wrapped_use {
+                continue;
+            }
             // Arm the latch on the boundary line so every *following* line is
             // exempt; the boundary line itself is still evaluated below (it is
             // not the offending pattern in practice, e.g. `#[cfg(test)]`).
@@ -238,6 +245,49 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             });
         }
     }
+
+    // Whole-`use`-statement pass: reconstruct wrapped imports once, then match
+    // each join rule against the joined text.
+    if rules.iter().any(|r| r.join_wrapped_use) {
+        let stmts = lex::use_statements(content);
+        for (ri, rule) in rules.iter().enumerate() {
+            if !rule.join_wrapped_use || !file_ok[ri] {
+                continue;
+            }
+            for st in &stmts {
+                if !rule.pattern.is_match(&st.joined) {
+                    continue;
+                }
+                // `allow_marker` matches on any physical line of the statement
+                // (plus the `allow_marker_above` window at its start).
+                if use_marker_suppresses(rule, &lines, st) {
+                    continue;
+                }
+                if rule.except.iter().any(|r| r.is_match(&st.joined)) {
+                    continue;
+                }
+                out.push(TextlintViolation {
+                    file: rel.to_path_buf(),
+                    line: st.start_line + 1,
+                    rule: rule.name.clone(),
+                    message: rule.message.clone(),
+                    content: cap(&st.joined),
+                });
+            }
+        }
+    }
+}
+
+/// `allow_marker` for a joined `use` statement: the marker on any physical line
+/// of the statement suppresses it, plus the `allow_marker_above` window above.
+fn use_marker_suppresses(rule: &Compiled, lines: &[&str], st: &lex::UseStmt) -> bool {
+    let Some(marker) = rule.allow_marker.as_deref() else {
+        return false;
+    };
+    let start = st.start_line.saturating_sub(rule.allow_marker_above);
+    lines
+        .get(start..=st.end_line.min(lines.len().saturating_sub(1)))
+        .is_some_and(|window| window.iter().any(|l| l.contains(marker)))
 }
 
 /// Whether `rule`'s allow-marker suppresses the match at line index `i`: on the
@@ -298,6 +348,7 @@ mod tests {
             skip_after: None,
             only_if_file_matches: None,
             region: None,
+            join_wrapped_use: false,
         }
     }
 
@@ -436,6 +487,32 @@ mod tests {
         let src = "let FIXME = 1; // FIXME real\n";
         // Only the comment occurrence is flagged, not the identifier.
         assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn join_wrapped_use_matches_across_lines() {
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        // The wrapped import is caught and reported at the `use` line (1).
+        let src = "use tracing::{\n    info,\n    warn,\n};\n";
+        assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn join_wrapped_use_single_line_still_matches() {
+        let mut r = rule("use tracing::");
+        r.join_wrapped_use = true;
+        assert_eq!(run(r, "use tracing::info;\n"), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn join_wrapped_use_marker_on_any_statement_line_suppresses() {
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        r.allow_marker = Some("import-ok".into());
+        // Marker on the closing line of the wrapped statement still suppresses.
+        let src = "use tracing::{\n    info,\n    warn,\n}; // import-ok\n";
+        assert!(run(r, src).is_empty());
     }
 
     #[test]

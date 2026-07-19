@@ -203,6 +203,11 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
   quoted in a comment or string, `string` targets message text (a `", got"`
   phrasing rule). Only `pattern` is scoped; markers/`except`/reporting stay on
   the physical line.
+- `join_wrapped_use = true` matches `pattern` against whole `use ...;`
+  statements: a rustfmt-wrapped import is reconstructed onto one line (comments
+  stripped) first, so `use tracing::.*warn` catches a multi-line `use` block.
+  Reported at the `use` line; `allow_marker` matches on any physical line of
+  the statement. Rust-only.
 - `except` (regexes; a line matching any is exempt) - the way to allow one
   specific form of an otherwise-forbidden pattern.
 - `in_toml_section` (only consider lines while the last-seen `[section]` header
