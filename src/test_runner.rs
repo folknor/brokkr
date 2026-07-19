@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
+
 use crate::error::DevError;
 use crate::output::CapturedOutput;
 use crate::ratatoskr::process::snapshot_proc;
@@ -21,12 +23,14 @@ use crate::ratatoskr::process::snapshot_proc;
 pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
-/// Whole-sweep wall-clock ceiling for a parallel test sweep. Once libtest runs
-/// tests concurrently its output interleaves, so the per-test hang watchdog
-/// (which attributes a stall to a named test from sequential markers) is
-/// impossible; a parallel sweep gets this single coarse timeout instead.
-/// Generous - a real parallel workspace suite runs in minutes - so it only
-/// trips on a genuinely wedged run.
+/// Coarse whole-sweep wall-clock backstop for a parallel test sweep. The
+/// parallel path enforces the same per-test [`TEST_TIMEOUT`] as the serial
+/// runner (aging each in-flight test from libtest's JSON `started`/`ok`/`failed`
+/// events - see [`run_libtest_parallel`]), so a hung *test* is caught in 20s
+/// with named attribution just like serial. This ceiling only guards the
+/// residual case the per-test watchdog cannot see: a wedge with no test
+/// in-flight (a stall before the first `started` event, or between tests).
+/// Generous, so it only trips on a genuinely un-attributable wedge.
 pub(crate) const PARALLEL_SWEEP_TIMEOUT: Duration = Duration::from_secs(1800);
 
 pub(crate) struct LibtestRun {
@@ -199,23 +203,44 @@ where
     })
 }
 
-/// Outcome of a parallel (non-watchdog) test sweep.
+/// Outcome of a parallel test sweep.
 pub(crate) struct ParallelRun {
     pub captured: CapturedOutput,
-    /// True when the whole-sweep timeout was hit and the process group killed.
+    /// A per-test hang caught by the watchdog (blamed test + snapshot), or
+    /// `Completed` if none tripped. Same shape as the serial runner.
+    pub outcome: LibtestOutcome,
+    /// True when the coarse whole-sweep backstop was hit and the process group
+    /// killed (an un-attributable wedge, not a single hung test).
     pub timed_out: bool,
+    /// (test name, wall-clock duration) for every test observed running to
+    /// completion, reconstructed from libtest's JSON `started`/`ok`/`failed`
+    /// event pairs.
+    pub completed: Vec<(String, Duration)>,
 }
 
-/// Run `cargo test` for a sweep that opted into parallel execution. Unlike
-/// [`streaming_run_libtest`] there is no `--test-threads=1` enforcement and no
-/// per-test hang watchdog - just streaming output and a single whole-sweep
-/// wall-clock `timeout` that kills the cargo process group if exceeded (or on a
-/// cooperative `brokkr kill` / Ctrl-C).
+/// Run `cargo test` for a sweep that opted into parallel execution.
+///
+/// Parallelism forecloses the serial runner's partial-marker watchdog (once
+/// tests run concurrently, libtest's human output no longer emits a per-test
+/// *start* signal to age). This path instead drives libtest's JSON event
+/// stream (`--format json -Z unstable-options`, injected by the caller): each
+/// `started` event records a start `Instant` in the shared [`TestTracker`],
+/// each `ok`/`failed`/`ignored` clears it, and the *same* [`watchdog_loop`] the
+/// serial runner uses ages the in-flight set against `per_test_timeout`. A test
+/// that blows the per-test limit is blamed by name and its process group killed
+/// - the exact serial guarantee, concurrent.
+///
+/// The JSON events are reconstructed back into human libtest text in the stdout
+/// buffer, so the downstream cargo parsers see the output shape they expect.
+/// `timeout` is a coarse whole-sweep backstop for a wedge with no test
+/// in-flight; it also honours a cooperative `brokkr kill` / Ctrl-C.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
     timeout: Duration,
+    per_test_timeout: Duration,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -239,10 +264,14 @@ where
 
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let tracker = Arc::new(Mutex::new(TestTracker::default()));
+    let done = Arc::new(AtomicBool::new(false));
+    let hung = Arc::new(Mutex::new(None::<HungTest>));
 
     let stdout_buf_t = Arc::clone(&stdout_buf);
+    let tracker_t = Arc::clone(&tracker);
     let stdout_thread = thread::spawn(move || {
-        drain_plain(stdout_pipe, &stdout_buf_t, forward_stdout_line);
+        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, forward_stdout_line);
     });
     let stderr_buf_t = Arc::clone(&stderr_buf);
     let stderr_thread = thread::spawn(move || {
@@ -253,6 +282,17 @@ where
             start,
             on_build_finished,
         );
+    });
+
+    // The per-test hang watchdog - identical to the serial path, aging the
+    // JSON-fed tracker. It kills the group and records a `HungTest` the instant
+    // any in-flight test crosses `per_test_timeout`.
+    let cwd_t = cwd.to_path_buf();
+    let tracker_w = Arc::clone(&tracker);
+    let done_w = Arc::clone(&done);
+    let hung_w = Arc::clone(&hung);
+    let watchdog_thread = thread::spawn(move || {
+        watchdog_loop(cwd_t, cargo_pid, tracker_w, done_w, hung_w, per_test_timeout);
     });
 
     let mut timed_out = false;
@@ -282,13 +322,21 @@ where
             }
         }
     };
+    done.store(true, Ordering::SeqCst);
 
     stdout_thread.join().ok();
     stderr_thread.join().ok();
+    watchdog_thread.join().ok();
 
     let elapsed = start.elapsed();
     let stdout = clone_buffer(&stdout_buf, "stdout")?;
     let stderr = clone_buffer(&stderr_buf, "stderr")?;
+    let hung_outcome = clone_hung(&hung)?;
+    let completed = tracker
+        .lock()
+        .map(|mut t| std::mem::take(&mut t.completed))
+        .map_err(|_| DevError::Build("test tracker mutex poisoned".into()))?;
+
     Ok(ParallelRun {
         captured: CapturedOutput {
             status,
@@ -296,31 +344,56 @@ where
             stderr,
             elapsed,
         },
+        outcome: match hung_outcome {
+            Some(h) => LibtestOutcome::HungTest(h),
+            None => LibtestOutcome::Completed,
+        },
         timed_out,
+        completed,
     })
 }
 
-/// Line-buffered pipe drain with no watchdog marker parsing - the parallel
-/// runner just captures and forwards.
-fn drain_plain<F>(mut pipe: ChildStdout, buf: &Mutex<Vec<u8>>, mut forward_line: F)
-where
+/// Line-buffered drain of the parallel runner's stdout, which is libtest's
+/// JSON event stream (plus, in `--json` mode, cargo's own `{"reason":...}`
+/// message lines).
+///
+/// Each line is fed to a [`JsonReconstructor`], which updates the shared
+/// [`TestTracker`] (so the watchdog can age in-flight tests) and turns the JSON
+/// events back into the human libtest text the downstream cargo parsers expect.
+/// The reconstructed text - not the raw JSON - is what lands in `buf`; cargo
+/// message lines and any non-JSON output pass through verbatim.
+fn drain_libtest_json<F>(
+    mut pipe: ChildStdout,
+    buf: &Mutex<Vec<u8>>,
+    tracker: &Mutex<TestTracker>,
+    mut forward_line: F,
+) where
     F: FnMut(&str),
 {
+    let mut recon = JsonReconstructor::default();
+    let emit = |out: &[String], buf: &Mutex<Vec<u8>>, forward_line: &mut F| {
+        for text in out {
+            if let Ok(mut b) = buf.lock() {
+                b.extend_from_slice(text.as_bytes());
+                b.push(b'\n');
+            }
+            forward_line(text);
+        }
+    };
+
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
     while let Ok(n) = pipe.read(&mut read_buf) {
         if n == 0 {
             break;
         }
-        if let Ok(mut out) = buf.lock() {
-            out.extend_from_slice(&read_buf[..n]);
-        }
         for &byte in &read_buf[..n] {
             if byte == b'\n' {
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                forward_line(&String::from_utf8_lossy(&line));
+                let out = recon.observe(&String::from_utf8_lossy(&line), tracker);
+                emit(&out, buf, &mut forward_line);
                 line.clear();
             } else {
                 line.push(byte);
@@ -328,7 +401,143 @@ where
         }
     }
     if !line.is_empty() {
-        forward_line(&String::from_utf8_lossy(&line));
+        let out = recon.observe(&String::from_utf8_lossy(&line), tracker);
+        emit(&out, buf, &mut forward_line);
+    }
+}
+
+/// Turns libtest's JSON event stream back into the human libtest text the
+/// downstream cargo parsers ([`crate::cargo_filter::parse_test_output`],
+/// [`crate::cargo_filter::filter_test`]) expect, while driving the
+/// [`TestTracker`] the watchdog ages.
+///
+/// libtest (nightly, `--format json`) emits one JSON object per line:
+/// - `{"type":"suite","event":"started","test_count":N}`
+/// - `{"type":"test","event":"started","name":"..."}`
+/// - `{"type":"test","event":"ok"|"failed"|"ignored","name":"...","stdout":"..."}`
+/// - `{"type":"suite","event":"ok"|"failed","passed":P,"failed":F,...}`
+///
+/// Failing tests are buffered until the suite summary, then rendered as
+/// libtest's two-part `failures:` block (detail `---- name stdout ----` blocks
+/// followed by the name list) so the parser recovers the panic messages exactly
+/// as it does from a serial run.
+#[derive(Default)]
+struct JsonReconstructor {
+    /// (test name, captured stdout) for failures seen since the last suite
+    /// summary, held back so they render as one block in libtest order.
+    failures: Vec<(String, Option<String>)>,
+}
+
+impl JsonReconstructor {
+    /// Consume one raw stdout line, updating `tracker` and returning the human
+    /// libtest lines to emit for it (possibly none, or several).
+    fn observe(&mut self, line: &str, tracker: &Mutex<TestTracker>) -> Vec<String> {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('{') {
+            // Non-JSON: `--nocapture` test output, or a stray print. Pass through.
+            return vec![line.to_owned()];
+        }
+        let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+            return vec![line.to_owned()];
+        };
+        // cargo's own `--message-format=json` line (has `reason`, no `type`):
+        // let the caller's JSON path handle it untouched.
+        let Some(kind) = val.get("type").and_then(Value::as_str) else {
+            return vec![line.to_owned()];
+        };
+        let event = val.get("event").and_then(Value::as_str).unwrap_or("");
+        match (kind, event) {
+            ("suite", "started") => {
+                self.failures.clear();
+                let count = val.get("test_count").and_then(Value::as_u64).unwrap_or(0);
+                vec![String::new(), format!("running {count} tests")]
+            }
+            ("suite", _) => self.render_suite_summary(&val, event),
+            ("test", "started") => {
+                if let Some(name) = val.get("name").and_then(Value::as_str)
+                    && let Ok(mut t) = tracker.lock()
+                {
+                    t.observe_start(name.to_owned());
+                }
+                Vec::new()
+            }
+            ("test", "ok") => {
+                let name = self.finish(&val, tracker);
+                name.map(|n| vec![format!("test {n} ... ok")]).unwrap_or_default()
+            }
+            ("test", "ignored") => {
+                let name = self.finish(&val, tracker);
+                name.map(|n| vec![format!("test {n} ... ignored")])
+                    .unwrap_or_default()
+            }
+            ("test", "failed") => {
+                let Some(name) = self.finish(&val, tracker) else {
+                    return Vec::new();
+                };
+                let captured = val
+                    .get("stdout")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                self.failures.push((name.clone(), captured));
+                vec![format!("test {name} ... FAILED")]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Clear a completed test from the tracker and return its name.
+    fn finish(&self, val: &Value, tracker: &Mutex<TestTracker>) -> Option<String> {
+        let name = val.get("name").and_then(Value::as_str)?.to_owned();
+        if let Ok(mut t) = tracker.lock() {
+            t.observe_result(&name);
+        }
+        Some(name)
+    }
+
+    /// Render the end-of-suite `failures:` block (if any) plus the
+    /// `test result:` summary line from a `suite` `ok`/`failed` event.
+    fn render_suite_summary(&mut self, val: &Value, event: &str) -> Vec<String> {
+        let count = |key: &str| val.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let (passed, failed) = (count("passed"), count("failed"));
+        let (ignored, measured) = (count("ignored"), count("measured"));
+        let filtered_out = count("filtered_out");
+        let exec_time = val.get("exec_time").and_then(Value::as_f64).unwrap_or(0.0);
+
+        let mut out = Vec::new();
+        if !self.failures.is_empty() {
+            out.push(String::new());
+            out.push("failures:".to_owned());
+            for (name, captured) in &self.failures {
+                if let Some(cap) = captured
+                    && !cap.is_empty()
+                {
+                    out.push(String::new());
+                    out.push(format!("---- {name} stdout ----"));
+                    for l in cap.lines() {
+                        out.push(l.to_owned());
+                    }
+                }
+            }
+            out.push(String::new());
+            out.push("failures:".to_owned());
+            for (name, _) in &self.failures {
+                out.push(format!("    {name}"));
+            }
+            out.push(String::new());
+        }
+        self.failures.clear();
+
+        let verb = if failed > 0 || event == "failed" {
+            "FAILED"
+        } else {
+            "ok"
+        };
+        out.push(format!(
+            "test result: {verb}. {passed} passed; {failed} failed; \
+             {ignored} ignored; {measured} measured; {filtered_out} filtered out; \
+             finished in {exec_time:.2}s"
+        ));
+        out
     }
 }
 
@@ -1253,6 +1462,95 @@ mod tests {
         assert!(
             wait_for_process_group_exit(cargo_pid),
             "process group {cargo_pid} survived watchdog kill"
+        );
+    }
+
+    /// Drive a JSON event stream through the reconstructor, returning the
+    /// emitted human lines and the set of tests still in-flight in the tracker
+    /// (i.e. what the watchdog would age).
+    fn drive_recon(events: &[&str]) -> (Vec<String>, Vec<String>) {
+        let tracker = Mutex::new(TestTracker::default());
+        let mut recon = JsonReconstructor::default();
+        let mut lines = Vec::new();
+        for ev in events {
+            lines.extend(recon.observe(ev, &tracker));
+        }
+        let mut in_flight: Vec<String> =
+            tracker.lock().unwrap().current.keys().cloned().collect();
+        in_flight.sort();
+        (lines, in_flight)
+    }
+
+    #[test]
+    fn recon_passing_suite_round_trips_to_parseable_text() {
+        let (lines, in_flight) = drive_recon(&[
+            r#"{"type":"suite","event":"started","test_count":2}"#,
+            r#"{"type":"test","event":"started","name":"a::one"}"#,
+            r#"{"type":"test","event":"started","name":"a::two"}"#,
+            r#"{"type":"test","name":"a::one","event":"ok"}"#,
+            r#"{"type":"test","name":"a::two","event":"ok"}"#,
+            r#"{"type":"suite","event":"ok","passed":2,"failed":0,"ignored":0,"measured":0,"filtered_out":3,"exec_time":0.01}"#,
+        ]);
+        assert!(in_flight.is_empty(), "all tests should have finished");
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let parsed = crate::cargo_filter::parse_test_output(&refs);
+        assert_eq!(parsed.passed, 2);
+        assert_eq!(parsed.failed, 0);
+        assert_eq!(parsed.filtered_out, 3);
+        assert_eq!(parsed.suites, 1);
+    }
+
+    #[test]
+    fn recon_failure_renders_failures_block_with_panic() {
+        let (lines, _) = drive_recon(&[
+            r#"{"type":"suite","event":"started","test_count":1}"#,
+            r#"{"type":"test","event":"started","name":"a::boom"}"#,
+            r#"{"type":"test","name":"a::boom","event":"failed","stdout":"thread 'a::boom' panicked at src/lib.rs:10:5:\nassertion failed\n"}"#,
+            r#"{"type":"suite","event":"failed","passed":0,"failed":1,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.02}"#,
+        ]);
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let parsed = crate::cargo_filter::parse_test_output(&refs);
+        assert_eq!(parsed.failed, 1);
+        assert_eq!(parsed.failures.len(), 1, "panic detail recovered: {refs:?}");
+        assert_eq!(parsed.failures[0].name, "a::boom");
+        assert!(
+            parsed.failures[0]
+                .location
+                .as_deref()
+                .is_some_and(|l| l.contains("src/lib.rs:10:5")),
+            "location parsed: {:?}",
+            parsed.failures[0].location
+        );
+    }
+
+    #[test]
+    fn recon_leaves_started_test_in_flight_for_watchdog() {
+        // A test that started but never emitted a terminating event is what the
+        // per-test watchdog must be able to age and blame.
+        let (_, in_flight) = drive_recon(&[
+            r#"{"type":"suite","event":"started","test_count":2}"#,
+            r#"{"type":"test","event":"started","name":"a::done"}"#,
+            r#"{"type":"test","event":"started","name":"a::hangs"}"#,
+            r#"{"type":"test","name":"a::done","event":"ok"}"#,
+        ]);
+        assert_eq!(in_flight, vec!["a::hangs".to_owned()]);
+    }
+
+    #[test]
+    fn recon_passes_cargo_json_and_stray_output_through() {
+        // cargo's own message-format=json line (has `reason`, no `type`) and a
+        // non-JSON stray print must survive verbatim - the former for the
+        // `--json` path, the latter for `--nocapture` test output.
+        let (lines, _) = drive_recon(&[
+            r#"{"reason":"compiler-artifact","target":{"name":"brokkr"}}"#,
+            "hello from a test under --nocapture",
+        ]);
+        assert_eq!(
+            lines,
+            vec![
+                r#"{"reason":"compiler-artifact","target":{"name":"brokkr"}}"#.to_owned(),
+                "hello from a test under --nocapture".to_owned(),
+            ]
         );
     }
 

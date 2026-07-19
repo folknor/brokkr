@@ -24,8 +24,9 @@ profile/filter combo can't silently green-light a check.
 ### Serial vs parallel test sweeps
 
 By default the test phase runs each sweep serial (`--test-threads=1`) under
-the per-test hang watchdog (see below), which needs libtest's sequential
-output to attribute a stall to a named test. A profile can opt a sweep into
+the per-test hang watchdog (see below), attributing a stall to a named test
+from libtest's sequential output. The parallel lane keeps the same watchdog via
+libtest's JSON event stream (see below). A profile can opt a sweep into
 parallel execution with `test_threads`:
 
 - unset or `test_threads = 1` - serial, per-test watchdog (the default; nothing
@@ -33,13 +34,25 @@ parallel execution with `test_threads`:
 - `test_threads = 0` - libtest's default parallelism (num_cpus).
 - `test_threads = N` (>= 2) - `--test-threads=N`.
 
-A parallel sweep gives up per-test hang attribution (impossible once output
-interleaves) and instead runs under a single whole-sweep wall-clock ceiling
-(30 min); exceeding it kills the cargo process group and fails the sweep. This
-is for large workspaces where serial execution is dominated by a few
-wall-clock-heavy tests (live/network/multi-second lifecycle) that parallelism
-hides. `brokkr test` is unaffected - it is always serial regardless of the
-profile's `test_threads`.
+A parallel sweep keeps the **same per-test 20s hang watchdog** as the serial
+path, with named attribution. Since libtest's human output emits no per-test
+*start* signal once tests run concurrently, the parallel path drives libtest's
+JSON event stream instead (`--format json -Z unstable-options`, injected
+automatically; native on nightly): each `started` event arms the watchdog for
+that test, each `ok`/`failed` disarms it, and a test that crosses 20s is blamed
+by name and its process group killed - exactly like serial. The JSON events are
+reconstructed back into human libtest text so `--raw`/`--json`/filtered output
+all look identical to a serial run. A coarse whole-sweep ceiling (30 min)
+remains only as a backstop for an un-attributable wedge (a stall with no test
+in-flight - e.g. before the first test starts); it kills the process group and
+fails the sweep. This lane is for large workspaces where serial execution is
+dominated by a few wall-clock-heavy tests (live/network/multi-second lifecycle)
+that parallelism hides - now without surrendering per-test hang protection.
+Because the per-test clock is wall-clock, a test that is merely CPU-starved
+under heavy `test_threads` load (not hung) can trip it; keep genuinely
+multi-second tests off the parallel lane. A profile must not set `--format` in
+its `libtest_args` on a parallel lane (the sweep owns that flag). `brokkr test`
+is unaffected - it is always serial regardless of the profile's `test_threads`.
 
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's

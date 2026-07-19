@@ -162,6 +162,20 @@ fn run_one_test_sweep(
         {
             libtest_args.push(format!("--test-threads={n}"));
         }
+        // Drive libtest's JSON event stream so the per-test hang watchdog can
+        // age each in-flight test even under concurrency (human output emits no
+        // per-test *start* signal in parallel). Native on nightly.
+        if libtest_args.iter().any(|a| a == "--format") {
+            return Err(DevError::Config(
+                "a parallel test sweep drives libtest's JSON output for the per-test \
+                 watchdog; remove the `--format` override from this profile's \
+                 libtest_args".into(),
+            ));
+        }
+        libtest_args.push("-Z".into());
+        libtest_args.push("unstable-options".into());
+        libtest_args.push("--format".into());
+        libtest_args.push("json".into());
     } else if test_runner::effective_test_threads(&libtest_args)?.is_none() {
         libtest_args.push("--test-threads=1".into());
     }
@@ -210,6 +224,7 @@ fn run_one_test_sweep(
             project_root,
             &env_refs,
             test_runner::PARALLEL_SWEEP_TIMEOUT,
+            test_runner::TEST_TIMEOUT,
             |_| {},
             |_| {},
             move |elapsed| {
@@ -221,7 +236,11 @@ fn run_one_test_sweep(
                 }
             },
         )?;
-        (run.captured, None, run.timed_out, Vec::new())
+        let hung = match run.outcome {
+            LibtestOutcome::HungTest(h) => Some(h),
+            LibtestOutcome::Completed => None,
+        };
+        (run.captured, hung, run.timed_out, run.completed)
     } else {
         let run = test_runner::streaming_run_libtest(
             &arg_refs,
