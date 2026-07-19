@@ -89,9 +89,11 @@ pub fn scan(
         let Ok(text) = std::fs::read_to_string(&abs) else {
             continue;
         };
-        let doc: DocumentMut = text.parse().map_err(|e| {
-            DevError::Config(format!("[manifest] {}: parse error: {e}", rel.display()))
-        })?;
+        // A broken template/fixture manifest elsewhere in the tree must not
+        // down the whole phase - skip it, mirroring the read_to_string branch.
+        let Ok(doc) = text.parse::<DocumentMut>() else {
+            continue;
+        };
         manifests.push((rel, doc));
     }
 
@@ -469,7 +471,8 @@ fn check_crate_type_order(
     let Some(arr) = doc
         .get("lib")
         .and_then(Item::as_table)
-        .and_then(|t| t.get("crate-type"))
+        // Cargo accepts both the hyphen and underscore spellings; hyphen wins.
+        .and_then(|t| t.get("crate-type").or_else(|| t.get("crate_type")))
         .and_then(Item::as_array)
     else {
         return;
@@ -502,19 +505,20 @@ fn check_sorted_dependencies(rel: &Path, table: &Table, out: &mut Vec<ManifestVi
 
 fn check_sorted_table(rel: &Path, section: &str, table: &Table, out: &mut Vec<ManifestViolation>) {
     for group in dependency_groups(table) {
-        let mut prev: Option<String> = None;
+        // Compare case-insensitively, but report the original spelling.
+        let mut prev: Option<(String, &str)> = None;
         for key in &group.keys {
             let lower = key.to_ascii_lowercase();
-            if let Some(prev_key) = &prev
-                && &lower < prev_key
+            if let Some((prev_lower, prev_orig)) = &prev
+                && &lower < prev_lower
             {
                 out.push(ManifestViolation {
                     file: rel.to_path_buf(),
                     rule: "sort-dependencies",
-                    message: format!("[{section}] `{key}` is out of order (after `{prev_key}`)"),
+                    message: format!("[{section}] `{key}` is out of order (after `{prev_orig}`)"),
                 });
             }
-            prev = Some(lower);
+            prev = Some((lower, key.as_str()));
         }
     }
 }
@@ -612,6 +616,16 @@ mod tests {
         let v = violations(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].contains("anyhow"), "{v:?}");
+    }
+
+    #[test]
+    fn sort_message_reports_original_cased_previous_key() {
+        // Comparison is case-insensitive (Tokio > anyhow), but the "after `X`"
+        // text must echo the original spelling, not the lowercased compare key.
+        let src = "[dependencies]\nTokio = \"1\"\nanyhow = \"1\"\n";
+        let v = violations(src);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("after `Tokio`"), "{v:?}");
     }
 
     #[test]
@@ -723,6 +737,21 @@ mod tests {
         let v = run_doc(&order_cfg(), bad);
         assert!(v.iter().any(|(r, _)| *r == "crate-type-order"), "{v:?}");
         let good = "[package]\nname = \"x\"\n[lib]\ncrate-type = [\"rlib\", \"cdylib\"]\n";
+        assert!(
+            !run_doc(&order_cfg(), good)
+                .iter()
+                .any(|(r, _)| *r == "crate-type-order")
+        );
+    }
+
+    #[test]
+    fn crate_type_order_reads_underscore_alias() {
+        // Cargo accepts `crate_type` as well as `crate-type`; the underscore
+        // spelling must still be ordered.
+        let bad = "[package]\nname = \"x\"\n[lib]\ncrate_type = [\"cdylib\", \"rlib\"]\n";
+        let v = run_doc(&order_cfg(), bad);
+        assert!(v.iter().any(|(r, _)| *r == "crate-type-order"), "{v:?}");
+        let good = "[package]\nname = \"x\"\n[lib]\ncrate_type = [\"rlib\", \"cdylib\"]\n";
         assert!(
             !run_doc(&order_cfg(), good)
                 .iter()

@@ -28,14 +28,22 @@ pub fn format_one(v: &HeaderViolation, expected: &str) -> String {
 }
 
 /// The current year in UTC, via libc `gmtime` (no date-crate dependency).
-pub fn current_utc_year() -> i32 {
+///
+/// Returns an error rather than a bogus year if `gmtime_r` fails: on failure it
+/// leaves `tm` zeroed, which would yield 1900 and mark every file's header
+/// stale. `gmtime_r` reports failure by returning a null pointer.
+pub fn current_utc_year() -> Result<i32, DevError> {
     // SAFETY: `time` accepts a null pointer and returns the epoch seconds;
     // `gmtime_r` fills a caller-owned `tm`. Neither reads uninitialised memory.
     unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::gmtime_r(&t, &mut tm);
-        tm.tm_year + 1900
+        if libc::gmtime_r(&t, &mut tm).is_null() {
+            return Err(DevError::Config(
+                "gmtime_r failed to convert the current time to UTC".into(),
+            ));
+        }
+        Ok(tm.tm_year + 1900)
     }
 }
 
@@ -91,7 +99,7 @@ mod tests {
     #[test]
     fn current_year_is_sane() {
         // The check ships in 2026; the year must be at least that and not wild.
-        let y = current_utc_year();
+        let y = current_utc_year().unwrap();
         assert!((2024..2100).contains(&y), "got {y}");
     }
 }

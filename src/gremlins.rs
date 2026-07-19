@@ -308,23 +308,32 @@ fn gremlin_name(c: char, allow: &CodepointSet, ban: &CodepointSet) -> Option<&'s
     if allow.contains(c) {
         return None;
     }
-    // Config `ban` flags a codepoint the built-in set would otherwise pass -
-    // checked before the ASCII fast path so even an out-of-place ASCII char
-    // can be banned.
+    // Fast path: printable ASCII plus tab/LF/CR are the overwhelmingly common
+    // case and are never built-in gremlins. They can still be `ban`ned, so the
+    // ban check below runs before we clear them; the built-in-table lookup is
+    // skipped for them purely as a performance guard (no ASCII char is in the
+    // table). Low-range control chars (U+0003, U+000B) are not on the fast path.
+    let cp = c as u32;
+    let ascii_ok = (0x20..0x7F).contains(&cp) || cp == 0x09 || cp == 0x0A || cp == 0x0D;
+    if !ascii_ok {
+        // A built-in gremlin keeps its real, specific name even when config
+        // `ban` also lists it - report that name, not the generic ban label, so
+        // the scan label matches what `--fix-gremlins` rewrites. Hence this
+        // lookup precedes the `ban` check below.
+        for (g, name) in GREMLINS {
+            if *g == c {
+                return Some(name);
+            }
+        }
+    }
+    // Config `ban` flags a codepoint the built-in set does not - checked before
+    // the ASCII fast path clears a char so even an out-of-place ASCII char can
+    // be banned.
     if ban.contains(c) {
         return Some(BANNED_BY_CONFIG);
     }
-    // Fast path: printable ASCII plus tab/LF/CR are the overwhelmingly common
-    // case and never gremlins. Everything else falls through to the table,
-    // including low-range control chars (U+0003, U+000B).
-    let cp = c as u32;
-    if (0x20..0x7F).contains(&cp) || cp == 0x09 || cp == 0x0A || cp == 0x0D {
+    if ascii_ok {
         return None;
-    }
-    for (g, name) in GREMLINS {
-        if *g == c {
-            return Some(name);
-        }
     }
     pictograph_name(cp)
 }
@@ -713,5 +722,23 @@ mod tests {
         let (fixed, count) = fix_content("non\u{2011}break\n", &allow);
         assert_eq!(count, 0);
         assert_eq!(fixed, "non\u{2011}break\n");
+    }
+
+    #[test]
+    fn banning_a_builtin_gremlin_keeps_its_real_name() {
+        // U+2019 (right single quote) is a built-in gremlin. Listing it in `ban`
+        // too must not downgrade the label to the generic ban text - the
+        // specific name wins, matching what `--fix-gremlins` rewrites.
+        let allow = CodepointSet::default();
+        let ban = CodepointSet {
+            singles: ['\u{2019}'].into_iter().collect(),
+            ranges: Vec::new(),
+        };
+        let mut out = Vec::new();
+        scan_content(Path::new("t.rs"), "it\u{2019}s\n", &mut out, &allow, &ban);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].codepoint, 0x2019);
+        assert_eq!(out[0].name, "RIGHT SINGLE QUOTATION MARK");
+        assert_ne!(out[0].name, BANNED_BY_CONFIG);
     }
 }

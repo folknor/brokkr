@@ -410,8 +410,14 @@ fn window_hit(w: &Window, lines: &[&str], anchor: usize, above: bool) -> bool {
     let range = if above {
         anchor.saturating_sub(w.lines)..anchor
     } else {
-        let start = (anchor + 1).min(lines.len());
-        let end = (anchor + 1 + w.lines).min(lines.len());
+        // Saturating throughout: `w.lines` is unbounded from config, so a
+        // pathological value must not overflow (debug panic / release wrap into
+        // a slice-panic). Mirrors the above-branch's `saturating_sub`.
+        let start = anchor.saturating_add(1).min(lines.len());
+        let end = anchor
+            .saturating_add(1)
+            .saturating_add(w.lines)
+            .min(lines.len());
         start..end
     };
     lines[range].iter().any(|l| w.re.is_match(l))
@@ -539,6 +545,19 @@ mod tests {
         // Only the table-row occurrence is flagged; the prose line is not.
         let src = "a foo-bar in prose\n| cell | foo-bar |\n";
         assert_eq!(run(r, src), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn window_hit_below_does_not_overflow_on_huge_lines() {
+        // A pathological `w.lines` must saturate, not overflow (debug panic) or
+        // wrap into an out-of-bounds slice (release panic). Anchor is line 0 of
+        // a 3-line file, so the below window would run off the end.
+        let w = Window { lines: usize::MAX, re: Regex::new("x").unwrap() };
+        let lines = ["a", "b", "c"];
+        // No match below -> false, but crucially: no panic.
+        assert!(!window_hit(&w, &lines, 0, false));
+        let hit = Window { lines: usize::MAX, re: Regex::new("c").unwrap() };
+        assert!(window_hit(&hit, &lines, 0, false));
     }
 
     #[test]

@@ -495,7 +495,7 @@ fn run_header(
     let Some(cfg) = header_cfg else {
         return Ok(());
     };
-    let year = crate::header::current_utc_year();
+    let year = crate::header::current_utc_year()?;
     let expected = crate::header::expand(&cfg.pattern, year);
 
     let violations = crate::header::scan(project_root, cfg, year)?;

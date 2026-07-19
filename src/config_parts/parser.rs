@@ -420,6 +420,21 @@ fn parse_gremlins(
                  project-root-relative directories."
             )));
         }
+        // `.` / `./` (any path whose only components are the current-dir marker)
+        // passes the empty/absolute gates but matches nothing at scan time:
+        // `is_excluded` compares `rel.starts_with(".")`, false for every real
+        // path. Reject it rather than let it silently exclude the whole tree of
+        // nothing.
+        let all_curdir = Path::new(entry)
+            .components()
+            .all(|c| c == std::path::Component::CurDir);
+        if all_curdir {
+            return Err(DevError::Config(format!(
+                "[gremlins].exclude entry {entry:?} normalizes to the current \
+                 directory and would exclude nothing. List the directories to \
+                 exclude (relative to the project root)."
+            )));
+        }
     }
 
     let allow = parse_codepoint_set("allow", &raw.allow)?;

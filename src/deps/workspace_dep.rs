@@ -54,8 +54,14 @@ pub fn run(metadata: &CargoMetadata, ignore: &[String]) -> Vec<UnusedWorkspaceDe
 }
 
 /// Whether `name` matches any ignore entry - exact, or a `*`-suffixed prefix.
+///
+/// A bare `"*"` is treated literally (exact match against a crate named `*`,
+/// i.e. never), not as an empty prefix: `strip_suffix('*')` on it yields `""`,
+/// and `starts_with("")` is always true, which would silently disable the whole
+/// phase.
 fn ignored(name: &str, ignore: &[String]) -> bool {
     ignore.iter().any(|ig| match ig.strip_suffix('*') {
+        Some("") => ig == name,
         Some(prefix) => name.starts_with(prefix),
         None => ig == name,
     })
@@ -86,7 +92,11 @@ fn collect_from(value: &toml::Value, out: &mut BTreeSet<String>) {
     };
     for (key, val) in table {
         match key.as_str() {
-            "dependencies" | "dev-dependencies" | "build-dependencies" => {
+            "dependencies"
+            | "dev-dependencies"
+            | "build-dependencies"
+            | "dev_dependencies"
+            | "build_dependencies" => {
                 if let Some(deps) = val.as_table() {
                     for (name, spec) in deps {
                         if spec.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
@@ -164,5 +174,31 @@ libc = { workspace = true }\n";
         assert!(!ignored("serde", &ignore));
         // "cargo" lacks the trailing hyphen, so the `cargo-*` glob misses it.
         assert!(!ignored("cargo", &ignore));
+    }
+
+    #[test]
+    fn bare_star_ignore_does_not_match_everything() {
+        // A lone "*" must not silently disable the phase (empty-prefix match).
+        // It is treated literally: only a crate actually named "*" would match.
+        let ignore = vec!["*".to_string()];
+        assert!(!ignored("serde", &ignore));
+        assert!(!ignored("tokio", &ignore));
+        assert!(ignored("*", &ignore));
+    }
+
+    #[test]
+    fn collects_underscore_alias_dep_tables() {
+        // cargo accepts the underscore spellings via serde alias; a member using
+        // them must still register its inherited deps (else false "unused").
+        let src = "\
+[dev_dependencies]\n\
+rstest = { workspace = true }\n\
+[build_dependencies]\n\
+cc = { workspace = true }\n";
+        let got = inherited(src);
+        assert_eq!(
+            got,
+            ["cc", "rstest"].iter().map(|s| (*s).to_string()).collect()
+        );
     }
 }
