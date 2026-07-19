@@ -298,6 +298,24 @@ pub struct ManifestConfig {
     /// requirements must agree at a chosen granularity. Empty by default.
     #[serde(default)]
     pub version_align: Vec<VersionAlign>,
+    /// `[manifest.adapter_group]`: a comment-labelled group inside the
+    /// workspace root's `[workspace.dependencies]` whose members must not be
+    /// used by the named crates. `None` when absent.
+    #[serde(default)]
+    pub adapter_group: Option<AdapterGroup>,
+}
+
+/// `[manifest.adapter_group]`: forbid a comment-delimited workspace-dependency
+/// group from being used by a set of crates (cargo-conv check 9).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterGroup {
+    /// Substring of the comment header that opens the group in
+    /// `[workspace.dependencies]` (e.g. `"Adapter dependencies"`).
+    pub marker: String,
+    /// Package names that must not depend on any crate in that group.
+    #[serde(default)]
+    pub forbidden_in: Vec<String>,
 }
 
 /// One `[[manifest.version_align]]` group.

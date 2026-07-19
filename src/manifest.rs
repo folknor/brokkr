@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::config::{ManifestConfig, VersionAlign};
+use crate::config::{AdapterGroup, ManifestConfig, VersionAlign};
 use crate::error::DevError;
 use crate::{globs, gremlins};
 
@@ -79,7 +79,7 @@ pub fn scan(
         }
     }
 
-    let mut out = Vec::new();
+    let mut manifests: Vec<(PathBuf, DocumentMut)> = Vec::new();
     for rel in gremlins::tracked_files(project_root)? {
         if !globs::matches(&paths, &rel) || globs::matches(&exclude, &rel) {
             continue;
@@ -91,9 +91,73 @@ pub fn scan(
         let doc: DocumentMut = text.parse().map_err(|e| {
             DevError::Config(format!("[manifest] {}: parse error: {e}", rel.display()))
         })?;
-        check_document(&rel, &doc, cfg, &mut out);
+        manifests.push((rel, doc));
+    }
+
+    let mut out = Vec::new();
+    for (rel, doc) in &manifests {
+        check_document(rel, doc, cfg, &mut out);
+    }
+    // A workspace-level check needs every manifest at once (the root defines the
+    // group, members are checked against it).
+    if let Some(ag) = &cfg.adapter_group {
+        check_adapter_group(&manifests, ag, &mut out);
     }
     Ok(out)
+}
+
+/// Cargo-conv check 9: crates named in `forbidden_in` must not depend on any
+/// member of the comment-labelled `[workspace.dependencies]` group.
+fn check_adapter_group(
+    manifests: &[(PathBuf, DocumentMut)],
+    ag: &AdapterGroup,
+    out: &mut Vec<ManifestViolation>,
+) {
+    let adapter_deps = manifests
+        .iter()
+        .find_map(|(_, doc)| {
+            let ws = doc
+                .get("workspace")
+                .and_then(Item::as_table)
+                .and_then(|w| w.get("dependencies"))
+                .and_then(Item::as_table)?;
+            Some(labelled_group_keys(ws, &ag.marker))
+        })
+        .unwrap_or_default();
+    if adapter_deps.is_empty() {
+        return;
+    }
+    for (rel, doc) in manifests {
+        let Some(name) = doc
+            .get("package")
+            .and_then(Item::as_table)
+            .and_then(|p| p.get("name"))
+            .and_then(Item::as_str)
+        else {
+            continue;
+        };
+        if !ag.forbidden_in.iter().any(|f| f == name) {
+            continue;
+        }
+        let mut declared = std::collections::BTreeSet::new();
+        declared_deps(doc.as_table(), &mut declared);
+        for dep in declared.intersection(&adapter_deps) {
+            out.push(ManifestViolation {
+                file: rel.clone(),
+                rule: "adapter-group",
+                message: format!("`{name}` must not depend on adapter-group crate `{dep}`"),
+            });
+        }
+    }
+}
+
+/// Keys of the dependency-table group whose header comment contains `marker`.
+fn labelled_group_keys(table: &Table, marker: &str) -> std::collections::BTreeSet<String> {
+    dependency_groups(table)
+        .into_iter()
+        .find(|g| g.labels.iter().any(|l| l.contains(marker)))
+        .map(|g| g.keys.into_iter().collect())
+        .unwrap_or_default()
 }
 
 fn check_document(
@@ -428,28 +492,67 @@ fn check_sorted_dependencies(rel: &Path, table: &Table, out: &mut Vec<ManifestVi
 }
 
 fn check_sorted_table(rel: &Path, section: &str, table: &Table, out: &mut Vec<ManifestViolation>) {
-    let mut prev: Option<String> = None;
+    for group in dependency_groups(table) {
+        let mut prev: Option<String> = None;
+        for key in &group.keys {
+            let lower = key.to_ascii_lowercase();
+            if let Some(prev_key) = &prev
+                && &lower < prev_key
+            {
+                out.push(ManifestViolation {
+                    file: rel.to_path_buf(),
+                    rule: "sort-dependencies",
+                    message: format!("[{section}] `{key}` is out of order (after `{prev_key}`)"),
+                });
+            }
+            prev = Some(lower);
+        }
+    }
+}
+
+/// A blank-line-separated group of a dependency table, with any comment lines
+/// that head it (from the first key's leading decoration).
+#[derive(Debug, Default)]
+struct DepGroup {
+    /// Comment lines heading the group, `#` and whitespace trimmed.
+    labels: Vec<String>,
+    keys: Vec<String>,
+}
+
+/// Segment a dependency table into blank-line-separated groups, reading key
+/// order and the comment/whitespace decorations `toml_edit` preserves. The one
+/// reader behind both `sort_dependencies` (order within a group) and
+/// `adapter_group` (find a group by its header comment).
+fn dependency_groups(table: &Table) -> Vec<DepGroup> {
+    let mut groups: Vec<DepGroup> = Vec::new();
+    let mut cur = DepGroup::default();
     for (key, _) in table {
         let prefix = table
             .key(key)
             .and_then(|k| k.leaf_decor().prefix())
             .and_then(|p| p.as_str())
             .unwrap_or("");
-        if starts_new_group(prefix) {
-            prev = None;
+        if starts_new_group(prefix) && !cur.keys.is_empty() {
+            groups.push(std::mem::take(&mut cur));
         }
-        let lower = key.to_ascii_lowercase();
-        if let Some(prev_key) = &prev
-            && &lower < prev_key
-        {
-            out.push(ManifestViolation {
-                file: rel.to_path_buf(),
-                rule: "sort-dependencies",
-                message: format!("[{section}] `{key}` is out of order (after `{prev_key}`)"),
-            });
+        if cur.keys.is_empty() {
+            cur.labels = comment_lines(prefix);
         }
-        prev = Some(lower);
+        cur.keys.push(key.to_string());
     }
+    if !cur.keys.is_empty() {
+        groups.push(cur);
+    }
+    groups
+}
+
+/// The `# ...` comment lines in a decoration prefix, `#` and surrounding
+/// whitespace stripped.
+fn comment_lines(prefix: &str) -> Vec<String> {
+    prefix
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('#').map(|c| c.trim().to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -660,6 +763,64 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].0, "cargo-machete-ignored");
         assert!(v[0].1.contains("ghost"), "{v:?}");
+    }
+
+    #[test]
+    fn dependency_groups_capture_header_comments() {
+        let src = "[workspace.dependencies]\nserde = \"1\"\n\n\
+                   # Adapter dependencies\ndydx-proto = \"1\"\nfoo = \"1\"\n";
+        let doc: DocumentMut = src.parse().unwrap();
+        let t = doc
+            .get("workspace")
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .get("dependencies")
+            .unwrap()
+            .as_table()
+            .unwrap();
+        let groups = dependency_groups(t);
+        assert_eq!(groups.len(), 2);
+        assert!(groups[1].labels.iter().any(|l| l == "Adapter dependencies"));
+        assert_eq!(groups[1].keys, vec!["dydx-proto", "foo"]);
+    }
+
+    #[test]
+    fn adapter_group_forbids_core_crate_usage() {
+        let cfg = ManifestConfig {
+            adapter_group: Some(AdapterGroup {
+                marker: "Adapter dependencies".into(),
+                forbidden_in: vec!["nautilus-core".into()],
+            }),
+            ..Default::default()
+        };
+        let root = "[workspace]\nmembers = [\"a\"]\n\n[workspace.dependencies]\n\
+                    serde = \"1\"\n\n# Adapter dependencies\ndydx-proto = \"1\"\n";
+        // A core crate depending on an adapter-group crate is flagged.
+        let core_bad = "[package]\nname = \"nautilus-core\"\n\n\
+                        [dependencies]\ndydx-proto = { workspace = true }\n";
+        let manifests = vec![
+            (PathBuf::from("Cargo.toml"), root.parse::<DocumentMut>().unwrap()),
+            (PathBuf::from("a/Cargo.toml"), core_bad.parse::<DocumentMut>().unwrap()),
+        ];
+        let mut out = Vec::new();
+        if let Some(ag) = &cfg.adapter_group {
+            check_adapter_group(&manifests, ag, &mut out);
+        }
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rule, "adapter-group");
+        assert!(out[0].message.contains("dydx-proto"), "{out:?}");
+
+        // A non-core crate using the same dep is fine.
+        let other = "[package]\nname = \"nautilus-adapter-x\"\n\n\
+                     [dependencies]\ndydx-proto = { workspace = true }\n";
+        let manifests2 = vec![
+            (PathBuf::from("Cargo.toml"), root.parse::<DocumentMut>().unwrap()),
+            (PathBuf::from("x/Cargo.toml"), other.parse::<DocumentMut>().unwrap()),
+        ];
+        let mut out2 = Vec::new();
+        check_adapter_group(&manifests2, cfg.adapter_group.as_ref().unwrap(), &mut out2);
+        assert!(out2.is_empty(), "{out2:?}");
     }
 
     #[test]

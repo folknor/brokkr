@@ -269,6 +269,18 @@ crates = ["arrow", "parquet"]
 granularity = "minor"
 ```
 
+- `[manifest.adapter_group]` - a comment-labelled group inside the workspace
+  root's `[workspace.dependencies]` (found by `marker`, a substring of the
+  header comment) whose members must not be depended on by the crates in
+  `forbidden_in`. A workspace-level check: it reads the group from the root
+  manifest and scans every member's dependency tables.
+
+```toml
+[manifest.adapter_group]
+marker = "Adapter dependencies"
+forbidden_in = ["nautilus-core", "nautilus-model"]
+```
+
 The section/target-shape checks (`section_order`, `crate_type_order`,
 `package_field_order`, `lints_workspace_required`, the bin/example flags) skip a
 `cargo-fuzz = true` crate, matching the hook's standalone-fuzz-workspace
