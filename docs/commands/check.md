@@ -171,17 +171,22 @@ fails. JSON mode emits `header`/`header_summary`. Ported from
 `check_copyright_year`; see `src/header.rs`.
 
 Textlint phase runs next, only when `[[textlint]]` rules exist. Each rule
-forbids a linear-time regex `pattern` on lines of files matching `paths`; a
-match is a violation, subject to bounded modifiers (`allow_marker`, `except`,
-`in_toml_section`, `table_row_only`). JSON mode emits `textlint`/
-`textlint_summary`. The generic engine behind most grep-style convention hooks;
-see `src/textlint.rs`.
+forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
+`exclude` globs); a match is a violation, subject to bounded modifiers
+(`allow_marker`, `except`, `in_toml_section`, `table_row_only`, and `skip_after`
+- a regex past which the rest of a file is exempt, e.g. to ignore a test
+module). JSON mode emits `textlint`/`textlint_summary`. The generic engine
+behind most grep-style convention hooks; see `src/textlint.rs`.
 
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads
 `cargo metadata --no-deps` and fails on configured direct dependency boundary
-violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`.
-JSON mode emits `dependency_violation` and `dependency_summary` events.
+violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`. A rule
+can scope the forbidden match by dependency `kinds` (`normal`/`dev`/`build`,
+default all) and `optional` (e.g. `optional = false` to require a dep be
+optional), so manifest conventions like "tokio only as a dev-dependency" are
+expressible. JSON mode emits `dependency_violation` and `dependency_summary`
+events.
 
 When hits exceed `--limit`, both the gremlin and clippy phases prefer files
 changed on the current branch (computed via git merge-base against

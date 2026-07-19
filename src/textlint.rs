@@ -52,11 +52,13 @@ struct Compiled {
     name: String,
     pattern: Regex,
     paths: globset::GlobSet,
+    exclude: globset::GlobSet,
     message: String,
     allow_marker: Option<String>,
     except: Vec<Regex>,
     in_toml_section: Option<String>,
     table_row_only: bool,
+    skip_after: Option<Regex>,
 }
 
 const DISPLAY_CAP: usize = 200;
@@ -78,15 +80,25 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             })?);
         }
         let paths = globs::build_set(&rule.paths, &format!("[[textlint]] {:?} paths", rule.name))?;
+        let exclude =
+            globs::build_set(&rule.exclude, &format!("[[textlint]] {:?} exclude", rule.name))?;
+        let skip_after = match &rule.skip_after {
+            Some(p) => Some(Regex::new(p).map_err(|e| {
+                DevError::Config(format!("[[textlint]] {:?}: invalid skip_after pattern: {e}", rule.name))
+            })?),
+            None => None,
+        };
         out.push(Compiled {
             name: rule.name.clone(),
             pattern,
             paths,
+            exclude,
             message: rule.message.clone(),
             allow_marker: rule.allow_marker.clone(),
             except,
             in_toml_section: rule.in_toml_section.clone(),
             table_row_only: rule.table_row_only,
+            skip_after,
         });
     }
     Ok(out)
@@ -104,10 +116,7 @@ pub fn scan(
     let files = gremlins::tracked_files(project_root)?;
     let mut out = Vec::new();
     for rel in &files {
-        let applicable: Vec<&Compiled> = compiled
-            .iter()
-            .filter(|c| globs::matches(&c.paths, rel))
-            .collect();
+        let applicable: Vec<&Compiled> = compiled.iter().filter(|c| applies(c, rel)).collect();
         if applicable.is_empty() {
             continue;
         }
@@ -120,14 +129,31 @@ pub fn scan(
     Ok(out)
 }
 
+/// Whether a compiled rule scans `rel`: matched by `paths` and not excused by
+/// `exclude`.
+fn applies(c: &Compiled, rel: &Path) -> bool {
+    globs::matches(&c.paths, rel) && !globs::matches(&c.exclude, rel)
+}
+
 fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<TextlintViolation>) {
     let mut section: Option<String> = None;
+    // Per-rule "past the skip_after boundary" latch, indexed alongside `rules`.
+    let mut skipping = vec![false; rules.len()];
     for (i, raw) in content.lines().enumerate() {
         let trimmed = raw.trim();
         if let Some(s) = toml_section(trimmed) {
             section = Some(s);
         }
-        for rule in rules {
+        for (ri, rule) in rules.iter().enumerate() {
+            if skipping[ri] {
+                continue;
+            }
+            // Arm the latch on the boundary line so every *following* line is
+            // exempt; the boundary line itself is still evaluated below (it is
+            // not the offending pattern in practice, e.g. `#[cfg(test)]`).
+            if rule.skip_after.as_ref().is_some_and(|r| r.is_match(raw)) {
+                skipping[ri] = true;
+            }
             if rule.table_row_only && !trimmed.starts_with('|') {
                 continue;
             }
@@ -188,11 +214,13 @@ mod tests {
             name: "r".into(),
             pattern: pattern.into(),
             paths: vec!["**/*".into()],
+            exclude: Vec::new(),
             message: "m".into(),
             allow_marker: None,
             except: Vec::new(),
             in_toml_section: None,
             table_row_only: false,
+            skip_after: None,
         }
     }
 
@@ -231,6 +259,47 @@ mod tests {
         let src = "[dependencies]\ntokio = \"1\"\n\n[dev-dependencies]\ntokio = \"1\"\n";
         // Only the `tokio` under [dependencies] (line 2) fires; the one under
         // [dev-dependencies] (line 5) is out of section.
+        assert_eq!(run(r, src), vec![(2, "r".into())]);
+    }
+
+    #[test]
+    fn exclude_glob_excuses_matching_files() {
+        let mut r = rule("panic!");
+        r.paths = vec!["crates/**/*.rs".into()];
+        r.exclude = vec!["**/*ANYHOW*".into(), "**/anyhow_style_guide*".into()];
+        let compiled = compile(&[r]).unwrap();
+        let c = &compiled[0];
+        // A normal source file is scanned; the style-guide docs are excused.
+        assert!(applies(c, Path::new("crates/core/src/lib.rs")));
+        assert!(!applies(c, Path::new("crates/core/src/ANYHOW.rs")));
+        assert!(!applies(c, Path::new("crates/core/docs/anyhow_style_guide.rs")));
+        // Outside `paths` entirely -> not applicable regardless of exclude.
+        assert!(!applies(c, Path::new("examples/demo.rs")));
+    }
+
+    #[test]
+    fn skip_after_exempts_lines_past_the_boundary() {
+        let mut r = rule("tokio::spawn\\(");
+        r.skip_after = Some("^#\\[cfg\\(test\\)\\]".into());
+        // The boundary line itself is still checked; only lines *after* it are
+        // exempt. Line 2 fires, line 5 (inside the test module) does not.
+        let src = "\
+tokio::spawn(a);
+let x = 1;
+#[cfg(test)]
+mod tests {
+    tokio::spawn(b);
+}
+";
+        assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn skip_after_boundary_line_is_still_checked() {
+        // A match on the very boundary line is reported before the latch arms.
+        let mut r = rule("MARK");
+        r.skip_after = Some("MARK".into());
+        let src = "ok\nMARK here\nMARK after\n";
         assert_eq!(run(r, src), vec![(2, "r".into())]);
     }
 

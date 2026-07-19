@@ -170,20 +170,39 @@ paths = ["crates/**/*.rs"]
 message = "finish or file an issue instead of todo!()"
 
 [[textlint]]
-name = "tokio-only-in-dev-deps"
-pattern = "^tokio\\b"
-paths = ["**/Cargo.toml"]
-message = "tokio belongs in [dev-dependencies]"
-in_toml_section = "dependencies"   # only while the last-seen [section] matches
+name = "anyhow-import-context-only"
+pattern = '^\s*use anyhow::'
+paths = ["crates/**/*.rs"]
+exclude = ["**/*ANYHOW*", "**/anyhow_style_guide*"]  # skip the docs that demo it
+except = ['^\s*use anyhow::Context;\s*(//.*)?$']     # the one allowed form
+message = "only `use anyhow::Context;` is allowed; fully-qualify the rest"
+
+[[textlint]]
+name = "no-tokio-spawn-in-adapters"
+pattern = 'tokio::spawn\('
+paths = ["crates/adapters/**/*.rs"]
+exclude = ["**/tests/**"]
+skip_after = '^#\[cfg\(test\)\]'   # ignore everything after the test module
+message = "adapters must use get_runtime().spawn()"
 ```
 
 Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
-`paths`, `message`, plus optional bounded modifiers - `allow_marker` (a line
-containing this literal, e.g. an author's `// allow-...` comment, is skipped),
-`except` (regexes; a line matching any is exempt), `in_toml_section` (only
-consider lines while the last-seen `[section]` header equals this), and
-`table_row_only` (only markdown table rows). No arbitrary multiline matching.
-See `src/textlint.rs`.
+`paths`, `message`, plus optional bounded modifiers:
+
+- `exclude` (globs; files matching are excused, checked after `paths`) - for
+  docs that deliberately show the forbidden pattern, or `tests/` trees.
+- `allow_marker` (a line containing this literal, e.g. an author's
+  `// allow-...` comment, is skipped).
+- `except` (regexes; a line matching any is exempt) - the way to allow one
+  specific form of an otherwise-forbidden pattern.
+- `in_toml_section` (only consider lines while the last-seen `[section]` header
+  equals this).
+- `table_row_only` (only markdown table rows).
+- `skip_after` (regex; once a line in a file matches it, every *following* line
+  in that file is exempt - the matching line itself is still checked). For
+  "don't fire inside the test module": `skip_after = '^#\[cfg\(test\)\]'`.
+
+No arbitrary multiline matching. See `src/textlint.rs`.
 
 ## Datasets and variant-selection flags
 
@@ -354,6 +373,17 @@ forbid = "rusqlite"
   external crates.
 - `except` (optional) - workspace packages to drop from the `from` set. Pairs
   with `from = "*"` to express "no crate may depend on X, except these".
+- `kinds` (optional) - dependency kinds the rule applies to: `normal`, `dev`,
+  `build` (string or array). Empty = every kind (the default; never flips to
+  silently ignore a kind you used to catch). `kinds = ["normal"]` means a
+  `[dev-dependencies]` entry is allowed - the self-documenting "dev-deps OK".
+- `optional` (optional) - when set, only match deps whose `optional` flag
+  equals it. `optional = false` matches only non-optional deps, i.e. "if this
+  crate is present it must be `optional = true`".
+
+`kinds` and `optional` both scope the *same* present-dep match (absence is
+never a violation), so manifest conventions fall straight out of the forbid
+mechanism:
 
 ```toml
 [[dependency_rule]]
@@ -361,6 +391,21 @@ name = "openssl-only-in-tls-adapter"
 from = "*"
 forbid = "openssl"
 except = ["tls-adapter"]
+
+# Sync-core crates must not have tokio as a regular dependency (dev-deps OK).
+[[dependency_rule]]
+name = "sync-core-no-tokio"
+from = ["nautilus-core", "nautilus-model", "nautilus-data"]
+forbid = "tokio"
+kinds = ["normal"]
+
+# The common crate's tokio must be optional (a non-optional tokio is flagged).
+[[dependency_rule]]
+name = "common-tokio-optional"
+from = "nautilus-common"
+forbid = "tokio"
+kinds = ["normal"]
+optional = false
 ```
 
 Rules are intentionally direct-edge checks: `app -> db` is rejected when `db`

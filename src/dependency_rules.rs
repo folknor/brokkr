@@ -54,6 +54,17 @@ impl From<Option<&str>> for DependencyKind {
     }
 }
 
+/// Parse a `kinds` config token into a filter kind. `Unknown` is never a valid
+/// config value (it only exists for future/odd metadata), so it is rejected.
+fn parse_config_kind(s: &str) -> Option<DependencyKind> {
+    match s {
+        "normal" => Some(DependencyKind::Normal),
+        "dev" => Some(DependencyKind::Dev),
+        "build" => Some(DependencyKind::Build),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct DependencyReport {
     pub rules: usize,
@@ -127,6 +138,19 @@ pub fn check_metadata(
         let forbidden: BTreeSet<&str> = rule.forbid.iter().map(String::as_str).collect();
         let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
 
+        // Resolve the kind filter once per rule. Empty = every kind.
+        let mut kinds = Vec::with_capacity(rule.kinds.len());
+        for k in &rule.kinds {
+            let Some(kind) = parse_config_kind(k) else {
+                return Err(DevError::Config(format!(
+                    "[[dependency_rule]]{}: unknown kind {k:?} in `kinds`; \
+                     expected \"normal\", \"dev\", or \"build\"",
+                    rule.name.as_deref().map(|n| format!(" {n:?}")).unwrap_or_default(),
+                )));
+            };
+            kinds.push(kind);
+        }
+
         // Resolve the `from` set. `"*"` expands to every workspace package;
         // otherwise each named package is looked up. `except` drops packages
         // from either form.
@@ -158,12 +182,23 @@ pub fn check_metadata(
                 if !forbidden.contains(dep.name.as_str()) {
                     continue;
                 }
+                let dep_kind = DependencyKind::from(dep.kind.as_deref());
+                // `kinds` scopes to specific kinds (empty = all); `optional`
+                // scopes to a specific optional flag (unset = either).
+                if !kinds.is_empty() && !kinds.contains(&dep_kind) {
+                    continue;
+                }
+                if let Some(want) = rule.optional
+                    && dep.optional != want
+                {
+                    continue;
+                }
                 violations.push(DependencyViolation {
                     rule: rule.name.clone(),
                     from: pkg.name.clone(),
                     to: dep.name.clone(),
                     alias: dep.rename.clone(),
-                    kind: DependencyKind::from(dep.kind.as_deref()),
+                    kind: dep_kind,
                     target: dep.target.clone(),
                     optional: dep.optional,
                 });
@@ -252,6 +287,8 @@ mod tests {
             from: vec!["app".into()],
             forbid: vec!["db".into()],
             except: Vec::new(),
+            kinds: Vec::new(),
+            optional: None,
         }];
         let report = check_metadata(metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 1);
@@ -268,6 +305,8 @@ mod tests {
             from: vec!["app".into()],
             forbid: vec!["db".into(), "service-state".into()],
             except: Vec::new(),
+            kinds: Vec::new(),
+            optional: None,
         }];
         let report = check_metadata(metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 2);
@@ -283,6 +322,8 @@ mod tests {
             from: vec!["missing".into()],
             forbid: vec!["db".into()],
             except: Vec::new(),
+            kinds: Vec::new(),
+            optional: None,
         }];
         let err = check_metadata(metadata(), &rules).unwrap_err().to_string();
         assert!(err.contains("missing"), "got: {err}");
@@ -297,6 +338,8 @@ mod tests {
             from: vec!["*".into()],
             forbid: vec!["db".into()],
             except: Vec::new(),
+            kinds: Vec::new(),
+            optional: None,
         }];
         assert_eq!(check_metadata(metadata(), &rules).unwrap().violations.len(), 1);
 
@@ -305,7 +348,63 @@ mod tests {
             from: vec!["*".into()],
             forbid: vec!["db".into()],
             except: vec!["app".into()],
+            kinds: Vec::new(),
+            optional: None,
         }];
         assert!(check_metadata(metadata(), &excepted).unwrap().violations.is_empty());
+    }
+
+    /// Build an `app` rule forbidding `to`, scoped by `kinds` / `optional`.
+    fn app_rule(to: &str, kinds: Vec<String>, optional: Option<bool>) -> DependencyRule {
+        DependencyRule {
+            name: None,
+            from: vec!["app".into()],
+            forbid: vec![to.into()],
+            except: Vec::new(),
+            kinds,
+            optional,
+        }
+    }
+
+    #[test]
+    fn kinds_normal_allows_a_dev_dependency() {
+        // `service-state` is a dev-dependency of `app`; `kinds = ["normal"]`
+        // means the dev-dep is fine, while a normal dep (`db`) still trips.
+        let dev = vec![app_rule("service-state", vec!["normal".into()], None)];
+        assert!(check_metadata(metadata(), &dev).unwrap().violations.is_empty());
+
+        let normal = vec![app_rule("db", vec!["normal".into()], None)];
+        assert_eq!(check_metadata(metadata(), &normal).unwrap().violations.len(), 1);
+    }
+
+    #[test]
+    fn kinds_dev_matches_only_the_dev_dependency() {
+        // The inverse scope: `kinds = ["dev"]` catches `service-state` (dev)
+        // but not `db` (normal).
+        let dev = vec![app_rule("service-state", vec!["dev".into()], None)];
+        assert_eq!(check_metadata(metadata(), &dev).unwrap().violations.len(), 1);
+
+        let normal = vec![app_rule("db", vec!["dev".into()], None)];
+        assert!(check_metadata(metadata(), &normal).unwrap().violations.is_empty());
+    }
+
+    #[test]
+    fn optional_false_requires_the_dep_be_optional() {
+        // `optional = false` matches only non-optional deps: `db` (optional
+        // false) trips, `service-state` (optional true) does not - i.e. "if
+        // present it must be optional".
+        let db = vec![app_rule("db", Vec::new(), Some(false))];
+        assert_eq!(check_metadata(metadata(), &db).unwrap().violations.len(), 1);
+
+        let svc = vec![app_rule("service-state", Vec::new(), Some(false))];
+        assert!(check_metadata(metadata(), &svc).unwrap().violations.is_empty());
+    }
+
+    #[test]
+    fn unknown_kind_is_a_config_error() {
+        let rules = vec![app_rule("db", vec!["regular".into()], None)];
+        let err = check_metadata(metadata(), &rules).unwrap_err().to_string();
+        assert!(err.contains("regular"), "got: {err}");
+        assert!(err.contains("normal"), "got: {err}");
     }
 }

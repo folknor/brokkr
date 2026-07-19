@@ -179,6 +179,11 @@ pub struct TextlintRule {
     pub pattern: String,
     /// Globs for the files this rule scans.
     pub paths: Vec<String>,
+    /// Globs for files excused from this rule (checked after `paths`). Use it
+    /// to skip docs that deliberately show the forbidden pattern, e.g. a style
+    /// guide. Empty by default.
+    #[serde(default)]
+    pub exclude: Vec<String>,
     /// Message shown for each violation.
     pub message: String,
     /// Inline escape hatch: a line containing this literal substring (typically
@@ -196,6 +201,12 @@ pub struct TextlintRule {
     /// with `|`). Off by default.
     #[serde(default)]
     pub table_row_only: bool,
+    /// Region predicate: once a line in a file matches this regex, every
+    /// *following* line in that file is exempt (the matching line itself is
+    /// still checked). Expresses "ignore everything after `#[cfg(test)]`" for
+    /// rules that should not fire inside test modules. Optional.
+    #[serde(default)]
+    pub skip_after: Option<String>,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must
@@ -208,6 +219,21 @@ pub struct TextlintRule {
 /// removes packages from the `from` set, which pairs with `from = "*"` to
 /// express "no crate may depend on X, except these". `from`, `forbid`, and
 /// `except` each accept a single string or an array of strings.
+///
+/// `kinds` and `optional` scope *which* occurrence of a forbidden dependency
+/// trips the rule - both filter the same present-dep match (absence is never a
+/// violation), so they express manifest conventions like "tokio is fine as a
+/// dev-dependency" or "tokio must be optional":
+///
+/// - `kinds` restricts the rule to specific dependency kinds (`normal` / `dev`
+///   / `build`). Unset = every kind (the historical behavior). `kinds =
+///   ["normal"]` means a forbidden crate is only a violation as a regular
+///   dependency - a `[dev-dependencies]` entry is allowed. Kept an explicit
+///   opt-in rather than a default so a rule never silently stops flagging a
+///   dev-dep it used to catch.
+/// - `optional` (when set) restricts the rule to deps whose `optional` flag
+///   equals it. `optional = false` matches only non-optional deps, i.e. "if
+///   this crate is present it must be `optional = true`, or it's a violation".
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyRule {
@@ -224,6 +250,14 @@ pub struct DependencyRule {
     /// `from = "*"`). Empty by default.
     #[serde(default, deserialize_with = "string_or_vec")]
     pub except: Vec<String>,
+    /// Dependency kinds the rule applies to (`normal` / `dev` / `build`). Empty
+    /// = all kinds. Validated when the phase runs. Single string or array.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub kinds: Vec<String>,
+    /// When set, only match deps whose `optional` flag equals this. `false`
+    /// expresses "must be optional". Unset = match regardless.
+    #[serde(default)]
+    pub optional: Option<bool>,
 }
 
 fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
