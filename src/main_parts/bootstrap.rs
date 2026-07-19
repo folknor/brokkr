@@ -296,6 +296,43 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &args,
         );
     }
+    if let Command::Clippy {
+        package,
+        all_features,
+        features,
+        no_default_features,
+        sweep,
+        env,
+        raw,
+        limit,
+        all,
+    } = cli.command
+    {
+        // Like `check`, `clippy` builds the code tree (cwd), reading `[[check]]`
+        // env/features from wherever brokkr.toml was found. The `disable_toolchain`
+        // guard set above (`_toolchain`) is already active, so the clippy build
+        // honours pin-suppression. Detection is optional - `clippy` runs in any
+        // Rust+git repo with no config.
+        let (project, check_entries, project_root) = match project::detect_optional()? {
+            Some(d) => (Some(d.project), d.config.check, d.build_root),
+            None => (None, Vec::new(), std::env::current_dir()?),
+        };
+        let env_overrides = parse_env_overrides(&env)?;
+        let _lock = acquire_cmd_lock_opt(project, &project_root, "clippy")?;
+        return check_cmd::cmd_clippy(
+            &project_root,
+            &check_entries,
+            &package,
+            all_features,
+            &features,
+            no_default_features,
+            sweep.as_deref(),
+            &env_overrides,
+            raw,
+            limit,
+            all,
+        );
+    }
 
     let detection = project::detect()?;
     let project = detection.project;
@@ -350,6 +387,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Diff { .. }
         | Command::BuildGeocodeIndex { .. }
         | Command::Check { .. }
+        | Command::Clippy { .. }
         | Command::Fmt { .. }
         | Command::Run { .. }
         | Command::Wc { .. }

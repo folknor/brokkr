@@ -41,7 +41,7 @@ JSON event stream instead (`--format json -Z unstable-options`, injected
 automatically; native on nightly): each `started` event arms the watchdog for
 that test, each `ok`/`failed` disarms it, and a test that crosses 20s is blamed
 by name and its process group killed - exactly like serial. The JSON events are
-reconstructed back into human libtest text so `--raw`/`--json`/filtered output
+reconstructed back into human libtest text so `--raw`/filtered output
 all look identical to a serial run. A coarse whole-sweep ceiling (30 min)
 remains only as a backstop for an un-attributable wedge (a stall with no test
 in-flight - e.g. before the first test starts); it kills the process group and
@@ -88,8 +88,7 @@ Flags:
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
 - `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
   `--features` / `--no-default-features`
-- `--raw` - unfiltered cargo output (mutually exclusive with `--json`)
-- `--json` - NDJSON diagnostics and summaries on stdout, no prefixed output
+- `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--limit N` - max diagnostics shown per phase, default 20
 - `--all` - show everything, no cap
 - `--fix-gremlins` - rewrite banned chars in place before scan
@@ -97,14 +96,14 @@ Flags:
 Output:
 - Default text mode: each diagnostic becomes one line, compilation noise
   stripped, passing tests aggregated.
-- `--json` mode: emits one JSON object per line to stdout. Always emits
-  summary events even on success.
 - `--raw` reconstructs cargo's terminal-style output by concatenating each
   diagnostic's `rendered` field plus the cargo status messages on stderr -
-  one cargo invocation, no separate non-JSON pass.
+  one cargo invocation. (There is no machine-readable `--json` output mode; it
+  was removed. For an investigative single-config clippy run outside the check
+  gate, see `docs/commands/clippy.md`.)
 
 The clippy phase always invokes cargo with `--message-format=json` and ingests
-via `cargo_json::parse_cargo_diagnostics` regardless of output mode - the text
+via `cargo_json::parse_cargo_diagnostics` regardless of `--raw` - the text
 formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every
 warning keeps its lint code in the header, even for repeats of the same rule
 (cargo's pretty-printed text only annotates the first occurrence per crate,
@@ -126,11 +125,11 @@ graph:
   at the first failure.)
 - Because a capped lint lets cargo exit 0, pass/fail is brokkr's own decision,
   not cargo's exit status: **any clippy diagnostic fails the check.** brokkr
-  treats a capped `warning` as the deny it really is - `event_to_clippy` and
-  `emit_json_clippy` promote it back to `error` for counting, the header, and
-  the JSON `level`/`status`, so the output never misleads with "0 errors, N
-  warnings" while failing. The `--raw` escape hatch still dumps clippy's own
-  rendered text verbatim (which shows the capped `warning:` wording).
+  treats a capped `warning` as the deny it really is - `event_to_clippy`
+  promotes it back to `error` for counting and the header, so the output never
+  misleads with "0 errors, N warnings" while failing. The `--raw` escape hatch
+  still dumps clippy's own rendered text verbatim (which shows the capped
+  `warning:` wording).
 
 Gremlin phase runs first and fails the check if any banned Unicode character
 is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or

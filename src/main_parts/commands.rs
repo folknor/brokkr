@@ -21,6 +21,22 @@ fn profile_override(debug: bool, release: bool) -> Option<bool> {
     }
 }
 
+/// Split each `brokkr clippy --env KEY=VALUE` pair (already validated to carry a
+/// non-empty key and one `=` by `validate_env_kv`) into an owned `(key, value)`.
+/// The `ok_or_else` is defence-in-depth against a caller that skipped the
+/// validator.
+fn parse_env_overrides(pairs: &[String]) -> Result<Vec<(String, String)>, DevError> {
+    pairs
+        .iter()
+        .map(|p| {
+            let (k, v) = p
+                .split_once('=')
+                .ok_or_else(|| DevError::Config(format!("--env expects KEY=VALUE, got '{p}'")))?;
+            Ok((k.to_owned(), v.to_owned()))
+        })
+        .collect()
+}
+
 fn resolve_features(dev_config: &config::DevConfig, cli_features: &[String]) -> Vec<String> {
     let host_features = config::host_features(dev_config);
     if host_features.is_empty() {

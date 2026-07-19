@@ -683,6 +683,154 @@ fn run_clippy_phase(
     Err(DevError::Build("clippy failed".into()))
 }
 
+/// Investigative single-phase clippy runner (`brokkr clippy`). Builds one
+/// `ResolvedSweep` from the CLI shape, runs the shared clippy pipeline, and
+/// reports the same summary line `brokkr check` does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_clippy(
+    project_root: &Path,
+    check_entries: &[CheckEntry],
+    packages: &[String],
+    all_features: bool,
+    features: &[String],
+    no_default_features: bool,
+    sweep_name: Option<&str>,
+    env_overrides: &[(String, String)],
+    raw: bool,
+    limit: usize,
+    all: bool,
+) -> Result<(), DevError> {
+    let started = std::time::Instant::now();
+    let sweep = build_clippy_sweep(
+        check_entries,
+        packages,
+        all_features,
+        features,
+        no_default_features,
+        sweep_name,
+        env_overrides,
+    )?;
+
+    // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
+    // sweep-label tags. `package: None` because ad-hoc `-p` is already in
+    // sweep.packages (emitted as `-p <pkg>`); the extra `--package` slot stays
+    // unused.
+    match run_clippy_phase(project_root, std::slice::from_ref(&sweep), None, raw, limit, all) {
+        Ok(()) => {
+            output::result_msg(&format!("clippy clean in {}", fmt_wall(started.elapsed())));
+            Ok(())
+        }
+        // A *rendered* clippy failure: the phase already printed the diagnostics,
+        // so add the summary and exit 1 without main echoing a second line.
+        Err(DevError::Build(_)) => {
+            output::error(&format!("clippy failed in {}", fmt_wall(started.elapsed())));
+            Err(DevError::ExitCode(1))
+        }
+        // Anything else (cargo missing, spawn failure, cooperative interrupt) is
+        // NOT an already-rendered lint result - propagate the real cause so main
+        // reports it, instead of masking it behind "clippy failed".
+        Err(other) => Err(other),
+    }
+}
+
+/// Construct the single `ResolvedSweep` a `brokkr clippy` invocation runs.
+///
+/// `--sweep NAME` borrows the named `[[check]]` entry wholesale (packages,
+/// features, env). Otherwise it is ad-hoc: packages from `-p`, features from the
+/// flags, env unioned from every `[[check]]` entry. `--env` overrides win over
+/// both and are applied last; keys an override sets are exempt from cross-sweep
+/// conflict detection, so `--env` can *resolve* a conflict rather than be masked
+/// by it.
+fn build_clippy_sweep(
+    check_entries: &[CheckEntry],
+    packages: &[String],
+    all_features: bool,
+    features: &[String],
+    no_default_features: bool,
+    sweep_name: Option<&str>,
+    env_overrides: &[(String, String)],
+) -> Result<ResolvedSweep, DevError> {
+    let overridden: std::collections::BTreeSet<&str> =
+        env_overrides.iter().map(|(k, _)| k.as_str()).collect();
+
+    let mut sweep = if let Some(name) = sweep_name {
+        let entry = check_entries
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| {
+                DevError::Config(format!(
+                    "--sweep '{name}' matches no [[check]] entry in brokkr.toml"
+                ))
+            })?;
+        // A single entry's env is unambiguous - no cross-sweep merge needed.
+        profile::sweep_from_check_entry(entry)
+    } else {
+        let cargo_feature_args = if all_features {
+            vec!["--all-features".into()]
+        } else {
+            let mut a = Vec::new();
+            if no_default_features {
+                a.push("--no-default-features".into());
+            }
+            if !features.is_empty() {
+                a.push("--features".into());
+                a.push(features.join(","));
+            }
+            a
+        };
+        ResolvedSweep {
+            label: "clippy".into(),
+            cargo_feature_args,
+            packages: packages.to_vec(),
+            env: merge_check_envs(check_entries, &overridden)?,
+            ..Default::default()
+        }
+    };
+
+    // `--env` overrides win last, over both the merged check env and a borrowed
+    // entry's env.
+    for (k, v) in env_overrides {
+        sweep.env.insert(k.clone(), v.clone());
+    }
+    Ok(sweep)
+}
+
+/// Union the `env` of every `[[check]]` entry, erroring on a key two entries set
+/// to *different* values - **unless** that key is in `overridden`, where an
+/// explicit `--env` will set it anyway and the cross-sweep disagreement is moot.
+///
+/// Union (not intersection) is deliberate: a build-affecting invariant present
+/// in most-but-not-all entries (the class HIGH_PRECISION belongs to) must not be
+/// silently dropped - that is the exact failure BUG_SWEEP set out to prevent.
+/// The cost is that entries setting *disjoint* keys contribute all of them; the
+/// escape is `--env KEY=...` (or `--sweep NAME` to replay one entry exactly).
+fn merge_check_envs(
+    entries: &[CheckEntry],
+    overridden: &std::collections::BTreeSet<&str>,
+) -> Result<std::collections::BTreeMap<String, String>, DevError> {
+    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for e in entries {
+        for (k, v) in &e.env {
+            if overridden.contains(k.as_str()) {
+                continue;
+            }
+            match merged.get(k) {
+                Some(existing) if existing != v => {
+                    return Err(DevError::Config(format!(
+                        "[[check]] env conflict on `{k}`: '{existing}' vs '{v}' across \
+                         sweeps - `brokkr clippy` can't pick one; pass `--env {k}=...` \
+                         to choose, or `--sweep NAME` to run one entry."
+                    )));
+                }
+                _ => {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    Ok(merged)
+}
+
 /// Reconstruct cargo's terminal-style output for `--raw` mode.
 ///
 /// With `--message-format=json` cargo no longer prints rendered
@@ -1137,6 +1285,142 @@ mod scope_limit_tests {
             scope_limit_with(violations, 1, true, |v| v.file.as_path(), None);
         assert_eq!(displayed.len(), 2);
         assert!(trailer.is_none());
+    }
+}
+
+#[cfg(test)]
+mod clippy_sweep_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn entry(name: &str, env: &[(&str, &str)]) -> CheckEntry {
+        CheckEntry {
+            name: name.into(),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn overrides(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    // ----- merge_check_envs -----
+
+    #[test]
+    fn merge_unions_disjoint_keys() {
+        let entries = [entry("a", &[("FOO", "1")]), entry("b", &[("BAR", "2")])];
+        let merged = merge_check_envs(&entries, &BTreeSet::new()).unwrap();
+        assert_eq!(merged.get("FOO").map(String::as_str), Some("1"));
+        assert_eq!(merged.get("BAR").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn merge_agreeing_duplicate_is_fine() {
+        let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "1")])];
+        let merged = merge_check_envs(&entries, &BTreeSet::new()).unwrap();
+        assert_eq!(merged.get("HP").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn merge_conflicting_duplicate_errors_naming_key() {
+        let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
+        let err = merge_check_envs(&entries, &BTreeSet::new()).unwrap_err();
+        assert!(err.to_string().contains("HP"), "got: {err}");
+    }
+
+    #[test]
+    fn merge_conflict_is_exempt_when_overridden() {
+        // The key both entries disagree on is in `overridden`, so no error - the
+        // --env override will set it. (The P1-1 fix: --env resolves a conflict.)
+        let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
+        let overridden: BTreeSet<&str> = ["HP"].into_iter().collect();
+        let merged = merge_check_envs(&entries, &overridden).unwrap();
+        // The overridden key is skipped entirely here; build_clippy_sweep layers
+        // the override on afterwards.
+        assert!(!merged.contains_key("HP"));
+    }
+
+    // ----- build_clippy_sweep: ad-hoc -----
+
+    #[test]
+    fn adhoc_all_features() {
+        let s = build_clippy_sweep(&[], &[], true, &[], false, None, &[]).unwrap();
+        assert_eq!(s.cargo_feature_args, vec!["--all-features"]);
+        assert_eq!(s.label, "clippy");
+    }
+
+    #[test]
+    fn adhoc_no_default_plus_features() {
+        let feats = vec!["x".to_owned(), "y".to_owned()];
+        let s = build_clippy_sweep(&[], &[], false, &feats, true, None, &[]).unwrap();
+        assert_eq!(
+            s.cargo_feature_args,
+            vec!["--no-default-features", "--features", "x,y"]
+        );
+    }
+
+    #[test]
+    fn adhoc_packages_copied() {
+        let pkgs = vec!["crate_a".to_owned(), "crate_b".to_owned()];
+        let s = build_clippy_sweep(&[], &pkgs, false, &[], false, None, &[]).unwrap();
+        assert_eq!(s.packages, vec!["crate_a", "crate_b"]);
+    }
+
+    #[test]
+    fn adhoc_env_override_resolves_conflict() {
+        // Two entries disagree on HP; --env HP=chosen must make the whole thing
+        // succeed AND land the chosen value on the sweep. This is the end-to-end
+        // P1-1 regression: conflict no longer errors before the override applies.
+        let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
+        let ov = overrides(&[("HP", "chosen")]);
+        let s = build_clippy_sweep(&entries, &[], false, &[], false, None, &ov).unwrap();
+        assert_eq!(s.env.get("HP").map(String::as_str), Some("chosen"));
+    }
+
+    #[test]
+    fn adhoc_env_override_wins_over_agreeing_value() {
+        let entries = [entry("a", &[("HP", "1")])];
+        let ov = overrides(&[("HP", "9")]);
+        let s = build_clippy_sweep(&entries, &[], false, &[], false, None, &ov).unwrap();
+        assert_eq!(s.env.get("HP").map(String::as_str), Some("9"));
+    }
+
+    // ----- build_clippy_sweep: --sweep -----
+
+    #[test]
+    fn sweep_unknown_name_errors() {
+        let entries = [entry("known", &[])];
+        let err =
+            build_clippy_sweep(&entries, &[], false, &[], false, Some("missing"), &[]).unwrap_err();
+        assert!(err.to_string().contains("missing"), "got: {err}");
+    }
+
+    #[test]
+    fn sweep_copies_entry_env_and_features() {
+        let mut e = entry("ffi", &[("HP", "1")]);
+        e.features = vec!["ffi".into()];
+        e.packages = vec!["nautilus-model".into()];
+        let entries = [e];
+        let s = build_clippy_sweep(&entries, &[], false, &[], false, Some("ffi"), &[]).unwrap();
+        assert_eq!(s.cargo_feature_args, vec!["--features", "ffi"]);
+        assert_eq!(s.packages, vec!["nautilus-model"]);
+        assert_eq!(s.env.get("HP").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn sweep_env_override_wins_over_entry() {
+        let entries = [entry("ffi", &[("HP", "1")])];
+        let ov = overrides(&[("HP", "0")]);
+        let s = build_clippy_sweep(&entries, &[], false, &[], false, Some("ffi"), &ov).unwrap();
+        assert_eq!(s.env.get("HP").map(String::as_str), Some("0"));
     }
 }
 

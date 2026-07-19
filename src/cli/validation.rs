@@ -18,6 +18,18 @@ fn validate_meta_filter(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
+/// Validate `--env KEY=VALUE` for `brokkr clippy`: exactly one `=`, a
+/// **non-empty** KEY (an env var must be named - unlike `results --meta`, whose
+/// validator deliberately allows an empty key for row filtering), and any VALUE
+/// including empty (`KEY=` legitimately sets an empty variable).
+fn validate_env_kv(s: &str) -> Result<String, String> {
+    match s.split_once('=') {
+        Some((k, _)) if !k.is_empty() => Ok(s.to_owned()),
+        Some(_) => Err(format!("--env KEY must be non-empty, got '{s}'")),
+        None => Err(format!("expected KEY=VALUE, got '{s}' (use --env KEY=VALUE)")),
+    }
+}
+
 fn validate_compression(s: &str) -> Result<String, String> {
     if s == "none" {
         return Ok(s.to_owned());
@@ -269,4 +281,69 @@ mod tests {
         assert_eq!(type_filter, None);
     }
 
+    #[test]
+    fn validate_env_kv_accepts_key_value() {
+        assert!(validate_env_kv("K=V").is_ok());
+        assert!(validate_env_kv("K=").is_ok(), "empty value is legal");
+        assert!(validate_env_kv("HIGH_PRECISION=1").is_ok());
+    }
+
+    #[test]
+    fn validate_env_kv_rejects_empty_key_and_missing_eq() {
+        assert!(validate_env_kv("=oops").is_err(), "empty key rejected");
+        assert!(validate_env_kv("noeq").is_err(), "missing = rejected");
+    }
+
+    #[test]
+    fn clippy_sweep_conflicts_with_ad_hoc_flags() {
+        for extra in [
+            vec!["-p", "x"],
+            vec!["--all-features"],
+            vec!["--features", "a"],
+            vec!["--no-default-features"],
+        ] {
+            let mut argv = vec!["brokkr", "clippy", "--sweep", "s"];
+            argv.extend(extra.iter().copied());
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "--sweep must conflict with {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clippy_all_features_conflicts_with_feature_flags() {
+        assert!(
+            Cli::try_parse_from(["brokkr", "clippy", "--all-features", "--features", "z"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["brokkr", "clippy", "--all-features", "--no-default-features"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn clippy_rejects_empty_env_key() {
+        assert!(Cli::try_parse_from(["brokkr", "clippy", "--env", "=oops"]).is_err());
+    }
+
+    #[test]
+    fn clippy_accepts_repeatable_package_and_env() {
+        let parsed = Cli::try_parse_from([
+            "brokkr", "clippy", "-p", "a", "-p", "b", "--env", "K=V", "--all-features",
+        ])
+        .expect("parse");
+        let Command::Clippy {
+            package,
+            all_features,
+            env,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected clippy command");
+        };
+        assert_eq!(package, vec!["a", "b"]);
+        assert!(all_features);
+        assert_eq!(env, vec!["K=V"]);
+    }
 }

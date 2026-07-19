@@ -134,6 +134,79 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run ONLY the clippy phase against an ad-hoc target (investigative).
+    #[command(
+        display_order = 0,
+        long_about = "\
+Run ONLY clippy - no gremlins/style/textlint/manifest/dependency/test.
+An investigative probe, not a gate: it allows a real `--all-features` and
+free feature sweeps a `[[check]]` gate never would, run under brokkr's env
+and toolchain discipline (disable_toolchain honoured, [[check]] env applied,
+global lock held) so a differential lint hunt no longer forces raw
+`cargo +nightly clippy` (which drops HIGH_PRECISION=1 and the toolchain pin).
+
+Two modes:
+  - Ad-hoc: `-p` (repeatable) + `--all-features` / `--features` /
+    `--no-default-features`. Env is the union of every [[check]] entry's env
+    (a project invariant a probe must not drop); a key two entries set to
+    different values is a config error unless `--env` picks one.
+  - `--sweep NAME`: borrow one [[check]] entry's packages/features/env verbatim.
+
+`--env KEY=VALUE` (repeatable) overrides either env source and wins last.
+Output modes match `brokkr check`'s clippy phase: default capped text,
+`--all` bulk-triage, `--limit N`, `--raw` (cargo's terminal-style rendering).
+Exit 0 iff zero diagnostics; 1 on any lint or build error.
+
+Examples:
+  brokkr clippy                              # default selection, default features
+  brokkr clippy -p mycrate --all-features    # one crate, all features
+  brokkr clippy --features a,b -p mycrate    # a virtual workspace needs -p
+  brokkr clippy --sweep ffi                  # replay the 'ffi' [[check]] entry
+  brokkr clippy --sweep ffi --env HIGH_PRECISION=0
+  brokkr clippy --all                        # bulk-triage, sorted by lint"
+    )]
+    Clippy {
+        /// Target package (repeatable). No `-p` uses cargo's default package
+        /// selection: every member of a virtual workspace, or the root package
+        /// of a package-rooted one.
+        #[arg(long, short, value_name = "PKG")]
+        package: Vec<String>,
+
+        /// Enable all Cargo features. Allowed here because clippy is a probe,
+        /// not a gate (the `[[check]]` `features = "all"` ban still stands).
+        #[arg(long, conflicts_with_all = ["features", "no_default_features", "sweep"])]
+        all_features: bool,
+
+        /// Cargo features to enable (comma-separated).
+        #[arg(long, value_delimiter = ',', conflicts_with = "sweep")]
+        features: Vec<String>,
+
+        /// Disable default Cargo features.
+        #[arg(long, conflicts_with = "sweep")]
+        no_default_features: bool,
+
+        /// Borrow one `[[check]]` entry's packages/features/env and run just
+        /// its clippy invocation. Conflicts with the ad-hoc target flags.
+        #[arg(long, value_name = "NAME", conflicts_with = "package")]
+        sweep: Option<String>,
+
+        /// Extra env var KEY=VALUE (repeatable, non-empty KEY). Overrides the
+        /// merged `[[check]]` env (ad-hoc) or the entry env (`--sweep`).
+        #[arg(long, value_parser = validate_env_kv)]
+        env: Vec<String>,
+
+        /// Reconstruct cargo's terminal-style output (human-rendered, not JSON).
+        #[arg(long)]
+        raw: bool,
+
+        /// Maximum diagnostics printed. Ignored with `--raw` or `--all`.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+
+        /// Show every diagnostic, sorted by (level, lint, file, line).
+        #[arg(long)]
+        all: bool,
+    },
     /// Run `cargo fmt`. All arguments are forwarded raw.
     #[command(display_order = 0)]
     Fmt {
