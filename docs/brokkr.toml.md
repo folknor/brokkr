@@ -247,10 +247,17 @@ sort_dependencies = true    # keys sorted within each blank-line dependency grou
   section appearing before an earlier-listed one is a violation.
 - `crate_type_order` (list; empty = off) - required relative order of
   `[lib] crate-type` entries, e.g. `["rlib", "staticlib", "cdylib"]`.
+- `package_field_order` (list; empty = off) - required relative order of
+  `[package]` keys.
+- `lints_workspace_required` (default `false`) - a crate with a `[lib]` or
+  `[[bin]]` target must set `[lints] workspace = true`.
+- `bin_doc_false` / `bin_test_false` (default `false`) - every `[[bin]]` must
+  set `doc = false` / `test = false` (a missing or `true` flag is a violation).
+- `example_doc_false` (default `false`) - every `[[example]]` must set
+  `doc = false`.
 
-`section_order` and `crate_type_order` (and the later structural checks) skip a
-`cargo-fuzz = true` crate (its `[package.metadata]`), matching the hook's
-standalone-fuzz-workspace exemption.
+Every check except `sort_dependencies` skips a `cargo-fuzz = true` crate (its
+`[package.metadata]`), matching the hook's standalone-fuzz-workspace exemption.
 
 See `src/manifest.rs`.
 

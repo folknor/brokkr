@@ -103,10 +103,130 @@ fn check_document(
         return;
     }
     if !cfg.section_order.is_empty() {
-        check_section_order(rel, doc, &cfg.section_order, out);
+        for (name, before) in order_violations(top_level_keys(doc), &cfg.section_order) {
+            out.push(ManifestViolation {
+                file: rel.to_path_buf(),
+                rule: "section-order",
+                message: format!("[{name}] section should come before [{before}]"),
+            });
+        }
     }
     if !cfg.crate_type_order.is_empty() {
         check_crate_type_order(rel, doc, &cfg.crate_type_order, out);
+    }
+    if !cfg.package_field_order.is_empty() {
+        for (name, before) in order_violations(package_keys(doc), &cfg.package_field_order) {
+            out.push(ManifestViolation {
+                file: rel.to_path_buf(),
+                rule: "package-field-order",
+                message: format!("[package] `{name}` should come before `{before}`"),
+            });
+        }
+    }
+    if cfg.lints_workspace_required {
+        check_lints_workspace(rel, doc, out);
+    }
+    check_bin_example_flags(rel, doc, cfg, out);
+}
+
+fn top_level_keys(doc: &DocumentMut) -> impl Iterator<Item = &str> {
+    doc.as_table().iter().map(|(k, _)| k)
+}
+
+fn package_keys(doc: &DocumentMut) -> impl Iterator<Item = &str> {
+    doc.get("package")
+        .and_then(Item::as_table)
+        .into_iter()
+        .flat_map(|t| t.iter().map(|(k, _)| k))
+}
+
+/// Each `(name, earlier_name)` where `name` (present in `order`) appears in the
+/// stream before an item ranked earlier in `order`. Unlisted items are skipped.
+fn order_violations<'a>(
+    items: impl Iterator<Item = &'a str>,
+    order: &[String],
+) -> Vec<(String, String)> {
+    let rank = |name: &str| order.iter().position(|s| s == name);
+    let mut max_rank = 0usize;
+    let mut max_name = String::new();
+    let mut out = Vec::new();
+    for name in items {
+        let Some(r) = rank(name) else {
+            continue;
+        };
+        if r < max_rank {
+            out.push((name.to_string(), max_name.clone()));
+        } else {
+            max_rank = r;
+            max_name = name.to_string();
+        }
+    }
+    out
+}
+
+/// Require `[lints] workspace = true` whenever the crate ships a `[lib]` or
+/// `[[bin]]` target.
+fn check_lints_workspace(rel: &Path, doc: &DocumentMut, out: &mut Vec<ManifestViolation>) {
+    let has_lib = doc.get("lib").is_some();
+    let has_bin = doc
+        .get("bin")
+        .and_then(Item::as_array_of_tables)
+        .is_some_and(|a| !a.is_empty());
+    if !has_lib && !has_bin {
+        return;
+    }
+    let ok = doc
+        .get("lints")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get("workspace"))
+        .and_then(Item::as_bool)
+        == Some(true);
+    if !ok {
+        out.push(ManifestViolation {
+            file: rel.to_path_buf(),
+            rule: "lints-workspace",
+            message: "a crate with [lib]/[[bin]] must set `[lints] workspace = true`".into(),
+        });
+    }
+}
+
+/// `[[bin]]` must set `doc`/`test` false and `[[example]]` must set `doc` false,
+/// per the enabled toggles. A missing or `true` flag is a violation.
+fn check_bin_example_flags(
+    rel: &Path,
+    doc: &DocumentMut,
+    cfg: &ManifestConfig,
+    out: &mut Vec<ManifestViolation>,
+) {
+    let flag_false = |t: &Table, key: &str| t.get(key).and_then(Item::as_bool) == Some(false);
+    let name_of = |t: &Table| {
+        t.get("name")
+            .and_then(Item::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    let mut require = |kind: &str, key: &'static str, rule: &'static str| {
+        let Some(arr) = doc.get(kind).and_then(Item::as_array_of_tables) else {
+            return;
+        };
+        for t in arr {
+            if !flag_false(t, key) {
+                out.push(ManifestViolation {
+                    file: rel.to_path_buf(),
+                    rule,
+                    message: format!("[[{kind}]] `{}` must set `{key} = false`", name_of(t)),
+                });
+            }
+        }
+    };
+    if cfg.bin_doc_false {
+        require("bin", "doc", "bin-doc-false");
+    }
+    if cfg.bin_test_false {
+        require("bin", "test", "bin-test-false");
+    }
+    if cfg.example_doc_false {
+        require("example", "doc", "example-doc-false");
     }
 }
 
@@ -119,34 +239,6 @@ fn is_cargo_fuzz(doc: &DocumentMut) -> bool {
         .and_then(|m| m.get("cargo-fuzz"))
         .and_then(Item::as_bool)
         == Some(true)
-}
-
-/// Flag any listed top-level section that appears before an earlier-listed one.
-/// Sections absent from `order` are unconstrained.
-fn check_section_order(
-    rel: &Path,
-    doc: &DocumentMut,
-    order: &[String],
-    out: &mut Vec<ManifestViolation>,
-) {
-    let rank = |name: &str| order.iter().position(|s| s == name);
-    let mut max_rank = 0usize;
-    let mut max_name = "";
-    for (name, _) in doc.as_table() {
-        let Some(r) = rank(name) else {
-            continue;
-        };
-        if r < max_rank {
-            out.push(ManifestViolation {
-                file: rel.to_path_buf(),
-                rule: "section-order",
-                message: format!("[{name}] section should come before [{max_name}]"),
-            });
-        } else {
-            max_rank = r;
-            max_name = name;
-        }
-    }
 }
 
 /// Flag `[lib] crate-type` entries that are out of the required relative order.
@@ -164,26 +256,12 @@ fn check_crate_type_order(
     else {
         return;
     };
-    let rank = |name: &str| order.iter().position(|s| s == name);
-    let mut max_rank = 0usize;
-    let mut max_name = String::new();
-    for v in arr {
-        let Some(name) = v.as_str() else {
-            continue;
-        };
-        let Some(r) = rank(name) else {
-            continue;
-        };
-        if r < max_rank {
-            out.push(ManifestViolation {
-                file: rel.to_path_buf(),
-                rule: "crate-type-order",
-                message: format!("crate-type `{name}` should come before `{max_name}`"),
-            });
-        } else {
-            max_rank = r;
-            max_name = name.to_string();
-        }
+    for (name, before) in order_violations(arr.iter().filter_map(|v| v.as_str()), order) {
+        out.push(ManifestViolation {
+            file: rel.to_path_buf(),
+            rule: "crate-type-order",
+            message: format!("crate-type `{name}` should come before `{before}`"),
+        });
     }
 }
 
@@ -339,6 +417,59 @@ mod tests {
                 .iter()
                 .any(|(r, _)| *r == "crate-type-order")
         );
+    }
+
+    #[test]
+    fn package_field_order_checked() {
+        let cfg = ManifestConfig {
+            package_field_order: ["name", "version", "edition"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            ..Default::default()
+        };
+        let bad = "[package]\nname = \"x\"\nedition = \"2021\"\nversion = \"1\"\n";
+        let v = run_doc(&cfg, bad);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, "package-field-order");
+        assert!(v[0].1.contains("version"), "{v:?}");
+        let good = "[package]\nname = \"x\"\nversion = \"1\"\nedition = \"2021\"\n";
+        assert!(run_doc(&cfg, good).is_empty());
+    }
+
+    #[test]
+    fn lints_workspace_required_when_lib_present() {
+        let cfg = ManifestConfig {
+            lints_workspace_required: true,
+            ..Default::default()
+        };
+        let bad = "[package]\nname = \"x\"\n\n[lib]\n";
+        assert_eq!(run_doc(&cfg, bad).len(), 1);
+        let good = "[package]\nname = \"x\"\n\n[lints]\nworkspace = true\n\n[lib]\n";
+        assert!(run_doc(&cfg, good).is_empty());
+        // No lib/bin -> not required.
+        let none = "[package]\nname = \"x\"\n";
+        assert!(run_doc(&cfg, none).is_empty());
+    }
+
+    #[test]
+    fn bin_and_example_flags_required() {
+        let cfg = ManifestConfig {
+            bin_doc_false: true,
+            bin_test_false: true,
+            example_doc_false: true,
+            ..Default::default()
+        };
+        // A bin missing both flags -> two violations; example missing doc -> one.
+        let bad = "[package]\nname = \"x\"\n\n[[bin]]\nname = \"a\"\n\n\
+                   [[example]]\nname = \"e\"\n";
+        let rules: Vec<&str> = run_doc(&cfg, bad).iter().map(|(r, _)| *r).collect();
+        assert!(rules.contains(&"bin-doc-false"), "{rules:?}");
+        assert!(rules.contains(&"bin-test-false"), "{rules:?}");
+        assert!(rules.contains(&"example-doc-false"), "{rules:?}");
+        let good = "[package]\nname = \"x\"\n\n[[bin]]\nname = \"a\"\ndoc = false\ntest = false\n\n\
+                    [[example]]\nname = \"e\"\ndoc = false\n";
+        assert!(run_doc(&cfg, good).is_empty());
     }
 
     #[test]

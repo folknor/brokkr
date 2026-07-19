@@ -272,6 +272,24 @@ pub struct ManifestConfig {
     /// Empty = off. `cargo-fuzz = true` crates are exempt.
     #[serde(default)]
     pub crate_type_order: Vec<String>,
+    /// Required relative order of `[package]` keys (e.g. `["name", "version",
+    /// "edition", ...]`). Only listed keys are constrained. Empty = off.
+    /// `cargo-fuzz = true` crates are exempt.
+    #[serde(default)]
+    pub package_field_order: Vec<String>,
+    /// When a `[lib]` or `[[bin]]` target is present, require `[lints] workspace
+    /// = true`. Off by default. `cargo-fuzz = true` crates are exempt.
+    #[serde(default)]
+    pub lints_workspace_required: bool,
+    /// Require every `[[bin]]` to set `doc = false`. Off by default.
+    #[serde(default)]
+    pub bin_doc_false: bool,
+    /// Require every `[[bin]]` to set `test = false`. Off by default.
+    #[serde(default)]
+    pub bin_test_false: bool,
+    /// Require every `[[example]]` to set `doc = false`. Off by default.
+    #[serde(default)]
+    pub example_doc_false: bool,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must
