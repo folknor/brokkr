@@ -359,6 +359,15 @@ impl CheckEntry {
 ///   pin the faster-compiling build without typing `--debug` every time.
 ///   The CLI wins: `--debug` forces dev, `--release` forces release, and
 ///   only when neither is passed does this field decide.
+/// - `doctests` decides whether the test phase runs doctests. It defaults
+///   to `false` because every brokkr-managed project runs its CI under
+///   cargo-nextest, which never executes doctests - so a `brokkr check`
+///   that ran them would fail (or pass) on a signal CI cannot see, breaking
+///   CI parity. With the default, brokkr scopes `cargo test` to `--tests`
+///   (lib + bins + integration, no doctests) unless the sweep already
+///   carries an explicit target selector (`--test <name>`), which excludes
+///   doctests on its own. Set `doctests = true` to opt a project back in to
+///   the full `cargo test` default (doctests included).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TestConfig {
@@ -366,6 +375,8 @@ pub struct TestConfig {
     pub default_profile: Option<String>,
     #[serde(default)]
     pub debug: bool,
+    #[serde(default)]
+    pub doctests: bool,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileDef>,
 }

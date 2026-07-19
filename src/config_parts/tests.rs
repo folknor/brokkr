@@ -885,6 +885,7 @@ features = ["a"]
             default_package: None,
             default_profile: None,
             debug: false,
+            doctests: false,
             profiles,
         };
         let err = validate_check_against_test(&check, Some(&test))

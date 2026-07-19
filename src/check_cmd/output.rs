@@ -88,6 +88,25 @@ fn run_sweep_pre_build(
     )))
 }
 
+/// True if the cargo-section args already name a build target, in which
+/// case cargo's default "everything incl. doctests" selection is off and
+/// doctests are already excluded. Any explicit `--test`/`--tests`/`--lib`/
+/// `--bin(s)`/`--example(s)`/`--bench(es)` selector (with or without an
+/// `=value`) counts; the caller uses this to avoid appending `--tests` on
+/// top of a `--test <name>` scope. `--test-threads` never appears here (it
+/// is a libtest flag emitted after `--`).
+fn has_target_selector(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a.starts_with("--test")
+            || a.starts_with("--lib")
+            || a.starts_with("--bin")
+            || a.starts_with("--example")
+            || a.starts_with("--bench")
+            || a.starts_with("--doc")
+            || a.starts_with("--all-targets")
+    })
+}
+
 /// Run one cargo test invocation for the given sweep. Returns
 /// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
 /// `Err(...)` on subprocess spawn failure. `multi` controls whether
@@ -103,6 +122,7 @@ fn run_one_test_sweep(
     project_env: &[(String, String)],
     raw: bool,
     json: bool,
+    doctests: bool,
     multi: bool,
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
@@ -140,6 +160,16 @@ fn run_one_test_sweep(
     }
     if json {
         args.push("--message-format=json".into());
+    }
+    // Exclude doctests unless the project opted in (`[test] doctests = true`).
+    // nextest - and therefore every brokkr-managed project's CI - never runs
+    // doctests, so running them here is a signal CI can't see. `--tests`
+    // selects lib + bins + integration but not doctests. A sweep that already
+    // carries an explicit target selector (e.g. a profile's `--test <name>`)
+    // excludes doctests on its own, and `--tests` would wrongly broaden it, so
+    // only inject when no selector is present.
+    if !doctests && !has_target_selector(&args) {
+        args.push("--tests".into());
     }
 
     // Thread policy. A serial sweep (`test_threads` unset or 1) runs under the
@@ -1037,6 +1067,42 @@ warning: z [too_many_lines]
         let (cargo, libtest) = split_extra_args(&extra);
         assert!(cargo.is_empty());
         assert!(libtest.is_empty());
+    }
+
+    #[test]
+    fn has_target_selector_detects_explicit_targets() {
+        // A profile's `--test <name>` scope, or any user-supplied target
+        // flag, means doctests are already off and `--tests` must not be
+        // appended on top.
+        assert!(has_target_selector(&s(&["test", "--test", "cli_sort"])));
+        assert!(has_target_selector(&s(&["test", "--tests"])));
+        assert!(has_target_selector(&s(&["test", "--lib"])));
+        assert!(has_target_selector(&s(&["test", "--bins"])));
+        assert!(has_target_selector(&s(&["test", "--bin=foo"])));
+        assert!(has_target_selector(&s(&["test", "--doc"])));
+        assert!(has_target_selector(&s(&["test", "--all-targets"])));
+        assert!(has_target_selector(&s(&["test", "--example", "e"])));
+        assert!(has_target_selector(&s(&["test", "--bench", "b"])));
+    }
+
+    #[test]
+    fn has_target_selector_ignores_non_target_flags() {
+        // The default sweep shape: feature scoping + package, no target
+        // selector - so `--tests` is what suppresses doctests here.
+        assert!(!has_target_selector(&s(&[
+            "test",
+            "-p",
+            "pkg",
+            "--features",
+            "a,b",
+            "--message-format=json",
+        ])));
+        assert!(!has_target_selector(&s(&[
+            "test",
+            "--workspace",
+            "--exclude",
+            "slow",
+        ])));
     }
 
     #[test]

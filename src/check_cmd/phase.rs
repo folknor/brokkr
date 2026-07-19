@@ -68,6 +68,10 @@ pub(crate) fn cmd_check(
     run_dependency_rules(project_root, dependency_rules, json, limit, all)?;
     run_clippy_phase(project_root, &active_sweeps, package, raw, json, limit, all)?;
     let mut collected_timings: Vec<TestTiming> = Vec::new();
+    // Doctests are excluded by default (nextest, hence CI, never runs them);
+    // an explicit `[test] doctests = true` opts back in. Absent `[test]`,
+    // the honest default is off.
+    let doctests = test_cfg.is_some_and(|c| c.doctests);
     let test_result = run_test_phase(
         project,
         project_root,
@@ -75,6 +79,7 @@ pub(crate) fn cmd_check(
         package,
         raw,
         json,
+        doctests,
         extra_args,
         timings.then_some(&mut collected_timings),
     );
@@ -1219,6 +1224,7 @@ fn run_test_phase(
     package: Option<&str>,
     raw: bool,
     json: bool,
+    doctests: bool,
     extra_args: &[String],
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<(), DevError> {
@@ -1245,6 +1251,7 @@ fn run_test_phase(
             &project_env,
             raw,
             json,
+            doctests,
             multi,
             timings.as_deref_mut(),
         )?;

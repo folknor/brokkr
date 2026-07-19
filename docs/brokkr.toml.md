@@ -369,14 +369,15 @@ should be encoded by adding rules for the intermediate crates too.
 
 ## `[test]` section
 
-Optional. Three things live here: a default cargo package, a default
-validation profile, and the named profiles that selectively reference
-`[[check]]` entries.
+Optional. Four things live here: a default cargo package, a default
+validation profile, a doctest toggle, and the named profiles that selectively
+reference `[[check]]` entries.
 
 ```toml
 [test]
 default_package = "pbfhogg"
 default_profile = "tier1"
+doctests = false
 
 [test.profiles.tier1]
 description = "Fast edit loop used by brokkr check (tier 1)"
@@ -399,6 +400,14 @@ include_ignored = true
   `--debug` forces dev, `--release` forces release; the field only decides
   when neither is passed. (Affects `brokkr test` only - `brokkr check`'s
   test phase always builds dev.)
+- `doctests` (default `false`) decides whether `brokkr check`'s test phase runs
+  doctests. Off by default because CI runs under cargo-nextest, which never
+  executes doctests - running them here would gate on a signal CI can't see. In
+  the default state each sweep's `cargo test` is scoped to `--tests` (no
+  doctests) unless it already names a target (`--test <name>`). Set `true` to
+  restore the full `cargo test` default. Project-wide only (no per-`[[check]]`
+  or CLI override); `brokkr test <name>` is unaffected. See
+  `docs/commands/check.md`.
 - `default_profile` is the validation profile `brokkr check` uses when no
   `--profile` is passed. With no profile config, `brokkr check` runs every
   `[[check]]` entry without libtest filters; with no `[[check]]` either, it

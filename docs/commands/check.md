@@ -58,6 +58,26 @@ Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
 `CARGO_TARGET_TMPDIR`); when absent, cwd is the project root.
 
+### Doctests
+
+The test phase does **not** run doctests by default. Every brokkr-managed
+project runs its CI under cargo-nextest, which never executes doctests, so a
+`brokkr check` that ran them would gate on a signal CI cannot see (a rotten
+doctest failing the check, or a passing one masking rot CI ignores). To match
+CI, each sweep's `cargo test` is scoped to `--tests` (lib + bins + integration
+tests, no doctests) - **unless** the sweep already carries an explicit target
+selector (a profile's `--test <name>`, or a `--test`/`--lib`/`--doc`/... token
+after `brokkr check --`), which excludes doctests on its own; `--tests` is not
+appended on top of one.
+
+Opt a project back in with `[test] doctests = true`, which restores the full
+`cargo test` default (doctests included). There is no per-sweep or CLI
+override - doctest inclusion is a project-wide, CI-parity property, so it lives
+once in `[test]`. `--skip` is not a workaround: doctests share libtest's filter
+namespace with unit tests, so skipping them by pattern would eat legitimate
+module tests too. `brokkr test <name>` is unaffected - it runs the full
+`cargo test` default so a deliberately named doctest still runs.
+
 Like every locked brokkr command, `check` and `test` acquire the global
 per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
 holds it, the command prints `[lock] waiting for …` and waits until released,
