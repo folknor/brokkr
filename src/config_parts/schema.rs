@@ -290,6 +290,27 @@ pub struct ManifestConfig {
     /// Require every `[[example]]` to set `doc = false`. Off by default.
     #[serde(default)]
     pub example_doc_false: bool,
+    /// Require `[package.metadata.cargo-machete] ignored` entries to each name a
+    /// declared dependency (in any dependency table). Off by default.
+    #[serde(default)]
+    pub cargo_machete_ignored_declared: bool,
+    /// `[[manifest.version_align]]` groups: sets of crates whose version
+    /// requirements must agree at a chosen granularity. Empty by default.
+    #[serde(default)]
+    pub version_align: Vec<VersionAlign>,
+}
+
+/// One `[[manifest.version_align]]` group.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct VersionAlign {
+    /// Crate names whose versions must agree. Absent crates are skipped, so a
+    /// group only fires when two or more of them are actually present.
+    #[serde(default)]
+    pub crates: Vec<String>,
+    /// `"major"` or `"minor"` (default). How much of the version must match.
+    #[serde(default)]
+    pub granularity: String,
 }
 
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must

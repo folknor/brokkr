@@ -255,9 +255,25 @@ sort_dependencies = true    # keys sorted within each blank-line dependency grou
   set `doc = false` / `test = false` (a missing or `true` flag is a violation).
 - `example_doc_false` (default `false`) - every `[[example]]` must set
   `doc = false`.
+- `cargo_machete_ignored_declared` (default `false`) - each
+  `[package.metadata.cargo-machete] ignored` entry must name a declared
+  dependency.
+- `[[manifest.version_align]]` (repeatable) - `crates = [...]` whose version
+  requirements must agree at `granularity` (`"minor"` default, or `"major"`).
+  Absent crates are skipped, so a group only fires when 2+ are present. Reads
+  both the bare-string and `{ version = "..." }` dep forms.
 
-Every check except `sort_dependencies` skips a `cargo-fuzz = true` crate (its
-`[package.metadata]`), matching the hook's standalone-fuzz-workspace exemption.
+```toml
+[[manifest.version_align]]
+crates = ["arrow", "parquet"]
+granularity = "minor"
+```
+
+The section/target-shape checks (`section_order`, `crate_type_order`,
+`package_field_order`, `lints_workspace_required`, the bin/example flags) skip a
+`cargo-fuzz = true` crate, matching the hook's standalone-fuzz-workspace
+exemption. The dependency-content checks (`sort_dependencies`, cargo-machete,
+`version_align`) apply to every manifest.
 
 See `src/manifest.rs`.
 
