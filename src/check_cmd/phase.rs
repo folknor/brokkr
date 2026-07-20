@@ -24,8 +24,8 @@ use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
-    CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig, StyleConfig,
-    TestConfig, TextlintRule,
+    CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig, ScriptCheck,
+    StyleConfig, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -47,6 +47,7 @@ pub(crate) fn cmd_check(
     style_cfg: Option<&StyleConfig>,
     header_cfg: Option<&HeaderConfig>,
     textlint_rules: &[TextlintRule],
+    script_checks: &[ScriptCheck],
     manifest_cfg: Option<&ManifestConfig>,
     features: &[String],
     no_default_features: bool,
@@ -78,6 +79,7 @@ pub(crate) fn cmd_check(
         run_header(project_root, header_cfg, limit, all)?;
         run_textlint(project_root, textlint_rules, limit, all)?;
         run_manifest(project_root, manifest_cfg, limit, all)?;
+        run_script_checks(project_root, script_checks)?;
         run_dependency_rules(project_root, dependency_rules, limit, all)?;
         run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all)?;
         run_test_phase(
@@ -527,6 +529,73 @@ fn run_manifest(
     output::error(msg.trim_end());
 
     Err(DevError::Build("manifest check failed".into()))
+}
+
+/// The `[[script_check]]` phase: run each configured command and assert its
+/// output matches the entry's sentinel. Inert unless the project defines
+/// `[[script_check]]` entries. Every check runs (failures are collected, not
+/// fail-fast) so one `brokkr check` surfaces all broken gates at once. The
+/// command's exit code is ignored - only the output match decides pass/fail; a
+/// spawn failure is a hard error. See [`crate::script_check`].
+fn run_script_checks(project_root: &Path, checks: &[ScriptCheck]) -> Result<(), DevError> {
+    if checks.is_empty() {
+        return Ok(());
+    }
+
+    let mut failures: Vec<(&ScriptCheck, crate::script_check::Outcome)> = Vec::new();
+    for check in checks {
+        let outcome = crate::script_check::run_one(check, project_root)?;
+        if outcome.passed {
+            output::run_msg(&format!("script-check {}: ok", check.name));
+        } else {
+            failures.push((check, outcome));
+        }
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    // The full captured output is the diagnostic - never truncated by `--limit`,
+    // since a single script's output is one atomic gate.
+    let mut msg = format!("script-check: {} failed\n", failures.len());
+    for (check, outcome) in &failures {
+        msg.push_str("  ");
+        msg.push_str(&check.name);
+        msg.push_str(&format!(
+            ": {} did not match {:?}\n",
+            stream_label(check.stream),
+            check.expect
+        ));
+        append_captured_stream(&mut msg, "stdout", &outcome.stdout);
+        append_captured_stream(&mut msg, "stderr", &outcome.stderr);
+    }
+    output::error(msg.trim_end());
+
+    Err(DevError::Build("script-check failed".into()))
+}
+
+/// The stream(s) a script-check matched against, for its failure line.
+fn stream_label(stream: crate::config::Stream) -> &'static str {
+    match stream {
+        crate::config::Stream::Stdout => "stdout",
+        crate::config::Stream::Stderr => "stderr",
+        crate::config::Stream::Both => "stdout+stderr",
+    }
+}
+
+/// Append a labelled, indented block of a script-check's captured stream to the
+/// failure message. A no-op for an empty stream.
+fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    msg.push_str(&format!("    --- {label} ---\n"));
+    for line in String::from_utf8_lossy(bytes).lines() {
+        msg.push_str("    ");
+        msg.push_str(line);
+        msg.push('\n');
+    }
 }
 
 fn run_dependency_rules(

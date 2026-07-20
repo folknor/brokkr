@@ -34,6 +34,7 @@ mod tests {
             style: None,
             header: None,
             textlint: Vec::new(),
+            script_checks: Vec::new(),
             manifest: None,
             deps: None,
             disable_toolchain: false,

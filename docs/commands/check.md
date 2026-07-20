@@ -210,6 +210,31 @@ it). `shape_exclude` globs excuse a manifest from the structural checks only
 `exclude` skips the file entirely. JSON mode emits `manifest`/`manifest_summary`.
 See `src/manifest.rs`.
 
+Script-check phase runs next, only when `[[script_check]]` entries exist (inert
+otherwise). Each entry runs `command` via `sh -c` (so pipes/redirects/env
+expansion work) with cwd = the code tree, and **passes iff the captured output
+matches `expect`**. Asserting on a success sentinel - not the exit code - is the
+point: it catches a check silently stubbed to `exit 0`, because the script must
+prove it ran to completion by emitting the sentinel. The command's exit code is
+therefore ignored; only a spawn failure is a hard error. Every entry runs (no
+fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
+each failure prints the full captured stdout/stderr (the diagnostic, never
+truncated by `--limit`). It fills the gap for gates brokkr's native phases can't
+express - semantic analysers (`# Panics`/`# Errors` doc checks) or external
+formatter conventions - that were previously hand-run before every commit.
+
+- `match` = `exact` (whole trimmed stream equals `expect`; suits quiet lints
+  that print only the sentinel), `last-line` (the last non-empty line, trimmed,
+  equals `expect` - the **default**; tolerates progress output above a final
+  verdict), or `contains` (`expect` is a substring).
+- `stream` = `stdout` (default), `stderr`, or `both` (stdout, a newline, then
+  stderr - for tools that split progress and results across the two).
+- Sentinel tip: a non-ASCII sentinel (e.g. a `U+2713` check mark) would itself
+  trip the gremlin scan on `brokkr.toml`. Use an ASCII sentinel, or
+  `match = "contains"` on an ASCII marker substring of the real success line.
+
+See `src/script_check.rs`.
+
 Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
 in `brokkr.toml`; without entries it is skipped silently. It reads
 `cargo metadata --no-deps` and fails on configured direct dependency boundary

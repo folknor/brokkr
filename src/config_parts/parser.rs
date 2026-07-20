@@ -44,6 +44,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let style = parse_style(table)?;
     let header = parse_header(table)?;
     let textlint = parse_textlint(table)?;
+    let script_checks = parse_script_checks(table)?;
     let manifest = parse_manifest(table)?;
     let deps = parse_deps(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
@@ -67,6 +68,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             style,
             header,
             textlint,
+            script_checks,
             manifest,
             deps,
             disable_toolchain,
@@ -199,6 +201,47 @@ fn parse_textlint(
     Ok(rules)
 }
 
+/// Parse the optional `[[script_check]]` array of gates. Absent -> empty. Each
+/// entry needs a non-empty `name`, `command`, and `expect`.
+fn parse_script_checks(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<ScriptCheck>, DevError> {
+    let Some(value) = table.get("script_check") else {
+        return Ok(Vec::new());
+    };
+    if value.is_table() {
+        return Err(DevError::Config(
+            "[script_check] (table form) is not supported. Use one or more \
+             `[[script_check]]` array-of-table entries."
+                .into(),
+        ));
+    }
+    let checks: Vec<ScriptCheck> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[script_check]]: {e}")))?;
+    for check in &checks {
+        if check.name.trim().is_empty() {
+            return Err(DevError::Config(
+                "[[script_check]] entry has empty `name`".into(),
+            ));
+        }
+        if check.command.trim().is_empty() {
+            return Err(DevError::Config(format!(
+                "[[script_check]] {:?} has empty `command`",
+                check.name
+            )));
+        }
+        if check.expect.is_empty() {
+            return Err(DevError::Config(format!(
+                "[[script_check]] {:?} has empty `expect`",
+                check.name
+            )));
+        }
+    }
+    Ok(checks)
+}
+
 /// Parse the optional `[style]` section. Absent - or present but with no rule
 /// enabled - collapses to `None` so the style phase stays inert.
 fn parse_style(
@@ -310,6 +353,7 @@ fn parse_hosts(
             || key == "style"
             || key == "header"
             || key == "textlint"
+            || key == "script_check"
             || key == "manifest"
             || key == "deps"
             || key == "disable_toolchain"

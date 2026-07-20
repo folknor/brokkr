@@ -41,6 +41,7 @@ mod request;
 mod resolve;
 mod results_cmd;
 mod scope;
+mod script_check;
 mod shutdown;
 mod sidecar;
 mod sidecar_cmd;

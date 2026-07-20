@@ -54,6 +54,11 @@ pub struct DevConfig {
     /// (dependency ordering, ...) run by `brokkr check`. `None` when the
     /// project has no `[manifest]` section. See [`ManifestConfig`].
     pub manifest: Option<ManifestConfig>,
+    /// `[[script_check]]` gates: run a command and assert its output matches a
+    /// sentinel, for pre-commit checks brokkr's native phases can't express.
+    /// Empty when the project defines no `[[script_check]]` entries. See
+    /// [`ScriptCheck`] and [`crate::script_check`].
+    pub script_checks: Vec<ScriptCheck>,
     /// `[deps]` config: tuning for the `brokkr deps` audit. `None` when the
     /// project has no `[deps]` section. See [`DepsConfig`].
     pub deps: Option<DepsConfig>,
@@ -197,6 +202,59 @@ pub struct ContextWindow {
     pub lines: usize,
     /// Regex matched against each raw physical line in the window.
     pub pattern: String,
+}
+
+/// How a [`ScriptCheck`]'s captured output is compared to its `expect`
+/// sentinel. See [`crate::script_check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MatchMode {
+    /// The whole captured stream (trimmed) must equal `expect` (trimmed).
+    /// Suits quiet-on-success lints that print only the sentinel.
+    Exact,
+    /// The last non-empty line (trimmed) must equal `expect` (trimmed).
+    /// The default - tolerates progress output above a final verdict line.
+    #[default]
+    LastLine,
+    /// The captured stream must contain `expect` as a substring.
+    Contains,
+}
+
+/// Which captured stream(s) a [`ScriptCheck`] matches against. See
+/// [`crate::script_check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stream {
+    /// Match against stdout only (the default).
+    #[default]
+    Stdout,
+    /// Match against stderr only.
+    Stderr,
+    /// Match against stdout and stderr concatenated (stdout, a newline, then
+    /// stderr). For tools that split progress and results across the two.
+    Both,
+}
+
+/// One `[[script_check]]` entry: run `command` (via `sh -c`) and pass iff its
+/// output matches the `expect` sentinel per `match`/`stream`. A gate for
+/// pre-commit checks that brokkr's native phases can't express. Asserting on a
+/// success sentinel (not the exit code) catches a check silently stubbed to
+/// exit 0. See [`crate::script_check`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptCheck {
+    /// Human label surfaced in phase output.
+    pub name: String,
+    /// The command line, run as `sh -c "<command>"` with cwd = the code tree.
+    pub command: String,
+    /// The success sentinel the output must match.
+    pub expect: String,
+    /// How `expect` is matched against the output. Defaults to `last-line`.
+    #[serde(rename = "match", default)]
+    pub match_mode: MatchMode,
+    /// Which captured stream(s) to match. Defaults to `stdout`.
+    #[serde(default)]
+    pub stream: Stream,
 }
 
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching

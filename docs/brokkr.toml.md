@@ -58,7 +58,8 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`, `style`, `header`, `textlint`, `disable_toolchain`.
+`gremlins`, `style`, `header`, `textlint`, `script_check`, `manifest`, `deps`,
+`disable_toolchain`.
 
 ## `disable_toolchain`
 
@@ -219,6 +220,35 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
 
 No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
 statements). See `src/textlint.rs` and `src/lex.rs`.
+
+## `[[script_check]]` array
+
+Run a command and assert its output (the script-check phase) - the escape hatch
+for gates brokkr's native phases can't express (semantic analysers, external
+formatter conventions). Each entry runs `command` via `sh -c` and passes iff the
+captured output matches `expect`; on failure the full captured output is shown.
+Matching the sentinel (not the exit code) catches a check stubbed to `exit 0`.
+
+```toml
+[[script_check]]
+name    = "docs-conventions"
+command = "bash .pre-commit-hooks/check_docs_conventions.sh"
+expect  = "All documentation conventions are valid"
+match   = "last-line"   # exact | last-line | contains   (default: last-line)
+stream  = "stdout"      # stdout | stderr | both          (default: stdout)
+```
+
+- `name` - label shown in phase output (`script-check <name>: ok`).
+- `command` - run as `sh -c "<command>"`, cwd = the code tree, so
+  pipes/redirects/env expansion work.
+- `expect` - the success sentinel. Keep it ASCII: a non-ASCII sentinel (e.g. a
+  check mark) would trip the gremlin scan on `brokkr.toml` itself.
+- `match` - `exact` (whole trimmed output equals `expect`), `last-line` (last
+  non-empty line equals `expect`; the default), or `contains` (substring).
+- `stream` - `stdout` (default), `stderr`, or `both` (concatenated).
+
+The command's exit code is ignored - only the output match decides. See
+`src/script_check.rs` and `docs/commands/check.md`.
 
 ## `[manifest]` section
 
