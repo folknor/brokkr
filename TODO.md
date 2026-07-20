@@ -1,6 +1,6 @@
 # TODO
 
-## Structural debt (last audited 2026-04-17)
+## Structural debt (last audited 2026-04-17.)
 
 The high-impact items have been worked off. What's listed below is
 either speculative, subjective, or low-ROI and has been left
