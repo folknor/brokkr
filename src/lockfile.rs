@@ -33,10 +33,19 @@ struct LockState {
 pub struct LockGuard {
     fd: OwnedFd,
     state: Mutex<LockState>,
+    /// Toolchain-disable guard activated under this lock (when `disable_toolchain`
+    /// is armed). Restored on drop *before* the flock is released, so the pinned
+    /// rust-toolchain is moved aside for exactly the locked window. See
+    /// [`crate::toolchain`].
+    toolchain: Option<crate::toolchain::DisabledToolchain>,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
+        // Restore the disabled toolchain (if any) while we still hold the flock,
+        // then release. Doing it before LOCK_UN keeps the moved-aside window
+        // inside the locked window, so a concurrent brokkr can never observe it.
+        drop(self.toolchain.take());
         // The flock is released automatically when the fd is closed, but
         // unlock explicitly for clarity. OwnedFd handles close.
         unsafe {
@@ -213,11 +222,17 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // We now hold the flock. Activate any armed toolchain-disable *inside* the
+    // lock so the moved-aside window is exactly the locked window; the guard is
+    // stored below and restored on drop before the flock is released. On error,
+    // `owned` drops here and releases the flock.
+    let toolchain = crate::toolchain::activate_for_lock()?;
     let state = build_state(ctx);
     rewrite_from_state(owned.as_raw_fd(), &state);
     Ok(LockGuard {
         fd: owned,
         state: Mutex::new(state),
+        toolchain,
     })
 }
 

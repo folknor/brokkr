@@ -282,17 +282,19 @@ where
                 wt.commit, wt.subject,
             ));
             // The worktree is a fresh checkout of `hash`, which may carry its
-            // own committed rust-toolchain pin. The command-level guard only
-            // disabled the pin in the live build root, not here, so disable it
-            // in the worktree too - otherwise `disable_toolchain` silently fails
-            // to hold for --commit builds. Restored on drop before the worktree
-            // is reused/inspected.
-            let _tc = if disable_toolchain {
-                Some(crate::toolchain::DisabledToolchain::activate(&wt.path)?)
+            // own committed rust-toolchain pin. The startup arm points at the
+            // live build root, not here, so re-arm the disable dir at the
+            // worktree for the build closure - otherwise the pin the build
+            // disables (when it takes the global lock) would be the live root's,
+            // not the worktree's. Restored to the previous arm afterwards.
+            if disable_toolchain {
+                let saved = crate::toolchain::arm(Some(wt.path.clone()));
+                let result = f(Some(&wt.path));
+                crate::toolchain::arm(saved);
+                result
             } else {
-                None
-            };
-            f(Some(&wt.path))
+                f(Some(&wt.path))
+            }
         }
         None => f(parent_build_root),
     }

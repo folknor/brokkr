@@ -4,9 +4,10 @@
 //! `rust-toolchain`) that we don't have installed, or don't want rustup to
 //! honour when brokkr drives cargo against it. When `disable_toolchain` is
 //! set in `brokkr.toml`, [`DisabledToolchain::activate`] moves any such file
-//! aside for the lifetime of the command and restores it on drop. brokkr
-//! picks *no* replacement - with the file gone, rustup just does its normal
-//! fallback (a directory override, then the default toolchain).
+//! aside while brokkr holds the global lock (see *Serialisation* below) and
+//! restores it on drop. brokkr picks *no* replacement - with the file gone,
+//! rustup just does its normal fallback (a directory override, then the
+//! default toolchain).
 //!
 //! ## Robustness
 //!
@@ -22,23 +23,59 @@
 //! there.
 //!
 //! A `--commit` run builds in a persistent worktree rather than the live build
-//! root, so [`with_worktree`](crate::context::with_worktree) activates a second
-//! guard on the worktree path when `disable_toolchain` is set - otherwise the
-//! commit's own committed pin would be honoured there.
+//! root, so [`with_worktree`](crate::context::with_worktree) re-[`arm`]s the
+//! disable dir to the worktree path for the build closure when
+//! `disable_toolchain` is set - otherwise the commit's own committed pin would
+//! be honoured there.
 //!
-//! ## Known limitation
+//! ## Serialisation
 //!
-//! Activation happens once at the top of a command, *before* the per-command
-//! file lock is taken. Two brokkr invocations started against the same tree at
-//! nearly the same instant can therefore race on the single toolchain file
-//! before the lock serialises them. This is a narrow window in an opt-in
-//! feature; the lock already serialises the far larger build/run body, and the
-//! sidecar-adoption path above heals any half-moved state on the next run.
+//! Activation is driven by the global command lock, not the top of `run`. The
+//! build root to disable is *armed* once ([`arm`], from `main` and
+//! `with_worktree`); [`crate::lockfile::acquire`] then activates it - moving the
+//! file aside - immediately after taking the flock, and the returned
+//! `LockGuard`'s drop restores it just before releasing the flock. The
+//! moved-aside window is thus exactly the locked window, so concurrent brokkr
+//! invocations (which the lock already serialises) can never observe or race
+//! the half-moved state. Commands that never take the lock never touch the file.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use crate::error::DevError;
 use crate::output;
+
+/// The build root whose pinned toolchain should be disabled when the global
+/// lock is taken, or `None`. Armed once from `main` (the live build root) and
+/// temporarily re-pointed at a worktree by `with_worktree`. Read by
+/// [`activate_for_lock`], which the lockfile calls under the flock.
+static DISABLE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Set the build root to disable at lock time, returning the previous value.
+///
+/// Called once at startup with the live build root (or `None` when
+/// `disable_toolchain` is off / no project), and by `with_worktree` to scope
+/// the dir to a `--commit` worktree for the duration of its build closure.
+pub fn arm(dir: Option<PathBuf>) -> Option<PathBuf> {
+    let mut slot = DISABLE_DIR.lock().unwrap_or_else(PoisonError::into_inner);
+    std::mem::replace(&mut *slot, dir)
+}
+
+/// Activate the armed toolchain-disable, if any. Called by
+/// [`crate::lockfile::acquire`] immediately after the flock is held, so the
+/// moved-aside window coincides with the locked window. The returned guard is
+/// stored in the `LockGuard` and restores the file just before the flock is
+/// released.
+pub fn activate_for_lock() -> Result<Option<DisabledToolchain>, DevError> {
+    let dir = DISABLE_DIR
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match dir {
+        Some(dir) => Ok(Some(DisabledToolchain::activate(&dir)?)),
+        None => Ok(None),
+    }
+}
 
 /// The toolchain files rustup recognises, in the order we disable them.
 const FILES: [&str; 2] = ["rust-toolchain.toml", "rust-toolchain"];
@@ -210,5 +247,30 @@ mod tests {
         // Healed on drop: the real file is back, sidecar gone.
         assert!(dir.join("rust-toolchain.toml").exists());
         assert!(!aside.exists());
+    }
+
+    #[test]
+    fn arm_drives_activation_and_restores_previous() {
+        let dir = tmpdir("armed");
+        let toml = dir.join("rust-toolchain.toml");
+        fs::write(&toml, "pinned").unwrap();
+
+        // Armed: activate_for_lock (what the lockfile calls under the flock)
+        // moves the file aside; dropping the returned guard restores it.
+        let saved = super::arm(Some(dir.clone()));
+        {
+            let guard = super::activate_for_lock().unwrap();
+            assert!(guard.is_some());
+            assert!(!toml.exists());
+            assert!(dir.join(format!("rust-toolchain.toml{SUFFIX}")).exists());
+        }
+        assert!(toml.exists());
+
+        // Not armed: activate_for_lock is a no-op.
+        super::arm(None);
+        assert!(super::activate_for_lock().unwrap().is_none());
+
+        // Restore whatever the process global held before this test.
+        super::arm(saved);
     }
 }

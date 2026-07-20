@@ -155,18 +155,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
         return cmd_fmt(args);
     }
 
-    // When `disable_toolchain` is set, move the project's rust-toolchain file
-    // aside for the rest of this command so rustup ignores the pin. Held in a
-    // local for the whole of `run`, so it is restored on every unwinding exit
-    // path (return, error, cooperative interrupt). The file lives in the code
-    // tree (build root / cwd), not the config dir. This peeks the config once;
-    // per-command detection still happens below.
-    let _toolchain = match project::detect_optional()? {
-        Some(d) if d.config.disable_toolchain => {
-            Some(toolchain::DisabledToolchain::activate(&d.build_root)?)
-        }
+    // When `disable_toolchain` is set, arm the build root whose pinned
+    // rust-toolchain should be moved aside. Nothing is moved here: the *global
+    // lock* activates it (and restores it on release), so the moved-aside window
+    // is exactly the locked window and concurrent brokkr runs can't race it. The
+    // file lives in the code tree (build root / cwd), not the config dir; a
+    // `--commit` run re-arms this at the worktree via `with_worktree`. This peeks
+    // the config once; per-command detection still happens below.
+    let disable_dir = match project::detect_optional()? {
+        Some(d) if d.config.disable_toolchain => Some(d.build_root),
         _ => None,
     };
+    toolchain::arm(disable_dir);
 
     if let Command::Run { args } = &cli.command {
         // `run` builds and runs the code, so it anchors on the build root
@@ -309,10 +309,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
     } = cli.command
     {
         // Like `check`, `clippy` builds the code tree (cwd), reading `[[check]]`
-        // env/features from wherever brokkr.toml was found. The `disable_toolchain`
-        // guard set above (`_toolchain`) is already active, so the clippy build
-        // honours pin-suppression. Detection is optional - `clippy` runs in any
-        // Rust+git repo with no config.
+        // env/features from wherever brokkr.toml was found. The disable dir armed
+        // above activates when `acquire_cmd_lock_opt` takes the global lock below,
+        // so the clippy build honours pin-suppression. Detection is optional -
+        // `clippy` runs in any Rust+git repo with no config.
         let (project, check_entries, project_root) = match project::detect_optional()? {
             Some(d) => (Some(d.project), d.config.check, d.build_root),
             None => (None, Vec::new(), std::env::current_dir()?),
