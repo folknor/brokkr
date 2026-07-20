@@ -152,6 +152,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
         });
     }
     if let Command::Fmt { args } = &cli.command {
+        // `cargo fmt` runs rustfmt from the pinned toolchain, so honour
+        // disable_toolchain here too. fmt takes no global lock (it's not a
+        // build), so unlike the locked phases it can't ride the lock's
+        // activation - it moves the file aside directly, held for the format
+        // run and restored on drop.
+        let _tc = match project::detect_optional()? {
+            Some(d) if d.config.disable_toolchain => {
+                Some(toolchain::DisabledToolchain::activate(&d.build_root)?)
+            }
+            _ => None,
+        };
         return cmd_fmt(args);
     }
 

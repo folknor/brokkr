@@ -38,6 +38,10 @@
 //! moved-aside window is thus exactly the locked window, so concurrent brokkr
 //! invocations (which the lock already serialises) can never observe or race
 //! the half-moved state. Commands that never take the lock never touch the file.
+//!
+//! The one exception is `brokkr fmt`: it runs `cargo fmt` (rustfmt is
+//! toolchain-pinned) but takes no lock, so it constructs a [`DisabledToolchain`]
+//! guard directly around the format run instead of riding a lock's activation.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
