@@ -208,7 +208,11 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
   statements: a rustfmt-wrapped import is reconstructed onto one line (comments
   stripped) first, so `use tracing::.*warn` catches a multi-line `use` block.
   Reported at the `use` line; `allow_marker` matches on any physical line of
-  the statement. Rust-only.
+  the statement. Rust-only. This *replaces* the per-physical-line pass for the
+  rule - it no longer scans ordinary lines, only reconstructed `use` statements,
+  so it is for import rules, not use-site rules. Setting it on a rule whose
+  `except` exempts ordinary `use` lines is a config error (the rule could never
+  fire), rejected at load time.
 - `except` (regexes; a line matching any is exempt) - the way to allow one
   specific form of an otherwise-forbidden pattern.
 - `in_toml_section` (only consider lines while the last-seen `[section]` header

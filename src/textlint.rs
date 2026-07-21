@@ -99,6 +99,25 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
                 DevError::Config(format!("[[textlint]] {:?}: invalid except pattern: {e}", rule.name))
             })?);
         }
+        // A `join_wrapped_use` rule matches only reconstructed `use ...;`
+        // statements (see `scan_use_statements`). If an `except` pattern exempts
+        // an ordinary `use` line, it exempts the very statements the rule scans,
+        // so the rule can never fire - a silent no-op. That is the fingerprint of
+        // a use-site rule wearing the import-rule flag by mistake (the bug that
+        // let `no-fq-nautilus-types` pass a tree CI then rejected). A rule with a
+        // *specific* except (e.g. `use tracing::info`) does not match the generic
+        // probe and is left alone. Reject the broad form at compile time.
+        if rule.join_wrapped_use
+            && let Some(ex) = except.iter().find(|r| r.is_match("use a::b;"))
+        {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?}: join_wrapped_use scans only `use` statements, but the \
+                 except pattern {:?} exempts ordinary `use` lines, so the rule can never fire. \
+                 Drop join_wrapped_use if this is a use-site rule, or narrow the except.",
+                rule.name,
+                ex.as_str(),
+            )));
+        }
         let paths = globs::build_set(&rule.paths, &format!("[[textlint]] {:?} paths", rule.name))?;
         let exclude =
             globs::build_set(&rule.exclude, &format!("[[textlint]] {:?} exclude", rule.name))?;
@@ -887,6 +906,36 @@ mod tests {
         r.require_below = Some(win(1, "import-ok"));
         let src = "use tracing::{\n    warn,\n};\n// import-ok\n";
         assert!(run(r, src).is_empty());
+    }
+
+    #[test]
+    fn join_wrapped_use_excepting_use_lines_is_a_config_error() {
+        // The `no-fq-nautilus-types` footgun: join_wrapped_use scans only `use`
+        // statements, so a broad `^\s*use\s` except suppresses every one of them
+        // - the rule becomes a silent no-op. Reject it at compile time.
+        let mut r = rule("nautilus_[a-z_]+::.*::[A-Z]");
+        r.join_wrapped_use = true;
+        r.except = vec![r"^\s*(pub(\([^)]*\))?\s+)?use\s".into()];
+        assert!(compile(&[r]).is_err());
+    }
+
+    #[test]
+    fn join_wrapped_use_with_specific_except_is_allowed() {
+        // A genuine import rule may except one *specific* import without tripping
+        // the guard - the probe `use a::b;` does not match a narrow pattern.
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        r.except = vec!["use tracing::info".into()];
+        assert!(compile(&[r]).is_ok());
+    }
+
+    #[test]
+    fn except_use_lines_without_join_is_fine() {
+        // Without join_wrapped_use the rule scans every physical line, so
+        // excepting `use` lines is the ordinary, valid way to skip imports.
+        let mut r = rule("nautilus_[a-z_]+::.*::[A-Z]");
+        r.except = vec![r"^\s*use\s".into()];
+        assert!(compile(&[r]).is_ok());
     }
 
     #[test]
