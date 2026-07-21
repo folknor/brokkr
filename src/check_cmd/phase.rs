@@ -697,11 +697,14 @@ fn run_clippy_phase(
         // Apply the sweep's env to the clippy build too, so a build-affecting
         // var (codegen toggle, etc.) is set consistently across every phase -
         // clippy, the test pre-build, and the test run - not just the tests.
-        let env_owned: Vec<(String, String)> = sweep
+        let mut env_owned: Vec<(String, String)> = sweep
             .env
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // A sweep with `rustflags` clippy-checks under the same cfg + isolated
+        // target dir as its tests, so the sim gate's lints match its build.
+        env_owned.extend(sweep_cargo_env(sweep, project_root));
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -1278,9 +1281,12 @@ fn run_test_phase(
     // guess (which silently lies when a workspace pins
     // `[profile.test]` overrides).
     let target_dir = build::project_info(Some(project_root))?.target_dir;
-    let project_env = build_test_env(project, &target_dir, "debug");
 
     for sweep in sweeps {
+        // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
+        // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
+        // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps.
+        let project_env = sweep_runtime_env(sweep, project, &target_dir, project_root, "debug");
         for pkg in &sweep.build_packages {
             run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw)?;
         }

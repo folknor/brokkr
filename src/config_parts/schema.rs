@@ -620,6 +620,29 @@ pub struct CheckEntry {
     /// key collision.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Extra `rustc` flags, appended to any inherited `RUSTFLAGS` and scoped
+    /// to this sweep's cargo processes only (clippy, pre-build, tests). Given
+    /// as a token list (`["--cfg", "madsim"]`). A non-empty value auto-isolates
+    /// the sweep into its own target dir (`target/rustflags-<hash>`, keyed by
+    /// the flag content) so a global cfg change does not thrash the shared
+    /// target cache of the other sweeps; sweeps sharing the same flags share
+    /// the dir. Setting `RUSTFLAGS` or `CARGO_TARGET_DIR` in `env` alongside
+    /// this is rejected at parse time (one unambiguous source each).
+    #[serde(default)]
+    pub rustflags: Vec<String>,
+    /// Per-check cargo `--test <name>` target filters, ANDed with any profile
+    /// `tests` filters (they append, never replace). Scopes the test phase to
+    /// named test targets - the curated-subset knob a sim sweep needs.
+    #[serde(default)]
+    pub tests: Vec<String>,
+    /// Per-check libtest `--skip <substr>` filters, ANDed with any profile
+    /// `skip` filters.
+    #[serde(default)]
+    pub skip: Vec<String>,
+    /// Per-check libtest positional substring filters (run only tests whose
+    /// name contains one of these), ANDed with any profile `only` filters.
+    #[serde(default)]
+    pub only: Vec<String>,
 }
 
 impl CheckEntry {
@@ -638,6 +661,24 @@ impl CheckEntry {
         }
         args
     }
+}
+
+/// Stable short hex digest (FNV-1a, 64-bit) of a rustflags token list, used to
+/// name a sweep's isolated target dir. Deterministic across runs and machines
+/// so the isolated `target/rustflags-<key>` cache persists between invocations
+/// and is shared by every sweep carrying identical flags. Returns `None` for an
+/// empty flag list (no isolation).
+pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
+    if rustflags.is_empty() {
+        return None;
+    }
+    let joined = rustflags.join(" ");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in joined.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(format!("{hash:016x}"))
 }
 
 /// `[test]` section.

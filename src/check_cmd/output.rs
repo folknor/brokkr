@@ -32,6 +32,80 @@ pub(crate) fn build_test_env(
     out
 }
 
+/// The isolated target dir a sweep's `rustflags` imply, or `None` when it sets
+/// none. Keyed on the flag content (`target/rustflags-<hash>`), so every sweep
+/// carrying identical flags shares one cache and a global cfg change (e.g.
+/// `--cfg madsim`) never thrashes the plain sweeps' shared `target/`.
+fn isolated_target_dir(sweep: &ResolvedSweep, project_root: &Path) -> Option<std::path::PathBuf> {
+    crate::config::rustflags_target_key(&sweep.rustflags)
+        .map(|key| project_root.join("target").join(format!("rustflags-{key}")))
+}
+
+/// Compose a sweep's `rustflags` with any inherited flags into the env pair to
+/// export. Appends to an inherited `CARGO_ENCODED_RUSTFLAGS` (0x1f-separated)
+/// when present - cargo ignores `RUSTFLAGS` once the encoded form is set - else
+/// to `RUSTFLAGS` (space-joined, matching `make cargo-test-sim`). `None` for an
+/// empty flag list.
+fn composed_rustflags_env(rustflags: &[String]) -> Option<(String, String)> {
+    if rustflags.is_empty() {
+        return None;
+    }
+    if let Ok(existing) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        let mut parts: Vec<String> = if existing.is_empty() {
+            Vec::new()
+        } else {
+            existing.split('\u{1f}').map(str::to_owned).collect()
+        };
+        parts.extend(rustflags.iter().cloned());
+        return Some(("CARGO_ENCODED_RUSTFLAGS".into(), parts.join("\u{1f}")));
+    }
+    let mut flags = std::env::var("RUSTFLAGS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_default();
+    if !flags.is_empty() {
+        flags.push(' ');
+    }
+    flags.push_str(&rustflags.join(" "));
+    Some(("RUSTFLAGS".into(), flags))
+}
+
+/// The `CARGO_TARGET_DIR` + `RUSTFLAGS` pair a sweep's `rustflags` imply, or an
+/// empty vec when it sets none. Used by the clippy phase (which needs no
+/// `BROKKR_TEST_BIN_DIR`); the test phase gets the same knobs plus the bin dir
+/// through [`sweep_runtime_env`].
+pub(crate) fn sweep_cargo_env(sweep: &ResolvedSweep, project_root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(dir) = isolated_target_dir(sweep, project_root) {
+        out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
+    }
+    out.extend(composed_rustflags_env(&sweep.rustflags));
+    out
+}
+
+/// The full base env for one sweep's test/pre-build cargo runs: `build_test_env`
+/// computed against the sweep's *effective* target dir (its isolated
+/// `target/rustflags-<hash>` when it carries `rustflags`, else cargo's own
+/// `meta_target_dir`), plus the `CARGO_TARGET_DIR` / `RUSTFLAGS` overlay. The
+/// sweep's own `env` still overlays this via `merged_env`.
+pub(crate) fn sweep_runtime_env(
+    sweep: &ResolvedSweep,
+    project: Option<Project>,
+    meta_target_dir: &Path,
+    project_root: &Path,
+    profile_dir: &str,
+) -> Vec<(String, String)> {
+    let isolated = isolated_target_dir(sweep, project_root);
+    let effective: &Path = isolated.as_deref().unwrap_or(meta_target_dir);
+
+    let mut out = build_test_env(project, effective, profile_dir);
+    if let Some(dir) = &isolated {
+        out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
+    }
+    out.extend(composed_rustflags_env(&sweep.rustflags));
+    out
+}
+
 /// Build one binary package with the sweep's feature flags. Errors
 /// surface compile failures the same way the test phase does: filter
 /// the stderr through `cargo_filter::filter_clippy` (or pass it
@@ -978,6 +1052,66 @@ warning: z [too_many_lines]
                 .map(|(_, v)| v.as_str()),
             Some("/x/target/release"),
         );
+    }
+
+    fn rustflags_sweep() -> ResolvedSweep {
+        ResolvedSweep {
+            rustflags: vec!["--cfg".into(), "madsim".into()],
+            ..Default::default()
+        }
+    }
+
+    fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    fn rustflags_value(env: &[(String, String)]) -> Option<&str> {
+        get(env, "RUSTFLAGS").or_else(|| get(env, "CARGO_ENCODED_RUSTFLAGS"))
+    }
+
+    #[test]
+    fn sweep_runtime_env_isolates_target_dir_for_rustflags() {
+        let sweep = rustflags_sweep();
+        let key = crate::config::rustflags_target_key(&sweep.rustflags).unwrap();
+        let env = sweep_runtime_env(
+            &sweep,
+            Some(Project::Pbfhogg),
+            Path::new("/meta/target"),
+            Path::new("/proj"),
+            "debug",
+        );
+        let dir = format!("/proj/target/rustflags-{key}");
+        assert_eq!(get(&env, "CARGO_TARGET_DIR"), Some(dir.as_str()));
+        // BROKKR_TEST_BIN_DIR tracks the isolated dir, not the metadata one.
+        assert_eq!(get(&env, "BROKKR_TEST_BIN_DIR"), Some(format!("{dir}/debug").as_str()));
+        // RUSTFLAGS carries the sweep's flags (composed with any inherited).
+        let rf = rustflags_value(&env).expect("rustflags env set");
+        assert!(rf.contains("--cfg") && rf.contains("madsim"), "got: {rf}");
+    }
+
+    #[test]
+    fn sweep_runtime_env_plain_sweep_uses_metadata_target() {
+        let env = sweep_runtime_env(
+            &ResolvedSweep::default(),
+            Some(Project::Pbfhogg),
+            Path::new("/meta/target"),
+            Path::new("/proj"),
+            "debug",
+        );
+        assert_eq!(get(&env, "BROKKR_TEST_BIN_DIR"), Some("/meta/target/debug"));
+        assert!(get(&env, "CARGO_TARGET_DIR").is_none());
+        assert!(rustflags_value(&env).is_none());
+    }
+
+    #[test]
+    fn sweep_cargo_env_omits_bin_dir() {
+        let env = sweep_cargo_env(&rustflags_sweep(), Path::new("/proj"));
+        assert!(get(&env, "CARGO_TARGET_DIR").is_some());
+        assert!(rustflags_value(&env).is_some());
+        // Clippy has no test binary to spawn.
+        assert!(get(&env, "BROKKR_TEST_BIN_DIR").is_none());
+        // A plain sweep contributes nothing.
+        assert!(sweep_cargo_env(&ResolvedSweep::default(), Path::new("/proj")).is_empty());
     }
 
     fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> cargo_filter::ParsedTestResults {

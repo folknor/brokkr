@@ -684,62 +684,77 @@ fn parse_check(
 
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for entry in &entries {
-        if entry.name.trim().is_empty() {
-            return Err(DevError::Config(
-                "[[check]] entry has empty `name` - every entry needs a label \
-                 used by output and by `[test.profiles].sweeps` references."
-                    .into(),
-            ));
-        }
-        if !seen.insert(entry.name.as_str()) {
+        if !seen.insert(entry.name.as_str()) && !entry.name.trim().is_empty() {
             return Err(DevError::Config(format!(
                 "[[check]] has duplicate name '{}' - each entry must have a unique name.",
                 entry.name
             )));
         }
-        for pkg in &entry.packages {
-            if pkg.trim().is_empty() {
+        validate_check_entry(entry)?;
+    }
+    Ok(entries)
+}
+
+/// Validate one `[[check]]` entry's fields (name, package lists, env, and the
+/// rustflags/filter fields). Split out of `parse_check` to keep that function
+/// under the line ceiling; duplicate-name detection stays in the caller since
+/// it is cross-entry.
+fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
+    if entry.name.trim().is_empty() {
+        return Err(DevError::Config(
+            "[[check]] entry has empty `name` - every entry needs a label \
+             used by output and by `[test.profiles].sweeps` references."
+                .into(),
+        ));
+    }
+    for (field, values) in [
+        ("packages", &entry.packages),
+        ("test_exclude_packages", &entry.test_exclude_packages),
+        ("build_packages", &entry.build_packages),
+        ("rustflags", &entry.rustflags),
+        ("tests", &entry.tests),
+        ("skip", &entry.skip),
+        ("only", &entry.only),
+    ] {
+        for v in values {
+            if v.trim().is_empty() {
                 return Err(DevError::Config(format!(
-                    "[[check]] entry '{}' has a blank string in `packages`.",
-                    entry.name
-                )));
-            }
-        }
-        for pkg in &entry.test_exclude_packages {
-            if pkg.trim().is_empty() {
-                return Err(DevError::Config(format!(
-                    "[[check]] entry '{}' has a blank string in `test_exclude_packages`.",
-                    entry.name
-                )));
-            }
-        }
-        for pkg in &entry.build_packages {
-            if pkg.trim().is_empty() {
-                return Err(DevError::Config(format!(
-                    "[[check]] entry '{}' has a blank string in `build_packages` \
-                     (would become `cargo build --package \"\"`).",
-                    entry.name
-                )));
-            }
-        }
-        if !entry.packages.is_empty() && !entry.test_exclude_packages.is_empty() {
-            return Err(DevError::Config(format!(
-                "[[check]] entry '{}' sets both `packages` (-p scoping) and \
-                 `test_exclude_packages` (--workspace --exclude); they are \
-                 mutually exclusive test-selection modes.",
-                entry.name
-            )));
-        }
-        for key in entry.env.keys() {
-            if key.trim().is_empty() {
-                return Err(DevError::Config(format!(
-                    "[[check]] entry '{}' has a blank `env` key.",
+                    "[[check]] entry '{}' has a blank string in `{field}`.",
                     entry.name
                 )));
             }
         }
     }
-    Ok(entries)
+    if !entry.packages.is_empty() && !entry.test_exclude_packages.is_empty() {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets both `packages` (-p scoping) and \
+             `test_exclude_packages` (--workspace --exclude); they are \
+             mutually exclusive test-selection modes.",
+            entry.name
+        )));
+    }
+    for key in entry.env.keys() {
+        if key.trim().is_empty() {
+            return Err(DevError::Config(format!(
+                "[[check]] entry '{}' has a blank `env` key.",
+                entry.name
+            )));
+        }
+    }
+    if !entry.rustflags.is_empty() {
+        for banned in ["RUSTFLAGS", "CARGO_TARGET_DIR"] {
+            if entry.env.contains_key(banned) {
+                return Err(DevError::Config(format!(
+                    "[[check]] entry '{}' sets both `rustflags` and \
+                     `env.{banned}`. Use `rustflags` alone - it composes \
+                     with any inherited RUSTFLAGS and auto-isolates the \
+                     sweep's target dir (`target/rustflags-<hash>`).",
+                    entry.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse the optional `[test]` section from the root table.

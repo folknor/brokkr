@@ -53,6 +53,11 @@ pub struct ResolvedSweep {
     pub name_filters: Vec<String>,
     /// Env vars to export to the cargo subprocess.
     pub env: BTreeMap<String, String>,
+    /// Extra `rustc` flags appended to `RUSTFLAGS` for this sweep's cargo runs.
+    /// A non-empty value also auto-isolates the sweep's target dir; the
+    /// execution layer (`sweep_runtime_env`) turns these into the `RUSTFLAGS`
+    /// and `CARGO_TARGET_DIR` env pair. From the `[[check]]` entry's `rustflags`.
+    pub rustflags: Vec<String>,
 }
 
 impl ResolvedSweep {
@@ -72,17 +77,30 @@ impl ResolvedSweep {
 /// profile filters. Used by the bare `brokkr check` path when
 /// `[[check]]` is configured but no profile is selected.
 pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
+    // No profile in play, so the entry's own filters are all there is.
+    let mut libtest_args: Vec<String> = Vec::new();
+    for s in &entry.skip {
+        libtest_args.push("--skip".into());
+        libtest_args.push(s.clone());
+    }
+    let mut cargo_test_filters: Vec<String> = Vec::new();
+    for t in &entry.tests {
+        cargo_test_filters.push("--test".into());
+        cargo_test_filters.push(t.clone());
+    }
+
     ResolvedSweep {
         label: entry.name.clone(),
         cargo_feature_args: entry.cargo_feature_args(),
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
         test_exclude_packages: entry.test_exclude_packages.clone(),
-        libtest_args: Vec::new(),
-        cargo_test_filters: Vec::new(),
-        name_filters: Vec::new(),
+        libtest_args,
+        cargo_test_filters,
+        name_filters: entry.only.clone(),
         env: entry.env.clone(),
         test_threads: None,
+        rustflags: entry.rustflags.clone(),
     }
 }
 
@@ -210,16 +228,22 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
     if profile.include_ignored {
         libtest_args.push("--include-ignored".into());
     }
-    for s in &profile.skip {
+    // Profile `skip` then the entry's own `skip` - they AND (both apply), never
+    // replace, so a sweep can pin its own exclusions on top of the profile's.
+    for s in profile.skip.iter().chain(&entry.skip) {
         libtest_args.push("--skip".into());
         libtest_args.push(s.clone());
     }
 
     let mut cargo_test_filters: Vec<String> = Vec::new();
-    for t in &profile.tests {
+    for t in profile.tests.iter().chain(&entry.tests) {
         cargo_test_filters.push("--test".into());
         cargo_test_filters.push(t.clone());
     }
+
+    // Profile `only` (positional substring filters) then the entry's own.
+    let mut name_filters = profile.only.clone();
+    name_filters.extend(entry.only.iter().cloned());
 
     // Profile env is the base; the entry's own env overlays it so a
     // sweep-specific var wins on a key collision.
@@ -236,9 +260,10 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         test_exclude_packages: entry.test_exclude_packages.clone(),
         libtest_args,
         cargo_test_filters,
-        name_filters: profile.only.clone(),
+        name_filters,
         env,
         test_threads: profile.test_threads,
+        rustflags: entry.rustflags.clone(),
     }
 }
 
@@ -288,6 +313,57 @@ mod tests {
         assert!(s.libtest_args.is_empty());
         assert!(s.cargo_test_filters.is_empty());
         assert!(s.name_filters.is_empty());
+    }
+
+    #[test]
+    fn sweep_from_check_entry_carries_rustflags_and_own_filters() {
+        let entry = CheckEntry {
+            name: "sim".into(),
+            rustflags: vec!["--cfg".into(), "madsim".into()],
+            tests: vec!["reconciliation".into()],
+            skip: vec!["flaky::".into()],
+            only: vec!["virtual_time".into()],
+            ..Default::default()
+        };
+        let s = sweep_from_check_entry(&entry);
+        assert_eq!(s.rustflags, vec!["--cfg", "madsim"]);
+        assert_eq!(s.cargo_test_filters, vec!["--test", "reconciliation"]);
+        assert_eq!(s.libtest_args, vec!["--skip", "flaky::"]);
+        assert_eq!(s.name_filters, vec!["virtual_time"]);
+    }
+
+    #[test]
+    fn per_check_filters_append_after_profile_filters() {
+        // Profile filters come first, the entry's own filters append (AND
+        // semantics), and the entry's rustflags propagate onto the sweep.
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "sim"
+rustflags = ["--cfg", "madsim"]
+skip = ["entry_skip::"]
+tests = ["entry_test"]
+only = ["entry_only"]
+
+[test.profiles.sim]
+sweeps = ["sim"]
+skip = ["profile_skip::"]
+tests = ["profile_test"]
+only = ["profile_only"]
+"#,
+        );
+        let resolved = resolve(&cfg, &checks, "sim").unwrap();
+        let s = &resolved[0];
+        assert_eq!(s.rustflags, vec!["--cfg", "madsim"]);
+        assert_eq!(
+            s.libtest_args,
+            vec!["--skip", "profile_skip::", "--skip", "entry_skip::"]
+        );
+        assert_eq!(
+            s.cargo_test_filters,
+            vec!["--test", "profile_test", "--test", "entry_test"]
+        );
+        assert_eq!(s.name_filters, vec!["profile_only", "entry_only"]);
     }
 
     #[test]

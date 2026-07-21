@@ -21,6 +21,37 @@ cargo-level. The test phase also fails on a successful `cargo test` that ran
 zero tests (suites=0, or filters excluded everything) so a too-narrow
 profile/filter combo can't silently green-light a check.
 
+### Per-sweep rustflags + auto target-dir isolation
+
+A `[[check]]` entry may carry `rustflags` (a token list, e.g.
+`["--cfg", "madsim"]`), exported as `RUSTFLAGS` on that sweep's cargo processes
+only - clippy, the test-phase pre-build, and the test run - and **composed**
+with any inherited `RUSTFLAGS` (appended; `CARGO_ENCODED_RUSTFLAGS` is used
+instead when the environment already carries the encoded form, which cargo
+would otherwise let shadow `RUSTFLAGS`). brokkr sets no `RUSTFLAGS` of its own
+(`--cap-lints=warn` is a cargo `--` arg, not a rustflag), so this composes only
+with what the caller's environment carries.
+
+Because a global cfg such as `--cfg madsim` reshapes every fingerprint in the
+build graph, a sweep with non-empty `rustflags` **auto-isolates** into its own
+target dir, `target/rustflags-<hash>` (the hash keys on the flag content).
+Sharing the default `target/` would force a full recompile in both directions
+every time the sweep alternated with the plain (default/ffi/live) sweeps;
+isolation keeps the two caches apart, and `BROKKR_TEST_BIN_DIR` /
+`CARGO_TARGET_DIR` are recomputed against the isolated dir. Sweeps carrying
+*identical* flags share one dir, so several madsim legs compile the simulator
+once. Isolation is automatic - there is no `target_dir` key; and setting
+`RUSTFLAGS` or `CARGO_TARGET_DIR` in the entry's `env` alongside `rustflags` is
+a parse error.
+
+An entry may also carry its own `tests` / `skip` / `only` libtest filters,
+**ANDed** with a referencing profile's filters of the same name (they append,
+never replace). This expresses a curated per-package subset as several sibling
+`[[check]]` entries under one profile - the shape a madsim gate needs, where
+one crate runs a single named test and another runs a `virtual_time`-filtered
+set, all under the same shared isolated target dir. See the `sim` worked
+example in `docs/brokkr.toml.md`.
+
 ### Serial vs parallel test sweeps
 
 By default the test phase runs each sweep serial (`--test-threads=1`) under

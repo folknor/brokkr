@@ -131,7 +131,6 @@ pub fn run(
     let debug = resolve_debug(profile_override, dev_config.test.as_ref());
     let profile_dir = if debug { "debug" } else { "release" };
     let target_dir = build::project_info(Some(project_root))?.target_dir;
-    let project_env = check_cmd::build_test_env(Some(project), &target_dir, profile_dir);
 
     let mut reports: Vec<RunReport> = Vec::new();
     let repeat_state = RepeatState::default();
@@ -155,6 +154,12 @@ pub fn run(
             continue;
         }
 
+        // Per-sweep base env: a sweep carrying `rustflags` gets its own
+        // isolated target dir + matching BROKKR_TEST_BIN_DIR + composed
+        // RUSTFLAGS, so running a sim sweep through `brokkr test` builds under
+        // its cfg without thrashing the plain sweeps.
+        let project_env =
+            check_cmd::sweep_runtime_env(sweep, Some(project), &target_dir, project_root, profile_dir);
         // Merge profile-declared env onto the project's always-set vars.
         // Profile env wins on collision so a profile can shadow defaults
         // when it really needs to (request 3 / B3: brokkr test was

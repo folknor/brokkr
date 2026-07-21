@@ -474,6 +474,48 @@ env = { HIGH_PRECISION = "1" }
   drift you'd otherwise catch only in `git status`) so `brokkr check` is
   reproducible without exporting it by hand. Merged under a referencing
   profile's `env`, with the entry winning on a key collision.
+- `rustflags` (optional, default `[]`) - extra `rustc` flags (token list, e.g.
+  `["--cfg", "madsim"]`) exported as `RUSTFLAGS` on the sweep's cargo processes
+  only, **composed** with any inherited `RUSTFLAGS` (appended; falls back to
+  `CARGO_ENCODED_RUSTFLAGS` when the environment already carries the encoded
+  form). A non-empty value **auto-isolates** the sweep into its own target dir,
+  `target/rustflags-<hash>`, keyed by the flag content: a global cfg like
+  `--cfg madsim` reshapes every fingerprint in the build graph, so sharing the
+  default `target/` would force a full recompile in both directions on every
+  alternation with the plain sweeps. Isolation keeps the caches apart; sweeps
+  carrying *identical* flags share one dir (so several madsim legs compile the
+  simulator once). There is no key to set - isolation is automatic and derived
+  from the flags. Setting `RUSTFLAGS` or `CARGO_TARGET_DIR` in `env` alongside
+  `rustflags` is a parse error (one unambiguous source each).
+- `tests` / `skip` / `only` (optional, default `[]`) - per-`[[check]]` libtest
+  filters, **ANDed** with any referencing profile's filters of the same name
+  (they append, never replace): `tests` -> cargo `--test <name>` target
+  selectors, `skip` -> libtest `--skip <substr>`, `only` -> libtest positional
+  substring filters. This lets a curated subset (e.g. one named test per
+  package) be expressed as several sibling `[[check]]` entries under one
+  profile, rather than one sweep running a whole package set's tests.
+
+A worked example - a deterministic-simulation (madsim) gate as several sibling
+sweeps sharing one isolated madsim target dir, each running its own curated
+subset, selected together by a `sim` profile:
+
+```toml
+[[check]]
+name = "sim-common"
+packages = ["nautilus-common"]
+features = ["simulation"]
+rustflags = ["--cfg", "madsim"]
+
+[[check]]
+name = "sim-core"
+packages = ["nautilus-core"]
+features = ["simulation"]
+rustflags = ["--cfg", "madsim"]
+only = ["virtual_time"]
+
+[test.profiles.sim]
+sweeps = ["sim-common", "sim-core"]
+```
 
 The legacy `[check]` table form (with `consumer_features`) is rejected at
 parse time with a migration message - move the flags into a `[[check]]` entry.

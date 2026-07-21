@@ -182,6 +182,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_check_rejects_rustflags_with_env_rustflags() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"sim\"\nrustflags = [\"--cfg\", \"madsim\"]\n\
+             env = { RUSTFLAGS = \"--cfg madsim\" }\n",
+        )
+        .unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("rustflags") && err.contains("RUSTFLAGS"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_rustflags_with_env_target_dir() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"sim\"\nrustflags = [\"--cfg\", \"madsim\"]\n\
+             env = { CARGO_TARGET_DIR = \"target/madsim\" }\n",
+        )
+        .unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("CARGO_TARGET_DIR"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_blank_rustflag() {
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[[check]]\nname = \"sim\"\nrustflags = [\"--cfg\", \"\"]\n").unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("blank") && err.contains("rustflags"), "got: {err}");
+    }
+
+    #[test]
+    fn rustflags_target_key_is_stable_and_content_keyed() {
+        // Deterministic across calls and shared by identical flag lists;
+        // different flags key to a different dir; empty -> no isolation.
+        let a = rustflags_target_key(&["--cfg".into(), "madsim".into()]).unwrap();
+        let b = rustflags_target_key(&["--cfg".into(), "madsim".into()]).unwrap();
+        assert_eq!(a, b);
+        let c = rustflags_target_key(&["--cfg".into(), "turmoil".into()]).unwrap();
+        assert_ne!(a, c);
+        assert!(rustflags_target_key(&[]).is_none());
+    }
+
+    #[test]
     fn capture_env_matcher() {
         let patterns = vec!["PBFHOGG*".to_owned(), "MALLOC_CONF".to_owned()];
         assert!(matches_capture("PBFHOGG_USE_NEW_PATH", &patterns));
