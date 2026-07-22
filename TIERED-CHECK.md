@@ -151,23 +151,15 @@ Open items, in rough order of pull:
    uncertified default, which is deliberately outside that contract.
 3. **Features 6 and 7 are options, not commitments** - re-evaluation
    criteria in the build order below. Do not build them speculatively.
-4. **A third quarantine category is trending but undesigned**: two
-   instances (pbfhogg's over-watchdog tests, nautilus's Redis tests) of
-   healthy tests with *environmental preconditions*, where the
-   issue-countdown semantics don't fit - an `issue` that can never close
-   muddies the ledger. A `requires`-style category is the likely shape;
-   upstream availability-gating is better where possible. Design before
-   implementing, and re-read "the claim is primary" first.
-
-   Refinement from the nautilus side (2026-07-22), which corrects this
-   entry's own framing: upstream `#[ignore]` and a local `requires`
-   category are **complementary, not alternatives**. `#[ignore]` says
-   "this does not run by default"; `requires` says "this lane's claim is
-   conditional on a precondition the host may not meet". A test can need
-   both, and the accounting already has a slot for the first (ignored
-   pairs are counted, reported, not fatal). Consequence for sequencing:
-   settle the category design *before* writing the B51 upstream PR, not
-   after - the PR's shape depends on which half of the pair it is.
+4. **The third quarantine category is now designed** as **feature 12
+   (`requires`)** - read it before writing code. Headlines: capabilities
+   are *declared* per host (`[<host>] provides`), never probed; unmet
+   pairs are outside the certified floor exactly as conditional sweeps
+   are, so `complete` stays host-independent and the CI-grade statement
+   is `complete` plus `unmet: 0`; and it is its own table because the
+   staleness rule inverts against `[[quarantine]]`'s. The nautilus
+   refinement is absorbed: upstream `#[ignore]` and local `requires` are
+   complementary, so this blocks their B51 PR.
 
 Working agreements that produced this doc: mechanisms derive from the
 claim (`certifies`), never stand alone; every proposed knob gets priced
@@ -916,6 +908,95 @@ motivating case is the other kind - top-level `serial_tests::` paths that
 are textually identical across packages - so this is a live need for the
 nautilus migration, not future-proofing.
 
+### 12. `requires`: healthy tests with host preconditions
+
+**Designed, not built.** Two instances forced it (pbfhogg's over-watchdog
+tests, nautilus's `redis::msgbus::serial_tests::`), and both break the
+ledger the same way: `[[quarantine]]` demands an `issue`, and these have
+no bug to close. An `issue` that can never close turns a countdown into a
+graveyard, which is the one thing feature 4's ledger exists not to be.
+
+```toml
+# What the host can offer. Beside `features`, in the existing
+# per-hostname table - no new mechanism, no new file.
+[plantasjen]
+provides = ["redis"]
+
+# What a pair needs. Same matcher as [[quarantine]]: substring
+# `pattern`, optional `package` (feature 11).
+[[requires]]
+pattern = "redis::msgbus::"
+capability = "redis"
+reason = "needs a live Redis on 127.0.0.1:6379"
+```
+
+**Declared, never probed.** The tempting design is a probe - `command =
+"redis-cli ping"`, or a typed `tcp = "127.0.0.1:6379"` connect. Rejected,
+for three reasons that compound. A probe is a second execution surface in
+a phase whose whole safety argument is that enumeration executes no test
+code. A probe can itself hang, which is *precisely* the failure being
+fixed - eleven Redis tests hanging on an absent server is what put this
+entry in the doc. And the other motivating case cannot be probed at all:
+"this host is fast enough not to trip the watchdog" has no ping. A
+declaration covers both cases with one mechanism and no new machinery.
+
+The lie case is the design's best property, not its weakness: a host that
+claims `redis` without running one gets the tests *executed*, and they
+fail loudly. Wrong declarations self-correct on first use. A probe's
+failure mode is the opposite - a probe that wrongly reports "absent"
+silently removes tests, which is the invisible-coverage-loss this whole
+document exists to prevent.
+
+**The claim: unmet requirements are never part of the certified floor.**
+This is feature 6's resolution applied unchanged, and it must be, or
+`complete` becomes host-dependent - two `complete` greens on the same
+tree from two machines would not be comparable, the same incomparability
+the B41 argument establishes for build shapes. So: pairs carrying a
+`requires` entry are **outside the floor**. When the capability is
+present they run, and a failure fails the run like any other. When it is
+absent they are an accounted omission, reported per entry and counted in
+the trailer and the `--json` `coverage` object as `unmet`.
+
+Note what this deliberately does *not* do: it does not promote the pairs
+into the claim on a host that provides the capability. Tempting - CI
+always has Redis - but a floor that grows with the host is exactly the
+incomparability above. The honest CI-grade statement is not a fourth
+verdict word; it is `complete` **plus** `unmet: 0`, both of which the
+JSON already carries. A consumer wanting the stronger guarantee asserts
+on two fields instead of one, and no knob is added to fail on unmet
+(resisted deliberately: `certifies` is the claim spine, and a second
+place to tighten the claim is the two-mechanisms smell).
+
+**Why a separate table rather than a `[[quarantine]]` variant.** The
+matcher is identical and the temptation to reuse the table is real, but
+the *staleness rule inverts*, which forces a separate code path anyway. A
+quarantine entry matching zero non-run pairs is stale and fails the check
+- delete it, the bug closed. A `requires` entry matching zero non-run
+pairs is the **healthy** case: the host provides the capability and every
+pair ran. So `requires` staleness is evaluated against pairs matched *in
+the universe*, not pairs justified - an entry matching nothing anywhere
+is dead config and fails; an entry matching pairs that all ran is
+working. Two rules that read the same field with opposite polarity do not
+belong in one table. The confirming tell: a `[[quarantine]]` without
+`issue` is meaningless, and a `[[requires]]` with one is too.
+
+**Implementation shape**, inherited whole from feature 11: unmet pairs
+are filtered out of the lane's ran-set, not expressed as cargo selection.
+A name-only pattern can go through libtest's own `--skip`; a
+package-qualified one needs per-test invocation and therefore
+`isolation = "process"`, the same constraint and the same collision guard
+(a name matching in both a provided and an unprovided package errors
+rather than half-obeys). Where it composes with `#[ignore]` is the
+nautilus refinement in open item 4: the two are complementary, and a pair
+may legitimately be both ignored and requiring - the accounting already
+counts ignored pairs separately, so it reports whichever channel
+suppressed it, listing `unmet` first because it is the more specific
+fact.
+
+Sequencing: this blocks nautilus's B51 upstream PR, because whether that
+PR adds `#[ignore]` upstream depends on whether `requires` exists locally
+to pair with it.
+
 ## Build order
 
 1. **Free today.** Rewrite nautilus's stale `sim` comment and land the sweep as
@@ -952,6 +1033,14 @@ now is cheaper than discovering the difference later. Feature 3's evaluation
 already happened: the 2026-07-22 measurements (see the feature) shelved it -
 manual `-p` reaches loop speed (23-32s), so the inference would buy
 convenience, not capability.
+
+**Feature 12 (`requires`) is the one open build item**, sequenced after
+the core because it needs feature 11's per-binary attribution and
+filtering to exist first - which it now does. It is small: a config
+table, a per-host string list, a fourth bucket in the classifier, and
+one field in the JSON. It is committed rather than optional, because
+unlike features 6 and 7 it has two live customers and a blocked upstream
+PR behind it.
 
 Feature 10 joins the committed half, sequenced with step 5: the serial-lane
 finding means no nautilus gate can certify `complete` - regardless of how
