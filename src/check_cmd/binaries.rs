@@ -114,19 +114,74 @@ fn package_name_from_id(id: &str) -> String {
     id.split_whitespace().next().unwrap_or(id).to_owned()
 }
 
+/// The toolchain's target-libdir, for the dynamic-loader path when
+/// running test binaries directly: proc-macro test binaries link libstd
+/// dynamically (rustc dlopens proc-macro crates; they have no choice),
+/// and cargo supplies this path itself when it runs test binaries. Found
+/// the hard way on nautilus's only `proc-macro = true` crate. Run in the
+/// project root so rustup resolves the same toolchain cargo uses.
+fn toolchain_libdir(
+    project_root: &Path,
+    env_refs: &[(&str, &str)],
+) -> Result<String, DevError> {
+    let captured = output::run_captured_with_env(
+        "rustc",
+        &["--print", "target-libdir"],
+        project_root,
+        env_refs,
+    )?;
+
+    if !captured.status.success() {
+        return Err(DevError::Build(format!(
+            "rustc --print target-libdir failed: {}",
+            String::from_utf8_lossy(&captured.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&captured.stdout).trim().to_owned())
+}
+
+/// The loader path for one binary: toolchain libdir, the exe's own deps
+/// dir and its parent (matching what cargo adds when it runs binaries -
+/// the deps dirs track per-shape isolated target dirs for free), then
+/// whatever the environment already had. Loader path only - this is NOT
+/// the test-code env (CARGO_MANIFEST_DIR etc.), which stays cargo's job;
+/// listing executes no test code, so loading is the whole requirement.
+fn loader_path(libdir: &str, executable: &str) -> String {
+    let mut paths: Vec<String> = vec![libdir.to_owned()];
+
+    if let Some(deps) = Path::new(executable).parent() {
+        paths.push(deps.display().to_string());
+
+        if let Some(profile_dir) = deps.parent() {
+            paths.push(profile_dir.display().to_string());
+        }
+    }
+
+    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH")
+        && !existing.is_empty()
+    {
+        paths.push(existing);
+    }
+    paths.join(":")
+}
+
 /// Run one built test binary with `--list` plus the given libtest args.
-/// Listing executes no test code, so direct execution is env-safe.
-/// `Ok(None)` means the listing failed and was already reported.
+/// Listing executes no test code, so direct execution is env-safe once
+/// the loader path is supplied (see [`loader_path`]). `Ok(None)` means
+/// the listing failed and was already reported.
 fn binary_list(
     binary: &TestBinary,
     project_root: &Path,
     libtest_args: &[&str],
     env_refs: &[(&str, &str)],
+    libdir: &str,
 ) -> Result<Option<Vec<String>>, DevError> {
     let mut args: Vec<&str> = libtest_args.to_vec();
     args.push("--list");
-    let captured =
-        output::run_captured_with_env(&binary.executable, &args, project_root, env_refs)?;
+    let ld = loader_path(libdir, &binary.executable);
+    let mut env: Vec<(&str, &str)> = env_refs.to_vec();
+    env.push(("LD_LIBRARY_PATH", &ld));
+    let captured = output::run_captured_with_env(&binary.executable, &args, project_root, &env)?;
 
     if !captured.status.success() {
         output::error(&format!(

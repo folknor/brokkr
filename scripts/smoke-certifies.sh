@@ -24,8 +24,39 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["member"]
+members = ["member", "pm"]
 resolver = "2"
+EOF
+
+# Proc-macro test binaries link libstd dynamically (rustc dlopens
+# proc-macro crates), so enumerating one is the regression test for the
+# loader-path fix: direct-exec --list must supply the toolchain libdir.
+mkdir -p "$smoke/pm/src"
+cat > "$smoke/pm/Cargo.toml" <<'EOF'
+[package]
+name = "pm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+EOF
+
+cat > "$smoke/pm/src/lib.rs" <<'EOF'
+use proc_macro::TokenStream;
+
+#[proc_macro]
+pub fn noop(input: TokenStream) -> TokenStream {
+    input
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pm_unit_test_runs() {
+        assert_eq!(2 + 2, 4);
+    }
+}
 EOF
 
 mkdir -p "$smoke/member/src"
@@ -92,7 +123,7 @@ project = "brokkr"
 
 [[check]]
 name = "default"
-packages = ["certifies-smoke", "member"]
+packages = ["certifies-smoke", "member", "pm"]
 
 [test]
 doctests = true

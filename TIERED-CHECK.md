@@ -23,48 +23,44 @@ execution), `src/check_cmd/coverage.rs` (the accounting),
 `scripts/smoke-certifies.sh` exercises every landed mechanism end-to-end
 against a generated two-package workspace; run it after any change here.
 
+Two findings from the first qualified-skip gate run are already fixed,
+recorded here because their reasoning constrains future work:
+
+- **Proc-macro test binaries and the loader path.** Direct-exec `--list`
+  failed on the workspace's only `proc-macro = true` crate (`error while
+  loading shared libraries: libstd-….so`): proc-macro crates link libstd
+  dynamically (rustc dlopens them), and cargo supplies the loader path
+  when *it* runs binaries. Fixed in `binaries.rs` (`toolchain_libdir` +
+  `loader_path`): `rustc --print target-libdir` plus the exe's deps dir
+  and its parent onto `LD_LIBRARY_PATH`. The constraint worth keeping:
+  this is *loader* path, not test-env replication - listing executes no
+  test code. "Enumerate through cargo instead" was rejected because
+  cargo cannot address one lib unit-test harness without `-p`, and `-p`
+  changes feature unification - it can list a *different build* than the
+  lane runs (B41 aimed at enumeration). Skipping proc-macro targets was
+  rejected as a quiet universe shrink. The smoke workspace carries a
+  proc-macro member as the permanent regression test.
+- **The audit runs on failing test phases too.** Twice the gate died
+  before the audit (`"failed_phase":"test","coverage":null`), and the
+  orphan worksheet is most needed on exactly the unhealthy runs that
+  never reached it. Now: a test-phase failure still runs the audit
+  best-effort (`audit_coverage` in `phase.rs`) - its findings print,
+  the `coverage` object rides in the failed run's JSON,
+  `failed_phase` stays `"test"`, and only a failure that predates built
+  binaries skips it.
+
 Open items, in rough order of pull:
 
-1. **BUG, blocks the nautilus gate: per-binary enumeration cannot load
-   proc-macro test binaries.** Diagnosed 2026-07-22 on the first
-   qualified-skip gate run: `nautilus-persistence-macros` (the
-   workspace's only `proc-macro = true` crate) fails direct-exec `--list`
-   with `error while loading shared libraries: libstd-….so`. Proc-macro
-   crates link libstd dynamically (rustc dlopens them); cargo puts the
-   toolchain's target-libdir on the loader path when *it* runs test
-   binaries, and `binaries.rs`'s direct exec does not - enumeration
-   hand-rolled the env that execution deliberately delegates to cargo.
-   **Decided direction**: fix the loader path, precisely scoped.
-   "Enumerate through cargo instead" does not survive analysis - cargo
-   cannot address one lib unit-test harness without `-p`, and `-p`
-   changes feature unification, which can list a *different build* than
-   the lane runs (B41 aimed at enumeration). And this is not the
-   test-env replication the design warns against: listing executes no
-   test code, so the binary only has to *load*, and cargo's additions
-   for that are bounded and documented - `rustc --print target-libdir`
-   plus the exe's parent dir (the per-shape deps dir) and its parent,
-   composed onto `LD_LIBRARY_PATH` (Linux is the only supported
-   platform). Skipping proc-macro targets instead is rejected: a quiet
-   universe shrink inside the feature that exists to prevent them.
-2. **Decided, unimplemented: run the coverage audit even when the test
-   phase fails.** Twice the gate died before the audit
-   (`"failed_phase":"test","coverage":null`), and the orphan worksheet
-   is most needed on exactly the unhealthy runs that never reach it.
-   The audit needs built binaries, not green tests: run it after a test
-   failure too (skip it only when the failure was a build failure),
-   keep `failed_phase = "test"` as the reported phase, treat an audit
-   error on an already-failing run as best-effort, and carry the
-   `coverage` object in the failed run's JSON.
-3. **The nautilus migration** is mid-flight: the serial lane has
+1. **The nautilus migration** is mid-flight: the serial lane has
    `isolation = "process"` and the qualified skips working; after item 1
    lands, the remaining ledger work is tier1's ~12 named skips, doctests
    (B42), and entries/skips for the remaining service-dependent
    families. The first gate run's coverage trailer is the ground truth -
    orphan lines are the worksheet. `AGENTS.md` there should say
    `brokkr check --gate`.
-4. **Features 6 and 7 are options, not commitments** - re-evaluation
+2. **Features 6 and 7 are options, not commitments** - re-evaluation
    criteria in the build order below. Do not build them speculatively.
-5. **A third quarantine category is trending but undesigned**: two
+3. **A third quarantine category is trending but undesigned**: two
    instances (pbfhogg's over-watchdog tests, nautilus's Redis tests) of
    healthy tests with *environmental preconditions*, where the
    issue-countdown semantics don't fit - an `issue` that can never close
@@ -780,8 +776,8 @@ exactly as sketched below; the collision guard is a hard error.
 qualified skips): the serial lane reported `1 pkg-skips`, the
 infrastructure family's ~84 service-dependent hangs were gone, and the
 run failed in 3m43s instead of burning ~28 minutes of watchdog. The same
-run found the enumeration bug recorded as open item 1 in the handoff
-section - read it before touching `binaries.rs`.
+run found the proc-macro loader-path bug, fixed same day - see the
+handoff section's fixed-findings notes before touching `binaries.rs`.
 
 ```toml
 [[test.profiles.serial.skip]]

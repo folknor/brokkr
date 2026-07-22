@@ -192,15 +192,17 @@ fn enumerate_shapes(
         let Some(binaries) = test_binaries(project_root, &bare, &env_refs, commands)? else {
             return Err(DevError::Build("coverage enumeration failed".into()));
         };
+        let libdir = toolchain_libdir(project_root, &env_refs)?;
         let mut universe: BTreeSet<(String, String)> = BTreeSet::new();
         let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
         for b in &binaries {
-            let Some(all) = binary_list(b, project_root, &["--include-ignored"], &env_refs)?
+            let Some(all) =
+                binary_list(b, project_root, &["--include-ignored"], &env_refs, &libdir)?
             else {
                 return Err(DevError::Build("coverage enumeration failed".into()));
             };
             universe.extend(all.into_iter().map(|t| (b.package.clone(), t)));
-            let Some(ig) = binary_list(b, project_root, &["--ignored"], &env_refs)? else {
+            let Some(ig) = binary_list(b, project_root, &["--ignored"], &env_refs, &libdir)? else {
                 return Err(DevError::Build("coverage enumeration failed".into()));
             };
             ignored.extend(ig.into_iter().map(|t| (b.package.clone(), t)));
@@ -213,7 +215,8 @@ fn enumerate_shapes(
             libtest.extend(sweep.libtest_args.iter().map(String::as_str));
             let inc = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
             for b in lane_binaries {
-                let Some(listed) = binary_list(b, project_root, &libtest, &env_refs)? else {
+                let Some(listed) = binary_list(b, project_root, &libtest, &env_refs, &libdir)?
+                else {
                     return Err(DevError::Build("coverage enumeration failed".into()));
                 };
                 for t in listed {

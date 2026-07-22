@@ -80,19 +80,7 @@ pub(crate) fn cmd_check(
     let (certifies, skip_phases) = profile_claim(&profile_label, test_cfg);
     reject_scoped_complete(certifies, package)?;
 
-    // Header for the collapsed form: name the profile and its sweep set once,
-    // so the per-sweep lines below can carry only what differs between them.
-    if !commands && active_sweeps.len() > 1 {
-        let labels: Vec<&str> = active_sweeps.iter().map(|s| s.label.as_str()).collect();
-        let n = active_sweeps.len();
-        let joined = labels.join(", ");
-        match &profile_label {
-            Some(name) => {
-                output::run_msg(&format!("profile {name}: {n} sweeps ({joined})"));
-            }
-            None => output::run_msg(&format!("{n} sweeps ({joined})")),
-        }
-    }
+    announce_profile_header(&active_sweeps, &profile_label, commands);
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
     let mut coverage_stats: Option<CoverageStats> = None;
@@ -138,9 +126,10 @@ pub(crate) fn cmd_check(
             run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
         }
 
+        let mut test_failure: Option<DevError> = None;
         if !skip("test") {
             failing_phase = Some("test");
-            run_test_phase(
+            test_failure = run_test_phase(
                 project,
                 project_root,
                 &active_sweeps,
@@ -150,21 +139,31 @@ pub(crate) fn cmd_check(
                 commands,
                 extra_args,
                 timings.then_some(&mut collected_timings),
-            )?;
+            )
+            .err();
         }
 
         // Coverage accounting runs only under a complete claim - it is
-        // what the claim buys (TIERED-CHECK.md feature 4).
+        // what the claim buys (TIERED-CHECK.md feature 4). It runs on a
+        // failing test phase too: the audit needs built binaries, not
+        // green tests, and the orphan worksheet is most needed exactly
+        // on the unhealthy runs that would otherwise never reach it.
         if certifies == Some(Certifies::Complete) {
-            failing_phase = Some("coverage");
-            coverage_stats = Some(run_coverage_phase(
+            // Stays "test" on a failing run - the audit is best-effort there.
+            failing_phase = Some(if test_failure.is_some() { "test" } else { "coverage" });
+            coverage_stats = audit_coverage(
                 project_root,
                 &active_sweeps,
                 quarantine,
                 limit,
                 all,
                 commands,
-            )?);
+                test_failure.as_ref(),
+            )?;
+        }
+
+        if let Some(e) = test_failure {
+            return Err(e);
         }
         failing_phase = None;
         Ok(())
@@ -187,6 +186,26 @@ pub(crate) fn cmd_check(
         json,
         started,
     )
+}
+
+/// Header for the collapsed form: name the profile and its sweep set once,
+/// so the per-sweep lines below can carry only what differs between them.
+/// Printed only when more than one sweep is active.
+fn announce_profile_header(
+    active_sweeps: &[ResolvedSweep],
+    profile_label: &Option<String>,
+    commands: bool,
+) {
+    if commands || active_sweeps.len() <= 1 {
+        return;
+    }
+    let labels: Vec<&str> = active_sweeps.iter().map(|s| s.label.as_str()).collect();
+    let n = active_sweeps.len();
+    let joined = labels.join(", ");
+    match profile_label {
+        Some(name) => output::run_msg(&format!("profile {name}: {n} sweeps ({joined})")),
+        None => output::run_msg(&format!("{n} sweeps ({joined})")),
+    }
 }
 
 /// A narrowed run must never look like a full one in the log: name the
@@ -259,6 +278,37 @@ fn run_convention_phases(
         run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.all, a.commands)?;
     }
     Ok(())
+}
+
+/// Run the coverage audit for a complete claim. On a green test phase an
+/// audit failure fails the run; when the tests themselves failed, the
+/// audit is best-effort (its findings still print - they are the
+/// worksheet) and is skipped entirely when the failure predates built
+/// binaries (anything other than the test phase's own "tests failed").
+#[allow(clippy::too_many_arguments)]
+fn audit_coverage(
+    project_root: &Path,
+    sweeps: &[ResolvedSweep],
+    quarantine: &[QuarantineEntry],
+    limit: usize,
+    all: bool,
+    commands: bool,
+    test_failure: Option<&DevError>,
+) -> Result<Option<CoverageStats>, DevError> {
+    match test_failure {
+        None => Ok(Some(run_coverage_phase(
+            project_root,
+            sweeps,
+            quarantine,
+            limit,
+            all,
+            commands,
+        )?)),
+        Some(DevError::Build(msg)) if msg == "tests failed" => {
+            Ok(run_coverage_phase(project_root, sweeps, quarantine, limit, all, commands).ok())
+        }
+        Some(_) => Ok(None),
+    }
 }
 
 /// The resolved profile's claim and skip-phase list. `(None, [])` for

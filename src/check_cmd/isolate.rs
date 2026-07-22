@@ -216,6 +216,7 @@ fn enumerate_isolated(
         return Ok(None);
     };
     let binaries = filter_binaries(&binaries, &sweep.cargo_test_filters);
+    let libdir = toolchain_libdir(project_root, env_refs)?;
     let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
     let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
     filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
@@ -223,7 +224,7 @@ fn enumerate_isolated(
     let mut names: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     let mut ignored: BTreeSet<String> = BTreeSet::new();
     for b in binaries {
-        let Some(listed) = binary_list(b, project_root, &filter_args, env_refs)? else {
+        let Some(listed) = binary_list(b, project_root, &filter_args, env_refs, &libdir)? else {
             return Ok(None);
         };
         let b_ignored: BTreeSet<String> = if include_ignored {
@@ -231,7 +232,7 @@ fn enumerate_isolated(
         } else {
             let mut ignored_args = filter_args.clone();
             ignored_args.push("--ignored");
-            let Some(l) = binary_list(b, project_root, &ignored_args, env_refs)? else {
+            let Some(l) = binary_list(b, project_root, &ignored_args, env_refs, &libdir)? else {
                 return Ok(None);
             };
             l.into_iter().collect()
