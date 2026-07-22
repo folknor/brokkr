@@ -57,10 +57,21 @@ mod visibility_tests {
             Project::Piners,
             Project::Other("some-foreign-repo"),
         ] {
-            for name in ["check", "test", "env", "results", "history", "clean"] {
+            for name in ["check", "env", "results", "history", "clean"] {
                 assert!(visible_in(name, project), "`{name}` hidden in {project}");
             }
         }
+    }
+
+    /// `Except` must subtract only the projects it names - and crucially must
+    /// keep the command for `Other(_)`, which an equivalent `Only` list of the
+    /// built-ins would have dropped.
+    #[test]
+    fn except_subtracts_without_dropping_other() {
+        assert!(!visible_in("test", Project::Litehtml));
+        assert!(!visible_in("test", Project::Sluggrs));
+        assert!(visible_in("test", Project::Piners));
+        assert!(visible_in("test", Project::Other("some-foreign-repo")));
     }
 
     /// `Other("piners")` is a foreign repo that happens to call itself piners

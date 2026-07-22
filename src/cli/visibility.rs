@@ -29,6 +29,12 @@ pub(crate) enum Visibility {
     Any,
     /// Only these projects.
     Only(&'static [Project]),
+    /// Every project except these. The arm `Only` cannot express: a command
+    /// that works in the built-ins *and* in unrecognised `Other(_)` trees but
+    /// is refused by a couple of them. Listing the positives instead would
+    /// silently drop `Other(_)`, which is the common case for a foreign
+    /// checkout driven from a parent `brokkr.toml`.
+    Except(&'static [Project]),
 }
 
 /// Table of every top-level subcommand name -> the projects it applies to.
@@ -87,7 +93,13 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("passthrough", Visibility::Any),
     ("planetiler", Visibility::Only(&[Project::Elivagar])),
     ("pmtiles-inspect", Visibility::Only(&[Project::Elivagar])),
-    ("pmtiles-stats", Visibility::Any),
+    // PMTiles archives exist only in the two projects that produce or serve
+    // them: `src/pmtiles.rs`'s callers are all under `src/elivagar/` and
+    // `src/nidhogg/`.
+    (
+        "pmtiles-stats",
+        Visibility::Only(&[Project::Elivagar, Project::Nidhogg]),
+    ),
     ("pmtiles-writer", Visibility::Only(&[Project::Elivagar])),
     ("prepare", Visibility::Only(&[Project::Litehtml])),
     ("query", Visibility::Only(&[Project::Nidhogg])),
@@ -115,7 +127,12 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("sync-list", Visibility::Only(&[Project::Ratatoskr])),
     ("sync-smoke", Visibility::Only(&[Project::Ratatoskr])),
     ("tags-filter", Visibility::Only(&[Project::Pbfhogg])),
-    ("test", Visibility::Any),
+    // Refused in litehtml and sluggrs at `bootstrap.rs`'s dispatch; available
+    // everywhere else, including unrecognised `Other(_)` trees.
+    (
+        "test",
+        Visibility::Except(&[Project::Litehtml, Project::Sluggrs]),
+    ),
     ("tilegen", Visibility::Only(&[Project::Elivagar])),
     ("tilemaker", Visibility::Only(&[Project::Elivagar])),
     ("tiles", Visibility::Only(&[Project::Nidhogg])),
@@ -145,8 +162,16 @@ pub(crate) fn visible_in(name: &str, project: Project) -> bool {
     };
     match vis {
         Visibility::Any => true,
-        Visibility::Only(projects) => projects
-            .iter()
-            .any(|p| std::mem::discriminant(p) == std::mem::discriminant(&project)),
+        Visibility::Only(projects) => same_variant(projects, project),
+        Visibility::Except(projects) => !same_variant(projects, project),
     }
+}
+
+/// Whether `project` is one of `projects`, compared by enum variant rather
+/// than by `PartialEq`, so an `Other(_)` payload never matters. No table entry
+/// names `Other`, so that coarseness is unobservable.
+fn same_variant(projects: &[Project], project: Project) -> bool {
+    projects
+        .iter()
+        .any(|p| std::mem::discriminant(p) == std::mem::discriminant(&project))
 }
