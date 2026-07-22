@@ -69,6 +69,34 @@ impl CoverageOutcome {
     }
 }
 
+/// One line for the whole ledger: entry count, total pairs, and the
+/// per-issue breakdown in descending pair order. The breakdown is what
+/// carries the countdown and the growth signal that the per-entry listing
+/// used to - an issue whose pair count climbs is visible here too, without
+/// a line per entry. Issues are first-seen ordered within a tie so the
+/// line is stable run to run.
+fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> String {
+    let mut issues: Vec<(&str, usize)> = Vec::new();
+    for (entry, count) in quarantine.iter().zip(per_entry) {
+        match issues.iter_mut().find(|(i, _)| *i == entry.issue) {
+            Some((_, total)) => *total += count,
+            None => issues.push((entry.issue.as_str(), *count)),
+        }
+    }
+    issues.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let pairs: usize = per_entry.iter().sum();
+    let breakdown: Vec<String> = issues
+        .iter()
+        .map(|(issue, n)| format!("{issue} {n}"))
+        .collect();
+
+    format!(
+        "quarantine: {} entries, {pairs} pairs - {} (--all to list)",
+        quarantine.len(),
+        breakdown.join(", ")
+    )
+}
+
 fn run_coverage_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
@@ -84,39 +112,48 @@ fn run_coverage_phase(
     let report = classify(&shapes, quarantine);
     let stats = Some(report.stats);
 
-    // Per-entry pair counts, always printed: the countdown the ledger
-    // exists for, and the growth signal when a substring starts matching
-    // more than it used to.
-    for (entry, count) in quarantine.iter().zip(&report.per_entry) {
-        match (&entry.pattern, &entry.category) {
-            (Some(p), _) => {
-                let scope = entry
-                    .package
-                    .as_deref()
-                    .map(|pkg| format!("{pkg}: "))
-                    .unwrap_or_default();
-                output::run_msg(&format!(
-                    "quarantine {} ({scope}{p}): {count} pairs",
-                    entry.issue
-                ));
+    // The per-entry pair counts are the countdown the ledger exists for,
+    // and the growth signal when a substring starts matching more than it
+    // used to - but one line per entry is a page of them on a real ledger.
+    // Rolled up per issue by default, which keeps both signals; `--all`
+    // restores the entry-by-entry listing.
+    if all {
+        for (entry, count) in quarantine.iter().zip(&report.per_entry) {
+            match (&entry.pattern, &entry.category) {
+                (Some(p), _) => {
+                    let scope = entry
+                        .package
+                        .as_deref()
+                        .map(|pkg| format!("{pkg}: "))
+                        .unwrap_or_default();
+                    output::run_msg(&format!(
+                        "quarantine {} ({scope}{p}): {count} pairs",
+                        entry.issue
+                    ));
+                }
+                (None, Some(cat)) => {
+                    output::run_msg(&format!("quarantine {} (category {cat})", entry.issue));
+                }
+                (None, None) => {}
             }
-            (None, Some(cat)) => {
-                output::run_msg(&format!("quarantine {} (category {cat})", entry.issue));
-            }
-            (None, None) => {}
         }
+    } else if !quarantine.is_empty() {
+        output::run_msg(&quarantine_rollup(quarantine, &report.per_entry));
     }
     // Package-level exclusion is outside the pair audit (the binaries
     // cannot even build); say so rather than hide it.
-    for sweep in sweeps {
-        if !sweep.test_exclude_packages.is_empty() {
-            output::run_msg(&format!(
-                "coverage: sweep {} excludes {} package(s) from tests - outside \
-                 the pair audit",
-                sweep.label,
-                sweep.test_exclude_packages.len()
-            ));
-        }
+    let excluding: Vec<String> = sweeps
+        .iter()
+        .filter(|s| !s.test_exclude_packages.is_empty())
+        .map(|s| format!("{} ({})", s.label, s.test_exclude_packages.len()))
+        .collect();
+
+    if !excluding.is_empty() {
+        output::run_msg(&format!(
+            "coverage: sweeps excluding packages from tests - outside the pair \
+             audit: {}",
+            excluding.join(", ")
+        ));
     }
 
     let stale: Vec<&str> = quarantine

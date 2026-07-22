@@ -32,6 +32,7 @@ fn run_isolated_sweep(
     extra_args: &[String],
     project_env: &[(String, String)],
     raw: bool,
+    all: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
@@ -56,7 +57,7 @@ fn run_isolated_sweep(
         return Ok(false);
     };
 
-    let Some(runnable) = plan_runnable(&plan, &sweep.label) else {
+    let Some((runnable, pkg_skipped)) = plan_runnable(&plan, &sweep.label, all) else {
         return Ok(false);
     };
 
@@ -66,7 +67,9 @@ fn run_isolated_sweep(
     for name in &runnable {
         if !plan.include_ignored && plan.ignored.contains(name) {
             ignored += 1;
-            println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
+            if all {
+                println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
+            }
             continue;
         }
         let outcome = run_one_isolated_test(
@@ -76,6 +79,7 @@ fn run_isolated_sweep(
             plan.include_ignored,
             &env_refs,
             raw,
+            all,
             commands,
         )?;
         match outcome {
@@ -106,9 +110,10 @@ fn run_isolated_sweep(
         return Ok(false);
     }
     println!(
-        "[test]    {}: {} process-isolated passed{ignored_note}",
+        "[test]    {}: {} process-isolated passed{ignored_note}{}",
         sweep.label,
-        count_tests(ran)
+        count_tests(ran),
+        skip_note(pkg_skipped)
     );
     Ok(true)
 }
@@ -139,9 +144,11 @@ enum IsolatedOutcome {
     Failed,
 }
 
-/// The plan's runnable name list, announced; `None` after reporting a
-/// qualified-skip collision or a zero-runnable enumeration.
-fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<Vec<String>> {
+/// The plan's runnable name list plus the package-qualified-skipped
+/// count; `None` after reporting a qualified-skip collision or a
+/// zero-runnable enumeration. Under `--raw` the plan is announced before
+/// the run; otherwise the sweep's one summary line reports it after.
+fn plan_runnable(plan: &IsolatedPlan, label: &str, raw: bool) -> Option<(Vec<String>, usize)> {
     // A name present in both a qualified-skipped and an unskipped package
     // cannot be split by one `cargo test -- --exact` invocation: error
     // rather than half-obey the skip.
@@ -178,16 +185,23 @@ fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<Vec<String>> {
         ));
         return None;
     }
-    let skip_note = if pkg_skipped > 0 {
-        format!(", {pkg_skipped} pkg-skipped")
+    if raw {
+        println!(
+            "[test]    {label}: {}, one process each{}",
+            count_tests(runnable.len()),
+            skip_note(pkg_skipped)
+        );
+    }
+    Some((runnable, pkg_skipped))
+}
+
+/// `", N pkg-skipped"` when a package-qualified skip excluded names.
+fn skip_note(n: usize) -> String {
+    if n > 0 {
+        format!(", {n} pkg-skipped")
     } else {
         String::new()
-    };
-    println!(
-        "[test]    {label}: {}, one process each{skip_note}",
-        count_tests(runnable.len())
-    );
-    Some(runnable)
+    }
 }
 
 /// What a process-isolated sweep will run, from per-binary enumeration.
@@ -258,6 +272,7 @@ fn enumerate_isolated(
 
 /// One `cargo test <selection> -- --exact <name>` invocation: a fresh
 /// process for exactly one test, under the standard per-test watchdog.
+#[allow(clippy::too_many_arguments)]
 fn run_one_isolated_test(
     project_root: &Path,
     selection: &[String],
@@ -265,6 +280,7 @@ fn run_one_isolated_test(
     include_ignored: bool,
     env_refs: &[(&str, &str)],
     raw: bool,
+    all: bool,
     commands: bool,
 ) -> Result<IsolatedOutcome, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
@@ -330,10 +346,15 @@ fn run_one_isolated_test(
         return Ok(IsolatedOutcome::Failed);
     }
 
+    // A passing test is not news: the sweep's summary line carries the
+    // count, and a failure reports itself in full. One line per test turns
+    // a gate run into a scroll. `--all` is the way back to the roll-call.
     let elapsed = run.completed.first().map(|(_, e)| *e);
-    match elapsed {
-        Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
-        None => println!("[test]    PASS {name}"),
+    if all {
+        match elapsed {
+            Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
+            None => println!("[test]    PASS {name}"),
+        }
     }
     Ok(IsolatedOutcome::Passed(elapsed))
 }

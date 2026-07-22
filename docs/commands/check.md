@@ -103,9 +103,14 @@ identical across invocations and lets cargo provide the test env
 (`CARGO_MANIFEST_DIR`, `OUT_DIR`, …). Each invocation runs under the
 standard per-test watchdog. Every test runs even after failures (the
 per-test failure list is the point); the sweep fails if any test failed or
-if zero tests were enumerated. `#[ignore]`d names in a lane without
-`include_ignored` are reported as `SKIP` lines, visibly. Shape lines carry
-`process-isolated`.
+if zero tests were enumerated. Shape lines carry `process-isolated`.
+
+Passing tests are **not** listed one per line: a lane of a hundred serial
+tests would bury the rest of the run, and the sweep's one summary line
+(`serial/live: 52 tests process-isolated passed, 1 pkg-skipped`) carries the
+counts. Failures always report in full. `--all` restores the roll-call: the
+pre-run plan line, one `PASS <name> (<secs>)` per test, and a `SKIP` line
+per `#[ignore]`d name in a lane without `include_ignored`.
 
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
@@ -207,7 +212,14 @@ optionally package-scoped, counted per entry) or ignored at the source
 the check, listed as `shape/package/test` up to `--limit`. A pattern
 entry justifying zero pairs is stale and fails the check. Package-level
 `test_exclude_packages` is outside the pair audit (those binaries cannot
-build) and is called out in the trailer. The `--json` summary carries a
+build) and is called out in the trailer.
+
+The ledger reports as **one rolled-up line** - entry count, total pairs,
+and the per-issue pair breakdown in descending order (`quarantine: 21
+entries, 106 pairs - B51 80, B41 14, B50 10, …`). That keeps both signals
+the per-entry listing carried: the countdown, and the growth warning when a
+substring starts matching more than it used to. `--all` prints the old line
+per entry, with each entry's pattern and package scope. The `--json` summary carries a
 `coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `orphaned`.
 It is present whenever the audit got as far as classifying pairs - a run
 that fails *on* the audit (stale entries, orphans) still reports its

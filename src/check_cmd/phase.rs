@@ -135,6 +135,7 @@ pub(crate) fn cmd_check(
                 &active_sweeps,
                 package,
                 raw,
+                all,
                 doctests,
                 commands,
                 extra_args,
@@ -1756,6 +1757,7 @@ fn run_test_phase(
     sweeps: &[ResolvedSweep],
     package: Option<&str>,
     raw: bool,
+    all: bool,
     doctests: bool,
     commands: bool,
     extra_args: &[String],
@@ -1796,6 +1798,7 @@ fn run_test_phase(
                 extra_args,
                 &project_env,
                 raw,
+                all,
                 commands,
                 timings.as_deref_mut(),
             )?
