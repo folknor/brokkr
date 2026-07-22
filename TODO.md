@@ -1,5 +1,35 @@
 # TODO
 
+## Baseline: `brokkr check` on nautilus_trader (2026-07-22)
+
+The largest `[[check]]` config in use, recorded verbatim as the reference
+point for work on the check pipeline. 820-line `brokkr.toml`, 36
+`[[textlint]]` rules, 3 sweeps, 8m11s wall.
+
+```
+[build]   toolchain disabled: rust-toolchain.toml moved aside
+[run]     zero gremlins!
+[run]     style: ok
+[run]     header: ok
+[run]     textlint: ok
+[run]     manifest: ok
+[run]     script-check docs-conventions: ok
+[run]     cargo metadata --format-version 1 --no-deps (dependency rules)
+[run]     dependency rules: ok (3 rule(s), 45 workspace package(s))
+[run]     cargo clippy --keep-going --all-targets --message-format=json -- --cap-lints=warn
+[run]     cargo clippy --keep-going --all-targets --message-format=json -p nautilus-core -p nautilus-model -p nautilus-common -p nautilus-persistence --features ffi -- --cap-lints=warn
+[run]     cargo clippy --keep-going --all-targets --message-format=json -p nautilus-common -p nautilus-live --features live -- --cap-lints=warn
+[run]     cargo test --workspace --exclude nautilus-pyo3 --exclude nautilus-cli --tests -- --skip serial_tests:: --skip logging::macros:: --skip test_data_client_stale_quote_recovery_heals_without_reconnect --skip test_quote_tick --skip test_trade_tick_query --skip test_bar_query --skip test_duplicate_table_registration --skip test_register_object_store_from_uri_local_file --skip test_data_any_ --skip test_bar_roundtrip --skip test_trade_tick_roundtrip --skip test_mark_price_update_roundtrip --skip test_index_price_update_roundtrip --skip test_twap_calculates_size_schedule_with_remainder -Z unstable-options --format json (sweep: default)
+[test]    test binaries built in 105.6s; running tests (parallel)
+[warn]    cargo test: 0 errors, 1 warnings
+[warn]      warning the following packages contain code that will be rejected by a future version of Rust: redis v1.4.1
+[run]     cargo test -p nautilus-core -p nautilus-model -p nautilus-common -p nautilus-persistence --features ffi --tests -- --skip serial_tests:: --skip logging::macros:: --skip test_data_client_stale_quote_recovery_heals_without_reconnect --skip test_quote_tick --skip test_trade_tick_query --skip test_bar_query --skip test_duplicate_table_registration --skip test_register_object_store_from_uri_local_file --skip test_data_any_ --skip test_bar_roundtrip --skip test_trade_tick_roundtrip --skip test_mark_price_update_roundtrip --skip test_index_price_update_roundtrip --skip test_twap_calculates_size_schedule_with_remainder -Z unstable-options --format json (sweep: ffi)
+[test]    test binaries built in 16.8s; running tests (parallel)
+[run]     cargo test -p nautilus-common -p nautilus-live --features live --tests -- --skip serial_tests:: --skip logging::macros:: --skip test_data_client_stale_quote_recovery_heals_without_reconnect --skip test_quote_tick --skip test_trade_tick_query --skip test_bar_query --skip test_duplicate_table_registration --skip test_register_object_store_from_uri_local_file --skip test_data_any_ --skip test_bar_roundtrip --skip test_trade_tick_roundtrip --skip test_mark_price_update_roundtrip --skip test_index_price_update_roundtrip --skip test_twap_calculates_size_schedule_with_remainder -Z unstable-options --format json (sweep: live)
+[test]    test binaries built in 9.2s; running tests (parallel)
+[result]  check passed in 8m11s
+```
+
 ## Structural debt (last audited 2026-04-17.)
 
 The high-impact items have been worked off. What's listed below is

@@ -58,11 +58,26 @@ pub(crate) fn cmd_check(
     all: bool,
     fix_gremlins: bool,
     timings: bool,
+    commands: bool,
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
     let active_sweeps =
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
+
+    // Header for the collapsed form: name the profile and its sweep set once,
+    // so the per-sweep lines below can carry only what differs between them.
+    if !commands && active_sweeps.len() > 1 {
+        let labels: Vec<&str> = active_sweeps.iter().map(|s| s.label.as_str()).collect();
+        let n = active_sweeps.len();
+        let joined = labels.join(", ");
+        match effective_profile_name(test_cfg, profile_name)? {
+            Some(name) => {
+                output::run_msg(&format!("profile {name}: {n} sweeps ({joined})"));
+            }
+            None => output::run_msg(&format!("{n} sweeps ({joined})")),
+        }
+    }
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
     // Doctests are excluded by default (nextest, hence CI, never runs them);
@@ -81,7 +96,7 @@ pub(crate) fn cmd_check(
         run_manifest(project_root, manifest_cfg, limit, all)?;
         run_script_checks(project_root, script_checks)?;
         run_dependency_rules(project_root, dependency_rules, limit, all)?;
-        run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all)?;
+        run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
         run_test_phase(
             project,
             project_root,
@@ -89,6 +104,7 @@ pub(crate) fn cmd_check(
             package,
             raw,
             doctests,
+            commands,
             extra_args,
             timings.then_some(&mut collected_timings),
         )
@@ -650,6 +666,7 @@ fn run_clippy_phase(
     raw: bool,
     limit: usize,
     all: bool,
+    commands: bool,
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
 
@@ -691,7 +708,7 @@ fn run_clippy_phase(
         args.push("--".into());
         args.push("--cap-lints=warn".into());
 
-        output::run_msg(&format!("cargo {}", args.join(" ")));
+        output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands));
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         // Apply the sweep's env to the clippy build too, so a build-affecting
@@ -713,6 +730,7 @@ fn run_clippy_phase(
             output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
         results.push(SweepResult {
             label: sweep.label.clone(),
+            command: format!("cargo {}", args.join(" ")),
             stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
             success: captured.status.success(),
@@ -733,6 +751,16 @@ fn run_clippy_phase(
     if !failed {
         // Clean: cap-lints leaves nothing to report when there are no lints.
         return Ok(());
+    }
+
+    // Collapsed form suppressed the command on the way in; a failing sweep is
+    // exactly where the copy-pasteable line earns its place.
+    if !commands {
+        for r in results.iter().filter(|r| {
+            !r.success || !cargo_json::parse_cargo_diagnostics(&r.stdout).is_empty()
+        }) {
+            output::error(&format!("failing command: {}", r.command));
+        }
     }
 
     if raw {
@@ -786,8 +814,18 @@ pub(crate) fn cmd_clippy(
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
     // sweep-label tags. `package: None` because ad-hoc `-p` is already in
     // sweep.packages (emitted as `-p <pkg>`); the extra `--package` slot stays
-    // unused.
-    match run_clippy_phase(project_root, std::slice::from_ref(&sweep), None, raw, limit, all) {
+    // unused. `commands = true`: this is the *investigative* runner, invoked to
+    // find out what a given target shape actually does, so the full cargo line
+    // is the point - unlike `brokkr check`, where it is per-run noise.
+    match run_clippy_phase(
+        project_root,
+        std::slice::from_ref(&sweep),
+        None,
+        raw,
+        limit,
+        all,
+        true,
+    ) {
         Ok(()) => {
             output::result_msg(&format!("clippy clean in {}", fmt_wall(started.elapsed())));
             Ok(())
@@ -944,6 +982,9 @@ fn raw_clippy_text(r: &SweepResult) -> String {
 
 struct SweepResult {
     label: String,
+    /// The full `cargo clippy ...` line, kept so a failing sweep can reprint it
+    /// even when the collapsed (default) log form suppressed it on the way in.
+    command: String,
     stdout: String,
     stderr: String,
     success: bool,
@@ -1270,6 +1311,7 @@ fn run_test_phase(
     package: Option<&str>,
     raw: bool,
     doctests: bool,
+    commands: bool,
     extra_args: &[String],
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<(), DevError> {
@@ -1288,7 +1330,7 @@ fn run_test_phase(
         // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps.
         let project_env = sweep_runtime_env(sweep, project, &target_dir, project_root, "debug");
         for pkg in &sweep.build_packages {
-            run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw)?;
+            run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, commands)?;
         }
 
         let success = run_one_test_sweep(
@@ -1300,6 +1342,7 @@ fn run_test_phase(
             raw,
             doctests,
             multi,
+            commands,
             timings.as_deref_mut(),
         )?;
         if !success {

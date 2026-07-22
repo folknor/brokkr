@@ -123,6 +123,8 @@ Flags:
 - `--limit N` - max diagnostics shown per phase, default 20
 - `--all` - show everything, no cap
 - `--fix-gremlins` - rewrite banned chars in place before scan
+- `--commands` - log each sweep's full cargo command instead of the collapsed
+  form (see below)
 
 Output:
 - Default text mode: each diagnostic becomes one line, compilation noise
@@ -132,6 +134,51 @@ Output:
   one cargo invocation. (There is no machine-readable `--json` output mode; it
   was removed. For an investigative single-config clippy run outside the check
   gate, see `docs/commands/clippy.md`.)
+
+### Per-sweep log lines (collapsed by default)
+
+Each sweep announces itself as `<phase> <name>: <shape>` rather than its full
+cargo command:
+
+```
+[run]     profile tier1: 3 sweeps (default, ffi, live)
+[run]     clippy default: workspace
+[run]     clippy ffi: 4 pkgs, +ffi
+[run]     clippy live: 2 pkgs, +live
+[run]     test default: workspace -2 pkgs, 14 skips, parallel
+```
+
+The full command is ~90% profile boilerplate repeated identically per sweep -
+on nautilus_trader the three `cargo test` lines are ~1,100 chars each, of which
+~900 are the same 14 `--skip` flags, because those come from the *profile*, not
+the sweep. What actually varies is package scope and features, which is what
+the shape carries. The profile header names the sweep set once; it is printed
+only when more than one sweep is active.
+
+The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
+
+- package scope - `workspace`, `N pkgs` (a `packages` list, emitted as `-p`),
+  or `workspace -N pkgs` (`test_exclude_packages`; test phase only, since
+  clippy stays workspace-wide).
+- features - read back out of the flattened argv, so it cannot drift from what
+  cargo is handed: `all-features`, `no-default`, `+ffi,live`. A fragment that
+  merely restates the sweep's name is dropped (the legacy no-`[[check]]` path
+  names its synthesized sweep `all-features`).
+- `rustflags <flags> (isolated target)` - always shown, because `rustflags`
+  silently redirects the sweep to `target/rustflags-<hash>`, and an unexplained
+  full recompile is the one thing a collapsed log must not hide.
+- test-phase bits - `N skips`, `include-ignored`, any `--test <name>` filters,
+  and the lane (`serial` under the per-test watchdog, `parallel` otherwise).
+
+**Failures always reprint the full command**, as `[error] failing command:
+cargo …` - when a sweep fails, the copy-pasteable line is the most useful thing
+in the output, so the collapsing applies to success only. This covers clippy
+failures, test failures, hung tests, parallel-sweep timeouts, zero-test runs,
+and `build_packages` pre-build failures.
+
+`--commands` restores the full command on every line. `brokkr clippy` is
+unaffected and always prints its command: it is the investigative runner,
+invoked precisely to find out what a given target shape does.
 
 The clippy phase always invokes cargo with `--message-format=json` and ingests
 via `cargo_json::parse_cargo_diagnostics` regardless of `--raw` - the text

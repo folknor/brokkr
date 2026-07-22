@@ -125,6 +125,14 @@ Examples:
         #[arg(long)]
         timings: bool,
 
+        /// Log the full `cargo clippy` / `cargo test` command for every
+        /// sweep instead of the collapsed `<phase> <name>: <shape>` form.
+        /// The default collapses because the command is mostly profile
+        /// boilerplate repeated identically per sweep; a *failing* sweep
+        /// reprints its command either way.
+        #[arg(long)]
+        commands: bool,
+
         /// Raw arguments forwarded to the test phase. Tokens before a
         /// literal `--` are passed to `cargo test` (before cargo's own
         /// `--`); tokens after the second `--` are passed to libtest

@@ -106,6 +106,117 @@ pub(crate) fn sweep_runtime_env(
     out
 }
 
+/// The feature-shape fragment of [`describe_sweep`], read back out of the
+/// already-flattened `cargo_feature_args` so it can never drift from what
+/// cargo is actually handed.
+fn describe_features(args: &[String]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--all-features" => parts.push("all-features".into()),
+            "--no-default-features" => parts.push("no-default".into()),
+            "--features" => {
+                if let Some(list) = it.next() {
+                    parts.push(format!("+{list}"));
+                }
+            }
+            other => {
+                if let Some(list) = other.strip_prefix("--features=") {
+                    parts.push(format!("+{list}"));
+                }
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// One-line human shape of a sweep: what distinguishes it from its siblings -
+/// package scope, feature shape, rustflags - plus the test-phase-only bits
+/// (libtest filters, thread policy) when `for_test`.
+///
+/// This is the routine success form. The full cargo command is ~90% profile
+/// boilerplate repeated identically across every sweep (a 14-entry `--skip`
+/// list dwarfs the `-p`/`--features` part that actually varies), so it is
+/// reprinted verbatim only when a sweep fails, or on demand via
+/// `brokkr check --commands`. `rustflags` is always surfaced here even though
+/// it is a single config field: it silently redirects the sweep to an isolated
+/// target dir, and an unexplained full recompile is exactly the thing a
+/// collapsed log must not hide.
+pub(crate) fn describe_sweep(sweep: &ResolvedSweep, for_test: bool) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if !sweep.packages.is_empty() {
+        parts.push(format!("{} pkgs", sweep.packages.len()));
+    } else if for_test && !sweep.test_exclude_packages.is_empty() {
+        parts.push(format!(
+            "workspace -{} pkgs",
+            sweep.test_exclude_packages.len()
+        ));
+    } else {
+        parts.push("workspace".into());
+    }
+
+    // Suppress a feature fragment that just restates the label: the legacy
+    // no-`[[check]]` path synthesizes a sweep literally named `all-features`,
+    // and `clippy all-features: workspace, all-features` is noise.
+    parts.extend(
+        describe_features(&sweep.cargo_feature_args).filter(|feat| *feat != sweep.label),
+    );
+
+    if !sweep.rustflags.is_empty() {
+        parts.push(format!(
+            "rustflags {} (isolated target)",
+            sweep.rustflags.join(" ")
+        ));
+    }
+
+    if for_test {
+        let skips = sweep.libtest_args.iter().filter(|a| *a == "--skip").count();
+        if skips > 0 {
+            parts.push(format!("{skips} skips"));
+        }
+        if sweep.libtest_args.iter().any(|a| a == "--include-ignored") {
+            parts.push("include-ignored".into());
+        }
+        for filter in &sweep.cargo_test_filters {
+            parts.push(filter.clone());
+        }
+        for name in &sweep.name_filters {
+            parts.push(format!("filter {name}"));
+        }
+        parts.push(
+            if matches!(sweep.test_threads, Some(n) if n != 1) {
+                "parallel"
+            } else {
+                "serial"
+            }
+            .into(),
+        );
+    }
+
+    parts.join(", ")
+}
+
+/// The log line announcing one sweep's cargo run: the full command under
+/// `--commands`, else `<phase> <label>: <shape>`.
+pub(crate) fn sweep_run_line(
+    phase: &str,
+    sweep: &ResolvedSweep,
+    args: &[String],
+    for_test: bool,
+    commands: bool,
+) -> String {
+    if commands {
+        return format!("cargo {}", args.join(" "));
+    }
+    format!(
+        "{phase} {}: {}",
+        sweep.label,
+        describe_sweep(sweep, for_test)
+    )
+}
+
 /// Build one binary package with the sweep's feature flags. Errors
 /// surface compile failures the same way the test phase does: filter
 /// the stderr through `cargo_filter::filter_clippy` (or pass it
@@ -116,6 +227,7 @@ fn run_sweep_pre_build(
     package: &str,
     project_env: &[(String, String)],
     raw: bool,
+    commands: bool,
 ) -> Result<(), DevError> {
     let mut args: Vec<String> = vec!["build".into()];
     for f in &sweep.cargo_feature_args {
@@ -124,11 +236,15 @@ fn run_sweep_pre_build(
     args.push("--package".into());
     args.push(package.into());
 
-    output::run_msg(&format!(
-        "cargo {} (sweep build: {})",
-        args.join(" "),
-        sweep.label
-    ));
+    if commands {
+        output::run_msg(&format!(
+            "cargo {} (sweep build: {})",
+            args.join(" "),
+            sweep.label
+        ));
+    } else {
+        output::run_msg(&format!("build {package} (sweep: {})", sweep.label));
+    }
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_full = merged_env(&sweep.env, project_env);
@@ -143,6 +259,9 @@ fn run_sweep_pre_build(
     }
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
+    if !commands {
+        output::error(&format!("failing command: cargo {}", args.join(" ")));
+    }
     if raw {
         if !stderr.is_empty() {
             output::error(&stderr);
@@ -191,6 +310,7 @@ fn run_one_test_sweep(
     raw: bool,
     doctests: bool,
     multi: bool,
+    commands: bool,
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
@@ -292,12 +412,17 @@ fn run_one_test_sweep(
         }
     }
 
-    let line = if multi {
+    let line = if commands && multi {
         format!("cargo {} (sweep: {})", args.join(" "), sweep.label)
     } else {
-        format!("cargo {}", args.join(" "))
+        sweep_run_line("test", sweep, &args, true, commands)
     };
     output::run_msg(&line);
+
+    // Reprinted on any failure below: when a sweep fails, the copy-pasteable
+    // cargo line is the most useful thing in the output, so collapsing applies
+    // to success only.
+    let full_command = format!("failing command: cargo {}", args.join(" "));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_full = merged_env(&sweep.env, project_env);
@@ -371,15 +496,24 @@ fn run_one_test_sweep(
             sweep.label,
             test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
         ));
+        if !commands {
+            output::error(&full_command);
+        }
         return Ok(false);
     }
 
     if let Some(hung) = hung {
         output::error(&test_runner::format_hung_test(&hung, project_root));
+        if !commands {
+            output::error(&full_command);
+        }
         return Ok(false);
     }
 
     if !captured.status.success() {
+        if !commands {
+            output::error(&full_command);
+        }
         if raw {
             if !stderr.is_empty() {
                 output::error(&stderr);
@@ -427,6 +561,9 @@ fn run_one_test_sweep(
              a profile/filter combo collected no work; treat as a wrong-run.",
             parsed.suites, parsed.filtered_out,
         ));
+        if !commands {
+            output::error(&full_command);
+        }
         return Ok(false);
     }
     Ok(true)
@@ -1166,5 +1303,150 @@ warning: z [too_many_lines]
         let (cargo, libtest) = split_extra_args(&extra);
         assert!(cargo.is_empty());
         assert!(libtest.is_empty());
+    }
+
+    fn sweep(label: &str) -> ResolvedSweep {
+        ResolvedSweep {
+            label: label.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn describe_sweep_reports_package_scope() {
+        // Whole workspace.
+        assert_eq!(describe_sweep(&sweep("default"), false), "workspace");
+
+        // `-p` scoped.
+        let scoped = ResolvedSweep {
+            packages: s(&["nautilus-core", "nautilus-model"]),
+            ..sweep("ffi")
+        };
+        assert_eq!(describe_sweep(&scoped, false), "2 pkgs");
+
+        // `--workspace --exclude` is a test-phase-only shape; the clippy line
+        // stays workspace-wide, matching what actually runs.
+        let excluded = ResolvedSweep {
+            test_exclude_packages: s(&["nautilus-pyo3", "nautilus-cli"]),
+            ..sweep("default")
+        };
+        assert_eq!(describe_sweep(&excluded, false), "workspace");
+        assert_eq!(
+            describe_sweep(&excluded, true),
+            "workspace -2 pkgs, serial"
+        );
+    }
+
+    #[test]
+    fn describe_sweep_reads_features_back_out_of_argv() {
+        let all = ResolvedSweep {
+            cargo_feature_args: s(&["--all-features"]),
+            ..sweep("all")
+        };
+        assert_eq!(describe_sweep(&all, false), "workspace, all-features");
+
+        let consumer = ResolvedSweep {
+            cargo_feature_args: s(&["--no-default-features", "--features", "commands"]),
+            ..sweep("consumer")
+        };
+        assert_eq!(
+            describe_sweep(&consumer, false),
+            "workspace, no-default +commands"
+        );
+
+        // The `--features=x,y` spelling is equivalent.
+        let joined = ResolvedSweep {
+            cargo_feature_args: s(&["--features=ffi,live"]),
+            ..sweep("j")
+        };
+        assert_eq!(describe_sweep(&joined, false), "workspace, +ffi,live");
+    }
+
+    #[test]
+    fn describe_sweep_does_not_restate_the_label() {
+        // The legacy no-`[[check]]` path names its synthesized sweep after the
+        // feature shape, which would otherwise print twice on one line.
+        let legacy = ResolvedSweep {
+            cargo_feature_args: s(&["--all-features"]),
+            ..sweep("all-features")
+        };
+        assert_eq!(describe_sweep(&legacy, false), "workspace");
+        assert_eq!(
+            sweep_run_line("clippy", &legacy, &[], false, false),
+            "clippy all-features: workspace"
+        );
+    }
+
+    #[test]
+    fn describe_sweep_surfaces_rustflags_and_isolation() {
+        // rustflags silently redirect the sweep to its own target dir; the
+        // collapsed form must not hide the cause of a full recompile.
+        let sim = ResolvedSweep {
+            rustflags: s(&["--cfg", "madsim"]),
+            ..sweep("sim")
+        };
+        assert!(describe_sweep(&sim, false).contains("rustflags --cfg madsim"));
+        assert!(describe_sweep(&sim, false).contains("isolated target"));
+    }
+
+    #[test]
+    fn describe_sweep_summarises_libtest_filters_by_count() {
+        // The 14-skip list is the bulk of nautilus's command line and is
+        // identical across its three sweeps - a count is the whole signal.
+        let mut libtest_args = Vec::new();
+        for name in ["a", "b", "c"] {
+            libtest_args.push("--skip".to_owned());
+            libtest_args.push(name.to_owned());
+        }
+        libtest_args.push("--include-ignored".to_owned());
+        let tier = ResolvedSweep {
+            libtest_args,
+            test_threads: Some(0),
+            ..sweep("tier1")
+        };
+        assert_eq!(
+            describe_sweep(&tier, true),
+            "workspace, 3 skips, include-ignored, parallel"
+        );
+        // Clippy never takes libtest filters, so its line omits them.
+        assert_eq!(describe_sweep(&tier, false), "workspace");
+    }
+
+    #[test]
+    fn describe_sweep_thread_policy_tracks_watchdog_lane() {
+        // None and Some(1) both mean the serial per-test watchdog lane.
+        for threads in [None, Some(1)] {
+            let serial = ResolvedSweep {
+                test_threads: threads,
+                ..sweep("serial")
+            };
+            assert_eq!(describe_sweep(&serial, true), "workspace, serial");
+        }
+        for threads in [Some(0), Some(4)] {
+            let parallel = ResolvedSweep {
+                test_threads: threads,
+                ..sweep("par")
+            };
+            assert_eq!(describe_sweep(&parallel, true), "workspace, parallel");
+        }
+    }
+
+    #[test]
+    fn sweep_run_line_switches_on_commands_flag() {
+        let ffi = ResolvedSweep {
+            packages: s(&["nautilus-core"]),
+            cargo_feature_args: s(&["--features", "ffi"]),
+            ..sweep("ffi")
+        };
+        let args = s(&["clippy", "-p", "nautilus-core", "--features", "ffi"]);
+
+        assert_eq!(
+            sweep_run_line("clippy", &ffi, &args, false, false),
+            "clippy ffi: 1 pkgs, +ffi"
+        );
+        assert_eq!(
+            sweep_run_line("clippy", &ffi, &args, true, true),
+            "cargo clippy -p nautilus-core --features ffi"
+        );
     }
 }
