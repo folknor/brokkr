@@ -120,6 +120,8 @@ Flags:
 - `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
   `--features` / `--no-default-features`
 - `--raw` - unfiltered cargo output (terminal-style rendering)
+- `--json` - append one machine-readable summary line (a JSON object) as the
+  last line of stdout; human output is unchanged
 - `--limit N` - max diagnostics shown per phase, default 20
 - `--all` - show everything, no cap
 - `--fix-gremlins` - rewrite banned chars in place before scan
@@ -131,9 +133,23 @@ Output:
   stripped, passing tests aggregated.
 - `--raw` reconstructs cargo's terminal-style output by concatenating each
   diagnostic's `rendered` field plus the cargo status messages on stderr -
-  one cargo invocation. (There is no machine-readable `--json` output mode; it
-  was removed. For an investigative single-config clippy run outside the check
-  gate, see `docs/commands/clippy.md`.)
+  one cargo invocation.
+- `--json` appends one summary object as the **last line of stdout**, leaving
+  the human output untouched (the old NDJSON per-event mode is gone; this is
+  the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
+  1), `certifies` (always `null` until profile certification exists),
+  `verdict` (`"passed"`/`"failed"`), `profile` (the profile that drove sweep
+  selection; `null` for ad-hoc and legacy runs), `sweeps` (labels),
+  `failed_phase` (`null` on success, else one of `gremlins`/`style`/`header`/
+  `textlint`/`manifest`/`script_check`/`dependency_rules`/`clippy`/`test`),
+  `elapsed_ms`. The object is versioned and additive: fields are only ever
+  added under `schema: 1`, consumers must tolerate unknown fields, and a bump
+  is reserved for renames or semantic changes. A config error before the
+  phases run (bad profile name, conflicting flags) emits no summary -
+  resolve-time errors are not run verdicts. Exit codes remain 0 (pass) / 1
+  (fail); 10 is reserved for a future partial pass under `certifies` and
+  verified free in check's namespace (2 = clap usage errors, 130 =
+  interrupt).
 
 ### Per-sweep log lines (collapsed by default)
 

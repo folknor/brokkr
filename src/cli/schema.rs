@@ -100,6 +100,15 @@ Examples:
         #[arg(long)]
         raw: bool,
 
+        /// Append one machine-readable summary line (a JSON object) as
+        /// the last line of stdout: `schema`, `certifies`, `verdict`,
+        /// `profile`, `sweeps`, `failed_phase`, `elapsed_ms`. The object
+        /// is versioned and additive (`schema: 1`) - consumers must
+        /// tolerate unknown fields. Human output is unchanged; parse the
+        /// final stdout line.
+        #[arg(long)]
+        json: bool,
+
         /// Maximum diagnostics printed per phase (gremlins, clippy). Ignored
         /// with `--raw` or `--all`.
         #[arg(long, default_value_t = 20)]

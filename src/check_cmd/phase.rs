@@ -54,6 +54,7 @@ pub(crate) fn cmd_check(
     package: Option<&str>,
     profile_name: Option<&str>,
     raw: bool,
+    json: bool,
     limit: usize,
     all: bool,
     fix_gremlins: bool,
@@ -64,6 +65,14 @@ pub(crate) fn cmd_check(
     let started = std::time::Instant::now();
     let active_sweeps =
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
+    // The profile that drove sweep selection, if any. Ad-hoc CLI features
+    // bypass profiles entirely (priority 1 in decide_active_sweeps), so an
+    // ad-hoc run reports no profile even when [test].default_profile is set.
+    let profile_label = if features.is_empty() && !no_default_features {
+        effective_profile_name(test_cfg, profile_name)?
+    } else {
+        None
+    };
 
     // Header for the collapsed form: name the profile and its sweep set once,
     // so the per-sweep lines below can carry only what differs between them.
@@ -71,7 +80,7 @@ pub(crate) fn cmd_check(
         let labels: Vec<&str> = active_sweeps.iter().map(|s| s.label.as_str()).collect();
         let n = active_sweeps.len();
         let joined = labels.join(", ");
-        match effective_profile_name(test_cfg, profile_name)? {
+        match &profile_label {
             Some(name) => {
                 output::run_msg(&format!("profile {name}: {n} sweeps ({joined})"));
             }
@@ -88,15 +97,29 @@ pub(crate) fn cmd_check(
     // Run every phase behind one closure so a failure from *any* of them
     // (not just the test phase) still funnels through the summary line below,
     // reporting the same total wall time a passing run does.
+    //
+    // `failing_phase` names the phase about to run and is cleared on
+    // success, so after an Err it names the phase that failed - the one
+    // per-phase datum the `--json` summary carries.
+    let mut failing_phase: Option<&'static str> = None;
     let mut run_phases = || -> Result<(), DevError> {
+        failing_phase = Some("gremlins");
         run_gremlins(project_root, gremlins_cfg, limit, all, fix_gremlins)?;
+        failing_phase = Some("style");
         run_style(project_root, style_cfg, gremlins_cfg, limit, all)?;
+        failing_phase = Some("header");
         run_header(project_root, header_cfg, limit, all)?;
+        failing_phase = Some("textlint");
         run_textlint(project_root, textlint_rules, limit, all)?;
+        failing_phase = Some("manifest");
         run_manifest(project_root, manifest_cfg, limit, all)?;
+        failing_phase = Some("script_check");
         run_script_checks(project_root, script_checks)?;
+        failing_phase = Some("dependency_rules");
         run_dependency_rules(project_root, dependency_rules, limit, all, commands)?;
+        failing_phase = Some("clippy");
         run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
+        failing_phase = Some("test");
         run_test_phase(
             project,
             project_root,
@@ -107,7 +130,9 @@ pub(crate) fn cmd_check(
             commands,
             extra_args,
             timings.then_some(&mut collected_timings),
-        )
+        )?;
+        failing_phase = None;
+        Ok(())
     };
     let outcome = run_phases();
 
@@ -118,6 +143,9 @@ pub(crate) fn cmd_check(
     match outcome {
         Ok(()) => {
             output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
+            if json {
+                emit_json_summary("passed", &profile_label, &active_sweeps, None, started.elapsed());
+            }
             Ok(())
         }
         Err(_) => {
@@ -125,8 +153,56 @@ pub(crate) fn cmd_check(
             // symmetric summary line and exit non-zero without main echoing a
             // second, timing-less `[error]` line.
             output::error(&format!("check failed in {}", fmt_wall(started.elapsed())));
+            if json {
+                emit_json_summary(
+                    "failed",
+                    &profile_label,
+                    &active_sweeps,
+                    failing_phase,
+                    started.elapsed(),
+                );
+            }
             Err(DevError::ExitCode(1))
         }
+    }
+}
+
+/// The `--json` summary object: one line, last on stdout (TIERED-CHECK.md,
+/// feature 8). Versioned and additive: fields are only ever added under
+/// `schema: 1`, consumers must tolerate unknown ones, and a bump is
+/// reserved for renames or semantic changes. `certifies` stays `null`
+/// until profile certification exists; the exit code stays 0/1, with 10
+/// reserved for a future partial pass.
+#[derive(serde::Serialize)]
+struct CheckSummary<'a> {
+    schema: u32,
+    certifies: Option<&'a str>,
+    verdict: &'a str,
+    profile: Option<&'a str>,
+    sweeps: Vec<&'a str>,
+    failed_phase: Option<&'a str>,
+    elapsed_ms: u64,
+}
+
+fn emit_json_summary(
+    verdict: &str,
+    profile: &Option<String>,
+    sweeps: &[ResolvedSweep],
+    failed_phase: Option<&'static str>,
+    elapsed: std::time::Duration,
+) {
+    let summary = CheckSummary {
+        schema: 1,
+        certifies: None,
+        verdict,
+        profile: profile.as_deref(),
+        sweeps: sweeps.iter().map(|s| s.label.as_str()).collect(),
+        failed_phase,
+        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+    };
+    match serde_json::to_string(&summary) {
+        Ok(line) => println!("{line}"),
+        Err(e) => output::error(&format!("--json summary serialization failed: {e}")),
     }
 }
 
@@ -1549,3 +1625,47 @@ mod clippy_sweep_tests {
     }
 }
 
+
+#[cfg(test)]
+mod json_summary_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::CheckSummary;
+
+    #[test]
+    fn summary_carries_schema_and_null_certifies() {
+        let s = CheckSummary {
+            schema: 1,
+            certifies: None,
+            verdict: "passed",
+            profile: Some("tier1"),
+            sweeps: vec!["default", "ffi"],
+            failed_phase: None,
+            elapsed_ms: 1234,
+        };
+        let line = serde_json::to_string(&s).unwrap();
+        // The two contract-critical fields: the version consumers key on,
+        // and `certifies` present-but-null until certification exists.
+        assert!(line.contains("\"schema\":1"), "{line}");
+        assert!(line.contains("\"certifies\":null"), "{line}");
+        assert!(line.contains("\"verdict\":\"passed\""), "{line}");
+        assert!(line.contains("\"sweeps\":[\"default\",\"ffi\"]"), "{line}");
+    }
+
+    #[test]
+    fn failed_summary_names_the_phase() {
+        let s = CheckSummary {
+            schema: 1,
+            certifies: None,
+            verdict: "failed",
+            profile: None,
+            sweeps: vec!["all-features"],
+            failed_phase: Some("clippy"),
+            elapsed_ms: 10,
+        };
+        let line = serde_json::to_string(&s).unwrap();
+        assert!(line.contains("\"verdict\":\"failed\""), "{line}");
+        assert!(line.contains("\"failed_phase\":\"clippy\""), "{line}");
+        assert!(line.contains("\"profile\":null"), "{line}");
+    }
+}
