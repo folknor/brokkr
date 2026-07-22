@@ -1010,11 +1010,18 @@ fn validate_check_against_test(
                 }
             }
         }
+        // A `lanes` profile is a list of runs, not a merged run: it carries
+        // no run-shaping fields of its own, its lanes exist, don't nest,
+        // and don't declare claims of their own.
+        if let Some(lanes) = &def.lanes {
+            validate_lanes_profile(profile_name, def, lanes, t, check)?;
+        }
         // Interim rule until coverage accounting (TIERED-CHECK.md feature 4)
         // lands: a "complete" profile may not narrow the test universe at
         // all. Crude, but it keeps `complete` honest before the accounting
-        // can audit finer-grained skips.
-        if def.certifies == Some(Certifies::Complete) {
+        // can audit finer-grained skips. A lanes profile was already
+        // checked per-lane above.
+        if def.certifies == Some(Certifies::Complete) && def.lanes.is_none() {
             validate_complete_profile(profile_name, def, t, check)?;
         }
         let Some(sweeps) = &def.sweeps else {
@@ -1032,6 +1039,73 @@ fn validate_check_against_test(
     Ok(())
 }
 
+/// Composition rules for a `lanes` profile (TIERED-CHECK.md feature 2),
+/// fixed at load time so implementation details never decide them: no
+/// run-shaping fields beside `lanes`, every lane exists, lanes don't nest,
+/// and a lane never declares `certifies` (the claim belongs to the
+/// composing profile). Under a `complete` claim, every lane must
+/// individually satisfy the interim no-narrowing rule.
+fn validate_lanes_profile(
+    name: &str,
+    def: &ProfileDef,
+    lanes: &[String],
+    t: &TestConfig,
+    check: &[CheckEntry],
+) -> Result<(), DevError> {
+    if lanes.is_empty() {
+        return Err(DevError::Config(format!(
+            "[test.profiles.{name}] declares `lanes = []` - list at least one \
+             profile to compose."
+        )));
+    }
+    if def.sweeps.is_some()
+        || def.tests.is_some()
+        || def.only.is_some()
+        || def.skip.is_some()
+        || def.include_ignored.is_some()
+        || def.test_threads.is_some()
+        || def.env.is_some()
+        || def.extends.is_some()
+    {
+        return Err(DevError::Config(format!(
+            "[test.profiles.{name}] combines `lanes` with run-shaping fields. \
+             A lanes profile is a list of runs, not a merged run: it may carry \
+             only `lanes`, `certifies`, `skip_phases`, and `description` - \
+             put sweeps/filters/env on the lane profiles themselves."
+        )));
+    }
+    for lane in lanes {
+        let Some(lane_def) = t.profiles.get(lane.as_str()) else {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{name}] references lane '{lane}', but no \
+                 `[test.profiles.*]` entry with that name exists."
+            )));
+        };
+        if lane_def.certifies.is_some() {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{name}] lane '{lane}' declares `certifies`. \
+                 Certification belongs to the composing profile; a lane is a \
+                 run, not a claim."
+            )));
+        }
+        if lane_def.lanes.is_some() {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{name}] lane '{lane}' has lanes of its own - \
+                 lanes do not nest."
+            )));
+        }
+        if def.certifies == Some(Certifies::Complete) {
+            validate_complete_profile(lane, lane_def, t, check).map_err(|e| match e {
+                DevError::Config(msg) => DevError::Config(format!(
+                    "[test.profiles.{name}] certifies \"complete\" via lanes: {msg}"
+                )),
+                other => other,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// The interim `certifies = "complete"` rule (TIERED-CHECK.md, build order
 /// step 3): until coverage accounting can justify individual skips with
 /// quarantine entries, a complete profile may not narrow the test universe
@@ -1044,11 +1118,14 @@ fn validate_complete_profile(
     t: &TestConfig,
     check: &[CheckEntry],
 ) -> Result<(), DevError> {
+    // Phrased as "cannot back a complete claim" because `name` is either
+    // the certifying profile itself or a lane composing into one.
     let reject = |what: String| {
         Err(DevError::Config(format!(
-            "[test.profiles.{name}] certifies \"complete\" but {what}. Until \
-             coverage accounting exists, a complete profile may not narrow \
-             the test universe; certify \"partial\" or remove the narrowing."
+            "[test.profiles.{name}] cannot back a \"complete\" claim: {what}. \
+             Until coverage accounting exists, a complete profile may not \
+             narrow the test universe; certify \"partial\" or remove the \
+             narrowing."
         )))
     };
     if def.extends.is_some() {

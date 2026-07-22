@@ -799,6 +799,16 @@ pub struct ProfileDef {
     /// `dependency_rules`, `clippy`, `test`. Not inherited through
     /// `extends`.
     pub skip_phases: Option<Vec<String>>,
+    /// Compose other profiles as a *list of runs* (TIERED-CHECK feature 2):
+    /// each lane resolves independently and the test phase runs every
+    /// lane's sweeps in order, while clippy dedupes on build shape so two
+    /// lanes sharing a `[[check]]` entry are linted once. The opposite of
+    /// `extends` (which merges): tier1's skips and serial's `only` are
+    /// contradictory by construction, so no merge can express them. A
+    /// profile with `lanes` carries no run-shaping fields of its own, a
+    /// lane may not declare `certifies` (the claim belongs to the
+    /// composing profile), and lanes do not nest - all load-time errors.
+    pub lanes: Option<Vec<String>>,
     pub extends: Option<String>,
     /// Names of `[[check]]` entries to execute. Each is one cargo test
     /// invocation with the entry's feature flags. Empty / unset after

@@ -55,11 +55,20 @@ certifies = "partial"
 skip_phases = ["clippy"]
 sweeps = ["default"]
 
-# The gate: `brokkr check --gate`. Complete, exits 0.
-[test.profiles.gate]
-certifies = "complete"
+# The gate: `brokkr check --gate`. Complete via two lanes sharing the
+# default sweep - clippy dedupes on build shape, the test phase runs both.
+[test.profiles.lane-par]
 sweeps = ["default"]
 include_ignored = true
+test_threads = 0
+
+[test.profiles.lane-ser]
+sweeps = ["default"]
+include_ignored = true
+
+[test.profiles.gate]
+certifies = "complete"
+lanes = ["lane-par", "lane-ser"]
 EOF
 
 cd "$smoke"

@@ -462,9 +462,18 @@ is the cap.
 | `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
 | `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | none |
 
+A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
+labels lane-qualified (`tier1/default`, `serial/default`). The test phase
+runs each lane's entry separately - contradictory filter sets are the point -
+while the clippy phase dedupes sweeps whose build shape (packages, features,
+rustflags, env, build_packages) is identical, logging
+`clippy <label>: deduped`.
+
 `brokkr test <name>` follows the same ladder except: filters are dropped (the
-user's `<name>` argument is the filter), and there's no CLI ad-hoc path (the
-test runner doesn't accept `--features`).
+user's `<name>` argument is the filter), there's no CLI ad-hoc path (the
+test runner doesn't accept `--features`), and a lanes profile keeps one
+sweep per build shape (with filters dropped, lane duplicates are identical
+runs). `--sweep` labels under a lanes profile are the lane-qualified form.
 
 Per-project orchestration blocks (today: `[ratatoskr.harness]`) are **not**
 `[[check]]` sweeps and are invisible to both `brokkr check` and `brokkr test`.

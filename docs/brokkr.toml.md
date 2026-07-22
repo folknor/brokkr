@@ -696,6 +696,19 @@ include_ignored = true
   `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`.
   `extends = "<other>"` walks the chain with cycle detection; collections are
   replaced (child wins), env merges key-by-key.
+- `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*
+  (TIERED-CHECK.md feature 2): each lane resolves independently and the test
+  phase runs every lane's sweeps in order (labels lane-qualified,
+  `tier1/default`), while the clippy phase dedupes on build shape so two
+  lanes sharing a `[[check]]` entry are linted once. The opposite of
+  `extends`: tier1's `skip` and serial's `only` are contradictory by
+  construction, so no merge can express them. A lanes profile may carry only
+  `lanes`, `certifies`, `skip_phases`, and `description`; its lanes must
+  exist, must not nest, and must not declare `certifies` themselves (the
+  claim belongs to the composing profile) - all load-time errors. Under
+  `certifies = "complete"`, every lane must individually satisfy the interim
+  no-narrowing rule. `brokkr test` under a lanes profile keeps one sweep per
+  build shape, since it drops filters anyway.
 - `certifies = "complete" | "partial"` declares what a green run of the
   profile claims, and permissions derive from the claim (TIERED-CHECK.md).
   `partial` may set `skip_phases` (subtractive list of check phases, validated

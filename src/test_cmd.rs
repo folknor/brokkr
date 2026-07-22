@@ -502,6 +502,11 @@ fn decide_sweeps(
         s.cargo_test_filters.clear();
         s.name_filters.clear();
     }
+    // A `lanes` profile lists the same `[[check]]` entry once per lane; with
+    // the filters dropped those runs are identical, so keep the first of
+    // each build shape (same key clippy dedupes on).
+    let mut seen = std::collections::HashSet::new();
+    sweeps.retain(|s| seen.insert(s.build_shape_key()));
     Ok(sweeps)
 }
 
@@ -1276,6 +1281,39 @@ sweeps = ["all", "consumer"]
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(sweeps[1].label, "consumer");
         assert_eq!(sweeps[1].build_packages, vec!["pbfhogg-cli"]);
+    }
+
+    #[test]
+    fn decide_sweeps_dedupes_lanes_by_build_shape() {
+        // A lanes profile lists the same [[check]] entry once per lane;
+        // with the user's <name> as the only filter those runs are
+        // identical, so `brokkr test` keeps the first of each build shape.
+        let toml_text = r#"
+default_profile = "pre-commit"
+
+[profiles.tier1]
+sweeps = ["all"]
+skip = ["serial::"]
+
+[profiles.serial]
+sweeps = ["all"]
+only = ["serial::"]
+test_threads = 1
+
+[profiles.pre-commit]
+lanes = ["tier1", "serial"]
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: Vec::new(),
+            ..Default::default()
+        }];
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].label, "tier1/all");
     }
 
     #[test]

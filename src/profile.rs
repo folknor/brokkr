@@ -71,7 +71,37 @@ impl ResolvedSweep {
         }
         out
     }
+
+    /// The sweep's *build shape*: everything that decides what cargo
+    /// compiles, and nothing that only decides which tests run. Two lanes
+    /// referencing the same `[[check]]` entry produce equal keys, so
+    /// clippy (and `brokkr test`, which drops filters) dedupe on this
+    /// while the test phase keeps both entries. `env` is in the key:
+    /// `HIGH_PRECISION=1` on one sweep and not another makes two
+    /// otherwise-identical sweeps cache-incompatible. `test_exclude_packages`
+    /// is deliberately out - it narrows the test invocation only.
+    pub fn build_shape_key(&self) -> BuildShapeKey {
+        (
+            self.packages.clone(),
+            self.cargo_feature_args.clone(),
+            self.rustflags.clone(),
+            self.env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            self.build_packages.clone(),
+        )
+    }
 }
+
+/// See [`ResolvedSweep::build_shape_key`].
+pub type BuildShapeKey = (
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    Vec<(String, String)>,
+    Vec<String>,
+);
 
 /// Synthesize a `ResolvedSweep` from a `CheckEntry` alone, with no
 /// profile filters. Used by the bare `brokkr check` path when
@@ -127,6 +157,33 @@ struct ResolvedProfile {
 /// - resolved profile names a sweep that is not in `checks`
 /// - resolved profile has zero sweeps
 pub fn resolve(
+    cfg: &TestConfig,
+    checks: &[CheckEntry],
+    name: &str,
+) -> Result<Vec<ResolvedSweep>, DevError> {
+    // A `lanes` profile is a list of runs: each lane resolves on its own
+    // (load-time validation guarantees lanes carry no run-shaping fields,
+    // don't nest, and exist), concatenated in declaration order. Labels are
+    // lane-qualified (`tier1/default`) so the log can tell two runs of the
+    // same `[[check]]` entry apart.
+    if let Some(def) = cfg.profiles.get(name)
+        && let Some(lanes) = &def.lanes
+    {
+        let mut out = Vec::new();
+        for lane in lanes {
+            let mut lane_sweeps = resolve_single(cfg, checks, lane)?;
+            for s in &mut lane_sweeps {
+                s.label = format!("{lane}/{}", s.label);
+            }
+            out.extend(lane_sweeps);
+        }
+        return Ok(out);
+    }
+    resolve_single(cfg, checks, name)
+}
+
+/// Resolve one non-`lanes` profile (the pre-lanes `resolve` body).
+fn resolve_single(
     cfg: &TestConfig,
     checks: &[CheckEntry],
     name: &str,
@@ -292,6 +349,63 @@ mod tests {
             .map(|t| t.clone().try_into().unwrap())
             .unwrap_or_default();
         (checks, test_cfg)
+    }
+
+    #[test]
+    fn resolve_lanes_concatenates_and_qualifies_labels() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "default"
+
+[test.profiles.tier1]
+sweeps = ["default"]
+skip = ["serial::"]
+test_threads = 0
+
+[test.profiles.serial]
+sweeps = ["default"]
+only = ["serial::"]
+test_threads = 1
+
+[test.profiles.pre-commit]
+lanes = ["tier1", "serial"]
+"#,
+        );
+        let sweeps = resolve(&cfg, &checks, "pre-commit").unwrap();
+        assert_eq!(sweeps.len(), 2);
+        assert_eq!(sweeps[0].label, "tier1/default");
+        assert_eq!(sweeps[1].label, "serial/default");
+        // Each lane keeps its own filters and thread policy - a lanes
+        // profile is a list of runs, not a merge...
+        assert_eq!(sweeps[0].libtest_argv(), vec!["--skip", "serial::"]);
+        assert_eq!(sweeps[0].test_threads, Some(0));
+        assert_eq!(sweeps[1].libtest_argv(), vec!["serial::"]);
+        assert_eq!(sweeps[1].test_threads, Some(1));
+        // ...while the build shape is identical, which is exactly what
+        // clippy (and `brokkr test`) dedupe on.
+        assert_eq!(sweeps[0].build_shape_key(), sweeps[1].build_shape_key());
+    }
+
+    #[test]
+    fn build_shape_key_tracks_env_not_filters() {
+        let plain = sweep_from_check_entry(&CheckEntry {
+            name: "default".into(),
+            ..Default::default()
+        });
+        let mut filtered = plain.clone();
+        filtered.libtest_args = vec!["--skip".into(), "slow::".into()];
+        filtered.test_threads = Some(0);
+        // Filters and thread policy don't change what cargo builds.
+        assert_eq!(plain.build_shape_key(), filtered.build_shape_key());
+
+        // Env does: HIGH_PRECISION=1 on one sweep and not another makes two
+        // otherwise-identical sweeps cache-incompatible.
+        let mut env_sweep = plain.clone();
+        env_sweep
+            .env
+            .insert("HIGH_PRECISION".into(), "1".into());
+        assert_ne!(plain.build_shape_key(), env_sweep.build_shape_key());
     }
 
     #[test]

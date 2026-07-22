@@ -1,11 +1,13 @@
 # Tiered check: a fast answer that admits it, and a slow answer worth trusting
 
 Status: in progress. Landed so far: feature 5; feature 8's first slice (the
-`--json` summary trailer, `schema: 1`); and build-order step 3 - `certifies`
+`--json` summary trailer, `schema: 1`); build-order step 3 - `certifies`
 with the full permission table and interim complete rule, feature 1
 (`skip_phases`), and feature 9 (`gate_profile` / `--gate`), including the
-0/10/1 exit contract and the `passed`/`complete`/`partial` verdict split.
-Everything else is proposed.
+0/10/1 exit contract and the `passed`/`complete`/`partial` verdict split;
+and step 4 - feature 2 (`lanes`), with the composition rules enforced at
+load time and clippy deduping on build shape. Feature 3 is shelved on
+measurement (see the feature). Next: step 5, coverage accounting.
 
 Scope: `brokkr check` and `brokkr test`. Every mechanism here is opt-in. No
 existing key changes meaning, and a `brokkr.toml` that does not ask for any of
@@ -197,6 +199,10 @@ already independently runnable. On nautilus this uniquely buys skipping
 
 ### 2. `lanes`: profile composition
 
+**Landed** (build-order step 4). The composition rules below are load-time
+errors, and under a `complete` claim each lane is individually held to the
+interim no-narrowing rule until feature 4 can audit the union.
+
 ```toml
 [test.profiles.pre-commit]
 certifies = "complete"
@@ -303,6 +309,22 @@ a log line (mirroring `brokkr test`'s SKIP), an all-sweeps skip fails
 instead of reading green, and the shape line plus the `--json` `package`
 field both carry the scope. Manual `-p` is thereby a working interim
 answer, and the feature-3 gate measurement (`edit` plus `-p`) is runnable.
+
+**Measured, part two (same day, post-fix) - the verdict.** Full gate
+4m28s; unscoped `edit` 3m37s; `edit -p nautilus-betfair` 22.8s; `edit -p
+nautilus-model` 31.8s. Scoping is 85-90% off the unscoped partial versus
+19% for dropping sweeps and textlint; 23-32s is a loop, 3m37s is not.
+(Betfair caveat: its suite was already teardown-fixed in the working tree,
+307s to 51.6s, so 22.8s reflects both effects.) Consequence: **feature 3
+is shelved.** Manual `-p` already reaches loop speed, and the person
+editing knows which crate they are in better than a dirty-set heuristic
+does - `scope = "changed"` would buy convenience, not capability, at the
+price of the inference machinery and the cache-thrash risk above. The
+known limitation is accepted and priced: `-p nautilus-model` tests model,
+not its reverse-dependency closure - the #4530 false green exactly - but
+under `certifies = "partial"` that run exits 10 and cannot be mistaken for
+a gate. The design absorbing its own worst case is the argument for the
+claim spine in one sentence.
 
 ### 4. Coverage accounting: make `skip` unable to hide
 
@@ -637,9 +659,11 @@ The order is really a commitment and an option. Steps 1-5 are committed: the
 honest core, each justified on today's evidence. Steps 6-8 are re-evaluated
 once the core lands - feature 6 against how often the sim sweep is actually
 invoked deliberately (`when = "manual"` plus `--with` may be enough), feature
-3 against measured `edit`-plus-manual-`-p` loop times, feature 7 against the
-cost of its baseline store. Pricing the two halves separately now is cheaper
-than discovering the difference later.
+7 against the cost of its baseline store. Pricing the two halves separately
+now is cheaper than discovering the difference later. Feature 3's evaluation
+already happened: the 2026-07-22 measurements (see the feature) shelved it -
+manual `-p` reaches loop speed (23-32s), so the inference would buy
+convenience, not capability.
 
 ## Non-goals
 

@@ -1115,6 +1115,7 @@ features = ["a"]
                 description: None,
                 certifies: None,
                 skip_phases: None,
+                lanes: None,
                 extends: None,
                 sweeps: Some(vec!["all".into(), "consumer".into()]),
                 tests: None,
@@ -1422,6 +1423,146 @@ include_ignored = true
             .unwrap_err()
             .to_string();
         assert!(err.contains("extends"), "got: {err}");
+    }
+
+    #[test]
+    fn lanes_profile_rejects_run_shaping_fields() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.tier1]
+sweeps = ["all"]
+[test.profiles.combo]
+lanes = ["tier1"]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("combines `lanes`"), "got: {err}");
+    }
+
+    #[test]
+    fn lanes_must_reference_existing_profiles() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.combo]
+lanes = ["nope"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lane 'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn lane_may_not_declare_certifies() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.tier1]
+certifies = "partial"
+sweeps = ["all"]
+[test.profiles.combo]
+lanes = ["tier1"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("declares `certifies`"), "got: {err}");
+    }
+
+    #[test]
+    fn lanes_do_not_nest() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.tier1]
+sweeps = ["all"]
+[test.profiles.inner]
+lanes = ["tier1"]
+[test.profiles.outer]
+lanes = ["inner"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("do not nest"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_lanes_profile_validates_each_lane() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+[test.profiles.tier1]
+sweeps = ["all"]
+skip = ["serial::"]
+include_ignored = true
+[test.profiles.gate]
+certifies = "complete"
+lanes = ["tier1"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("via lanes"), "got: {err}");
+        assert!(err.contains("`skip`"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_lanes_profile_with_clean_lanes_passes() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+gate_profile = "gate"
+[test.profiles.lane-par]
+sweeps = ["all"]
+include_ignored = true
+test_threads = 0
+[test.profiles.lane-ser]
+sweeps = ["all"]
+include_ignored = true
+[test.profiles.gate]
+certifies = "complete"
+lanes = ["lane-par", "lane-ser"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
     }
 
     #[test]

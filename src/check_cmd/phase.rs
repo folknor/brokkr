@@ -948,6 +948,12 @@ fn run_clippy_phase(
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
 
+    // Clippy is per-build-shape while tests are per-lane (TIERED-CHECK
+    // feature 2): two lanes sharing a `[[check]]` entry must not lint it
+    // twice, so dedupe on the whole build shape.
+    let mut seen_shapes: std::collections::HashSet<profile::BuildShapeKey> =
+        std::collections::HashSet::new();
+
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
     for sweep in sweeps {
         // A CLI `-p` replaces the sweep's selection or skips the sweep
@@ -960,6 +966,14 @@ fn run_clippy_phase(
                 continue;
             }
         };
+
+        if !seen_shapes.insert(sweep.build_shape_key()) {
+            output::run_msg(&format!(
+                "clippy {}: deduped (build shape already checked)",
+                sweep.label
+            ));
+            continue;
+        }
         // Always run with --message-format=json so the lint code
         // (`message.code.code`) is populated on every diagnostic. cargo's
         // pretty-printed stderr only includes the `= note: #[warn(rule)]`
