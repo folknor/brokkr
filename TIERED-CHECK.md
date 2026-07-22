@@ -8,7 +8,10 @@ contract and verdict split; step 4 - feature 2 (`lanes`); feature 10
 (`isolation = "process"`); step 5 - feature 4 (coverage accounting over
 (build shape, package, test) pairs with the `[[quarantine]]` ledger); and
 feature 11 (package-qualified skips + package-scoped quarantine entries).
-Feature 3 is shelved on measurement (see the feature).
+Feature 3 is shelved on measurement (see the feature). **The design's
+purpose is discharged**: nautilus's gate certifies `complete` over
+29,128 pairs with zero orphans (2026-07-22), so `check complete` is now
+a sentence backed by an audit rather than by prose comments.
 
 ## Continuing this work - read this first
 
@@ -72,18 +75,59 @@ nowhere because the serial lane covers only the `default` shape. The
 name-level accounting this doc originally sketched would have printed
 `check complete` over precisely that hole.
 
+**And then it went green** (nautilus, 2026-07-22, same day):
+
+```
+coverage: 3 shapes, 29128 pairs - 28986 run, 106 quarantined, 36 ignored, 0 orphaned
+check complete in 5m58s          (exit 0)
+```
+
+The 69 orphans closed by **widening the serial lane** to `sweeps =
+["default", "ffi", "live"]` rather than quarantining them: 73 to 142
+process-isolated tests, all passing, at ~2 minutes over the tier1
+baseline - the predicted ~3x on that lane, paid for real coverage.
+Narrowing tier1's skips per-sweep turned out not to be needed. Every
+count now sums to exactly the reported 106, and every B41/B50 entry is
+package-qualified.
+
+Three findings came out of the narrowing that the plan did not predict,
+and all three are about the *ledger*, not the accounting:
+
+- `test_quote_tick` was suppressing a **B50 test under a B41 reason** -
+  it absorbed capnp's `test_quote_tick_roundtrip`, whose four siblings
+  are B50 entries. This is the substring-growth hazard the feature-4
+  section names, except it grew across *issues*: narrowing B41 would
+  have silently un-skipped a test that still needs suppressing.
+- `test_data_any_` was **over-broad by intent, not by accident**. Its
+  count was an innocent-looking 12, matching exactly the 12 tests
+  intended - but only 5 carry `Price`/`Quantity` raws. The other 7 now
+  run and pass. The lesson, worth keeping verbatim: *an explainable
+  count is necessary but not sufficient; the reason has to apply to
+  every member too.*
+- The B50 **reason text was wrong twice** (no proptest in either file;
+  four of five patterns are capnp, not SBE). Corrected upstream.
+
 Open items, in rough order of pull:
 
-1. **The nautilus migration** is one decision from a passing gate: the
-   69 orphans resolve by either widening the serial lane to
-   `sweeps = ["default", "ffi", "live"]` (runs the family under all
-   three shapes; costs ~2 more isolated passes) or quarantining the
-   `ffi`/`live` pairs with an issue. Then `AGENTS.md` there should say
-   `brokkr check --gate`, and the ledger's six issue IDs become
+1. **The ledger reports counts, not membership** - the gap all three
+   findings above walked through. Per-entry pair counts catch an entry
+   that *grows*; they cannot catch an entry that was always too wide, or
+   one whose members belong to a different issue, because both look like
+   a stable, explainable number. Every one of the three was found by a
+   human narrowing patterns by hand. The cheap instrument is to print
+   the pairs an entry absorbs, not just how many (a flag on the audit,
+   or `--json` per-entry pair lists) - then "does the reason apply to
+   every member?" becomes a question a reviewer can actually answer. Not
+   yet designed: price it against the two-mechanisms smell first, and
+   note that the honest version may be a *review* affordance rather than
+   a gate mechanism, since neither miscategorisation can be detected
+   mechanically.
+2. **Nautilus migration, remainder**: `AGENTS.md` there should say
+   `brokkr check --gate`, and the ledger's issue IDs are now
    append-only, load-bearing config.
-2. **Features 6 and 7 are options, not commitments** - re-evaluation
+3. **Features 6 and 7 are options, not commitments** - re-evaluation
    criteria in the build order below. Do not build them speculatively.
-3. **A third quarantine category is trending but undesigned**: two
+4. **A third quarantine category is trending but undesigned**: two
    instances (pbfhogg's over-watchdog tests, nautilus's Redis tests) of
    healthy tests with *environmental preconditions*, where the
    issue-countdown semantics don't fit - an `issue` that can never close
