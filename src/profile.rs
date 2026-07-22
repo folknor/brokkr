@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{CheckEntry, ProfileDef, TestConfig};
+use crate::config::{CheckEntry, Isolation, ProfileDef, TestConfig};
 use crate::error::DevError;
 
 /// One sweep to execute, after profile resolution + check-entry lookup.
@@ -58,6 +58,10 @@ pub struct ResolvedSweep {
     /// execution layer (`sweep_runtime_env`) turns these into the `RUSTFLAGS`
     /// and `CARGO_TARGET_DIR` env pair. From the `[[check]]` entry's `rustflags`.
     pub rustflags: Vec<String>,
+    /// Run each test in its own `cargo test -- --exact` process (the
+    /// profile's `isolation = "process"`). Execution policy only - never
+    /// part of the build shape.
+    pub process_isolation: bool,
 }
 
 impl ResolvedSweep {
@@ -131,6 +135,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         env: entry.env.clone(),
         test_threads: None,
         rustflags: entry.rustflags.clone(),
+        process_isolation: false,
     }
 }
 
@@ -145,6 +150,7 @@ struct ResolvedProfile {
     skip: Vec<String>,
     include_ignored: bool,
     test_threads: Option<u32>,
+    isolation: Option<Isolation>,
     env: BTreeMap<String, String>,
 }
 
@@ -241,6 +247,10 @@ fn resolve_profile_chain(
         if let Some(v) = def.test_threads {
             out.test_threads = Some(v);
         }
+
+        if let Some(v) = def.isolation {
+            out.isolation = Some(v);
+        }
         if let Some(v) = &def.env {
             for (k, val) in v {
                 out.env.insert(k.clone(), val.clone());
@@ -321,6 +331,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         env,
         test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
+        process_isolation: profile.isolation == Some(Isolation::Process),
     }
 }
 
@@ -385,6 +396,28 @@ lanes = ["tier1", "serial"]
         // ...while the build shape is identical, which is exactly what
         // clippy (and `brokkr test`) dedupe on.
         assert_eq!(sweeps[0].build_shape_key(), sweeps[1].build_shape_key());
+    }
+
+    #[test]
+    fn isolation_reaches_the_sweep_and_stays_out_of_the_shape() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "default"
+
+[test.profiles.serial]
+sweeps = ["default"]
+only = ["serial::"]
+isolation = "process"
+"#,
+        );
+        let sweeps = resolve(&cfg, &checks, "serial").unwrap();
+        assert!(sweeps[0].process_isolation);
+
+        // Execution policy, not build shape: an isolated and a plain sweep
+        // of the same entry still dedupe to one clippy run.
+        let plain = sweep_from_check_entry(&checks[0]);
+        assert_eq!(plain.build_shape_key(), sweeps[0].build_shape_key());
     }
 
     #[test]

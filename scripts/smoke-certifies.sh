@@ -65,6 +65,7 @@ test_threads = 0
 [test.profiles.lane-ser]
 sweeps = ["default"]
 include_ignored = true
+isolation = "process"
 
 [test.profiles.gate]
 certifies = "complete"

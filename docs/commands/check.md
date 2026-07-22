@@ -85,6 +85,25 @@ multi-second tests off the parallel lane. A profile must not set `--format` in
 its `libtest_args` on a parallel lane (the sweep owns that flag). `brokkr test`
 is unaffected - it is always serial regardless of the profile's `test_threads`.
 
+### Process isolation (`isolation = "process"`)
+
+A profile may set `isolation = "process"` (see `docs/brokkr.toml.md`): the
+sweep's filtered test set is enumerated with `--list` (the lane's real
+filter argv is the ground truth - no reimplementation of libtest filter
+semantics), then each test runs in its own
+`cargo test <selection> -- --exact <name> --test-threads=1` invocation.
+`--test-threads=1` alone serializes tests within one process per test
+binary; it does not isolate them, and tests touching process-global state
+(a global logger) need the fresh-process guarantee CI's nextest provides.
+Reusing the sweep's selection argv verbatim keeps the build fingerprint
+identical across invocations and lets cargo provide the test env
+(`CARGO_MANIFEST_DIR`, `OUT_DIR`, …). Each invocation runs under the
+standard per-test watchdog. Every test runs even after failures (the
+per-test failure list is the point); the sweep fails if any test failed or
+if zero tests were enumerated. `#[ignore]`d names in a lane without
+`include_ignored` are reported as `SKIP` lines, visibly. Shape lines carry
+`process-isolated`.
+
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
 `CARGO_TARGET_TMPDIR`); when absent, cwd is the project root.

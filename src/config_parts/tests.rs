@@ -1115,6 +1115,7 @@ features = ["a"]
                 description: None,
                 certifies: None,
                 skip_phases: None,
+                isolation: None,
                 lanes: None,
                 extends: None,
                 sweeps: Some(vec!["all".into(), "consumer".into()]),
@@ -1558,6 +1559,46 @@ include_ignored = true
 [test.profiles.gate]
 certifies = "complete"
 lanes = ["lane-par", "lane-ser"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
+    }
+
+    #[test]
+    fn process_isolation_requires_serial_threads() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.serial]
+sweeps = ["all"]
+isolation = "process"
+test_threads = 4
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("serial by construction"), "got: {err}");
+    }
+
+    #[test]
+    fn process_isolation_accepts_serial_profile() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.serial]
+sweeps = ["all"]
+only = ["serial::"]
+isolation = "process"
+test_threads = 1
 "#,
         );
         let check = parse_check(&table).unwrap();

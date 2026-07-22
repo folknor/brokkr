@@ -229,6 +229,10 @@ pub(crate) fn describe_sweep(
             }
             .into(),
         );
+
+        if sweep.process_isolation {
+            parts.push("process-isolated".into());
+        }
     }
 
     parts.join(", ")
@@ -331,32 +335,16 @@ fn has_target_selector(args: &[String]) -> bool {
     })
 }
 
-/// Run one cargo test invocation for the given sweep. Returns
-/// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
-/// `Err(...)` on subprocess spawn failure. `multi` controls whether
-/// the `cargo ... (sweep: <label>)` log line carries the suffix - in
-/// single-sweep mode (legacy `--all-features` path or one [[check]]
-/// entry) the label noise is unhelpful.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
-fn run_one_test_sweep(
-    project_root: &Path,
-    sweep: &ResolvedSweep,
-    package: Option<&str>,
-    extra_args: &[String],
-    project_env: &[(String, String)],
-    raw: bool,
-    doctests: bool,
-    multi: bool,
-    commands: bool,
-    timings: Option<&mut Vec<TestTiming>>,
-) -> Result<bool, DevError> {
-    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+/// The cargo-level selection + feature args shared by the standard and
+/// process-isolated test paths, so the two can never diverge on what a
+/// sweep selects. A CLI `-p` *replaces* the sweep's package selection -
+/// cargo unions selection flags, so emitting `--workspace --exclude …
+/// --package X` would silently run the whole workspace (see
+/// cli_package_scope; callers already skipped sweeps whose config rules
+/// the package out).
+fn sweep_selection_args(sweep: &ResolvedSweep, package: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
 
-    let mut args: Vec<String> = vec!["test".into()];
-    // A CLI `-p` *replaces* the sweep's package selection - cargo unions
-    // selection flags, so emitting `--workspace --exclude … --package X`
-    // would silently run the whole workspace (see cli_package_scope; the
-    // caller already skipped sweeps whose config rules the package out).
     if let Some(pkg) = package {
         args.push("--package".into());
         args.push(pkg.into());
@@ -385,6 +373,32 @@ fn run_one_test_sweep(
     for f in &sweep.cargo_test_filters {
         args.push(f.clone());
     }
+    args
+}
+
+/// Run one cargo test invocation for the given sweep. Returns
+/// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
+/// `Err(...)` on subprocess spawn failure. `multi` controls whether
+/// the `cargo ... (sweep: <label>)` log line carries the suffix - in
+/// single-sweep mode (legacy `--all-features` path or one [[check]]
+/// entry) the label noise is unhelpful.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
+fn run_one_test_sweep(
+    project_root: &Path,
+    sweep: &ResolvedSweep,
+    package: Option<&str>,
+    extra_args: &[String],
+    project_env: &[(String, String)],
+    raw: bool,
+    doctests: bool,
+    multi: bool,
+    commands: bool,
+    timings: Option<&mut Vec<TestTiming>>,
+) -> Result<bool, DevError> {
+    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+
+    let mut args: Vec<String> = vec!["test".into()];
+    args.extend(sweep_selection_args(sweep, package));
     for c in cargo_extra {
         args.push(c.clone());
     }

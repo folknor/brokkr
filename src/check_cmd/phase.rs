@@ -1656,18 +1656,31 @@ fn run_test_phase(
             run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, commands)?;
         }
 
-        let success = run_one_test_sweep(
-            project_root,
-            sweep,
-            package,
-            extra_args,
-            &project_env,
-            raw,
-            doctests,
-            multi,
-            commands,
-            timings.as_deref_mut(),
-        )?;
+        let success = if sweep.process_isolation {
+            run_isolated_sweep(
+                project_root,
+                sweep,
+                package,
+                extra_args,
+                &project_env,
+                raw,
+                commands,
+                timings.as_deref_mut(),
+            )?
+        } else {
+            run_one_test_sweep(
+                project_root,
+                sweep,
+                package,
+                extra_args,
+                &project_env,
+                raw,
+                doctests,
+                multi,
+                commands,
+                timings.as_deref_mut(),
+            )?
+        };
         if !success {
             return Err(DevError::Build("tests failed".into()));
         }

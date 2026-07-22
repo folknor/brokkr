@@ -368,6 +368,24 @@ subtle part is the enumeration pass itself: libtest's `--list` honours the
 same filters, so the pass must pass `--include-ignored` or it inherits the
 blindness it exists to remove.
 
+**"Runs elsewhere" presupposes "can pass elsewhere" - and today the serial
+family cannot.** Found by the first-ever run of the serial lane (2026-07-22,
+feature 2's first real use): all ten `serial_tests::`/`logging::macros::`
+tests fail under the lane, because `--test-threads=1` provides
+serialization, not isolation - one process per test *binary*, a
+process-global logger carried from test one to test nine, while CI's
+nextest gives process-per-test and a fresh logger every time. (The
+corroborating failure is the one that isn't a timeout: `No files found` is
+state carryover, not slowness.) The lane closed the invocation hole and
+immediately exposed the isolation hole behind it. Structurally the
+accounting is safe - a complete profile whose serial lane fails, fails -
+but it means the serial family cannot be green in *any* lane, and
+therefore no complete gate can pass, until either feature 10 provides the
+isolation these tests actually require or upstream removes their
+dependence on a fresh process. The brokkr.toml prose claiming the family
+"runs properly" serially was problem 3 one level up: a coverage claim
+nobody had ever exercised.
+
 ```toml
 [test.coverage]
 enforce = true   # implied by certifies = "complete"
@@ -628,6 +646,39 @@ Flag-name note: ratatoskr's `sync-bench --gate <name>` already exists and is
 untouched - different subcommand, no clap conflict, and "gate" means the same
 thing in both places. The overlap is deliberate, not an accident to fix.
 
+### 10. `isolation = "process"` (found by feature 2's first run)
+
+**Landed** (with build-order step 5). Enumeration uses the lane's real
+filter argv via `--list`; each test runs through cargo (not the bare
+binary) so the test env comes from cargo instead of being replicated by
+hand, and the sweep's selection argv is reused verbatim so the build
+fingerprint never changes between invocations.
+
+```toml
+[test.profiles.serial]
+sweeps = ["default"]
+only = ["serial_tests::", "logging::macros::"]
+test_threads = 1
+isolation = "process"
+```
+
+`--test-threads=1` serializes tests inside one process per test binary; it
+does not isolate them. Tests that touch process-global state (the logging
+family's global logger) pass under CI's nextest - which runs
+process-per-test - and fail under any libtest lane, because the first
+test's init is still resident for the ninth. That is a *different
+guarantee*, and the serial lane cannot honestly justify a `skip` elsewhere
+until it can provide the guarantee the tests actually need.
+
+The mode: enumerate the lane's filtered set with the same per-sweep
+`--list` pass feature 4 needs anyway, then run one
+`cargo test <name> -- --exact` per test - fresh process, fresh logger, the
+guarantee CI actually tests. Cost is a process spawn per test: negligible
+at family scale (~12 tests), and a lane that wants it for thousands of
+tests has a different problem (that is nextest's job, not brokkr's).
+`isolation = "process"` with `test_threads` other than 1 is rejected at
+load time - per-process execution is serial by construction.
+
 ## Build order
 
 1. **Free today.** Rewrite nautilus's stale `sim` comment and land the sweep as
@@ -664,6 +715,14 @@ now is cheaper than discovering the difference later. Feature 3's evaluation
 already happened: the 2026-07-22 measurements (see the feature) shelved it -
 manual `-p` reaches loop speed (23-32s), so the inference would buy
 convenience, not capability.
+
+Feature 10 joins the committed half, sequenced with step 5: the serial-lane
+finding means no nautilus gate can certify `complete` - regardless of how
+good the accounting is - until some lane can actually pass the logging
+family, and process isolation is what that takes (unless upstream removes
+the tests' dependence on a fresh process first, which is B49's territory
+and slower). It reuses the same `--list` enumeration feature 4 builds, so
+land them together or isolation first.
 
 ## Non-goals
 

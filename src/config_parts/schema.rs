@@ -753,6 +753,16 @@ pub enum Certifies {
     Partial,
 }
 
+/// How a profile's tests execute relative to process boundaries. The only
+/// mode is `process`: one `cargo test … -- --exact <name>` invocation per
+/// test, giving the fresh-process guarantee (fresh logger, fresh globals)
+/// that CI's nextest provides and a shared-process libtest run cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Isolation {
+    Process,
+}
+
 /// Check phase identifiers, in execution order. The universe for
 /// `skip_phases` validation and the `failed_phase` field of the
 /// `check --json` summary.
@@ -799,6 +809,15 @@ pub struct ProfileDef {
     /// `dependency_rules`, `clippy`, `test`. Not inherited through
     /// `extends`.
     pub skip_phases: Option<Vec<String>>,
+    /// Run each of this profile's tests in its own process
+    /// (TIERED-CHECK feature 10). `--test-threads=1` serializes tests
+    /// inside one process per test binary; it does not isolate them, and
+    /// tests touching process-global state (a global logger) need the
+    /// process-per-test guarantee CI's nextest provides. Requires
+    /// `test_threads` unset or 1 - per-process execution is serial by
+    /// construction. Merges through `extends` like other run-shaping
+    /// fields.
+    pub isolation: Option<Isolation>,
     /// Compose other profiles as a *list of runs* (TIERED-CHECK feature 2):
     /// each lane resolves independently and the test phase runs every
     /// lane's sweeps in order, while clippy dedupes on build shape so two

@@ -696,6 +696,16 @@ include_ignored = true
   `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`.
   `extends = "<other>"` walks the chain with cycle detection; collections are
   replaced (child wins), env merges key-by-key.
+- `isolation = "process"` runs each of the profile's tests in its own
+  `cargo test … -- --exact <name>` process (TIERED-CHECK.md feature 10).
+  `--test-threads=1` serializes tests inside one process per test binary; it
+  does not isolate them, and tests touching process-global state (a global
+  logger) need the fresh-process guarantee CI's nextest provides. The sweep's
+  selection argv is reused verbatim per test - identical build fingerprint,
+  cargo-provided test env - at the cost of one cargo spawn per test, sized
+  for a serial family of a dozen tests, not thousands. Requires
+  `test_threads` unset or 1; never runs doctests; `brokkr check -- …` extra
+  args are rejected on an isolated sweep. Merges through `extends`.
 - `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*
   (TIERED-CHECK.md feature 2): each lane resolves independently and the test
   phase runs every lane's sweeps in order (labels lane-qualified,

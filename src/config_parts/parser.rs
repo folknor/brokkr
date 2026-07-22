@@ -1010,6 +1010,19 @@ fn validate_check_against_test(
                 }
             }
         }
+        // Per-process execution is serial by construction: a parallel
+        // thread count under `isolation = "process"` has no meaning.
+        if def.isolation == Some(Isolation::Process)
+            && matches!(def.test_threads, Some(n) if n != 1)
+        {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{profile_name}] combines `isolation = \
+                 \"process\"` with `test_threads = {}` - per-process \
+                 execution is serial by construction; drop `test_threads` \
+                 or set it to 1.",
+                def.test_threads.unwrap_or_default()
+            )));
+        }
         // A `lanes` profile is a list of runs, not a merged run: it carries
         // no run-shaping fields of its own, its lanes exist, don't nest,
         // and don't declare claims of their own.
@@ -1064,6 +1077,7 @@ fn validate_lanes_profile(
         || def.skip.is_some()
         || def.include_ignored.is_some()
         || def.test_threads.is_some()
+        || def.isolation.is_some()
         || def.env.is_some()
         || def.extends.is_some()
     {
