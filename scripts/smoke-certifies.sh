@@ -22,6 +22,34 @@ cat > "$smoke/Cargo.toml" <<'EOF'
 name = "certifies-smoke"
 version = "0.1.0"
 edition = "2021"
+
+[workspace]
+members = ["member"]
+resolver = "2"
+EOF
+
+mkdir -p "$smoke/member/src"
+cat > "$smoke/member/Cargo.toml" <<'EOF'
+[package]
+name = "member"
+version = "0.1.0"
+edition = "2021"
+EOF
+
+# The same `shared::` module path as the root package - textually
+# indistinguishable by name-based skips, the feature-11 case.
+cat > "$smoke/member/src/lib.rs" <<'EOF'
+pub fn double(x: u64) -> u64 {
+    x * 2
+}
+
+#[cfg(test)]
+mod shared {
+    #[test]
+    fn member_only() {
+        assert_eq!(super::double(2), 4);
+    }
+}
 EOF
 
 cat > "$smoke/src/lib.rs" <<'EOF'
@@ -49,6 +77,14 @@ mod tests {
         assert_eq!(super::add(3, 3), 6);
     }
 }
+
+#[cfg(test)]
+mod shared {
+    #[test]
+    fn runs_in_root() {
+        assert_eq!(super::add(2, 3), 5);
+    }
+}
 EOF
 
 cat > "$smoke/brokkr.toml" <<'EOF'
@@ -56,6 +92,7 @@ project = "brokkr"
 
 [[check]]
 name = "default"
+packages = ["certifies-smoke", "member"]
 
 [test]
 doctests = true
@@ -74,12 +111,14 @@ sweeps = ["default"]
 [test.profiles.lane-par]
 sweeps = ["default"]
 test_threads = 0
-skip = ["skipme"]
+skip = ["skipme", "shared::"]
 
+# The isolated lane runs root's shared:: but package-skips member's -
+# a name-based skip cannot make that distinction (feature 11).
 [test.profiles.lane-ser]
 sweeps = ["default"]
 isolation = "process"
-skip = ["skipme"]
+skip = ["skipme", { package = "member", pattern = "shared::" }]
 
 [test.profiles.gate]
 certifies = "complete"
@@ -90,7 +129,7 @@ lanes = ["lane-par", "lane-ser"]
 [test.profiles.gate-orphan]
 certifies = "complete"
 sweeps = ["default"]
-skip = ["adds", "skipme"]
+skip = ["adds", "skipme", "shared::"]
 
 [test.profiles.gate-stale]
 certifies = "complete"
@@ -100,6 +139,14 @@ sweeps = ["default"]
 pattern = "skipme"
 issue = "B1"
 reason = "flaky teardown; tracked upstream"
+
+# Package-scoped: justifies member's shared:: pairs only; root's
+# same-named pairs stay auditable.
+[[quarantine]]
+package = "member"
+pattern = "shared::"
+issue = "B2"
+reason = "member's shared suite needs a service the gate host lacks"
 EOF
 
 cd "$smoke"

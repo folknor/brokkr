@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{CheckEntry, Isolation, ProfileDef, TestConfig};
+use crate::config::{CheckEntry, Isolation, ProfileDef, QualifiedSkip, SkipSpec, TestConfig};
 use crate::error::DevError;
 
 /// One sweep to execute, after profile resolution + check-entry lookup.
@@ -62,6 +62,11 @@ pub struct ResolvedSweep {
     /// profile's `isolation = "process"`). Execution policy only - never
     /// part of the build shape.
     pub process_isolation: bool,
+    /// Package-qualified skips, filtered out of the enumerated set
+    /// (never expressed as cargo selection). Non-empty only on
+    /// process-isolated sweeps (enforced at resolve time). A filter,
+    /// never part of the build shape.
+    pub qualified_skips: Vec<QualifiedSkip>,
 }
 
 impl ResolvedSweep {
@@ -136,6 +141,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         test_threads: None,
         rustflags: entry.rustflags.clone(),
         process_isolation: false,
+        qualified_skips: Vec::new(),
     }
 }
 
@@ -147,7 +153,7 @@ struct ResolvedProfile {
     sweeps: Vec<String>,
     tests: Vec<String>,
     only: Vec<String>,
-    skip: Vec<String>,
+    skip: Vec<SkipSpec>,
     include_ignored: bool,
     test_threads: Option<u32>,
     isolation: Option<Isolation>,
@@ -215,6 +221,20 @@ fn resolve_single(
                 ))
             })?;
         out.push(build_resolved_sweep(entry, &merged));
+    }
+
+    // Package-qualified skips are filtered out of the enumerated set, and
+    // the enumerated set only exists on the process-isolated path - a
+    // shared-process libtest run has no per-package attribution to filter.
+    if out
+        .iter()
+        .any(|s| !s.qualified_skips.is_empty() && !s.process_isolation)
+    {
+        return Err(DevError::Config(format!(
+            "[test.profiles.{name}] has package-qualified skip entries; these \
+             filter the enumerated set and require `isolation = \"process\"` \
+             on this profile."
+        )));
     }
     Ok(out)
 }
@@ -297,7 +317,19 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
     }
     // Profile `skip` then the entry's own `skip` - they AND (both apply), never
     // replace, so a sweep can pin its own exclusions on top of the profile's.
-    for s in profile.skip.iter().chain(&entry.skip) {
+    // Name entries become libtest `--skip` flags; qualified entries are
+    // carried separately and filtered out of the enumerated set instead.
+    let mut qualified_skips: Vec<QualifiedSkip> = Vec::new();
+    for spec in &profile.skip {
+        match spec {
+            SkipSpec::Name(s) => {
+                libtest_args.push("--skip".into());
+                libtest_args.push(s.clone());
+            }
+            SkipSpec::Qualified(q) => qualified_skips.push(q.clone()),
+        }
+    }
+    for s in &entry.skip {
         libtest_args.push("--skip".into());
         libtest_args.push(s.clone());
     }
@@ -332,6 +364,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
         process_isolation: profile.isolation == Some(Isolation::Process),
+        qualified_skips,
     }
 }
 

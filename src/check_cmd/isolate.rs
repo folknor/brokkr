@@ -19,6 +19,8 @@
 // (a dozen serial tests), and a lane that wants it for thousands of
 // tests wants nextest, not brokkr.
 
+use std::collections::BTreeMap;
+
 /// Enumerate and run one process-isolated sweep. Runs every test even
 /// after failures (the per-test failure list is the point of the mode),
 /// returns Ok(false) when any failed.
@@ -48,62 +50,21 @@ fn run_isolated_sweep(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Enumerate with the lane's real filter argv - the ground truth for
-    // what would run, with no reimplementation of libtest's filter
-    // semantics. `--tests` always: an isolated sweep never runs doctests
-    // (cargo cannot run one doctest per process), other lanes own them.
-    let mut list_args: Vec<String> = vec!["test".into()];
-    list_args.extend(selection.iter().cloned());
-    list_args.push("--tests".into());
-    list_args.push("--".into());
-    for f in &sweep.name_filters {
-        list_args.push(f.clone());
-    }
-    for a in &sweep.libtest_args {
-        list_args.push(a.clone());
-    }
-    list_args.push("--list".into());
-
-    // The standard sweep announce (shape carries `process-isolated`); with
-    // --commands this prints the full enumeration command instead.
-    output::run_msg(&sweep_run_line("test", sweep, &list_args, true, commands, package));
-    let Some(names) = isolate_list(project_root, &list_args, &env_refs, false, commands)? else {
+    output::run_msg(&sweep_run_line("test", sweep, &[], true, false, package));
+    let Some(plan) = enumerate_isolated(project_root, sweep, &selection, &env_refs, commands)?
+    else {
         return Ok(false);
     };
 
-    if names.is_empty() {
-        output::error(&format!(
-            "sweep '{}' enumerated zero tests under its filters - a \
-             process-isolated lane that runs nothing must not read as green",
-            sweep.label
-        ));
+    let Some(runnable) = plan_runnable(&plan, &sweep.label) else {
         return Ok(false);
-    }
-    println!(
-        "[test]    {}: {}, one process each",
-        sweep.label,
-        count_tests(names.len())
-    );
-
-    // libtest's `--list` includes `#[ignore]`d names regardless of
-    // `--include-ignored` (verified empirically), so a lane that runs
-    // without the flag must subtract them here - `--list --ignored`
-    // lists only the ignored set. `--include-ignored` is also what an
-    // ignored test needs to actually run under `--exact`.
-    let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
-    let ignored_names: std::collections::BTreeSet<String> = if include_ignored {
-        std::collections::BTreeSet::new()
-    } else {
-        let Some(list) = isolate_list(project_root, &list_args, &env_refs, true, commands)? else {
-            return Ok(false);
-        };
-        list.into_iter().collect()
     };
 
+    let runnable_count = runnable.len();
     let mut failed = 0usize;
     let mut ignored = 0usize;
-    for name in &names {
-        if ignored_names.contains(name) {
+    for name in &runnable {
+        if !plan.include_ignored && plan.ignored.contains(name) {
             ignored += 1;
             println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
             continue;
@@ -112,7 +73,7 @@ fn run_isolated_sweep(
             project_root,
             &selection,
             name,
-            include_ignored,
+            plan.include_ignored,
             &env_refs,
             raw,
             commands,
@@ -134,7 +95,7 @@ fn run_isolated_sweep(
     }
 
     let ignored_note = ignored_note(ignored);
-    let ran = names.len() - ignored;
+    let ran = runnable_count - ignored;
 
     if failed > 0 {
         output::error(&format!(
@@ -178,37 +139,120 @@ enum IsolatedOutcome {
     Failed,
 }
 
-/// One `cargo test … --list` invocation, parsed. `only_ignored` inserts
-/// `--ignored` before `--list`, listing only the `#[ignore]`d subset.
-/// `Ok(None)` means the listing failed and was already reported (the
-/// sweep should return `Ok(false)`).
-fn isolate_list(
+/// The plan's runnable name list, announced; `None` after reporting a
+/// qualified-skip collision or a zero-runnable enumeration.
+fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<Vec<String>> {
+    // A name present in both a qualified-skipped and an unskipped package
+    // cannot be split by one `cargo test -- --exact` invocation: error
+    // rather than half-obey the skip.
+    let collisions: Vec<&str> = plan
+        .names
+        .iter()
+        .filter(|(_, f)| f.0 && f.1)
+        .map(|(n, _)| n.as_str())
+        .collect();
+
+    if !collisions.is_empty() {
+        output::error(&format!(
+            "package-qualified skip collision ({}): the name exists in both a \
+             skipped and an unskipped package, and one `cargo test -- --exact` \
+             invocation cannot split them. Rename the test(s) or adjust the skip.",
+            collisions.join(", ")
+        ));
+        return None;
+    }
+
+    let runnable: Vec<String> = plan
+        .names
+        .iter()
+        .filter(|(_, f)| f.0)
+        .map(|(n, _)| n.clone())
+        .collect();
+    let pkg_skipped = plan.names.values().filter(|f| f.1 && !f.0).count();
+
+    if runnable.is_empty() {
+        output::error(&format!(
+            "sweep '{label}' enumerated zero runnable tests under its filters \
+             and skips - a process-isolated lane that runs nothing must not \
+             read as green"
+        ));
+        return None;
+    }
+    let skip_note = if pkg_skipped > 0 {
+        format!(", {pkg_skipped} pkg-skipped")
+    } else {
+        String::new()
+    };
+    println!(
+        "[test]    {label}: {}, one process each{skip_note}",
+        count_tests(runnable.len())
+    );
+    Some(runnable)
+}
+
+/// What a process-isolated sweep will run, from per-binary enumeration.
+struct IsolatedPlan {
+    /// name -> (present in an unskipped binary, present in a
+    /// package-qualified-skipped binary). Both true = collision.
+    names: BTreeMap<String, (bool, bool)>,
+    /// Names `#[ignore]`d at the source (from `--list --ignored`; plain
+    /// `--list` includes ignored names, verified empirically).
+    ignored: BTreeSet<String>,
+    include_ignored: bool,
+}
+
+/// Enumerate the sweep per test binary (attribution comes from the
+/// `--no-run` artifact stream; listing runs the binaries directly, which
+/// is env-safe because no test code executes) and apply the
+/// package-qualified skips. `Ok(None)` = failure already reported.
+fn enumerate_isolated(
     project_root: &Path,
-    list_args: &[String],
+    sweep: &ResolvedSweep,
+    selection: &[String],
     env_refs: &[(&str, &str)],
-    only_ignored: bool,
     commands: bool,
-) -> Result<Option<Vec<String>>, DevError> {
-    let mut args = list_args.to_vec();
-
-    if only_ignored {
-        args.insert(args.len() - 1, "--ignored".into());
-    }
-
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &refs, project_root, env_refs)?;
-
-    if !captured.status.success() {
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
-        output::error(&String::from_utf8_lossy(&captured.stderr));
+) -> Result<Option<IsolatedPlan>, DevError> {
+    let Some(binaries) = test_binaries(project_root, selection, env_refs, commands)? else {
         return Ok(None);
+    };
+    let binaries = filter_binaries(&binaries, &sweep.cargo_test_filters);
+    let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
+    let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
+    filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
+
+    let mut names: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    let mut ignored: BTreeSet<String> = BTreeSet::new();
+    for b in binaries {
+        let Some(listed) = binary_list(b, project_root, &filter_args, env_refs)? else {
+            return Ok(None);
+        };
+        let b_ignored: BTreeSet<String> = if include_ignored {
+            BTreeSet::new()
+        } else {
+            let mut ignored_args = filter_args.clone();
+            ignored_args.push("--ignored");
+            let Some(l) = binary_list(b, project_root, &ignored_args, env_refs)? else {
+                return Ok(None);
+            };
+            l.into_iter().collect()
+        };
+        for t in listed {
+            if sweep.qualified_skips.iter().any(|q| q.matches(&b.package, &t)) {
+                names.entry(t).or_insert((false, false)).1 = true;
+                continue;
+            }
+
+            if b_ignored.contains(&t) {
+                ignored.insert(t.clone());
+            }
+            names.entry(t).or_insert((false, false)).0 = true;
+        }
     }
-    Ok(Some(parse_list_output(&String::from_utf8_lossy(
-        &captured.stdout,
-    ))))
+    Ok(Some(IsolatedPlan {
+        names,
+        ignored,
+        include_ignored,
+    }))
 }
 
 /// One `cargo test <selection> -- --exact <name>` invocation: a fresh

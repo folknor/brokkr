@@ -1359,6 +1359,7 @@ include_ignored = true
         // config.
         let q = vec![QuarantineEntry {
             pattern: None,
+            package: None,
             category: Some("doctests".into()),
             issue: "B42".into(),
             reason: "42/55 persistence doctests fail to compile".into(),
@@ -1383,6 +1384,7 @@ sweeps = ["all"]
         let test = parse_test(&table).unwrap();
         let q = vec![QuarantineEntry {
             pattern: None,
+            package: None,
             category: Some("doctests".into()),
             issue: "B42".into(),
             reason: "no longer true".into(),

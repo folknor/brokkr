@@ -977,6 +977,18 @@ fn parse_quarantine(
                  category is \"doctests\"."
             )));
         }
+
+        if q.package.is_some() && q.pattern.is_none() {
+            return Err(DevError::Config(format!(
+                "[[quarantine]] entry {i}: `package` only qualifies a `pattern` \
+                 entry."
+            )));
+        }
+        if q.package.as_deref().is_some_and(|p| p.trim().is_empty()) {
+            return Err(DevError::Config(format!(
+                "[[quarantine]] entry {i}: `package` is empty."
+            )));
+        }
         if label.is_empty() || q.reason.trim().is_empty() {
             return Err(DevError::Config(format!(
                 "[[quarantine]] entry {i}: `issue` and `reason` are required - an \

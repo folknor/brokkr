@@ -693,9 +693,17 @@ include_ignored = true
 - `[test.profiles.<name>]` declares a test selection layered onto one or more
   `[[check]]` entries. Fields: `sweeps` (required, list of `[[check]]` entry
   names), `tests` (`--test <name>`), `only` (positional substring filter),
-  `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`.
-  `extends = "<other>"` walks the chain with cycle detection; collections are
-  replaced (child wins), env merges key-by-key.
+  `skip`, `include_ignored`, `test_threads`, `env`. `extends = "<other>"`
+  walks the chain with cycle detection; collections are replaced (child
+  wins), env merges key-by-key.
+- `skip` entries are either bare substrings (libtest `--skip`) or
+  package-qualified tables - `{ package = "nautilus-infrastructure",
+  pattern = "serial_tests::" }` - filtered out of the enumerated set rather
+  than expressed as cargo selection, which is the only way to distinguish
+  identical module paths in different packages (integration-test paths carry
+  no crate prefix). Qualified entries require `isolation = "process"`
+  (enforced at resolve time), and a test name existing in both a skipped and
+  an unskipped package is a reported collision, never half-obeyed.
 - `isolation = "process"` runs each of the profile's tests in its own
   `cargo test … -- --exact <name>` process (TIERED-CHECK.md feature 10).
   `--test-threads=1` serializes tests inside one process per test binary; it
@@ -759,6 +767,10 @@ reason   = "42/55 persistence doctests fail to compile"
   semantics) or `category` (only `"doctests"`). `issue` and `reason` are
   required - the issue ID is what turns the list from a graveyard with
   good manners into a countdown.
+- `package = "<pkg>"` (optional, `pattern` entries only) restricts the
+  entry to one package's pairs. Without it, a name-only pattern absorbs
+  same-named pairs in every package, so a test that later stops running
+  for an unrelated reason lands as accounted instead of orphaned.
 - Staleness is mechanical in both directions: a `pattern` entry justifying
   zero non-run pairs fails the check (delete it when the bug closes), and
   a `doctests` entry with `[test] doctests = true` is rejected at load

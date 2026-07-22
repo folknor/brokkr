@@ -1,15 +1,54 @@
 # Tiered check: a fast answer that admits it, and a slow answer worth trusting
 
-Status: the committed core has landed. Feature 5; feature 8 (the `--json`
-summary trailer, `schema: 1`, now incl. the `coverage` object); step 3 -
-`certifies`, feature 1 (`skip_phases`), feature 9 (`gate_profile` /
-`--gate`), the 0/10/1 exit contract and verdict split; step 4 - feature 2
-(`lanes`); feature 10 (`isolation = "process"`); and step 5 - feature 4
-(coverage accounting over (build shape, test) pairs with the
-`[[quarantine]]` ledger). Feature 3 is shelved on measurement (see the
-feature). Remaining, as options: feature 6 (conditional sweeps) and
-feature 7 (slow-test budget), each with its named re-evaluation criterion
-in the build order.
+Status: the committed core has landed, plus two features the first real
+runs forced. Feature 5; feature 8 (the `--json` summary trailer,
+`schema: 1`, incl. the `coverage` object); step 3 - `certifies`, feature 1
+(`skip_phases`), feature 9 (`gate_profile` / `--gate`), the 0/10/1 exit
+contract and verdict split; step 4 - feature 2 (`lanes`); feature 10
+(`isolation = "process"`); step 5 - feature 4 (coverage accounting over
+(build shape, package, test) pairs with the `[[quarantine]]` ledger); and
+feature 11 (package-qualified skips + package-scoped quarantine entries).
+Feature 3 is shelved on measurement (see the feature).
+
+## Continuing this work - read this first
+
+Config semantics: `docs/brokkr.toml.md` (`[test]` section,
+`[[quarantine]]`); runtime behaviour: `docs/commands/check.md`. Code:
+`src/config_parts/{schema,parser}.rs` (keys + load-time rules),
+`src/profile.rs` (resolution, lanes, `build_shape_key`, resolve-time
+rules), `src/check_cmd/phase.rs` (`cmd_check`, phase order, the exit
+contract in `finish_check`), `src/check_cmd/isolate.rs` (per-process
+execution), `src/check_cmd/coverage.rs` (the accounting),
+`src/check_cmd/binaries.rs` (per-binary attribution).
+`scripts/smoke-certifies.sh` exercises every landed mechanism end-to-end
+against a generated two-package workspace; run it after any change here.
+
+Open items, in rough order of pull:
+
+1. **The nautilus migration** is mid-flight: the serial lane needs
+   `isolation = "process"`, the service-dependent families
+   (`redis::msgbus::…` and the top-level `serial_tests::` in
+   nautilus-infrastructure) need package-qualified skips + ledger
+   entries, tier1's ~12 named skips and doctests (B42) need entries, and
+   `AGENTS.md` there should say `brokkr check --gate`. The first
+   passing gate's coverage trailer is the ground truth for what remains -
+   orphan lines are the worksheet.
+2. **Features 6 and 7 are options, not commitments** - re-evaluation
+   criteria in the build order below. Do not build them speculatively.
+3. **A third quarantine category is trending but undesigned**: two
+   instances (pbfhogg's over-watchdog tests, nautilus's Redis tests) of
+   healthy tests with *environmental preconditions*, where the
+   issue-countdown semantics don't fit - an `issue` that can never close
+   muddies the ledger. A `requires`-style category is the likely shape;
+   upstream availability-gating is better where possible. Design before
+   implementing, and re-read "the claim is primary" first.
+
+Working agreements that produced this doc: mechanisms derive from the
+claim (`certifies`), never stand alone; every proposed knob gets priced
+against the two-mechanisms-one-question smell; enumeration is ground
+truth, never a reimplementation of libtest semantics; findings from real
+runs get folded back into this doc with their dates and numbers; and
+markdown-only changes ride with the next code commit.
 
 Scope: `brokkr check` and `brokkr test`. Every mechanism here is opt-in. No
 existing key changes meaning, and a `brokkr.toml` that does not ask for any of
@@ -696,6 +735,53 @@ at family scale (~12 tests), and a lane that wants it for thousands of
 tests has a different problem (that is nextest's job, not brokkr's).
 `isolation = "process"` with `test_threads` other than 1 is rejected at
 load time - per-process execution is serial by construction.
+
+### 11. Package-qualified skips (found by the first gate run)
+
+**Landed**, with the symmetric quarantine qualification: `[[quarantine]]`
+entries take an optional `package` field, because a name-only pattern
+written for one package would otherwise absorb same-named pairs in every
+other - a test that later stops running for an unrelated reason would
+land as accounted instead of orphaned, the mirror of the ignored-listing
+bug. The coverage pair is now (build shape, package, test) throughout;
+orphans print as `shape/package/test`. Enumeration moved to per-binary
+exactly as sketched below; the collision guard is a hard error.
+
+```toml
+[[test.profiles.serial.skip]]
+package = "nautilus-infrastructure"
+pattern = "serial_tests::"
+```
+
+A structured skip filtered out of the enumerated set, not expressed as
+cargo selection: `--exclude` would drop the whole package and alter the
+test invocation, while a bare name substring cannot distinguish
+`nautilus-infrastructure`'s four `serial_tests::` binaries from the three
+legitimate top-level `serial_tests::` modules in backtest/live/lighter -
+integration-test paths carry no crate prefix, so identical module paths in
+different packages are textually indistinguishable.
+
+Prerequisite the current implementation lacks: (package, test)
+attribution. Enumeration today goes through cargo, which prints per-binary
+attribution on stderr while the listing arrives on stdout - separately
+captured streams, no reliable correlation. The mechanism: `cargo test
+--no-run --message-format=json` yields each test binary with its owning
+package; each binary then runs `--list` *directly*, which is safe because
+listing executes no test code (the cargo-env argument against direct
+execution does not apply to enumeration). Execution stays through cargo
+with `--exact` - unchanged selection, unchanged fingerprint - plus a
+collision guard: a test name matching in both a skipped and an unskipped
+package cannot be split by one cargo invocation, so it errors rather than
+half-obeys. Composes with the ledger as-is (the pair is already (build
+shape, test); the structured skip's non-run pairs need quarantine
+justification like any other), and upgrades the pair to (build shape,
+package, test) for free where it matters.
+
+A qualified substring plus a ledger entry covers only the cases where the
+module path happens to be package-distinguishing (`redis::msgbus::…`); the
+motivating case is the other kind - top-level `serial_tests::` paths that
+are textually identical across packages - so this is a live need for the
+nautilus migration, not future-proofing.
 
 ## Build order
 

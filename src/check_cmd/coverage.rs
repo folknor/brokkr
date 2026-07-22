@@ -41,13 +41,15 @@ struct CoverageStats {
     orphaned: usize,
 }
 
-/// One build shape's enumeration: the full universe, the `#[ignore]`d
-/// subset, and the union of every lane's ran-set.
+/// One build shape's enumeration, package-qualified: the full universe,
+/// the `#[ignore]`d subset, and the union of every lane's ran-set. Each
+/// element is a `(package, test)` pair (TIERED-CHECK feature 11 upgraded
+/// the coverage pair to (build shape, package, test)).
 struct ShapeCoverage {
     label: String,
-    universe: BTreeSet<String>,
-    ignored: BTreeSet<String>,
-    ran: BTreeSet<String>,
+    universe: BTreeSet<(String, String)>,
+    ignored: BTreeSet<(String, String)>,
+    ran: BTreeSet<(String, String)>,
 }
 
 fn run_coverage_phase(
@@ -67,7 +69,15 @@ fn run_coverage_phase(
     for (entry, count) in quarantine.iter().zip(&report.per_entry) {
         match (&entry.pattern, &entry.category) {
             (Some(p), _) => {
-                output::run_msg(&format!("quarantine {} ({p}): {count} pairs", entry.issue));
+                let scope = entry
+                    .package
+                    .as_deref()
+                    .map(|pkg| format!("{pkg}: "))
+                    .unwrap_or_default();
+                output::run_msg(&format!(
+                    "quarantine {} ({scope}{p}): {count} pairs",
+                    entry.issue
+                ));
             }
             (None, Some(cat)) => {
                 output::run_msg(&format!("quarantine {} (category {cat})", entry.issue));
@@ -174,43 +184,53 @@ fn enumerate_shapes(
             .collect();
 
         let bare = shape_selection_args(first);
+        // Per-binary enumeration (feature 11): the artifact stream gives
+        // package attribution, direct-binary `--list` gives the names.
         // libtest's `--list` includes `#[ignore]`d tests regardless of
         // `--include-ignored` (verified empirically), so the ignored set
         // comes from `--list --ignored`, which lists ONLY ignored tests.
-        let universe: BTreeSet<String> = coverage_list(
-            project_root,
-            &bare,
-            &[],
-            &["--include-ignored"],
-            &env_refs,
-            commands,
-        )?
-        .into_iter()
-        .collect();
-        let ignored: BTreeSet<String> =
-            coverage_list(project_root, &bare, &[], &["--ignored"], &env_refs, commands)?
-                .into_iter()
-                .collect();
+        let Some(binaries) = test_binaries(project_root, &bare, &env_refs, commands)? else {
+            return Err(DevError::Build("coverage enumeration failed".into()));
+        };
+        let mut universe: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
+        for b in &binaries {
+            let Some(all) = binary_list(b, project_root, &["--include-ignored"], &env_refs)?
+            else {
+                return Err(DevError::Build("coverage enumeration failed".into()));
+            };
+            universe.extend(all.into_iter().map(|t| (b.package.clone(), t)));
+            let Some(ig) = binary_list(b, project_root, &["--ignored"], &env_refs)? else {
+                return Err(DevError::Build("coverage enumeration failed".into()));
+            };
+            ignored.extend(ig.into_iter().map(|t| (b.package.clone(), t)));
+        }
 
-        let mut ran: BTreeSet<String> = BTreeSet::new();
+        let mut ran: BTreeSet<(String, String)> = BTreeSet::new();
         for sweep in members {
+            let lane_binaries = filter_binaries(&binaries, &sweep.cargo_test_filters);
             let mut libtest: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
             libtest.extend(sweep.libtest_args.iter().map(String::as_str));
-            let lane_ran = coverage_list(
-                project_root,
-                &bare,
-                &sweep.cargo_test_filters,
-                &libtest,
-                &env_refs,
-                commands,
-            )?;
-            // A lane without `--include-ignored` lists ignored names it
-            // will never execute; subtract them or the lane claims
-            // coverage it does not provide.
-            if sweep.libtest_args.iter().any(|a| a == "--include-ignored") {
-                ran.extend(lane_ran);
-            } else {
-                ran.extend(lane_ran.into_iter().filter(|t| !ignored.contains(t)));
+            let inc = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
+            for b in lane_binaries {
+                let Some(listed) = binary_list(b, project_root, &libtest, &env_refs)? else {
+                    return Err(DevError::Build("coverage enumeration failed".into()));
+                };
+                for t in listed {
+                    // Package-qualified skips narrow the lane's claim; a
+                    // lane without `--include-ignored` lists ignored names
+                    // it will never execute - subtract both, or the lane
+                    // claims coverage it does not provide.
+                    if sweep.qualified_skips.iter().any(|q| q.matches(&b.package, &t)) {
+                        continue;
+                    }
+                    let pair = (b.package.clone(), t);
+
+                    if !inc && ignored.contains(&pair) {
+                        continue;
+                    }
+                    ran.insert(pair);
+                }
             }
         }
 
@@ -244,47 +264,19 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
     args
 }
 
-/// One `cargo test … -- … --list` invocation, parsed into test names.
-fn coverage_list(
-    project_root: &Path,
-    selection: &[String],
-    cargo_filters: &[String],
-    libtest_args: &[&str],
-    env_refs: &[(&str, &str)],
-    commands: bool,
-) -> Result<Vec<String>, DevError> {
-    let mut args: Vec<String> = vec!["test".into()];
-    args.extend(selection.iter().cloned());
-    args.extend(cargo_filters.iter().cloned());
-    args.push("--tests".into());
-    args.push("--".into());
-    args.extend(libtest_args.iter().map(|s| (*s).to_owned()));
-    args.push("--list".into());
-
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
-
-    if !captured.status.success() {
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
-        output::error(&String::from_utf8_lossy(&captured.stderr));
-        return Err(DevError::Build("coverage enumeration failed".into()));
-    }
-    Ok(parse_list_output(&String::from_utf8_lossy(&captured.stdout)))
-}
-
 struct CoverageReport {
     stats: CoverageStats,
     /// Pair count justified per `[[quarantine]]` entry, index-aligned.
     per_entry: Vec<usize>,
-    /// `shape-label/test-name` for every unjustified non-run pair.
+    /// `shape-label/package/test-name` for every unjustified non-run pair.
     orphans: Vec<String>,
 }
 
 /// Pure pair classification: universe minus ran, partitioned into
-/// ignored / quarantined / orphaned per shape.
+/// ignored / quarantined / orphaned per shape. A quarantine entry with a
+/// `package` field justifies only that package's pairs - a name-only
+/// pattern written for one package must not absorb same-named pairs in
+/// every other (the mirror of the ignored-listing bug).
 fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> CoverageReport {
     let mut stats = CoverageStats {
         pairs: 0,
@@ -296,21 +288,23 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
     let mut per_entry = vec![0usize; quarantine.len()];
     let mut orphans: Vec<String> = Vec::new();
     for shape in shapes {
-        for test in &shape.universe {
+        for pair in &shape.universe {
+            let (package, test) = pair;
             stats.pairs += 1;
 
-            if shape.ran.contains(test) {
+            if shape.ran.contains(pair) {
                 stats.run += 1;
                 continue;
             }
 
-            if shape.ignored.contains(test) {
+            if shape.ignored.contains(pair) {
                 stats.ignored += 1;
                 continue;
             }
-            let hit = quarantine
-                .iter()
-                .position(|q| q.pattern.as_deref().is_some_and(|p| test.contains(p)));
+            let hit = quarantine.iter().position(|q| {
+                q.pattern.as_deref().is_some_and(|p| test.contains(p))
+                    && q.package.as_deref().is_none_or(|pkg| pkg == package)
+            });
             match hit {
                 Some(i) => {
                     per_entry[i] += 1;
@@ -318,7 +312,7 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
                 }
                 None => {
                     stats.orphaned += 1;
-                    orphans.push(format!("{}/{test}", shape.label));
+                    orphans.push(format!("{}/{package}/{test}", shape.label));
                 }
             }
         }
@@ -337,13 +331,17 @@ mod coverage_tests {
     use super::{classify, CoverageStats, QuarantineEntry, ShapeCoverage};
     use std::collections::BTreeSet;
 
-    fn set(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|s| (*s).to_owned()).collect()
+    fn set(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        pairs
+            .iter()
+            .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
+            .collect()
     }
 
     fn entry(pattern: &str, issue: &str) -> QuarantineEntry {
         QuarantineEntry {
             pattern: Some(pattern.into()),
+            package: None,
             category: None,
             issue: issue.into(),
             reason: "test".into(),
@@ -362,20 +360,20 @@ mod coverage_tests {
         let shapes = vec![
             ShapeCoverage {
                 label: "tier1/default".into(),
-                universe: set(&["serial_tests::a", "plain"]),
+                universe: set(&[("core", "serial_tests::a"), ("core", "plain")]),
                 ignored: set(&[]),
-                ran: set(&["serial_tests::a", "plain"]),
+                ran: set(&[("core", "serial_tests::a"), ("core", "plain")]),
             },
             ShapeCoverage {
                 label: "tier1/ffi".into(),
-                universe: set(&["serial_tests::a", "plain"]),
+                universe: set(&[("core", "serial_tests::a"), ("core", "plain")]),
                 ignored: set(&[]),
-                ran: set(&["plain"]),
+                ran: set(&[("core", "plain")]),
             },
         ];
         let report = classify(&shapes, &[]);
         assert_eq!(report.stats.orphaned, 1);
-        assert_eq!(report.orphans, vec!["tier1/ffi/serial_tests::a"]);
+        assert_eq!(report.orphans, vec!["tier1/ffi/core/serial_tests::a"]);
 
         // A quarantine entry justifies exactly that pair.
         let q = vec![entry("serial_tests::", "B14")];
@@ -388,9 +386,9 @@ mod coverage_tests {
     fn ignored_pairs_count_separately() {
         let shapes = vec![ShapeCoverage {
             label: "default".into(),
-            universe: set(&["a", "slow_manual"]),
-            ignored: set(&["slow_manual"]),
-            ran: set(&["a"]),
+            universe: set(&[("core", "a"), ("core", "slow_manual")]),
+            ignored: set(&[("core", "slow_manual")]),
+            ran: set(&[("core", "a")]),
         }];
         let stats = stats_of(&shapes, &[]);
         assert_eq!(stats.ignored, 1);
@@ -402,12 +400,37 @@ mod coverage_tests {
     fn first_matching_entry_gets_the_credit() {
         let shapes = vec![ShapeCoverage {
             label: "default".into(),
-            universe: set(&["test_bar_roundtrip"]),
+            universe: set(&[("core", "test_bar_roundtrip")]),
             ignored: set(&[]),
             ran: set(&[]),
         }];
         let q = vec![entry("test_bar", "B50"), entry("roundtrip", "B99")];
         let report = classify(&shapes, &q);
         assert_eq!(report.per_entry, vec![1, 0]);
+    }
+
+    #[test]
+    fn package_scoped_entry_does_not_absorb_other_packages() {
+        // The over-absorption hazard: a pattern written for infrastructure
+        // must not justify a same-named pair in backtest, or a test that
+        // later stops running lands as accounted instead of orphaned.
+        let shapes = vec![ShapeCoverage {
+            label: "serial/default".into(),
+            universe: set(&[
+                ("nautilus-infrastructure", "serial_tests::t"),
+                ("nautilus-backtest", "serial_tests::t"),
+            ]),
+            ignored: set(&[]),
+            ran: set(&[]),
+        }];
+        let mut scoped = entry("serial_tests::", "B51");
+        scoped.package = Some("nautilus-infrastructure".into());
+        let report = classify(&shapes, &[scoped]);
+        assert_eq!(report.per_entry, vec![1]);
+        assert_eq!(report.stats.orphaned, 1);
+        assert_eq!(
+            report.orphans,
+            vec!["serial/default/nautilus-backtest/serial_tests::t"]
+        );
     }
 }

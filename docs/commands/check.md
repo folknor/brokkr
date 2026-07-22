@@ -88,9 +88,12 @@ is unaffected - it is always serial regardless of the profile's `test_threads`.
 ### Process isolation (`isolation = "process"`)
 
 A profile may set `isolation = "process"` (see `docs/brokkr.toml.md`): the
-sweep's filtered test set is enumerated with `--list` (the lane's real
-filter argv is the ground truth - no reimplementation of libtest filter
-semantics), then each test runs in its own
+sweep's filtered test set is enumerated per test binary (attribution from
+`cargo test --no-run --message-format=json`; the binaries run `--list`
+directly under the lane's real filter argv - no reimplementation of
+libtest filter semantics), package-qualified skips are filtered out of the
+enumerated set (with a hard error on a name that exists in both a skipped
+and an unskipped package), then each test runs in its own
 `cargo test <selection> -- --exact <name> --test-threads=1` invocation.
 `--test-threads=1` alone serializes tests within one process per test
 binary; it does not isolate them, and tests touching process-global state
@@ -184,21 +187,24 @@ Output:
 ### Coverage accounting (complete profiles)
 
 Under `certifies = "complete"` a tenth phase, `coverage`, runs after the
-tests pass. The unit of coverage is the **(build shape, test) pair**: the
-universe is enumerated per distinct build shape (`--list
---include-ignored`, no filters), each lane's ran-set is `--list` under the
-lane's real filter argv (libtest itself decides what an argv admits - no
-filter-semantics reimplementation), and the `#[ignore]`d set comes from
+tests pass. The unit of coverage is the **(build shape, package, test)
+pair**. Enumeration is per test binary: `cargo test --no-run
+--message-format=json` yields each binary with its owning package, then
+each binary runs `--list` directly (env-safe: listing executes no test
+code). The universe is `--list --include-ignored` with no filters, each
+lane's ran-set is `--list` under the lane's real filter argv (libtest
+itself decides what an argv admits), package-qualified skips are
+subtracted from the lane's claim, and the `#[ignore]`d set comes from
 `--list --ignored` (plain `--list` includes ignored names, so a lane
 without `include_ignored` has them subtracted from its ran-set). Every
-non-run pair must be quarantined (`[[quarantine]]` pattern match, counted
-per entry) or ignored at the source (counted, reported, not fatal);
-anything else is **orphaned** and fails the check, listed up to `--limit`.
-A pattern entry justifying zero pairs is stale and fails the check.
-Package-level `test_exclude_packages` is outside the pair audit (those
-binaries cannot build) and is called out in the trailer. The `--json`
-summary carries a `coverage` object: `pairs`, `run`, `quarantined`,
-`ignored`, `orphaned`.
+non-run pair must be quarantined (`[[quarantine]]` pattern match,
+optionally package-scoped, counted per entry) or ignored at the source
+(counted, reported, not fatal); anything else is **orphaned** and fails
+the check, listed as `shape/package/test` up to `--limit`. A pattern
+entry justifying zero pairs is stale and fails the check. Package-level
+`test_exclude_packages` is outside the pair audit (those binaries cannot
+build) and is called out in the trailer. The `--json` summary carries a
+`coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `orphaned`.
 
 ### `certifies` and the exit-code contract
 

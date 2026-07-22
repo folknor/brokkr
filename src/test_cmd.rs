@@ -501,6 +501,7 @@ fn decide_sweeps(
         s.libtest_args.clear();
         s.cargo_test_filters.clear();
         s.name_filters.clear();
+        s.qualified_skips.clear();
     }
     // A `lanes` profile lists the same `[[check]]` entry once per lane; with
     // the filters dropped those runs are identical, so keep the first of

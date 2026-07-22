@@ -233,6 +233,10 @@ pub(crate) fn describe_sweep(
         if sweep.process_isolation {
             parts.push("process-isolated".into());
         }
+
+        if !sweep.qualified_skips.is_empty() {
+            parts.push(format!("{} pkg-skips", sweep.qualified_skips.len()));
+        }
     }
 
     parts.join(", ")

@@ -759,6 +759,38 @@ pub enum Certifies {
     Partial,
 }
 
+/// One entry in a profile's `skip` list: either a bare test-name
+/// substring (libtest `--skip` semantics, applied by libtest itself) or a
+/// package-qualified skip (TIERED-CHECK feature 11), filtered out of the
+/// enumerated set rather than expressed as cargo selection - the only way
+/// to distinguish identical module paths in different packages
+/// (integration-test paths carry no crate prefix). Qualified entries
+/// require `isolation = "process"`: the enumerated set only exists on
+/// the isolated path.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SkipSpec {
+    Name(String),
+    Qualified(QualifiedSkip),
+}
+
+/// The `{ package = "...", pattern = "..." }` form of a skip entry.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualifiedSkip {
+    /// Cargo package whose test binaries the pattern applies to.
+    pub package: String,
+    /// Test-name substring, matched within that package only.
+    pub pattern: String,
+}
+
+impl QualifiedSkip {
+    /// Does this entry suppress `test` in `package`?
+    pub fn matches(&self, package: &str, test: &str) -> bool {
+        self.package == package && test.contains(&self.pattern)
+    }
+}
+
 /// How a profile's tests execute relative to process boundaries. The only
 /// mode is `process`: one `cargo test … -- --exact <name>` invocation per
 /// test, giving the fresh-process guarantee (fresh logger, fresh globals)
@@ -797,6 +829,12 @@ pub struct QuarantineEntry {
     /// Substring matched against test names (libtest filter semantics).
     /// Exactly one of `pattern` / `category` must be set.
     pub pattern: Option<String>,
+    /// Restrict `pattern` to one package's pairs. Without it, a name-only
+    /// pattern absorbs same-named pairs in every package - so a test that
+    /// later stops running for an unrelated reason lands as accounted
+    /// instead of orphaned, a green tick for something nobody checked.
+    /// Only valid alongside `pattern`.
+    pub package: Option<String>,
     /// Non-test suppression channels. The only category is `"doctests"`,
     /// which justifies `[test] doctests = false` under a complete profile.
     pub category: Option<String>,
@@ -870,9 +908,12 @@ pub struct ProfileDef {
     /// out by libtest. Use module path prefixes (e.g. `tier2::`) to
     /// match every test inside a module.
     pub only: Option<Vec<String>>,
-    /// `--skip <substring>` for each entry. Cumulative with libtest's
-    /// own `--skip`.
-    pub skip: Option<Vec<String>>,
+    /// Skip entries: bare substrings become libtest `--skip` flags;
+    /// `{ package, pattern }` tables are package-qualified skips filtered
+    /// out of the enumerated set (see [`SkipSpec`]; requires
+    /// `isolation = "process"`). Cumulative with a `[[check]]` entry's
+    /// own `skip`.
+    pub skip: Option<Vec<SkipSpec>>,
     /// `--include-ignored` (run `#[ignore]`d tests too).
     pub include_ignored: Option<bool>,
     /// `--test-threads=N`. Required for serial-only tests that touch
