@@ -353,7 +353,11 @@ it is inert for every project that does not opt in). The one current rule,
 (first expression in a block, comment/attribute above, string continuation,
 shared identifier with the line above or the first body line, plus per-keyword
 carve-outs: else-if chains, expression position, loop labels, `.spawn` method
-chains). It scans tracked `.rs` files, honouring `[gremlins].exclude`. JSON
+chains). An `if` that is a **match guard** is exempt outright rather than via
+the ladder - scanning forward from the `if`, a line ending in `=>` before any
+`{` or `;` means the construct opens no block and is the arm's guard clause,
+which is what rustfmt produces when a guard is too long to sit beside its
+pattern. It scans tracked `.rs` files, honouring `[gremlins].exclude`. JSON
 mode emits `style` and `style_summary` events. Ported from nautilus_trader's
 `check_formatting_rs` hook; see `src/style.rs`.
 

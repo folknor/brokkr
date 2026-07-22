@@ -98,18 +98,32 @@ fn scan_content(rel: &Path, content: &str, out: &mut Vec<StyleViolation>) {
     // `content.lines()` drops).
     let regions = lex::classify(content);
     let base = content.as_ptr() as usize;
-    for (i, raw) in lines.iter().enumerate() {
-        // Detect on a CODE-masked view (string/comment bytes blanked); report
-        // the original text.
-        let offset = raw.as_ptr() as usize - base;
-        let masked = lex::mask_line(raw, offset, &regions, lex::Region::Code);
-        let trimmed = masked.trim_start();
+    // Masked once for the whole file: detection reads the CODE-masked view
+    // (string/comment bytes blanked) and so does the forward guard scan, so a
+    // `=>` inside a literal cannot exempt an `if` that isn't a guard.
+    let masked: Vec<String> = lines
+        .iter()
+        .map(|raw| {
+            let offset = raw.as_ptr() as usize - base;
+            lex::mask_line(raw, offset, &regions, lex::Region::Code)
+        })
+        .collect();
+
+    for (i, _raw) in lines.iter().enumerate() {
+        // Detect on the masked view; report the original text.
+        let trimmed = masked[i].trim_start();
         let Some(kw) = control_flow_keyword(trimmed) else {
             continue;
         };
         // No line above: first line of the file is exempt (nothing to
         // separate from).
         if i == 0 {
+            continue;
+        }
+        // A multi-line match guard: the `if` opens no block, it is the arm's
+        // guard clause, terminated by `=>`. Checked before the line-above
+        // exemptions because the construct simply isn't a statement.
+        if kw == "if" && opens_match_guard(&masked, i) {
             continue;
         }
         let prev = lines[i - 1];
@@ -120,10 +134,42 @@ fn scan_content(rel: &Path, content: &str, out: &mut Vec<StyleViolation>) {
             file: rel.to_path_buf(),
             line: i + 1,
             keyword: kw,
-            content: cap(raw.trim_start()),
+            content: cap(lines[i].trim_start()),
             prev: cap(prev.trim_start()),
         });
     }
+}
+
+/// Whether the `if` at `start` is the guard clause of a match arm rather than
+/// a statement. Ports the bash hook's awk prepass: scan forward from the `if`
+/// and exempt it if a line ending in `=>` arrives before any line containing
+/// `{` or `;`.
+///
+/// rustfmt splits an arm whose guard is too long to sit beside the pattern:
+///
+/// ```text
+/// BybitOrderStatus::Canceled
+///     if filled_qty.is_zero()
+///         && due_post_only(reason) =>
+/// {
+/// ```
+///
+/// The `if` opens no block and `=>` terminates it, so demanding a blank line
+/// above it is nonsense - and the line above is a bare pattern, which shares
+/// no identifier with the guard, so the identifier escape hatch never fires.
+/// Both same-line orderings the awk encodes are preserved: `=>` is tested
+/// before `{`/`;`, so a line carrying both still reads as a guard.
+fn opens_match_guard(masked: &[String], start: usize) -> bool {
+    for line in &masked[start..] {
+        let end = line.trim_end();
+        if end.ends_with("=>") {
+            return true;
+        }
+        if line.contains('{') || line.contains(';') {
+            return false;
+        }
+    }
+    false
 }
 
 /// Which control-flow construct, if any, this (already leading-trimmed) line
@@ -599,6 +645,34 @@ mod tests {
     }
 
     // ---- Fix #1: is_match_guard must not over-match bitwise-or. ----
+
+    #[test]
+    fn rustfmt_split_match_guard_is_exempt() {
+        // The nautilus bybit repro (parse.rs:1412): rustfmt pushed a long guard
+        // onto its own line under a bare pattern. No blank line, no shared
+        // identifier - exempt only because `=>` terminates the guard.
+        let src = "fn f() {\n    match s {\n        Bybit::Canceled\n            if filled_qty.is_zero()\n                && due_post_only(r) =>\n        {\n            Rejected\n        }\n    }\n}\n";
+        assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn guard_scan_stops_at_a_block_or_statement() {
+        // A plain `if` statement must stay flagged: its own line carries `{`,
+        // so the forward scan rejects it before any later `=>` is reached.
+        let src = "fn f() {\n    let x = 1;\n    if y {\n        match z {\n            A =>\n        }\n    }\n}\n";
+        assert_eq!(violations(src), vec![("if", 3)]);
+        // Same, with the `{` on a following line and a `;` intervening.
+        let src2 = "fn f() {\n    let x = 1;\n    if y\n    {\n        let a = q =>;\n    }\n}\n";
+        assert_eq!(violations(src2), vec![("if", 3)]);
+    }
+
+    #[test]
+    fn fat_arrow_in_a_string_does_not_exempt_a_guard() {
+        // The scan reads the masked view, so a `=>` inside a literal cannot
+        // launder a genuine statement `if` into a match guard.
+        let src = "fn f() {\n    let x = 1;\n    if y\n        .cmp(\"a =>\")\n    {\n    }\n}\n";
+        assert_eq!(violations(src), vec![("if", 3)]);
+    }
 
     #[test]
     fn bitwise_or_above_if_is_flagged() {
