@@ -100,6 +100,8 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("lint-results", Visibility::Only(&[Project::Piners])),
     ("list", Visibility::Only(&[Project::Litehtml, Project::Sluggrs])),
     ("lock", Visibility::Any),
+    // The topic list inside is project-filtered; the command itself is not.
+    ("man", Visibility::Any),
     ("merge", Visibility::Only(&[Project::Pbfhogg])),
     ("merge-changes", Visibility::Only(&[Project::Pbfhogg])),
     ("mock-serve", Visibility::Only(&[Project::Ratatoskr])),
@@ -177,6 +179,13 @@ pub(crate) fn visible_in(name: &str, project: Project) -> bool {
     let Some((_, vis)) = TABLE.iter().find(|(n, _)| *n == name) else {
         return true;
     };
+    visible_to(vis, project)
+}
+
+/// Resolve a [`Visibility`] against a project. Split out from [`visible_in`]
+/// so `brokkr man` can reuse the same three arms for its topic table without
+/// duplicating the discriminant-comparison rule.
+pub(crate) fn visible_to(vis: &Visibility, project: Project) -> bool {
     match vis {
         Visibility::Any => true,
         Visibility::Only(projects) => same_variant(projects, project),

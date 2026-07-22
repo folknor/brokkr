@@ -23,6 +23,10 @@ png = "0.18"
 regex = "1"
 globset = "0.4"
 rustc_lexer = "0.1.0"
+# `brokkr man`: the bundled docs are markdown, rendered to ANSI for the
+# terminal. Both are leaf crates with no transitive dependencies of their own.
+pulldown-cmark = { version = "0.13", default-features = false }
+owo-colors = "4"
 
 [lints.clippy]
 uninlined_format_args = "deny"

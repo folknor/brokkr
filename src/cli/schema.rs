@@ -256,6 +256,17 @@ Examples:
         #[arg(default_value_t = crate::wc::DEFAULT_THRESHOLD)]
         threshold: usize,
     },
+    /// Read the bundled documentation (`brokkr man` lists the topics).
+    ///
+    /// The `docs/**.md` files are compiled into the binary and rendered to the
+    /// terminal. Topics are filtered by the detected project, except the
+    /// project-agnostic ones (check, clippy, deps, config, measure,
+    /// output-channels), which are listed everywhere.
+    #[command(display_order = 0)]
+    Man {
+        /// Topic to read; omit to list the topics available here.
+        topic: Option<String>,
+    },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///
     /// Phase-based; each phase emits zero or more findings. v1 ships

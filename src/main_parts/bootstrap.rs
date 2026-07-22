@@ -231,6 +231,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
         let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
         return cmd_cargo_run(args);
     }
+    if let Command::Man { topic } = &cli.command {
+        // Reading the docs must work in a tree brokkr knows nothing about, so
+        // an undetectable project falls back to `Other("")` and gets the
+        // project-agnostic topics rather than an error. No lock: this reads
+        // compiled-in strings and touches nothing on disk.
+        let project = project::detect_optional()
+            .ok()
+            .flatten()
+            .map_or(Project::Other(""), |d| d.project);
+        return man::run(topic.as_deref(), project);
+    }
     if let Command::Wc { threshold } = &cli.command {
         // `wc` lists source files in the code tree (cwd).
         let project_root = match project::detect_optional()? {
@@ -457,6 +468,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Fmt { .. }
         | Command::Run { .. }
         | Command::Wc { .. }
+        | Command::Man { .. }
         | Command::Deps { .. } => unreachable!(),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {
