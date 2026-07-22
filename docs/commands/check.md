@@ -176,9 +176,12 @@ in the output, so the collapsing applies to success only. This covers clippy
 failures, test failures, hung tests, parallel-sweep timeouts, zero-test runs,
 and `build_packages` pre-build failures.
 
-`--commands` restores the full command on every line. `brokkr clippy` is
-unaffected and always prints its command: it is the investigative runner,
-invoked precisely to find out what a given target shape does.
+`--commands` restores the full command on every line, and additionally logs the
+dependency-rule phase's `cargo metadata` invocation (suppressed by default: it
+is a fixed string that says less than the `dependency rules: ok (…)` line
+following it). `brokkr clippy` is unaffected and always prints its command: it
+is the investigative runner, invoked precisely to find out what a given target
+shape does.
 
 The clippy phase always invokes cargo with `--message-format=json` and ingests
 via `cargo_json::parse_cargo_diagnostics` regardless of `--raw` - the text

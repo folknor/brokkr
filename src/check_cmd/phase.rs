@@ -95,7 +95,7 @@ pub(crate) fn cmd_check(
         run_textlint(project_root, textlint_rules, limit, all)?;
         run_manifest(project_root, manifest_cfg, limit, all)?;
         run_script_checks(project_root, script_checks)?;
-        run_dependency_rules(project_root, dependency_rules, limit, all)?;
+        run_dependency_rules(project_root, dependency_rules, limit, all, commands)?;
         run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
         run_test_phase(
             project,
@@ -619,12 +619,19 @@ fn run_dependency_rules(
     rules: &[DependencyRule],
     limit: usize,
     all: bool,
+    commands: bool,
 ) -> Result<(), DevError> {
     if rules.is_empty() {
         return Ok(());
     }
 
-    output::run_msg("cargo metadata --format-version 1 --no-deps (dependency rules)");
+    // A fixed invocation with no per-project variation - it says strictly less
+    // than the `dependency rules: ...` line below it, so it is `--commands`-only
+    // like every other cargo line. The phase is otherwise silent until its
+    // result, matching the native phases (style/header/textlint).
+    if commands {
+        output::run_msg("cargo metadata --format-version 1 --no-deps (dependency rules)");
+    }
     let report = dependency_rules::check(project_root, rules)?;
 
     if report.violations.is_empty() {
