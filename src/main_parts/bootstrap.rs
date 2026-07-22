@@ -64,11 +64,52 @@ fn capture_brokkr_args() -> String {
     }
 }
 
+/// Parse argv, with subcommands that don't apply to the detected project
+/// hidden from `--help`.
+///
+/// Hidden is not disabled: a hidden subcommand still parses and still reaches
+/// its handler, where `project::require()` produces the "only available in X
+/// projects" error it always did. The filtering is purely about what a help
+/// listing shows, so `brokkr --help` in a piners tree isn't a menu of tilegen
+/// and nidhogg commands.
+///
+/// Fails open in every direction. Detection runs before parsing, so it cannot
+/// use the CLI, and any failure to detect - no `brokkr.toml`, a malformed one,
+/// an unreadable cwd - leaves the full command list visible rather than
+/// hiding commands on the strength of a guess. A `brokkr.toml` so broken that
+/// the project is unknown must not also cost the user their `--help`.
+fn parse_cli() -> Cli {
+    let Some(project) = project::detect_optional().ok().flatten().map(|d| d.project) else {
+        return Cli::parse();
+    };
+
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|s| s.get_name().to_owned())
+        .collect();
+
+    for name in names {
+        if !cli::visible_in(&name, project) {
+            cmd = cmd.mut_subcommand(&name, |s| s.hide(true));
+        }
+    }
+
+    let matches = cmd.get_matches();
+    match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        // The matches came from the same derived command, so a conversion
+        // failure is a clap-internal contract break, not user error: let clap
+        // render and exit exactly as `parse()` would.
+        Err(e) => e.exit(),
+    }
+}
+
 fn main() {
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     // Lead our own process group before spawning anything or acquiring the
     // lock, so brokkr's internal `kill(-pgid, …)` sweeps can't escape upward

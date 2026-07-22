@@ -68,7 +68,15 @@ Single crate, single binary. No workspace.
 ### Source layout
 
 - `src/main.rs` - `main()`, command dispatch, `run_measured()`, `resolve_mode()`
-- `src/cli/` - CLI definition (clap derive), split into `schema.rs` (`Cli`, `Command` incl. `Command::Deps` and all measurable commands, `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`) and `validation.rs` (clap value parsers). All commands are top-level - no subcommand enums for litehtml/sluggrs
+- `src/cli/` - CLI definition (clap derive), split into `schema.rs` (`Cli`, `Command` incl. `Command::Deps` and all measurable commands, `ModeArgs`, `PbfArgs`, `VerifyCommand`, `Command::as_pbfhogg()`) and `validation.rs` (clap value parsers). All commands are top-level - no subcommand enums for litehtml/sluggrs. `visibility.rs` holds `TABLE`, the subcommand-name -> applicable-projects map that hides irrelevant commands from `--help` (see below); the three files are `include!`d into `src/cli.rs`, so they carry `//` comments, not `//!`
+
+### Project-scoped help
+
+`brokkr --help` lists only the commands that apply to the detected project - 18 in a brokkr checkout, not the full 87. `parse_cli()` in `src/main_parts/bootstrap.rs` detects the project *before* parsing, then walks `Cli::command()` marking every subcommand `cli::visible_in()` rejects as `hide(true)`, and parses from the mutated command via `FromArgMatches`.
+
+Hidden is **not** disabled. A hidden subcommand still parses and still reaches its handler, where `project::require()` produces the usual `'brokkr X' is only available in Y projects` error. `visibility.rs` is therefore a presentation layer that must agree with those `require()` calls - it never becomes the gate itself.
+
+Everything fails open: an undetectable or malformed `brokkr.toml` leaves the full list visible, and a subcommand missing from `TABLE` stays visible everywhere. Two tests in `src/cli.rs` keep the table honest - one fails if any subcommand is absent from `TABLE`, the other if `TABLE` names a subcommand that no longer exists
 - `src/cargo_filter.rs` - Formatter primitives (`ClippyDiagnostic`, `ClippyParse`) plus the legacy text-output parser still used as a fallback by the test-phase build-error path. See the module header for why the JSON path replaced text scraping
 - `src/cargo_json.rs` - Parser for cargo's `--message-format=json` diagnostics (`DiagnosticEvent`, `parse_cargo_diagnostics`), feeding check's text renderer. The old NDJSON `CheckEvent` output mode was removed (3ff8291); `check --json` now emits a single schema-versioned summary trailer built in `src/check_cmd/phase.rs` (`CheckSummary`)
 - `src/gremlins.rs` - Gremlin detector for `brokkr check`. Scans `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked + untracked-not-gitignored) for invisible/deceptive Unicode. Exposes `tracked_files()` (shared file walk) and `CodepointSet` (allow/ban singletons + ranges)
