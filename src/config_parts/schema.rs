@@ -260,6 +260,11 @@ pub struct ScriptCheck {
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching
 /// `paths`, with bounded predicates and inline/regex exceptions. See
 /// [`crate::textlint`].
+///
+/// Every field but `name`/`pattern`/`message` can also come from a shared
+/// `[textlint_preset.<name>]` block named by the rule's `preset` key - a
+/// parse-time merge, so by the time this struct exists the preset is already
+/// folded in and there is no runtime notion of a preset.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextlintRule {

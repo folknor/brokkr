@@ -58,8 +58,8 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`, `style`, `header`, `textlint`, `script_check`, `manifest`, `deps`,
-`disable_toolchain`.
+`gremlins`, `style`, `header`, `textlint`, `textlint_preset`, `script_check`,
+`manifest`, `deps`, `disable_toolchain`.
 
 ## `disable_toolchain`
 
@@ -224,6 +224,59 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
 
 No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
 statements). See `src/textlint.rs` and `src/lex.rs`.
+
+## `[textlint_preset.<name>]` blocks
+
+A named bundle of textlint scope/predicate fields that rules pull in with
+`preset`. For a family of rules that differ only in `pattern` and `message` but
+share a long `exclude` list - the shape a ported hook suite converges on - this
+single-sources the scope, so adding one exempt file is a one-line edit rather
+than the same edit repeated across every rule in the family.
+
+```toml
+[textlint_preset.dst-scope]
+paths = ["crates/*/src/**/*.rs"]
+exclude = [
+    "crates/adapters/**", "crates/backtest/**", "crates/pyo3/**",
+    "**/tests/**", "**/*_test.rs",
+]
+region = "code"
+skip_after = '^\s*#\[cfg\((all\()?test'
+allow_marker = "dst-ok"
+
+[[textlint]]
+name = "dst-no-wallclock-qualified"
+preset = "dst-scope"
+pattern = 'std::time::Instant::now\(\)|chrono::Utc::now\(\)'
+message = "route through a DST seam"
+
+[[textlint]]
+name = "dst-tcp-seam-qualified"
+preset = "dst-scope"
+pattern = 'tokio::net::TcpStream::connect\b'
+exclude = ["crates/network/src/net.rs"]   # appended to the preset's list
+message = "route through nautilus_network::net"
+```
+
+A preset may set any `[[textlint]]` field except `name`, `pattern`, and
+`message` - the three that identify one rule. An unknown or misspelled field in
+a preset is a load-time error even if no rule uses the preset.
+
+Merge rules:
+
+- **Nearest value wins.** A field the rule sets itself is kept. This includes a
+  field set back to its own default (`join_wrapped_use = false` beats a preset's
+  `true`) - the merge happens on raw TOML before deserialization, so "set to
+  false" and "absent" stay distinguishable.
+- **`paths`, `exclude`, and `except` concatenate**, preset entries first, so a
+  rule *adds* to a shared list instead of replacing it. Narrow a preset's
+  `paths` with the rule's own `exclude`.
+- `preset` also takes a list (`preset = ["rust-src", "dst-markers"]`), applied
+  left to right under the same nearest-wins rule: the rule's own value wins,
+  then the first-listed preset, and so on. Lists take entries from all of them.
+
+Presets are resolved entirely at parse time - the check phases see ordinary
+fully-resolved rules and have no notion of a preset.
 
 ## `[[script_check]]` array
 

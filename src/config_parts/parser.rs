@@ -160,11 +160,133 @@ fn parse_header(
     Ok(Some(cfg))
 }
 
+/// `[[textlint]]` fields holding string lists. When a rule draws on a preset
+/// these *concatenate* (preset entries first) rather than the rule's value
+/// replacing the preset's, so a rule can add one more path to a shared
+/// `exclude` without restating the whole list.
+const TEXTLINT_LIST_FIELDS: [&str; 3] = ["paths", "exclude", "except"];
+
+/// Fields a `[textlint_preset.<name>]` block may carry: everything a
+/// `[[textlint]]` rule accepts except the three that identify one rule
+/// (`name`, `pattern`, `message`), which are never shareable.
+const TEXTLINT_PRESET_FIELDS: [&str; 16] = [
+    "paths",
+    "exclude",
+    "except",
+    "allow_marker",
+    "allow_marker_above",
+    "in_toml_section",
+    "table_row_only",
+    "skip_after",
+    "only_if_file_matches",
+    "only_if_file_matches_above",
+    "region",
+    "join_wrapped_use",
+    "except_above",
+    "except_below",
+    "require_above",
+    "require_below",
+];
+
+/// Parse the optional `[textlint_preset.<name>]` blocks into raw TOML tables,
+/// keyed by name. They are merged into rules by [`apply_textlint_preset`]
+/// *before* deserialization, so a rule that explicitly sets a field back to its
+/// default (`join_wrapped_use = false`) still overrides the preset - something
+/// a post-deserialization merge cannot see.
+fn parse_textlint_presets(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<HashMap<String, toml::value::Table>, DevError> {
+    let Some(value) = table.get("textlint_preset") else {
+        return Ok(HashMap::new());
+    };
+    let map = value.as_table().ok_or_else(|| {
+        DevError::Config(
+            "[textlint_preset] must be a table of named blocks, e.g. \
+             `[textlint_preset.dst-scope]`"
+                .into(),
+        )
+    })?;
+    let mut out = HashMap::new();
+    for (name, body) in map {
+        let body = body.as_table().ok_or_else(|| {
+            DevError::Config(format!("[textlint_preset.{name}] must be a table"))
+        })?;
+        for key in body.keys() {
+            if matches!(key.as_str(), "name" | "pattern" | "message") {
+                return Err(DevError::Config(format!(
+                    "[textlint_preset.{name}] may not set `{key}` - it identifies a \
+                     single rule, not a shared scope"
+                )));
+            }
+            if !TEXTLINT_PRESET_FIELDS.contains(&key.as_str()) {
+                return Err(DevError::Config(format!(
+                    "[textlint_preset.{name}] has unknown field `{key}`"
+                )));
+            }
+        }
+        out.insert(name.clone(), body.clone());
+    }
+    Ok(out)
+}
+
+/// Layer `preset` underneath `rule`: nearest value wins, so a key the rule sets
+/// itself is left alone. The exception is [`TEXTLINT_LIST_FIELDS`], which
+/// concatenate preset-first.
+fn apply_textlint_preset(rule: &mut toml::value::Table, preset: &toml::value::Table) {
+    for (key, preset_value) in preset {
+        let Some(rule_value) = rule.get(key) else {
+            rule.insert(key.clone(), preset_value.clone());
+            continue;
+        };
+        if !TEXTLINT_LIST_FIELDS.contains(&key.as_str()) {
+            continue;
+        }
+        if let (Some(from_preset), Some(from_rule)) =
+            (preset_value.as_array(), rule_value.as_array())
+        {
+            let mut merged = from_preset.clone();
+            merged.extend(from_rule.iter().cloned());
+            rule.insert(key.clone(), toml::Value::Array(merged));
+        }
+    }
+}
+
+/// Pull the `preset` key off a raw rule table, accepting either a single name
+/// or a list of them. Removing it keeps `TextlintRule`'s `deny_unknown_fields`
+/// intact - the merged table it eventually sees has no `preset` field.
+fn take_textlint_presets(
+    body: &mut toml::value::Table,
+    label: &str,
+) -> Result<Vec<String>, DevError> {
+    let Some(value) = body.remove("preset") else {
+        return Ok(Vec::new());
+    };
+    match value {
+        toml::Value::String(s) => Ok(vec![s]),
+        toml::Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_owned).ok_or_else(|| {
+                    DevError::Config(format!(
+                        "[[textlint]] {label}: `preset` list entries must be strings"
+                    ))
+                })
+            })
+            .collect(),
+        _ => Err(DevError::Config(format!(
+            "[[textlint]] {label}: `preset` must be a preset name or a list of them"
+        ))),
+    }
+}
+
 /// Parse the optional `[[textlint]]` array of rules. Absent -> empty. Each rule
-/// needs a `name`, `pattern`, and non-empty `paths`.
+/// needs a `name`, `pattern`, and non-empty `paths`. A rule may name one or
+/// more `[textlint_preset.<name>]` blocks via `preset`; those are merged in
+/// first (see [`apply_textlint_preset`]), so `paths` may come from the preset.
 fn parse_textlint(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Vec<TextlintRule>, DevError> {
+    let presets = parse_textlint_presets(table)?;
     let Some(value) = table.get("textlint") else {
         return Ok(Vec::new());
     };
@@ -175,10 +297,37 @@ fn parse_textlint(
                 .into(),
         ));
     }
-    let rules: Vec<TextlintRule> = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("[[textlint]]: {e}")))?;
+    let entries = value.as_array().ok_or_else(|| {
+        DevError::Config(
+            "[[textlint]] must be a sequence of array-of-table entries".into(),
+        )
+    })?;
+    let mut rules: Vec<TextlintRule> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut body = entry
+            .as_table()
+            .cloned()
+            .ok_or_else(|| DevError::Config("[[textlint]] entry is not a table".into()))?;
+        let label = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map_or_else(|| "<unnamed>".to_owned(), |n| format!("{n:?}"));
+        for name in take_textlint_presets(&mut body, &label)? {
+            let preset = presets.get(&name).ok_or_else(|| {
+                DevError::Config(format!(
+                    "[[textlint]] {label} references unknown preset {name:?}; \
+                     define it as [textlint_preset.{name}]"
+                ))
+            })?;
+            apply_textlint_preset(&mut body, preset);
+        }
+        let rule: TextlintRule = toml::Value::Table(body)
+            .try_into()
+            .map_err(|e: toml::de::Error| {
+                DevError::Config(format!("[[textlint]] {label}: {e}"))
+            })?;
+        rules.push(rule);
+    }
     for rule in &rules {
         if rule.name.trim().is_empty() {
             return Err(DevError::Config(
@@ -353,6 +502,7 @@ fn parse_hosts(
             || key == "style"
             || key == "header"
             || key == "textlint"
+            || key == "textlint_preset"
             || key == "script_check"
             || key == "manifest"
             || key == "deps"

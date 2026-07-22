@@ -41,6 +41,153 @@ mod tests {
         }
     }
 
+    fn textlint_of(src: &str) -> Result<Vec<TextlintRule>, DevError> {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
+        parse_textlint(&table)
+    }
+
+    #[test]
+    fn textlint_preset_supplies_scope_and_rule_overrides_scalars() {
+        let rules = textlint_of(
+            r#"
+[textlint_preset.dst-scope]
+paths = ["crates/*/src/**/*.rs"]
+exclude = ["crates/adapters/**"]
+region = "code"
+allow_marker = "dst-ok"
+join_wrapped_use = true
+
+[[textlint]]
+name = "inherits"
+pattern = "Instant::now"
+message = "m"
+preset = "dst-scope"
+
+[[textlint]]
+name = "overrides"
+pattern = "Utc::now"
+message = "m"
+preset = "dst-scope"
+allow_marker = "clock-ok"
+join_wrapped_use = false
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(rules[0].paths, vec!["crates/*/src/**/*.rs".to_owned()]);
+        assert_eq!(rules[0].region.as_deref(), Some("code"));
+        assert_eq!(rules[0].allow_marker.as_deref(), Some("dst-ok"));
+        assert!(rules[0].join_wrapped_use);
+
+        // Nearest value wins - including one explicitly set back to the field's
+        // own default, which a post-deserialization merge could not distinguish
+        // from "unset".
+        assert_eq!(rules[1].allow_marker.as_deref(), Some("clock-ok"));
+        assert!(!rules[1].join_wrapped_use);
+    }
+
+    #[test]
+    fn textlint_preset_lists_concatenate_preset_first() {
+        let rules = textlint_of(
+            r#"
+[textlint_preset.scope]
+exclude = ["crates/adapters/**", "**/tests/**"]
+except = ["^\\s*use\\s"]
+
+[[textlint]]
+name = "adds"
+pattern = "p"
+message = "m"
+paths = ["crates/**/*.rs"]
+preset = "scope"
+exclude = ["crates/network/src/net.rs"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rules[0].exclude,
+            vec![
+                "crates/adapters/**".to_owned(),
+                "**/tests/**".to_owned(),
+                "crates/network/src/net.rs".to_owned(),
+            ]
+        );
+        assert_eq!(rules[0].except, vec!["^\\s*use\\s".to_owned()]);
+    }
+
+    #[test]
+    fn textlint_multiple_presets_apply_nearest_first() {
+        let rules = textlint_of(
+            r#"
+[textlint_preset.a]
+paths = ["a/**"]
+region = "code"
+
+[textlint_preset.b]
+paths = ["b/**"]
+region = "comment"
+skip_after = "cfg\\(test"
+
+[[textlint]]
+name = "both"
+pattern = "p"
+message = "m"
+preset = ["a", "b"]
+"#,
+        )
+        .unwrap();
+
+        // Earlier-listed preset wins for scalars; lists take both.
+        assert_eq!(rules[0].region.as_deref(), Some("code"));
+        assert_eq!(rules[0].skip_after.as_deref(), Some("cfg\\(test"));
+        assert_eq!(
+            rules[0].paths,
+            vec!["b/**".to_owned(), "a/**".to_owned()]
+        );
+    }
+
+    #[test]
+    fn textlint_preset_errors() {
+        // Unknown preset name.
+        assert!(textlint_of(
+            "[[textlint]]\nname = \"r\"\npattern = \"p\"\nmessage = \"m\"\n\
+             paths = [\"**\"]\npreset = \"nope\"\n"
+        )
+        .is_err());
+
+        // A preset may not carry a rule's identity.
+        assert!(textlint_of(
+            "[textlint_preset.p]\npattern = \"x\"\n\n[[textlint]]\nname = \"r\"\n\
+             pattern = \"p\"\nmessage = \"m\"\npaths = [\"**\"]\npreset = \"p\"\n"
+        )
+        .is_err());
+
+        // Typo in a preset field is caught even though the rule looks fine.
+        assert!(textlint_of("[textlint_preset.p]\nexcludes = [\"x\"]\n").is_err());
+
+        // `preset` must be a string or list of strings.
+        assert!(textlint_of(
+            "[textlint_preset.p]\npaths = [\"**\"]\n\n[[textlint]]\nname = \"r\"\n\
+             pattern = \"p\"\nmessage = \"m\"\npreset = 3\n"
+        )
+        .is_err());
+
+        // A rule drawing no `paths` from anywhere is still rejected.
+        assert!(textlint_of(
+            "[textlint_preset.p]\nregion = \"code\"\n\n[[textlint]]\nname = \"r\"\n\
+             pattern = \"p\"\nmessage = \"m\"\npreset = \"p\"\n"
+        )
+        .is_err());
+
+        // `preset` itself never reaches the rule struct's deny_unknown_fields.
+        assert!(textlint_of(
+            "[textlint_preset.p]\npaths = [\"**\"]\n\n[[textlint]]\nname = \"r\"\n\
+             pattern = \"p\"\nmessage = \"m\"\npreset = \"p\"\n"
+        )
+        .is_ok());
+    }
+
     #[test]
     fn gremlins_exclude_matches_dir_prefix() {
         let cfg = GremlinsConfig {
