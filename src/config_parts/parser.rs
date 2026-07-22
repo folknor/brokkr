@@ -955,6 +955,24 @@ fn validate_check_against_test(
             "[test].default_profile = '{default}' names no `[test.profiles.*]` entry."
         )));
     }
+    // `gate_profile` must name an existing profile, and that profile must
+    // certify "complete": `--gate` exists to be the invocation whose green
+    // may be treated as a gate result, so a gate resolving to a partial
+    // (or unaccounted legacy) profile is rejected at load time.
+    if let Some(gate) = &t.gate_profile {
+        let Some(def) = t.profiles.get(gate.as_str()) else {
+            return Err(DevError::Config(format!(
+                "[test].gate_profile = '{gate}' names no `[test.profiles.*]` entry."
+            )));
+        };
+        if def.certifies != Some(Certifies::Complete) {
+            return Err(DevError::Config(format!(
+                "[test].gate_profile = '{gate}' must name a profile with \
+                 `certifies = \"complete\"` - the gate invocation is exactly \
+                 the run whose green is allowed to mean \"ready\"."
+            )));
+        }
+    }
     if t.profiles.is_empty() {
         return Ok(());
     }
@@ -969,6 +987,36 @@ fn validate_check_against_test(
                  but no `[test.profiles.*]` entry with that name exists."
             )));
         }
+        // `skip_phases` is a permission the partial claim grants - a
+        // profile without `certifies` gets no new permissions, and a
+        // "complete" profile skipping phases would claim what it did not
+        // check.
+        if let Some(phases) = &def.skip_phases {
+            if def.certifies != Some(Certifies::Partial) {
+                return Err(DevError::Config(format!(
+                    "[test.profiles.{profile_name}] sets `skip_phases` without \
+                     `certifies = \"partial\"`. Skipping phases is a permission \
+                     the partial claim grants; a complete or unclaimed profile \
+                     may not skip phases."
+                )));
+            }
+            for p in phases {
+                if !PHASE_NAMES.contains(&p.as_str()) {
+                    return Err(DevError::Config(format!(
+                        "[test.profiles.{profile_name}] skip_phases entry '{p}' \
+                         is not a check phase. Valid phases: {}.",
+                        PHASE_NAMES.join(", ")
+                    )));
+                }
+            }
+        }
+        // Interim rule until coverage accounting (TIERED-CHECK.md feature 4)
+        // lands: a "complete" profile may not narrow the test universe at
+        // all. Crude, but it keeps `complete` honest before the accounting
+        // can audit finer-grained skips.
+        if def.certifies == Some(Certifies::Complete) {
+            validate_complete_profile(profile_name, def, t, check)?;
+        }
         let Some(sweeps) = &def.sweeps else {
             continue;
         };
@@ -979,6 +1027,72 @@ fn validate_check_against_test(
                      but no `[[check]]` entry with that name exists."
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// The interim `certifies = "complete"` rule (TIERED-CHECK.md, build order
+/// step 3): until coverage accounting can justify individual skips with
+/// quarantine entries, a complete profile may not narrow the test universe
+/// in any direction - no libtest filters on the profile or its sweeps, no
+/// per-sweep package exclusion, ignored tests included, doctests on, and no
+/// `extends` (a parent's filters must not merge in under an explicit claim).
+fn validate_complete_profile(
+    name: &str,
+    def: &ProfileDef,
+    t: &TestConfig,
+    check: &[CheckEntry],
+) -> Result<(), DevError> {
+    let reject = |what: String| {
+        Err(DevError::Config(format!(
+            "[test.profiles.{name}] certifies \"complete\" but {what}. Until \
+             coverage accounting exists, a complete profile may not narrow \
+             the test universe; certify \"partial\" or remove the narrowing."
+        )))
+    };
+    if def.extends.is_some() {
+        return reject("uses `extends` (an inherited filter set defeats an explicit claim)".into());
+    }
+    if def.tests.as_ref().is_some_and(|v| !v.is_empty()) {
+        return reject("sets `tests` (target filtering skips every other test binary)".into());
+    }
+    if def.only.as_ref().is_some_and(|v| !v.is_empty()) {
+        return reject("sets `only`".into());
+    }
+    if def.skip.as_ref().is_some_and(|v| !v.is_empty()) {
+        return reject("sets `skip`".into());
+    }
+    if def.include_ignored != Some(true) {
+        return reject(
+            "does not set `include_ignored = true` (#[ignore] is a suppression \
+             channel like any skip list)"
+                .into(),
+        );
+    }
+    if !t.doctests {
+        return reject(
+            "runs with doctests disabled - set `[test] doctests = true` \
+             (doctests outside the universe are invisible skips)"
+                .into(),
+        );
+    }
+    for sweep in def.sweeps.iter().flatten() {
+        // An unknown sweep name is reported by the existing reference check.
+        let Some(entry) = check.iter().find(|e| e.name == *sweep) else {
+            continue;
+        };
+        if !entry.tests.is_empty() || !entry.only.is_empty() || !entry.skip.is_empty() {
+            return reject(format!(
+                "references sweep '{sweep}', which carries its own \
+                 tests/only/skip filters"
+            ));
+        }
+        if !entry.test_exclude_packages.is_empty() {
+            return reject(format!(
+                "references sweep '{sweep}', which excludes packages from its \
+                 test phase"
+            ));
         }
     }
     Ok(())

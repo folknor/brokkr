@@ -1,9 +1,11 @@
 # Tiered check: a fast answer that admits it, and a slow answer worth trusting
 
-Status: in progress. Feature 5 has landed, and feature 8's first slice is
-implemented: the `--json` summary trailer (`schema: 1`, `certifies: null`,
-verdict/profile/sweeps/failed_phase/elapsed_ms), with exit codes still binary
-until `certifies` exists. Everything else is proposed.
+Status: in progress. Landed so far: feature 5; feature 8's first slice (the
+`--json` summary trailer, `schema: 1`); and build-order step 3 - `certifies`
+with the full permission table and interim complete rule, feature 1
+(`skip_phases`), and feature 9 (`gate_profile` / `--gate`), including the
+0/10/1 exit contract and the `passed`/`complete`/`partial` verdict split.
+Everything else is proposed.
 
 Scope: `brokkr check` and `brokkr test`. Every mechanism here is opt-in. No
 existing key changes meaning, and a `brokkr.toml` that does not ask for any of

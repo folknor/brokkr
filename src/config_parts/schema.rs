@@ -723,6 +723,11 @@ pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
 pub struct TestConfig {
     pub default_package: Option<String>,
     pub default_profile: Option<String>,
+    /// The profile `brokkr check --gate` runs. Must name an existing
+    /// profile with `certifies = "complete"` (both checked at load time),
+    /// so AGENTS.md and pre-commit hooks can say `brokkr check --gate`
+    /// and stay correct through profile renames.
+    pub gate_profile: Option<String>,
     #[serde(default)]
     pub debug: bool,
     #[serde(default)]
@@ -730,6 +735,38 @@ pub struct TestConfig {
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileDef>,
 }
+
+/// What a green result from this profile claims (TIERED-CHECK.md).
+///
+/// `Complete` may print the success verdict and exit 0, and in exchange
+/// rejects everything that narrows the run: `skip_phases`, package
+/// scoping (`-p`), and - until coverage accounting exists - any libtest
+/// filtering at all. `Partial` gets the narrowing permissions and pays
+/// with exit code 10 and a `check partial` verdict that no `passed`
+/// grep can mistake for a gate result. Profiles without `certifies`
+/// behave exactly as before this key existed: binary exit codes,
+/// `check passed`, no new permissions or restrictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Certifies {
+    Complete,
+    Partial,
+}
+
+/// Check phase identifiers, in execution order. The universe for
+/// `skip_phases` validation and the `failed_phase` field of the
+/// `check --json` summary.
+pub const PHASE_NAMES: [&str; 9] = [
+    "gremlins",
+    "style",
+    "header",
+    "textlint",
+    "manifest",
+    "script_check",
+    "dependency_rules",
+    "clippy",
+    "test",
+];
 
 /// A named test selection layered onto one or more `[[check]]` entries.
 ///
@@ -750,6 +787,18 @@ pub struct ProfileDef {
     /// command will use it).
     #[allow(dead_code)]
     pub description: Option<String>,
+    /// The claim this profile's green makes; permissions derive from it
+    /// (see [`Certifies`]). Deliberately NOT inherited through `extends`
+    /// and not merged: a claim is per-profile and explicit, or absent.
+    pub certifies: Option<Certifies>,
+    /// Check phases this profile skips, subtractive (a new native phase
+    /// is included everywhere until opted out, never silently excluded).
+    /// Requires `certifies = "partial"` - the claim is what grants the
+    /// permission. Valid names are the phase identifiers `gremlins`,
+    /// `style`, `header`, `textlint`, `manifest`, `script_check`,
+    /// `dependency_rules`, `clippy`, `test`. Not inherited through
+    /// `extends`.
+    pub skip_phases: Option<Vec<String>>,
     pub extends: Option<String>,
     /// Names of `[[check]]` entries to execute. Each is one cargo test
     /// invocation with the entry's feature flags. Empty / unset after

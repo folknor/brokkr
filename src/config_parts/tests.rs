@@ -1113,6 +1113,8 @@ features = ["a"]
             "tier1".into(),
             ProfileDef {
                 description: None,
+                certifies: None,
+                skip_phases: None,
                 extends: None,
                 sweeps: Some(vec!["all".into(), "consumer".into()]),
                 tests: None,
@@ -1126,6 +1128,7 @@ features = ["a"]
         let test = TestConfig {
             default_package: None,
             default_profile: None,
+            gate_profile: None,
             debug: false,
             doctests: false,
             profiles,
@@ -1175,6 +1178,266 @@ sweeps = ["all"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn gate_profile_must_name_existing_profile() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+gate_profile = "nope"
+[test.profiles.tier1]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("gate_profile"), "got: {err}");
+        assert!(err.contains("'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn gate_profile_must_certify_complete() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+gate_profile = "edit"
+[test.profiles.edit]
+certifies = "partial"
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("complete"), "got: {err}");
+    }
+
+    #[test]
+    fn gate_profile_accepts_clean_complete_profile() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+gate_profile = "gate"
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["all"]
+include_ignored = true
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
+    }
+
+    #[test]
+    fn skip_phases_requires_partial_claim() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.edit]
+skip_phases = ["textlint"]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("skip_phases"), "got: {err}");
+        assert!(err.contains("partial"), "got: {err}");
+    }
+
+    #[test]
+    fn skip_phases_validates_phase_names() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.edit]
+certifies = "partial"
+skip_phases = ["clipy"]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'clipy'"), "got: {err}");
+        assert!(err.contains("not a check phase"), "got: {err}");
+    }
+
+    #[test]
+    fn partial_profile_with_skips_and_skip_phases_is_accepted() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.edit]
+certifies = "partial"
+skip_phases = ["script_check", "textlint"]
+sweeps = ["all"]
+skip = ["tier2::"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        validate_check_against_test(&check, test.as_ref()).unwrap();
+    }
+
+    #[test]
+    fn complete_profile_rejects_skip_list() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["all"]
+include_ignored = true
+skip = ["tier2::"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`skip`"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_profile_requires_include_ignored() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("include_ignored"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_profile_requires_doctests() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["all"]
+include_ignored = true
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("doctests"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_profile_rejects_sweep_level_filters() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+skip = ["flaky::"]
+[test]
+doctests = true
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["all"]
+include_ignored = true
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'all'"), "got: {err}");
+        assert!(err.contains("tests/only/skip"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_profile_rejects_extends() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+[test.profiles.base]
+sweeps = ["all"]
+[test.profiles.gate]
+certifies = "complete"
+extends = "base"
+include_ignored = true
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extends"), "got: {err}");
+    }
+
+    #[test]
+    fn certifies_rejects_unknown_value_at_parse() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.gate]
+certifies = "full"
+sweeps = ["all"]
+"#,
+        );
+        let err = parse_test(&table).unwrap_err().to_string();
+        assert!(err.contains("full"), "got: {err}");
     }
 
     #[test]

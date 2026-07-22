@@ -94,6 +94,14 @@ Examples:
         #[arg(long, conflicts_with_all = ["features", "no_default_features"])]
         profile: Option<String>,
 
+        /// Run the gate profile named by `[test] gate_profile` (validated
+        /// at load time to certify "complete"). The stable pre-commit
+        /// invocation: docs and hooks can say `brokkr check --gate` and
+        /// survive profile renames. Conflicts with every flag that would
+        /// narrow the run.
+        #[arg(long, conflicts_with_all = ["profile", "features", "no_default_features", "package"])]
+        gate: bool,
+
         /// Reconstruct cargo's terminal-style output (full source
         /// annotations, help suggestions) by concatenating each
         /// diagnostic's `rendered` field.

@@ -642,14 +642,15 @@ should be encoded by adding rules for the intermediate crates too.
 
 ## `[test]` section
 
-Optional. Four things live here: a default cargo package, a default
-validation profile, a doctest toggle, and the named profiles that selectively
-reference `[[check]]` entries.
+Optional. Five things live here: a default cargo package, a default
+validation profile, a gate profile, a doctest toggle, and the named profiles
+that selectively reference `[[check]]` entries.
 
 ```toml
 [test]
 default_package = "pbfhogg"
 default_profile = "tier1"
+gate_profile = "gate"
 doctests = false
 
 [test.profiles.tier1]
@@ -685,12 +686,29 @@ include_ignored = true
   `--profile` is passed. With no profile config, `brokkr check` runs every
   `[[check]]` entry without libtest filters; with no `[[check]]` either, it
   falls back to a single `--all-features` sweep.
+- `gate_profile` names the profile `brokkr check --gate` runs. Load-time
+  validation requires it to exist and to carry `certifies = "complete"`, so
+  docs and hooks can say `brokkr check --gate` and stay correct through
+  profile renames.
 - `[test.profiles.<name>]` declares a test selection layered onto one or more
   `[[check]]` entries. Fields: `sweeps` (required, list of `[[check]]` entry
   names), `tests` (`--test <name>`), `only` (positional substring filter),
   `skip` (`--skip <substring>`), `include_ignored`, `test_threads`, `env`.
   `extends = "<other>"` walks the chain with cycle detection; collections are
   replaced (child wins), env merges key-by-key.
+- `certifies = "complete" | "partial"` declares what a green run of the
+  profile claims, and permissions derive from the claim (TIERED-CHECK.md).
+  `partial` may set `skip_phases` (subtractive list of check phases, validated
+  against the phase names) and use `-p` scoping; it prints `check partial` and
+  exits **10** on success so `brokkr check && git commit` fails closed.
+  `complete` prints `check complete`, exits 0, rejects `skip_phases` and `-p`,
+  and - until coverage accounting lands - may not narrow the test universe at
+  all: no `tests`/`only`/`skip` on the profile or its sweeps, no
+  `test_exclude_packages`, `include_ignored = true` required, `[test]
+  doctests = true` required, no `extends`. All of it is enforced at load
+  time. Profiles without `certifies` behave exactly as before the key
+  existed (binary exit codes, `check passed`). Neither `certifies` nor
+  `skip_phases` is inherited through `extends`.
 - Profiles use Rust module paths as the annotation surface; `only` / `skip`
   translate directly into cargo substring filters and `--skip`.
 - The legacy `[test.sweeps.*]` map is rejected at parse time. Sweeps now live

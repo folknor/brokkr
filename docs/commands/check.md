@@ -119,6 +119,9 @@ Flags:
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
 - `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
   `--features` / `--no-default-features`
+- `--gate` - run the profile named by `[test] gate_profile` (load-validated
+  to certify "complete"). The stable pre-commit invocation. Conflicts with
+  `--profile`, `--features`, `--no-default-features`, and `-p`
 - `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
@@ -138,18 +141,37 @@ Output:
   the human output untouched (the old NDJSON per-event mode is gone; this is
   the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
   1), `certifies` (always `null` until profile certification exists),
-  `verdict` (`"passed"`/`"failed"`), `profile` (the profile that drove sweep
-  selection; `null` for ad-hoc and legacy runs), `sweeps` (labels),
-  `failed_phase` (`null` on success, else one of `gremlins`/`style`/`header`/
-  `textlint`/`manifest`/`script_check`/`dependency_rules`/`clippy`/`test`),
-  `elapsed_ms`. The object is versioned and additive: fields are only ever
-  added under `schema: 1`, consumers must tolerate unknown fields, and a bump
-  is reserved for renames or semantic changes. A config error before the
-  phases run (bad profile name, conflicting flags) emits no summary -
-  resolve-time errors are not run verdicts. Exit codes remain 0 (pass) / 1
-  (fail); 10 is reserved for a future partial pass under `certifies` and
-  verified free in check's namespace (2 = clap usage errors, 130 =
-  interrupt).
+  `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`), `profile` (the
+  profile that drove sweep selection; `null` for ad-hoc and legacy runs),
+  `sweeps` (labels), `failed_phase` (`null` on success, else one of
+  `gremlins`/`style`/`header`/`textlint`/`manifest`/`script_check`/
+  `dependency_rules`/`clippy`/`test`), `elapsed_ms`. The object is versioned
+  and additive: fields are only ever added under `schema: 1`, consumers must
+  tolerate unknown fields, and a bump is reserved for renames or semantic
+  changes. A config error before the phases run (bad profile name,
+  conflicting flags, a certifies violation) emits no summary - resolve-time
+  errors are not run verdicts.
+
+### `certifies` and the exit-code contract
+
+A profile may declare `certifies = "complete"` or `"partial"` (see
+`docs/brokkr.toml.md`); the claim decides the success word, the exit code,
+and which narrowing is permitted:
+
+| profile | success line | exit on success | exit on failure |
+|---|---|---|---|
+| no `certifies` (legacy) | `check passed` | 0 | 1 |
+| `certifies = "complete"` | `check complete` | 0 | 1 |
+| `certifies = "partial"` | `check partial (...)` | **10** | 1 |
+
+Partial's exit 10 is the point: `brokkr check && git commit` on a partial
+profile fails closed, so a loop answer cannot silently substitute for a gate
+answer. The partial success line lists what was narrowed (skipped phases,
+`-p` scope) and never contains the word `passed`. `skip_phases` on a partial
+profile skips the named phases and announces them up front; under a
+`complete` profile, `-p` is rejected before anything compiles (a scoped
+build's green is not comparable to the full build's - feature unification
+changes with the package set). 2 = clap usage errors, 130 = interrupt.
 
 ### Per-sweep log lines (collapsed by default)
 

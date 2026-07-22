@@ -24,8 +24,8 @@ use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
-    CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig, ScriptCheck,
-    StyleConfig, TestConfig, TextlintRule,
+    Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
+    ScriptCheck, StyleConfig, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -53,6 +53,7 @@ pub(crate) fn cmd_check(
     no_default_features: bool,
     package: Option<&str>,
     profile_name: Option<&str>,
+    gate: bool,
     raw: bool,
     json: bool,
     limit: usize,
@@ -63,6 +64,8 @@ pub(crate) fn cmd_check(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
+    let gate_name = resolve_gate_profile(gate, test_cfg)?;
+    let profile_name = gate_name.as_deref().or(profile_name);
     let active_sweeps =
         decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
     // The profile that drove sweep selection, if any. Ad-hoc CLI features
@@ -73,6 +76,8 @@ pub(crate) fn cmd_check(
     } else {
         None
     };
+    let (certifies, skip_phases) = profile_claim(&profile_label, test_cfg);
+    reject_scoped_complete(certifies, package)?;
 
     // Header for the collapsed form: name the profile and its sweep set once,
     // so the per-sweep lines below can carry only what differs between them.
@@ -94,6 +99,17 @@ pub(crate) fn cmd_check(
     // the honest default is off.
     let doctests = test_cfg.is_some_and(|c| c.doctests);
 
+    // A partial profile may skip phases (validated against PHASE_NAMES at
+    // load time). Announce the omission up front - a narrowed run must
+    // never look like a full one in the log.
+    let skip = |phase: &str| skip_phases.iter().any(|s| s == phase);
+    if !skip_phases.is_empty() {
+        output::run_msg(&format!(
+            "skipping phases: {} (certifies partial)",
+            skip_phases.join(", ")
+        ));
+    }
+
     // Run every phase behind one closure so a failure from *any* of them
     // (not just the test phase) still funnels through the summary line below,
     // reporting the same total wall time a passing run does.
@@ -103,34 +119,60 @@ pub(crate) fn cmd_check(
     // per-phase datum the `--json` summary carries.
     let mut failing_phase: Option<&'static str> = None;
     let mut run_phases = || -> Result<(), DevError> {
-        failing_phase = Some("gremlins");
-        run_gremlins(project_root, gremlins_cfg, limit, all, fix_gremlins)?;
-        failing_phase = Some("style");
-        run_style(project_root, style_cfg, gremlins_cfg, limit, all)?;
-        failing_phase = Some("header");
-        run_header(project_root, header_cfg, limit, all)?;
-        failing_phase = Some("textlint");
-        run_textlint(project_root, textlint_rules, limit, all)?;
-        failing_phase = Some("manifest");
-        run_manifest(project_root, manifest_cfg, limit, all)?;
-        failing_phase = Some("script_check");
-        run_script_checks(project_root, script_checks)?;
-        failing_phase = Some("dependency_rules");
-        run_dependency_rules(project_root, dependency_rules, limit, all, commands)?;
-        failing_phase = Some("clippy");
-        run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
-        failing_phase = Some("test");
-        run_test_phase(
-            project,
-            project_root,
-            &active_sweeps,
-            package,
-            raw,
-            doctests,
-            commands,
-            extra_args,
-            timings.then_some(&mut collected_timings),
-        )?;
+        if !skip("gremlins") {
+            failing_phase = Some("gremlins");
+            run_gremlins(project_root, gremlins_cfg, limit, all, fix_gremlins)?;
+        }
+
+        if !skip("style") {
+            failing_phase = Some("style");
+            run_style(project_root, style_cfg, gremlins_cfg, limit, all)?;
+        }
+
+        if !skip("header") {
+            failing_phase = Some("header");
+            run_header(project_root, header_cfg, limit, all)?;
+        }
+
+        if !skip("textlint") {
+            failing_phase = Some("textlint");
+            run_textlint(project_root, textlint_rules, limit, all)?;
+        }
+
+        if !skip("manifest") {
+            failing_phase = Some("manifest");
+            run_manifest(project_root, manifest_cfg, limit, all)?;
+        }
+
+        if !skip("script_check") {
+            failing_phase = Some("script_check");
+            run_script_checks(project_root, script_checks)?;
+        }
+
+        if !skip("dependency_rules") {
+            failing_phase = Some("dependency_rules");
+            run_dependency_rules(project_root, dependency_rules, limit, all, commands)?;
+        }
+
+        if !skip("clippy") {
+            failing_phase = Some("clippy");
+            run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
+        }
+
+        if !skip("test") {
+            failing_phase = Some("test");
+            run_test_phase(
+                project,
+                project_root,
+                &active_sweeps,
+                package,
+                raw,
+                doctests,
+                commands,
+                extra_args,
+                timings.then_some(&mut collected_timings),
+            )?;
+        }
         failing_phase = None;
         Ok(())
     };
@@ -140,14 +182,152 @@ pub(crate) fn cmd_check(
         emit_timings(&collected_timings, limit, all, active_sweeps.len() > 1);
     }
 
+    finish_check(
+        &outcome,
+        certifies,
+        &profile_label,
+        &active_sweeps,
+        skip_phases,
+        package,
+        failing_phase,
+        json,
+        started,
+    )
+}
+
+/// The resolved profile's claim and skip-phase list. `(None, [])` for
+/// ad-hoc, legacy, and profile-less runs.
+fn profile_claim<'a>(
+    profile_label: &Option<String>,
+    test_cfg: Option<&'a TestConfig>,
+) -> (Option<Certifies>, &'a [String]) {
+    let def = profile_label
+        .as_ref()
+        .and_then(|name| test_cfg.and_then(|c| c.profiles.get(name.as_str())));
+    (
+        def.and_then(|d| d.certifies),
+        def.and_then(|d| d.skip_phases.as_deref()).unwrap_or(&[]),
+    )
+}
+
+/// Resolve `--gate` through `[test].gate_profile`, which load-time
+/// validation guarantees names a `certifies = "complete"` profile.
+fn resolve_gate_profile(
+    gate: bool,
+    test_cfg: Option<&TestConfig>,
+) -> Result<Option<String>, DevError> {
+    if !gate {
+        return Ok(None);
+    }
+    match test_cfg.and_then(|c| c.gate_profile.clone()) {
+        Some(name) => Ok(Some(name)),
+        None => Err(DevError::Config(
+            "`brokkr check --gate` requires `[test] gate_profile = \"<name>\"` \
+             in brokkr.toml, naming a profile with `certifies = \"complete\"`."
+                .into(),
+        )),
+    }
+}
+
+/// The certifies permission table governs CLI flags too: `-p` scopes the
+/// build, and a scoped green is not comparable to the full green (feature
+/// unification changes with the package set - the B41 hazard), so a
+/// complete profile rejects it before anything compiles.
+fn reject_scoped_complete(
+    certifies: Option<Certifies>,
+    package: Option<&str>,
+) -> Result<(), DevError> {
+    if certifies == Some(Certifies::Complete) && package.is_some() {
+        return Err(DevError::Config(
+            "package scoping (`-p`) is rejected under `certifies = \"complete\"`: \
+             a scoped build's green is not comparable to the full build's. Use a \
+             partial profile (or a profile without `certifies`) for scoped runs."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Print the summary line, emit the `--json` trailer, and map the claim to
+/// the exit contract. The claim decides the word and the exit code: `passed`
+/// stays with unclaimed legacy profiles (exactly as trustworthy as before
+/// `certifies` existed), `complete` owns the gate verdict, and `partial` may
+/// never print a success word a grep could mistake for one - it exits 10 so
+/// naive `&& git commit` chaining fails closed. Any failure exits 1.
+#[allow(clippy::too_many_arguments)]
+fn finish_check(
+    outcome: &Result<(), DevError>,
+    certifies: Option<Certifies>,
+    profile_label: &Option<String>,
+    active_sweeps: &[ResolvedSweep],
+    skip_phases: &[String],
+    package: Option<&str>,
+    failing_phase: Option<&'static str>,
+    json: bool,
+    started: std::time::Instant,
+) -> Result<(), DevError> {
     match outcome {
-        Ok(()) => {
-            output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
-            if json {
-                emit_json_summary("passed", &profile_label, &active_sweeps, None, started.elapsed());
+        Ok(()) => match certifies {
+            None => {
+                output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
+                if json {
+                    emit_json_summary(
+                        "passed",
+                        certifies,
+                        profile_label,
+                        active_sweeps,
+                        None,
+                        started.elapsed(),
+                    );
+                }
+                Ok(())
             }
-            Ok(())
-        }
+            Some(Certifies::Complete) => {
+                output::result_msg(&format!("check complete in {}", fmt_wall(started.elapsed())));
+                if json {
+                    emit_json_summary(
+                        "complete",
+                        certifies,
+                        profile_label,
+                        active_sweeps,
+                        None,
+                        started.elapsed(),
+                    );
+                }
+                Ok(())
+            }
+            Some(Certifies::Partial) => {
+                let mut narrowed: Vec<String> = Vec::new();
+
+                if !skip_phases.is_empty() {
+                    narrowed.push(format!("skipped phases: {}", skip_phases.join(", ")));
+                }
+
+                if let Some(p) = package {
+                    narrowed.push(format!("scoped to -p {p}"));
+                }
+                let suffix = if narrowed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", narrowed.join("; "))
+                };
+                output::result_msg(&format!(
+                    "check partial in {}{suffix}",
+                    fmt_wall(started.elapsed())
+                ));
+                if json {
+                    emit_json_summary(
+                        "partial",
+                        certifies,
+                        profile_label,
+                        active_sweeps,
+                        None,
+                        started.elapsed(),
+                    );
+                }
+                Err(DevError::ExitCode(10))
+            }
+        },
         Err(_) => {
             // The failing phase already printed its detail above; add the
             // symmetric summary line and exit non-zero without main echoing a
@@ -156,8 +336,9 @@ pub(crate) fn cmd_check(
             if json {
                 emit_json_summary(
                     "failed",
-                    &profile_label,
-                    &active_sweeps,
+                    certifies,
+                    profile_label,
+                    active_sweeps,
                     failing_phase,
                     started.elapsed(),
                 );
@@ -170,9 +351,9 @@ pub(crate) fn cmd_check(
 /// The `--json` summary object: one line, last on stdout (TIERED-CHECK.md,
 /// feature 8). Versioned and additive: fields are only ever added under
 /// `schema: 1`, consumers must tolerate unknown ones, and a bump is
-/// reserved for renames or semantic changes. `certifies` stays `null`
-/// until profile certification exists; the exit code stays 0/1, with 10
-/// reserved for a future partial pass.
+/// reserved for renames or semantic changes. `certifies` mirrors the
+/// resolved profile's claim (`null` for unclaimed profiles); `verdict` is
+/// `passed`/`complete`/`partial`/`failed`, paired with exit codes 0/0/10/1.
 #[derive(serde::Serialize)]
 struct CheckSummary<'a> {
     schema: u32,
@@ -186,6 +367,7 @@ struct CheckSummary<'a> {
 
 fn emit_json_summary(
     verdict: &str,
+    certifies: Option<Certifies>,
     profile: &Option<String>,
     sweeps: &[ResolvedSweep],
     failed_phase: Option<&'static str>,
@@ -193,7 +375,10 @@ fn emit_json_summary(
 ) {
     let summary = CheckSummary {
         schema: 1,
-        certifies: None,
+        certifies: certifies.map(|c| match c {
+            Certifies::Complete => "complete",
+            Certifies::Partial => "partial",
+        }),
         verdict,
         profile: profile.as_deref(),
         sweeps: sweeps.iter().map(|s| s.label.as_str()).collect(),

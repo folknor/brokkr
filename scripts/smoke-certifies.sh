@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Smoke test for TIERED-CHECK step 3: certifies + skip_phases + --gate.
+#
+# Generates a throwaway crate under scratch/certifies-smoke and drives
+# brokkr check through the partial/complete/gate paths, asserting on exit
+# codes (the 0/10/1 contract, clap's 2 for flag conflicts). Run from the
+# brokkr repo root after installing the binary under test:
+#
+#   bash scripts/smoke-certifies.sh
+#
+# The generated directory is left behind for inspection; it is disposable
+# and regenerated on every run.
+set -u
+
+root="$(cd "$(dirname "$0")/.."; pwd)"
+smoke="$root/scratch/certifies-smoke"
+rm -rf "$smoke"
+mkdir -p "$smoke/src"
+
+cat > "$smoke/Cargo.toml" <<'EOF'
+[package]
+name = "certifies-smoke"
+version = "0.1.0"
+edition = "2021"
+EOF
+
+cat > "$smoke/src/lib.rs" <<'EOF'
+pub fn add(a: u64, b: u64) -> u64 {
+    a + b
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() {
+        assert_eq!(super::add(2, 2), 4);
+    }
+}
+EOF
+
+cat > "$smoke/brokkr.toml" <<'EOF'
+project = "brokkr"
+
+[[check]]
+name = "default"
+
+[test]
+doctests = true
+default_profile = "edit"
+gate_profile = "gate"
+
+# The loop answer: bare `brokkr check`. Partial, skips clippy, exits 10.
+[test.profiles.edit]
+certifies = "partial"
+skip_phases = ["clippy"]
+sweeps = ["default"]
+
+# The gate: `brokkr check --gate`. Complete, exits 0.
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["default"]
+include_ignored = true
+EOF
+
+cd "$smoke"
+git init -q
+git add -A
+
+fail=0
+expect() {
+  desc="$1"
+  want="$2"
+  got="$3"
+  if [ "$got" -eq "$want" ]; then
+    echo "ok   $desc (exit $got)"
+  else
+    echo "FAIL $desc: want exit $want, got $got"
+    fail=1
+  fi
+}
+
+echo "=== bare check: partial default profile ==="
+brokkr check --json
+expect "bare check = partial" 10 $?
+
+echo "=== --gate: complete profile ==="
+brokkr check --gate --json
+expect "--gate = complete" 0 $?
+
+echo "=== --gate -p: rejected by clap ==="
+brokkr check --gate -p certifies-smoke
+expect "--gate -p = usage error" 2 $?
+
+echo "=== --profile gate -p: rejected at resolve time ==="
+brokkr check --profile gate -p certifies-smoke
+expect "complete + -p = config error" 1 $?
+
+if [ "$fail" -eq 0 ]; then
+  echo "smoke: all scenarios passed"
+fi
+exit $fail
