@@ -9,7 +9,7 @@ Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs,
 - Never pipe commands with |. Write a script instead.
 - Never capture stdout into env vars (`UUID=$(...)`) - shell state doesn't persist between tool calls. Read the output directly and use the value inline.
 - Never read or write from /tmp. All data lives in the project.
-- Prefer `brokkr check` over `cargo build` / `cargo clippy` / `cargo test`.
+- Never use raw `cargo`. Use `brokkr check` or `brokkr test`.
 
 ## Subagents
 Subagents must NOT run any shell commands. They write code only. Integration, building, and testing is done in the main conversation.
