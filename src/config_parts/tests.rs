@@ -29,6 +29,7 @@ mod tests {
             dependency_rules: Vec::new(),
             check: Vec::new(),
             test: None,
+            quarantine: Vec::new(),
             capture_env: Vec::new(),
             gremlins: None,
             style: None,
@@ -1135,7 +1136,7 @@ features = ["a"]
             doctests: false,
             profiles,
         };
-        let err = validate_check_against_test(&check, Some(&test))
+        let err = validate_check_against_test(&check, Some(&test), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("'consumer'"), "got: {err}");
@@ -1156,7 +1157,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("teir1"), "got: {err}");
@@ -1176,7 +1177,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("'nope'"), "got: {err}");
@@ -1197,7 +1198,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("gate_profile"), "got: {err}");
@@ -1220,7 +1221,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("complete"), "got: {err}");
@@ -1244,7 +1245,7 @@ include_ignored = true
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref()).unwrap();
+        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
     }
 
     #[test]
@@ -1261,7 +1262,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("skip_phases"), "got: {err}");
@@ -1283,7 +1284,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("'clipy'"), "got: {err}");
@@ -1306,78 +1307,15 @@ skip = ["tier2::"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref()).unwrap();
+        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
     }
 
     #[test]
-    fn complete_profile_rejects_skip_list() {
-        let table = root_table(
-            r#"
-project = "pbfhogg"
-[[check]]
-name = "all"
-[test]
-doctests = true
-[test.profiles.gate]
-certifies = "complete"
-sweeps = ["all"]
-include_ignored = true
-skip = ["tier2::"]
-"#,
-        );
-        let check = parse_check(&table).unwrap();
-        let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`skip`"), "got: {err}");
-    }
-
-    #[test]
-    fn complete_profile_requires_include_ignored() {
-        let table = root_table(
-            r#"
-project = "pbfhogg"
-[[check]]
-name = "all"
-[test]
-doctests = true
-[test.profiles.gate]
-certifies = "complete"
-sweeps = ["all"]
-"#,
-        );
-        let check = parse_check(&table).unwrap();
-        let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("include_ignored"), "got: {err}");
-    }
-
-    #[test]
-    fn complete_profile_requires_doctests() {
-        let table = root_table(
-            r#"
-project = "pbfhogg"
-[[check]]
-name = "all"
-[test.profiles.gate]
-certifies = "complete"
-sweeps = ["all"]
-include_ignored = true
-"#,
-        );
-        let check = parse_check(&table).unwrap();
-        let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("doctests"), "got: {err}");
-    }
-
-    #[test]
-    fn complete_profile_rejects_sweep_level_filters() {
+    fn complete_profile_allows_audited_narrowing() {
+        // Feature 4 relaxed the interim rule: skip lists, sweep-level
+        // filters, and include_ignored left unset are all legal at load
+        // time now - the coverage phase audits them against [[quarantine]]
+        // at run time.
         let table = root_table(
             r#"
 project = "pbfhogg"
@@ -1389,16 +1327,70 @@ doctests = true
 [test.profiles.gate]
 certifies = "complete"
 sweeps = ["all"]
+skip = ["tier2::"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
+    }
+
+    #[test]
+    fn complete_profile_requires_doctests_or_quarantine() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["all"]
 include_ignored = true
 "#,
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("'all'"), "got: {err}");
-        assert!(err.contains("tests/only/skip"), "got: {err}");
+        assert!(err.contains("doctests"), "got: {err}");
+
+        // A doctests quarantine entry with an issue justifies the same
+        // config.
+        let q = vec![QuarantineEntry {
+            pattern: None,
+            category: Some("doctests".into()),
+            issue: "B42".into(),
+            reason: "42/55 persistence doctests fail to compile".into(),
+        }];
+        validate_check_against_test(&check, test.as_ref(), &q).unwrap();
+    }
+
+    #[test]
+    fn doctests_quarantine_goes_stale_when_doctests_run() {
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test]
+doctests = true
+[test.profiles.tier1]
+sweeps = ["all"]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let q = vec![QuarantineEntry {
+            pattern: None,
+            category: Some("doctests".into()),
+            issue: "B42".into(),
+            reason: "no longer true".into(),
+        }];
+        let err = validate_check_against_test(&check, test.as_ref(), &q)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stale"), "got: {err}");
     }
 
     #[test]
@@ -1420,7 +1412,7 @@ include_ignored = true
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("extends"), "got: {err}");
@@ -1442,7 +1434,7 @@ sweeps = ["all"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("combines `lanes`"), "got: {err}");
@@ -1461,7 +1453,7 @@ lanes = ["nope"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("lane 'nope'"), "got: {err}");
@@ -1483,7 +1475,7 @@ lanes = ["tier1"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("declares `certifies`"), "got: {err}");
@@ -1506,7 +1498,7 @@ lanes = ["inner"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("do not nest"), "got: {err}");
@@ -1514,6 +1506,8 @@ lanes = ["inner"]
 
     #[test]
     fn complete_lanes_profile_validates_each_lane() {
+        // The structural rule (`extends` under a complete claim) is still
+        // enforced per lane, with the composing profile named in the error.
         let table = root_table(
             r#"
 project = "pbfhogg"
@@ -1521,10 +1515,10 @@ project = "pbfhogg"
 name = "all"
 [test]
 doctests = true
-[test.profiles.tier1]
+[test.profiles.base]
 sweeps = ["all"]
-skip = ["serial::"]
-include_ignored = true
+[test.profiles.tier1]
+extends = "base"
 [test.profiles.gate]
 certifies = "complete"
 lanes = ["tier1"]
@@ -1532,11 +1526,11 @@ lanes = ["tier1"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("via lanes"), "got: {err}");
-        assert!(err.contains("`skip`"), "got: {err}");
+        assert!(err.contains("extends"), "got: {err}");
     }
 
     #[test]
@@ -1563,7 +1557,7 @@ lanes = ["lane-par", "lane-ser"]
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref()).unwrap();
+        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
     }
 
     #[test]
@@ -1581,7 +1575,7 @@ test_threads = 4
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        let err = validate_check_against_test(&check, test.as_ref())
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("serial by construction"), "got: {err}");
@@ -1603,7 +1597,7 @@ test_threads = 1
         );
         let check = parse_check(&table).unwrap();
         let test = parse_test(&table).unwrap();
-        validate_check_against_test(&check, test.as_ref()).unwrap();
+        validate_check_against_test(&check, test.as_ref(), &[]).unwrap();
     }
 
     #[test]

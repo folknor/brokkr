@@ -724,18 +724,46 @@ include_ignored = true
   `partial` may set `skip_phases` (subtractive list of check phases, validated
   against the phase names) and use `-p` scoping; it prints `check partial` and
   exits **10** on success so `brokkr check && git commit` fails closed.
-  `complete` prints `check complete`, exits 0, rejects `skip_phases` and `-p`,
-  and - until coverage accounting lands - may not narrow the test universe at
-  all: no `tests`/`only`/`skip` on the profile or its sweeps, no
-  `test_exclude_packages`, `include_ignored = true` required, `[test]
-  doctests = true` required, no `extends`. All of it is enforced at load
-  time. Profiles without `certifies` behave exactly as before the key
-  existed (binary exit codes, `check passed`). Neither `certifies` nor
-  `skip_phases` is inherited through `extends`.
+  `complete` prints `check complete`, exits 0, rejects `skip_phases`, `-p`,
+  and `extends` (an inherited filter set defeats an explicit claim), and runs
+  the **coverage phase**: every (build shape, test) pair that no lane runs
+  must be justified by a `[[quarantine]]` entry or be `#[ignore]`d at the
+  source, or the check fails as orphaned. `[test] doctests = false` needs a
+  `[[quarantine]] category = "doctests"` entry. Profiles without `certifies`
+  behave exactly as before the key existed (binary exit codes, `check
+  passed`). Neither `certifies` nor `skip_phases` is inherited through
+  `extends`.
 - Profiles use Rust module paths as the annotation surface; `only` / `skip`
   translate directly into cargo substring filters and `--skip`.
 - The legacy `[test.sweeps.*]` map is rejected at parse time. Sweeps now live
   in `[[check]]` entries; profiles reference them by name.
+
+## `[[quarantine]]` entries
+
+The justification ledger for coverage accounting (TIERED-CHECK.md feature
+4), audited on every `certifies = "complete"` run:
+
+```toml
+[[quarantine]]
+pattern = "test_twap_calculates_size_schedule_with_remainder"
+issue   = "B14"
+reason  = "expectation width-sensitive under unified 128-bit build"
+
+[[quarantine]]
+category = "doctests"
+issue    = "B42"
+reason   = "42/55 persistence doctests fail to compile"
+```
+
+- Exactly one of `pattern` (a test-name substring, libtest filter
+  semantics) or `category` (only `"doctests"`). `issue` and `reason` are
+  required - the issue ID is what turns the list from a graveyard with
+  good manners into a countdown.
+- Staleness is mechanical in both directions: a `pattern` entry justifying
+  zero non-run pairs fails the check (delete it when the bug closes), and
+  a `doctests` entry with `[test] doctests = true` is rejected at load
+  time. Per-entry pair counts print on every complete run, so an entry
+  silently growing (a new test riding an old substring) is visible.
 
 For the sweep-selection ladder used by `brokkr check` (and how `brokkr test`
 diverges) see `docs/commands/check.md`.

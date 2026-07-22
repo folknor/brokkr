@@ -30,6 +30,12 @@ pub struct DevConfig {
     /// projects that haven't configured anything.
     pub check: Vec<CheckEntry>,
     pub test: Option<TestConfig>,
+    /// `[[quarantine]]` entries: the justification ledger for coverage
+    /// accounting (TIERED-CHECK.md feature 4). Under a `certifies =
+    /// "complete"` profile, every (sweep, test) pair that no lane runs must
+    /// match one of these or the check fails as orphaned. Empty when the
+    /// project declares none.
+    pub quarantine: Vec<QuarantineEntry>,
     /// Env var names / globs to capture into `run_kv` on every measured
     /// run (as `env.<NAME>` pairs). Supports exact names (`MALLOC_CONF`)
     /// and `PREFIX_*` globs (`PBFHOGG_*`). Empty by default.
@@ -765,8 +771,9 @@ pub enum Isolation {
 
 /// Check phase identifiers, in execution order. The universe for
 /// `skip_phases` validation and the `failed_phase` field of the
-/// `check --json` summary.
-pub const PHASE_NAMES: [&str; 9] = [
+/// `check --json` summary. `coverage` runs only under a
+/// `certifies = "complete"` profile.
+pub const PHASE_NAMES: [&str; 10] = [
     "gremlins",
     "style",
     "header",
@@ -776,7 +783,29 @@ pub const PHASE_NAMES: [&str; 9] = [
     "dependency_rules",
     "clippy",
     "test",
+    "coverage",
 ];
+
+/// One `[[quarantine]]` entry: a justified, counted suppression
+/// (TIERED-CHECK.md feature 4). `issue` is required, not decorative - it
+/// is what turns the list from a graveyard with good manners into a
+/// countdown that cannot silently grow, and staleness is mechanical: an
+/// entry justifying nothing fails the check.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantineEntry {
+    /// Substring matched against test names (libtest filter semantics).
+    /// Exactly one of `pattern` / `category` must be set.
+    pub pattern: Option<String>,
+    /// Non-test suppression channels. The only category is `"doctests"`,
+    /// which justifies `[test] doctests = false` under a complete profile.
+    pub category: Option<String>,
+    /// Backlog / issue identifier (e.g. "B14"). Opaque to brokkr; its
+    /// stability is the repo's contract.
+    pub issue: String,
+    /// One line on why the suppression exists.
+    pub reason: String,
+}
 
 /// A named test selection layered onto one or more `[[check]]` entries.
 ///

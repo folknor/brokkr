@@ -35,6 +35,19 @@ mod tests {
     fn adds() {
         assert_eq!(super::add(2, 2), 4);
     }
+
+    // Skipped by the gate lanes; justified by the [[quarantine]] entry.
+    #[test]
+    fn skipme_flaky() {
+        assert_eq!(super::add(1, 1), 2);
+    }
+
+    // Source-level suppression: counted as ignored by coverage, not orphaned.
+    #[test]
+    #[ignore]
+    fn ignored_manual() {
+        assert_eq!(super::add(3, 3), 6);
+    }
 }
 EOF
 
@@ -56,20 +69,37 @@ skip_phases = ["clippy"]
 sweeps = ["default"]
 
 # The gate: `brokkr check --gate`. Complete via two lanes sharing the
-# default sweep - clippy dedupes on build shape, the test phase runs both.
+# default sweep - clippy dedupes on build shape, the test phase runs both,
+# and the coverage phase audits the skipme skip against [[quarantine]].
 [test.profiles.lane-par]
 sweeps = ["default"]
-include_ignored = true
 test_threads = 0
+skip = ["skipme"]
 
 [test.profiles.lane-ser]
 sweeps = ["default"]
-include_ignored = true
 isolation = "process"
+skip = ["skipme"]
 
 [test.profiles.gate]
 certifies = "complete"
 lanes = ["lane-par", "lane-ser"]
+
+# Coverage failure modes, driven below: an unjustified skip (orphan) and
+# a quarantine entry justifying nothing (stale).
+[test.profiles.gate-orphan]
+certifies = "complete"
+sweeps = ["default"]
+skip = ["adds", "skipme"]
+
+[test.profiles.gate-stale]
+certifies = "complete"
+sweeps = ["default"]
+
+[[quarantine]]
+pattern = "skipme"
+issue = "B1"
+reason = "flaky teardown; tracked upstream"
 EOF
 
 cd "$smoke"
@@ -96,6 +126,14 @@ expect "bare check = partial" 10 $?
 echo "=== --gate: complete profile ==="
 brokkr check --gate --json
 expect "--gate = complete" 0 $?
+
+echo "=== --profile gate-orphan: unjustified skip fails coverage ==="
+brokkr check --profile gate-orphan --json
+expect "orphaned pair = exit 1" 1 $?
+
+echo "=== --profile gate-stale: quarantine justifying nothing fails ==="
+brokkr check --profile gate-stale --json
+expect "stale quarantine = exit 1" 1 $?
 
 echo "=== --gate -p: rejected by clap ==="
 brokkr check --gate -p certifies-smoke

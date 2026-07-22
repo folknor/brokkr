@@ -181,6 +181,25 @@ Output:
   conflicting flags, a certifies violation) emits no summary - resolve-time
   errors are not run verdicts.
 
+### Coverage accounting (complete profiles)
+
+Under `certifies = "complete"` a tenth phase, `coverage`, runs after the
+tests pass. The unit of coverage is the **(build shape, test) pair**: the
+universe is enumerated per distinct build shape (`--list
+--include-ignored`, no filters), each lane's ran-set is `--list` under the
+lane's real filter argv (libtest itself decides what an argv admits - no
+filter-semantics reimplementation), and the `#[ignore]`d set comes from
+`--list --ignored` (plain `--list` includes ignored names, so a lane
+without `include_ignored` has them subtracted from its ran-set). Every
+non-run pair must be quarantined (`[[quarantine]]` pattern match, counted
+per entry) or ignored at the source (counted, reported, not fatal);
+anything else is **orphaned** and fails the check, listed up to `--limit`.
+A pattern entry justifying zero pairs is stale and fails the check.
+Package-level `test_exclude_packages` is outside the pair audit (those
+binaries cannot build) and is called out in the trailer. The `--json`
+summary carries a `coverage` object: `pairs`, `run`, `quarantined`,
+`ignored`, `orphaned`.
+
 ### `certifies` and the exit-code contract
 
 A profile may declare `certifies = "complete"` or `"partial"` (see

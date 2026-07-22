@@ -38,7 +38,8 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
-    validate_check_against_test(&check, test.as_ref())?;
+    let quarantine = parse_quarantine(table)?;
+    validate_check_against_test(&check, test.as_ref(), &quarantine)?;
     let capture_env = parse_capture_env(table)?;
     let gremlins = parse_gremlins(table)?;
     let style = parse_style(table)?;
@@ -63,6 +64,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             dependency_rules,
             check,
             test,
+            quarantine,
             capture_env,
             gremlins,
             style,
@@ -497,6 +499,7 @@ fn parse_hosts(
             || key == "dependency_rule"
             || key == "check"
             || key == "test"
+            || key == "quarantine"
             || key == "capture_env"
             || key == "gremlins"
             || key == "style"
@@ -938,9 +941,56 @@ fn parse_test(
 /// Cross-check that every sweep name referenced by a profile resolves
 /// to a `[[check]]` entry. Catches typos at parse time instead of at
 /// `brokkr check --profile` time.
+/// Parse the `[[quarantine]]` array (absent -> empty). Shape rules are
+/// enforced here so a malformed ledger never reaches the coverage phase:
+/// exactly one of `pattern`/`category`, non-empty `issue` and `reason`,
+/// and `"doctests"` as the only category.
+fn parse_quarantine(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Vec<QuarantineEntry>, DevError> {
+    let Some(value) = table.get("quarantine") else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<QuarantineEntry> = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[[quarantine]]: {e}")))?;
+    for (i, q) in entries.iter().enumerate() {
+        let label = q.issue.trim();
+
+        if q.pattern.is_some() == q.category.is_some() {
+            return Err(DevError::Config(format!(
+                "[[quarantine]] entry {i}: set exactly one of `pattern` (a test-name \
+                 substring) or `category`."
+            )));
+        }
+        if q.pattern.as_deref().is_some_and(|p| p.trim().is_empty()) {
+            return Err(DevError::Config(format!(
+                "[[quarantine]] entry {i}: `pattern` is empty - it would match every test."
+            )));
+        }
+        if let Some(cat) = &q.category
+            && cat != "doctests"
+        {
+            return Err(DevError::Config(format!(
+                "[[quarantine]] entry {i}: unknown category '{cat}'. The only \
+                 category is \"doctests\"."
+            )));
+        }
+        if label.is_empty() || q.reason.trim().is_empty() {
+            return Err(DevError::Config(format!(
+                "[[quarantine]] entry {i}: `issue` and `reason` are required - an \
+                 unjustified quarantine is a graveyard with good manners."
+            )));
+        }
+    }
+    Ok(entries)
+}
+
 fn validate_check_against_test(
     check: &[CheckEntry],
     test: Option<&TestConfig>,
+    quarantine: &[QuarantineEntry],
 ) -> Result<(), DevError> {
     let Some(t) = test else {
         return Ok(());
@@ -972,6 +1022,20 @@ fn validate_check_against_test(
                  the run whose green is allowed to mean \"ready\"."
             )));
         }
+    }
+    // Staleness, direction two: a doctests quarantine while doctests
+    // actually run justifies nothing. The ledger must shrink when the
+    // suppression it covers is removed.
+    if t.doctests
+        && quarantine
+            .iter()
+            .any(|q| q.category.as_deref() == Some("doctests"))
+    {
+        return Err(DevError::Config(
+            "[[quarantine]] category = \"doctests\" is stale: `[test] doctests = \
+             true`, so nothing is suppressed. Delete the entry."
+                .into(),
+        ));
     }
     if t.profiles.is_empty() {
         return Ok(());
@@ -1027,15 +1091,14 @@ fn validate_check_against_test(
         // no run-shaping fields of its own, its lanes exist, don't nest,
         // and don't declare claims of their own.
         if let Some(lanes) = &def.lanes {
-            validate_lanes_profile(profile_name, def, lanes, t, check)?;
+            validate_lanes_profile(profile_name, def, lanes, t, quarantine)?;
         }
-        // Interim rule until coverage accounting (TIERED-CHECK.md feature 4)
-        // lands: a "complete" profile may not narrow the test universe at
-        // all. Crude, but it keeps `complete` honest before the accounting
-        // can audit finer-grained skips. A lanes profile was already
+        // A "complete" profile's load-time rules; the finer-grained
+        // narrowing (`skip`/`only`) is audited at run time by the coverage
+        // phase against `[[quarantine]]`. A lanes profile was already
         // checked per-lane above.
         if def.certifies == Some(Certifies::Complete) && def.lanes.is_none() {
-            validate_complete_profile(profile_name, def, t, check)?;
+            validate_complete_profile(profile_name, def, t, quarantine)?;
         }
         let Some(sweeps) = &def.sweeps else {
             continue;
@@ -1063,7 +1126,7 @@ fn validate_lanes_profile(
     def: &ProfileDef,
     lanes: &[String],
     t: &TestConfig,
-    check: &[CheckEntry],
+    quarantine: &[QuarantineEntry],
 ) -> Result<(), DevError> {
     if lanes.is_empty() {
         return Err(DevError::Config(format!(
@@ -1109,7 +1172,7 @@ fn validate_lanes_profile(
             )));
         }
         if def.certifies == Some(Certifies::Complete) {
-            validate_complete_profile(lane, lane_def, t, check).map_err(|e| match e {
+            validate_complete_profile(lane, lane_def, t, quarantine).map_err(|e| match e {
                 DevError::Config(msg) => DevError::Config(format!(
                     "[test.profiles.{name}] certifies \"complete\" via lanes: {msg}"
                 )),
@@ -1120,71 +1183,43 @@ fn validate_lanes_profile(
     Ok(())
 }
 
-/// The interim `certifies = "complete"` rule (TIERED-CHECK.md, build order
-/// step 3): until coverage accounting can justify individual skips with
-/// quarantine entries, a complete profile may not narrow the test universe
-/// in any direction - no libtest filters on the profile or its sweeps, no
-/// per-sweep package exclusion, ignored tests included, doctests on, and no
-/// `extends` (a parent's filters must not merge in under an explicit claim).
+/// A `certifies = "complete"` profile's load-time rules (TIERED-CHECK.md
+/// feature 4 relaxed the interim step-3 rule): libtest-level narrowing
+/// (`skip` / `only` / `tests` / `include_ignored`) is now legal and audited
+/// at run time by the coverage phase - every non-run (sweep, test) pair
+/// must be quarantined or the check fails as orphaned. What remains
+/// structural: no `extends` (an inherited filter set defeats an explicit
+/// claim), and doctests off is itself a suppression that needs a
+/// `[[quarantine]] category = "doctests"` entry, because doctests are
+/// invisible to the `--list` enumeration.
 fn validate_complete_profile(
     name: &str,
     def: &ProfileDef,
     t: &TestConfig,
-    check: &[CheckEntry],
+    quarantine: &[QuarantineEntry],
 ) -> Result<(), DevError> {
     // Phrased as "cannot back a complete claim" because `name` is either
     // the certifying profile itself or a lane composing into one.
     let reject = |what: String| {
         Err(DevError::Config(format!(
-            "[test.profiles.{name}] cannot back a \"complete\" claim: {what}. \
-             Until coverage accounting exists, a complete profile may not \
-             narrow the test universe; certify \"partial\" or remove the \
-             narrowing."
+            "[test.profiles.{name}] cannot back a \"complete\" claim: {what}."
         )))
     };
     if def.extends.is_some() {
         return reject("uses `extends` (an inherited filter set defeats an explicit claim)".into());
     }
-    if def.tests.as_ref().is_some_and(|v| !v.is_empty()) {
-        return reject("sets `tests` (target filtering skips every other test binary)".into());
-    }
-    if def.only.as_ref().is_some_and(|v| !v.is_empty()) {
-        return reject("sets `only`".into());
-    }
-    if def.skip.as_ref().is_some_and(|v| !v.is_empty()) {
-        return reject("sets `skip`".into());
-    }
-    if def.include_ignored != Some(true) {
+    if !t.doctests
+        && !quarantine
+            .iter()
+            .any(|q| q.category.as_deref() == Some("doctests"))
+    {
         return reject(
-            "does not set `include_ignored = true` (#[ignore] is a suppression \
-             channel like any skip list)"
+            "doctests are disabled with no justification. Doctests are \
+             invisible to the coverage enumeration, so `[test] doctests = \
+             false` needs a `[[quarantine]] category = \"doctests\"` entry \
+             with an issue, or set doctests = true"
                 .into(),
         );
-    }
-    if !t.doctests {
-        return reject(
-            "runs with doctests disabled - set `[test] doctests = true` \
-             (doctests outside the universe are invisible skips)"
-                .into(),
-        );
-    }
-    for sweep in def.sweeps.iter().flatten() {
-        // An unknown sweep name is reported by the existing reference check.
-        let Some(entry) = check.iter().find(|e| e.name == *sweep) else {
-            continue;
-        };
-        if !entry.tests.is_empty() || !entry.only.is_empty() || !entry.skip.is_empty() {
-            return reject(format!(
-                "references sweep '{sweep}', which carries its own \
-                 tests/only/skip filters"
-            ));
-        }
-        if !entry.test_exclude_packages.is_empty() {
-            return reject(format!(
-                "references sweep '{sweep}', which excludes packages from its \
-                 test phase"
-            ));
-        }
     }
     Ok(())
 }

@@ -67,15 +67,9 @@ fn run_isolated_sweep(
     // The standard sweep announce (shape carries `process-isolated`); with
     // --commands this prints the full enumeration command instead.
     output::run_msg(&sweep_run_line("test", sweep, &list_args, true, commands, package));
-    let list_refs: Vec<&str> = list_args.iter().map(String::as_str).collect();
-    let listed = output::run_captured_with_env("cargo", &list_refs, project_root, &env_refs)?;
-
-    if !listed.status.success() {
-        output::error(&format!("failing command: cargo {}", list_args.join(" ")));
-        output::error(&String::from_utf8_lossy(&listed.stderr));
+    let Some(names) = isolate_list(project_root, &list_args, &env_refs, false, commands)? else {
         return Ok(false);
-    }
-    let names = parse_list_output(&String::from_utf8_lossy(&listed.stdout));
+    };
 
     if names.is_empty() {
         output::error(&format!(
@@ -91,12 +85,29 @@ fn run_isolated_sweep(
         count_tests(names.len())
     );
 
-    // Needed for an #[ignore]d test to actually run under `--exact`;
-    // harmless for the rest.
+    // libtest's `--list` includes `#[ignore]`d names regardless of
+    // `--include-ignored` (verified empirically), so a lane that runs
+    // without the flag must subtract them here - `--list --ignored`
+    // lists only the ignored set. `--include-ignored` is also what an
+    // ignored test needs to actually run under `--exact`.
     let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
+    let ignored_names: std::collections::BTreeSet<String> = if include_ignored {
+        std::collections::BTreeSet::new()
+    } else {
+        let Some(list) = isolate_list(project_root, &list_args, &env_refs, true, commands)? else {
+            return Ok(false);
+        };
+        list.into_iter().collect()
+    };
+
     let mut failed = 0usize;
     let mut ignored = 0usize;
     for name in &names {
+        if ignored_names.contains(name) {
+            ignored += 1;
+            println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
+            continue;
+        }
         let outcome = run_one_isolated_test(
             project_root,
             &selection,
@@ -108,7 +119,6 @@ fn run_isolated_sweep(
         )?;
         match outcome {
             IsolatedOutcome::Failed => failed += 1,
-            IsolatedOutcome::Ignored => ignored += 1,
             IsolatedOutcome::Passed(elapsed) => {
                 if let Some(out) = timings.as_deref_mut()
                     && let Some(e) = elapsed
@@ -123,26 +133,32 @@ fn run_isolated_sweep(
         }
     }
 
-    let ignored_note = if ignored > 0 {
-        format!(", {ignored} ignored")
-    } else {
-        String::new()
-    };
+    let ignored_note = ignored_note(ignored);
+    let ran = names.len() - ignored;
 
     if failed > 0 {
         output::error(&format!(
             "{}: {failed} of {} process-isolated failed{ignored_note}",
             sweep.label,
-            count_tests(names.len())
+            count_tests(ran)
         ));
         return Ok(false);
     }
     println!(
         "[test]    {}: {} process-isolated passed{ignored_note}",
         sweep.label,
-        count_tests(names.len())
+        count_tests(ran)
     );
     Ok(true)
+}
+
+/// `", N ignored"` when any test was skipped as `#[ignore]`d, else empty.
+fn ignored_note(n: usize) -> String {
+    if n > 0 {
+        format!(", {n} ignored")
+    } else {
+        String::new()
+    }
 }
 
 /// `1 test` / `12 tests`.
@@ -158,12 +174,41 @@ enum IsolatedOutcome {
     /// Ran and passed; carries the test's own wall time when libtest
     /// reported one.
     Passed(Option<std::time::Duration>),
-    /// `#[ignore]`d name in a lane that runs without `--include-ignored`:
-    /// libtest lists it, `--exact` runs zero tests, exit 0. Visible, not
-    /// fatal - the ignored set is lane policy, not a bug.
-    Ignored,
     /// Failed, hung, or was killed; already reported with its command.
     Failed,
+}
+
+/// One `cargo test … --list` invocation, parsed. `only_ignored` inserts
+/// `--ignored` before `--list`, listing only the `#[ignore]`d subset.
+/// `Ok(None)` means the listing failed and was already reported (the
+/// sweep should return `Ok(false)`).
+fn isolate_list(
+    project_root: &Path,
+    list_args: &[String],
+    env_refs: &[(&str, &str)],
+    only_ignored: bool,
+    commands: bool,
+) -> Result<Option<Vec<String>>, DevError> {
+    let mut args = list_args.to_vec();
+
+    if only_ignored {
+        args.insert(args.len() - 1, "--ignored".into());
+    }
+
+    if commands {
+        output::run_msg(&format!("cargo {}", args.join(" ")));
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let captured = output::run_captured_with_env("cargo", &refs, project_root, env_refs)?;
+
+    if !captured.status.success() {
+        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        output::error(&String::from_utf8_lossy(&captured.stderr));
+        return Ok(None);
+    }
+    Ok(Some(parse_list_output(&String::from_utf8_lossy(
+        &captured.stdout,
+    ))))
 }
 
 /// One `cargo test <selection> -- --exact <name>` invocation: a fresh
@@ -227,11 +272,17 @@ fn run_one_isolated_test(
         return Ok(IsolatedOutcome::Failed);
     }
 
+    // The caller already routed `#[ignore]`d names away from execution, so
+    // an invocation that ran zero tests means the name stopped matching
+    // between enumeration and execution - an anomaly, not a skip.
     let stdout_lines: Vec<&str> = stdout.lines().collect();
 
     if zero_test_run(&cargo_filter::parse_test_output(&stdout_lines)) {
-        println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
-        return Ok(IsolatedOutcome::Ignored);
+        output::error(&format!(
+            "FAIL {name}: invocation ran zero tests (name no longer matches?)"
+        ));
+        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        return Ok(IsolatedOutcome::Failed);
     }
 
     let elapsed = run.completed.first().map(|(_, e)| *e);

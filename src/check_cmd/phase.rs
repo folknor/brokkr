@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
     Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
-    ScriptCheck, StyleConfig, TestConfig, TextlintRule,
+    QuarantineEntry, ScriptCheck, StyleConfig, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -42,6 +42,7 @@ pub(crate) fn cmd_check(
     project_root: &Path,
     check_entries: &[CheckEntry],
     dependency_rules: &[DependencyRule],
+    quarantine: &[QuarantineEntry],
     test_cfg: Option<&TestConfig>,
     gremlins_cfg: Option<&GremlinsConfig>,
     style_cfg: Option<&StyleConfig>,
@@ -94,21 +95,15 @@ pub(crate) fn cmd_check(
     }
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
-    // Doctests are excluded by default (nextest, hence CI, never runs them);
-    // an explicit `[test] doctests = true` opts back in. Absent `[test]`,
-    // the honest default is off.
+    let mut coverage_stats: Option<CoverageStats> = None;
+    // Doctests off unless `[test] doctests = true` (nextest/CI never runs them).
     let doctests = test_cfg.is_some_and(|c| c.doctests);
 
     // A partial profile may skip phases (validated against PHASE_NAMES at
     // load time). Announce the omission up front - a narrowed run must
     // never look like a full one in the log.
     let skip = |phase: &str| skip_phases.iter().any(|s| s == phase);
-    if !skip_phases.is_empty() {
-        output::run_msg(&format!(
-            "skipping phases: {} (certifies partial)",
-            skip_phases.join(", ")
-        ));
-    }
+    announce_skipped_phases(skip_phases);
 
     // Run every phase behind one closure so a failure from *any* of them
     // (not just the test phase) still funnels through the summary line below,
@@ -119,40 +114,24 @@ pub(crate) fn cmd_check(
     // per-phase datum the `--json` summary carries.
     let mut failing_phase: Option<&'static str> = None;
     let mut run_phases = || -> Result<(), DevError> {
-        if !skip("gremlins") {
-            failing_phase = Some("gremlins");
-            run_gremlins(project_root, gremlins_cfg, limit, all, fix_gremlins)?;
-        }
-
-        if !skip("style") {
-            failing_phase = Some("style");
-            run_style(project_root, style_cfg, gremlins_cfg, limit, all)?;
-        }
-
-        if !skip("header") {
-            failing_phase = Some("header");
-            run_header(project_root, header_cfg, limit, all)?;
-        }
-
-        if !skip("textlint") {
-            failing_phase = Some("textlint");
-            run_textlint(project_root, textlint_rules, limit, all)?;
-        }
-
-        if !skip("manifest") {
-            failing_phase = Some("manifest");
-            run_manifest(project_root, manifest_cfg, limit, all)?;
-        }
-
-        if !skip("script_check") {
-            failing_phase = Some("script_check");
-            run_script_checks(project_root, script_checks)?;
-        }
-
-        if !skip("dependency_rules") {
-            failing_phase = Some("dependency_rules");
-            run_dependency_rules(project_root, dependency_rules, limit, all, commands)?;
-        }
+        run_convention_phases(
+            &ConventionPhaseArgs {
+                project_root,
+                gremlins_cfg,
+                style_cfg,
+                header_cfg,
+                textlint_rules,
+                manifest_cfg,
+                script_checks,
+                dependency_rules,
+                limit,
+                all,
+                fix_gremlins,
+                commands,
+            },
+            &skip,
+            &mut failing_phase,
+        )?;
 
         if !skip("clippy") {
             failing_phase = Some("clippy");
@@ -173,6 +152,20 @@ pub(crate) fn cmd_check(
                 timings.then_some(&mut collected_timings),
             )?;
         }
+
+        // Coverage accounting runs only under a complete claim - it is
+        // what the claim buys (TIERED-CHECK.md feature 4).
+        if certifies == Some(Certifies::Complete) {
+            failing_phase = Some("coverage");
+            coverage_stats = Some(run_coverage_phase(
+                project_root,
+                &active_sweeps,
+                quarantine,
+                limit,
+                all,
+                commands,
+            )?);
+        }
         failing_phase = None;
         Ok(())
     };
@@ -190,9 +183,82 @@ pub(crate) fn cmd_check(
         skip_phases,
         package,
         failing_phase,
+        coverage_stats,
         json,
         started,
     )
+}
+
+/// A narrowed run must never look like a full one in the log: name the
+/// skipped phases up front, not only in the trailer.
+fn announce_skipped_phases(skip_phases: &[String]) {
+    if !skip_phases.is_empty() {
+        output::run_msg(&format!(
+            "skipping phases: {} (certifies partial)",
+            skip_phases.join(", ")
+        ));
+    }
+}
+
+/// Everything the seven convention phases (gremlins through dependency
+/// rules) need, bundled so `cmd_check` stays readable.
+struct ConventionPhaseArgs<'a> {
+    project_root: &'a Path,
+    gremlins_cfg: Option<&'a GremlinsConfig>,
+    style_cfg: Option<&'a StyleConfig>,
+    header_cfg: Option<&'a HeaderConfig>,
+    textlint_rules: &'a [TextlintRule],
+    manifest_cfg: Option<&'a ManifestConfig>,
+    script_checks: &'a [ScriptCheck],
+    dependency_rules: &'a [DependencyRule],
+    limit: usize,
+    all: bool,
+    fix_gremlins: bool,
+    commands: bool,
+}
+
+/// Run the convention phases in order, honouring `skip_phases` and
+/// keeping `failing_phase` pointed at the phase in flight.
+fn run_convention_phases(
+    a: &ConventionPhaseArgs<'_>,
+    skip: &dyn Fn(&str) -> bool,
+    failing_phase: &mut Option<&'static str>,
+) -> Result<(), DevError> {
+    if !skip("gremlins") {
+        *failing_phase = Some("gremlins");
+        run_gremlins(a.project_root, a.gremlins_cfg, a.limit, a.all, a.fix_gremlins)?;
+    }
+
+    if !skip("style") {
+        *failing_phase = Some("style");
+        run_style(a.project_root, a.style_cfg, a.gremlins_cfg, a.limit, a.all)?;
+    }
+
+    if !skip("header") {
+        *failing_phase = Some("header");
+        run_header(a.project_root, a.header_cfg, a.limit, a.all)?;
+    }
+
+    if !skip("textlint") {
+        *failing_phase = Some("textlint");
+        run_textlint(a.project_root, a.textlint_rules, a.limit, a.all)?;
+    }
+
+    if !skip("manifest") {
+        *failing_phase = Some("manifest");
+        run_manifest(a.project_root, a.manifest_cfg, a.limit, a.all)?;
+    }
+
+    if !skip("script_check") {
+        *failing_phase = Some("script_check");
+        run_script_checks(a.project_root, a.script_checks)?;
+    }
+
+    if !skip("dependency_rules") {
+        *failing_phase = Some("dependency_rules");
+        run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.all, a.commands)?;
+    }
+    Ok(())
 }
 
 /// The resolved profile's claim and skip-phase list. `(None, [])` for
@@ -263,6 +329,7 @@ fn finish_check(
     skip_phases: &[String],
     package: Option<&str>,
     failing_phase: Option<&'static str>,
+    coverage: Option<CoverageStats>,
     json: bool,
     started: std::time::Instant,
 ) -> Result<(), DevError> {
@@ -278,6 +345,7 @@ fn finish_check(
                         active_sweeps,
                         package,
                         None,
+                        coverage,
                         started.elapsed(),
                     );
                 }
@@ -293,6 +361,7 @@ fn finish_check(
                         active_sweeps,
                         package,
                         None,
+                        coverage,
                         started.elapsed(),
                     );
                 }
@@ -325,6 +394,7 @@ fn finish_check(
                         active_sweeps,
                         package,
                         None,
+                        coverage,
                         started.elapsed(),
                     );
                 }
@@ -344,6 +414,7 @@ fn finish_check(
                     active_sweeps,
                     package,
                     failing_phase,
+                    coverage,
                     started.elapsed(),
                 );
             }
@@ -369,6 +440,9 @@ struct CheckSummary<'a> {
     /// able to see that a green covered one package, not the workspace.
     package: Option<&'a str>,
     failed_phase: Option<&'a str>,
+    /// Coverage accounting result; present only when the coverage phase
+    /// ran to completion (complete profiles).
+    coverage: Option<CoverageStats>,
     elapsed_ms: u64,
 }
 
@@ -380,6 +454,7 @@ fn emit_json_summary(
     sweeps: &[ResolvedSweep],
     package: Option<&str>,
     failed_phase: Option<&'static str>,
+    coverage: Option<CoverageStats>,
     elapsed: std::time::Duration,
 ) {
     let summary = CheckSummary {
@@ -393,6 +468,7 @@ fn emit_json_summary(
         sweeps: sweeps.iter().map(|s| s.label.as_str()).collect(),
         package,
         failed_phase,
+        coverage,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     };
     match serde_json::to_string(&summary) {
@@ -1892,7 +1968,7 @@ mod clippy_sweep_tests {
 mod json_summary_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::CheckSummary;
+    use super::{CheckSummary, CoverageStats};
 
     #[test]
     fn summary_carries_schema_and_null_certifies() {
@@ -1904,6 +1980,7 @@ mod json_summary_tests {
             sweeps: vec!["default", "ffi"],
             package: None,
             failed_phase: None,
+            coverage: None,
             elapsed_ms: 1234,
         };
         let line = serde_json::to_string(&s).unwrap();
@@ -1925,6 +2002,13 @@ mod json_summary_tests {
             sweeps: vec!["all-features"],
             package: Some("nautilus-betfair"),
             failed_phase: Some("clippy"),
+            coverage: Some(CoverageStats {
+                pairs: 100,
+                run: 90,
+                quarantined: 8,
+                ignored: 2,
+                orphaned: 0,
+            }),
             elapsed_ms: 10,
         };
         let line = serde_json::to_string(&s).unwrap();

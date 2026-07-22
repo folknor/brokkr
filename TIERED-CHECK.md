@@ -1,13 +1,15 @@
 # Tiered check: a fast answer that admits it, and a slow answer worth trusting
 
-Status: in progress. Landed so far: feature 5; feature 8's first slice (the
-`--json` summary trailer, `schema: 1`); build-order step 3 - `certifies`
-with the full permission table and interim complete rule, feature 1
-(`skip_phases`), and feature 9 (`gate_profile` / `--gate`), including the
-0/10/1 exit contract and the `passed`/`complete`/`partial` verdict split;
-and step 4 - feature 2 (`lanes`), with the composition rules enforced at
-load time and clippy deduping on build shape. Feature 3 is shelved on
-measurement (see the feature). Next: step 5, coverage accounting.
+Status: the committed core has landed. Feature 5; feature 8 (the `--json`
+summary trailer, `schema: 1`, now incl. the `coverage` object); step 3 -
+`certifies`, feature 1 (`skip_phases`), feature 9 (`gate_profile` /
+`--gate`), the 0/10/1 exit contract and verdict split; step 4 - feature 2
+(`lanes`); feature 10 (`isolation = "process"`); and step 5 - feature 4
+(coverage accounting over (build shape, test) pairs with the
+`[[quarantine]]` ledger). Feature 3 is shelved on measurement (see the
+feature). Remaining, as options: feature 6 (conditional sweeps) and
+feature 7 (slow-test budget), each with its named re-evaluation criterion
+in the build order.
 
 Scope: `brokkr check` and `brokkr test`. Every mechanism here is opt-in. No
 existing key changes meaning, and a `brokkr.toml` that does not ask for any of
@@ -327,6 +329,22 @@ a gate. The design absorbing its own worst case is the argument for the
 claim spine in one sentence.
 
 ### 4. Coverage accounting: make `skip` unable to hide
+
+**Landed** (build-order step 5), with one deviation from the sketch below:
+there is no `[test.coverage] enforce` key - enforcement is implied by
+`certifies = "complete"`, full stop. Enumeration is ground truth rather
+than reimplementation: the universe is `--list --include-ignored` per
+build shape, each lane's ran-set is `--list` under the lane's real filter
+argv, and the `#[ignore]`d set comes from `--list --ignored` - discovered
+the hard way, because plain `--list` includes ignored names, and the first
+implementation counted an ignored test as *covered* on the strength of a
+listing that would never execute it. Ignored non-run pairs are counted
+and reported, not fatal (lane policy, visible in the diff that adds the
+attribute); doctests-off requires a `category = "doctests"` entry checked
+at load time; `test_exclude_packages` is outside the pair audit and says
+so in the trailer. The step-3 interim rule is relaxed accordingly:
+`skip`/`only`/`tests`/`include_ignored` are load-legal under complete now,
+audited at run time; `extends` stays rejected.
 
 `--timings` proves brokkr already enumerates every test. Orphan detection needs
 one further primitive: a libtest `--list` pass per sweep with filters off, then
