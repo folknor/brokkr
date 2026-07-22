@@ -171,13 +171,13 @@ Output:
 - `--json` appends one summary object as the **last line of stdout**, leaving
   the human output untouched (the old NDJSON per-event mode is gone; this is
   the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
-  1), `certifies` (always `null` until profile certification exists),
-  `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`), `profile` (the
-  profile that drove sweep selection; `null` for ad-hoc and legacy runs),
-  `sweeps` (labels), `package` (the CLI `-p` scope, `null` when the run was
-  not scoped), `failed_phase` (`null` on success, else one of
-  `gremlins`/`style`/`header`/`textlint`/`manifest`/`script_check`/
-  `dependency_rules`/`clippy`/`test`), `elapsed_ms`. The object is versioned
+  1), `certifies` (the resolved profile's claim, `null` for unclaimed
+  profiles), `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`),
+  `profile` (the profile that drove sweep selection; `null` for ad-hoc and
+  legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
+  when the run was not scoped), `failed_phase` (`null` on success, else one
+  of `gremlins`/`style`/`header`/`textlint`/`manifest`/`script_check`/
+  `dependency_rules`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must
   tolerate unknown fields, and a bump is reserved for renames or semantic
   changes. A config error before the phases run (bad profile name,
@@ -187,7 +187,11 @@ Output:
 ### Coverage accounting (complete profiles)
 
 Under `certifies = "complete"` a tenth phase, `coverage`, runs after the
-tests pass. The unit of coverage is the **(build shape, package, test)
+test phase - including when the tests **failed**, since the audit needs
+built binaries rather than green ones and the orphan worksheet is most
+needed on exactly the unhealthy runs. On a failing test phase the audit is
+best-effort: its findings print, its counts ride in the JSON, and
+`failed_phase` stays `"test"`. The unit of coverage is the **(build shape, package, test)
 pair**. Enumeration is per test binary: `cargo test --no-run
 --message-format=json` yields each binary with its owning package, then
 each binary runs `--list` directly (env-safe: listing executes no test
@@ -205,6 +209,11 @@ entry justifying zero pairs is stale and fails the check. Package-level
 `test_exclude_packages` is outside the pair audit (those binaries cannot
 build) and is called out in the trailer. The `--json` summary carries a
 `coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `orphaned`.
+It is present whenever the audit got as far as classifying pairs - a run
+that fails *on* the audit (stale entries, orphans) still reports its
+counts, so a consumer of a failed gate sees the worksheet's numbers and
+not `null`. Only an enumeration failure, which predates any counts,
+leaves it null.
 
 ### `certifies` and the exit-code contract
 

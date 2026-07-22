@@ -23,8 +23,8 @@ execution), `src/check_cmd/coverage.rs` (the accounting),
 `scripts/smoke-certifies.sh` exercises every landed mechanism end-to-end
 against a generated two-package workspace; run it after any change here.
 
-Two findings from the first qualified-skip gate run are already fixed,
-recorded here because their reasoning constrains future work:
+Three findings from the first real gate runs are already fixed, recorded
+here because their reasoning constrains future work:
 
 - **Proc-macro test binaries and the loader path.** Direct-exec `--list`
   failed on the workspace's only `proc-macro = true` crate (`error while
@@ -48,6 +48,16 @@ recorded here because their reasoning constrains future work:
   the `coverage` object rides in the failed run's JSON,
   `failed_phase` stays `"test"`, and only a failure that predates built
   binaries skips it.
+- **The counts survive the audit's own failure.** The last case of the
+  same species: a run that failed *on* the audit reported
+  `"failed_phase":"coverage","coverage":null`, throwing away the
+  worksheet's numbers at the one moment a consumer needs them. The
+  phase now returns counts and verdict separately (`CoverageOutcome` in
+  `coverage.rs`), and `cmd_check` records the stats before propagating
+  the error. `None` is now reserved for the one honest case: enumeration
+  died before any pair was classified. The general rule this closes out
+  - a phase that fails still reports what it learned - is worth applying
+  to the next phase that grows a summary object.
 
 **The first full audit ran to completion** (nautilus, 2026-07-22,
 `--profile pre-commit`, 5m33s): the test phase was entirely green across
@@ -71,15 +81,9 @@ Open items, in rough order of pull:
    `ffi`/`live` pairs with an issue. Then `AGENTS.md` there should say
    `brokkr check --gate`, and the ledger's six issue IDs become
    append-only, load-bearing config.
-2. **Small gap: the `coverage` JSON object is lost when the audit
-   itself fails** (`"failed_phase":"coverage","coverage":null` on the
-   run above). The stats exist before the orphan/stale error returns;
-   emit them anyway so a consumer of a failed audit still gets the
-   counts. Same species as the fixed died-before-reporting pattern,
-   last remaining case.
-3. **Features 6 and 7 are options, not commitments** - re-evaluation
+2. **Features 6 and 7 are options, not commitments** - re-evaluation
    criteria in the build order below. Do not build them speculatively.
-4. **A third quarantine category is trending but undesigned**: two
+3. **A third quarantine category is trending but undesigned**: two
    instances (pbfhogg's over-watchdog tests, nautilus's Redis tests) of
    healthy tests with *environmental preconditions*, where the
    issue-countdown semantics don't fit - an `issue` that can never close

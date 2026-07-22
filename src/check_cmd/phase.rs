@@ -151,7 +151,7 @@ pub(crate) fn cmd_check(
         if certifies == Some(Certifies::Complete) {
             // Stays "test" on a failing run - the audit is best-effort there.
             failing_phase = Some(if test_failure.is_some() { "test" } else { "coverage" });
-            coverage_stats = audit_coverage(
+            let audit = audit_coverage(
                 project_root,
                 &active_sweeps,
                 quarantine,
@@ -159,7 +159,11 @@ pub(crate) fn cmd_check(
                 all,
                 commands,
                 test_failure.as_ref(),
-            )?;
+            );
+            // Counts first, verdict second: the summary carries them even
+            // when the audit is what failed.
+            coverage_stats = audit.stats;
+            audit.result?;
         }
 
         if let Some(e) = test_failure {
@@ -285,6 +289,10 @@ fn run_convention_phases(
 /// audit is best-effort (its findings still print - they are the
 /// worksheet) and is skipped entirely when the failure predates built
 /// binaries (anything other than the test phase's own "tests failed").
+///
+/// Either way the counts ride out with the outcome: a failed audit that
+/// reported `coverage: null` was the same died-before-reporting shape the
+/// best-effort path above exists to fix.
 #[allow(clippy::too_many_arguments)]
 fn audit_coverage(
     project_root: &Path,
@@ -294,20 +302,18 @@ fn audit_coverage(
     all: bool,
     commands: bool,
     test_failure: Option<&DevError>,
-) -> Result<Option<CoverageStats>, DevError> {
+) -> CoverageOutcome {
     match test_failure {
-        None => Ok(Some(run_coverage_phase(
-            project_root,
-            sweeps,
-            quarantine,
-            limit,
-            all,
-            commands,
-        )?)),
+        None => run_coverage_phase(project_root, sweeps, quarantine, limit, all, commands),
         Some(DevError::Build(msg)) if msg == "tests failed" => {
-            Ok(run_coverage_phase(project_root, sweeps, quarantine, limit, all, commands).ok())
+            // The test failure is the run's verdict; the audit only
+            // contributes its worksheet and its counts.
+            let outcome =
+                run_coverage_phase(project_root, sweeps, quarantine, limit, all, commands);
+
+            CoverageOutcome { stats: outcome.stats, result: Ok(()) }
         }
-        Some(_) => Ok(None),
+        Some(_) => CoverageOutcome { stats: None, result: Ok(()) },
     }
 }
 

@@ -52,6 +52,23 @@ struct ShapeCoverage {
     ran: BTreeSet<(String, String)>,
 }
 
+/// What the audit produced. `stats` is present whenever enumeration and
+/// classification completed - including on the two failing paths, so a
+/// consumer of a failed audit still gets the counts instead of a null
+/// `coverage` object. Only a failure that predates classification
+/// (enumeration itself) leaves it `None`.
+struct CoverageOutcome {
+    stats: Option<CoverageStats>,
+    result: Result<(), DevError>,
+}
+
+impl CoverageOutcome {
+    /// Enumeration died before any counts existed.
+    fn aborted(e: DevError) -> Self {
+        CoverageOutcome { stats: None, result: Err(e) }
+    }
+}
+
 fn run_coverage_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
@@ -59,9 +76,13 @@ fn run_coverage_phase(
     limit: usize,
     all: bool,
     commands: bool,
-) -> Result<CoverageStats, DevError> {
-    let shapes = enumerate_shapes(project_root, sweeps, commands)?;
+) -> CoverageOutcome {
+    let shapes = match enumerate_shapes(project_root, sweeps, commands) {
+        Ok(s) => s,
+        Err(e) => return CoverageOutcome::aborted(e),
+    };
     let report = classify(&shapes, quarantine);
+    let stats = Some(report.stats);
 
     // Per-entry pair counts, always printed: the countdown the ledger
     // exists for, and the growth signal when a substring starts matching
@@ -112,7 +133,8 @@ fn run_coverage_phase(
              removed - delete the entries.",
             stale.join(", ")
         ));
-        return Err(DevError::Build("coverage failed".into()));
+
+        return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
     }
 
     if !report.orphans.is_empty() {
@@ -132,19 +154,20 @@ fn run_coverage_phase(
              entry with an issue, or a lane that runs it under this build shape",
             report.orphans.len()
         ));
-        return Err(DevError::Build("coverage failed".into()));
+
+        return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
     }
 
-    let stats = report.stats;
     output::run_msg(&format!(
         "coverage: {} shapes, {} pairs - {} run, {} quarantined, {} ignored, 0 orphaned",
         shapes.len(),
-        stats.pairs,
-        stats.run,
-        stats.quarantined,
-        stats.ignored
+        report.stats.pairs,
+        report.stats.run,
+        report.stats.quarantined,
+        report.stats.ignored
     ));
-    Ok(stats)
+
+    CoverageOutcome { stats, result: Ok(()) }
 }
 
 /// Group active sweeps by build shape and enumerate each shape once:
