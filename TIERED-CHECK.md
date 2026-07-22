@@ -125,6 +125,30 @@ Open items, in rough order of pull:
 2. **Nautilus migration, remainder**: `AGENTS.md` there should say
    `brokkr check --gate`, and the ledger's issue IDs are now
    append-only, load-bearing config.
+
+   Reported 2026-07-22, and it is problem 3 recurring one layer up:
+   nautilus had been **gating PRs on plain `brokkr check`** the whole
+   time. With `default_profile = "tier1"` and `gate_profile =
+   "pre-commit"`, bare `check` runs tier1 alone - no serial lane, no
+   coverage audit - while `TODO.md` recorded every PR's gate as "brokkr
+   fmt + brokkr check green" and `CLAUDE.md` prescribed exactly that.
+   The incomplete gate was the *documented* one, and until the audit
+   existed it could not have said so. Their fix is one word in two
+   documents, ~1.5 min/run.
+
+   The brokkr-side question this raises, undesigned: **when a config
+   declares a gate and the run isn't it, should the run say so?** A
+   single line naming `--gate` on a bare `check` in a repo that sets
+   `gate_profile` is cheap, and it is the one moment the tool knows the
+   user may be reaching for the wrong command. It stays inside the
+   non-goal because `gate_profile` is opt-in - a config without it sees
+   nothing, and pbfhogg's `default_profile = "tier1"` is untouched. But
+   price it honestly first: an unconditional nag on the high-frequency
+   loop path is how people learn to stop reading output, and the failure
+   it prevents is a documentation error, which documentation can also
+   fix. Note the verdict vocabulary already carries the honest signal
+   for *certified* profiles (`partial`, exit 10); this would be for the
+   uncertified default, which is deliberately outside that contract.
 3. **Features 6 and 7 are options, not commitments** - re-evaluation
    criteria in the build order below. Do not build them speculatively.
 4. **A third quarantine category is trending but undesigned**: two
@@ -134,6 +158,16 @@ Open items, in rough order of pull:
    muddies the ledger. A `requires`-style category is the likely shape;
    upstream availability-gating is better where possible. Design before
    implementing, and re-read "the claim is primary" first.
+
+   Refinement from the nautilus side (2026-07-22), which corrects this
+   entry's own framing: upstream `#[ignore]` and a local `requires`
+   category are **complementary, not alternatives**. `#[ignore]` says
+   "this does not run by default"; `requires` says "this lane's claim is
+   conditional on a precondition the host may not meet". A test can need
+   both, and the accounting already has a slot for the first (ignored
+   pairs are counted, reported, not fatal). Consequence for sequencing:
+   settle the category design *before* writing the B51 upstream PR, not
+   after - the PR's shape depends on which half of the pair it is.
 
 Working agreements that produced this doc: mechanisms derive from the
 claim (`certifies`), never stand alone; every proposed knob gets priced
