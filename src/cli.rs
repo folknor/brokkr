@@ -57,7 +57,30 @@ mod visibility_tests {
             Project::Piners,
             Project::Other("some-foreign-repo"),
         ] {
-            for name in ["check", "env", "results", "history", "clean"] {
+            for name in ["check", "env", "history", "clean"] {
+                assert!(visible_in(name, project), "`{name}` hidden in {project}");
+            }
+        }
+    }
+
+    /// The measured-run query commands follow the rows. Litehtml's only use of
+    /// `results.db` is the unrelated `MechanicalDb` schema, so it is the one
+    /// project where they have nothing to show; everywhere else - including an
+    /// `Other(_)` tree, which reaches `BenchHarness` via `generic-hotpath` -
+    /// they must stay.
+    #[test]
+    fn measured_queries_follow_the_rows() {
+        for name in ["results", "sidecar", "invalidate"] {
+            assert!(!visible_in(name, Project::Litehtml), "`{name}` in litehtml");
+            for project in [
+                Project::Pbfhogg,
+                Project::Elivagar,
+                Project::Nidhogg,
+                Project::Ratatoskr,
+                Project::Sluggrs,
+                Project::Piners,
+                Project::Other("some-foreign-repo"),
+            ] {
                 assert!(visible_in(name, project), "`{name}` hidden in {project}");
             }
         }

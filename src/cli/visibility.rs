@@ -37,6 +37,23 @@ pub(crate) enum Visibility {
     Except(&'static [Project]),
 }
 
+/// Projects with no rows in `results.db` / `sidecar.db`, so the three commands
+/// that read and prune those stores are noise there.
+///
+/// Litehtml is the only one. It *does* open `results_db_path`, but through
+/// `MechanicalDb` - the `mechanical_runs` / `mechanical_results` /
+/// `mechanical_approvals` schema for visual-reference runs, sharing the file
+/// and nothing else. `brokkr results` reads `ResultsDb` and would find
+/// nothing.
+///
+/// Every other project reaches `BenchHarness`, which is what writes those
+/// rows: pbfhogg and elivagar heavily, nidhogg via `bench_{api,tiles}`,
+/// ratatoskr via `bench_gate`/`list_smoke`, sluggrs via `hotpath` (so sluggrs
+/// is on both lists - `MechanicalDb` for visual work, real result rows from
+/// hotpath), piners for its hotpath/alloc runs, and any `Other(_)` tree
+/// through the ungated `generic-hotpath`.
+const MEASURED_DB_ABSENT: &[Project] = &[Project::Litehtml];
+
 /// Table of every top-level subcommand name -> the projects it applies to.
 ///
 /// Sorted by name. Every variant of `crate::cli::schema::Command` appears
@@ -77,7 +94,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("html-extract", Visibility::Only(&[Project::Litehtml])),
     ("ingest", Visibility::Only(&[Project::Nidhogg])),
     ("inspect", Visibility::Only(&[Project::Pbfhogg])),
-    ("invalidate", Visibility::Any),
+    ("invalidate", Visibility::Except(MEASURED_DB_ABSENT)),
     ("kill", Visibility::Any),
     ("lint-corpus", Visibility::Only(&[Project::Piners])),
     ("lint-results", Visibility::Only(&[Project::Piners])),
@@ -108,13 +125,13 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("renumber", Visibility::Only(&[Project::Pbfhogg])),
     ("repack", Visibility::Only(&[Project::Pbfhogg])),
     ("report", Visibility::Only(&[Project::Litehtml, Project::Sluggrs])),
-    ("results", Visibility::Any),
+    ("results", Visibility::Except(MEASURED_DB_ABSENT)),
     ("run", Visibility::Any),
     ("serve", Visibility::Only(&[Project::Nidhogg])),
     ("service-list", Visibility::Only(&[Project::Ratatoskr])),
     ("service-suite", Visibility::Only(&[Project::Ratatoskr])),
     ("service-test", Visibility::Only(&[Project::Ratatoskr])),
-    ("sidecar", Visibility::Any),
+    ("sidecar", Visibility::Except(MEASURED_DB_ABSENT)),
     ("sort", Visibility::Only(&[Project::Pbfhogg])),
     ("status", Visibility::Only(&[Project::Nidhogg])),
     ("stop", Visibility::Only(&[Project::Nidhogg])),
