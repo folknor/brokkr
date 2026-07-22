@@ -95,6 +95,10 @@ echo "=== --profile gate -p: rejected at resolve time ==="
 brokkr check --profile gate -p certifies-smoke
 expect "complete + -p = config error" 1 $?
 
+echo "=== --profile edit -p: scoped partial ==="
+brokkr check --profile edit -p certifies-smoke --json
+expect "partial + -p = exit 10" 10 $?
+
 if [ "$fail" -eq 0 ]; then
   echo "smoke: all scenarios passed"
 fi

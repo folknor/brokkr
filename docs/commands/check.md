@@ -116,6 +116,15 @@ then proceeds - rather than failing with `lock: already locked`. So a
 concurrent lock never produces an error to handle; just let the command wait.
 
 Flags:
+- `-p/--package <PKG>` - scope every sweep's cargo invocation (clippy + test)
+  to one package. The flag **replaces** each sweep's own package selection -
+  cargo unions selection flags, so composing `--workspace --exclude …` with
+  `--package` would silently un-scope the run. A sweep whose `packages` list
+  or (test phase only) `test_exclude_packages` rules the package out is
+  skipped with a log line, mirroring `brokkr test`'s SKIP; if every sweep
+  skips, the phase fails rather than reading as green. The shape line shows
+  `-p <pkg>` and the `--json` summary carries a `package` field. Rejected
+  under a `certifies = "complete"` profile
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
 - `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
   `--features` / `--no-default-features`
@@ -143,7 +152,8 @@ Output:
   1), `certifies` (always `null` until profile certification exists),
   `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`), `profile` (the
   profile that drove sweep selection; `null` for ad-hoc and legacy runs),
-  `sweeps` (labels), `failed_phase` (`null` on success, else one of
+  `sweeps` (labels), `package` (the CLI `-p` scope, `null` when the run was
+  not scoped), `failed_phase` (`null` on success, else one of
   `gremlins`/`style`/`header`/`textlint`/`manifest`/`script_check`/
   `dependency_rules`/`clippy`/`test`), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must

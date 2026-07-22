@@ -290,6 +290,20 @@ something new. It is **conditional, not merely last**: measure the loop as
 `--profile edit` plus manual `-p` first, and build the inference only if the
 measured gap justifies both the machinery and the thrash risk.
 
+**Measured** (nautilus, 2026-07-22, first real partial run): the `edit`
+profile - one sweep instead of three, textlint skipped - saved 50.5s of
+268.4s, 18.8%. 3m37s is not a loop: phases and sweeps alone do not get
+there, because the default sweep is still the whole workspace. Scoping is
+the lever. The same run also caught manual `-p` broken under profiles:
+cargo *unions* selection flags, so a sweep emitting `--workspace --exclude
+…` silently swallowed the CLI `--package` - scope recorded in the trailer,
+not applied, on the first day the trailer existed to record it. Fixed: a
+CLI `-p` now replaces the sweep's selection, out-of-scope sweeps skip with
+a log line (mirroring `brokkr test`'s SKIP), an all-sweeps skip fails
+instead of reading green, and the shape line plus the `--json` `package`
+field both carry the scope. Manual `-p` is thereby a working interim
+answer, and the feature-3 gate measurement (`edit` plus `-p`) is runnable.
+
 ### 4. Coverage accounting: make `skip` unable to hide
 
 `--timings` proves brokkr already enumerates every test. Orphan detection needs
@@ -541,7 +555,11 @@ makes `&& git commit` silently unsafe and that failure reaches a maintainer,
 while this one only costs the loop. But it is the plan's biggest UX bet, and
 feature 8 landing second is the chance to validate it: run a real agent loop
 against the tri-state contract before anything is built on top, and let the
-consumer report whether it degrades the loop. Precondition, equally
+consumer report whether it degrades the loop. First real-use observation
+(nautilus, 2026-07-22): the harness surfaced both successful partial runs
+as error blocks, exactly as predicted. The bet stands - exit 0 would make
+`&& git commit` silently unsafe, and that failure reaches a maintainer -
+but the loop cost is now measured fact, not forecast. Precondition, equally
 unglamorous: survey the `DevError::ExitCode` namespace before claiming 10.
 (Done: `check` itself uses only 0/1; 2 is clap's usage-error code and
 elivagar `regress`'s `REFUSED`; 130 is interrupt/`kill`; the dispatch layers

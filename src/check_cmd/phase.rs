@@ -276,6 +276,7 @@ fn finish_check(
                         certifies,
                         profile_label,
                         active_sweeps,
+                        package,
                         None,
                         started.elapsed(),
                     );
@@ -290,6 +291,7 @@ fn finish_check(
                         certifies,
                         profile_label,
                         active_sweeps,
+                        package,
                         None,
                         started.elapsed(),
                     );
@@ -321,6 +323,7 @@ fn finish_check(
                         certifies,
                         profile_label,
                         active_sweeps,
+                        package,
                         None,
                         started.elapsed(),
                     );
@@ -339,6 +342,7 @@ fn finish_check(
                     certifies,
                     profile_label,
                     active_sweeps,
+                    package,
                     failing_phase,
                     started.elapsed(),
                 );
@@ -361,15 +365,20 @@ struct CheckSummary<'a> {
     verdict: &'a str,
     profile: Option<&'a str>,
     sweeps: Vec<&'a str>,
+    /// The CLI `-p` scope, when one narrowed the run - a consumer must be
+    /// able to see that a green covered one package, not the workspace.
+    package: Option<&'a str>,
     failed_phase: Option<&'a str>,
     elapsed_ms: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_json_summary(
     verdict: &str,
     certifies: Option<Certifies>,
     profile: &Option<String>,
     sweeps: &[ResolvedSweep],
+    package: Option<&str>,
     failed_phase: Option<&'static str>,
     elapsed: std::time::Duration,
 ) {
@@ -382,6 +391,7 @@ fn emit_json_summary(
         verdict,
         profile: profile.as_deref(),
         sweeps: sweeps.iter().map(|s| s.label.as_str()).collect(),
+        package,
         failed_phase,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     };
@@ -940,6 +950,16 @@ fn run_clippy_phase(
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
     for sweep in sweeps {
+        // A CLI `-p` replaces the sweep's selection or skips the sweep
+        // entirely when the sweep's config rules the package out - it never
+        // combines, because cargo unions selection flags (cli_package_scope).
+        let scope = match cli_package_scope(sweep, package, false) {
+            Ok(s) => s,
+            Err(reason) => {
+                output::run_msg(&format!("clippy {}: skipped ({reason})", sweep.label));
+                continue;
+            }
+        };
         // Always run with --message-format=json so the lint code
         // (`message.code.code`) is populated on every diagnostic. cargo's
         // pretty-printed stderr only includes the `= note: #[warn(rule)]`
@@ -955,17 +975,19 @@ fn run_clippy_phase(
             "--all-targets".into(),
             "--message-format=json".into(),
         ];
-        // Scope to the sweep's packages (`-p <pkg>`) so `--features` is valid
-        // in a virtual workspace, where cargo rejects features at the root.
-        for pkg in &sweep.packages {
-            args.push("-p".into());
-            args.push(pkg.clone());
-        }
-        args.extend(sweep.cargo_feature_args.iter().cloned());
-        if let Some(pkg) = package {
+        if let Some(pkg) = scope {
             args.push("--package".into());
             args.push(pkg.into());
+        } else {
+            // Scope to the sweep's packages (`-p <pkg>`) so `--features` is
+            // valid in a virtual workspace, where cargo rejects features at
+            // the root.
+            for pkg in &sweep.packages {
+                args.push("-p".into());
+                args.push(pkg.clone());
+            }
         }
+        args.extend(sweep.cargo_feature_args.iter().cloned());
         // Cap lints at `warn` so a deny-level lint no longer aborts its
         // crate's compile: the crate still produces its .rmeta, so every
         // downstream crate is checked too, and one run surfaces every lint
@@ -976,7 +998,7 @@ fn run_clippy_phase(
         args.push("--".into());
         args.push("--cap-lints=warn".into());
 
-        output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands));
+        output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, scope));
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         // Apply the sweep's env to the clippy build too, so a build-affecting
@@ -1003,6 +1025,16 @@ fn run_clippy_phase(
             stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
             success: captured.status.success(),
         });
+    }
+
+    // Skipping some sweeps for an out-of-scope `-p` is fine; skipping all of
+    // them means nothing was checked, which must not read as clean.
+    if results.is_empty() && !sweeps.is_empty() {
+        return Err(DevError::Config(format!(
+            "-p {}: every sweep's config rules the package out; nothing was \
+             clippy-checked",
+            package.unwrap_or_default()
+        )));
     }
 
     // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
@@ -1592,7 +1624,16 @@ fn run_test_phase(
     // `[profile.test]` overrides).
     let target_dir = build::project_info(Some(project_root))?.target_dir;
 
+    let mut ran_any = false;
     for sweep in sweeps {
+        // A CLI `-p` replaces the sweep's selection or skips the sweep when
+        // the sweep's config rules the package out (cli_package_scope).
+        if let Err(reason) = cli_package_scope(sweep, package, true) {
+            output::run_msg(&format!("test {}: skipped ({reason})", sweep.label));
+            continue;
+        }
+        ran_any = true;
+
         // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
         // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
         // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps.
@@ -1616,6 +1657,15 @@ fn run_test_phase(
         if !success {
             return Err(DevError::Build("tests failed".into()));
         }
+    }
+
+    // Skipping some sweeps for an out-of-scope `-p` is fine; skipping all of
+    // them means zero tests ran, which must not read as green.
+    if !ran_any && !sweeps.is_empty() {
+        return Err(DevError::Config(format!(
+            "-p {}: every sweep's config rules the package out; zero tests ran",
+            package.unwrap_or_default()
+        )));
     }
 
     Ok(())
@@ -1825,6 +1875,7 @@ mod json_summary_tests {
             verdict: "passed",
             profile: Some("tier1"),
             sweeps: vec!["default", "ffi"],
+            package: None,
             failed_phase: None,
             elapsed_ms: 1234,
         };
@@ -1845,6 +1896,7 @@ mod json_summary_tests {
             verdict: "failed",
             profile: None,
             sweeps: vec!["all-features"],
+            package: Some("nautilus-betfair"),
             failed_phase: Some("clippy"),
             elapsed_ms: 10,
         };
@@ -1852,5 +1904,8 @@ mod json_summary_tests {
         assert!(line.contains("\"verdict\":\"failed\""), "{line}");
         assert!(line.contains("\"failed_phase\":\"clippy\""), "{line}");
         assert!(line.contains("\"profile\":null"), "{line}");
+        // The `-p` scope must be visible to consumers - a green that
+        // covered one package may not be mistaken for a workspace green.
+        assert!(line.contains("\"package\":\"nautilus-betfair\""), "{line}");
     }
 }
