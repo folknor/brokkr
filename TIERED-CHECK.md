@@ -156,10 +156,13 @@ Open items, in rough order of pull:
    are *declared* per host (`[<host>] provides`), never probed; unmet
    pairs are outside the certified floor exactly as conditional sweeps
    are, so `complete` stays host-independent and the CI-grade statement
-   is `complete` plus `unmet: 0`; and it is its own table because the
-   staleness rule inverts against `[[quarantine]]`'s. The nautilus
-   refinement is absorbed: upstream `#[ignore]` and local `requires` are
-   complementary, so this blocks their B51 PR.
+   is `complete` plus `unmet: 0` (reachable on ephemeral-hostname CI via
+   `BROKKR_PROVIDES`); and it is its own table because the staleness
+   rule inverts against `[[quarantine]]`'s - though the zero-matches-
+   anywhere typo check survives. A pair matching both tables is a
+   load-time error. It does **not** block or replace nautilus's B51 PR:
+   declarations only self-correct when the capability fails fast, and
+   B51's Redis client retries with backoff past the watchdog.
 
 Working agreements that produced this doc: mechanisms derive from the
 claim (`certifies`), never stand alone; every proposed knob gets priced
@@ -940,12 +943,40 @@ entry in the doc. And the other motivating case cannot be probed at all:
 "this host is fast enough not to trip the watchdog" has no ping. A
 declaration covers both cases with one mechanism and no new machinery.
 
-The lie case is the design's best property, not its weakness: a host that
-claims `redis` without running one gets the tests *executed*, and they
-fail loudly. Wrong declarations self-correct on first use. A probe's
-failure mode is the opposite - a probe that wrongly reports "absent"
-silently removes tests, which is the invisible-coverage-loss this whole
-document exists to prevent.
+The lie case is the better failure *direction*: a host that claims
+`redis` without running one gets the tests **executed** rather than
+silently removed. A probe that wrongly reports "absent" is the
+invisible-coverage-loss this whole document exists to prevent, and no
+amount of hang is worse than a hole you cannot see.
+
+**But the self-correction has a precondition, and neither live customer
+meets it** (corrected 2026-07-22 on nautilus's measurement, after this
+section first claimed the tests "fail loudly"). Declarations self-correct
+on first use *when the capability fails fast*. B51's Redis tests do not:
+`create_redis_connection` builds a `ConnectionManagerConfig` with retries
+and exponential backoff, so with nothing listening each test blocks past
+the 20s per-test watchdog - 37 hangs recorded before the first run was
+killed, ~28 minutes of watchdog for the full set. pbfhogg's case is the
+same shape one axis over: a host wrongly claiming "fast enough" trips the
+watchdog and looks like a real failure rather than a bad declaration.
+
+So on a mis-declaring host the failure mode is *the exact hang this entry
+was written to fix*, relocated from "any host without Redis" to "a host
+that declared Redis and whose Redis is down" - and that second state is
+not exotic, because `provides` is static config while service liveness is
+dynamic. Reboots, an unstarted container, a moved port. The honest
+statement of the property is therefore: **when the capability fails fast,
+a wrong declaration self-corrects on first use; when it fails slow, the
+per-test watchdog is the only backstop and the cost is watchdog x
+matching pairs.** Both current customers are the slow kind. That is a
+documented limitation of the feature, not a footnote.
+
+The consequence names itself: **`[[requires]]` does not retire an
+upstream fail-fast fix.** It fixes the ledger and the non-declaring host;
+a declaring host with a dead Redis still hangs. A bounded connect timeout
+or `#[ignore]` upstream is what makes the failure loud, and the two are
+complementary - which corrects this section's original sequencing claim
+below.
 
 **The claim: unmet requirements are never part of the certified floor.**
 This is feature 6's resolution applied unchanged, and it must be, or
@@ -957,6 +988,12 @@ present they run, and a failure fails the run like any other. When it is
 absent they are an accounted omission, reported per entry and counted in
 the trailer and the `--json` `coverage` object as `unmet`.
 
+`unmet` is counted in **pairs**, on the same axis as `run` /
+`quarantined` / `ignored` / `orphaned`. Not entries, not names: this
+doc's own history is that name-level accounting is what certifies over
+holes, and a per-entry count is the very instrument open item 1 records
+as insufficient.
+
 Note what this deliberately does *not* do: it does not promote the pairs
 into the claim on a host that provides the capability. Tempting - CI
 always has Redis - but a floor that grows with the host is exactly the
@@ -966,6 +1003,19 @@ JSON already carries. A consumer wanting the stronger guarantee asserts
 on two fields instead of one, and no knob is added to fail on unmet
 (resisted deliberately: `certifies` is the claim spine, and a second
 place to tighten the claim is the two-mechanisms smell).
+
+**Hostname keying alone cannot express that CI case, so it is not the
+only key.** Raised on review and correct: CI runner hostnames are
+typically ephemeral and per-run, so the one host that genuinely always
+has the capability is the one that cannot declare it in a
+`[<hostname>]` table - and `complete` plus `unmet: 0` would be
+aspirational exactly where it is wanted. The escape hatch is an
+environment override, `BROKKR_PROVIDES=redis,postgres`, unioned with the
+host table's list. No new concept (the config layer already resolves
+per-host values), no probe, and it keeps the CI-grade statement
+reachable. A wildcard/default table entry would serve equally; the env
+var is preferred because CI capability is a property of the *run*, not
+of a checked-in file.
 
 **Why a separate table rather than a `[[quarantine]]` variant.** The
 matcher is identical and the temptation to reuse the table is real, but
@@ -980,6 +1030,26 @@ working. Two rules that read the same field with opposite polarity do not
 belong in one table. The confirming tell: a `[[quarantine]]` without
 `issue` is meaningless, and a `[[requires]]` with one is too.
 
+**The typo check survives the inversion - keep it.** Two predicates were
+being conflated when this section first dropped quarantine's zero-match
+load error for `requires`. *Zero non-run matches* is polarity-inverted
+and correctly excluded. *Zero matches in the universe at all* is a
+misspelled pattern - dead config on every host, host-independent, and
+still a load-time error for `requires` exactly as for `[[quarantine]]`.
+Without it a typo'd `[[requires]]` is indistinguishable from a satisfied
+one on a providing host: an entry that looks healthy because its number
+is explainable, which is precisely the failure mode that cost three
+hand-found ledger defects.
+
+**A pair matching both tables is a load-time error.** Not a precedence
+rule: a pair that is simultaneously "environmentally unavailable" and
+"broken, tracked by issue B-n" is a modelling confusion, and picking a
+winner would paper over it - on a non-providing host it is non-run for
+two declared reasons and double-counts, and on a providing host it runs
+while a `[[quarantine]]` entry asserts it is suppressed. Erroring also
+forces a migration like nautilus's B51 to be a **move** rather than an
+addition, which is the correct shape.
+
 **Implementation shape**, inherited whole from feature 11: unmet pairs
 are filtered out of the lane's ran-set, not expressed as cargo selection.
 A name-only pattern can go through libtest's own `--skip`; a
@@ -993,9 +1063,13 @@ counts ignored pairs separately, so it reports whichever channel
 suppressed it, listing `unmet` first because it is the more specific
 fact.
 
-Sequencing: this blocks nautilus's B51 upstream PR, because whether that
-PR adds `#[ignore]` upstream depends on whether `requires` exists locally
-to pair with it.
+Sequencing, restated after the fail-fast correction above: `requires`
+does **not** retire nautilus's B51 upstream PR, and the two should be
+built in parallel rather than one gating the other. `requires` fixes the
+ledger (no `issue` that can never close) and the non-declaring host; the
+upstream fail-fast change - a bounded connect timeout, or `#[ignore]` -
+is what makes a *declaring* host with a dead Redis fail loudly instead of
+burning watchdog. Neither substitutes for the other.
 
 ## Build order
 
@@ -1039,8 +1113,9 @@ the core because it needs feature 11's per-binary attribution and
 filtering to exist first - which it now does. It is small: a config
 table, a per-host string list, a fourth bucket in the classifier, and
 one field in the JSON. It is committed rather than optional, because
-unlike features 6 and 7 it has two live customers and a blocked upstream
-PR behind it.
+unlike features 6 and 7 it has two live customers behind it - though it
+is not on nautilus's B51 critical path, which needs an upstream
+fail-fast change `requires` cannot provide.
 
 Feature 10 joins the committed half, sequenced with step 5: the serial-lane
 finding means no nautilus gate can certify `complete` - regardless of how
