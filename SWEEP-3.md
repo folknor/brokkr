@@ -48,7 +48,7 @@ Worked in waves of Opus agents (max 3 at a time), each wave partitioned so agent
 | S3-12 | 2 | **fixed (breaking)** - new load-time `validate_complete_universe`: a `complete` profile that leaves any `[[check]]` entry referenced by no sweep/lane is a resolve-time error. Configs carrying unreferenced entries under a complete claim now fail to load until reconciled. |
 | S3-13 | 2 | **fixed** - `reject_extra_args_complete`: trailing `-- …` test args rejected under any `complete` claim (they narrow the run but not the audit) |
 | S3-14 | 2 | **refuted (adjudicated)** - accountability for `test_exclude_packages` (a host-capability fact) belongs to the unbuilt `requires` feature; a required quarantine issue would be a never-closing "graveyard". Behaviour + docs already agree. |
-| S3-15 | 3 | pending |
+| S3-15 | 3 | **fixed** - the two coverage scenarios now parse the `--json` trailer and assert `failed_phase == "coverage"` + `coverage.*`, so they fail for the right reason (not any exit-1); header comment scoped honestly. No S3-12/S3-13 load-time interaction (one referenced `[[check]]` entry). |
 | S3-16 | 2 | **fixed** - quarantine attribution changed from first-match to most-specific-wins (longest pattern), so a narrower nested entry isn't starved and falsely reported stale |
 | S3-17 | 2 | **fixed** - orphan worksheet and stale-entry report both print before the phase fails |
 | S3-18 | 2 | **fixed** - an `executed: &[bool]` set threaded from `run_test_phase` so lanes the fail-fast loop never reached don't contribute to the audit's ran-set |
@@ -60,16 +60,16 @@ Worked in waves of Opus agents (max 3 at a time), each wave partitioned so agent
 | S3-24 | 4 | pending |
 | S3-25 | 4 | pending |
 | S3-26 | 2 | **fixed** (done with the toolchain wave) - `docs/brokkr.toml.md` corrected: suppression lasts "for the duration of the global lock" (not "every command"), and worktree `--commit` pins are disabled, not honored |
-| S3-27 | 3 | pending |
+| S3-27 | 3 | **fixed** - `cmd_pmtiles_stats` now takes the detected `Project` and rejects non-elivagar/nidhogg checkouts (message mirrors `project::require`), so the handler gate agrees with `TABLE` instead of `visibility.rs` being the de-facto gate |
 | S3-28 | 1 | **fixed** - emphasis/strong/strikethrough/sub/superscript open+close arms route into `current_cell` when `in_table_cell` (via new `push_marker` helper) instead of leaking to `out` |
 | S3-29 | 1 | **fixed** - `Command::Man` arm moved above the `detect_optional()?` call so a malformed `brokkr.toml` no longer aborts `brokkr man` before its own fail-open fallback |
 | S3-30 | 1 | **fixed** - in-cell inline code now carries backticks + `theme.code`; header cells styled via `theme.table_header`; column widths measured ANSI-aware (`visible_len`) |
 | S3-31 | 1 | **fixed** - `man` listing header drops the `for X` clause (and its dangling space) when no project name is present |
 | S3-32 | 2 | **fixed** - `skip_after` wired through into `scan_use_statements` for join rules; `region`/`table_row_only`/`in_toml_section` + `join_wrapped_use` rejected at compile time (a reconstructed `use` is always code) |
-| S3-33 | 3 | pending |
+| S3-33 | 3 | **fixed** - `--json` `sweeps` now lists only sweeps that actually ran: a new `clippy_ran` mask (set after clippy's skip/dedupe) unioned with the S3-18 `executed` set via `ran_sweep_labels`, so a `-p`-scoped green no longer claims skipped sweeps |
 | S3-34 | 2 | **fixed** - `keyword_structural_exempt` treats a line-final `=>` as arm-position, so a single-pattern match arm body is no longer flagged |
-| S3-35 | 3 | pending |
-| S3-36 | 3 | pending |
+| S3-35 | 3 | **fixed** - `describe_sweep` joins each `--test <name>` filter into one fragment instead of two comma-separated items |
+| S3-36 | 3 | **fixed** - deleted the five stale NDJSON per-event claims in `check.md`; the doc now describes only the single `--json` summary trailer |
 
 ---
 

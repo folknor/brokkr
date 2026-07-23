@@ -591,7 +591,20 @@ fn cmd_cargo_run(args: &[String]) -> Result<(), DevError> {
     }
 }
 
-fn cmd_pmtiles_stats(files: &[String]) -> Result<(), DevError> {
+/// `pmtiles-stats` is restricted to the two projects that produce or serve
+/// PMTiles archives (elivagar, nidhogg). `project::require` gates a single
+/// project; this command spans two, so we enforce the same restriction inline
+/// with a message in `require`'s exact shape. Keeping the gate here - not only
+/// in `visibility.rs`'s `TABLE` - is what stops the presentation layer from
+/// becoming the de-facto gate: a hidden command still parses and reaches this
+/// handler, which must produce the real error.
+fn cmd_pmtiles_stats(project: Project, files: &[String]) -> Result<(), DevError> {
+    if !matches!(project, Project::Elivagar | Project::Nidhogg) {
+        return Err(DevError::Config(format!(
+            "'brokkr pmtiles-stats' is only available in elivagar and nidhogg projects (current: {project})"
+        )));
+    }
+
     for file in files {
         pmtiles::run(file)?;
     }
@@ -835,4 +848,41 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod pmtiles_stats_gate_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    // The gate must agree with `visibility.rs`'s TABLE entry, which scopes
+    // pmtiles-stats to elivagar + nidhogg. Wrong projects get the real
+    // `require`-shaped error; allowed projects fall through (empty file list
+    // makes the call a pure no-op, so no disk I/O).
+
+    #[test]
+    fn rejects_projects_without_pmtiles() {
+        for project in [
+            Project::Pbfhogg,
+            Project::Litehtml,
+            Project::Piners,
+            Project::Other("mystery"),
+        ] {
+            let err = cmd_pmtiles_stats(project, &[]).unwrap_err();
+            let DevError::Config(msg) = err else {
+                panic!("expected DevError::Config, got {err:?}");
+            };
+            assert!(msg.contains("pmtiles-stats"), "message: {msg}");
+            assert!(msg.contains("elivagar"), "message: {msg}");
+            assert!(msg.contains("nidhogg"), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn allows_elivagar_and_nidhogg() {
+        // Empty file list => the loop body never runs, so an allowed project
+        // returns Ok without opening any archive.
+        assert!(cmd_pmtiles_stats(Project::Elivagar, &[]).is_ok());
+        assert!(cmd_pmtiles_stats(Project::Nidhogg, &[]).is_ok());
+    }
 }

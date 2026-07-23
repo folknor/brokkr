@@ -90,6 +90,15 @@ pub(crate) fn cmd_check(
     // coverage audit must not credit their ran-set (S3-18). All true on a
     // green run, so the happy path is unchanged.
     let mut executed = vec![false; active_sweeps.len()];
+    // Which sweeps the clippy phase actually invoked cargo for - set after its
+    // cli_package_scope skips AND build-shape dedupe, so a sweep clippy never
+    // ran (out-of-scope `-p`, or deduped onto an identical shape) stays false.
+    // The `--json` trailer's `sweeps` array must list what ran, not the
+    // selected set (S3-33); a sweep runs in clippy, in the test phase, or both,
+    // so the honest set is the union of this and `executed`. Kept separate from
+    // `executed` because clippy runs first - folding it in would mark lanes an
+    // earlier test-phase fail-fast never reached, the exact bug S3-18 fixed.
+    let mut clippy_ran = vec![false; active_sweeps.len()];
     // Doctests off unless `[test] doctests = true` (nextest/CI never runs them).
     let doctests = test_cfg.is_some_and(|c| c.doctests);
 
@@ -127,59 +136,28 @@ pub(crate) fn cmd_check(
             &mut failing_phase,
         )?;
 
-        if !skip("clippy") {
-            failing_phase = Some("clippy");
-            run_clippy_phase(project_root, &active_sweeps, package, raw, limit, all, commands)?;
-        }
-
-        let mut test_failure: Option<DevError> = None;
-        if !skip("test") {
-            failing_phase = Some("test");
-            test_failure = run_test_phase(
+        run_build_phases(
+            &BuildPhaseArgs {
                 project,
                 project_root,
-                &active_sweeps,
+                active_sweeps: &active_sweeps,
                 package,
-                raw,
-                all,
-                doctests,
-                commands,
-                extra_args,
-                timings.then_some(&mut collected_timings),
-                &mut executed,
-            )
-            .err();
-        }
-
-        // Coverage accounting runs only under a complete claim - it is
-        // what the claim buys (TIERED-CHECK.md feature 4). It runs on a
-        // failing test phase too: the audit needs built binaries, not
-        // green tests, and the orphan worksheet is most needed exactly
-        // on the unhealthy runs that would otherwise never reach it.
-        if certifies == Some(Certifies::Complete) {
-            // Stays "test" on a failing run - the audit is best-effort there.
-            failing_phase = Some(if test_failure.is_some() { "test" } else { "coverage" });
-            let audit = audit_coverage(
-                project_root,
-                &active_sweeps,
-                &executed,
                 quarantine,
+                certifies,
+                doctests,
+                raw,
                 limit,
                 all,
                 commands,
-                test_failure.as_ref(),
-            );
-            // Counts first, verdict second: the summary carries them even
-            // when the audit is what failed.
-            coverage_stats = audit.stats;
-            audit.result?;
-        }
-
-        if let Some(e) = test_failure {
-            return Err(e);
-        }
-        failing_phase = None;
-        Ok(())
+                extra_args,
+            },
+            &skip,
+            &mut failing_phase,
+            &mut clippy_ran,
+            &mut executed,
+            timings.then_some(&mut collected_timings),
+            &mut coverage_stats,
+        )
     };
     let outcome = run_phases();
 
@@ -187,11 +165,13 @@ pub(crate) fn cmd_check(
         emit_timings(&collected_timings, limit, all, active_sweeps.len() > 1);
     }
 
+    let ran_labels = ran_sweep_labels(&active_sweeps, &clippy_ran, &executed);
+
     finish_check(
         &outcome,
         certifies,
         &profile_label,
-        &active_sweeps,
+        &ran_labels,
         skip_phases,
         package,
         failing_phase,
@@ -290,6 +270,98 @@ fn run_convention_phases(
         *failing_phase = Some("dependency_rules");
         run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.all, a.commands)?;
     }
+    Ok(())
+}
+
+struct BuildPhaseArgs<'a> {
+    project: Option<Project>,
+    project_root: &'a Path,
+    active_sweeps: &'a [ResolvedSweep],
+    package: Option<&'a str>,
+    quarantine: &'a [QuarantineEntry],
+    certifies: Option<Certifies>,
+    doctests: bool,
+    raw: bool,
+    limit: usize,
+    all: bool,
+    commands: bool,
+    extra_args: &'a [String],
+}
+
+/// Run clippy, the test phase, and (under a `complete` claim) the coverage
+/// audit. Threads the two ran-tracking masks - `clippy_ran` (set per sweep
+/// after clippy's skip/dedupe) and `executed` (set per lane the test phase
+/// reaches before its fail-fast) - plus the `failing_phase` pointer and the
+/// coverage stats the summary carries even on a failing run.
+fn run_build_phases(
+    a: &BuildPhaseArgs<'_>,
+    skip: &dyn Fn(&str) -> bool,
+    failing_phase: &mut Option<&'static str>,
+    clippy_ran: &mut [bool],
+    executed: &mut [bool],
+    collected_timings: Option<&mut Vec<TestTiming>>,
+    coverage_stats: &mut Option<CoverageStats>,
+) -> Result<(), DevError> {
+    if !skip("clippy") {
+        *failing_phase = Some("clippy");
+        run_clippy_phase(
+            a.project_root,
+            a.active_sweeps,
+            a.package,
+            a.raw,
+            a.limit,
+            a.all,
+            a.commands,
+            clippy_ran,
+        )?;
+    }
+
+    let mut test_failure: Option<DevError> = None;
+    if !skip("test") {
+        *failing_phase = Some("test");
+        test_failure = run_test_phase(
+            a.project,
+            a.project_root,
+            a.active_sweeps,
+            a.package,
+            a.raw,
+            a.all,
+            a.doctests,
+            a.commands,
+            a.extra_args,
+            collected_timings,
+            executed,
+        )
+        .err();
+    }
+
+    // Coverage accounting runs only under a complete claim - it is what the
+    // claim buys (TIERED-CHECK.md feature 4). It runs on a failing test phase
+    // too: the audit needs built binaries, not green tests, and the orphan
+    // worksheet is most needed exactly on the unhealthy runs.
+    if a.certifies == Some(Certifies::Complete) {
+        // Stays "test" on a failing run - the audit is best-effort there.
+        *failing_phase = Some(if test_failure.is_some() { "test" } else { "coverage" });
+        let audit = audit_coverage(
+            a.project_root,
+            a.active_sweeps,
+            executed,
+            a.quarantine,
+            a.limit,
+            a.all,
+            a.commands,
+            test_failure.as_ref(),
+        );
+        // Counts first, verdict second: the summary carries them even when
+        // the audit is what failed.
+        *coverage_stats = audit.stats;
+        audit.result?;
+    }
+
+    if let Some(e) = test_failure {
+        return Err(e);
+    }
+    *failing_phase = None;
     Ok(())
 }
 
@@ -415,6 +487,30 @@ fn reject_extra_args_complete(
     Ok(())
 }
 
+/// The labels of the sweeps that actually ran, for the honest `--json`
+/// trailer (S3-33). A sweep counts if the clippy phase invoked cargo for it
+/// (`clippy_ran`, set after cli_package_scope skips and build-shape dedupe)
+/// **or** the test phase reached it (`executed`, the S3-18 array) - it may run
+/// in one phase, the other, or both. A sweep skipped in both (an out-of-scope
+/// `-p`, or a lane an earlier fail-fast never reached) is omitted, so the
+/// machine trailer never lists a sweep as green that never ran - the same
+/// over-claim the `package` field was added to prevent.
+fn ran_sweep_labels<'a>(
+    sweeps: &'a [ResolvedSweep],
+    clippy_ran: &[bool],
+    executed: &[bool],
+) -> Vec<&'a str> {
+    sweeps
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            clippy_ran.get(*i).copied().unwrap_or(false)
+                || executed.get(*i).copied().unwrap_or(false)
+        })
+        .map(|(_, s)| s.label.as_str())
+        .collect()
+}
+
 /// Print the summary line, emit the `--json` trailer, and map the claim to
 /// the exit contract. The claim decides the word and the exit code: `passed`
 /// stays with unclaimed legacy profiles (exactly as trustworthy as before
@@ -426,7 +522,7 @@ fn finish_check(
     outcome: &Result<(), DevError>,
     certifies: Option<Certifies>,
     profile_label: &Option<String>,
-    active_sweeps: &[ResolvedSweep],
+    sweep_labels: &[&str],
     skip_phases: &[String],
     package: Option<&str>,
     failing_phase: Option<&'static str>,
@@ -443,7 +539,7 @@ fn finish_check(
                         "passed",
                         certifies,
                         profile_label,
-                        active_sweeps,
+                        sweep_labels,
                         package,
                         None,
                         coverage,
@@ -459,7 +555,7 @@ fn finish_check(
                         "complete",
                         certifies,
                         profile_label,
-                        active_sweeps,
+                        sweep_labels,
                         package,
                         None,
                         coverage,
@@ -492,7 +588,7 @@ fn finish_check(
                         "partial",
                         certifies,
                         profile_label,
-                        active_sweeps,
+                        sweep_labels,
                         package,
                         None,
                         coverage,
@@ -512,7 +608,7 @@ fn finish_check(
                     "failed",
                     certifies,
                     profile_label,
-                    active_sweeps,
+                    sweep_labels,
                     package,
                     failing_phase,
                     coverage,
@@ -552,7 +648,7 @@ fn emit_json_summary(
     verdict: &str,
     certifies: Option<Certifies>,
     profile: &Option<String>,
-    sweeps: &[ResolvedSweep],
+    sweeps: &[&str],
     package: Option<&str>,
     failed_phase: Option<&'static str>,
     coverage: Option<CoverageStats>,
@@ -566,7 +662,7 @@ fn emit_json_summary(
         }),
         verdict,
         profile: profile.as_deref(),
-        sweeps: sweeps.iter().map(|s| s.label.as_str()).collect(),
+        sweeps: sweeps.to_vec(),
         package,
         failed_phase,
         coverage,
@@ -1122,6 +1218,7 @@ fn run_clippy_phase(
     limit: usize,
     all: bool,
     commands: bool,
+    clippy_ran: &mut [bool],
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
 
@@ -1132,7 +1229,7 @@ fn run_clippy_phase(
         std::collections::HashSet::new();
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
-    for sweep in sweeps {
+    for (i, sweep) in sweeps.iter().enumerate() {
         // A CLI `-p` replaces the sweep's selection or skips the sweep
         // entirely when the sweep's config rules the package out - it never
         // combines, because cargo unions selection flags (cli_package_scope).
@@ -1151,6 +1248,10 @@ fn run_clippy_phase(
             ));
             continue;
         }
+        // Past the skip and the dedupe: this sweep gets its own cargo run, so
+        // the `--json` trailer may honestly list it as clippy-checked (S3-33).
+        // `i` indexes `sweeps`, and `clippy_ran` is sized to match, so direct.
+        clippy_ran[i] = true;
         // Always run with --message-format=json so the lint code
         // (`message.code.code`) is populated on every diagnostic. cargo's
         // pretty-printed stderr only includes the `= note: #[warn(rule)]`
@@ -1308,6 +1409,9 @@ pub(crate) fn cmd_clippy(
     // unused. `commands = true`: this is the *investigative* runner, invoked to
     // find out what a given target shape actually does, so the full cargo line
     // is the point - unlike `brokkr check`, where it is per-run noise.
+    // The investigative runner has no `--json` trailer, so the ran-mask is
+    // write-only here; a single throwaway slot satisfies the shared signature.
+    let mut clippy_ran = [false];
     match run_clippy_phase(
         project_root,
         std::slice::from_ref(&sweep),
@@ -1316,6 +1420,7 @@ pub(crate) fn cmd_clippy(
         limit,
         all,
         true,
+        &mut clippy_ran,
     ) {
         Ok(()) => {
             output::result_msg(&format!("clippy clean in {}", fmt_wall(started.elapsed())));
@@ -2072,6 +2177,68 @@ mod clippy_sweep_tests {
     }
 }
 
+
+#[cfg(test)]
+mod ran_labels_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::ran_sweep_labels;
+    use crate::profile::ResolvedSweep;
+
+    fn sweep(label: &str) -> ResolvedSweep {
+        ResolvedSweep {
+            label: label.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn omits_sweeps_skipped_in_both_phases() {
+        // S3-33: profile `tier1` selects [default, ffi, live]; a `-p` scope
+        // rules ffi/live out of both clippy and the test phase, so only
+        // `default` ran. The trailer must not list ffi/live as green.
+        let sweeps = [sweep("default"), sweep("ffi"), sweep("live")];
+        let clippy_ran = [true, false, false];
+        let executed = [true, false, false];
+        assert_eq!(
+            ran_sweep_labels(&sweeps, &clippy_ran, &executed),
+            vec!["default"]
+        );
+    }
+
+    #[test]
+    fn unions_clippy_only_and_test_only_lanes() {
+        // A lane can run in one phase but not the other: `a` clippy-checked
+        // with its tests skipped, `b` deduped in clippy but its tests still
+        // ran, `c` reached by neither. The honest set is the union of the two.
+        let sweeps = [sweep("a"), sweep("b"), sweep("c")];
+        let clippy_ran = [true, false, false];
+        let executed = [false, true, false];
+        assert_eq!(
+            ran_sweep_labels(&sweeps, &clippy_ran, &executed),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn all_green_reports_every_sweep_in_order() {
+        let sweeps = [sweep("default"), sweep("ffi")];
+        let all_true = [true, true];
+        assert_eq!(
+            ran_sweep_labels(&sweeps, &all_true, &all_true),
+            vec!["default", "ffi"]
+        );
+    }
+
+    #[test]
+    fn nothing_ran_reports_empty() {
+        // A failure in an early convention phase (e.g. gremlins) returns
+        // before any sweep runs, so the trailer honestly lists none.
+        let sweeps = [sweep("default"), sweep("ffi")];
+        let none = [false, false];
+        assert!(ran_sweep_labels(&sweeps, &none, &none).is_empty());
+    }
+}
 
 #[cfg(test)]
 mod json_summary_tests {

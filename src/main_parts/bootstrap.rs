@@ -1187,7 +1187,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "download-natural-earth")?;
             elivagar::cmd::download_natural_earth(&dev_config, project, &project_root)
         }
-        Command::PmtilesStats { files } => cmd_pmtiles_stats(&files),
+        Command::PmtilesStats { files } => cmd_pmtiles_stats(project, &files),
         Command::Serve {
             data_dir,
             dataset,

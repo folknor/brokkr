@@ -2,9 +2,15 @@
 # Smoke test for TIERED-CHECK step 3: certifies + skip_phases + --gate.
 #
 # Generates a throwaway crate under scratch/certifies-smoke and drives
-# brokkr check through the partial/complete/gate paths, asserting on exit
-# codes (the 0/10/1 contract, clap's 2 for flag conflicts). Run from the
-# brokkr repo root after installing the binary under test:
+# brokkr check through the partial/complete/gate paths. The three verdict
+# scenarios assert on exit codes (the 0/10/1 contract, clap's 2 for flag
+# conflicts). The two coverage-failure scenarios can't: exit 1 is brokkr's
+# universal failure code (config, gremlin, clippy, build, test all produce
+# it), so they additionally parse the `--json` summary and assert on
+# `failed_phase`/`coverage.*` - proving each fails IN the coverage phase for
+# the right reason, not for some unrelated reason that never ran the audit.
+# Requires `jq`. Run from the brokkr repo root after installing the binary
+# under test:
 #
 #   bash scripts/smoke-certifies.sh
 #
@@ -184,6 +190,11 @@ cd "$smoke"
 git init -q
 git add -A
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "smoke: jq is required (the coverage scenarios assert on the --json summary)" >&2
+  exit 2
+fi
+
 fail=0
 expect() {
   desc="$1"
@@ -197,21 +208,66 @@ expect() {
   fi
 }
 
+# Runs `brokkr "$@"` capturing stdout - whose LAST line, under --json, is the
+# machine-readable summary - to a file so a scenario can assert on the
+# summary's discriminating fields. stderr streams live; stdout is echoed
+# afterwards so the run is still visible. Sets `rc` (exit code) and `summary`
+# (the JSON trailer). A resolve-time error emits no summary, so `summary` is
+# then a human line and jq fails to parse it - which correctly fails the
+# assertion rather than passing vacuously.
+summary=""
+rc=0
+check_json() {
+  local out="$smoke/check.stdout"
+  brokkr "$@" >"$out"
+  rc=$?
+  cat "$out"
+  summary="$(tail -n 1 "$out")"
+}
+
+# Asserts a jq boolean filter holds against the captured `summary`. Keeps the
+# summary in the failure line so a broken audit is debuggable.
+expect_json() {
+  desc="$1"
+  filter="$2"
+  local got
+  got="$(printf '%s' "$summary" | jq -r "$filter" 2>/dev/null)"
+  if [ "$got" = "true" ]; then
+    echo "ok   $desc"
+  else
+    echo "FAIL $desc: jq '$filter' => '$got' (summary: $summary)"
+    fail=1
+  fi
+}
+
 echo "=== bare check: partial default profile ==="
 brokkr check --json
 expect "bare check = partial" 10 $?
 
 echo "=== --gate: complete profile ==="
-brokkr check --gate --json
-expect "--gate = complete" 0 $?
+check_json check --gate --json
+expect "--gate = complete" 0 $rc
+# The point of a complete gate is that the audit RAN: a green exit with a null
+# coverage object would be a pass that certified nothing.
+expect_json "--gate ran the coverage phase" \
+  '.failed_phase == null and .coverage != null and .coverage.orphaned == 0'
 
 echo "=== --profile gate-orphan: unjustified skip fails coverage ==="
-brokkr check --profile gate-orphan --json
-expect "orphaned pair = exit 1" 1 $?
+check_json check --profile gate-orphan --json
+expect "orphaned pair = exit 1" 1 $rc
+# Must fail IN the coverage phase with orphaned pairs - not at load, not in
+# build/test. `adds` and root's `shared::` are skipped but unquarantined.
+expect_json "gate-orphan failed on coverage with orphans" \
+  '.failed_phase == "coverage" and .coverage.orphaned > 0'
 
 echo "=== --profile gate-stale: quarantine justifying nothing fails ==="
-brokkr check --profile gate-stale --json
-expect "stale quarantine = exit 1" 1 $?
+check_json check --profile gate-stale --json
+expect "stale quarantine = exit 1" 1 $rc
+# The stale signature: coverage failed with zero orphans (every test ran, so
+# the two [[quarantine]] entries justify nothing). Distinguishes stale from
+# orphan, and both from any non-coverage failure.
+expect_json "gate-stale failed on coverage with no orphans" \
+  '.failed_phase == "coverage" and .coverage != null and .coverage.orphaned == 0'
 
 echo "=== --gate -p: rejected by clap ==="
 brokkr check --gate -p certifies-smoke

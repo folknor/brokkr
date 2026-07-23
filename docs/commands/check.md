@@ -374,15 +374,13 @@ chains). An `if` that is a **match guard** is exempt outright rather than via
 the ladder - scanning forward from the `if`, a line ending in `=>` before any
 `{` or `;` means the construct opens no block and is the arm's guard clause,
 which is what rustfmt produces when a guard is too long to sit beside its
-pattern. It scans tracked `.rs` files, honouring `[gremlins].exclude`. JSON
-mode emits `style` and `style_summary` events. Ported from nautilus_trader's
-`check_formatting_rs` hook; see `src/style.rs`.
+pattern. It scans tracked `.rs` files, honouring `[gremlins].exclude`. Ported
+from nautilus_trader's `check_formatting_rs` hook; see `src/style.rs`.
 
 Header phase runs next, only when a `[header]` section is present. A file
 matching `[header].paths` (minus `exempt`) must contain `[header].pattern` with
 `{year}` expanded to the current UTC year; a missing header or a stale year
-fails. JSON mode emits `header`/`header_summary`. Ported from
-`check_copyright_year`; see `src/header.rs`.
+fails. Ported from `check_copyright_year`; see `src/header.rs`.
 
 Textlint phase runs next, only when `[[textlint]]` rules exist. Each rule
 forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
@@ -409,9 +407,8 @@ preceding `#[cfg(...)]` exemption, `require_below` for a required token like
 (the violation stands only when every window is clear). Windows read raw text -
 no region masking, no `use`-joining - so because the test is per-line, write
 context patterns fragment-tolerant (match `madsim`, not a full single-line
-attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. JSON mode emits
-`textlint`/`textlint_summary`. The generic engine behind most grep-style
-convention hooks; see `src/textlint.rs`.
+attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
+engine behind most grep-style convention hooks; see `src/textlint.rs`.
 
 Manifest phase runs next, only when a `[manifest]` section enables a check
 (off by default, inert otherwise). It parses each `Cargo.toml` matching
@@ -422,8 +419,7 @@ physically after the inline table, are their own group and never ordered against
 it). `shape_exclude` globs excuse a manifest from the structural checks only
 (section/crate-type/package-field order, `[lints] workspace`, bin/example flags
 - the same set a `cargo-fuzz = true` stub skips) while still sort-checking it;
-`exclude` skips the file entirely. JSON mode emits `manifest`/`manifest_summary`.
-See `src/manifest.rs`.
+`exclude` skips the file entirely. See `src/manifest.rs`.
 
 Script-check phase runs next, only when `[[script_check]]` entries exist (inert
 otherwise). Each entry runs `command` via `sh -c` (so pipes/redirects/env
@@ -457,8 +453,7 @@ violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`. A rule
 can scope the forbidden match by dependency `kinds` (`normal`/`dev`/`build`,
 default all) and `optional` (e.g. `optional = false` to require a dep be
 optional), so manifest conventions like "tokio only as a dev-dependency" are
-expressible. JSON mode emits `dependency_violation` and `dependency_summary`
-events.
+expressible.
 
 When hits exceed `--limit`, both the gremlin and clippy phases prefer files
 changed on the current branch (computed via git merge-base against

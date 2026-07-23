@@ -215,8 +215,15 @@ pub(crate) fn describe_sweep(
         if sweep.libtest_args.iter().any(|a| a == "--include-ignored") {
             parts.push("include-ignored".into());
         }
-        for filter in &sweep.cargo_test_filters {
-            parts.push(filter.clone());
+        // `cargo_test_filters` is stored flattened as `["--test", name, ...]`;
+        // pair each flag back with its name so one filter reads as one item,
+        // not `--test` and the bare name as two comma-separated fragments.
+        let mut filters = sweep.cargo_test_filters.iter();
+        while let Some(flag) = filters.next() {
+            match filters.next() {
+                Some(name) => parts.push(format!("{flag} {name}")),
+                None => parts.push(flag.clone()),
+            }
         }
         for name in &sweep.name_filters {
             parts.push(format!("filter {name}"));
@@ -1471,6 +1478,34 @@ warning: z [too_many_lines]
         );
         // Clippy never takes libtest filters, so its line omits them.
         assert_eq!(describe_sweep(&tier, false, None), "workspace");
+    }
+
+    #[test]
+    fn describe_sweep_joins_test_filter_pairs() {
+        // S3-35: `cargo_test_filters` is flattened `["--test", "cli_sort"]`;
+        // the shape must render each filter as one item, not `--test` and the
+        // bare name as two comma-separated fragments.
+        let one = ResolvedSweep {
+            cargo_test_filters: s(&["--test", "cli_sort"]),
+            ..sweep("sort")
+        };
+        assert_eq!(
+            describe_sweep(&one, true, None),
+            "workspace, --test cli_sort, serial"
+        );
+
+        // Two filters stay two distinct items, each self-contained.
+        let two = ResolvedSweep {
+            cargo_test_filters: s(&["--test", "cli_sort", "--test", "cli_env"]),
+            ..sweep("sort")
+        };
+        assert_eq!(
+            describe_sweep(&two, true, None),
+            "workspace, --test cli_sort, --test cli_env, serial"
+        );
+
+        // Clippy never takes cargo test filters, so its line omits them.
+        assert_eq!(describe_sweep(&one, false, None), "workspace");
     }
 
     #[test]
