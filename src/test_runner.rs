@@ -1205,6 +1205,80 @@ mod tests {
         (forwarded, still_running)
     }
 
+    /// Like [`drive_drain`] but returns the names the tracker recorded as
+    /// *completed* (in order) - the exact set that feeds `check --timings`.
+    /// `drive_drain` only exposes `current` (the hang watchdog's view), so
+    /// nothing else pins down the timing capture.
+    fn drive_drain_completed(chunks: &[&[u8]]) -> Vec<String> {
+        use std::io::Write;
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+        let mut stdin = child.stdin.take().expect("cat stdin");
+        let stdout = child.stdout.take().expect("cat stdout");
+
+        let chunks_owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
+        let writer = std::thread::spawn(move || {
+            for c in &chunks_owned {
+                stdin.write_all(c).ok();
+            }
+            drop(stdin);
+        });
+
+        let buf = Mutex::new(Vec::<u8>::new());
+        let tracker = Mutex::new(TestTracker::default());
+        drain_stdout(stdout, &buf, &tracker, |_line: &str| {});
+
+        writer.join().ok();
+        child.wait().ok();
+
+        tracker
+            .lock()
+            .unwrap()
+            .completed
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn completed_captures_all_tests_atomic_lines() {
+        // Capture ON (no --nocapture): libtest writes each result as one
+        // atomic `test NAME ... ok\n` line. Every test - including the last,
+        // cleared by the summary - must land in `completed`, or
+        // `check --timings` reports "no tests ran" for a green suite.
+        let stream: Vec<&[u8]> = vec![
+            b"\nrunning 3 tests\n",
+            b"test alpha ... ok\n",
+            b"test beta ... ok\n",
+            b"test gamma ... ok\n",
+            b"\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let mut completed = drive_drain_completed(&stream);
+        completed.sort();
+        assert_eq!(completed, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn completed_captures_all_tests_partial_markers() {
+        // Capture OFF (--nocapture): the `test NAME ... ` marker is flushed
+        // separately from the trailing `ok\n`. Same guarantee.
+        let stream: Vec<&[u8]> = vec![
+            b"\nrunning 2 tests\n",
+            b"test alpha ... ",
+            b"ok\n",
+            b"test beta ... ",
+            b"ok\n",
+            b"\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        ];
+        let mut completed = drive_drain_completed(&stream);
+        completed.sort();
+        assert_eq!(completed, vec!["alpha", "beta"]);
+    }
+
     #[test]
     fn watchdog_clears_when_test_prints_without_newline() {
         // Trigger A from the review: `print!("hello")` glues with the

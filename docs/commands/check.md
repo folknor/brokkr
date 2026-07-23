@@ -19,7 +19,15 @@ to libtest after the default `--test-threads=1` (e.g.
 `brokkr check -- -- --ignored`). With no separator, every token is
 cargo-level. The test phase also fails on a successful `cargo test` that ran
 zero tests (suites=0, or filters excluded everything) so a too-narrow
-profile/filter combo can't silently green-light a check.
+profile/filter combo can't silently green-light a check. Each test sweep
+closes with a `[test]    N passed` count line (`, M ignored` / `, K filtered
+out` appended when non-zero) - the symmetric bookend to `running tests`, so a
+green run always says how much it ran. A suite that *legitimately* ran zero
+tests (nothing filtered out - e.g. an all-doctest crate, since `--tests`
+excludes doctests) still passes; on an explicit `-p <pkg>` spot-check that ran
+nothing, an extra warning notes the green validated clippy, not tests. The
+warning is scoped to the hand-typed `-p` path so a whole-workspace run never
+nags.
 
 ### Per-sweep rustflags + auto target-dir isolation
 

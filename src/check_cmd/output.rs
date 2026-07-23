@@ -645,6 +645,37 @@ fn run_one_test_sweep(
         }
         return Ok(false);
     }
+
+    // The symmetric close to "running tests" above: always report how many
+    // tests actually ran, 0 or thousands. On a green run every counted test
+    // passed (a failure returns early), so the headline is the pass count;
+    // ignored / filtered-out are appended only when non-zero. The wrong-run
+    // shapes were already caught by `zero_test_run`, so a 0 here is a
+    // *legitimate* empty run - but on an explicit `-p` spot-check it is worth
+    // a word, since `--tests` excludes doctests and an all-doctest crate
+    // greens on clippy alone.
+    let label = if multi {
+        format!(" (sweep: {})", sweep.label)
+    } else {
+        String::new()
+    };
+    let mut extra = String::new();
+    if parsed.ignored > 0 {
+        extra.push_str(&format!(", {} ignored", parsed.ignored));
+    }
+    if parsed.filtered_out > 0 {
+        extra.push_str(&format!(", {} filtered out", parsed.filtered_out));
+    }
+    println!("[test]    {} passed{extra}{label}", parsed.passed);
+    let total = parsed.passed + parsed.failed + parsed.ignored;
+    if total == 0
+        && let Some(pkg) = package
+    {
+        output::warn(&format!(
+            "`-p {pkg}` ran no tests - clippy passed, but nothing was validated \
+             (doctests are excluded; its tests may be doctests or live in another crate)",
+        ));
+    }
     Ok(true)
 }
 
