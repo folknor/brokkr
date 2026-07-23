@@ -231,6 +231,11 @@ fn enumerate_shapes(
         groups.entry(key).or_default().push(idx);
     }
 
+    // cargo's resolved target dir: a rustflags shape's isolated dir hangs off
+    // it (S3-20), and enumeration must reuse the *same* dir the test phase
+    // built into or it would rebuild the whole shape from scratch.
+    let meta_target_dir = build::project_info(Some(project_root))?.target_dir;
+
     let mut out = Vec::with_capacity(order.len());
     for key in &order {
         let members = &groups[key];
@@ -243,7 +248,7 @@ fn enumerate_shapes(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        env_owned.extend(sweep_cargo_env(first, project_root));
+        env_owned.extend(sweep_cargo_env(first, &meta_target_dir));
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))

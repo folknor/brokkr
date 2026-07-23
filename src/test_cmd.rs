@@ -158,7 +158,7 @@ pub fn run(
         // RUSTFLAGS, so running a sim sweep through `brokkr test` builds under
         // its cfg without thrashing the plain sweeps.
         let project_env =
-            check_cmd::sweep_runtime_env(sweep, Some(project), &target_dir, project_root, profile_dir);
+            check_cmd::sweep_runtime_env(sweep, Some(project), &target_dir, profile_dir);
         // Merge profile-declared env onto the project's always-set vars.
         // Profile env wins on collision so a profile can shadow defaults
         // when it really needs to (request 3 / B3: brokkr test was

@@ -270,7 +270,10 @@ message = "route through nautilus_network::net"
 
 A preset may set any `[[textlint]]` field except `name`, `pattern`, and
 `message` - the three that identify one rule. An unknown or misspelled field in
-a preset is a load-time error even if no rule uses the preset.
+a preset is a load-time error even if no rule uses the preset. A preset that
+**no rule references** is also a load-time error - dead config that would load
+clean is exactly what this parser rejects, so define a preset only where a rule
+draws on it.
 
 Merge rules:
 
@@ -282,8 +285,11 @@ Merge rules:
   rule *adds* to a shared list instead of replacing it. Narrow a preset's
   `paths` with the rule's own `exclude`.
 - `preset` also takes a list (`preset = ["rust-src", "dst-markers"]`), applied
-  left to right under the same nearest-wins rule: the rule's own value wins,
-  then the first-listed preset, and so on. Lists take entries from all of them.
+  left to right under the same nearest-wins rule: for a **scalar** the rule's
+  own value wins, then the first-listed preset, and so on. For a **list** the
+  entries concatenate in that same declaration order - `preset = ["a", "b"]`
+  gives `a`'s entries, then `b`'s, then the rule's own - so lists and scalars
+  agree on "earlier-listed wins".
 
 Presets are resolved entirely at parse time - the check phases see ordinary
 fully-resolved rules and have no notion of a preset.

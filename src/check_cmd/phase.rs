@@ -1209,6 +1209,37 @@ fn run_dependency_rules(
     Err(DevError::Build("dependency rules failed".into()))
 }
 
+/// Assemble the `cargo clippy` argv for one sweep. Always
+/// `--message-format=json` so the lint code is populated on every diagnostic
+/// (cargo's pretty stderr only annotates the first occurrence per crate),
+/// `--keep-going` so a failing unit doesn't hide lints queued behind it, and
+/// `--cap-lints=warn` so a deny-level lint still yields `.rmeta` and every
+/// downstream crate is checked - brokkr recovers the intent by treating any
+/// surfaced diagnostic as a hard failure at the call site.
+fn clippy_args(sweep: &ResolvedSweep, scope: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "clippy".into(),
+        "--keep-going".into(),
+        "--all-targets".into(),
+        "--message-format=json".into(),
+    ];
+    if let Some(pkg) = scope {
+        args.push("--package".into());
+        args.push(pkg.into());
+    } else {
+        // Scope to the sweep's packages (`-p <pkg>`) so `--features` is valid
+        // in a virtual workspace, where cargo rejects features at the root.
+        for pkg in &sweep.packages {
+            args.push("-p".into());
+            args.push(pkg.clone());
+        }
+    }
+    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.push("--".into());
+    args.push("--cap-lints=warn".into());
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_clippy_phase(
     project_root: &Path,
@@ -1221,6 +1252,17 @@ fn run_clippy_phase(
     clippy_ran: &mut [bool],
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
+
+    // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
+    // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
+    // they must agree on the location, and a workspace can place it off the
+    // project root (S3-20). Only rustflags sweeps need it, so the extra `cargo
+    // metadata` call is paid lazily - the common (no-isolation) run skips it.
+    let meta_target_dir = if sweeps.iter().any(|s| !s.rustflags.is_empty()) {
+        Some(build::project_info(Some(project_root))?.target_dir)
+    } else {
+        None
+    };
 
     // Clippy is per-build-shape while tests are per-lane (TIERED-CHECK
     // feature 2): two lanes sharing a `[[check]]` entry must not lint it
@@ -1252,43 +1294,7 @@ fn run_clippy_phase(
         // the `--json` trailer may honestly list it as clippy-checked (S3-33).
         // `i` indexes `sweeps`, and `clippy_ran` is sized to match, so direct.
         clippy_ran[i] = true;
-        // Always run with --message-format=json so the lint code
-        // (`message.code.code`) is populated on every diagnostic. cargo's
-        // pretty-printed stderr only includes the `= note: #[warn(rule)]`
-        // annotation on the first occurrence of each lint per crate,
-        // which made bulk triage by rule impossible in text mode.
-        let mut args: Vec<String> = vec![
-            "clippy".into(),
-            // Keep checking independent branches of the graph after a unit
-            // fails, instead of cargo's default fail-fast (which stops
-            // scheduling new work at the first error and hides every lint
-            // queued behind it).
-            "--keep-going".into(),
-            "--all-targets".into(),
-            "--message-format=json".into(),
-        ];
-        if let Some(pkg) = scope {
-            args.push("--package".into());
-            args.push(pkg.into());
-        } else {
-            // Scope to the sweep's packages (`-p <pkg>`) so `--features` is
-            // valid in a virtual workspace, where cargo rejects features at
-            // the root.
-            for pkg in &sweep.packages {
-                args.push("-p".into());
-                args.push(pkg.clone());
-            }
-        }
-        args.extend(sweep.cargo_feature_args.iter().cloned());
-        // Cap lints at `warn` so a deny-level lint no longer aborts its
-        // crate's compile: the crate still produces its .rmeta, so every
-        // downstream crate is checked too, and one run surfaces every lint
-        // across the whole workspace. Genuine (non-lint) compile errors are
-        // unaffected and still fail. brokkr recovers the intent: it treats
-        // every surfaced lint as a hard failure (see `event_to_clippy` and
-        // the gate below), so nothing is silently downgraded.
-        args.push("--".into());
-        args.push("--cap-lints=warn".into());
+        let args = clippy_args(sweep, scope);
 
         output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, scope));
 
@@ -1303,7 +1309,11 @@ fn run_clippy_phase(
             .collect();
         // A sweep with `rustflags` clippy-checks under the same cfg + isolated
         // target dir as its tests, so the sim gate's lints match its build.
-        env_owned.extend(sweep_cargo_env(sweep, project_root));
+        // Plain sweeps contribute nothing here; only rustflags sweeps do, and
+        // for those `meta_target_dir` is `Some` (computed above).
+        if let Some(dir) = &meta_target_dir {
+            env_owned.extend(sweep_cargo_env(sweep, dir));
+        }
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -1939,7 +1949,7 @@ fn run_test_phase(
         // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
         // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
         // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps.
-        let project_env = sweep_runtime_env(sweep, project, &target_dir, project_root, "debug");
+        let project_env = sweep_runtime_env(sweep, project, &target_dir, "debug");
         for pkg in &sweep.build_packages {
             run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, commands)?;
         }

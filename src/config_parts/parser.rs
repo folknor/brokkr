@@ -231,9 +231,35 @@ fn parse_textlint_presets(
     Ok(out)
 }
 
+/// Fold one preset into the running *combined* preset a multi-preset rule
+/// resolves against, in declaration order. Scalars: the first preset to set a
+/// key wins (an earlier-listed preset is never overridden by a later one), so
+/// precedence follows declaration order. Lists concatenate in declaration order
+/// (`preset = ["a", "b"]` -> `a`'s entries then `b`'s). The combined table is
+/// then layered under the rule by [`apply_textlint_preset`], which keeps every
+/// preset entry ahead of the rule's own - so the final list is
+/// `a ++ b ++ rule`, matching the first-listed-wins order scalars already use.
+fn merge_preset_into_combined(combined: &mut toml::value::Table, preset: &toml::value::Table) {
+    for (key, preset_value) in preset {
+        if TEXTLINT_LIST_FIELDS.contains(&key.as_str()) {
+            if let Some(toml::Value::Array(existing)) = combined.get_mut(key) {
+                if let Some(add) = preset_value.as_array() {
+                    existing.extend(add.iter().cloned());
+                }
+            } else {
+                combined.insert(key.clone(), preset_value.clone());
+            }
+        } else if !combined.contains_key(key) {
+            // First-listed preset wins for scalars.
+            combined.insert(key.clone(), preset_value.clone());
+        }
+    }
+}
+
 /// Layer `preset` underneath `rule`: nearest value wins, so a key the rule sets
 /// itself is left alone. The exception is [`TEXTLINT_LIST_FIELDS`], which
-/// concatenate preset-first.
+/// concatenate preset-first. `preset` is the already-combined table when a rule
+/// names several (see [`merge_preset_into_combined`]).
 fn apply_textlint_preset(rule: &mut toml::value::Table, preset: &toml::value::Table) {
     for (key, preset_value) in preset {
         let Some(rule_value) = rule.get(key) else {
@@ -281,15 +307,34 @@ fn take_textlint_presets(
     }
 }
 
+/// Error for a `[textlint_preset.<name>]` block that no rule references. Dead
+/// config that loads clean is exactly what this parser rejects everywhere else,
+/// so an unused preset is a load-time error too.
+fn unreferenced_preset_err(name: &str) -> DevError {
+    DevError::Config(format!(
+        "[textlint_preset.{name}] is defined but no `[[textlint]]` rule \
+         references it (via `preset = \"{name}\"`). Reference it from a rule or \
+         delete the block."
+    ))
+}
+
 /// Parse the optional `[[textlint]]` array of rules. Absent -> empty. Each rule
 /// needs a `name`, `pattern`, and non-empty `paths`. A rule may name one or
-/// more `[textlint_preset.<name>]` blocks via `preset`; those are merged in
-/// first (see [`apply_textlint_preset`]), so `paths` may come from the preset.
+/// more `[textlint_preset.<name>]` blocks via `preset`; those are combined in
+/// declaration order (see [`merge_preset_into_combined`]) and layered under the
+/// rule (see [`apply_textlint_preset`]), so `paths` may come from the preset.
+/// A preset that no rule references is rejected.
 fn parse_textlint(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Vec<TextlintRule>, DevError> {
     let presets = parse_textlint_presets(table)?;
+    // Presets referenced by at least one rule; anything left over is dead.
+    let mut referenced: HashSet<String> = HashSet::new();
     let Some(value) = table.get("textlint") else {
+        // No rules at all, so any defined preset is unreferenced.
+        if let Some(name) = presets.keys().next() {
+            return Err(unreferenced_preset_err(name));
+        }
         return Ok(Vec::new());
     };
     if value.is_table() {
@@ -314,6 +359,10 @@ fn parse_textlint(
             .get("name")
             .and_then(|v| v.as_str())
             .map_or_else(|| "<unnamed>".to_owned(), |n| format!("{n:?}"));
+        // Combine the named presets in declaration order into one table, then
+        // layer that under the rule - so a later preset never reorders an
+        // earlier one's list entries ahead of it (S3-25).
+        let mut combined = toml::value::Table::new();
         for name in take_textlint_presets(&mut body, &label)? {
             let preset = presets.get(&name).ok_or_else(|| {
                 DevError::Config(format!(
@@ -321,8 +370,10 @@ fn parse_textlint(
                      define it as [textlint_preset.{name}]"
                 ))
             })?;
-            apply_textlint_preset(&mut body, preset);
+            merge_preset_into_combined(&mut combined, preset);
+            referenced.insert(name);
         }
+        apply_textlint_preset(&mut body, &combined);
         let rule: TextlintRule = toml::Value::Table(body)
             .try_into()
             .map_err(|e: toml::de::Error| {
@@ -347,6 +398,12 @@ fn parse_textlint(
                 "[[textlint]] {:?} has empty `paths`",
                 rule.name
             )));
+        }
+    }
+    // Every defined preset must have been drawn on by a rule above.
+    for name in presets.keys() {
+        if !referenced.contains(name) {
+            return Err(unreferenced_preset_err(name));
         }
     }
     Ok(rules)
@@ -848,6 +905,39 @@ fn parse_check(
     Ok(entries)
 }
 
+/// Env keys brokkr composes itself for a sweep's target-dir + `RUSTFLAGS`
+/// isolation (`sweep_runtime_env` / `sweep_cargo_env`). Both a `[[check]]`
+/// entry's `env` and a profile's `env` feed `merged_env`, which lets the sweep
+/// env win over the composed isolation overlay - so a hand-set value here
+/// silently *replaces* it rather than layering onto it.
+const RESERVED_SWEEP_ENV: [&str; 3] = ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR"];
+
+/// Reject any [`RESERVED_SWEEP_ENV`] key set by hand in an env map that feeds a
+/// sweep, **unconditionally** - not gated on `rustflags` being present, because
+/// the hazard is the hand-set key itself: it defeats the per-sweep isolation
+/// brokkr owns these keys for. cargo would build into one `CARGO_TARGET_DIR`
+/// while `BROKKR_TEST_BIN_DIR` still points at another (a silent wrong-binary),
+/// or a set `RUSTFLAGS` would drop the composed `--cfg` and a sim gate would
+/// report green without its cfg. `at` labels the offending block.
+fn reject_reserved_sweep_env(
+    env: &BTreeMap<String, String>,
+    at: &str,
+) -> Result<(), DevError> {
+    for banned in RESERVED_SWEEP_ENV {
+        if env.contains_key(banned) {
+            return Err(DevError::Config(format!(
+                "{at} sets `env.{banned}`, a key brokkr composes itself for the \
+                 sweep's target-dir / RUSTFLAGS isolation. A hand-set value \
+                 silently replaces the composed one (a wrong-binary \
+                 BROKKR_TEST_BIN_DIR, or a dropped `--cfg`). Remove it; pass \
+                 extra rustc flags through a `[[check]]` entry's `rustflags` \
+                 field, which auto-isolates the target dir."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate one `[[check]]` entry's fields (name, package lists, env, and the
 /// rustflags/filter fields). Split out of `parse_check` to keep that function
 /// under the line ceiling; duplicate-name detection stays in the caller since
@@ -894,19 +984,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
             )));
         }
     }
-    if !entry.rustflags.is_empty() {
-        for banned in ["RUSTFLAGS", "CARGO_TARGET_DIR"] {
-            if entry.env.contains_key(banned) {
-                return Err(DevError::Config(format!(
-                    "[[check]] entry '{}' sets both `rustflags` and \
-                     `env.{banned}`. Use `rustflags` alone - it composes \
-                     with any inherited RUSTFLAGS and auto-isolates the \
-                     sweep's target dir (`target/rustflags-<hash>`).",
-                    entry.name
-                )));
-            }
-        }
-    }
+    reject_reserved_sweep_env(&entry.env, &format!("[[check]] entry '{}'", entry.name))?;
     Ok(())
 }
 
@@ -999,6 +1077,53 @@ fn parse_quarantine(
     Ok(entries)
 }
 
+/// Validate a profile's `skip_phases`: it is a permission the `partial` claim
+/// grants (a profile without `certifies = "partial"` may not skip phases), and
+/// every named phase must be real AND skippable. `coverage` is real (a valid
+/// `failed_phase`) but not skippable - it runs only under a complete claim, the
+/// opposite of the partial one `skip_phases` requires, so skipping it is a
+/// guaranteed no-op and is rejected loudly rather than announced.
+fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevError> {
+    let Some(phases) = &def.skip_phases else {
+        return Ok(());
+    };
+    if def.certifies != Some(Certifies::Partial) {
+        return Err(DevError::Config(format!(
+            "[test.profiles.{profile_name}] sets `skip_phases` without \
+             `certifies = \"partial\"`. Skipping phases is a permission \
+             the partial claim grants; a complete or unclaimed profile \
+             may not skip phases."
+        )));
+    }
+    // The skippable universe is every phase minus the non-skippable ones,
+    // derived from `PHASE_NAMES` so a renamed phase can't drift a second
+    // hard-coded list out of sync.
+    let skippable = || {
+        PHASE_NAMES
+            .iter()
+            .copied()
+            .filter(|n| !NON_SKIPPABLE_PHASES.contains(n))
+    };
+    for p in phases {
+        if NON_SKIPPABLE_PHASES.contains(&p.as_str()) {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{profile_name}] skip_phases entry '{p}' \
+                 cannot be skipped: it runs only under `certifies = \
+                 \"complete\"`, while skip_phases requires `certifies = \
+                 \"partial\"` - skipping it would do nothing. Remove it."
+            )));
+        }
+        if !skippable().any(|n| n == p.as_str()) {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{profile_name}] skip_phases entry '{p}' \
+                 is not a skippable check phase. Valid phases: {}.",
+                skippable().collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_check_against_test(
     check: &[CheckEntry],
     test: Option<&TestConfig>,
@@ -1054,6 +1179,14 @@ fn validate_check_against_test(
     }
     let names: BTreeSet<&str> = check.iter().map(|e| e.name.as_str()).collect();
     for (profile_name, def) in &t.profiles {
+        // A profile's `env` reaches the sweep too (`build_resolved_sweep`
+        // merges it into `sweep.env`, which then wins over the composed
+        // isolation in `merged_env`), so the same reserved keys are rejected
+        // here as on a `[[check]]` entry - a profile-set CARGO_TARGET_DIR or
+        // RUSTFLAGS would silently redirect the build past the isolation.
+        if let Some(env) = &def.env {
+            reject_reserved_sweep_env(env, &format!("[test.profiles.{profile_name}]"))?;
+        }
         // A profile's `extends` target must itself be a defined profile.
         if let Some(parent) = &def.extends
             && !t.profiles.contains_key(parent.as_str())
@@ -1063,29 +1196,7 @@ fn validate_check_against_test(
                  but no `[test.profiles.*]` entry with that name exists."
             )));
         }
-        // `skip_phases` is a permission the partial claim grants - a
-        // profile without `certifies` gets no new permissions, and a
-        // "complete" profile skipping phases would claim what it did not
-        // check.
-        if let Some(phases) = &def.skip_phases {
-            if def.certifies != Some(Certifies::Partial) {
-                return Err(DevError::Config(format!(
-                    "[test.profiles.{profile_name}] sets `skip_phases` without \
-                     `certifies = \"partial\"`. Skipping phases is a permission \
-                     the partial claim grants; a complete or unclaimed profile \
-                     may not skip phases."
-                )));
-            }
-            for p in phases {
-                if !PHASE_NAMES.contains(&p.as_str()) {
-                    return Err(DevError::Config(format!(
-                        "[test.profiles.{profile_name}] skip_phases entry '{p}' \
-                         is not a check phase. Valid phases: {}.",
-                        PHASE_NAMES.join(", ")
-                    )));
-                }
-            }
-        }
+        validate_skip_phases(profile_name, def)?;
         // Per-process execution is serial by construction: a parallel
         // thread count under `isolation = "process"` has no meaning.
         if def.isolation == Some(Isolation::Process)

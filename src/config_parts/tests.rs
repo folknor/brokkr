@@ -118,7 +118,7 @@ exclude = ["crates/network/src/net.rs"]
     }
 
     #[test]
-    fn textlint_multiple_presets_apply_nearest_first() {
+    fn textlint_multiple_presets_scalars_first_lists_declaration_order() {
         let rules = textlint_of(
             r#"
 [textlint_preset.a]
@@ -139,13 +139,62 @@ preset = ["a", "b"]
         )
         .unwrap();
 
-        // Earlier-listed preset wins for scalars; lists take both.
+        // S3-25: the earlier-listed preset wins for scalars *and* its list
+        // entries come first, so lists and scalars agree on `preset = ["a",
+        // "b"]` meaning "a before b" (before the fix, lists came out reversed:
+        // ["b/**", "a/**"]).
         assert_eq!(rules[0].region.as_deref(), Some("code"));
         assert_eq!(rules[0].skip_after.as_deref(), Some("cfg\\(test"));
         assert_eq!(
             rules[0].paths,
-            vec!["b/**".to_owned(), "a/**".to_owned()]
+            vec!["a/**".to_owned(), "b/**".to_owned()]
         );
+    }
+
+    #[test]
+    fn textlint_multiple_presets_rule_list_comes_last() {
+        // A rule adding its own path keeps the full order: preset a, preset b,
+        // then the rule's own entry - the rule *adds* to the shared lists.
+        let rules = textlint_of(
+            r#"
+[textlint_preset.a]
+paths = ["a/**"]
+
+[textlint_preset.b]
+paths = ["b/**"]
+
+[[textlint]]
+name = "both"
+pattern = "p"
+message = "m"
+paths = ["own/**"]
+preset = ["a", "b"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rules[0].paths,
+            vec!["a/**".to_owned(), "b/**".to_owned(), "own/**".to_owned()]
+        );
+    }
+
+    #[test]
+    fn textlint_unreferenced_preset_rejected() {
+        // S3-24: a preset no rule draws on is dead config - reject it, whether
+        // or not any rules exist.
+        assert!(textlint_of(
+            "[textlint_preset.unused]\npaths = [\"**\"]\n\n[[textlint]]\n\
+             name = \"r\"\npattern = \"p\"\nmessage = \"m\"\npaths = [\"src/**\"]\n"
+        )
+        .is_err());
+        // A defined preset with no `[[textlint]]` at all is also unreferenced.
+        assert!(textlint_of("[textlint_preset.lonely]\npaths = [\"**\"]\n").is_err());
+        // A referenced preset stays fine.
+        assert!(textlint_of(
+            "[textlint_preset.used]\npaths = [\"**\"]\n\n[[textlint]]\n\
+             name = \"r\"\npattern = \"p\"\nmessage = \"m\"\npreset = \"used\"\n"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -357,6 +406,95 @@ preset = ["a", "b"]
             toml::from_str("[[check]]\nname = \"sim\"\nrustflags = [\"--cfg\", \"\"]\n").unwrap();
         let err = parse_check(&table).unwrap_err().to_string();
         assert!(err.contains("blank") && err.contains("rustflags"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_env_target_dir_without_rustflags() {
+        // S3-19: brokkr owns CARGO_TARGET_DIR for the sweep's isolation
+        // unconditionally - the old guard only fired when `rustflags` was also
+        // set, so a plain entry hand-setting it slipped through.
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"x\"\nenv = { CARGO_TARGET_DIR = \"target/foo\" }\n",
+        )
+        .unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("CARGO_TARGET_DIR"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_check_rejects_env_encoded_rustflags() {
+        // S3-19: CARGO_ENCODED_RUSTFLAGS wins over a plain RUSTFLAGS, so a
+        // hand-set one would silently defeat the composed flags too.
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"x\"\nenv = { CARGO_ENCODED_RUSTFLAGS = \"x\" }\n",
+        )
+        .unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("CARGO_ENCODED_RUSTFLAGS"), "got: {err}");
+    }
+
+    /// Parse `[[check]]`/`[test]`/`[[quarantine]]` from a fragment and run the
+    /// cross-check that guards profile-level invariants.
+    fn validate_fragment(src: &str) -> Result<(), DevError> {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let quarantine = parse_quarantine(&table).unwrap();
+        validate_check_against_test(&check, test.as_ref(), &quarantine)
+    }
+
+    #[test]
+    fn profile_env_rejects_reserved_target_dir() {
+        // S3-19: a profile's env reaches the sweep (build_resolved_sweep merges
+        // it in) and would win over the composed isolation, so the reserved
+        // keys are rejected on a profile too, not only on a `[[check]]` entry.
+        let err = validate_fragment(
+            "[[check]]\nname = \"all\"\n\n[test.profiles.p]\nsweeps = [\"all\"]\n\
+             env = { CARGO_TARGET_DIR = \"target/foo\" }\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("CARGO_TARGET_DIR") && err.contains("test.profiles.p"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn skip_phases_coverage_rejected() {
+        // S3-23: coverage is a valid `failed_phase` but not skippable - it runs
+        // only under a complete claim, so skipping it under the required partial
+        // claim could never do anything.
+        let err = validate_fragment(
+            "[[check]]\nname = \"all\"\n\n[test.profiles.p]\nsweeps = [\"all\"]\n\
+             certifies = \"partial\"\nskip_phases = [\"coverage\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("coverage") && err.contains("cannot be skipped"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn skip_phases_real_phase_accepted_under_partial() {
+        assert!(validate_fragment(
+            "[[check]]\nname = \"all\"\n\n[test.profiles.p]\nsweeps = [\"all\"]\n\
+             certifies = \"partial\"\nskip_phases = [\"clippy\", \"test\"]\n",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn non_skippable_phases_are_real_phases() {
+        // S3-23: the non-skippable set must be a subset of the real phase set -
+        // `coverage` stays a valid `failed_phase` value even though it can't be
+        // skipped.
+        for p in NON_SKIPPABLE_PHASES {
+            assert!(PHASE_NAMES.contains(&p), "{p} missing from PHASE_NAMES");
+        }
+        assert!(NON_SKIPPABLE_PHASES.contains(&"coverage"));
     }
 
     #[test]
@@ -1288,7 +1426,7 @@ sweeps = ["all"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("'clipy'"), "got: {err}");
-        assert!(err.contains("not a check phase"), "got: {err}");
+        assert!(err.contains("not a skippable check phase"), "got: {err}");
     }
 
     #[test]

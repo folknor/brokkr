@@ -109,6 +109,21 @@ test assertions. Per-migration tests that start at the precise prior
 version would fix this but require redesigning `tests::test_db` to
 accept a starting schema version.
 
+#### `bench_gate.rs` runs `cargo metadata` before taking the lock
+`src/ratatoskr_sync/bench_gate.rs` calls `context::bootstrap(None)`
+(which shells out to `cargo metadata`) before `BenchHarness::new`
+acquires the global lock. This is the same metadata-before-lock ordering
+that sweep-3 S3-11 fixed in `BenchContext`/`HarnessContext`: with
+`disable_toolchain = true`, the toolchain pin is only moved aside inside
+the locked window, so a `cargo metadata` before the lock runs under the
+still-live pin. Benign today because the ratatoskr sync-bench path is not
+a foreign-checkout `disable_toolchain` scenario, so nothing moves the pin
+aside there. **Trigger**: `disable_toolchain` ever reaching a ratatoskr
+sync-bench run. **Fix shape**: acquire the lock before the first
+`cargo metadata`, handing it to `BenchHarness::new_with_lock` (mirror the
+S3-11 reorder in `context.rs`). Noted by the sweep-3 wave-2 toolchain
+review.
+
 
 ## Punted
 

@@ -283,6 +283,13 @@ fn cmd_clean(
         output::run_msg("removed verify output");
     }
 
+    // Reclaim the per-sweep isolated target dirs a `rustflags` `[[check]]`
+    // entry mints (`<target>/rustflags-<hash>`). Under `pi.target_dir` -
+    // cargo's real resolved target dir, where the check/test phase actually
+    // built them - not `paths.target_dir` (which a host `target` override can
+    // repoint). Routine scratch: reproducible, and nothing else reaches them.
+    clean_rustflags_target_dirs(&pi.target_dir);
+
     // Clean scratch temp files.
     if paths.scratch_dir.exists() {
         if project == Project::Elivagar {
@@ -439,6 +446,35 @@ fn clean_elivagar_outputs(paths: &config::ResolvedPaths) {
     }
     if removed > 0 {
         output::run_msg(&format!("removed {removed} tilegen output archive(s)"));
+    }
+}
+
+/// Remove the per-sweep isolated target dirs (`<target>/rustflags-<hash>`) that
+/// a `rustflags` `[[check]]` entry mints (see `check_cmd::output`'s
+/// `isolated_target_dir`). They are reproducible build scratch - a full rebuild
+/// recreates them - and nothing else reclaims them: `cargo clean -p` only
+/// touches the default target dir, and editing a sweep's `rustflags` orphans the
+/// old hash's tree permanently. A routine `brokkr clean` sweeps them (S3-06).
+fn clean_rustflags_target_dirs(target_dir: &Path) {
+    let mut removed = 0u32;
+    if let Ok(entries) = std::fs::read_dir(target_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("rustflags-")
+            {
+                std::fs::remove_dir_all(&path).ok();
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        output::run_msg(&format!(
+            "removed {removed} isolated rustflags target dir(s)"
+        ));
     }
 }
 

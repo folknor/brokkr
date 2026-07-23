@@ -33,12 +33,18 @@ pub(crate) fn build_test_env(
 }
 
 /// The isolated target dir a sweep's `rustflags` imply, or `None` when it sets
-/// none. Keyed on the flag content (`target/rustflags-<hash>`), so every sweep
+/// none. Keyed on the flag content (`<target>/rustflags-<hash>`), so every sweep
 /// carrying identical flags shares one cache and a global cfg change (e.g.
-/// `--cfg madsim`) never thrashes the plain sweeps' shared `target/`.
-fn isolated_target_dir(sweep: &ResolvedSweep, project_root: &Path) -> Option<std::path::PathBuf> {
+/// `--cfg madsim`) never thrashes the plain sweeps' shared target dir.
+///
+/// `meta_target_dir` is cargo's resolved `target_directory` (from `cargo
+/// metadata`), not `<project_root>/target`: a workspace `.cargo/config.toml`
+/// `[build] target-dir` can place it on another drive entirely, and the
+/// isolated dir must sit beside the real one so `brokkr clean` and the plain
+/// sweeps find it (S3-20).
+fn isolated_target_dir(sweep: &ResolvedSweep, meta_target_dir: &Path) -> Option<std::path::PathBuf> {
     crate::config::rustflags_target_key(&sweep.rustflags)
-        .map(|key| project_root.join("target").join(format!("rustflags-{key}")))
+        .map(|key| meta_target_dir.join(format!("rustflags-{key}")))
 }
 
 /// Compose a sweep's `rustflags` with any inherited flags into the env pair to
@@ -74,9 +80,12 @@ fn composed_rustflags_env(rustflags: &[String]) -> Option<(String, String)> {
 /// empty vec when it sets none. Used by the clippy phase (which needs no
 /// `BROKKR_TEST_BIN_DIR`); the test phase gets the same knobs plus the bin dir
 /// through [`sweep_runtime_env`].
-pub(crate) fn sweep_cargo_env(sweep: &ResolvedSweep, project_root: &Path) -> Vec<(String, String)> {
+pub(crate) fn sweep_cargo_env(
+    sweep: &ResolvedSweep,
+    meta_target_dir: &Path,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if let Some(dir) = isolated_target_dir(sweep, project_root) {
+    if let Some(dir) = isolated_target_dir(sweep, meta_target_dir) {
         out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
     }
     out.extend(composed_rustflags_env(&sweep.rustflags));
@@ -92,10 +101,9 @@ pub(crate) fn sweep_runtime_env(
     sweep: &ResolvedSweep,
     project: Option<Project>,
     meta_target_dir: &Path,
-    project_root: &Path,
     profile_dir: &str,
 ) -> Vec<(String, String)> {
-    let isolated = isolated_target_dir(sweep, project_root);
+    let isolated = isolated_target_dir(sweep, meta_target_dir);
     let effective: &Path = isolated.as_deref().unwrap_or(meta_target_dir);
 
     let mut out = build_test_env(project, effective, profile_dir);
@@ -1282,16 +1290,36 @@ warning: z [too_many_lines]
             &sweep,
             Some(Project::Pbfhogg),
             Path::new("/meta/target"),
-            Path::new("/proj"),
             "debug",
         );
-        let dir = format!("/proj/target/rustflags-{key}");
+        // S3-20: the isolated dir sits beside cargo's resolved target dir, not
+        // under an assumed `<project_root>/target`.
+        let dir = format!("/meta/target/rustflags-{key}");
         assert_eq!(get(&env, "CARGO_TARGET_DIR"), Some(dir.as_str()));
-        // BROKKR_TEST_BIN_DIR tracks the isolated dir, not the metadata one.
+        // BROKKR_TEST_BIN_DIR tracks the isolated dir, not the plain one.
         assert_eq!(get(&env, "BROKKR_TEST_BIN_DIR"), Some(format!("{dir}/debug").as_str()));
         // RUSTFLAGS carries the sweep's flags (composed with any inherited).
         let rf = rustflags_value(&env).expect("rustflags env set");
         assert!(rf.contains("--cfg") && rf.contains("madsim"), "got: {rf}");
+    }
+
+    #[test]
+    fn sweep_runtime_env_isolated_dir_follows_offroot_target() {
+        // S3-20 regression: a workspace `.cargo/config.toml` can put the target
+        // dir on another drive. The isolated dir must land there, not on the
+        // project root's drive (where `brokkr clean` never reclaims it).
+        let sweep = rustflags_sweep();
+        let key = crate::config::rustflags_target_key(&sweep.rustflags).unwrap();
+        let env = sweep_runtime_env(
+            &sweep,
+            Some(Project::Pbfhogg),
+            Path::new("/media/folk/Banan/cargo"),
+            "debug",
+        );
+        assert_eq!(
+            get(&env, "CARGO_TARGET_DIR"),
+            Some(format!("/media/folk/Banan/cargo/rustflags-{key}").as_str())
+        );
     }
 
     #[test]
@@ -1300,7 +1328,6 @@ warning: z [too_many_lines]
             &ResolvedSweep::default(),
             Some(Project::Pbfhogg),
             Path::new("/meta/target"),
-            Path::new("/proj"),
             "debug",
         );
         assert_eq!(get(&env, "BROKKR_TEST_BIN_DIR"), Some("/meta/target/debug"));
@@ -1310,13 +1337,18 @@ warning: z [too_many_lines]
 
     #[test]
     fn sweep_cargo_env_omits_bin_dir() {
-        let env = sweep_cargo_env(&rustflags_sweep(), Path::new("/proj"));
-        assert!(get(&env, "CARGO_TARGET_DIR").is_some());
+        let key = crate::config::rustflags_target_key(&rustflags_sweep().rustflags).unwrap();
+        let env = sweep_cargo_env(&rustflags_sweep(), Path::new("/meta/target"));
+        // Clippy shares the same isolated dir the test phase builds into.
+        assert_eq!(
+            get(&env, "CARGO_TARGET_DIR"),
+            Some(format!("/meta/target/rustflags-{key}").as_str())
+        );
         assert!(rustflags_value(&env).is_some());
         // Clippy has no test binary to spawn.
         assert!(get(&env, "BROKKR_TEST_BIN_DIR").is_none());
         // A plain sweep contributes nothing.
-        assert!(sweep_cargo_env(&ResolvedSweep::default(), Path::new("/proj")).is_empty());
+        assert!(sweep_cargo_env(&ResolvedSweep::default(), Path::new("/meta/target")).is_empty());
     }
 
     fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> cargo_filter::ParsedTestResults {

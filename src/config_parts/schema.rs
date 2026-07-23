@@ -801,10 +801,16 @@ pub enum Isolation {
     Process,
 }
 
-/// Check phase identifiers, in execution order. The universe for
-/// `skip_phases` validation and the `failed_phase` field of the
-/// `check --json` summary. `coverage` runs only under a
-/// `certifies = "complete"` profile.
+/// Check phase identifiers, in execution order. The universe for the
+/// `failed_phase` field of the `check --json` summary - every phase can be the
+/// one that failed, `coverage` included.
+///
+/// It is **not** the `skip_phases` universe: `coverage` is not skippable (it
+/// runs only under a `certifies = "complete"` profile, while `skip_phases`
+/// requires `certifies = "partial"`, and it is not gated on the skip predicate
+/// anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion, and the `skip_phases`
+/// validator subtracts it from this list - so the two roles no longer let
+/// `skip_phases = ["coverage"]` load clean and announce a no-op.
 pub const PHASE_NAMES: [&str; 10] = [
     "gremlins",
     "style",
@@ -817,6 +823,12 @@ pub const PHASE_NAMES: [&str; 10] = [
     "test",
     "coverage",
 ];
+
+/// Phases that are real (valid `failed_phase` values) but that a `skip_phases`
+/// list may not name. Subtracted from [`PHASE_NAMES`] to form the skippable
+/// universe. Only `coverage` today; kept a named list so the reason travels
+/// with the data.
+pub const NON_SKIPPABLE_PHASES: [&str; 1] = ["coverage"];
 
 /// One `[[quarantine]]` entry: a justified, counted suppression
 /// (TIERED-CHECK.md feature 4). `issue` is required, not decorative - it
@@ -871,10 +883,11 @@ pub struct ProfileDef {
     /// Check phases this profile skips, subtractive (a new native phase
     /// is included everywhere until opted out, never silently excluded).
     /// Requires `certifies = "partial"` - the claim is what grants the
-    /// permission. Valid names are the phase identifiers `gremlins`,
+    /// permission. Valid names are the [`PHASE_NAMES`] identifiers `gremlins`,
     /// `style`, `header`, `textlint`, `manifest`, `script_check`,
-    /// `dependency_rules`, `clippy`, `test`. Not inherited through
-    /// `extends`.
+    /// `dependency_rules`, `clippy`, `test` minus [`NON_SKIPPABLE_PHASES`] -
+    /// `coverage` is not skippable (it runs only under a complete claim). Not
+    /// inherited through `extends`.
     pub skip_phases: Option<Vec<String>>,
     /// Run each of this profile's tests in its own process
     /// (TIERED-CHECK feature 10). `--test-threads=1` serializes tests

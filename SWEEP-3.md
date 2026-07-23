@@ -39,7 +39,7 @@ Worked in waves of Opus agents (max 3 at a time), each wave partitioned so agent
 | S3-03 | 1 | **refuted (adjudicated)** - `zero_test_run` flags on `total == 0 && filtered_out > 0`, and `total` *includes* `ignored`; an all-ignored run has `total > 0` so the non-isolated sibling also reads green. The isolated path already mirrors it. L1/L5 misread the guard's direction. |
 | S3-04 | 1 | **fixed** - `enumerate_isolated` tracks a live-name set and removes live names from the global `ignored` set, so binary A's `#[ignore]` no longer suppresses B's live same-named test |
 | S3-05 | 1 | **fixed** - `loader_path` takes the effective `LD_LIBRARY_PATH` (sweep env when set, else inherited) so a sweep's value is honored during the direct `--list` exec |
-| S3-06 | 4 | pending |
+| S3-06 | 4 | **fixed** - `brokkr clean` now removes `<target>/rustflags-*` isolated dirs (using cargo's resolved target dir, agreeing with the S3-20 creation site) |
 | S3-07 | 1 | **fixed** - pipeline reordered to `decide_sweeps → select_sweep → dedupe_sweeps`; lane-qualified `--sweep` labels resolve before build-shape collapse |
 | S3-08 | 1 | **fixed** - `dedupe_sweeps` key extended with `test_exclude_packages` so a sweep permitting `-p PKG` is never discarded for an order-earlier excluding one |
 | S3-09 | 1 | **fixed** - `plan_runnable`'s stale `raw` param renamed to `all` (pure rename; caller already passed `all`) |
@@ -52,13 +52,13 @@ Worked in waves of Opus agents (max 3 at a time), each wave partitioned so agent
 | S3-16 | 2 | **fixed** - quarantine attribution changed from first-match to most-specific-wins (longest pattern), so a narrower nested entry isn't starved and falsely reported stale |
 | S3-17 | 2 | **fixed** - orphan worksheet and stale-entry report both print before the phase fails |
 | S3-18 | 2 | **fixed** - an `executed: &[bool]` set threaded from `run_test_phase` so lanes the fail-fast loop never reached don't contribute to the audit's ran-set |
-| S3-19 | 4 | pending |
-| S3-20 | 4 | pending |
+| S3-19 | 4 | **fixed** - shared `RESERVED_SWEEP_ENV` (RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS/CARGO_TARGET_DIR) rejected **unconditionally** (no longer gated on rustflags) from both a `[[check]]` entry's env and a profile's env, so neither can silently redirect the build past the isolation |
+| S3-20 | 4 | **fixed** - `isolated_target_dir` joins cargo's resolved `meta_target_dir` (threaded through `sweep_runtime_env`/`sweep_cargo_env`) instead of hardcoding `<project_root>/target` |
 | S3-21 | 2 | **fixed** - `deps` (and a `compare-tiles` sibling) now take the global lock so the disabled toolchain is activated before their `cargo metadata`/`ccu` calls |
 | S3-22 | 2 | **fixed** - `fmt` arms-then-locks when `disable_toolchain` is set (rides the lock's activation) instead of a racy bare `DisabledToolchain::activate` guard; stays lock-free otherwise |
-| S3-23 | 4 | pending |
-| S3-24 | 4 | pending |
-| S3-25 | 4 | pending |
+| S3-23 | 4 | **fixed** - split `PHASE_NAMES`' double duty with `NON_SKIPPABLE_PHASES = ["coverage"]`; `skip_phases = ["coverage"]` is now a load-time error while `coverage` stays a valid `failed_phase`. Validation extracted to `validate_skip_phases`. |
+| S3-24 | 4 | **fixed** - `parse_textlint` errors on a `[textlint_preset.<name>]` block that no rule references (including the no-rules case) |
+| S3-25 | 4 | **fixed (judgement)** - multi-preset list merge now follows declaration order (`a ++ b ++ rule`) so lists and scalars agree ("earlier-listed wins"); test renamed + doc pinned |
 | S3-26 | 2 | **fixed** (done with the toolchain wave) - `docs/brokkr.toml.md` corrected: suppression lasts "for the duration of the global lock" (not "every command"), and worktree `--commit` pins are disabled, not honored |
 | S3-27 | 3 | **fixed** - `cmd_pmtiles_stats` now takes the detected `Project` and rejects non-elivagar/nidhogg checkouts (message mirrors `project::require`), so the handler gate agrees with `TABLE` instead of `visibility.rs` being the de-facto gate |
 | S3-28 | 1 | **fixed** - emphasis/strong/strikethrough/sub/superscript open+close arms route into `current_cell` when `in_table_cell` (via new `push_marker` helper) instead of leaking to `out` |
@@ -70,6 +70,12 @@ Worked in waves of Opus agents (max 3 at a time), each wave partitioned so agent
 | S3-34 | 2 | **fixed** - `keyword_structural_exempt` treats a line-final `=>` as arm-position, so a single-pattern match arm body is no longer flagged |
 | S3-35 | 3 | **fixed** - `describe_sweep` joins each `--test <name>` filter into one fragment instead of two comma-separated items |
 | S3-36 | 3 | **fixed** - deleted the five stale NDJSON per-event claims in `check.md`; the doc now describes only the single `--json` summary trailer |
+
+**Outcome: 34 fixed, 2 refuted (S3-03 and S3-14, both adjudicated in the main conversation).** Each wave was built and tested with `brokkr check` before commit; a few `too_many_lines` refactors (`run_build_phases`/`BuildPhaseArgs`, `clippy_args`, `validate_skip_phases`, `resolve_sweeps`, `push_marker`) were done in the main conversation to keep functions under the limit after the new plumbing.
+
+### Follow-ups noted but not actioned (out of the reviewed range / benign today)
+
+- `src/ratatoskr_sync/bench_gate.rs` runs `context::bootstrap(None)` (`cargo metadata`) before `BenchHarness::new` acquires the lock - the same metadata-before-lock ordering as S3-11, but on the ratatoskr sync-bench path, not the foreign-checkout `disable_toolchain` case, so it is benign today. Same structural pattern if `disable_toolchain` ever reaches that path.
 
 ---
 
