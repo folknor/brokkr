@@ -287,10 +287,18 @@ fn keyword_structural_exempt(kw: &str, trimmed: &str, prev_trim: &str, prev_end:
                 || ends_with_assign(prev_end)
                 || ends_with_any(prev_end, &[',', '(', ')', '|'])
                 || prev_trim.starts_with('|')
+                || prev_end.ends_with("=>")
                 || is_match_guard(prev_trim)
         }
-        // `match` as an expression / argument.
-        "match" => ends_with_assign(prev_end) || ends_with_any(prev_end, &[',', '(', '|']),
+        // `match` as an expression / argument, or a match-arm body: a previous
+        // line ending in `=>` is a single-pattern arm whose arrow rustfmt left
+        // on its own line, so this construct is the arm body (`is_match_guard`
+        // only recognises the OR-pattern shape, which shares a `|`).
+        "match" => {
+            ends_with_assign(prev_end)
+                || ends_with_any(prev_end, &[',', '(', '|'])
+                || prev_end.ends_with("=>")
+        }
         // Loop label on the previous line.
         "for" | "while" | "loop" => {
             prev_trim.starts_with('\'')
@@ -697,6 +705,30 @@ mod tests {
         // if-guard line gets falsely flagged.
         let src = "fn f() {\n    match n {\n        0..=9 | 20..=29\n        if odd => {}\n    }\n}\n";
         assert!(violations(src).is_empty());
+    }
+
+    #[test]
+    fn single_pattern_arm_body_construct_is_exempt() {
+        // A single-pattern match arm whose arrow rustfmt left on its own line,
+        // with the arm body a nested `match`: the body is the first thing in the
+        // arm, so demanding a blank line above it is nonsense. The `=>` at the
+        // end of the pattern line marks it - and a bare pattern shares no
+        // identifier with the body, so the fallback never fired before the fix.
+        let nested_match =
+            "fn f() {\n    match v {\n        A =>\n            match w {\n                B => g(),\n            }\n    }\n}\n";
+        assert!(violations(nested_match).is_empty());
+        // Identical shape with an `if` arm body.
+        let nested_if =
+            "fn f() {\n    match v {\n        A =>\n            if cond {\n                g()\n            }\n    }\n}\n";
+        assert!(violations(nested_if).is_empty());
+    }
+
+    #[test]
+    fn fat_arrow_end_does_not_exempt_a_genuine_missing_blank_line() {
+        // Guard against over-exemption: a plain statement `if` whose previous
+        // line is ordinary code (no trailing `=>`) must still be flagged.
+        let src = "fn f() {\n    let x = compute();\n    if y {\n        g();\n    }\n}\n";
+        assert_eq!(violations(src), vec![("if", 3)]);
     }
 
     // ---- Fix #2: bare `*` comment line and `#![...]` inner attribute. ----

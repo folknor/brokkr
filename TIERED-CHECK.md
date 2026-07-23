@@ -532,7 +532,10 @@ green over a set that has been shrinking, at sweep granularity, inside the
 auditing feature. So: universe = all `[[check]]` entries x their enumerated
 tests. An unconditional entry referenced by no lane of a `complete` profile is
 a resolve-time error; a `when`-carrying entry is accounted through feature 6's
-omission reporting.
+omission reporting. **Enforced** (load time, `validate_complete_universe` in
+`config_parts/parser.rs`): every `[[check]]` entry is unconditional today
+(feature 6 unbuilt), so a `complete` profile - single or via lanes - must
+reference every entry or the config is rejected before anything compiles.
 
 **`#[ignore]` is a third suppression channel, and it is already live.** 19
 files under nautilus's `crates/` carry `#[ignore]`, including three in

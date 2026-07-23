@@ -100,12 +100,13 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
 fn run_coverage_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
+    executed: &[bool],
     quarantine: &[QuarantineEntry],
     limit: usize,
     all: bool,
     commands: bool,
 ) -> CoverageOutcome {
-    let shapes = match enumerate_shapes(project_root, sweeps, commands) {
+    let shapes = match enumerate_shapes(project_root, sweeps, executed, commands) {
         Ok(s) => s,
         Err(e) => return CoverageOutcome::aborted(e),
     };
@@ -163,17 +164,10 @@ fn run_coverage_phase(
         .map(|(q, _)| q.issue.as_str())
         .collect();
 
-    if !stale.is_empty() {
-        output::error(&format!(
-            "stale [[quarantine]] entries ({}): every matching pair runs (or no \
-             pair matches). The ledger must shrink when a suppression is \
-             removed - delete the entries.",
-            stale.join(", ")
-        ));
-
-        return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
-    }
-
+    // Both findings are printed before the phase fails: an unhealthy run
+    // with stale entries AND orphans needs the orphan worksheet (the very
+    // reason this phase runs on failing test phases) just as much as the
+    // stale report, and returning on the first hid the other.
     if !report.orphans.is_empty() {
         let cap = if all { usize::MAX } else { limit };
         for orphan in report.orphans.iter().take(cap) {
@@ -191,7 +185,18 @@ fn run_coverage_phase(
              entry with an issue, or a lane that runs it under this build shape",
             report.orphans.len()
         ));
+    }
 
+    if !stale.is_empty() {
+        output::error(&format!(
+            "stale [[quarantine]] entries ({}): every matching pair runs (or no \
+             pair matches). The ledger must shrink when a suppression is \
+             removed - delete the entries.",
+            stale.join(", ")
+        ));
+    }
+
+    if !report.orphans.is_empty() || !stale.is_empty() {
         return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
     }
 
@@ -213,22 +218,23 @@ fn run_coverage_phase(
 fn enumerate_shapes(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
+    executed: &[bool],
     commands: bool,
 ) -> Result<Vec<ShapeCoverage>, DevError> {
     let mut order: Vec<profile::BuildShapeKey> = Vec::new();
-    let mut groups: HashMap<profile::BuildShapeKey, Vec<&ResolvedSweep>> = HashMap::new();
-    for sweep in sweeps {
+    let mut groups: HashMap<profile::BuildShapeKey, Vec<usize>> = HashMap::new();
+    for (idx, sweep) in sweeps.iter().enumerate() {
         let key = sweep.build_shape_key();
         if !groups.contains_key(&key) {
             order.push(key.clone());
         }
-        groups.entry(key).or_default().push(sweep);
+        groups.entry(key).or_default().push(idx);
     }
 
     let mut out = Vec::with_capacity(order.len());
     for key in &order {
         let members = &groups[key];
-        let first = members[0];
+        let first = &sweeps[members[0]];
         // Same shape => same env by construction (env is in the key), and
         // rustflags shapes keep their isolated target dir so enumeration
         // never causes a cross-shape rebuild.
@@ -269,7 +275,15 @@ fn enumerate_shapes(
         }
 
         let mut ran: BTreeSet<(String, String)> = BTreeSet::new();
-        for sweep in members {
+        for &idx in members {
+            // A lane the test phase never reached (an earlier sweep failed
+            // fast) ran nothing, so it may not credit its filtered set - the
+            // universe still carries the shape (enumerated above), so its
+            // pairs surface as non-run rather than silently counted as run.
+            if !executed[idx] {
+                continue;
+            }
+            let sweep = &sweeps[idx];
             let lane_binaries = filter_binaries(&binaries, &sweep.cargo_test_filters);
             let mut libtest: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
             libtest.extend(sweep.libtest_args.iter().map(String::as_str));
@@ -364,10 +378,26 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
                 stats.ignored += 1;
                 continue;
             }
-            let hit = quarantine.iter().position(|q| {
-                q.pattern.as_deref().is_some_and(|p| test.contains(p))
-                    && q.package.as_deref().is_none_or(|pkg| pkg == package)
-            });
+            // Most-specific match wins: the longest matching pattern, ties
+            // broken by declaration order. First-match-wins misattributed a
+            // pair to a broad entry (`test_bar`) that a narrower one
+            // (`test_bar_roundtrip`) was written for, leaving the narrower
+            // entry crediting zero pairs and failing the stale check - a
+            // narrower suppression reported dead while it was doing its job.
+            let hit = quarantine
+                .iter()
+                .enumerate()
+                .filter(|(_, q)| {
+                    q.pattern.as_deref().is_some_and(|p| test.contains(p))
+                        && q.package.as_deref().is_none_or(|pkg| pkg == package)
+                })
+                .max_by_key(|(i, q)| {
+                    (
+                        q.pattern.as_deref().map_or(0, str::len),
+                        std::cmp::Reverse(*i),
+                    )
+                })
+                .map(|(i, _)| i);
             match hit {
                 Some(i) => {
                     per_entry[i] += 1;
@@ -460,16 +490,45 @@ mod coverage_tests {
     }
 
     #[test]
-    fn first_matching_entry_gets_the_credit() {
+    fn most_specific_entry_gets_the_credit() {
+        // Two entries both match; the longer pattern wins regardless of
+        // declaration order (was first-match-wins, which credited the
+        // broader entry and starved the narrower one).
         let shapes = vec![ShapeCoverage {
             label: "default".into(),
             universe: set(&[("core", "test_bar_roundtrip")]),
             ignored: set(&[]),
             ran: set(&[]),
         }];
+        // "roundtrip" (9) is longer than "test_bar" (8): credit index 1.
         let q = vec![entry("test_bar", "B50"), entry("roundtrip", "B99")];
         let report = classify(&shapes, &q);
-        assert_eq!(report.per_entry, vec![1, 0]);
+        assert_eq!(report.per_entry, vec![0, 1]);
+    }
+
+    #[test]
+    fn narrower_nested_pattern_is_not_starved() {
+        // The S3-16 bug: a broad `test_bar` entry declared before a narrower
+        // `test_bar_roundtrip` used to absorb the roundtrip pair, so the
+        // narrower entry credited zero pairs and was flagged stale, failing
+        // the gate. Most-specific-wins gives each entry its own pairs.
+        let shapes = vec![ShapeCoverage {
+            label: "default".into(),
+            universe: set(&[
+                ("core", "test_bar_basic"),
+                ("core", "test_bar_roundtrip"),
+            ]),
+            ignored: set(&[]),
+            ran: set(&[]),
+        }];
+        let q = vec![
+            entry("test_bar", "B50"),
+            entry("test_bar_roundtrip", "B51"),
+        ];
+        let report = classify(&shapes, &q);
+        // test_bar_basic -> broad entry; test_bar_roundtrip -> narrow entry.
+        assert_eq!(report.per_entry, vec![1, 1]);
+        assert_eq!(report.stats.orphaned, 0);
     }
 
     #[test]

@@ -194,17 +194,22 @@ fn run(cli: Cli) -> Result<(), DevError> {
     }
     if let Command::Fmt { args } = &cli.command {
         // `cargo fmt` runs rustfmt from the pinned toolchain, so honour
-        // disable_toolchain here too. fmt takes no global lock (it's not a
-        // build), so unlike the locked phases it can't ride the lock's
-        // activation - it moves the file aside directly, held for the format
-        // run and restored on drop.
-        let _tc = match project::detect_optional()? {
+        // disable_toolchain. When it's set we must move the pin aside; do it
+        // by arming the build root and riding the global lock's activation -
+        // the same mechanism every build path uses - rather than a bare
+        // guard. A bare guard would race a concurrent locked build that had
+        // already moved the same file aside: fmt would adopt that build's
+        // sidecar and restore it mid-command. Under the lock, fmt and the
+        // build can't overlap. When disable_toolchain is off there is nothing
+        // to move, so fmt stays lock-free as before.
+        match project::detect_optional()? {
             Some(d) if d.config.disable_toolchain => {
-                Some(toolchain::DisabledToolchain::activate(&d.build_root)?)
+                toolchain::arm(Some(d.build_root.clone()));
+                let _lock = acquire_cmd_lock(d.project, &d.build_root, "fmt")?;
+                return cmd_fmt(args);
             }
-            _ => None,
-        };
-        return cmd_fmt(args);
+            _ => return cmd_fmt(args),
+        }
     }
     if let Command::Man { topic } = &cli.command {
         // Reading the docs must work in a tree brokkr knows nothing about, so
@@ -262,17 +267,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
         focus,
     } = cli.command
     {
-        // `deps` audits the code tree's Cargo.lock / metadata (cwd).
-        let (project_root, workspace_dep_ignore) = match project::detect_optional()? {
+        // `deps` audits the code tree's Cargo.lock / metadata (cwd). It shells
+        // out to `cargo metadata` and `ccu`/`rustc`, all rustup-mediated, so it
+        // must take the global lock like the other build paths: the lock is what
+        // activates the armed toolchain-disable, moving a foreign checkout's
+        // uninstalled pin aside for the window these tools run in.
+        let (project, project_root, workspace_dep_ignore) = match project::detect_optional()? {
             Some(d) => (
+                Some(d.project),
                 d.build_root,
                 d.config
                     .deps
                     .map(|c| c.workspace_dep_ignore)
                     .unwrap_or_default(),
             ),
-            None => (std::env::current_dir()?, Vec::new()),
+            None => (None, std::env::current_dir()?, Vec::new()),
         };
+        let _lock = acquire_cmd_lock_opt(project, &project_root, "deps")?;
         return deps::run(
             &project_root,
             &deps::DepsArgs {
@@ -1047,7 +1058,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
             file_a,
             file_b,
             sample,
-        } => elivagar::cmd::compare_tiles(project, &build_root, &file_a, &file_b, sample),
+        } => {
+            // compare_tiles resolves target_dir via `cargo metadata` (bootstrap),
+            // so like its elivagar siblings it must hold the lock - that is what
+            // activates the armed toolchain-disable before the rustup-mediated
+            // metadata call runs in a foreign checkout.
+            let _lock = acquire_cmd_lock(project, &project_root, "compare-tiles")?;
+            elivagar::cmd::compare_tiles(project, &build_root, &file_a, &file_b, sample)
+        }
         Command::PmtilesInspect {
             dataset,
             commit,

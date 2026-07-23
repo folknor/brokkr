@@ -1112,6 +1112,13 @@ fn validate_check_against_test(
         if def.certifies == Some(Certifies::Complete) && def.lanes.is_none() {
             validate_complete_profile(profile_name, def, t, quarantine)?;
         }
+        // The universe of a complete profile is every `[[check]]` entry, not
+        // its own sweep list - checked once at the certifying-profile level
+        // (a single lane referencing a subset is correct; the composed
+        // profile's union must be total).
+        if def.certifies == Some(Certifies::Complete) {
+            validate_complete_universe(profile_name, t, check)?;
+        }
         let Some(sweeps) = &def.sweeps else {
             continue;
         };
@@ -1232,6 +1239,89 @@ fn validate_complete_profile(
              with an issue, or set doctests = true"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+/// The `[[check]]` entry names a profile's runs reference, following
+/// `lanes` (union across every lane) and `extends` (the closest `sweeps`
+/// in the chain wins, matching resolution). A visited set guards against a
+/// `lanes` cycle, and the inner walk against an `extends` cycle, so a
+/// malformed config cannot spin here ahead of the resolver's own checks.
+fn referenced_check_entries(
+    profiles: &BTreeMap<String, ProfileDef>,
+    name: &str,
+    visited: &mut BTreeSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    if !visited.insert(name.to_owned()) {
+        return;
+    }
+    let Some(def) = profiles.get(name) else {
+        return;
+    };
+    if let Some(lanes) = &def.lanes {
+        for lane in lanes {
+            referenced_check_entries(profiles, lane, visited, out);
+        }
+        return;
+    }
+    // Non-lanes: the effective sweep list is the closest `sweeps` up the
+    // `extends` chain (child replaces parent), so walk until one is found.
+    let mut cur = Some(name);
+    let mut chain_seen: BTreeSet<&str> = BTreeSet::new();
+    while let Some(n) = cur {
+        if !chain_seen.insert(n) {
+            break;
+        }
+        let Some(d) = profiles.get(n) else {
+            break;
+        };
+        if let Some(sweeps) = &d.sweeps {
+            for s in sweeps {
+                out.insert(s.clone());
+            }
+            break;
+        }
+        cur = d.extends.as_deref();
+    }
+}
+
+/// The universe of a `complete` profile is every `[[check]]` entry, not its
+/// own sweep list (TIERED-CHECK.md feature 4). If the universe were the
+/// sweeps a lane happens to reference, an entry no lane names would be
+/// enumerated nowhere and the coverage audit would print `0 orphaned` over
+/// tests that never ran - the exact hole the audit exists to close. Every
+/// `[[check]]` entry is unconditional today (feature 6 `when` is unbuilt),
+/// so a complete profile must reference every one; an omission is a
+/// resolve-time error.
+fn validate_complete_universe(
+    name: &str,
+    t: &TestConfig,
+    check: &[CheckEntry],
+) -> Result<(), DevError> {
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    referenced_check_entries(&t.profiles, name, &mut visited, &mut referenced);
+    let unreferenced: Vec<&str> = check
+        .iter()
+        .map(|e| e.name.as_str())
+        .filter(|n| !referenced.contains(*n))
+        .collect();
+    if !unreferenced.is_empty() {
+        let (entry_word, it_word) = if unreferenced.len() == 1 {
+            ("entry", "it")
+        } else {
+            ("entries", "them")
+        };
+        return Err(DevError::Config(format!(
+            "[test.profiles.{name}] cannot back a \"complete\" claim: [[check]] \
+             {entry_word} {} referenced by no sweep or lane. The universe of a \
+             complete profile is every [[check]] entry - an unreferenced entry \
+             is enumerated nowhere, so its tests would be certified without \
+             running. Reference {it_word} from a lane (or delete the entry).",
+            unreferenced.join(", "),
+        )));
     }
     Ok(())
 }
@@ -1559,5 +1649,103 @@ fn resolve_relative(base: &Path, rel: &str) -> PathBuf {
         p.to_path_buf()
     } else {
         base.join(p)
+    }
+}
+
+#[cfg(test)]
+mod universe_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn check_entries(names: &[&str]) -> Vec<CheckEntry> {
+        names
+            .iter()
+            .map(|n| CheckEntry {
+                name: (*n).into(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn complete_lanes_profile_must_reference_every_check_entry() {
+        // The S3-12 hole: a complete profile whose lanes name only
+        // default+ffi leaves live+sim enumerated nowhere, so the audit would
+        // print `0 orphaned` over tests that never ran.
+        let cfg: TestConfig = toml::from_str(
+            r#"
+doctests = true
+[profiles.gate]
+certifies = "complete"
+lanes = ["tier1"]
+[profiles.tier1]
+sweeps = ["default", "ffi"]
+"#,
+        )
+        .unwrap();
+        let check = check_entries(&["default", "ffi", "live", "sim"]);
+        let err = validate_check_against_test(&check, Some(&cfg), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("live"), "got: {err}");
+        assert!(err.contains("sim"), "got: {err}");
+        assert!(
+            err.contains("referenced by no sweep or lane"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn complete_single_profile_must_reference_every_check_entry() {
+        let cfg: TestConfig = toml::from_str(
+            r#"
+doctests = true
+[profiles.gate]
+certifies = "complete"
+sweeps = ["default"]
+"#,
+        )
+        .unwrap();
+        let check = check_entries(&["default", "ffi"]);
+        let err = validate_check_against_test(&check, Some(&cfg), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ffi"), "got: {err}");
+        assert!(err.contains("cannot back a \"complete\" claim"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_profile_covering_every_entry_across_lanes_passes() {
+        let cfg: TestConfig = toml::from_str(
+            r#"
+doctests = true
+[profiles.gate]
+certifies = "complete"
+lanes = ["a", "b"]
+[profiles.a]
+sweeps = ["default", "ffi"]
+[profiles.b]
+sweeps = ["live", "sim"]
+"#,
+        )
+        .unwrap();
+        let check = check_entries(&["default", "ffi", "live", "sim"]);
+        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+    }
+
+    #[test]
+    fn partial_profile_may_reference_a_subset() {
+        // The universe rule is complete-only: a partial profile is allowed
+        // to narrow, and legitimately references a subset of entries.
+        let cfg: TestConfig = toml::from_str(
+            r#"
+[profiles.edit]
+certifies = "partial"
+sweeps = ["default"]
+"#,
+        )
+        .unwrap();
+        let check = check_entries(&["default", "ffi", "live"]);
+        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
     }
 }

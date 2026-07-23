@@ -69,18 +69,28 @@ disable_toolchain = true
 
 Top-level boolean (default `false`). When set, brokkr moves the project's
 `rust-toolchain.toml` (or the legacy bare `rust-toolchain`) aside for the
-duration of every command, so rustup ignores the pin and falls back to its
+duration of the global lock, so rustup ignores the pin and falls back to its
 normal default. brokkr picks no replacement toolchain - it only disables the
 file. The file lives in the code tree (the working directory / build root),
 which is where cargo runs; combined with the parent-directory `brokkr.toml`
 lookup, this is the setup for driving a foreign checkout whose pinned toolchain
 you don't have or don't want.
 
-The file is restored when the command exits normally, on error, or on a
-cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
+Suppression is tied to the lock, not to the whole command: the file is moved
+aside the moment brokkr takes the global lock and restored just before it is
+released. Every command that runs cargo or rustup against the tree therefore
+takes the lock so the pin is disabled while it works - including `deps` and
+`compare-tiles` (which shell out to `cargo metadata`) and `fmt` (rustfmt is
+toolchain-pinned), none of which are builds in the timing sense. A command that
+touches neither cargo nor rustup takes no lock and leaves the file alone.
+
+The file is restored when the lock is released - on normal exit, on error, or
+on a cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
 non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disabled`;
 the next brokkr run in that directory adopts the leftover and restores it.
-Worktree builds (`--commit`) are a separate checkout and keep their own pin.
+Worktree builds (`--commit`) run in a separate checkout that may carry its own
+committed pin; brokkr re-points the disable there for the build, so the
+worktree's pin is disabled too rather than honored.
 
 ## `[gremlins]` section
 

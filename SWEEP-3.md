@@ -44,30 +44,30 @@ Worked in waves of Opus agents (max 3 at a time), each wave partitioned so agent
 | S3-08 | 1 | **fixed** - `dedupe_sweeps` key extended with `test_exclude_packages` so a sweep permitting `-p PKG` is never discarded for an order-earlier excluding one |
 | S3-09 | 1 | **fixed** - `plan_runnable`'s stale `raw` param renamed to `all` (pure rename; caller already passed `all`) |
 | S3-10 | 1 | **fixed** - isolated success path now echoes a passing test's captured output under `--raw`, mirroring the non-isolated path |
-| S3-11 | 2 | pending |
-| S3-12 | 2 | pending |
-| S3-13 | 2 | pending |
-| S3-14 | 2 | pending |
+| S3-11 | 2 | **fixed** - `BenchContext`/`HarnessContext` acquire the lock (activating the worktree pin-disable) before their first `cargo metadata`; restores pre-rework ordering |
+| S3-12 | 2 | **fixed (breaking)** - new load-time `validate_complete_universe`: a `complete` profile that leaves any `[[check]]` entry referenced by no sweep/lane is a resolve-time error. Configs carrying unreferenced entries under a complete claim now fail to load until reconciled. |
+| S3-13 | 2 | **fixed** - `reject_extra_args_complete`: trailing `-- …` test args rejected under any `complete` claim (they narrow the run but not the audit) |
+| S3-14 | 2 | **refuted (adjudicated)** - accountability for `test_exclude_packages` (a host-capability fact) belongs to the unbuilt `requires` feature; a required quarantine issue would be a never-closing "graveyard". Behaviour + docs already agree. |
 | S3-15 | 3 | pending |
-| S3-16 | 2 | pending |
-| S3-17 | 2 | pending |
-| S3-18 | 2 | pending |
+| S3-16 | 2 | **fixed** - quarantine attribution changed from first-match to most-specific-wins (longest pattern), so a narrower nested entry isn't starved and falsely reported stale |
+| S3-17 | 2 | **fixed** - orphan worksheet and stale-entry report both print before the phase fails |
+| S3-18 | 2 | **fixed** - an `executed: &[bool]` set threaded from `run_test_phase` so lanes the fail-fast loop never reached don't contribute to the audit's ran-set |
 | S3-19 | 4 | pending |
 | S3-20 | 4 | pending |
-| S3-21 | 2 | pending |
-| S3-22 | 2 | pending |
+| S3-21 | 2 | **fixed** - `deps` (and a `compare-tiles` sibling) now take the global lock so the disabled toolchain is activated before their `cargo metadata`/`ccu` calls |
+| S3-22 | 2 | **fixed** - `fmt` arms-then-locks when `disable_toolchain` is set (rides the lock's activation) instead of a racy bare `DisabledToolchain::activate` guard; stays lock-free otherwise |
 | S3-23 | 4 | pending |
 | S3-24 | 4 | pending |
 | S3-25 | 4 | pending |
-| S3-26 | 3 | pending |
+| S3-26 | 2 | **fixed** (done with the toolchain wave) - `docs/brokkr.toml.md` corrected: suppression lasts "for the duration of the global lock" (not "every command"), and worktree `--commit` pins are disabled, not honored |
 | S3-27 | 3 | pending |
 | S3-28 | 1 | **fixed** - emphasis/strong/strikethrough/sub/superscript open+close arms route into `current_cell` when `in_table_cell` (via new `push_marker` helper) instead of leaking to `out` |
 | S3-29 | 1 | **fixed** - `Command::Man` arm moved above the `detect_optional()?` call so a malformed `brokkr.toml` no longer aborts `brokkr man` before its own fail-open fallback |
 | S3-30 | 1 | **fixed** - in-cell inline code now carries backticks + `theme.code`; header cells styled via `theme.table_header`; column widths measured ANSI-aware (`visible_len`) |
 | S3-31 | 1 | **fixed** - `man` listing header drops the `for X` clause (and its dangling space) when no project name is present |
-| S3-32 | 2 | pending |
+| S3-32 | 2 | **fixed** - `skip_after` wired through into `scan_use_statements` for join rules; `region`/`table_row_only`/`in_toml_section` + `join_wrapped_use` rejected at compile time (a reconstructed `use` is always code) |
 | S3-33 | 3 | pending |
-| S3-34 | 2 | pending |
+| S3-34 | 2 | **fixed** - `keyword_structural_exempt` treats a line-final `=>` as arm-position, so a single-pattern match arm body is no longer flagged |
 | S3-35 | 3 | pending |
 | S3-36 | 3 | pending |
 

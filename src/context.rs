@@ -95,14 +95,25 @@ impl HarnessContext {
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
+        // Take the lock before resolving paths, for the same reason as
+        // `BenchContext::with_build_config`: `resolve_bootstrap_paths` runs
+        // `cargo metadata`, and the lock activates the armed toolchain-disable.
+        // Acquiring first keeps a worktree's committed pin from being live
+        // during that metadata call. (`BenchHarness::new` would otherwise take
+        // the lock only afterwards; we hand it a pre-acquired one instead.)
+        let lock = lockfile::acquire(&lockfile::LockContext {
+            project: project.name(),
+            command: lock_command,
+            project_root: &project_root.display().to_string(),
+        })?;
         let (paths, effective, db_root) =
             resolve_bootstrap_paths(dev_config, project_root, build_root)?;
-        let harness = harness::BenchHarness::new(
+        let harness = harness::BenchHarness::new_with_lock(
+            lock,
             &paths,
             effective,
             db_root,
             project,
-            lock_command,
             force,
             stop_marker,
         )?;
@@ -189,15 +200,20 @@ impl BenchContext {
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
-        let (paths, effective_build_root, db_root) =
-            resolve_bootstrap_paths(dev_config, project_root, build_root)?;
-        // Acquire the lock BEFORE building so concurrent brokkr invocations
-        // block here instead of competing for CPU during cargo build.
+        // Acquire the lock BEFORE resolving paths - not just before building.
+        // `resolve_bootstrap_paths` shells out to `cargo metadata`, and the lock
+        // is what activates the armed toolchain-disable. Acquiring it first means
+        // the pin is already moved aside for that first rustup-mediated call; a
+        // `--commit` worktree carrying its own uninstalled pin would otherwise
+        // have it live during metadata. It also keeps concurrent brokkr
+        // invocations blocking here instead of competing for CPU during build.
         let lock = lockfile::acquire(&lockfile::LockContext {
             project: project.name(),
             command: lock_command,
             project_root: &project_root.display().to_string(),
         })?;
+        let (paths, effective_build_root, db_root) =
+            resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         let cargo_features = if build_config.features.is_empty() {
             None
         } else {

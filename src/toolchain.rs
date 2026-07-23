@@ -37,11 +37,17 @@
 //! `LockGuard`'s drop restores it just before releasing the flock. The
 //! moved-aside window is thus exactly the locked window, so concurrent brokkr
 //! invocations (which the lock already serialises) can never observe or race
-//! the half-moved state. Commands that never take the lock never touch the file.
+//! the half-moved state.
 //!
-//! The one exception is `brokkr fmt`: it runs `cargo fmt` (rustfmt is
-//! toolchain-pinned) but takes no lock, so it constructs a [`DisabledToolchain`]
-//! guard directly around the format run instead of riding a lock's activation.
+//! Every command that runs cargo/rustup against a pinned tree therefore takes
+//! the lock so this activation fires - including the ones that aren't builds in
+//! the timing sense: `deps` (`cargo metadata` + `ccu`), `compare-tiles`
+//! (`cargo metadata`), and `fmt` (rustfmt is toolchain-pinned). `fmt` used to
+//! construct a [`DisabledToolchain`] guard directly, but a bare guard races a
+//! concurrent locked build that already moved the same file aside - it would
+//! adopt that build's sidecar and restore it mid-command - so it now rides the
+//! lock's activation like the rest. `fmt` only takes the lock when
+//! `disable_toolchain` is set; with nothing to move it stays lock-free.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};

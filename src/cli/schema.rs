@@ -155,7 +155,10 @@ Examples:
         /// `--`); tokens after the second `--` are passed to libtest
         /// (after brokkr's enforced `--test-threads=1`). Examples:
         /// `brokkr check -- --test read_paths` (cargo-level filter),
-        /// `brokkr check -- -- --ignored` (libtest-level flag).
+        /// `brokkr check -- -- --ignored` (libtest-level flag). Rejected
+        /// under a `certifies = "complete"` profile: they narrow the test
+        /// run but not the coverage audit, which would then count tests
+        /// that never ran.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

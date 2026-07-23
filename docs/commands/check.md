@@ -157,7 +157,8 @@ Flags:
   `--features` / `--no-default-features`
 - `--gate` - run the profile named by `[test] gate_profile` (load-validated
   to certify "complete"). The stable pre-commit invocation. Conflicts with
-  `--profile`, `--features`, `--no-default-features`, and `-p`
+  `--profile`, `--features`, `--no-default-features`, and `-p`. Trailing
+  `-- …` test args are rejected under any `complete` claim (see below)
 - `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
@@ -196,8 +197,18 @@ test phase - including when the tests **failed**, since the audit needs
 built binaries rather than green ones and the orphan worksheet is most
 needed on exactly the unhealthy runs. On a failing test phase the audit is
 best-effort: its findings print, its counts ride in the JSON, and
-`failed_phase` stays `"test"`. The unit of coverage is the **(build shape, package, test)
-pair**. Enumeration is per test binary: `cargo test --no-run
+`failed_phase` stays `"test"`. Because the test phase fails fast, a lane it
+never reached credits **nothing** to the ran-set - the shape still counts
+in the universe, so its pairs surface as non-run rather than being counted
+as run they never were. The unit of coverage is the **(build shape, package, test)
+pair**.
+
+The universe is **every `[[check]]` entry**, not the profile's own sweep
+list: if it were the latter, dropping a sweep from a lane would silently
+shrink the certified set. A `complete` profile that leaves a `[[check]]`
+entry referenced by no sweep or lane is therefore a **load-time error**
+(the entry would be enumerated nowhere, so the audit would print `0
+orphaned` over tests that never ran). Enumeration is per test binary: `cargo test --no-run
 --message-format=json` yields each binary with its owning package, then
 each binary runs `--list` directly (env-safe: listing executes no test
 code). The universe is `--list --include-ignored` with no filters, each
@@ -207,10 +218,13 @@ subtracted from the lane's claim, and the `#[ignore]`d set comes from
 `--list --ignored` (plain `--list` includes ignored names, so a lane
 without `include_ignored` has them subtracted from its ran-set). Every
 non-run pair must be quarantined (`[[quarantine]]` pattern match,
-optionally package-scoped, counted per entry) or ignored at the source
+optionally package-scoped, counted per entry - the **most-specific**
+matching pattern takes the pair, so a narrow entry is never starved by a
+broad one it nests under) or ignored at the source
 (counted, reported, not fatal); anything else is **orphaned** and fails
 the check, listed as `shape/package/test` up to `--limit`. A pattern
-entry justifying zero pairs is stale and fails the check. Package-level
+entry justifying zero pairs is stale and fails the check. A run with
+both stale entries and orphans prints **both** worksheets before failing. Package-level
 `test_exclude_packages` is outside the pair audit (those binaries cannot
 build) and is called out in the trailer.
 
@@ -246,7 +260,10 @@ answer. The partial success line lists what was narrowed (skipped phases,
 profile skips the named phases and announces them up front; under a
 `complete` profile, `-p` is rejected before anything compiles (a scoped
 build's green is not comparable to the full build's - feature unification
-changes with the package set). 2 = clap usage errors, 130 = interrupt.
+changes with the package set). Trailing `-- …` test args are rejected the
+same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
+the real run but not the coverage audit, so the audit would count tests
+that never ran. 2 = clap usage errors, 130 = interrupt.
 
 ### Per-sweep log lines (collapsed by default)
 

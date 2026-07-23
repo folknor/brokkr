@@ -118,6 +118,24 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
                 ex.as_str(),
             )));
         }
+        // The join pass matches whole reconstructed `use` statements, which are
+        // always Rust code - never a markdown table row nor inside a TOML
+        // `[section]`, and region-masking to "code" is a no-op while "string"/
+        // "comment" never matches one. So these line/region predicates cannot
+        // *bound* a join rule; they can only silently make it a no-op. Same
+        // fingerprint as the `except`-eats-`use` footgun above: reject at compile
+        // time rather than drop them mutely (which is what the join pass would).
+        if rule.join_wrapped_use
+            && let Some(field) = join_incompatible_predicate(rule)
+        {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?}: {field} cannot combine with join_wrapped_use, which matches \
+                 whole reconstructed `use` statements (always code, never a markdown table row \
+                 or TOML section). The predicate would silently make the rule a no-op; drop it, \
+                 or drop join_wrapped_use.",
+                rule.name,
+            )));
+        }
         let paths = globs::build_set(&rule.paths, &format!("[[textlint]] {:?} paths", rule.name))?;
         let exclude =
             globs::build_set(&rule.exclude, &format!("[[textlint]] {:?} exclude", rule.name))?;
@@ -208,6 +226,22 @@ fn compile_window(
         ))
     })?;
     Ok(Some(Window { lines: win.lines, re }))
+}
+
+/// The name of a line/region predicate that is incoherent with
+/// `join_wrapped_use` (they scope the *per-line* pass, which the join pass does
+/// not run), or `None` if the rule sets none of them. Used only for the
+/// compile-time rejection above.
+fn join_incompatible_predicate(rule: &TextlintRule) -> Option<&'static str> {
+    if rule.region.is_some() {
+        Some("region")
+    } else if rule.table_row_only {
+        Some("table_row_only")
+    } else if rule.in_toml_section.is_some() {
+        Some("in_toml_section")
+    } else {
+        None
+    }
 }
 
 /// Scan tracked files against every rule, one pass per file.
@@ -361,6 +395,15 @@ fn scan_use_statements(
             continue;
         }
         for st in &stmts {
+            // `skip_after`: the per-line pass never armed the latch for a join
+            // rule (it `continue`s above the arming), so the boundary is applied
+            // here instead - a statement whose first physical line sits past a
+            // boundary line (the regex matched strictly above it) is exempt,
+            // mirroring the latch that arms on the boundary and skips everything
+            // following.
+            if skip_after_suppresses(rule, lines, st.start_line) {
+                continue;
+            }
             if !rule.pattern.is_match(&st.joined) {
                 continue;
             }
@@ -391,6 +434,20 @@ fn scan_use_statements(
             });
         }
     }
+}
+
+/// Whether `rule`'s `skip_after` latch exempts a join statement beginning at
+/// physical line `start`: the boundary regex matches some raw line *strictly
+/// above* it. Mirrors the per-line latch, which arms on the boundary line (still
+/// evaluated) and skips every line after it - a `use` statement never lands on
+/// the boundary line (that is an attribute/comment), so `..start` is exact.
+fn skip_after_suppresses(rule: &Compiled, lines: &[&str], start: usize) -> bool {
+    let Some(re) = &rule.skip_after else {
+        return false;
+    };
+    lines
+        .get(..start)
+        .is_some_and(|above| above.iter().any(|l| re.is_match(l)))
 }
 
 /// `allow_marker` for a joined `use` statement: the marker on any physical line
@@ -927,6 +984,57 @@ mod tests {
         r.join_wrapped_use = true;
         r.except = vec!["use tracing::info".into()];
         assert!(compile(&[r]).is_ok());
+    }
+
+    #[test]
+    fn join_wrapped_use_skip_after_exempts_past_boundary() {
+        // The join pass must honour `skip_after`: the wrapped import above the
+        // `#[cfg(test)]` boundary fires (line 1); the one inside the test module
+        // is past the boundary and exempt. Before the fix the latch never armed
+        // for a join rule, so both fired.
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        r.skip_after = Some("^#\\[cfg\\(test\\)\\]".into());
+        let src = "\
+use tracing::{
+    warn,
+};
+#[cfg(test)]
+mod tests {
+    use tracing::{
+        warn,
+    };
+}
+";
+        assert_eq!(run(r, src), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn join_wrapped_use_with_region_is_a_config_error() {
+        // `region` scopes the per-line pass; the join pass matches joined `use`
+        // statements (always code), so the predicate can only no-op the rule.
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        r.region = Some("code".into());
+        assert!(compile(&[r]).is_err());
+    }
+
+    #[test]
+    fn join_wrapped_use_with_table_row_only_is_a_config_error() {
+        // A `use` statement is never a markdown table row.
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        r.table_row_only = true;
+        assert!(compile(&[r]).is_err());
+    }
+
+    #[test]
+    fn join_wrapped_use_with_in_toml_section_is_a_config_error() {
+        // A `use` statement is never inside a TOML `[section]`.
+        let mut r = rule("use tracing::.*warn");
+        r.join_wrapped_use = true;
+        r.in_toml_section = Some("dependencies".into());
+        assert!(compile(&[r]).is_err());
     }
 
     #[test]

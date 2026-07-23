@@ -79,11 +79,17 @@ pub(crate) fn cmd_check(
     };
     let (certifies, skip_phases) = profile_claim(&profile_label, test_cfg);
     reject_scoped_complete(certifies, package)?;
+    reject_extra_args_complete(certifies, extra_args)?;
 
     announce_profile_header(&active_sweeps, &profile_label, commands);
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
     let mut coverage_stats: Option<CoverageStats> = None;
+    // Which active sweeps the test phase actually reached. The phase fails
+    // fast, so on a failing run the later lanes never execute - and the
+    // coverage audit must not credit their ran-set (S3-18). All true on a
+    // green run, so the happy path is unchanged.
+    let mut executed = vec![false; active_sweeps.len()];
     // Doctests off unless `[test] doctests = true` (nextest/CI never runs them).
     let doctests = test_cfg.is_some_and(|c| c.doctests);
 
@@ -140,6 +146,7 @@ pub(crate) fn cmd_check(
                 commands,
                 extra_args,
                 timings.then_some(&mut collected_timings),
+                &mut executed,
             )
             .err();
         }
@@ -155,6 +162,7 @@ pub(crate) fn cmd_check(
             let audit = audit_coverage(
                 project_root,
                 &active_sweeps,
+                &executed,
                 quarantine,
                 limit,
                 all,
@@ -298,6 +306,7 @@ fn run_convention_phases(
 fn audit_coverage(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
+    executed: &[bool],
     quarantine: &[QuarantineEntry],
     limit: usize,
     all: bool,
@@ -305,12 +314,21 @@ fn audit_coverage(
     test_failure: Option<&DevError>,
 ) -> CoverageOutcome {
     match test_failure {
-        None => run_coverage_phase(project_root, sweeps, quarantine, limit, all, commands),
+        None => {
+            run_coverage_phase(project_root, sweeps, executed, quarantine, limit, all, commands)
+        }
         Some(DevError::Build(msg)) if msg == "tests failed" => {
             // The test failure is the run's verdict; the audit only
             // contributes its worksheet and its counts.
-            let outcome =
-                run_coverage_phase(project_root, sweeps, quarantine, limit, all, commands);
+            let outcome = run_coverage_phase(
+                project_root,
+                sweeps,
+                executed,
+                quarantine,
+                limit,
+                all,
+                commands,
+            );
 
             CoverageOutcome { stats: outcome.stats, result: Ok(()) }
         }
@@ -365,6 +383,32 @@ fn reject_scoped_complete(
             "package scoping (`-p`) is rejected under `certifies = \"complete\"`: \
              a scoped build's green is not comparable to the full build's. Use a \
              partial profile (or a profile without `certifies`) for scoped runs."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Trailing `brokkr check -- …` args narrow the real test run - a libtest
+/// `--skip` drops tests, a cargo `--lib` drops integration binaries - but
+/// the coverage audit enumerates each lane's ran-set from the sweep's own
+/// filters alone, without them. Those narrowed-away pairs would land in
+/// `ran`, so the audit would certify `complete` over tests that never
+/// executed. Reject trailing args under a complete claim, exactly like
+/// `-p`: this closes the hole for both `--gate` and a `complete`
+/// `default_profile`, and for the ordinary-lane profiles that
+/// `run_isolated_sweep`'s per-sweep guard never covers.
+fn reject_extra_args_complete(
+    certifies: Option<Certifies>,
+    extra_args: &[String],
+) -> Result<(), DevError> {
+    if certifies == Some(Certifies::Complete) && !extra_args.is_empty() {
+        return Err(DevError::Config(
+            "trailing `-- …` test args are rejected under `certifies = \
+             \"complete\"`: they narrow the test run (a libtest `--skip`, a \
+             cargo `--lib`) but not the coverage audit, so the audit would \
+             count tests that never ran. Use a partial profile for ad-hoc \
+             narrowing, or fold the selection into a `[[check]]` entry."
                 .into(),
         ));
     }
@@ -1762,6 +1806,7 @@ fn run_test_phase(
     commands: bool,
     extra_args: &[String],
     mut timings: Option<&mut Vec<TestTiming>>,
+    executed: &mut [bool],
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
     // `brokkr check`'s test phase always runs `cargo test` without
@@ -1773,7 +1818,7 @@ fn run_test_phase(
     let target_dir = build::project_info(Some(project_root))?.target_dir;
 
     let mut ran_any = false;
-    for sweep in sweeps {
+    for (i, sweep) in sweeps.iter().enumerate() {
         // A CLI `-p` replaces the sweep's selection or skips the sweep when
         // the sweep's config rules the package out (cli_package_scope).
         if let Err(reason) = cli_package_scope(sweep, package, true) {
@@ -1781,6 +1826,10 @@ fn run_test_phase(
             continue;
         }
         ran_any = true;
+        // Record before the run: the sweep's tests execute below (pass or
+        // fail), so the coverage audit may credit its ran-set. A sweep the
+        // loop never reaches (an earlier one failed fast) stays false.
+        executed[i] = true;
 
         // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
         // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
@@ -2078,5 +2127,46 @@ mod json_summary_tests {
         // The `-p` scope must be visible to consumers - a green that
         // covered one package may not be mistaken for a workspace green.
         assert!(line.contains("\"package\":\"nautilus-betfair\""), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod complete_rejection_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::{reject_extra_args_complete, reject_scoped_complete};
+    use crate::config::Certifies;
+
+    #[test]
+    fn complete_rejects_trailing_args() {
+        // S3-13: `--gate -- -- --skip expensive_` (or `-- --lib`) narrows the
+        // real run but not the audit, so the skipped pairs would land in the
+        // audit's ran-set. Rejected before anything compiles.
+        let args = vec!["--".to_owned(), "--skip".to_owned(), "expensive_".to_owned()];
+        let err = reject_extra_args_complete(Some(Certifies::Complete), &args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("trailing"), "got: {err}");
+        assert!(err.contains("complete"), "got: {err}");
+    }
+
+    #[test]
+    fn complete_allows_no_trailing_args() {
+        reject_extra_args_complete(Some(Certifies::Complete), &[]).unwrap();
+    }
+
+    #[test]
+    fn partial_and_legacy_allow_trailing_args() {
+        let args = vec!["--lib".to_owned()];
+        reject_extra_args_complete(Some(Certifies::Partial), &args).unwrap();
+        reject_extra_args_complete(None, &args).unwrap();
+    }
+
+    #[test]
+    fn scoped_complete_still_rejected() {
+        // Sanity: the sibling `-p` guard is unchanged.
+        assert!(reject_scoped_complete(Some(Certifies::Complete), Some("pkg")).is_err());
+        reject_scoped_complete(Some(Certifies::Complete), None).unwrap();
+        reject_scoped_complete(Some(Certifies::Partial), Some("pkg")).unwrap();
     }
 }
