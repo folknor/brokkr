@@ -39,7 +39,13 @@ fn test_binaries(
         "--message-format=json".into(),
     ];
     args.extend(selection.iter().cloned());
-    args.push("--tests".into());
+    // `--tests` builds lib+bins+integration harnesses. A selection that
+    // already names a target (`--test <name>`) must not be broadened -
+    // cargo unions selection flags, so `--test foo --tests` would build
+    // every harness and enumerate tests the lane meant to exclude.
+    if !has_target_selector(&args) {
+        args.push("--tests".into());
+    }
 
     if commands {
         output::run_msg(&format!("cargo {}", args.join(" ")));
@@ -143,10 +149,14 @@ fn toolchain_libdir(
 /// The loader path for one binary: toolchain libdir, the exe's own deps
 /// dir and its parent (matching what cargo adds when it runs binaries -
 /// the deps dirs track per-shape isolated target dirs for free), then
-/// whatever the environment already had. Loader path only - this is NOT
-/// the test-code env (CARGO_MANIFEST_DIR etc.), which stays cargo's job;
-/// listing executes no test code, so loading is the whole requirement.
-fn loader_path(libdir: &str, executable: &str) -> String {
+/// `existing` - whatever `LD_LIBRARY_PATH` the run already carried. Loader
+/// path only - this is NOT the test-code env (CARGO_MANIFEST_DIR etc.),
+/// which stays cargo's job; listing executes no test code, so loading is
+/// the whole requirement. `existing` is the sweep's own `LD_LIBRARY_PATH`
+/// when it declared one (so a `[[check]] env` shared-object path is
+/// honored during listing, as it is for the cargo-mediated build/test),
+/// otherwise brokkr's inherited value - resolved by the caller.
+fn loader_path(libdir: &str, executable: &str, existing: Option<&str>) -> String {
     let mut paths: Vec<String> = vec![libdir.to_owned()];
 
     if let Some(deps) = Path::new(executable).parent() {
@@ -157,10 +167,8 @@ fn loader_path(libdir: &str, executable: &str) -> String {
         }
     }
 
-    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH")
-        && !existing.is_empty()
-    {
-        paths.push(existing);
+    if let Some(existing) = existing.filter(|e| !e.is_empty()) {
+        paths.push(existing.to_owned());
     }
     paths.join(":")
 }
@@ -178,7 +186,16 @@ fn binary_list(
 ) -> Result<Option<Vec<String>>, DevError> {
     let mut args: Vec<&str> = libtest_args.to_vec();
     args.push("--list");
-    let ld = loader_path(libdir, &binary.executable);
+    // The `LD_LIBRARY_PATH` this run already carries: the sweep's own
+    // (from `[[check]] env`) when it set one, else brokkr's inherited
+    // value. The loader tail folds it in, and the pushed pair below wins
+    // over the env_refs copy - so the sweep's path is honored here too.
+    let existing = env_refs
+        .iter()
+        .find(|(k, _)| *k == "LD_LIBRARY_PATH")
+        .map(|(_, v)| (*v).to_owned())
+        .or_else(|| std::env::var("LD_LIBRARY_PATH").ok());
+    let ld = loader_path(libdir, &binary.executable, existing.as_deref());
     let mut env: Vec<(&str, &str)> = env_refs.to_vec();
     env.push(("LD_LIBRARY_PATH", &ld));
     let captured = output::run_captured_with_env(&binary.executable, &args, project_root, &env)?;

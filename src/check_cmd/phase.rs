@@ -1799,6 +1799,7 @@ fn run_test_phase(
                 &project_env,
                 raw,
                 all,
+                doctests,
                 commands,
                 timings.as_deref_mut(),
             )?

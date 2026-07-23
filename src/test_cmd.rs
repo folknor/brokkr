@@ -116,8 +116,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
     let ceiling = timeout.map_or(test_runner::TEST_TIMEOUT, Duration::from_secs);
-    let sweeps = decide_sweeps(dev_config.test.as_ref(), &dev_config.check)?;
-    let sweeps = select_sweep(sweeps, sweep_filter)?;
+    let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
     let multi = sweeps.len() > 1;
 
     let pkg = resolve_package(package, dev_config, project)?;
@@ -489,6 +488,26 @@ fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), Dev
 /// `--all-features`), then drops the libtest filters that would
 /// fight with the user's `<name>` argument. `env` is preserved (B3:
 /// silent profile-env drop fixed by this consolidation).
+///
+/// Deduping lane duplicates is deliberately *not* done here - it happens in
+/// [`dedupe_sweeps`], after `--sweep`/`-p` selection, so a lane-qualified
+/// label or a package-scoped run can still reach a sweep that a pure
+/// build-shape collapse would have discarded.
+/// Resolve the profile's sweeps, apply a `--sweep` selection, then collapse
+/// build-shape duplicates. Selection runs on the full lane list (labels are
+/// lane-qualified, `serial/all`) *before* any dedupe, so a documented label
+/// can't resolve to a sweep dedupe already discarded. Dedupe runs on what
+/// survives selection.
+fn resolve_sweeps(
+    test_cfg: Option<&crate::config::TestConfig>,
+    check_entries: &[crate::config::CheckEntry],
+    sweep_filter: Option<&str>,
+) -> Result<Vec<ResolvedSweep>, DevError> {
+    let sweeps = decide_sweeps(test_cfg, check_entries)?;
+    let sweeps = select_sweep(sweeps, sweep_filter)?;
+    Ok(dedupe_sweeps(sweeps))
+}
+
 fn decide_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
@@ -503,12 +522,28 @@ fn decide_sweeps(
         s.name_filters.clear();
         s.qualified_skips.clear();
     }
-    // A `lanes` profile lists the same `[[check]]` entry once per lane; with
-    // the filters dropped those runs are identical, so keep the first of
-    // each build shape (same key clippy dedupes on).
-    let mut seen = std::collections::HashSet::new();
-    sweeps.retain(|s| seen.insert(s.build_shape_key()));
     Ok(sweeps)
+}
+
+/// Collapse lane-duplicate sweeps that `brokkr test` would run identically.
+///
+/// A `lanes` profile lists the same `[[check]]` entry once per lane; with the
+/// filters dropped those runs build and test the same thing, so only the
+/// first need run. This is called *after* `--sweep`/`-p` selection so it never
+/// hides a sweep the user named or a package a sweep permits.
+///
+/// The key extends the shared `build_shape_key` with `test_exclude_packages`,
+/// which that key deliberately omits (clippy, which shares the key, stays
+/// workspace-wide). For `brokkr test` two sweeps differing only in their test
+/// exclusions are *not* identical runs: one skips the `-p` target, the other
+/// runs it, so collapsing them would let declaration order decide whether a
+/// `-p PKG NAME` run finds its test.
+fn dedupe_sweeps(sweeps: Vec<ResolvedSweep>) -> Vec<ResolvedSweep> {
+    let mut seen = std::collections::HashSet::new();
+    sweeps
+        .into_iter()
+        .filter(|s| seen.insert((s.build_shape_key(), s.test_exclude_packages.clone())))
+        .collect()
 }
 
 /// Narrow the resolved sweep set to a single `--sweep <label>`. Passing
@@ -1284,11 +1319,11 @@ sweeps = ["all", "consumer"]
         assert_eq!(sweeps[1].build_packages, vec!["pbfhogg-cli"]);
     }
 
-    #[test]
-    fn decide_sweeps_dedupes_lanes_by_build_shape() {
-        // A lanes profile lists the same [[check]] entry once per lane;
-        // with the user's <name> as the only filter those runs are
-        // identical, so `brokkr test` keeps the first of each build shape.
+    /// The lanes fixture shared by the dedupe / selection tests: one
+    /// `[[check]]` entry (`all`) referenced by two lanes, whose only
+    /// difference is a dropped libtest filter - so both lanes share a build
+    /// shape.
+    fn lanes_cfg() -> (TestConfig, Vec<CheckEntry>) {
         let toml_text = r#"
 default_profile = "pre-commit"
 
@@ -1312,9 +1347,69 @@ lanes = ["tier1", "serial"]
             build_packages: Vec::new(),
             ..Default::default()
         }];
+        (test_cfg, entries)
+    }
+
+    #[test]
+    fn decide_sweeps_keeps_every_lane_undeduped() {
+        // decide_sweeps no longer dedupes: it hands `run` the full lane list
+        // so selection can see both lane-qualified labels. The collapse is
+        // dedupe_sweeps' job, run after selection.
+        let (test_cfg, entries) = lanes_cfg();
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        assert_eq!(sweeps.len(), 2);
+        assert_eq!(sweeps[0].label, "tier1/all");
+        assert_eq!(sweeps[1].label, "serial/all");
+    }
+
+    #[test]
+    fn dedupe_sweeps_collapses_lanes_by_build_shape() {
+        // With the user's <name> as the only filter, the two lanes' runs are
+        // identical, so dedupe_sweeps keeps the first of each build shape.
+        let (test_cfg, entries) = lanes_cfg();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = dedupe_sweeps(sweeps);
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "tier1/all");
+    }
+
+    #[test]
+    fn select_then_dedupe_resolves_lane_qualified_label() {
+        // S3-07: `--sweep serial/all` must resolve even though serial/all
+        // shares a build shape with tier1/all and would be deduped away.
+        // Selecting before deduping is what makes the documented
+        // lane-qualified label reachable.
+        let (test_cfg, entries) = lanes_cfg();
+        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
+        let sweeps = select_sweep(sweeps, Some("serial/all")).unwrap();
+        let sweeps = dedupe_sweeps(sweeps);
+        assert_eq!(sweeps.len(), 1);
+        assert_eq!(sweeps[0].label, "serial/all");
+    }
+
+    #[test]
+    fn dedupe_sweeps_spares_sweeps_differing_only_in_test_exclusions() {
+        // S3-08: two lanes with the same build shape but different
+        // `test_exclude_packages` are NOT identical `brokkr test` runs - one
+        // skips the `-p` target, the other runs it. dedupe must keep both so
+        // declaration order can't decide whether `-p PKG NAME` finds its test.
+        let excludes = ResolvedSweep {
+            label: "tier1/all".into(),
+            cargo_feature_args: vec!["--features".into(), "a".into()],
+            test_exclude_packages: vec!["pkg-x".into()],
+            ..Default::default()
+        };
+        let permits = ResolvedSweep {
+            label: "serial/all".into(),
+            cargo_feature_args: vec!["--features".into(), "a".into()],
+            test_exclude_packages: Vec::new(),
+            ..Default::default()
+        };
+        let sweeps = dedupe_sweeps(vec![excludes, permits]);
+        assert_eq!(sweeps.len(), 2);
+        // And the surviving permitting sweep runs pkg-x rather than skipping.
+        let permitting = sweeps.iter().find(|s| s.label == "serial/all").unwrap();
+        assert!(sweep_skip_reason(permitting, "pkg-x").is_none());
     }
 
     #[test]

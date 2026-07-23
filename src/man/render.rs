@@ -176,7 +176,15 @@ where
                 }
                 Event::Code(text) => {
                     if self.in_table_cell {
-                        self.push_table_text(&text);
+                        // Same backtick + code styling as outside a table; the
+                        // ANSI is stripped when the column width is measured, so
+                        // it does not throw off alignment. Pushed straight to the
+                        // cell rather than via `push_table_text` to avoid the
+                        // header path re-wrapping already-styled bytes.
+                        self.current_cell.push('`');
+                        self.current_cell
+                            .push_str(&text.style(self.theme.code).to_string());
+                        self.current_cell.push('`');
                     } else {
                         self.flush_pending_marker(&mut out);
                         out.push('`');
@@ -403,29 +411,55 @@ where
                 }
                 out.push_str(": ");
             }
-            // Inline formatting can be the FIRST child of a list item (e.g.
-            // `- **Bold lead** - ...`). These arms emit their markup directly,
-            // so flush any pending list marker first or it lands mid-markup
-            // (`* ` + `**` rendering as `*** `).
+            // Inline markup, two contexts. In a list item it can be the FIRST
+            // child (e.g. `- **Bold lead** - ...`), so flush any pending list
+            // marker first or it lands mid-markup (`* ` + `**` -> `*** `). In a
+            // table cell it must land in `current_cell`, not `out`: a table is
+            // buffered and only flushed at `TagEnd::Table`, so anything written
+            // to `out` here would surface as a stray line of markers ABOVE the
+            // rendered table. Every other inline event already routes through
+            // the cell; these arms join them.
             Tag::Subscript => {
-                self.flush_pending_marker(out);
-                out.push('~');
+                if self.in_table_cell {
+                    self.current_cell.push('~');
+                } else {
+                    self.flush_pending_marker(out);
+                    out.push('~');
+                }
             }
             Tag::Superscript => {
-                self.flush_pending_marker(out);
-                out.push('^');
+                if self.in_table_cell {
+                    self.current_cell.push('^');
+                } else {
+                    self.flush_pending_marker(out);
+                    out.push('^');
+                }
             }
             Tag::Emphasis => {
-                self.flush_pending_marker(out);
-                out.push_str(&"*".style(self.theme.code).to_string());
+                let marker = "*".style(self.theme.code).to_string();
+                if self.in_table_cell {
+                    self.current_cell.push_str(&marker);
+                } else {
+                    self.flush_pending_marker(out);
+                    out.push_str(&marker);
+                }
             }
             Tag::Strong => {
-                self.flush_pending_marker(out);
-                out.push_str(&"**".style(self.theme.code).to_string());
+                let marker = "**".style(self.theme.code).to_string();
+                if self.in_table_cell {
+                    self.current_cell.push_str(&marker);
+                } else {
+                    self.flush_pending_marker(out);
+                    out.push_str(&marker);
+                }
             }
             Tag::Strikethrough => {
-                self.flush_pending_marker(out);
-                out.push_str(STRIKE_ON);
+                if self.in_table_cell {
+                    self.current_cell.push_str(STRIKE_ON);
+                } else {
+                    self.flush_pending_marker(out);
+                    out.push_str(STRIKE_ON);
+                }
             }
             Tag::Link {
                 link_type: LinkType::Email,
@@ -466,6 +500,17 @@ where
             Tag::MetadataBlock(_) => {
                 self.in_non_writing_block = true;
             }
+        }
+    }
+
+    /// Route an inline marker to the buffered cell when inside a table, else
+    /// to the output stream. A table is emitted only at `TagEnd::Table`, so a
+    /// marker written straight to `out` would leak ahead of the table body.
+    fn push_marker(&mut self, out: &mut String, marker: &str) {
+        if self.in_table_cell {
+            self.current_cell.push_str(marker);
+        } else {
+            out.push_str(marker);
         }
     }
 
@@ -556,11 +601,13 @@ where
                 out.push('\n');
                 self.end_newline = true;
             }
-            TagEnd::Emphasis => out.push_str(&"*".style(self.theme.code).to_string()),
-            TagEnd::Strong => out.push_str(&"**".style(self.theme.code).to_string()),
-            TagEnd::Superscript => out.push('^'),
-            TagEnd::Subscript => out.push('~'),
-            TagEnd::Strikethrough => out.push_str(STRIKE_OFF),
+            // Mirror the open arms: a cell's closing markers belong in the
+            // buffered cell, not the output stream.
+            TagEnd::Emphasis => self.push_marker(out, &"*".style(self.theme.code).to_string()),
+            TagEnd::Strong => self.push_marker(out, &"**".style(self.theme.code).to_string()),
+            TagEnd::Superscript => self.push_marker(out, "^"),
+            TagEnd::Subscript => self.push_marker(out, "~"),
+            TagEnd::Strikethrough => self.push_marker(out, STRIKE_OFF),
             TagEnd::Link => {
                 // Drop the destination URL. The link text already names the
                 // target, so appending the full URL after every inline link
@@ -605,7 +652,17 @@ where
     }
 
     fn push_table_text(&mut self, text: &str) {
-        self.current_cell.push_str(text);
+        // Header cells sit inside `TableHead`; style their plain text with the
+        // header theme (the non-table `push_text` header branch is unreachable
+        // because header text is buffered through here, so this is where the
+        // styling has to happen). Explicit inline markup - code, emphasis -
+        // pushes to `current_cell` directly and keeps its own styling.
+        if self.in_table_head {
+            self.current_cell
+                .push_str(&text.style(self.theme.table_header).to_string());
+        } else {
+            self.current_cell.push_str(text);
+        }
     }
 
     fn flush_pending_marker(&mut self, out: &mut String) {
@@ -635,7 +692,9 @@ where
                 if widths.len() <= i {
                     widths.push(0usize);
                 }
-                let len = cell.chars().count();
+                // Cells can carry ANSI (styled code/emphasis/header text); the
+                // escapes take no columns, so measure the visible width only.
+                let len = visible_len(cell);
                 if len > widths[i] {
                     widths[i] = len;
                 }
@@ -705,12 +764,20 @@ where
 }
 
 fn pad(text: &str, width: usize) -> String {
-    let len = text.chars().count();
+    // `width` is a visible-column count, so pad against the visible length -
+    // ANSI escapes in `text` occupy no columns.
+    let len = visible_len(text);
     if len >= width {
         text.to_string()
     } else {
         format!("{text}{}", " ".repeat(width - len))
     }
+}
+
+/// Visible column count of `s`: its char count with ANSI escape sequences
+/// removed, so styled table cells still align.
+fn visible_len(s: &str) -> usize {
+    strip_ansi(s).chars().count()
 }
 
 #[cfg(test)]
@@ -739,6 +806,50 @@ mod tests {
         assert!(
             out.contains('A') && out.contains('2'),
             "table cells missing: {out:?}"
+        );
+    }
+
+    #[test]
+    fn table_cell_markup_stays_inside_the_table() {
+        // S3-28/S3-30: emphasis, strong, and inline code inside a table cell
+        // used to leak their markers into the stream ABOVE the buffered table
+        // (and code lost its backticks). They must render in place, in the cell.
+        let out = render(
+            "| Tool | Note |\n| --- | --- |\n| **piners** | uses `xxh128` |\n",
+            true,
+        );
+        assert!(
+            out.contains("**piners**"),
+            "strong markers stay with their text: {out:?}"
+        );
+        assert!(
+            out.contains("`xxh128`"),
+            "inline code keeps its backticks in a cell: {out:?}"
+        );
+        // Nothing leaks onto a line before the table: the first `*` must sit on
+        // the same line as `piners`, not on a stray line above.
+        let star = out.find('*').expect("markers present");
+        let piners = out.find("piners").expect("cell text present");
+        assert!(
+            star < piners && !out[star..piners].contains('\n'),
+            "no stray marker line above the table: {out:?}"
+        );
+    }
+
+    #[test]
+    fn table_header_cells_are_styled() {
+        // S3-30: header cells route through `push_table_text`, so the header
+        // theme only takes effect if that path styles them. A plain table (no
+        // inline markup) therefore emits ANSI only once the header is styled.
+        let colored = render("| Head | X |\n| --- | --- |\n| a | b |\n", false);
+        assert!(
+            colored.contains('\x1b'),
+            "header styling should emit ANSI: {colored:?}"
+        );
+        let plain = render("| Head | X |\n| --- | --- |\n| a | b |\n", true);
+        assert!(
+            plain.contains("Head") && plain.contains('a'),
+            "table content survives with color stripped: {plain:?}"
         );
     }
 

@@ -225,9 +225,14 @@ fn write_stdout(text: &str) {
 fn list_topics(project: Project) -> String {
     let topics = visible(project);
     let width = topics.iter().map(|t| t.name.len()).max().unwrap_or(0);
-    let mut out = format!(
-        "Bundled docs for {project}. Run `brokkr man <topic>` to read one.\n\n"
-    );
+    // An undetectable project is `Other("")`, whose name is empty; naming it
+    // would leave a dangling space ("Bundled docs for . Run ..."). Drop the
+    // "for X" clause entirely in that case - only the generic topics show.
+    let mut out = if project.name().is_empty() {
+        "Bundled docs. Run `brokkr man <topic>` to read one.\n\n".to_string()
+    } else {
+        format!("Bundled docs for {project}. Run `brokkr man <topic>` to read one.\n\n")
+    };
     for topic in topics {
         out.push_str(&format!(
             "  {name:width$}  {summary}\n",
@@ -292,5 +297,18 @@ mod tests {
         let out = list_topics(Project::Other("some-foreign-repo"));
         assert!(out.contains("check"), "{out}");
         assert!(!out.contains("corpus"), "{out}");
+    }
+
+    /// The no-project fallback is `Other("")`, whose empty name must not leave
+    /// a dangling space in the header ("Bundled docs for . Run ...").
+    #[test]
+    fn empty_project_header_has_no_dangling_space() {
+        let out = list_topics(Project::Other(""));
+        assert!(
+            out.starts_with("Bundled docs. Run `brokkr man <topic>`"),
+            "clean header without a stray space: {out:?}"
+        );
+        assert!(!out.contains(" for . "), "no empty 'for X' clause: {out:?}");
+        assert!(out.contains("check"), "generic topics still listed: {out}");
     }
 }

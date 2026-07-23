@@ -33,6 +33,7 @@ fn run_isolated_sweep(
     project_env: &[(String, String)],
     raw: bool,
     all: bool,
+    doctests: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
@@ -41,6 +42,18 @@ fn run_isolated_sweep(
             "`brokkr check -- …` extra args are not supported on a sweep with \
              `isolation = \"process\"` - the per-test invocations own their argv."
                 .into(),
+        ));
+    }
+
+    // Doctests cannot be enumerated per test binary (they live in the
+    // `--doc` pseudo-target, which has no `--list`-able executable), so a
+    // process-isolated lane cannot run them. Announce the omission rather
+    // than swallow a project's `[test] doctests = true` in silence.
+    if doctests {
+        output::warn(&format!(
+            "{}: `doctests = true` has no effect on a process-isolated sweep - \
+             doctests cannot be enumerated per binary, so this lane runs none",
+            sweep.label
         ));
     }
 
@@ -146,9 +159,10 @@ enum IsolatedOutcome {
 
 /// The plan's runnable name list plus the package-qualified-skipped
 /// count; `None` after reporting a qualified-skip collision or a
-/// zero-runnable enumeration. Under `--raw` the plan is announced before
-/// the run; otherwise the sweep's one summary line reports it after.
-fn plan_runnable(plan: &IsolatedPlan, label: &str, raw: bool) -> Option<(Vec<String>, usize)> {
+/// zero-runnable enumeration. Under `--all` the plan is announced before
+/// the run (the roll-call); otherwise the sweep's one summary line
+/// reports it after.
+fn plan_runnable(plan: &IsolatedPlan, label: &str, all: bool) -> Option<(Vec<String>, usize)> {
     // A name present in both a qualified-skipped and an unskipped package
     // cannot be split by one `cargo test -- --exact` invocation: error
     // rather than half-obey the skip.
@@ -185,7 +199,7 @@ fn plan_runnable(plan: &IsolatedPlan, label: &str, raw: bool) -> Option<(Vec<Str
         ));
         return None;
     }
-    if raw {
+    if all {
         println!(
             "[test]    {label}: {}, one process each{}",
             count_tests(runnable.len()),
@@ -237,6 +251,13 @@ fn enumerate_isolated(
 
     let mut names: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     let mut ignored: BTreeSet<String> = BTreeSet::new();
+    // Names seen live (not `#[ignore]`d) in at least one unskipped binary.
+    // The same bare name can be `#[ignore]`d in one package's binary and
+    // live in another's; the single `--exact <name>` invocation runs both
+    // binaries, skipping the ignored copy and running the live one, so a
+    // name is a real skip only when it is ignored in every binary that
+    // carries it - live nowhere.
+    let mut live: BTreeSet<String> = BTreeSet::new();
     for b in binaries {
         let Some(listed) = binary_list(b, project_root, &filter_args, env_refs, &libdir)? else {
             return Ok(None);
@@ -259,9 +280,16 @@ fn enumerate_isolated(
 
             if b_ignored.contains(&t) {
                 ignored.insert(t.clone());
+            } else {
+                live.insert(t.clone());
             }
             names.entry(t).or_insert((false, false)).0 = true;
         }
+    }
+    // A name live in any binary must run; drop it from the ignore set even
+    // if another binary listed it as `#[ignore]`d.
+    for n in &live {
+        ignored.remove(n);
     }
     Ok(Some(IsolatedPlan {
         names,
@@ -285,7 +313,14 @@ fn run_one_isolated_test(
 ) -> Result<IsolatedOutcome, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
     args.extend(selection.iter().cloned());
-    args.push("--tests".into());
+    // `--tests` selects lib+bins+integration but not doctests (which this
+    // lane never runs). A selection that already carries a target selector
+    // (a profile's `--test <name>`) must not be broadened by it - cargo
+    // unions selection flags, so `--test foo --tests` would run every
+    // harness, defeating the lane's target scope.
+    if !has_target_selector(&args) {
+        args.push("--tests".into());
+    }
     args.push("--".into());
     args.push("--exact".into());
     args.push(name.into());
@@ -354,6 +389,17 @@ fn run_one_isolated_test(
         match elapsed {
             Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
             None => println!("[test]    PASS {name}"),
+        }
+    }
+    // `--raw` disables all filtering, on the success path too: echo the
+    // passing test's own captured output, matching the non-isolated sweep.
+    if raw {
+        let stderr = String::from_utf8_lossy(&run.captured.stderr);
+        if !stderr.is_empty() {
+            print!("{stderr}");
+        }
+        if !stdout.is_empty() {
+            print!("{stdout}");
         }
     }
     Ok(IsolatedOutcome::Passed(elapsed))

@@ -206,6 +206,21 @@ fn run(cli: Cli) -> Result<(), DevError> {
         };
         return cmd_fmt(args);
     }
+    if let Command::Man { topic } = &cli.command {
+        // Reading the docs must work in a tree brokkr knows nothing about, so
+        // an undetectable project falls back to `Other("")` and gets the
+        // project-agnostic topics rather than an error. This sits ABOVE the
+        // `detect_optional()?` below on purpose: that `?` propagates a parse
+        // error from a malformed brokkr.toml, which would abort `man` before
+        // its own `.ok()` fallback could run - the exact case the fallback
+        // exists to cover. No lock: this reads compiled-in strings and touches
+        // nothing on disk, and needs no toolchain arming (it never builds).
+        let project = project::detect_optional()
+            .ok()
+            .flatten()
+            .map_or(Project::Other(""), |d| d.project);
+        return man::run(topic.as_deref(), project);
+    }
 
     // When `disable_toolchain` is set, arm the build root whose pinned
     // rust-toolchain should be moved aside. Nothing is moved here: the *global
@@ -230,17 +245,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         };
         let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
         return cmd_cargo_run(args);
-    }
-    if let Command::Man { topic } = &cli.command {
-        // Reading the docs must work in a tree brokkr knows nothing about, so
-        // an undetectable project falls back to `Other("")` and gets the
-        // project-agnostic topics rather than an error. No lock: this reads
-        // compiled-in strings and touches nothing on disk.
-        let project = project::detect_optional()
-            .ok()
-            .flatten()
-            .map_or(Project::Other(""), |d| d.project);
-        return man::run(topic.as_deref(), project);
     }
     if let Command::Wc { threshold } = &cli.command {
         // `wc` lists source files in the code tree (cwd).
