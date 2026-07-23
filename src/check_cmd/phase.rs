@@ -40,6 +40,7 @@ use crate::test_runner::{self, LibtestOutcome};
 pub(crate) fn cmd_check(
     project: Option<Project>,
     project_root: &Path,
+    state_root: &Path,
     check_entries: &[CheckEntry],
     dependency_rules: &[DependencyRule],
     quarantine: &[QuarantineEntry],
@@ -140,6 +141,7 @@ pub(crate) fn cmd_check(
             &BuildPhaseArgs {
                 project,
                 project_root,
+                state_root,
                 active_sweeps: &active_sweeps,
                 package,
                 quarantine,
@@ -276,6 +278,11 @@ fn run_convention_phases(
 struct BuildPhaseArgs<'a> {
     project: Option<Project>,
     project_root: &'a Path,
+    /// Config-dir root where brokkr's own `.brokkr` state lives. Equals
+    /// `project_root` except under the one-level-up foreign-checkout layout,
+    /// where cargo runs in `project_root` (the code tree) but hung-test
+    /// snapshots must stay out of the foreign repo.
+    state_root: &'a Path,
     active_sweeps: &'a [ResolvedSweep],
     package: Option<&'a str>,
     quarantine: &'a [QuarantineEntry],
@@ -322,6 +329,7 @@ fn run_build_phases(
         test_failure = run_test_phase(
             a.project,
             a.project_root,
+            a.state_root,
             a.active_sweeps,
             a.package,
             a.raw,
@@ -1913,6 +1921,7 @@ fn split_extra_args(extra: &[String]) -> (&[String], &[String]) {
 fn run_test_phase(
     project: Option<Project>,
     project_root: &Path,
+    state_root: &Path,
     sweeps: &[ResolvedSweep],
     package: Option<&str>,
     raw: bool,
@@ -1957,6 +1966,7 @@ fn run_test_phase(
         let success = if sweep.process_isolation {
             run_isolated_sweep(
                 project_root,
+                state_root,
                 sweep,
                 package,
                 extra_args,
@@ -1970,6 +1980,7 @@ fn run_test_phase(
         } else {
             run_one_test_sweep(
                 project_root,
+                state_root,
                 sweep,
                 package,
                 extra_args,

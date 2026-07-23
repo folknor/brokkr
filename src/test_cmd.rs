@@ -105,6 +105,7 @@ pub fn run(
     dev_config: &DevConfig,
     project: Project,
     project_root: &Path,
+    state_root: &Path,
     name: &str,
     package: Option<&str>,
     repeat: u32,
@@ -242,6 +243,7 @@ pub fn run(
             let report = run_one(
                 &arg_refs,
                 project_root,
+                state_root,
                 &env_refs,
                 &tag,
                 raw,
@@ -579,6 +581,7 @@ fn select_sweep(
 fn run_one(
     args: &[&str],
     project_root: &Path,
+    state_root: &Path,
     env: &[(&str, &str)],
     tag: &str,
     raw: bool,
@@ -591,6 +594,7 @@ fn run_one(
     let run = test_runner::streaming_run_libtest(
         args,
         project_root,
+        state_root,
         env,
         ceiling,
         make_stdout_forwarder(raw, sink.clone()),

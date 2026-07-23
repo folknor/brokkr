@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 #[allow(clippy::too_many_arguments)]
 fn run_isolated_sweep(
     project_root: &Path,
+    state_root: &Path,
     sweep: &ResolvedSweep,
     package: Option<&str>,
     extra_args: &[String],
@@ -87,6 +88,7 @@ fn run_isolated_sweep(
         }
         let outcome = run_one_isolated_test(
             project_root,
+            state_root,
             &selection,
             name,
             plan.include_ignored,
@@ -303,6 +305,7 @@ fn enumerate_isolated(
 #[allow(clippy::too_many_arguments)]
 fn run_one_isolated_test(
     project_root: &Path,
+    state_root: &Path,
     selection: &[String],
     name: &str,
     include_ignored: bool,
@@ -337,6 +340,7 @@ fn run_one_isolated_test(
     let run = test_runner::streaming_run_libtest(
         &arg_refs,
         project_root,
+        state_root,
         env_refs,
         test_runner::TEST_TIMEOUT,
         |_| {},

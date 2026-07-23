@@ -329,6 +329,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             script_checks,
             manifest_cfg,
             project_root,
+            state_root,
         ) = match project::detect_optional()? {
             Some(d) => (
                 Some(d.project),
@@ -342,27 +343,36 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 d.config.textlint,
                 d.config.script_checks,
                 d.config.manifest,
+                // cargo/git run in the code tree (build_root); brokkr's own
+                // `.brokkr` state anchors to the config dir (project_root).
+                // The two differ only under the one-level-up layout.
                 d.build_root,
+                d.project_root,
             ),
-            None => (
-                None,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                std::env::current_dir()?,
-            ),
+            None => {
+                let cwd = std::env::current_dir()?;
+                (
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    cwd.clone(),
+                    cwd,
+                )
+            }
         };
-        let _lock = acquire_cmd_lock_opt(project, &project_root, "check")?;
+        let _lock = acquire_cmd_lock_opt(project, &state_root, "check")?;
         return check_cmd::cmd_check(
             project,
             &project_root,
+            &state_root,
             &check_entries,
             &dependency_rules,
             &quarantine,
@@ -1263,7 +1273,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     // against the code tree (build_root), which differs under
                     // the one-level-up layout.
                     let _lock = acquire_cmd_lock(project, &project_root, "test")?;
-                    test_cmd::run(&dev_config, project, &build_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
+                    // cargo runs in the code tree (build_root); brokkr's own
+                    // `.brokkr` state (hung-test snapshots) belongs under the
+                    // config dir (project_root), which differs under the
+                    // one-level-up foreign-checkout layout.
+                    test_cmd::run(&dev_config, project, &build_root, &project_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
                 }
             }
         }

@@ -97,10 +97,11 @@ impl TestTracker {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     args: &[&str],
     cwd: &Path,
+    state_root: &Path,
     env: &[(&str, &str)],
     timeout: Duration,
     forward_stdout_line: Out,
@@ -155,12 +156,12 @@ where
         );
     });
 
-    let cwd_t = cwd.to_path_buf();
+    let state_root_t = state_root.to_path_buf();
     let tracker_t = Arc::clone(&tracker);
     let done_t = Arc::clone(&done);
     let hung_t = Arc::clone(&hung);
     let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(cwd_t, cargo_pid, tracker_t, done_t, hung_t, timeout);
+        watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, timeout);
     });
 
     let status = child.wait().map_err(|e| DevError::Subprocess {
@@ -238,6 +239,7 @@ pub(crate) struct ParallelRun {
 pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
     args: &[&str],
     cwd: &Path,
+    state_root: &Path,
     env: &[(&str, &str)],
     timeout: Duration,
     per_test_timeout: Duration,
@@ -287,12 +289,12 @@ where
     // The per-test hang watchdog - identical to the serial path, aging the
     // JSON-fed tracker. It kills the group and records a `HungTest` the instant
     // any in-flight test crosses `per_test_timeout`.
-    let cwd_t = cwd.to_path_buf();
+    let state_root_t = state_root.to_path_buf();
     let tracker_w = Arc::clone(&tracker);
     let done_w = Arc::clone(&done);
     let hung_w = Arc::clone(&hung);
     let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(cwd_t, cargo_pid, tracker_w, done_w, hung_w, per_test_timeout);
+        watchdog_loop(state_root_t, cargo_pid, tracker_w, done_w, hung_w, per_test_timeout);
     });
 
     let mut timed_out = false;
@@ -848,19 +850,19 @@ fn parse_result_marker(line: &str) -> Option<String> {
 
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
 fn watchdog_loop(
-    cwd: PathBuf,
+    state_root: PathBuf,
     cargo_pid: u32,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
     timeout: Duration,
 ) {
-    watchdog_loop_with_timing(cwd, cargo_pid, tracker, done, hung, timeout, WATCHDOG_POLL);
+    watchdog_loop_with_timing(state_root, cargo_pid, tracker, done, hung, timeout, WATCHDOG_POLL);
 }
 
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
 fn watchdog_loop_with_timing(
-    cwd: PathBuf,
+    state_root: PathBuf,
     cargo_pid: u32,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
@@ -888,7 +890,7 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        let hung_test = capture_hung_test(&cwd, cargo_pid, &test, elapsed, timeout);
+        let hung_test = capture_hung_test(&state_root, cargo_pid, &test, elapsed, timeout);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
         }
@@ -898,7 +900,7 @@ fn watchdog_loop_with_timing(
 }
 
 fn capture_hung_test(
-    cwd: &Path,
+    state_root: &Path,
     cargo_pid: u32,
     test: &str,
     elapsed: Duration,
@@ -906,7 +908,11 @@ fn capture_hung_test(
 ) -> HungTest {
     let test_pids = direct_child_pids(cargo_pid);
     let snapshot_pid = test_pids.first().copied().or(Some(cargo_pid));
-    let snapshot_dir = cwd
+    // Diagnostic snapshots are brokkr-owned state, so they live under the
+    // config-dir `project_root` (`state_root`), not the code tree cargo runs
+    // in - the two differ when brokkr.toml is one level above a foreign
+    // checkout, and the foreign repo must stay clean.
+    let snapshot_dir = state_root
         .join(".brokkr")
         .join("test-hung")
         .join(format!(

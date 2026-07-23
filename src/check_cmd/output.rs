@@ -404,6 +404,7 @@ fn sweep_selection_args(sweep: &ResolvedSweep, package: Option<&str>) -> Vec<Str
 #[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 fn run_one_test_sweep(
     project_root: &Path,
+    state_root: &Path,
     sweep: &ResolvedSweep,
     package: Option<&str>,
     extra_args: &[String],
@@ -514,6 +515,7 @@ fn run_one_test_sweep(
         let run = test_runner::run_libtest_parallel(
             &arg_refs,
             project_root,
+            state_root,
             &env_refs,
             test_runner::PARALLEL_SWEEP_TIMEOUT,
             test_runner::TEST_TIMEOUT,
@@ -535,6 +537,7 @@ fn run_one_test_sweep(
         let run = test_runner::streaming_run_libtest(
             &arg_refs,
             project_root,
+            state_root,
             &env_refs,
             test_runner::TEST_TIMEOUT,
             |_| {},
