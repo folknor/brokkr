@@ -152,6 +152,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &ctx.paths.output_dir,
                 &ctx.paths.data_dir,
                 req.dataset,
+                req.variant,
                 req.effective_build_root(),
             );
 
@@ -303,6 +304,7 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         &ctx.paths.output_dir,
         &ctx.paths.data_dir,
         req.dataset,
+        req.variant,
         req.effective_build_root(),
     );
 
@@ -578,6 +580,7 @@ fn rename_elivagar_output(
     output_dir: &std::path::Path,
     data_dir: &std::path::Path,
     dataset: &str,
+    variant: &str,
     git_root: &std::path::Path,
 ) {
     let output_files = command.output_files(scratch_dir);
@@ -624,11 +627,11 @@ fn rename_elivagar_output(
 
     for path in &output_files {
         if path.exists() {
-            let dest = output_dir.join(format!("{dataset}-{commit}.pmtiles"));
+            let dest = crate::resolve::pmtiles_archive_name(output_dir, dataset, variant, &commit);
             match std::fs::rename(path, &dest) {
                 Ok(()) => {
                     output::run_msg(&format!("output: {}", dest.display()));
-                    prune_output_dir(output_dir, dataset);
+                    prune_output_dir(output_dir, dataset, variant);
                 }
                 Err(e) => {
                     output::error(&format!("failed to rename output: {e}"));
@@ -639,11 +642,14 @@ fn rename_elivagar_output(
     }
 }
 
-/// Keep only the [`OUTPUT_RETENTION`] most-recent `<dataset>-*.pmtiles`
-/// archives (by mtime) in `output_dir`, deleting older ones. Best-effort:
-/// any IO error just leaves the file in place.
-fn prune_output_dir(output_dir: &std::path::Path, dataset: &str) {
-    let prefix = format!("{dataset}-");
+/// Keep only the [`OUTPUT_RETENTION`] most-recent
+/// `<dataset>-<variant>-*.pmtiles` archives (by mtime) in `output_dir`,
+/// deleting older ones. Scoped to the `(dataset, variant)` pair: building one
+/// variant must never evict another's archives (the clobber that made a raw
+/// build wipe the locations baseline at the same commit). Best-effort: any IO
+/// error just leaves the file in place.
+fn prune_output_dir(output_dir: &std::path::Path, dataset: &str, variant: &str) {
+    let prefix = crate::resolve::pmtiles_archive_prefix(dataset, variant);
     let mut archives: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(output_dir) else {
         return;

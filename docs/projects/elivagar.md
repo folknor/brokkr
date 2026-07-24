@@ -99,23 +99,31 @@ that way (not `inspect`) because `brokkr inspect` is already pbfhogg's PBF
 inspector - the two share one flat clap `Command` enum so names must be
 unique.
 
-All three take `--dataset`/`--commit`/`--file`, resolved by
+All three take `--dataset`/`--variant`/`--commit`/`--file`, resolved by
 `resolve_pmtiles_by_commit()` in `src/resolve_parts/schema.rs`: `--file`
 skips resolution; otherwise the path is
-`<output_dir>/<dataset>-<commit>.pmtiles` (the durable output store, default
-`data/tilegen`, NOT scratch), matching the naming convention
-`rename_elivagar_output()` (`src/elivagar/dispatch.rs`) uses after `tilegen`:
-`git rev-parse --short HEAD` collected from the *build root* (the worktree's
-HEAD under `tilegen --commit <hash>`, else the main tree), so the archive name
-always names the commit whose code produced the tiles. `--commit` defaults to
-current HEAD. The durable store survives a routine `brokkr clean`; only the
-deep clean (`brokkr clean --worktrees`) reclaims it. These
-subcommands only read the file - the current release binary can inspect
-output built by any commit, so `--commit` picks which file to open, not
-which binary to build (no historical worktree rebuild, unlike `verify
---commit`). All three acquire the brokkr lock (non-blocking
-`acquire_cmd_lock`, like `regress`/`bless`) so an inspection can't read an
-archive a concurrent `tilegen` run is mid-write - it refuses instead.
+`<output_dir>/<dataset>-<variant>-<commit>.pmtiles` (the durable output store,
+default `data/tilegen`, NOT scratch), constructed by the single
+`resolve::pmtiles_archive_name()` helper that `rename_elivagar_output()`
+(`src/elivagar/dispatch.rs`) also uses after `tilegen`, so the resolver and the
+writer can never drift on spelling. The archive content is a function of
+`(dataset, variant, commit)`, and the name carries all three - the variant is
+load-bearing, because without it `--against-commit H` (or a plain re-open)
+resolves to whichever variant happened to be built last at `H`, the
+meaning-lives-in-the-filesystem trap the contract-free `regress` cannot catch.
+The name is **constructed, never parsed back** (dataset names carry hyphens,
+e.g. `north-america`, so splitting is ambiguous but construction is not).
+`--variant` defaults to `raw` (matching `tilegen`); `--commit` defaults to
+current HEAD; the commit is `git rev-parse --short HEAD` from the *build root*
+(the worktree's HEAD under `tilegen --commit <hash>`, else the main tree), so
+the name always names the commit whose code produced the tiles. The durable
+store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
+--worktrees`) reclaims it. These subcommands only read the file - the current
+release binary can inspect output built by any commit, so `--commit` picks
+which file to open, not which binary to build (no historical worktree rebuild,
+unlike `verify --commit`). All three acquire the brokkr lock (non-blocking
+`acquire_cmd_lock`, like `regress`) so an inspection can't read an archive a
+concurrent `tilegen` run is mid-write - it refuses instead.
 
 `brokkr verify pmtiles --geometry-stats` forwards `--geometry-stats` to
 `elivagar verify` (per-zoom ocean ring geometry statistics).
@@ -125,9 +133,14 @@ archive a concurrent `tilegen` run is mid-write - it refuses instead.
 `brokkr regress` (`src/elivagar/regress.rs`) is a thin passthrough over
 `elivagar regress <current> --against <comparand>`. **Both sides are
 explicit** and there is no default baseline, ever: the CURRENT archive comes
-from `--commit`/`--file`, the COMPARAND from `--against-commit`/`--against`,
-each resolved through the same `resolve_pmtiles_by_commit()` used by
-`pmtiles-inspect`/`diag`/`svg` (durable output dir `data/tilegen`). A required
+from `--variant`/`--commit`/`--file`, the COMPARAND from
+`--against-variant`/`--against-commit`/`--against`, each resolved through the
+same `resolve_pmtiles_by_commit()` used by `pmtiles-inspect`/`diag`/`svg`
+(durable output dir `data/tilegen`). The comparand's variant is addressed
+**independently** (`--against-variant`, defaulting to `raw` like `--variant`):
+a cross-variant diff is a legitimate regress use - it is the attribution
+instrument, and adjudicating artifact-active vs computed output or pricing a
+config change means diffing two deliberately different contracts. A required
 clap `ArgGroup` over the two `--against*` flags means a missing comparand is a
 usage error at clap's exit **2** - never colliding with regress's own verdict
 codes. Flags `--tol`/`--max-moved`/`--max-examples`/`--overlay`/`--overlay-max`/
@@ -165,7 +178,7 @@ clap namespace (the same reason `inspect` became `pmtiles-inspect`).
 
 | brokkr | wraps | brokkr resolves |
 |---|---|---|
-| `pmtiles-corpus check [--dataset D] [--commit H \| --file P] [--corpus DIR]` | `elivagar corpus check <archive> --corpus <dir>` | archive, corpus dir |
+| `pmtiles-corpus check [--dataset D] [--variant V] [--commit H \| --file P] [--corpus DIR]` | `elivagar corpus check <archive> --corpus <dir>` | archive, corpus dir |
 | `pmtiles-corpus bless [... ] [--corpus DIR] [--rotate] [--mode M]` | `elivagar corpus bless` | archive, corpus dir |
 | `pmtiles-corpus render-manifest [...] [--corpus DIR] [--style P]` | `elivagar corpus render-manifest` | archive, corpus dir |
 | `pmtiles-corpus render [...] -z Z -x X -y Y [--layers L] [--style P] [-o OUT]` | `elivagar corpus render` | archive only |
@@ -174,8 +187,12 @@ clap namespace (the same reason `inspect` became `pmtiles-inspect`).
 
 Every subcommand resolves the archive through the SAME
 `resolve_pmtiles_by_commit()` as `pmtiles-inspect`/`diag`/`svg`
-(`[--dataset D] [--commit H | --file P]`), so default-commit semantics never
-diverge. `--corpus` defaults to `corpus/<dataset>` under the **build root**
+(`[--dataset D] [--variant V] [--commit H | --file P]`, variant default
+`raw`), so default-commit/variant semantics never diverge. The standing gate is
+therefore symmetric: `brokkr tilegen --dataset denmark --variant locations`
+then `brokkr pmtiles-corpus check --dataset denmark --variant locations`; a
+wrong variant fails loudly at resolution (`no locations build for <hash>`)
+before the archive even opens. `--corpus` defaults to `corpus/<dataset>` under the **build root**
 (where the git-committed corpus lives, alongside the code - NOT the
 config/`data/` dir), and is overridable. Every other flag passes through
 verbatim; elivagar owns the value sets (`--mode`, `--op`), so brokkr carries

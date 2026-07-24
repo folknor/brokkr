@@ -150,19 +150,21 @@ pub(crate) fn verify(
     super::verify::run(&pmtiles_path, effective, features, geometry_stats)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn inspect(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
     build_root: &Path,
     dataset: &str,
+    variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "pmtiles-inspect")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::inspect::run(&pmtiles_path, build_root)
 }
 
@@ -173,6 +175,7 @@ pub(crate) fn diag(
     project_root: &Path,
     build_root: &Path,
     dataset: &str,
+    variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
     z: u8,
@@ -182,7 +185,7 @@ pub(crate) fn diag(
     project::require(project, Project::Elivagar, "diag")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::diag::run(&pmtiles_path, build_root, z, x, y)
 }
 
@@ -193,6 +196,7 @@ pub(crate) fn svg(
     project_root: &Path,
     build_root: &Path,
     dataset: &str,
+    variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
     z: u8,
@@ -206,7 +210,7 @@ pub(crate) fn svg(
     project::require(project, Project::Elivagar, "svg")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     super::svg::run(
         &pmtiles_path,
         build_root,
@@ -237,8 +241,10 @@ pub(crate) fn regress(
     project_root: &Path,
     build_root: &Path,
     dataset: &str,
+    variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
+    against_variant: &str,
     against_commit: Option<&str>,
     against: Option<&str>,
     tol: i32,
@@ -252,11 +258,13 @@ pub(crate) fn regress(
     project::require(project, Project::Elivagar, "regress")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let current = resolve_pmtiles_by_commit(dataset, commit, file, &paths, build_root)?;
+    let current = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
     // The comparand is one of the two --against* flags (clap's required
     // ArgGroup guarantees exactly one is present). An explicit path is checked
     // for existence; a commit resolves through the same durable-output resolver
-    // as the current side.
+    // as the current side, but with its OWN variant: a cross-variant diff is a
+    // legitimate regress use (it is the attribution instrument), so the
+    // comparand's variant is addressed independently via --against-variant.
     let comparand = match against {
         Some(p) => {
             let path = std::path::PathBuf::from(p);
@@ -268,7 +276,14 @@ pub(crate) fn regress(
             }
             path
         }
-        None => resolve_pmtiles_by_commit(dataset, against_commit, None, &paths, build_root)?,
+        None => resolve_pmtiles_by_commit(
+            dataset,
+            against_variant,
+            against_commit,
+            None,
+            &paths,
+            build_root,
+        )?,
     };
     super::regress::run(
         &current,
@@ -305,7 +320,14 @@ pub(crate) fn corpus(
     // Resolve an archive through the same commit/file resolver as
     // pmtiles-inspect/diag/svg.
     let resolve = |a: &CorpusArchiveArgs| -> Result<PathBuf, DevError> {
-        resolve_pmtiles_by_commit(&a.dataset, a.commit.as_deref(), a.file.as_deref(), &paths, build_root)
+        resolve_pmtiles_by_commit(
+            &a.dataset,
+            &a.variant,
+            a.commit.as_deref(),
+            a.file.as_deref(),
+            &paths,
+            build_root,
+        )
     };
     // Corpus dir default: corpus/<dataset> under the repo root (build_root),
     // where the git-committed corpus lives - NOT project_root (config/data dir).

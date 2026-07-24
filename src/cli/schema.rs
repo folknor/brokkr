@@ -1489,10 +1489,13 @@ check` refuses on the artifact key until the corpus is re-blessed."
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        /// PBF variant selecting which output to open (raw, indexed, locations)
+        #[arg(long, default_value = "raw")]
+        variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
         #[arg(long)]
         commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/commit resolution
+        /// Explicit PMTiles path, skips dataset/variant/commit resolution
         #[arg(long)]
         file: Option<String>,
     },
@@ -1502,10 +1505,13 @@ check` refuses on the artifact key until the corpus is re-blessed."
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        /// PBF variant selecting which output to open (raw, indexed, locations)
+        #[arg(long, default_value = "raw")]
+        variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
         #[arg(long)]
         commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/commit resolution
+        /// Explicit PMTiles path, skips dataset/variant/commit resolution
         #[arg(long)]
         file: Option<String>,
         #[arg(short = 'z', long)]
@@ -1521,10 +1527,13 @@ check` refuses on the artifact key until the corpus is re-blessed."
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        /// PBF variant selecting which output to open (raw, indexed, locations)
+        #[arg(long, default_value = "raw")]
+        variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
         #[arg(long)]
         commit: Option<String>,
-        /// Explicit PMTiles path, skips dataset/commit resolution
+        /// Explicit PMTiles path, skips dataset/variant/commit resolution
         #[arg(long)]
         file: Option<String>,
         #[arg(short = 'z', long)]
@@ -1570,12 +1579,19 @@ variants or configs reports a six-figure diff on two correct builds.",
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
+        /// PBF variant of the CURRENT output (raw, indexed, locations)
+        #[arg(long, default_value = "raw")]
+        variant: String,
         /// Commit short hash selecting the CURRENT output (default: current HEAD)
         #[arg(long)]
         commit: Option<String>,
-        /// Explicit CURRENT PMTiles path, skips dataset/commit resolution
+        /// Explicit CURRENT PMTiles path, skips dataset/variant/commit resolution
         #[arg(long)]
         file: Option<String>,
+        /// PBF variant of the COMPARAND output (defaults to raw; set it
+        /// independently of --variant - a cross-variant diff is a legitimate use)
+        #[arg(long, default_value = "raw")]
+        against_variant: String,
         /// Commit short hash selecting the COMPARAND output from data/tilegen/
         #[arg(long)]
         against_commit: Option<String>,
@@ -2752,10 +2768,13 @@ pub(crate) struct CorpusArchiveArgs {
     /// Dataset name from brokkr.toml
     #[arg(long, default_value = "denmark")]
     pub(crate) dataset: String,
+    /// PBF variant, selecting which archive to open (raw, indexed, locations)
+    #[arg(long, default_value = "raw")]
+    pub(crate) variant: String,
     /// Commit short hash selecting which archive to open (default: current HEAD)
     #[arg(long)]
     pub(crate) commit: Option<String>,
-    /// Explicit PMTiles path, skips dataset/commit resolution
+    /// Explicit PMTiles path, skips dataset/variant/commit resolution
     #[arg(long)]
     pub(crate) file: Option<String>,
 }

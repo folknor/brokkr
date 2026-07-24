@@ -556,6 +556,7 @@ pub(crate) fn resolve_default_pmtiles_path(
 /// commit).
 pub(crate) fn resolve_pmtiles_by_commit(
     dataset: &str,
+    variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
     paths: &config::ResolvedPaths,
@@ -572,14 +573,43 @@ pub(crate) fn resolve_pmtiles_by_commit(
         Some(c) => c.to_owned(),
         None => crate::git::collect(build_root)?.commit,
     };
-    let path = paths.output_dir.join(format!("{dataset}-{hash}.pmtiles"));
+    // Constructed from (dataset, variant, commit) - the three axes the archive
+    // content is a function of. Never parsed back: dataset names carry hyphens
+    // (`north-america`), so splitting would be ambiguous, but constructing the
+    // expected name is not. The variant is load-bearing: `--against-commit H`
+    // otherwise resolves to whatever variant was built last at H, which is the
+    // meaning-lives-in-the-filesystem trap regress (contract-free) can't catch.
+    let path = crate::resolve::pmtiles_archive_name(&paths.output_dir, dataset, variant, &hash);
     if !path.exists() {
         return Err(DevError::Config(format!(
-            "no build for {hash}; run brokkr tilegen first (looked for {})",
+            "no {variant} build for {hash}; run `brokkr tilegen --variant {variant}` first \
+             (looked for {})",
             path.display()
         )));
     }
     Ok(path)
+}
+
+/// The canonical durable-archive path: `<output>/<dataset>-<variant>-<commit>.pmtiles`.
+/// The single place this name is constructed - shared by the resolver, the
+/// post-tilegen rename, retention pruning, and `clean --archives` so they can
+/// never drift on spelling.
+pub(crate) fn pmtiles_archive_name(
+    output_dir: &Path,
+    dataset: &str,
+    variant: &str,
+    commit: &str,
+) -> PathBuf {
+    output_dir.join(format!("{dataset}-{variant}-{commit}.pmtiles"))
+}
+
+/// The canonical filename prefix for a `(dataset, variant)` pair:
+/// `<dataset>-<variant>-`. Retention and `clean --archives` match on this to
+/// scope by variant; anything not matching a constructed prefix is preserved
+/// (hand-named files and the toml-contract ocean artifact are self-evidently
+/// not brokkr's to delete).
+pub(crate) fn pmtiles_archive_prefix(dataset: &str, variant: &str) -> String {
+    format!("{dataset}-{variant}-")
 }
 
 /// Resolve PMTiles path and its size in one call.

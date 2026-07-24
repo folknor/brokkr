@@ -1078,6 +1078,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::PmtilesInspect {
             dataset,
+            variant,
             commit,
             file,
         } => {
@@ -1088,12 +1089,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &build_root,
                 &dataset,
+                &variant,
                 commit.as_deref(),
                 file.as_deref(),
             )
         }
         Command::Diag {
             dataset,
+            variant,
             commit,
             file,
             z,
@@ -1107,6 +1110,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &build_root,
                 &dataset,
+                &variant,
                 commit.as_deref(),
                 file.as_deref(),
                 z,
@@ -1116,6 +1120,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Svg {
             dataset,
+            variant,
             commit,
             file,
             z,
@@ -1133,6 +1138,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &build_root,
                 &dataset,
+                &variant,
                 commit.as_deref(),
                 file.as_deref(),
                 z,
@@ -1146,8 +1152,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Regress {
             dataset,
+            variant,
             commit,
             file,
+            against_variant,
             against_commit,
             against,
             tol,
@@ -1164,8 +1172,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &build_root,
                 &dataset,
+                &variant,
                 commit.as_deref(),
                 file.as_deref(),
+                &against_variant,
                 against_commit.as_deref(),
                 against.as_deref(),
                 tol,
