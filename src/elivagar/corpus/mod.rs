@@ -24,6 +24,7 @@ pub mod digest;
 pub mod manifest;
 pub mod mutate;
 pub mod render;
+pub mod style;
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -370,7 +371,7 @@ fn svg_staleness(view: &ArchiveView, corpus_dir: &Path, _base: &Baseline) -> io:
             "contract records no style hash - run render-manifest".to_string()
         ]);
     };
-    let style = render::Style::load(Path::new(&style_path))?;
+    let style = style::Style::load(Path::new(&style_path))?;
     if recorded != style.hash_hex() {
         return Ok(vec![
             "style hash differs from contract - run render-manifest".to_string()
@@ -431,7 +432,7 @@ pub fn render_manifest(
         return Ok(baseline_trouble("manifest.toml is absent"));
     }
     let manifest = manifest::load(&manifest_path)?;
-    let style = render::Style::load(style_path)?;
+    let style = style::Style::load(style_path)?;
     let tiles = corpus_dir.join("tiles");
     std::fs::create_dir_all(&tiles)?;
     let mut wanted = BTreeSet::new();
@@ -499,7 +500,7 @@ pub fn render_tile(
 ) -> io::Result<()> {
     use std::io::Write as _;
     let view = ArchiveView::open(archive)?;
-    let style = render::Style::load(style_path)?;
+    let style = style::Style::load(style_path)?;
     let svg = render::render_archive_tile(&view, z, x, y, &style, layers)?;
     for w in &svg.warnings {
         crate::output::run_msg(&format!("warning: {w}"));
@@ -517,14 +518,18 @@ pub fn render_tile(
 }
 
 /// Emit ocean ring geometry - the input to the ring-grouping differential oracle
-/// (`brokkr.md`, Calibration). SCAFFOLD pending the render/decoder port.
-#[allow(unused_variables, clippy::missing_errors_doc)]
+/// (`brokkr.md`, Calibration). Writes to `output` (or stdout when `-`).
 pub fn rings(archive: &Path, output: &Path) -> io::Result<()> {
-    let _ = ArchiveView::open(archive)?;
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "rings pending render/decoder port (corpus/mod.rs)",
-    ))
+    let view = ArchiveView::open(archive)?;
+    let mut out: Box<dyn std::io::Write> = if output == Path::new("-") {
+        Box::new(std::io::stdout())
+    } else {
+        if let Some(parent) = output.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        Box::new(std::fs::File::create(output)?)
+    };
+    render::dump_ring_grouping(&view, &mut out)
 }
 
 /// Serialize a contract snapshot to the committed `contract.json` text. Stored

@@ -146,6 +146,46 @@ fn detail_component_hash(component: &super::super::eliv::DetailComponent) -> u12
     sink.finish()
 }
 
+/// Regress's canonical feature order: id, then geom type, then attributes, then
+/// component geometry (ring count, then role and points per ring). The render
+/// core sorts a layer's features through this so the SVG byte order is
+/// deterministic and matches the canonical form; regress diffs through it too.
+/// Verbatim from elivagar's `compare_detail_features` (needs none of the dropped
+/// bbox/structure fields).
+#[allow(dead_code)]
+pub(crate) fn compare_detail_features(
+    a: &super::super::eliv::DetailFeature,
+    b: &super::super::eliv::DetailFeature,
+) -> std::cmp::Ordering {
+    a.id.cmp(&b.id)
+        .then_with(|| a.geom_type.cmp(&b.geom_type))
+        .then_with(|| a.attrs.cmp(&b.attrs))
+        .then_with(|| compare_detail_component_slices(&a.components, &b.components))
+}
+
+fn compare_detail_component_slices(
+    a: &[super::super::eliv::DetailComponent],
+    b: &[super::super::eliv::DetailComponent],
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (left, right) in a.iter().zip(b) {
+        let rings = left.rings.len().cmp(&right.rings.len());
+        if rings != Ordering::Equal {
+            return rings;
+        }
+        for (left_ring, right_ring) in left.rings.iter().zip(&right.rings) {
+            let ring = left_ring
+                .role
+                .cmp(&right_ring.role)
+                .then_with(|| left_ring.points.cmp(&right_ring.points));
+            if ring != Ordering::Equal {
+                return ring;
+            }
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 fn detail_ring_hash(ring: &super::super::eliv::DetailRing) -> u128 {
     let mut points = HashSink::new();
     for &(x, y) in &ring.points {

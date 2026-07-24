@@ -12,7 +12,9 @@
 //! internal in elivagar and left with the adjudication layer.
 
 // Reader surface.
-pub use elivagar::pmtiles_reader::{ArchiveView, BlobRef, RawDirEntry, read_i32_le};
+pub use elivagar::pmtiles_reader::{
+    ArchiveView, BlobRef, RawDirEntry, find_entry, gzip_decompress, read_i32_le,
+};
 // Writer surface (mutate) + PMTiles addressing math.
 pub use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
 // Decoder surface. DetailAttr/CanonRingRole/Strictness + decode_detail_attr feed
@@ -21,7 +23,7 @@ pub use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy,
 // equivalence tests).
 pub use elivagar::tile_detail::{
     CanonRingRole, DetailAttr, DetailComponent, DetailFeature, DetailLayer, DetailRing, DetailTile,
-    Strictness, decode_detail_attr,
+    Strictness, decode_detail_attr, decode_detail_feature,
 };
 
 /// The tile id that begins the zoom after the one holding `tile_id`. Brokkr-
