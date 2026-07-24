@@ -114,6 +114,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     // PMTiles archives exist only in the two projects that produce or serve
     // them: `src/pmtiles.rs`'s callers are all under `src/elivagar/` and
     // `src/nidhogg/`.
+    ("pmtiles-corpus", Visibility::Only(&[Project::Elivagar])),
     (
         "pmtiles-stats",
         Visibility::Only(&[Project::Elivagar, Project::Nidhogg]),

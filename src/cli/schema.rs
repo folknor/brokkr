@@ -1581,6 +1581,12 @@ variants or configs reports a six-figure diff on two correct builds.",
         #[arg(long)]
         json: bool,
     },
+    /// [elivagar] Wrap elivagar's corpus namespace (check/bless/render/...)
+    #[command(display_order = 37, subcommand_help_heading = "Corpus subcommands")]
+    PmtilesCorpus {
+        #[command(subcommand)]
+        cmd: PmtilesCorpusCommand,
+    },
     /// Print PMTiles v3 file statistics
     #[command(display_order = 19)]
     PmtilesStats {
@@ -2715,6 +2721,113 @@ pub(crate) enum VerifyCommand {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
+    },
+}
+
+/// The archive selector shared by every `pmtiles-corpus` subcommand: the same
+/// `[--dataset D] [--commit H | --file P]` resolver `pmtiles-inspect`/`diag`/
+/// `svg` use. One resolver, zero divergence in default-commit semantics.
+#[derive(Args)]
+pub(crate) struct CorpusArchiveArgs {
+    /// Dataset name from brokkr.toml
+    #[arg(long, default_value = "denmark")]
+    pub(crate) dataset: String,
+    /// Commit short hash selecting which archive to open (default: current HEAD)
+    #[arg(long)]
+    pub(crate) commit: Option<String>,
+    /// Explicit PMTiles path, skips dataset/commit resolution
+    #[arg(long)]
+    pub(crate) file: Option<String>,
+}
+
+/// Subcommands of `brokkr pmtiles-corpus`, each a thin wrapper over the
+/// matching `elivagar corpus <sub>`. brokkr resolves the archive (and the
+/// corpus dir, where one applies) and passes every other flag through
+/// verbatim; elivagar owns the value sets (`--mode`, `--op`) and the exit-code
+/// contract (0 pass / 1 mismatch / 2 refusal), so brokkr carries strings, not
+/// re-validated enums, and never interprets the verdict.
+///
+/// Named `pmtiles-corpus` (not `corpus`) because `corpus` is already piners'
+/// parity-corpus runner and brokkr's command names share one flat namespace -
+/// the same reason `inspect` became `pmtiles-inspect`.
+#[derive(Subcommand)]
+pub(crate) enum PmtilesCorpusCommand {
+    /// Check an archive against the committed digest (exit 0 pass / 1 mismatch / 2 refusal)
+    Check {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
+        /// Corpus directory (default: corpus/<dataset> under the repo root)
+        #[arg(long)]
+        corpus: Option<std::path::PathBuf>,
+    },
+    /// Re-derive the digest baseline from an archive (writes into the corpus dir)
+    Bless {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
+        /// Corpus directory (default: corpus/<dataset> under the repo root)
+        #[arg(long)]
+        corpus: Option<std::path::PathBuf>,
+        /// Replace an existing baseline (elivagar refuses to overwrite otherwise)
+        #[arg(long)]
+        rotate: bool,
+        /// Digest mode passed through to elivagar (e.g. leaves, buckets)
+        #[arg(long)]
+        mode: Option<String>,
+    },
+    /// Render the SVG corpus manifest for an archive
+    #[command(name = "render-manifest")]
+    RenderManifest {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
+        /// Corpus directory (default: corpus/<dataset> under the repo root)
+        #[arg(long)]
+        corpus: Option<std::path::PathBuf>,
+        /// Style TOML passed through to elivagar
+        #[arg(long)]
+        style: Option<std::path::PathBuf>,
+    },
+    /// Render a single tile from an archive to SVG
+    Render {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
+        #[arg(short = 'z', long)]
+        z: u8,
+        #[arg(short = 'x', long)]
+        x: u32,
+        #[arg(short = 'y', long)]
+        y: u32,
+        /// Comma-separated layer names passed through to elivagar
+        #[arg(long)]
+        layers: Option<String>,
+        /// Style TOML passed through to elivagar
+        #[arg(long)]
+        style: Option<std::path::PathBuf>,
+        /// Output file path
+        #[arg(short = 'o', long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Emit ocean ring geometry from an archive
+    Rings {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
+        /// Output file path
+        #[arg(short = 'o', long)]
+        output: std::path::PathBuf,
+    },
+    /// Produce a mutated copy of an archive (calibration oracle)
+    Mutate {
+        #[command(flatten)]
+        archive: CorpusArchiveArgs,
+        /// Output file path for the mutated archive
+        #[arg(short = 'o', long)]
+        output: std::path::PathBuf,
+        /// Mutation op passed through to elivagar
+        /// (drop-tile|nudge-geometry|layer-version|regzip)
+        #[arg(long)]
+        op: String,
+        /// Target tile z/x/y for ops that need one
+        #[arg(long)]
+        tile: Option<String>,
     },
 }
 

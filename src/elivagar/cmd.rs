@@ -1,8 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::cli::{CorpusArchiveArgs, PmtilesCorpusCommand};
 use crate::config;
 use crate::context::{HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
+use crate::lockfile::LockGuard;
 use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
 use crate::resolve::{
@@ -280,4 +282,132 @@ pub(crate) fn regress(
         json,
         lock,
     )
+}
+
+/// `brokkr pmtiles-corpus <sub>` - resolve the archive (and, where the
+/// subcommand uses one, the corpus dir) from the shared selector, assemble the
+/// trailing flags verbatim, and exec `elivagar corpus <sub>`. Every value set
+/// (`--mode`, `--op`) is elivagar's to own, so brokkr carries strings; exit
+/// codes (0/1/2) pass through untouched.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn corpus(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    build_root: &Path,
+    cmd: &PmtilesCorpusCommand,
+    lock: Option<&LockGuard>,
+) -> Result<(), DevError> {
+    project::require(project, Project::Elivagar, "pmtiles-corpus")?;
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+
+    // Resolve an archive through the same commit/file resolver as
+    // pmtiles-inspect/diag/svg.
+    let resolve = |a: &CorpusArchiveArgs| -> Result<PathBuf, DevError> {
+        resolve_pmtiles_by_commit(&a.dataset, a.commit.as_deref(), a.file.as_deref(), &paths, build_root)
+    };
+    // Corpus dir default: corpus/<dataset> under the repo root (build_root),
+    // where the git-committed corpus lives - NOT project_root (config/data dir).
+    // Overridable with --corpus.
+    let corpus_dir = |a: &CorpusArchiveArgs, over: &Option<PathBuf>| -> String {
+        over.clone()
+            .unwrap_or_else(|| build_root.join("corpus").join(&a.dataset))
+            .display()
+            .to_string()
+    };
+
+    match cmd {
+        PmtilesCorpusCommand::Check { archive, corpus } => {
+            let path = resolve(archive)?;
+            let trailing = vec!["--corpus".to_owned(), corpus_dir(archive, corpus)];
+            super::corpus::run(build_root, "check", &path, &trailing, lock)
+        }
+        PmtilesCorpusCommand::Bless {
+            archive,
+            corpus,
+            rotate,
+            mode,
+        } => {
+            let path = resolve(archive)?;
+            let mut trailing = vec!["--corpus".to_owned(), corpus_dir(archive, corpus)];
+            if *rotate {
+                trailing.push("--rotate".to_owned());
+            }
+            if let Some(m) = mode {
+                trailing.push("--mode".to_owned());
+                trailing.push(m.clone());
+            }
+            super::corpus::run(build_root, "bless", &path, &trailing, lock)
+        }
+        PmtilesCorpusCommand::RenderManifest {
+            archive,
+            corpus,
+            style,
+        } => {
+            let path = resolve(archive)?;
+            let mut trailing = vec!["--corpus".to_owned(), corpus_dir(archive, corpus)];
+            if let Some(s) = style {
+                trailing.push("--style".to_owned());
+                trailing.push(s.display().to_string());
+            }
+            super::corpus::run(build_root, "render-manifest", &path, &trailing, lock)
+        }
+        PmtilesCorpusCommand::Render {
+            archive,
+            z,
+            x,
+            y,
+            layers,
+            style,
+            output,
+        } => {
+            let path = resolve(archive)?;
+            let mut trailing = vec![
+                "-z".to_owned(),
+                z.to_string(),
+                "-x".to_owned(),
+                x.to_string(),
+                "-y".to_owned(),
+                y.to_string(),
+            ];
+            if let Some(l) = layers {
+                trailing.push("--layers".to_owned());
+                trailing.push(l.clone());
+            }
+            if let Some(s) = style {
+                trailing.push("--style".to_owned());
+                trailing.push(s.display().to_string());
+            }
+            if let Some(o) = output {
+                trailing.push("-o".to_owned());
+                trailing.push(o.display().to_string());
+            }
+            super::corpus::run(build_root, "render", &path, &trailing, lock)
+        }
+        PmtilesCorpusCommand::Rings { archive, output } => {
+            let path = resolve(archive)?;
+            let trailing = vec!["-o".to_owned(), output.display().to_string()];
+            super::corpus::run(build_root, "rings", &path, &trailing, lock)
+        }
+        PmtilesCorpusCommand::Mutate {
+            archive,
+            output,
+            op,
+            tile,
+        } => {
+            let path = resolve(archive)?;
+            let mut trailing = vec![
+                "-o".to_owned(),
+                output.display().to_string(),
+                "--op".to_owned(),
+                op.clone(),
+            ];
+            if let Some(t) = tile {
+                trailing.push("--tile".to_owned());
+                trailing.push(t.clone());
+            }
+            super::corpus::run(build_root, "mutate", &path, &trailing, lock)
+        }
+    }
 }

@@ -1177,6 +1177,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 Some(&_lock),
             )
         }
+        Command::PmtilesCorpus { cmd } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "pmtiles-corpus")?;
+            elivagar::cmd::corpus(
+                &dev_config,
+                project,
+                &project_root,
+                &build_root,
+                &cmd,
+                Some(&_lock),
+            )
+        }
         Command::DownloadOcean => {
             let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
             elivagar::cmd::download_ocean(&dev_config, project, &project_root)

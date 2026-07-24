@@ -11,7 +11,8 @@
   run/bench/hotpath/alloc based on command enum + mode. Uses `BenchContext`
   for build+harness.
 - `src/elivagar/...` - benchmarks (self, node-store, pmtiles, planetiler,
-  tilemaker, all), verify, compare-tiles, download-ocean, hotpath.
+  tilemaker, all), verify, compare-tiles, download-ocean, hotpath, regress,
+  corpus (the `pmtiles-corpus` exec runner).
 
 ## Variant defaults
 
@@ -122,3 +123,44 @@ see the pmtiles-corpus section below.
 Oracle (`scripts/validate/earcut-oracle.mjs`, a Node script, not a Rust
 subcommand) has no brokkr wrapper yet - deferred, since it needs a
 Node-subprocess invocation pattern brokkr doesn't have today.
+
+## The pmtiles corpus: `brokkr pmtiles-corpus <sub>`
+
+`brokkr pmtiles-corpus` (`src/elivagar/corpus.rs` for the exec runner,
+`cmd::corpus` for the dispatch) is a namespace mirroring elivagar's `corpus`
+subcommands - the standing baseline mechanism that replaced the blessed
+archive. It is named `pmtiles-corpus`, not `corpus`, because `corpus` is
+already piners' parity-corpus runner and brokkr's command names share one flat
+clap namespace (the same reason `inspect` became `pmtiles-inspect`).
+
+| brokkr | wraps | brokkr resolves |
+|---|---|---|
+| `pmtiles-corpus check [--dataset D] [--commit H \| --file P] [--corpus DIR]` | `elivagar corpus check <archive> --corpus <dir>` | archive, corpus dir |
+| `pmtiles-corpus bless [... ] [--corpus DIR] [--rotate] [--mode M]` | `elivagar corpus bless` | archive, corpus dir |
+| `pmtiles-corpus render-manifest [...] [--corpus DIR] [--style P]` | `elivagar corpus render-manifest` | archive, corpus dir |
+| `pmtiles-corpus render [...] -z Z -x X -y Y [--layers L] [--style P] [-o OUT]` | `elivagar corpus render` | archive only |
+| `pmtiles-corpus rings [...] -o OUT` | `elivagar corpus rings` | archive only |
+| `pmtiles-corpus mutate [...] -o OUT --op OP [--tile z/x/y]` | `elivagar corpus mutate` | input archive only |
+
+Every subcommand resolves the archive through the SAME
+`resolve_pmtiles_by_commit()` as `pmtiles-inspect`/`diag`/`svg`
+(`[--dataset D] [--commit H | --file P]`), so default-commit semantics never
+diverge. `--corpus` defaults to `corpus/<dataset>` under the **build root**
+(where the git-committed corpus lives, alongside the code - NOT the
+config/`data/` dir), and is overridable. Every other flag passes through
+verbatim; elivagar owns the value sets (`--mode`, `--op`), so brokkr carries
+them as strings and never re-validates.
+
+The wrapper is convenience, never safety: the corpus machinery enforces its
+own guards (contract refusal, dirty-build refusal, `--rotate` protection), so
+brokkr adds no baseline registry, no default comparand, and no filesystem
+inference. There is **no clean-tree gate and no tilegen lock** - a check is
+read-only on the archive and never touches tilegen scratch, and bless writes
+only into the corpus dir (committed with the landing, so a dirty tree is the
+normal state). Exit codes pass through unchanged: **0** pass, **1** content
+mismatch, **2** refusal (missing baseline, invalid archive, contract
+mismatch). The 0/1/2 distinction is load-bearing for the caller, and brokkr
+adds no interpretation of the verdict. Each wrapper still takes the
+non-blocking brokkr lock and rebuilds the elivagar release binary
+(cargo up-to-date check, sub-second) so a stale binary can never silently
+serve the standing gate.
