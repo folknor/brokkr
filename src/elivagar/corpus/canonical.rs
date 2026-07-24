@@ -163,6 +163,18 @@ pub(crate) fn compare_detail_features(
         .then_with(|| compare_detail_component_slices(&a.components, &b.components))
 }
 
+/// Canonical order of two components (ring count, then per-ring role + points).
+/// The new wire-order decoder does not sort a feature's attrs/components the way
+/// the old decoder did, so consumers must canonicalize a decoded feature through
+/// this + an attr sort before `compare_detail_features` is meaningful.
+#[allow(dead_code)]
+pub(crate) fn compare_detail_components(
+    a: &super::super::eliv::DetailComponent,
+    b: &super::super::eliv::DetailComponent,
+) -> std::cmp::Ordering {
+    compare_detail_component_slices(std::slice::from_ref(a), std::slice::from_ref(b))
+}
+
 fn compare_detail_component_slices(
     a: &[super::super::eliv::DetailComponent],
     b: &[super::super::eliv::DetailComponent],

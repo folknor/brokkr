@@ -22,7 +22,7 @@ use super::super::eliv::{
     ArchiveView, DetailAttr, DetailFeature, Strictness, decode_detail_attr, decode_detail_feature,
     find_entry, gzip_decompress, tile_id_to_zxy, xy_to_tile_id,
 };
-use super::canonical::compare_detail_features;
+use super::canonical::{compare_detail_components, compare_detail_features};
 use super::style::{Paint, Style};
 
 pub struct RenderTile {
@@ -65,7 +65,13 @@ fn decode_render_layer(data: &[u8]) -> Result<RenderLayer, String> {
     let (name, extent, keys, values, feature_bytes) = wire_layer(data)?;
     let mut items: Vec<(DetailFeature, WirePaths)> = Vec::with_capacity(feature_bytes.len());
     for bytes in &feature_bytes {
-        let detail = decode_detail_feature(bytes, &keys, &values, Strictness::Strict)?;
+        let mut detail = decode_detail_feature(bytes, &keys, &values, Strictness::Strict)?;
+        // The wire-order decoder leaves attrs/components unsorted; the canonical
+        // feature order (and the committed SVG feature order) is defined over the
+        // sorted form, so canonicalize before comparing. Geometry is still
+        // emitted from the WIRE-order `wire_paths` (classifyRings needs it).
+        detail.attrs.sort();
+        detail.components.sort_by(compare_detail_components);
         let (_, wire_paths) = wire_feature_paths(bytes)?;
         items.push((detail, wire_paths));
     }

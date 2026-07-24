@@ -84,6 +84,13 @@ fn archive_refused(message: impl Into<String>) -> (Outcome, CheckReport) {
     (Outcome::ArchiveRefused, report(message))
 }
 
+/// The corpus-global canonical style: `<corpus-root>/style.toml`, where
+/// `corpus_dir` is `<corpus-root>/<dataset>`. Anchored at the corpus root so it
+/// resolves the same regardless of the invoking cwd.
+fn corpus_style_path(corpus_dir: &Path) -> std::path::PathBuf {
+    corpus_dir.parent().unwrap_or(corpus_dir).join("style.toml")
+}
+
 fn format_guard(a: &ArchiveView) -> Option<String> {
     if a.tile_type() != 1 {
         return Some(format!("archive tile type {} is not MVT", a.tile_type()));
@@ -323,12 +330,13 @@ pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(Outcome, CheckRep
             .map(|p| format!("svg stale (digest unchanged, re-render corpus): {p}"))
             .collect::<Vec<_>>()
             .join("\n");
+        // `changed` is a leaf-diff run count; staleness is not a content diff,
+        // so it stays 0 (the report's own lines say "digest unchanged").
         return Ok((
             Outcome::BaselineTrouble,
             CheckReport {
                 message,
                 warnings,
-                changed: 1,
                 ..Default::default()
             },
         ));
@@ -361,17 +369,15 @@ fn svg_staleness(view: &ArchiveView, corpus_dir: &Path, _base: &Baseline) -> io:
     let recorded = raw
         .pointer("/style/xxh3_128")
         .and_then(serde_json::Value::as_str);
-    let style_path = raw
-        .pointer("/style/path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("corpus/style.toml")
-        .to_string();
     let Some(recorded) = recorded else {
         return Ok(vec![
             "contract records no style hash - run render-manifest".to_string()
         ]);
     };
-    let style = style::Style::load(Path::new(&style_path))?;
+    // The canonical style is corpus-global, one per corpus root
+    // (`<root>/style.toml`), and `corpus_dir` is `<root>/<dataset>`. Anchor there
+    // rather than at the cwd-relative path recorded in contract.json.
+    let style = style::Style::load(&corpus_style_path(corpus_dir))?;
     if recorded != style.hash_hex() {
         return Ok(vec![
             "style hash differs from contract - run render-manifest".to_string()
@@ -638,7 +644,7 @@ pub fn bless(
         std::fs::remove_file(&leaves_path)?;
     }
     if corpus_dir.join("manifest.toml").exists() {
-        let (verdict, r) = render_manifest(archive, corpus_dir, Path::new("corpus/style.toml"))?;
+        let (verdict, r) = render_manifest(archive, corpus_dir, &corpus_style_path(corpus_dir))?;
         if verdict != Outcome::Pass {
             return Ok((verdict, r));
         }
