@@ -430,7 +430,9 @@ it). `shape_exclude` globs excuse a manifest from the structural checks only
 `exclude` skips the file entirely. See `src/manifest.rs`.
 
 Script-check phase runs next, only when `[[script_check]]` entries exist (inert
-otherwise). Each entry runs `command` via `sh -c` (so pipes/redirects/env
+otherwise). This is the phase's default `pre-clippy` stage; an entry can instead
+name `pre-test` or `post-test` and run at that point in the pipeline (see
+`stage` below). Each entry runs `command` via `sh -c` (so pipes/redirects/env
 expansion work) with cwd = the code tree, and **passes iff the captured output
 matches `expect`**. Asserting on a success sentinel - not the exit code - is the
 point: it catches a check silently stubbed to `exit 0`, because the script must
@@ -451,6 +453,16 @@ formatter conventions - that were previously hand-run before every commit.
 - Sentinel tip: a non-ASCII sentinel (e.g. a `U+2713` check mark) would itself
   trip the gremlin scan on `brokkr.toml`. Use an ASCII sentinel, or
   `match = "contains"` on an ASCII marker substring of the real success line.
+- `stage` = `pre-clippy` (default - here, with the other convention phases),
+  `pre-test` (after clippy, before the test phase), or `post-test` (after the
+  test phase and the coverage audit). One value per entry; an entry runs once.
+
+`post-test` entries are skipped when the test phase failed: it fails fast, so
+its later lanes never ran and there is no partial-run reading for a sentinel
+gate (the coverage audit, which deliberately does run there, wants built
+binaries rather than green tests). All three stages share the one
+`script_check` phase name for `skip_phases` and the JSON `failed_phase`; the
+failing entry is named in the output regardless.
 
 See `src/script_check.rs`.
 

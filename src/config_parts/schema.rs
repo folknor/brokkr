@@ -241,6 +241,27 @@ pub enum Stream {
     Both,
 }
 
+/// Where in the `brokkr check` pipeline a [`ScriptCheck`] runs. One value per
+/// entry - an entry runs once, at the point it names. See
+/// [`crate::script_check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stage {
+    /// With the other convention phases, before clippy builds anything (the
+    /// default, and where every script-check ran before `stage` existed).
+    /// Right for cheap source-level gates: they fail before the run has spent
+    /// any time compiling.
+    #[default]
+    PreClippy,
+    /// After clippy, before the test phase. For gates that want a
+    /// clippy-clean tree but shouldn't wait on the test suite.
+    PreTest,
+    /// After the test phase and the coverage audit. Skipped entirely when the
+    /// test phase failed - the tests fail fast, so a post-test gate would be
+    /// judging a half-run tree.
+    PostTest,
+}
+
 /// One `[[script_check]]` entry: run `command` (via `sh -c`) and pass iff its
 /// output matches the `expect` sentinel per `match`/`stream`. A gate for
 /// pre-commit checks that brokkr's native phases can't express. Asserting on a
@@ -261,6 +282,9 @@ pub struct ScriptCheck {
     /// Which captured stream(s) to match. Defaults to `stdout`.
     #[serde(default)]
     pub stream: Stream,
+    /// Where in the check pipeline this entry runs. Defaults to `pre-clippy`.
+    #[serde(default)]
+    pub stage: Stage,
 }
 
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching

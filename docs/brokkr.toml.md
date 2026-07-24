@@ -315,6 +315,7 @@ command = "bash .pre-commit-hooks/check_docs_conventions.sh"
 expect  = "All documentation conventions are valid"
 match   = "last-line"   # exact | last-line | contains   (default: last-line)
 stream  = "stdout"      # stdout | stderr | both          (default: stdout)
+stage   = "pre-clippy"  # pre-clippy | pre-test | post-test (default: pre-clippy)
 ```
 
 - `name` - label shown in phase output (`script-check <name>: ok`).
@@ -325,9 +326,34 @@ stream  = "stdout"      # stdout | stderr | both          (default: stdout)
 - `match` - `exact` (whole trimmed output equals `expect`), `last-line` (last
   non-empty line equals `expect`; the default), or `contains` (substring).
 - `stream` - `stdout` (default), `stderr`, or `both` (concatenated).
+- `stage` - where in the check pipeline the entry runs (below).
 
 The command's exit code is ignored - only the output match decides. See
 `src/script_check.rs` and `docs/commands/check.md`.
+
+### `stage`
+
+An entry runs once, at the point its `stage` names:
+
+| `stage` | Runs | For |
+| --- | --- | --- |
+| `pre-clippy` (default) | With the other convention phases, before clippy builds anything | Cheap source-level gates - they fail before the run spends time compiling |
+| `pre-test` | After clippy, before the test phase | Gates that want a clippy-clean tree but shouldn't wait on the suite |
+| `post-test` | After the test phase and the coverage audit | Gates that need built binaries or test output |
+
+Entries at the same stage run in declaration order, and every entry at a stage
+runs even when an earlier one failed, so a run surfaces all broken gates at
+once.
+
+`post-test` entries are **skipped entirely when the test phase failed**. The
+test phase fails fast, so its later lanes never ran; a script-check has no
+partial-run reading, unlike the coverage audit, which deliberately still runs
+there. Leaving `stage` off is exactly the old behaviour.
+
+All three stages share the one `script_check` phase name, so a profile's
+`skip_phases = ["script_check"]` drops every stage, and a failure is reported
+as `failed_phase: "script_check"` regardless of where it happened - the failing
+entry is named in the output either way.
 
 ## `[manifest]` section
 

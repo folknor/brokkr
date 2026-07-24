@@ -47,6 +47,72 @@ mod tests {
         parse_textlint(&table)
     }
 
+    fn script_checks_of(src: &str) -> Result<Vec<ScriptCheck>, DevError> {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
+        parse_script_checks(&table)
+    }
+
+    #[test]
+    fn script_check_stage_defaults_to_pre_clippy() {
+        // An entry written before `stage` existed keeps running where it always
+        // did - the key's absence must not move a gate.
+        let checks = script_checks_of(
+            r#"
+[[script_check]]
+name = "docs"
+command = "bash check_docs.sh"
+expect = "ok"
+"#,
+        )
+        .unwrap();
+        assert_eq!(checks[0].stage, Stage::PreClippy);
+    }
+
+    #[test]
+    fn script_check_stage_parses_each_slot() {
+        let checks = script_checks_of(
+            r#"
+[[script_check]]
+name = "early"
+command = "a"
+expect = "ok"
+stage = "pre-clippy"
+
+[[script_check]]
+name = "middle"
+command = "b"
+expect = "ok"
+stage = "pre-test"
+
+[[script_check]]
+name = "late"
+command = "c"
+expect = "ok"
+stage = "post-test"
+"#,
+        )
+        .unwrap();
+        let stages: Vec<Stage> = checks.iter().map(|c| c.stage).collect();
+        assert_eq!(stages, vec![Stage::PreClippy, Stage::PreTest, Stage::PostTest]);
+    }
+
+    #[test]
+    fn script_check_rejects_unknown_stage() {
+        // deny_unknown_fields covers typo'd keys; this covers a typo'd *value*,
+        // which would otherwise silently fall back to the default slot.
+        let err = script_checks_of(
+            r#"
+[[script_check]]
+name = "late"
+command = "c"
+expect = "ok"
+stage = "after-tests"
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, DevError::Config(_)), "unexpected: {err:?}");
+    }
+
     #[test]
     fn textlint_preset_supplies_scope_and_rule_overrides_scalars() {
         let rules = textlint_of(

@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
     Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
-    QuarantineEntry, ScriptCheck, StyleConfig, TestConfig, TextlintRule,
+    QuarantineEntry, ScriptCheck, Stage, StyleConfig, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -141,6 +141,7 @@ pub(crate) fn cmd_check(
             &BuildPhaseArgs {
                 project,
                 project_root,
+                script_checks,
                 state_root,
                 active_sweeps: &active_sweeps,
                 package,
@@ -265,7 +266,7 @@ fn run_convention_phases(
 
     if !skip("script_check") {
         *failing_phase = Some("script_check");
-        run_script_checks(a.project_root, a.script_checks)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy)?;
     }
 
     if !skip("dependency_rules") {
@@ -278,6 +279,9 @@ fn run_convention_phases(
 struct BuildPhaseArgs<'a> {
     project: Option<Project>,
     project_root: &'a Path,
+    /// The full entry list; the build phases run the `pre-test` and
+    /// `post-test` slices of it around the test phase.
+    script_checks: &'a [ScriptCheck],
     /// Config-dir root where brokkr's own `.brokkr` state lives. Equals
     /// `project_root` except under the one-level-up foreign-checkout layout,
     /// where cargo runs in `project_root` (the code tree) but hung-test
@@ -321,6 +325,11 @@ fn run_build_phases(
             a.commands,
             clippy_ran,
         )?;
+    }
+
+    if !skip("script_check") {
+        *failing_phase = Some("script_check");
+        run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
     let mut test_failure: Option<DevError> = None;
@@ -369,6 +378,16 @@ fn run_build_phases(
     if let Some(e) = test_failure {
         return Err(e);
     }
+
+    // Only past a green test phase: the test phase fails fast, so a post-test
+    // gate on a failing run would be judging a tree whose later lanes never
+    // ran. Unlike the coverage audit above, which is deliberately best-effort
+    // there, a script-check has no partial-run reading - it just lies.
+    if !skip("script_check") {
+        *failing_phase = Some("script_check");
+        run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
+    }
+
     *failing_phase = None;
     Ok(())
 }
@@ -1099,13 +1118,18 @@ fn run_manifest(
     Err(DevError::Build("manifest check failed".into()))
 }
 
-/// The `[[script_check]]` phase: run each configured command and assert its
-/// output matches the entry's sentinel. Inert unless the project defines
-/// `[[script_check]]` entries. Every check runs (failures are collected, not
-/// fail-fast) so one `brokkr check` surfaces all broken gates at once. The
-/// command's exit code is ignored - only the output match decides pass/fail; a
-/// spawn failure is a hard error. See [`crate::script_check`].
-fn run_script_checks(project_root: &Path, checks: &[ScriptCheck]) -> Result<(), DevError> {
+/// The `[[script_check]]` phase for one [`Stage`]: run the configured commands
+/// that named this stage and assert each one's output matches its sentinel.
+/// Inert when no entry sits at this stage. Every check runs (failures are
+/// collected, not fail-fast) so one `brokkr check` surfaces all broken gates at
+/// once. The command's exit code is ignored - only the output match decides
+/// pass/fail; a spawn failure is a hard error. See [`crate::script_check`].
+fn run_script_checks(
+    project_root: &Path,
+    checks: &[ScriptCheck],
+    stage: Stage,
+) -> Result<(), DevError> {
+    let checks: Vec<&ScriptCheck> = checks.iter().filter(|c| c.stage == stage).collect();
     if checks.is_empty() {
         return Ok(());
     }
