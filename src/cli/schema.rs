@@ -1460,6 +1460,26 @@ Examples:
     /// [elivagar] Download ocean shapefiles
     #[command(display_order = 31)]
     DownloadOcean,
+    /// [elivagar] Build the world-ocean pmtiles artifact from the tilegen block
+    #[command(
+        display_order = 31,
+        long_about = "\
+[elivagar] Build the world-ocean pmtiles artifact (one shot per shapefile \
+release), wrapping `elivagar ocean-build`.
+
+The invocation is derived entirely from [<host>.tilegen.default].ocean - the \
+same block tilegen reads its ocean inputs from. The shapefile entries become \
+the --ocean specs; the .pmtiles entry becomes the output path. There are no \
+override flags: to build a different artifact, edit the block.
+
+Rotating the artifact is an output-changing event - the next `pmtiles-corpus \
+check` refuses on the artifact key until the corpus is re-blessed."
+    )]
+    OceanBuild {
+        /// Validate the derived invocation and input paths without building
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// [elivagar] Download Natural Earth shapefiles for low-zoom layers
     #[command(display_order = 32)]
     DownloadNaturalEarth,

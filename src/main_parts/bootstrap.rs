@@ -1192,6 +1192,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
             elivagar::cmd::download_ocean(&dev_config, project, &project_root)
         }
+        Command::OceanBuild { dry_run } => {
+            let _lock = acquire_cmd_lock(project, &project_root, "ocean-build")?;
+            elivagar::ocean_build::run(
+                &dev_config,
+                project,
+                &project_root,
+                &build_root,
+                dry_run,
+                Some(&_lock),
+            )
+        }
         Command::DownloadNaturalEarth => {
             let _lock = acquire_cmd_lock(project, &project_root, "download-natural-earth")?;
             elivagar::cmd::download_natural_earth(&dev_config, project, &project_root)

@@ -18,6 +18,7 @@ pub mod dispatch;
 pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod inspect;
+pub mod ocean_build;
 pub mod regress;
 pub mod svg;
 pub mod verify;

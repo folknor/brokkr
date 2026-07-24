@@ -107,6 +107,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("multi-extract", Visibility::Only(&[Project::Pbfhogg])),
     ("nid-ingest", Visibility::Only(&[Project::Nidhogg])),
     ("node-store", Visibility::Only(&[Project::Elivagar])),
+    ("ocean-build", Visibility::Only(&[Project::Elivagar])),
     ("outline", Visibility::Only(&[Project::Litehtml])),
     ("passthrough", Visibility::Any),
     ("planetiler", Visibility::Only(&[Project::Elivagar])),

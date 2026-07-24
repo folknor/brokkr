@@ -12,7 +12,7 @@
   for build+harness.
 - `src/elivagar/...` - benchmarks (self, node-store, pmtiles, planetiler,
   tilemaker, all), verify, compare-tiles, download-ocean, hotpath, regress,
-  corpus (the `pmtiles-corpus` exec runner).
+  corpus (the `pmtiles-corpus` exec runner), ocean_build (`ocean-build`).
 
 ## Variant defaults
 
@@ -58,6 +58,36 @@ which is the "arm defined by an absent flag" case `--grep-v` exists for.
 
 Fetches the ocean polygon dataset used by tile generation. Follows a similar
 pattern to pbfhogg's `download` but is elivagar-specific.
+
+## ocean-build
+
+`brokkr ocean-build` (`src/elivagar/ocean_build.rs`) wraps `elivagar
+ocean-build` - one shot per shapefile release, building the world-ocean
+pmtiles artifact that tilegen later consumes as an ocean input. The invocation
+is derived **entirely** from `[<host>.tilegen.default].ocean`, the same block
+tilegen reads: the shapefile entries (the zoom-banded `OceanSpec` variants)
+become the `--ocean` specs, and the single `.pmtiles` entry (the `Artifact`
+variant) becomes the `-o` output path. There are no override flags - to build
+a different artifact, edit the block, the same philosophy as tilegen. The
+builder and the consumer therefore read the same statement and cannot drift on
+spelling, and the artifact key elivagar records is derived from the same
+shapefiles every run re-hashes.
+
+The block is partitioned by role: any number of shapefile specs plus exactly
+one artifact. brokkr refuses two ways, both the spec's: **no `.pmtiles` entry**
+(nowhere to write the output) and **no shapefile entries** (nothing to build
+from); more than one artifact is refused too. Shapefile inputs are resolved
+against the host data dir and checked for existence (a missing input fails with
+a clear brokkr message rather than deep inside elivagar). `--dry-run` prints
+the derived invocation and output path and validates the inputs without
+building, matching tilegen. The `default` tilegen block is hardcoded and there
+is no `--dataset` - the ocean artifact is per-host pipeline config (the world
+ocean serves every extract), not a dataset property; a block selector can be
+added the day a second tilegen block exists.
+
+Rotating the artifact is an output-changing event: the next `pmtiles-corpus
+check` refuses on the artifact key until the corpus is re-blessed. That
+refusal is elivagar's job; brokkr just runs the commands.
 
 ## Read-only PMTiles inspection: pmtiles-inspect / diag / svg
 
