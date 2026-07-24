@@ -7,10 +7,7 @@ use crate::error::DevError;
 use crate::lockfile::LockGuard;
 use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
-use crate::resolve::{
-    resolve_default_pmtiles_path, resolve_pbf_with_size, resolve_pmtiles_by_commit,
-    resolve_pmtiles_path,
-};
+use crate::resolve::{resolve_pbf_with_size, resolve_pmtiles_by_commit};
 
 pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
     let ctx = HarnessContext::new(
@@ -133,21 +130,26 @@ pub(crate) fn verify(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
-    build_root: Option<&Path>,
+    build_root: &Path,
     dataset: &str,
-    tiles_variant: Option<&str>,
+    variant: &str,
+    commit: Option<&str>,
+    file: Option<&str>,
     features: &[String],
     geometry_stats: bool,
+    unique_payloads: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "verify")?;
-    let pi = bootstrap(build_root)?;
+    let pi = bootstrap(Some(build_root))?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path = match tiles_variant {
-        Some(v) => resolve_pmtiles_path(dataset, v, &paths, project_root)?,
-        None => resolve_default_pmtiles_path(dataset, &paths, project_root)?,
-    };
-    let effective = build_root.unwrap_or(project_root);
-    super::verify::run(&pmtiles_path, effective, features, geometry_stats)
+    let pmtiles_path = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    super::verify::run(
+        &pmtiles_path,
+        build_root,
+        features,
+        geometry_stats,
+        unique_payloads,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

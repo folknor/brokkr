@@ -28,8 +28,11 @@
 ## Variant defaults
 
 - `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`).
-- `--tiles <variant>` selects the `pmtiles.<variant>` entry; auto-selects if
-  exactly one is configured.
+- The shared `--tiles <variant>` flag (the `pmtiles.<variant>` config entry)
+  has **no elivagar consumer**. Elivagar produces archives rather than reading
+  configured ones, so every archive-consuming command addresses the durable
+  output store through `--dataset`/`--variant`/`--commit`/`--file` instead -
+  see the resolver section below. `--tiles` survives on nidhogg's `serve`.
 
 See `docs/brokkr.toml.md` for the dataset structure and shared variant flags.
 
@@ -100,17 +103,18 @@ Rotating the artifact is an output-changing event: the next `pmtiles-corpus
 check` refuses on the artifact key until the corpus is re-blessed. That
 refusal is elivagar's job; brokkr just runs the commands.
 
-## Read-only PMTiles inspection: pmtiles-inspect / diag / svg
+## Read-only PMTiles inspection: pmtiles-inspect / diag / svg / verify pmtiles
 
-`brokkr pmtiles-inspect`, `brokkr diag -z Z -x X -y Y`, and
-`brokkr svg -z Z -x X -y Y [-W width] [-H height] [-l layers] [-o output]`
-wrap elivagar's `inspect`/`diag`/`svg` subcommands (`src/elivagar/inspect.rs`,
-`src/elivagar/diag.rs`, `src/elivagar/svg.rs`). `pmtiles-inspect` is named
+`brokkr pmtiles-inspect`, `brokkr diag -z Z -x X -y Y`,
+`brokkr svg -z Z -x X -y Y [-W width] [-H height] [-l layers] [-o output]`, and
+`brokkr verify pmtiles` wrap elivagar's `inspect`/`diag`/`svg`/`verify`
+subcommands (`src/elivagar/inspect.rs`, `src/elivagar/diag.rs`,
+`src/elivagar/svg.rs`, `src/elivagar/verify.rs`). `pmtiles-inspect` is named
 that way (not `inspect`) because `brokkr inspect` is already pbfhogg's PBF
 inspector - the two share one flat clap `Command` enum so names must be
 unique.
 
-All three take `--dataset`/`--variant`/`--commit`/`--file`, resolved by
+All four take `--dataset`/`--variant`/`--commit`/`--file`, resolved by
 `resolve_pmtiles_by_commit()` in `src/resolve_parts/schema.rs`: `--file`
 skips resolution; otherwise the path is
 `<output_dir>/<dataset>-<variant>-<commit>.pmtiles` (the durable output store,
@@ -132,12 +136,39 @@ store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 --worktrees`) reclaims it. These subcommands only read the file - the current
 release binary can inspect output built by any commit, so `--commit` picks
 which file to open, not which binary to build (no historical worktree rebuild,
-unlike `verify --commit`). All three acquire the brokkr lock (non-blocking
-`acquire_cmd_lock`, like `regress`) so an inspection can't read an archive a
-concurrent `tilegen` run is mid-write - it refuses instead.
+unlike `brokkr verify --commit` on the pbfhogg cross-validators). All four
+acquire the brokkr lock (non-blocking `acquire_cmd_lock`, like `regress`) so an
+inspection can't read an archive a concurrent `tilegen` run is mid-write - it
+refuses instead.
 
-`brokkr verify pmtiles --geometry-stats` forwards `--geometry-stats` to
-`elivagar verify` (per-zoom ocean ring geometry statistics).
+### verify pmtiles
+
+```
+brokkr verify pmtiles [--dataset D --variant V --commit H | --file P]
+                      [--geometry-stats] [--unique-payloads]
+```
+
+Forwards `--geometry-stats` (per-zoom ocean ring geometry statistics) and
+`--unique-payloads` to `elivagar verify`. `--unique-payloads` validates each
+distinct compressed payload once while keeping addressed-tile accounting: it is
+what makes a large run-heavy archive verifiable at all - the world artifact
+addresses ~212M tiles over ~9.18M distinct payloads, so without it the check is
+~23x the work.
+
+`verify pmtiles` joined this family late (2026-07-24). It used to address a
+different namespace entirely: `--dataset` plus `--tiles <variant>`, resolved
+against the `pmtiles.<variant>` *config* table. Nothing populated that table on
+any host, so the command was dead surface - `brokkr verify pmtiles --dataset
+denmark` failed with `dataset 'denmark' has no pmtiles configured`, and there
+was no `--file` escape hatch to reach an archive that isn't dataset output
+(the world artifact `data/ocean-tiles.pmtiles` is exactly that case). It also
+sat under the `Command::Verify` worktree wrapper, where `--commit` meant
+"rebuild that binary" rather than "open that archive". `run()` in
+`src/main_parts/bootstrap.rs` now dispatches this one variant *before*
+`with_worktree` and rejects the outer `brokkr verify --commit` with a message
+pointing at the subcommand flag; the rest of `VerifyCommand` (pbfhogg's
+cross-validators, which genuinely do compare a historical binary against a
+reference tool) still runs inside the worktree.
 
 ## Output regression: regress (tier-3 attribution)
 

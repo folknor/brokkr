@@ -1052,6 +1052,33 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             let features = resolve_features(&dev_config, &[]);
             output::set_quiet(!verbose);
+            // `verify pmtiles` only reads an archive, with the current binary,
+            // so it belongs to the resolver family (pmtiles-inspect/diag/svg/
+            // regress) rather than to the pbfhogg cross-validators: no
+            // historical worktree, and its own `--commit` picks the file. It
+            // takes the same non-blocking lock they do, so it cannot read an
+            // archive a concurrent `tilegen` is mid-write.
+            if matches!(verify, VerifyCommand::ElivVerify { .. }) {
+                if commit.is_some() {
+                    return Err(DevError::Config(
+                        "'brokkr verify --commit' rebuilds a historical binary, which \
+                         'verify pmtiles' never needs - it reads the archive with the \
+                         current one. Use 'brokkr verify pmtiles --commit <hash>' to \
+                         choose which archive to open."
+                            .to_string(),
+                    ));
+                }
+                let _lock = acquire_cmd_lock(project, &project_root, "verify pmtiles")?;
+                return cmd_verify(
+                    &dev_config,
+                    project,
+                    &project_root,
+                    Some(&build_root),
+                    verify,
+                    &features,
+                    verbose,
+                );
+            }
             let cwd = std::env::current_dir()
                 .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
             let parent_build_root = (cwd != project_root).then_some(cwd.as_path());

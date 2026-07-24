@@ -14,6 +14,7 @@ pub fn run(
     build_root: &Path,
     features: &[String],
     geometry_stats: bool,
+    unique_payloads: bool,
 ) -> Result<(), DevError> {
     let build_config = if features.is_empty() {
         build::BuildConfig::release(None)
@@ -29,6 +30,9 @@ pub fn run(
     let mut args = vec!["verify", &pmtiles_str];
     if geometry_stats {
         args.push("--geometry-stats");
+    }
+    if unique_payloads {
+        args.push("--unique-payloads");
     }
     let captured = output::run_captured(&binary_str, &args, build_root)?;
 

@@ -64,7 +64,10 @@ Every measurable command on a project that uses datasets accepts:
 - `--osc-seq <seq>` - selects from `osc.<seq>`. Auto-selects if exactly one
   OSC is configured.
 - `--tiles <variant>` - selects from `pmtiles.<variant>`. Auto-selects if
-  exactly one PMTiles entry is configured.
+  exactly one PMTiles entry is configured. Only nidhogg's `serve` consumes it:
+  elivagar's archive readers address the durable output store by
+  `--dataset`/`--variant`/`--commit`/`--file` instead (see
+  `docs/projects/elivagar.md`).
 
 pbfhogg has additional flags for snapshots, I/O backends, and compression -
 see `docs/projects/pbfhogg.md`.

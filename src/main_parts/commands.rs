@@ -946,19 +946,28 @@ fn cmd_verify(
         // ----- elivagar verify variants -----
         VerifyCommand::ElivVerify {
             dataset,
-            tiles,
+            variant,
+            commit,
+            file,
             geometry_stats,
+            unique_payloads,
         } => {
             project::require(project, Project::Elivagar, "verify")?;
+            // Never reached under a historical worktree: `run()` dispatches
+            // this variant before `with_worktree`, so `build_root` is the
+            // main tree and the archive resolver reads its HEAD.
             elivagar::cmd::verify(
                 dev_config,
                 project,
                 project_root,
-                build_root,
+                build_root.unwrap_or(project_root),
                 &dataset,
-                tiles.as_deref(),
+                &variant,
+                commit.as_deref(),
+                file.as_deref(),
                 features,
                 geometry_stats,
+                unique_payloads,
             )
         }
 

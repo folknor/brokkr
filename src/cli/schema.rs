@@ -2746,17 +2746,37 @@ pub(crate) enum VerifyCommand {
     },
 
     /// [elivagar] Verify PMTiles output integrity
+    ///
+    /// Addresses the durable output store through the same
+    /// `[--dataset D] [--variant V] [--commit H | --file P]` resolver as
+    /// `pmtiles-inspect`/`diag`/`svg`/`regress`. It reads the archive with the
+    /// current binary, so `--commit` picks which file to open, not which
+    /// toolchain to build - unlike `brokkr verify --commit` on the pbfhogg
+    /// subcommands. `--file` is the escape hatch for archives that are not
+    /// dataset output at all, such as the world artifact
+    /// `data/ocean-tiles.pmtiles`.
     #[command(name = "pmtiles", display_order = 15)]
     ElivVerify {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        /// PMTiles variant from config (auto-selects if only one configured)
+        /// PBF variant, selecting which archive to open (raw, indexed, locations)
+        #[arg(long, default_value = "raw")]
+        variant: String,
+        /// Commit short hash selecting which archive to open (default: current HEAD)
         #[arg(long)]
-        tiles: Option<String>,
+        commit: Option<String>,
+        /// Explicit PMTiles path, skips dataset/variant/commit resolution
+        #[arg(long)]
+        file: Option<String>,
         /// Print per-zoom ocean ring geometry statistics
         #[arg(long)]
         geometry_stats: bool,
+        /// Validate each distinct compressed payload once, keeping addressed-tile
+        /// accounting. The way to verify a large run-heavy archive (the world
+        /// artifact addresses ~23x more tiles than it stores payloads).
+        #[arg(long)]
+        unique_payloads: bool,
     },
 
     /// [nidhogg] Batch query verification
