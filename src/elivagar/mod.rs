@@ -15,6 +15,7 @@ pub mod compare_tiles;
 pub mod corpus;
 pub mod diag;
 pub mod dispatch;
+pub mod eliv;
 pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod inspect;

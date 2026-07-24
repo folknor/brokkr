@@ -299,11 +299,15 @@ pub(crate) fn regress(
     )
 }
 
-/// `brokkr pmtiles-corpus <sub>` - resolve the archive (and, where the
-/// subcommand uses one, the corpus dir) from the shared selector, assemble the
-/// trailing flags verbatim, and exec `elivagar corpus <sub>`. Every value set
-/// (`--mode`, `--op`) is elivagar's to own, so brokkr carries strings; exit
-/// codes (0/1/2) pass through untouched.
+/// `brokkr pmtiles-corpus <sub>` - the corpus gate, now native brokkr code over
+/// the linked elivagar crate (no shelling). Resolves the archive and corpus dir
+/// from the shared selector, runs the gate in-process, prints the report, and
+/// maps the verdict to the process exit code (0 pass / 1 content mismatch / 2
+/// archive refusal / 3 baseline trouble) via `DevError::ExitCode`.
+///
+/// `lock` is currently unused: the gate is read-only on the archive (check /
+/// render) or writes only into the committed corpus dir (bless / render-manifest
+/// / mutate output), neither of which touches tilegen scratch or the global lock.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn corpus(
     dev_config: &config::DevConfig,
@@ -311,8 +315,10 @@ pub(crate) fn corpus(
     project_root: &Path,
     build_root: &Path,
     cmd: &PmtilesCorpusCommand,
-    lock: Option<&LockGuard>,
+    _lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
+    use super::corpus::{self as gate, MutationOp};
+
     project::require(project, Project::Elivagar, "pmtiles-corpus")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
@@ -332,18 +338,17 @@ pub(crate) fn corpus(
     // Corpus dir default: corpus/<dataset> under the repo root (build_root),
     // where the git-committed corpus lives - NOT project_root (config/data dir).
     // Overridable with --corpus.
-    let corpus_dir = |a: &CorpusArchiveArgs, over: &Option<PathBuf>| -> String {
+    let corpus_dir = |a: &CorpusArchiveArgs, over: &Option<PathBuf>| -> PathBuf {
         over.clone()
             .unwrap_or_else(|| build_root.join("corpus").join(&a.dataset))
-            .display()
-            .to_string()
     };
 
     match cmd {
         PmtilesCorpusCommand::Check { archive, corpus } => {
             let path = resolve(archive)?;
-            let trailing = vec!["--corpus".to_owned(), corpus_dir(archive, corpus)];
-            super::corpus::run(build_root, "check", &path, &trailing, lock)
+            let (outcome, report) = gate::check(&path, &corpus_dir(archive, corpus))
+                .map_err(DevError::Io)?;
+            emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Bless {
             archive,
@@ -352,15 +357,10 @@ pub(crate) fn corpus(
             mode,
         } => {
             let path = resolve(archive)?;
-            let mut trailing = vec!["--corpus".to_owned(), corpus_dir(archive, corpus)];
-            if *rotate {
-                trailing.push("--rotate".to_owned());
-            }
-            if let Some(m) = mode {
-                trailing.push("--mode".to_owned());
-                trailing.push(m.clone());
-            }
-            super::corpus::run(build_root, "bless", &path, &trailing, lock)
+            let mode = parse_mode(mode.as_deref())?;
+            let (outcome, report) = gate::bless(&path, &corpus_dir(archive, corpus), mode, *rotate)
+                .map_err(DevError::Io)?;
+            emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::RenderManifest {
             archive,
@@ -368,12 +368,13 @@ pub(crate) fn corpus(
             style,
         } => {
             let path = resolve(archive)?;
-            let mut trailing = vec!["--corpus".to_owned(), corpus_dir(archive, corpus)];
-            if let Some(s) = style {
-                trailing.push("--style".to_owned());
-                trailing.push(s.display().to_string());
-            }
-            super::corpus::run(build_root, "render-manifest", &path, &trailing, lock)
+            let dir = corpus_dir(archive, corpus);
+            let style_path = style
+                .clone()
+                .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
+            let (outcome, report) = gate::render_manifest(&path, &dir, &style_path)
+                .map_err(DevError::Io)?;
+            emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Render {
             archive,
@@ -385,32 +386,26 @@ pub(crate) fn corpus(
             output,
         } => {
             let path = resolve(archive)?;
-            let mut trailing = vec![
-                "-z".to_owned(),
-                z.to_string(),
-                "-x".to_owned(),
-                x.to_string(),
-                "-y".to_owned(),
-                y.to_string(),
-            ];
-            if let Some(l) = layers {
-                trailing.push("--layers".to_owned());
-                trailing.push(l.clone());
-            }
-            if let Some(s) = style {
-                trailing.push("--style".to_owned());
-                trailing.push(s.display().to_string());
-            }
-            if let Some(o) = output {
-                trailing.push("-o".to_owned());
-                trailing.push(o.display().to_string());
-            }
-            super::corpus::run(build_root, "render", &path, &trailing, lock)
+            let style_path = style
+                .clone()
+                .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
+            let layer_list: Option<Vec<String>> = layers
+                .as_ref()
+                .map(|l| l.split(',').map(str::to_owned).collect());
+            gate::render_tile(
+                &path,
+                *z,
+                *x,
+                *y,
+                &style_path,
+                layer_list.as_deref(),
+                output.as_deref(),
+            )
+            .map_err(DevError::Io)
         }
         PmtilesCorpusCommand::Rings { archive, output } => {
             let path = resolve(archive)?;
-            let trailing = vec!["-o".to_owned(), output.display().to_string()];
-            super::corpus::run(build_root, "rings", &path, &trailing, lock)
+            gate::rings(&path, output).map_err(DevError::Io)
         }
         PmtilesCorpusCommand::Mutate {
             archive,
@@ -419,6 +414,8 @@ pub(crate) fn corpus(
             tile,
         } => {
             let path = resolve(archive)?;
+            let mop = MutationOp::parse(op)
+                .ok_or_else(|| DevError::Config(format!("unknown mutate op: {op}")))?;
             // Default `-o` to a calibrand under data/corpus-calibrands/ (cleared
             // by a routine `brokkr clean`); an explicit `-o` is the user's file.
             let out_path = match output {
@@ -429,17 +426,58 @@ pub(crate) fn corpus(
                     dir.join(format!("{}-{}-{op}.pmtiles", archive.dataset, archive.variant))
                 }
             };
-            let mut trailing = vec![
-                "-o".to_owned(),
-                out_path.display().to_string(),
-                "--op".to_owned(),
-                op.clone(),
-            ];
-            if let Some(t) = tile {
-                trailing.push("--tile".to_owned());
-                trailing.push(t.clone());
-            }
-            super::corpus::run(build_root, "mutate", &path, &trailing, lock)
+            let target = tile.as_deref().map(parse_tile).transpose()?;
+            gate::mutate::mutate(&path, &out_path, target, mop).map_err(DevError::Io)?;
+            crate::output::result_msg(&format!("mutated -> {}", out_path.display()));
+            Ok(())
         }
     }
+}
+
+/// Print a corpus report and translate the verdict into the process exit code.
+fn emit_corpus(outcome: super::corpus::Outcome, report: &super::corpus::CheckReport) -> Result<(), DevError> {
+    use super::corpus::Outcome;
+    for w in &report.warnings {
+        crate::output::run_msg(&format!("warning: {w}"));
+    }
+    for d in &report.contract_diffs {
+        crate::output::run_msg(&format!("contract {d}"));
+    }
+    if !report.message.is_empty() {
+        for line in report.message.lines() {
+            crate::output::run_msg(line);
+        }
+    }
+    if report.changed > 0 {
+        crate::output::run_msg(&format!("{} changed run(s)", report.changed));
+    }
+    match outcome {
+        Outcome::Pass => {
+            crate::output::result_msg("corpus: pass");
+            Ok(())
+        }
+        other => Err(DevError::ExitCode(other.exit_code())),
+    }
+}
+
+fn parse_mode(mode: Option<&str>) -> Result<super::corpus::DigestMode, DevError> {
+    use super::corpus::DigestMode;
+    match mode {
+        None | Some("leaves") => Ok(DigestMode::Leaves),
+        Some("buckets") => Ok(DigestMode::Buckets),
+        Some(other) => Err(DevError::Config(format!("unknown digest mode: {other}"))),
+    }
+}
+
+/// Parse a `z/x/y` mutate/render target.
+fn parse_tile(s: &str) -> Result<(u8, u32, u32), DevError> {
+    let mut p = s.split('/');
+    let bad = || DevError::Config(format!("invalid tile spec (want z/x/y): {s}"));
+    let z: u8 = p.next().and_then(|t| t.parse().ok()).ok_or_else(bad)?;
+    let x: u32 = p.next().and_then(|t| t.parse().ok()).ok_or_else(bad)?;
+    let y: u32 = p.next().and_then(|t| t.parse().ok()).ok_or_else(bad)?;
+    if p.next().is_some() {
+        return Err(bad());
+    }
+    Ok((z, x, y))
 }
