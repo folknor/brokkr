@@ -332,3 +332,120 @@ fn nudge_geometry(input: &[u8]) -> io::Result<Vec<u8>> {
     }
     Err(io::Error::new(io::ErrorKind::InvalidData, "geometry has no MoveTo"))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::let_underscore_must_use)]
+mod calibration {
+    //! The mutate calibrands (ported from elivagar's `corpus::mutation_tests`):
+    //! `drop-tile`/`nudge-geometry`/`layer-version` must change the target
+    //! tile's canonical hash and nothing else, and `regzip` (byte-different)
+    //! must be semantically neutral. Built over the real `PmtilesWriter` +
+    //! canonical hash on a synthetic archive - no external data - so they run in
+    //! the normal test suite (`brokkr.md`, Calibration).
+
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    use super::super::super::eliv::{
+        ArchiveView, PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id,
+    };
+    use super::super::digest::{DigestMode, LeafRun};
+    use super::super::compute;
+    use super::{Field, MutationOp, encode_fields, mutate};
+
+    fn fixture_payload() -> Vec<u8> {
+        // One point feature: geometry MoveTo(1) at (0,0); extent 4096, version 2.
+        let feature = encode_fields(&[
+            Field { number: 3, wire: 0, value: vec![1] },
+            Field { number: 4, wire: 2, value: vec![9, 0, 0] },
+        ]);
+        let layer = encode_fields(&[
+            Field { number: 1, wire: 2, value: b"test".to_vec() },
+            Field { number: 2, wire: 2, value: feature },
+            Field { number: 5, wire: 0, value: vec![0x80, 0x20] },
+            Field { number: 15, wire: 0, value: vec![2] },
+        ]);
+        let tile = encode_fields(&[Field { number: 3, wire: 2, value: layer }]);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::new(6));
+        gzip.write_all(&tile).unwrap();
+        gzip.finish().unwrap()
+    }
+
+    fn test_dir() -> PathBuf {
+        let path = PathBuf::from("target").join(format!("corpus-mutation-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    // A z1 run of 4 tiles sharing one blob; the target is the second tile.
+    fn source(path: &Path) -> u64 {
+        let payload = fixture_payload();
+        let mut writer = PmtilesWriter::new(PmtilesConfig {
+            min_zoom: 1,
+            max_zoom: 1,
+            bounds: (0.0, 0.0, 1.0, 1.0),
+            center: (0.0, 0.0, 1),
+        });
+        let first = xy_to_tile_id(1, 0, 0);
+        writer.add_run(first, 4, &payload).unwrap();
+        writer.write_to(path).unwrap();
+        first + 1
+    }
+
+    fn leaf_hashes(leaves: &[LeafRun]) -> BTreeMap<u64, u128> {
+        leaves
+            .iter()
+            .flat_map(|leaf| {
+                (leaf.tile_id..leaf.tile_id + u64::from(leaf.run_length)).map(move |id| (id, leaf.hash))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mutations_are_isolated_and_regzip_is_semantically_neutral() {
+        let dir = test_dir();
+        let input = dir.join("source.pmtiles");
+        let target = source(&input);
+        let before = ArchiveView::open(&input).unwrap();
+        let (before_digest, before_leaves) = compute(&before, DigestMode::Leaves).unwrap();
+        let before_meta = before.metadata().unwrap();
+
+        for (op, name) in [
+            (MutationOp::DropTile, "drop"),
+            (MutationOp::NudgeGeometry, "nudge"),
+            (MutationOp::LayerVersion, "version"),
+        ] {
+            let output = dir.join(format!("{name}.pmtiles"));
+            mutate(&input, &output, Some(tile_id_to_zxy(target)), op).unwrap();
+            let after = ArchiveView::open(&output).unwrap();
+            assert_eq!(after.metadata().unwrap(), before_meta, "{name} metadata changed");
+            let (digest, leaves) = compute(&after, DigestMode::Leaves).unwrap();
+            assert_ne!(digest.root, before_digest.root, "{name} did not FIRE (digest unchanged)");
+            let old = leaf_hashes(&before_leaves);
+            let new = leaf_hashes(&leaves);
+            for (&id, &hash) in &old {
+                if id != target {
+                    assert_eq!(new.get(&id), Some(&hash), "{name} changed non-target tile {id}");
+                }
+            }
+        }
+
+        // regzip: byte-different, semantically identical (must CLEAR).
+        let output = dir.join("regzip.pmtiles");
+        mutate(&input, &output, None, MutationOp::Regzip).unwrap();
+        let after = ArchiveView::open(&output).unwrap();
+        let (digest, leaves) = compute(&after, DigestMode::Leaves).unwrap();
+        assert_eq!(after.metadata().unwrap(), before_meta);
+        assert_eq!(digest.root, before_digest.root, "regzip changed the digest");
+        assert_eq!(leaves, before_leaves, "regzip changed the leaves");
+        assert_ne!(fs::read(&input).unwrap(), fs::read(&output).unwrap(), "regzip left bytes unchanged");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
