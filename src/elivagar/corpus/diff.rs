@@ -151,3 +151,65 @@ pub fn bucket_delta_lines(committed: &[BucketDigest], current: &[BucketDigest]) 
     }
     (changed, out)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::super::super::eliv::xy_to_tile_id;
+    use super::*;
+
+    fn run(z: u8, x: u32, y: u32, len: u32, hash: u128) -> LeafRun {
+        LeafRun {
+            tile_id: xy_to_tile_id(z, x, y),
+            run_length: len,
+            hash,
+        }
+    }
+
+    #[test]
+    fn leaf_diff_names_changed_added_and_removed() {
+        // committed: a 2-run at z3 (hash A) and a single tile (hash B).
+        let committed = vec![run(3, 0, 0, 2, 0xA), run(3, 4, 4, 1, 0xB)];
+        // current: the 2-run re-hashed to C (changed), B gone (removed), a new
+        // tile at z3/5/5 (added).
+        let current = vec![run(3, 0, 0, 2, 0xC), run(3, 5, 5, 1, 0xD)];
+        let (n, lines) = leaf_diff(&committed, &current);
+        assert_eq!(n, 3, "one changed run + one removed + one added");
+        assert!(lines.iter().any(|l| l.starts_with("changed 3 0 0 2")));
+        assert!(lines.iter().any(|l| l.starts_with("added")));
+        assert!(lines.iter().any(|l| l.starts_with("removed")));
+    }
+
+    #[test]
+    fn identical_leaves_diff_empty() {
+        let leaves = vec![run(5, 1, 1, 3, 0x11)];
+        let (n, lines) = leaf_diff(&leaves, &leaves);
+        assert_eq!(n, 0);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn zoom_delta_flags_hash_change_and_count_change() {
+        let committed = vec![
+            ZoomDigest { z: 3, tiles: 10, hash: 0x1 },
+            ZoomDigest { z: 4, tiles: 20, hash: 0x2 },
+        ];
+        let current = vec![
+            ZoomDigest { z: 3, tiles: 10, hash: 0x9 }, // same count, hash changed
+            ZoomDigest { z: 4, tiles: 21, hash: 0x2 }, // count changed
+        ];
+        let lines = zoom_delta_lines(&committed, &current);
+        assert!(lines.iter().any(|l| l.contains("zoom 3") && l.contains("hash-changed")));
+        assert!(lines.iter().any(|l| l.contains("zoom 4 tiles 20->21")));
+    }
+
+    #[test]
+    fn bucket_delta_counts_changed_cells() {
+        let committed = vec![BucketDigest { z: 8, cell: xy_to_tile_id(7, 1, 1), tiles: 5, hash: 0x1 }];
+        let current = vec![BucketDigest { z: 8, cell: xy_to_tile_id(7, 1, 1), tiles: 5, hash: 0x2 }];
+        let (changed, lines) = bucket_delta_lines(&committed, &current);
+        assert_eq!(changed, 1);
+        assert!(lines.iter().any(|l| l.starts_with("bucket z=8")));
+    }
+}

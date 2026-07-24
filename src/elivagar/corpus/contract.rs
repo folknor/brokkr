@@ -119,3 +119,74 @@ fn diff_json(path: &str, left: &Value, right: &Value, out: &mut Vec<String>) {
 pub fn input_name(c: &ContractDoc) -> Option<&str> {
     c.input.get("name").and_then(Value::as_str)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Ported from elivagar's `provenance` tests - the gating policy is brokkr's
+    //! now, so its tests live with it.
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use serde_json::json;
+
+    fn contract_metadata() -> String {
+        json!({
+            "elivagar": {
+                "schema": SCHEMA_VERSION,
+                "input": {"name": "denmark", "xxh3_128": "ab", "features": {"locations_on_ways": true}},
+                "config": {"ocean": {"artifact_key": {"policy_version": 2}}, "fanout_cap": 8},
+                "build": {"elivagar": {"commit": "abc", "dirty": false}}
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn extract_contract_names_every_no_contract_case() {
+        assert!(matches!(extract_contract("not json"), ContractState::Invalid));
+        assert!(matches!(extract_contract("{}"), ContractState::Absent));
+        assert!(matches!(
+            extract_contract(r#"{"elivagar": 7}"#),
+            ContractState::Invalid
+        ));
+        assert!(matches!(
+            extract_contract(r#"{"elivagar": {}}"#),
+            ContractState::Incomplete("schema")
+        ));
+        assert!(matches!(
+            extract_contract(r#"{"elivagar": {"schema": 999}}"#),
+            ContractState::UnknownSchema(999)
+        ));
+        assert!(matches!(
+            extract_contract(r#"{"elivagar": {"schema": 1, "config": {}, "build": {}}}"#),
+            ContractState::Incomplete("input")
+        ));
+        assert!(matches!(
+            extract_contract(&contract_metadata()),
+            ContractState::Contract(_)
+        ));
+    }
+
+    #[test]
+    fn contract_diff_gates_config_and_input_but_never_name_or_build() {
+        let ContractState::Contract(base) = extract_contract(&contract_metadata()) else {
+            panic!("baseline must parse");
+        };
+        // Identical contract: no diffs.
+        assert!(contract_diff(&base, &base).is_empty());
+
+        // A name-only change and a build-only change are both ignored (diagnostic).
+        let mut named = base.clone();
+        named.input["name"] = json!("germany");
+        named.build["elivagar"]["commit"] = json!("def");
+        assert!(contract_diff(&base, &named).is_empty());
+
+        // The ocean policy version is gated and named by path.
+        let mut policy = base.clone();
+        policy.config["ocean"]["artifact_key"]["policy_version"] = json!(1);
+        assert_eq!(
+            contract_diff(&base, &policy),
+            vec!["config.ocean.artifact_key.policy_version".to_string()]
+        );
+    }
+}
