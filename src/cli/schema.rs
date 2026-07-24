@@ -1524,19 +1524,42 @@ Examples:
         #[arg(short = 'o', long)]
         output: Option<std::path::PathBuf>,
     },
-    /// [elivagar] Diff current tilegen output against the blessed archive
-    #[command(display_order = 36)]
+    /// [elivagar] Diff two explicit tilegen archives (tier-3 attribution)
+    #[command(
+        display_order = 36,
+        long_about = "\
+[elivagar] Diff two explicit tilegen output archives.
+
+Both sides are explicit - there is no default baseline, ever. The CURRENT \
+side comes from --commit/--file; the COMPARAND from --against-commit/--against \
+(one is required, or clap refuses with a usage error).
+
+Comparability is YOUR responsibility. regress reads no provenance contract by \
+design - it is the attribution instrument, and cross-contract diffs (artifact-\
+active vs computed, an intended config change) are legitimate uses. Read the \
+provenance blocks via `brokkr pmtiles-inspect` first: comparing across \
+variants or configs reports a six-figure diff on two correct builds.",
+        group(
+            ArgGroup::new("comparand")
+                .args(&["against", "against_commit"])
+                .required(true)
+                .multiple(false)
+        ),
+    )]
     Regress {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
-        /// Commit short hash selecting which current output to diff (default: current HEAD)
+        /// Commit short hash selecting the CURRENT output (default: current HEAD)
         #[arg(long)]
         commit: Option<String>,
         /// Explicit CURRENT PMTiles path, skips dataset/commit resolution
         #[arg(long)]
         file: Option<String>,
-        /// Explicit BLESSED PMTiles path, skips brokkr.toml blessed resolution
+        /// Commit short hash selecting the COMPARAND output from data/tilegen/
+        #[arg(long)]
+        against_commit: Option<String>,
+        /// Explicit COMPARAND PMTiles path
         #[arg(long)]
         against: Option<String>,
         /// Geometry tolerance in the layer's extent units (default 0)
@@ -1548,25 +1571,15 @@ Examples:
         /// Per-class example cap (default 20)
         #[arg(long, default_value_t = 20)]
         max_examples: usize,
-        /// Dump side-by-side SVG pairs for the worst structural diffs to DIR
+        /// Dump side-by-side overlay pairs for the worst structural diffs to DIR
         #[arg(long)]
-        svg_dump: Option<std::path::PathBuf>,
+        overlay: Option<std::path::PathBuf>,
+        /// Cap on the number of overlay pairs emitted
+        #[arg(long)]
+        overlay_max: Option<usize>,
         /// Emit a machine-readable report to stdout
         #[arg(long)]
         json: bool,
-    },
-    /// [elivagar] Bless the current tilegen output as the regress reference
-    #[command(display_order = 37)]
-    Bless {
-        /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
-        dataset: String,
-        /// Commit short hash selecting which output to bless (default: current HEAD)
-        #[arg(long)]
-        commit: Option<String>,
-        /// Explicit PMTiles path to bless, skips dataset/commit resolution
-        #[arg(long)]
-        file: Option<String>,
     },
     /// Print PMTiles v3 file statistics
     #[command(display_order = 19)]

@@ -41,15 +41,6 @@ impl FileEntry for config::PmtilesEntry {
     }
 }
 
-impl FileEntry for config::BlessedEntry {
-    fn file(&self) -> &str {
-        &self.file
-    }
-    fn xxhash(&self) -> Option<&str> {
-        self.xxhash.as_deref()
-    }
-}
-
 /// Generic file resolver: lookup entry in map → join path → check exists → verify hash.
 fn resolve_entry_path<E: FileEntry>(
     entries: &HashMap<String, E>,
@@ -551,32 +542,6 @@ pub(crate) fn resolve_default_pmtiles_path(
         "pmtiles",
         "--tiles",
         &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )
-}
-
-/// Resolve the blessed reference archive for a dataset (for `regress`).
-/// Looks up the singular `[<host>.datasets.<D>.blessed]` entry, joins its
-/// `file` under the data dir, checks existence, and verifies the recorded
-/// xxhash. Errors clearly when no blessed archive is registered.
-pub(crate) fn resolve_blessed_path(
-    dataset: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, DevError> {
-    let ds = get_dataset(dataset, paths)?;
-    let blessed = ds.blessed.as_ref().ok_or_else(|| {
-        DevError::Config(format!(
-            "dataset '{dataset}' has no blessed archive registered on {}; \
-             run `brokkr bless --dataset {dataset}` after a gate-passing build",
-            paths.hostname
-        ))
-    })?;
-    finalize_entry_path(
-        blessed,
-        &paths.data_dir,
-        "blessed archive",
         ds.origin.as_deref(),
         project_root,
     )

@@ -635,7 +635,6 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
-            blessed: None,
             snapshot: HashMap::new(),
         }
     }
@@ -906,7 +905,6 @@ xxhash = "feedface"
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
-            blessed: None,
             snapshot: HashMap::new(),
         };
         ds.snapshot.insert(
@@ -947,7 +945,6 @@ xxhash = "feedface"
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
-            blessed: None,
             snapshot: HashMap::new(),
         };
         ds.snapshot.insert(

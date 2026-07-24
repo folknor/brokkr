@@ -1148,11 +1148,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             dataset,
             commit,
             file,
+            against_commit,
             against,
             tol,
             max_moved,
             max_examples,
-            svg_dump,
+            overlay,
+            overlay_max,
             json,
         } => {
             let _lock = acquire_cmd_lock(project, &project_root, "regress")?;
@@ -1164,29 +1166,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dataset,
                 commit.as_deref(),
                 file.as_deref(),
+                against_commit.as_deref(),
                 against.as_deref(),
                 tol,
                 max_moved,
                 max_examples,
-                svg_dump.as_deref(),
+                overlay.as_deref(),
+                overlay_max,
                 json,
                 Some(&_lock),
-            )
-        }
-        Command::Bless {
-            dataset,
-            commit,
-            file,
-        } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "bless")?;
-            elivagar::cmd::bless(
-                &dev_config,
-                project,
-                &project_root,
-                &build_root,
-                &dataset,
-                commit.as_deref(),
-                file.as_deref(),
             )
         }
         Command::DownloadOcean => {

@@ -89,86 +89,35 @@ archive a concurrent `tilegen` run is mid-write - it refuses instead.
 `brokkr verify pmtiles --geometry-stats` forwards `--geometry-stats` to
 `elivagar verify` (per-zoom ocean ring geometry statistics).
 
-## Output regression: regress / bless
+## Output regression: regress (tier-3 attribution)
 
-`brokkr regress` (`src/elivagar/regress.rs`) is a passthrough wrapper over
-`elivagar regress <current> --against <blessed>`: it resolves the CURRENT
-archive via `resolve_pmtiles_by_commit()` (durable output dir, by
-`--commit`/`--file`) and the BLESSED archive via `resolve_blessed_path()`
-(the singular `[<host>.datasets.<D>.blessed]` brokkr.toml entry, xxhash-
-verified) or an explicit `--against <path>`. Flags `--tol`/`--max-moved`/
-`--max-examples`/`--svg-dump`/`--json` pass straight through. The wrapper
-streams the report live and propagates elivagar's exit code verbatim (0 =
-no accountable diff, 1 = regression / budget overrun) - it is a gate. Like
-the inspection subcommands, it takes the non-blocking brokkr lock first.
+`brokkr regress` (`src/elivagar/regress.rs`) is a thin passthrough over
+`elivagar regress <current> --against <comparand>`. **Both sides are
+explicit** and there is no default baseline, ever: the CURRENT archive comes
+from `--commit`/`--file`, the COMPARAND from `--against-commit`/`--against`,
+each resolved through the same `resolve_pmtiles_by_commit()` used by
+`pmtiles-inspect`/`diag`/`svg` (durable output dir `data/tilegen`). A required
+clap `ArgGroup` over the two `--against*` flags means a missing comparand is a
+usage error at clap's exit **2** - never colliding with regress's own verdict
+codes. Flags `--tol`/`--max-moved`/`--max-examples`/`--overlay`/`--overlay-max`/
+`--json` pass straight through. The wrapper streams the report live and
+propagates elivagar's exit code verbatim (0 = no accountable diff, 1 =
+regression / budget overrun). Like the inspection subcommands, it takes the
+non-blocking brokkr lock first.
 
-### The comparability gate (`provenance.rs`)
-
-Before any of that, `regress` reads both archives' `elivagar` provenance
-blocks (`src/elivagar/provenance.rs`, via `pmtiles::read_metadata()`) and
-implements step 1 of the consumer contract in elivagar's
-`reference/metadata.md`: compare `input` and `config`, and **refuse** the
-geometry comparison on mismatch rather than emitting a diff. Refusal exits
-**2** - neither of elivagar's two codes, on purpose. A refusal is not a pass,
-and reporting it as 1 recreates the exact false alarm the gate exists to
-prevent: on 2026-07-14 a locations-blessed baseline was compared against a raw
-build, reported as 363,620 structural moves, and investigated at length as a
-code regression. Both builds were correct.
-
-The gate runs *before* `cargo_build` - it is two header reads and a JSON
-parse, and there is no reason to pay for a compile to be told the comparison
-was never going to mean anything.
-
-What is and isn't gated is the whole design:
-
-- **Gated** (`CONTRACT_FIELDS`): `input.xxh3_128` plus the named `config.*`
-  fields. `input.xxh3_128` is the *identity* and subsumes `bytes`,
-  `replication_timestamp` and `features` - all functions of the same bytes.
-- **Never gated**: `input.name` is a **label**; two files named for the same
-  region at the same commit can be entirely different contracts, which is how
-  2026-07-14 happened. `build`, `effective` and `execution` are diagnostic -
-  given identical input and config, `effective` is a pure function of the code
-  and `build` *is* the code, so gating them would refuse precisely the
-  revision-to-revision comparisons the gate is for. They are reported as
-  `[contract]` context lines instead.
-- The comparison is over a **fixed list of named fields**, not a deep-equal:
-  `metadata.md` says adding a member needs no schema bump because readers
-  ignore unknown members, so a deep-equal would refuse two comparable archives
-  the moment elivagar grew a field. A `schema` mismatch short-circuits, since
-  a bump means an existing field changed meaning.
-
-An archive with **no** block cannot be gated and is refused, saying so - the
-contract's own instruction, the alternative being to assume comparability.
-There is no override flag: an escape hatch would just be the prose rule again,
-with a flag. Note this means a baseline blessed before elivagar's `b833fc8`
-must be rebuilt and re-blessed before `regress` will compare against it.
-
-A block that is *present but incomplete* is refused too, by
-`Provenance::validate()` before any comparison happens. The gate requires
-positive evidence of comparability, and comparison alone cannot establish it:
-two `{}` blocks agree on every contract field by both lacking it, which is the
-strongest possible statement of "we know nothing" reading as "these are
-comparable". So every contract field must be present, non-null, and not the
-`unknown` sentinel (freshness is load-bearing - provenance that lies is worse
-than provenance that is absent), and the block must be a JSON object.
-
-`schema` is checked against `SCHEMA`, the version this reader knows, **not**
-merely against the other archive's. Two archives at a schema brokkr has never
-seen agree with each other trivially, including on fields the bump renamed
-away - which both would then lack - so an equal-to-each-other check would pass
-them. A bump means an existing field changed meaning, so a reader that has not
-been taught the new meaning must refuse rather than guess. Adding a member
-still needs no bump: unknown members are ignored, and there is a test pinning
-that.
-
-`brokkr bless` (`src/elivagar/bless.rs`) promotes a gate-passing output to
-the dataset's regress reference: it REFUSES a dirty tree (results.db, `*.md`,
-and brokkr.toml excluded, matching bench discipline - a hash from uncommitted state
-does not reproduce), copies the current archive to
-`data/blessed/<dataset>-<commit>.pmtiles` (gitignored), computes its xxh128,
-and writes the singular `[<host>.datasets.<D>.blessed]` entry into
-brokkr.toml via `toml_edit` (comment-preserving). Blessing is manual and
-deliberate - run only after a landing's full gate battery (incl. human QA).
+**There is deliberately no comparability gate and no baseline registry.**
+`regress` is the attribution instrument, and reads no provenance contract by
+design: its legitimate uses include cross-contract diffs (adjudicating
+artifact-active vs computed output, pricing an intended config change), which
+a brokkr-side refusal would block, pushing people back to the raw binary.
+Comparability is the caller's responsibility - the help text points at `brokkr
+pmtiles-inspect` for reading the provenance blocks and warns that cross-variant
+comparisons report six-figure diffs on two correct builds. This replaced the
+old `src/elivagar/provenance.rs` comparability gate (and `brokkr bless` / the
+`[<host>.datasets.<D>.blessed]` config entry), removed on 2026-07-24 when
+elivagar retired the blessed-pmtiles-archive machinery in favour of a
+git-committed output corpus. The corpus is the only baseline mechanism now;
+see the pmtiles-corpus section below.
 
 Oracle (`scripts/validate/earcut-oracle.mjs`, a Node script, not a Rust
 subcommand) has no brokkr wrapper yet - deferred, since it needs a

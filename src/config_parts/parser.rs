@@ -1463,18 +1463,6 @@ fn validate_datasets(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError
                     )));
                 }
             }
-            if let Some(blessed) = &ds.blessed {
-                if blessed.file.is_empty() {
-                    return Err(DevError::Config(format!(
-                        "{host}.datasets.{ds_name}.blessed: file name is empty"
-                    )));
-                }
-                if blessed.commit.is_empty() {
-                    return Err(DevError::Config(format!(
-                        "{host}.datasets.{ds_name}.blessed: commit is empty"
-                    )));
-                }
-            }
             for (snap_key, snap) in &ds.snapshot {
                 validate_snapshot_key(snap_key).map_err(|e| {
                     DevError::Config(format!(

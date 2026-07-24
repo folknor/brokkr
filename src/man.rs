@@ -88,7 +88,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "elivagar",
-        summary: "elivagar commands, regress/bless, the durable tilegen output store",
+        summary: "elivagar commands, regress, the pmtiles corpus, the durable tilegen output store",
         content: include_str!("../docs/projects/elivagar.md"),
         visibility: Visibility::Only(&[Project::Elivagar]),
     },

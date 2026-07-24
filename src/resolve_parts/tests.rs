@@ -58,7 +58,6 @@ mod tests {
             pbf: HashMap::new(),
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
-            blessed: None,
             snapshot: HashMap::new(),
         }
     }
