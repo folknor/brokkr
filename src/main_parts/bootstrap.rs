@@ -1092,12 +1092,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             file_b,
             sample,
         } => {
-            // compare_tiles resolves target_dir via `cargo metadata` (bootstrap),
-            // so like its elivagar siblings it must hold the lock - that is what
-            // activates the armed toolchain-disable before the rustup-mediated
-            // metadata call runs in a foreign checkout.
-            let _lock = acquire_cmd_lock(project, &project_root, "compare-tiles")?;
-            elivagar::cmd::compare_tiles(project, &build_root, &file_a, &file_b, sample)
+            // Native since the corpus redesign: it opens the two archives
+            // in-process, so there is no cargo build and no `cargo metadata`
+            // bootstrap to serialize behind the lock.
+            elivagar::cmd::compare_tiles(project, &file_a, &file_b, sample)
         }
         Command::PmtilesInspect {
             dataset,
@@ -1188,6 +1186,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             overlay_max,
             json,
         } => {
+            // The archive resolver still bootstraps through `cargo metadata`,
+            // so the lock is still held; the diff itself is in-process.
             let _lock = acquire_cmd_lock(project, &project_root, "regress")?;
             elivagar::cmd::regress(
                 &dev_config,
@@ -1207,7 +1207,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 overlay.as_deref(),
                 overlay_max,
                 json,
-                Some(&_lock),
             )
         }
         Command::PmtilesCorpus { cmd } => {

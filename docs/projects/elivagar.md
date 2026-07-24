@@ -11,8 +11,19 @@
   run/bench/hotpath/alloc based on command enum + mode. Uses `BenchContext`
   for build+harness.
 - `src/elivagar/...` - benchmarks (self, node-store, pmtiles, planetiler,
-  tilemaker, all), verify, compare-tiles, download-ocean, hotpath, regress,
-  corpus (the `pmtiles-corpus` exec runner), ocean_build (`ocean-build`).
+  tilemaker, all), verify, download-ocean, hotpath, ocean_build
+  (`ocean-build`).
+- `src/elivagar/eliv.rs` - the linked-crate seam. The one place that names the
+  elivagar API the adjudication code depends on (reader, `tile_detail` decoder,
+  writer, PMTiles addressing), so `corpus/` and `regress/` import from here
+  rather than reaching into `elivagar::` directly.
+- `src/elivagar/corpus/` - the native corpus gate (`pmtiles-corpus`). Owns the
+  frozen canonical tile hash, the digest fold, the contract gating policy, the
+  SVG render core, and every verdict.
+- `src/elivagar/regress/` - the native two-archive semantic diff. See the
+  regress section below.
+- `src/elivagar/compare_tiles.rs` - the lenient per-layer sampling census, also
+  native.
 
 ## Variant defaults
 
@@ -130,8 +141,9 @@ concurrent `tilegen` run is mid-write - it refuses instead.
 
 ## Output regression: regress (tier-3 attribution)
 
-`brokkr regress` (`src/elivagar/regress.rs`) is a thin passthrough over
-`elivagar regress <current> --against <comparand>`. **Both sides are
+`brokkr regress` (`src/elivagar/regress/`) is **native brokkr code** over the
+linked elivagar crate - there is no `elivagar regress` subcommand to shell to
+anymore. **Both sides are
 explicit** and there is no default baseline, ever: the CURRENT archive comes
 from `--variant`/`--commit`/`--file`, the COMPARAND from
 `--against-variant`/`--against-commit`/`--against`, each resolved through the
@@ -143,17 +155,70 @@ instrument, and adjudicating artifact-active vs computed output or pricing a
 config change means diffing two deliberately different contracts. A required
 clap `ArgGroup` over the two `--against*` flags means a missing comparand is a
 usage error at clap's exit **2** - never colliding with regress's own verdict
-codes. Flags `--tol`/`--max-moved`/`--max-examples`/`--overlay`/`--overlay-max`/
-`--json` pass straight through. The wrapper streams the report live and
-propagates elivagar's exit code verbatim (0 = no accountable diff, 1 =
-regression / budget overrun). Like the inspection subcommands, it takes the
-non-blocking brokkr lock first.
+codes. Exit 0 is no accountable diff, exit 1 a regression or budget overrun.
+Like the inspection subcommands, it takes the non-blocking brokkr lock first -
+the diff itself needs no lock, but the archive resolver still bootstraps through
+`cargo metadata`.
+
+### The engine
+
+Three passes over **blob pairs**, not tiles. PMTiles addresses tiles through
+run-length directory entries, so one stored blob commonly serves thousands of
+addressed tiles - a denmark archive addresses ~1.3M tiles from ~166k unique
+blobs. `merge_runs` (`engine.rs`) cuts the two directories into spans constant on
+both sides and clipped at zoom boundaries; spans sharing a `(current, baseline)`
+blob pair collapse into one work item, and each verdict is multiplied back out by
+tile count at report time. Each pass only sees what the last could not settle:
+
+1. **raw** - byte equality of the two stored blobs.
+2. **canonical** - `corpus::canonical::semantic_hash` per blob (memoized per
+   blob, not per pair), which absorbs the intra-layer feature reordering the
+   pipeline deliberately leaves unconstrained across archives. This is the *same*
+   frozen hash the corpus gate uses, so the two can never disagree about "the
+   same tile".
+3. **detail** - full structural decode via elivagar's `tile_detail`, re-augmented
+   by `prepared.rs` with the bboxes, digests and structure signatures the matcher
+   needs, then classified.
+
+Classification (`compare.rs`) writes to a `DiffSink` rather than a concrete
+result, because the overlay renderer needs the same walk with different retention
+(it keeps the features so it can draw them). Sharing the walk is what guarantees
+an overlay shows the diff the report counted.
+
+Features with an OSM id match by id; anonymous features bucket by attribute set
+and match geometrically within each bucket, so the matcher can never pair two
+features a renderer would style differently. The `ocean` layer opts out of id
+matching entirely - its ids are synthetic piece indices, stable within a build
+and meaningless across two. The residual matcher (`pairing.rs`) is a minimum-cost
+maximum-cardinality matching over a sparse K-nearest candidate graph: greedy
+pairing crosses over on a cluster that moved together, which turns one
+displacement into an added plus a missing feature and reads as structural.
+
+`geometry.rs` is exact integer arithmetic throughout - displacements are compared
+against `--tol`, so a float path would make the tolerance verdict depend on
+rounding. A displacement is only ever *reported* when the two geometries are the
+same shape; a geometry-type, component-count, ring-role or hole-containment
+change is `structural_moved` at distance 0, because "moved by N" would be a false
+reassurance about a change that is not a movement.
+
+The report is bounded by construction (`report.rs`): differing tiles are a count
+plus coalesced ranges, displacements are histograms, and examples are capped per
+outcome class by `ExampleSelector`. `--overlay` (`overlay.rs`) renders per-tile
+attribution SVGs for the first differing tile ids - pink current, blue comparand,
+grey matched-exactly, orange attributes-only - with an attribute-diff panel below
+the tile.
+
+One counter difference from the elivagar original: it emitted its `regress_*`
+counters onto the sidecar marker FIFO as a child process. brokkr is the process
+that *drains* that FIFO, so the same numbers are reported in-band instead - the
+`regress ...` line of the text report, and `counters` in `--json`.
 
 **There is deliberately no comparability gate and no baseline registry.**
 `regress` is the attribution instrument, and reads no provenance contract by
 design: its legitimate uses include cross-contract diffs (adjudicating
 artifact-active vs computed output, pricing an intended config change), which
-a brokkr-side refusal would block, pushing people back to the raw binary.
+a brokkr-side refusal would block - and there is no raw binary to fall back to
+anymore, so a refusal here would simply remove the capability.
 Comparability is the caller's responsibility - the help text points at `brokkr
 pmtiles-inspect` for reading the provenance blocks and warns that cross-variant
 comparisons report six-figure diffs on two correct builds. This replaced the
@@ -162,6 +227,27 @@ old `src/elivagar/provenance.rs` comparability gate (and `brokkr bless` / the
 elivagar retired the blessed-pmtiles-archive machinery in favour of a
 git-committed output corpus. The corpus is the only baseline mechanism now;
 see the pmtiles-corpus section below.
+
+## compare-tiles: the lenient census
+
+`brokkr compare-tiles <a> <b> [--sample N]` (`src/elivagar/compare_tiles.rs`) is
+the lenient half of the pair. Where `regress` diffs feature by feature and
+returns a verdict, this samples `N` tiles per zoom (default 200, even stride so
+the sample spans the extent rather than one corner of the Hilbert curve) and
+prints per-layer feature counts side by side. It has no pass/fail, gates nothing,
+and never refuses.
+
+That is why it decodes **tolerant** while regress decodes **strict**: a foreign
+producer's extra wire fields are corruption to the gate and unremarkable here,
+since the whole point is answering "roughly what changed, and where" for two
+archives that may not be comparable at all.
+
+Native since the corpus redesign - it used to build and run elivagar's
+`compare_tiles` cargo example, which carried its own hand-rolled PMTiles reader
+and MVT scanner. Needs no build and takes no lock. One reporting change came with
+that: the example counted raw geometry-command varints (`cmds`), only reachable
+by scanning wire bytes directly; decoding through `tile_detail` gives vertex
+counts, so the column is now `verts`.
 
 Oracle (`scripts/validate/earcut-oracle.mjs`, a Node script, not a Rust
 subcommand) has no brokkr wrapper yet - deferred, since it needs a

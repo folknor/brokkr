@@ -94,16 +94,16 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     )
 }
 
+/// `brokkr compare-tiles` - the lenient per-layer census. Native since the
+/// corpus redesign, so it needs no build and no lock.
 pub(crate) fn compare_tiles(
     project: Project,
-    build_root: &Path,
     file_a: &str,
     file_b: &str,
     sample: Option<usize>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "compare-tiles")?;
-    let pi = bootstrap(None)?;
-    super::compare_tiles::run(&pi.target_dir, build_root, file_a, file_b, sample)
+    super::compare_tiles::run(file_a, file_b, sample)
 }
 
 pub(crate) fn download_ocean(
@@ -225,9 +225,8 @@ pub(crate) fn svg(
 }
 
 /// `brokkr regress` - resolve two explicit tilegen archives (CURRENT via
-/// --commit/--file, COMPARAND via --against-commit/--against) and exec
-/// `elivagar regress <current> --against <comparand>` with the
-/// tolerance/overlay/reporting flags passed through verbatim.
+/// --commit/--file, COMPARAND via --against-commit/--against) and run the
+/// native two-archive semantic diff over them.
 ///
 /// Both sides are explicit: there is no default baseline and no comparability
 /// gate. regress is the tier-3 attribution instrument, whose legitimate uses
@@ -253,7 +252,6 @@ pub(crate) fn regress(
     overlay: Option<&Path>,
     overlay_max: Option<usize>,
     json: bool,
-    lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "regress")?;
     let pi = bootstrap(None)?;
@@ -288,14 +286,12 @@ pub(crate) fn regress(
     super::regress::run(
         &current,
         &comparand,
-        build_root,
         tol,
         max_moved,
         max_examples,
         overlay,
         overlay_max,
         json,
-        lock,
     )
 }
 

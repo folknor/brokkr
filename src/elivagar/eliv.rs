@@ -23,7 +23,7 @@ pub use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy,
 // equivalence tests).
 pub use elivagar::tile_detail::{
     CanonRingRole, DetailAttr, DetailComponent, DetailFeature, DetailLayer, DetailRing, DetailTile,
-    Strictness, decode_detail_attr, decode_detail_feature,
+    Strictness, decode_detail_attr, decode_detail_feature, decode_detail_tile,
 };
 
 /// The tile id that begins the zoom after the one holding `tile_id`. Brokkr-

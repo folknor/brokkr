@@ -19,6 +19,8 @@
 
 pub mod canonical;
 pub mod contract;
+#[cfg(test)]
+pub(crate) mod fixture;
 pub mod diff;
 pub mod digest;
 pub mod manifest;

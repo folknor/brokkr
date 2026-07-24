@@ -32,6 +32,12 @@ owo-colors = "4"
 # src/elivagar/eliv.rs (the seam) and src/elivagar/corpus/canonical.rs.
 elivagar = { path = "../elivagar" }
 protohoggr = "0.4.0"
+# `brokkr regress`: the three-pass engine fans the raw/canonical/detail passes
+# over blob pairs, and the matcher/grouping code is keyed by hash maps hot enough
+# that SipHash showed up in the original. Both were elivagar's dependencies
+# before the adjudication layer moved here; they carry the same roles.
+rayon = "1.11"
+rustc-hash = "2"
 
 [lints.clippy]
 uninlined_format_args = "deny"
