@@ -1639,7 +1639,7 @@ variants or configs reports a six-figure diff on two correct builds.",
         #[arg(long)]
         json: bool,
     },
-    /// [elivagar] Wrap elivagar's corpus namespace (check/bless/render/...)
+    /// [elivagar] The corpus gate: adjudicate an archive against the committed baseline (check/bless/render/...)
     #[command(display_order = 37, subcommand_help_heading = "Corpus subcommands")]
     PmtilesCorpus {
         #[command(subcommand)]
@@ -2813,7 +2813,7 @@ pub(crate) struct CorpusArchiveArgs {
 /// the same reason `inspect` became `pmtiles-inspect`.
 #[derive(Subcommand)]
 pub(crate) enum PmtilesCorpusCommand {
-    /// Check an archive against the committed digest (exit 0 pass / 1 mismatch / 2 refusal)
+    /// Check an archive against the committed baseline (exit 0 pass / 1 content mismatch / 2 archive refusal / 3 baseline trouble)
     Check {
         #[command(flatten)]
         archive: CorpusArchiveArgs,
