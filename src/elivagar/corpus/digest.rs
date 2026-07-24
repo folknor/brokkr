@@ -260,9 +260,18 @@ fn parse_baseline_text(text: &str) -> io::Result<Baseline> {
     let mut zooms = Vec::new();
     let mut buckets = Vec::new();
     for (n, line) in text.lines().enumerate() {
+        // The header is mandatory and version-checked, exactly as in
+        // `parse_leaves_text`. Accepting a headerless or wrong-version file
+        // would let merge damage that truncated the first line - or a future
+        // v2 written by a newer brokkr - parse as a v1 baseline.
+        if n == 0 {
+            if line != "elivagar-corpus-digest v1" {
+                return Err(invalid("digest header invalid"));
+            }
+            continue;
+        }
         let p: Vec<&str> = line.split_whitespace().collect();
         match p.first().copied() {
-            Some("elivagar-corpus-digest") if n == 0 => {}
             Some("mode") => {
                 mode = match p.get(1) {
                     Some(&"leaves") => Some(DigestMode::Leaves),
@@ -505,6 +514,22 @@ mod tests {
         let text = digest_text(&dg).replace(&hex(dg.root), &format!("{:032x}", dg.root ^ 1));
         let base = parse_baseline_text(&text).unwrap();
         assert!(baseline_inconsistency(&base, Some(&leaves)).is_some());
+    }
+
+    #[test]
+    fn digest_header_is_mandatory_and_version_checked() {
+        let leaves = vec![LeafRun {
+            tile_id: xy_to_tile_id(2, 1, 1),
+            run_length: 1,
+            hash: 5,
+        }];
+        let text = digest_text(&fold_leaves(&leaves, DigestMode::Leaves));
+        assert!(parse_baseline_text(&text).is_ok());
+        // Truncated first line (the shape merge damage takes).
+        let headerless = text.split_once('\n').unwrap().1.to_string();
+        assert!(parse_baseline_text(&headerless).is_err());
+        // A version this parser does not speak is not silently read as v1.
+        assert!(parse_baseline_text(&text.replace("v1", "v2")).is_err());
     }
 
     #[test]

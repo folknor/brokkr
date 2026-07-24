@@ -649,18 +649,16 @@ fn rename_elivagar_output(
 /// build wipe the locations baseline at the same commit). Best-effort: any IO
 /// error just leaves the file in place.
 fn prune_output_dir(output_dir: &std::path::Path, dataset: &str, variant: &str) {
-    let prefix = crate::resolve::pmtiles_archive_prefix(dataset, variant);
     let mut archives: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(output_dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_match = path.extension().and_then(|e| e.to_str()) == Some("pmtiles")
-            && path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&prefix));
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| crate::resolve::pmtiles_archive_matches(n, dataset, variant));
         if !is_match {
             continue;
         }

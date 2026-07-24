@@ -554,10 +554,10 @@ fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) {
 
 /// `--archives`: prune canonical `<dataset>-<variant>-<commit>.pmtiles` archives
 /// in the durable output store, keeping the newest `keep` per (dataset,
-/// variant). Groups are built by CONSTRUCTING each known (dataset, variant)
-/// prefix from config (`resolve::pmtiles_archive_prefix`) - filenames are never
-/// parsed back, since dataset names carry hyphens. The safety property follows:
-/// anything not matching a constructed prefix (hand-named files, the
+/// variant). Group membership is decided by CONSTRUCTING each known (dataset,
+/// variant) name shape (`resolve::pmtiles_archive_matches`) - filenames are
+/// never parsed back, since dataset names carry hyphens. The safety property
+/// follows: anything the constructed matcher rejects (hand-named files, the
 /// toml-contract ocean artifact, pre-rename `<dataset>-<commit>` archives) is
 /// preserved unconditionally, because a file brokkr can't name by construction
 /// is self-evidently not brokkr's to delete.
@@ -566,36 +566,48 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
     if !output_dir.exists() {
         return;
     }
+    // Read the directory once, for every group. Reading it per group made a
+    // transient failure abort the whole pass silently, halfway through.
+    let entries = match std::fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            output::error(&format!(
+                "cannot read output dir {}: {e} - archives not pruned",
+                output_dir.display()
+            ));
+            return;
+        }
+    };
+    let listing: Vec<(String, std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_owned();
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            Some((name, mtime, path))
+        })
+        .collect();
+
     let mut removed = 0u32;
     for (dataset, ds) in &paths.datasets {
         for variant in ds.pbf.keys() {
-            let prefix = crate::resolve::pmtiles_archive_prefix(dataset, variant);
-            let mut archives: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
-            let Ok(entries) = std::fs::read_dir(output_dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let is_match = path.extension().and_then(|e| e.to_str()) == Some("pmtiles")
-                    && path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with(&prefix));
-                if is_match {
-                    let mtime = entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::UNIX_EPOCH);
-                    archives.push((mtime, path));
-                }
-            }
+            let mut archives: Vec<(std::time::SystemTime, &std::path::Path)> = listing
+                .iter()
+                .filter(|(name, _, _)| {
+                    crate::resolve::pmtiles_archive_matches(name, dataset, variant)
+                })
+                .map(|(_, mtime, path)| (*mtime, path.as_path()))
+                .collect();
             if archives.len() <= keep {
                 continue;
             }
             // Newest first; prune everything past the keep window.
             archives.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
             for (_, path) in archives.into_iter().skip(keep) {
-                c.file(&path);
+                c.file(path);
                 removed += 1;
             }
         }

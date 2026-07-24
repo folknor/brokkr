@@ -574,6 +574,10 @@ static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A scratch directory under `target/`, removed on drop. The atomic suffix keeps
 /// concurrently running tests from sharing one.
+///
+/// Anchored at `CARGO_MANIFEST_DIR` rather than the cwd: a test that changes
+/// directory, or a runner that starts somewhere other than the crate root,
+/// would otherwise scatter scratch trees outside the repo.
 pub(crate) struct TestDir {
     pub(crate) path: PathBuf,
 }
@@ -581,8 +585,7 @@ pub(crate) struct TestDir {
 impl TestDir {
     pub(crate) fn new(name: &str) -> Self {
         let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::current_dir()
-            .expect("current dir")
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("regress-tests")
             .join(format!("{name}-{id}"));

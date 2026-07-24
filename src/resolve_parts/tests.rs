@@ -663,4 +663,38 @@ mod tests {
             .to_string();
         assert!(err.contains("has no data_dir configured"));
     }
+
+    #[test]
+    fn archive_matcher_accepts_only_constructed_names() {
+        let name = pmtiles_archive_name(Path::new("/out"), "north-america", "raw", "abc1234");
+        let file = name.file_name().unwrap().to_str().unwrap();
+        assert!(pmtiles_archive_matches(file, "north-america", "raw"));
+        // A hyphenated dataset name is never parsed back, only constructed, so
+        // a split that constructs the same name is the same group by
+        // definition - and prunes it identically. Not a bleed.
+        assert!(pmtiles_archive_matches(file, "north", "america-raw"));
+        // Not an archive at all, and the pre-rename `<dataset>-<commit>` form.
+        assert!(!pmtiles_archive_matches("ocean-tiles.pmtiles", "ocean", "raw"));
+        assert!(!pmtiles_archive_matches(
+            "denmark-abc1234.pmtiles",
+            "denmark",
+            "raw"
+        ));
+    }
+
+    #[test]
+    fn archive_matcher_does_not_let_a_variant_claim_its_dash_extension() {
+        // The bug this closes: `denmark-raw-` prefixes every `denmark-raw-fast-*`
+        // file, so `raw`'s keep-N window would evict `raw-fast`'s archives.
+        assert!(pmtiles_archive_matches(
+            "denmark-raw-fast-abc1234.pmtiles",
+            "denmark",
+            "raw-fast"
+        ));
+        assert!(!pmtiles_archive_matches(
+            "denmark-raw-fast-abc1234.pmtiles",
+            "denmark",
+            "raw"
+        ));
+    }
 }

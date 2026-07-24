@@ -86,6 +86,29 @@ fn archive_refused(message: impl Into<String>) -> (Outcome, CheckReport) {
     (Outcome::ArchiveRefused, report(message))
 }
 
+fn refused((outcome, report): (Outcome, CheckReport)) -> Gate {
+    Gate::Refused(outcome, report)
+}
+
+/// Fold a read of committed baseline material into the BASELINE verdict.
+///
+/// A missing or malformed committed file is damage to the baseline (exit 3),
+/// never a statement about the archive: letting the `io::Error` escape makes the
+/// dispatch wrap it as `DevError::Io` and exit **1**, which tells an automated
+/// caller that the archive's content regressed when in fact the corpus took
+/// merge damage. Only `NotFound`/`InvalidData` fold - a genuine IO failure
+/// (permissions, a bad disk) is not a verdict about anything and still
+/// propagates.
+fn baseline_material<T>(what: &str, read: io::Result<T>) -> io::Result<Result<T, String>> {
+    match read {
+        Ok(v) => Ok(Ok(v)),
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData) => {
+            Ok(Err(format!("{what}: {e}")))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// The corpus-global canonical style: `<corpus-root>/style.toml`, where
 /// `corpus_dir` is `<corpus-root>/<dataset>`. Anchored at the corpus root so it
 /// resolves the same regardless of the invoking cwd.
@@ -174,7 +197,10 @@ pub fn compute(archive: &ArchiveView, mode: DigestMode) -> io::Result<(Digest, V
 /// Parse the committed `contract.json`. A malformed committed contract is a
 /// BASELINE problem (exit 3), so the error string is surfaced as such.
 fn contract_from_file(path: &Path) -> io::Result<Result<ContractDoc, String>> {
-    let text = std::fs::read_to_string(path)?;
+    let text = match baseline_material("committed corpus contract", std::fs::read_to_string(path))? {
+        Ok(t) => t,
+        Err(msg) => return Ok(Err(msg)),
+    };
     Ok(
         match contract::extract_contract(&format!("{{\"elivagar\":{text}}}")) {
             ContractState::Contract(c) => Ok(c),
@@ -217,40 +243,45 @@ struct Passed {
 #[allow(clippy::too_many_lines)]
 fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
     // STEP 1 - baseline integrity (subject: the baseline; exit 3 on damage).
-    let base = digest::parse_baseline(&corpus_dir.join("digest"))?;
+    // Every read here goes through `baseline_material`, so an absent or
+    // corrupted committed file is the exit-3 verdict rather than an escaping
+    // io::Error the dispatch would flatten into exit 1 (content mismatch).
+    let base = match baseline_material(
+        "baseline digest",
+        digest::parse_baseline(&corpus_dir.join("digest")),
+    )? {
+        Ok(b) => b,
+        Err(msg) => return Ok(refused(baseline_trouble(msg))),
+    };
     let committed_leaves = if base.mode == DigestMode::Leaves {
-        let path = corpus_dir.join("leaves");
-        if !path.is_file() {
-            return Ok(Gate::Refused(baseline_trouble("baseline leaves missing").0, report("baseline leaves missing")));
+        match baseline_material(
+            "baseline leaves",
+            digest::parse_leaves(&corpus_dir.join("leaves")),
+        )? {
+            Ok(l) => Some(l),
+            Err(msg) => return Ok(refused(baseline_trouble(msg))),
         }
-        Some(digest::parse_leaves(&path)?)
     } else {
         None
     };
     if let Some(msg) = digest::baseline_inconsistency(&base, committed_leaves.as_deref()) {
-        let (o, r) = baseline_trouble(format!("baseline internally inconsistent: {msg}"));
-        return Ok(Gate::Refused(o, r));
+        return Ok(refused(baseline_trouble(format!(
+            "baseline internally inconsistent: {msg}"
+        ))));
     }
 
     // STEP 2 - comparability (subject: the incoming archive; exit 2 on refusal).
     let view = ArchiveView::open(archive)?;
     if let Some(msg) = format_guard(&view) {
-        let (o, r) = archive_refused(msg);
-        return Ok(Gate::Refused(o, r));
+        return Ok(refused(archive_refused(msg)));
     }
     let base_contract = match contract_from_file(&corpus_dir.join("contract.json"))? {
         Ok(c) => c,
-        Err(msg) => {
-            let (o, r) = baseline_trouble(msg);
-            return Ok(Gate::Refused(o, r));
-        }
+        Err(msg) => return Ok(refused(baseline_trouble(msg))),
     };
     let candidate = match candidate_contract(&view)? {
         Ok(c) => c,
-        Err(msg) => {
-            let (o, r) = archive_refused(msg);
-            return Ok(Gate::Refused(o, r));
-        }
+        Err(msg) => return Ok(refused(archive_refused(msg))),
     };
     let diffs = contract::contract_diff(&base_contract, &candidate);
     if !diffs.is_empty() {
@@ -664,4 +695,69 @@ pub fn bless(
             ..Default::default()
         },
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod baseline_verdict_tests {
+    //! Step 1's verdict mapping: damaged committed material is exit 3, never
+    //! the exit 1 that means "the archive's content regressed". Step 1 runs
+    //! before the archive is opened, so these need no archive at all - the path
+    //! below never exists, and reaching it would itself be the failure.
+
+    use super::super::eliv::xy_to_tile_id;
+    use super::digest::{digest_text, fold_leaves, leaves_text};
+    use super::fixture::TestDir;
+    use super::{DigestMode, LeafRun, Outcome, Path, check};
+
+    fn intact_baseline(dir: &Path) {
+        let leaves = vec![LeafRun {
+            tile_id: xy_to_tile_id(2, 1, 1),
+            run_length: 1,
+            hash: 0xABCD,
+        }];
+        let d = fold_leaves(&leaves, DigestMode::Leaves);
+        std::fs::write(dir.join("digest"), digest_text(&d)).unwrap();
+        std::fs::write(dir.join("leaves"), leaves_text(&leaves)).unwrap();
+    }
+
+    fn verdict(corpus_dir: &Path) -> Outcome {
+        check(&corpus_dir.join("no-such-archive.pmtiles"), corpus_dir)
+            .expect("baseline damage is a verdict, not an escaping io::Error")
+            .0
+    }
+
+    #[test]
+    fn a_missing_digest_is_baseline_trouble() {
+        let dir = TestDir::new("corpus-baseline-missing-digest");
+        assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
+    }
+
+    #[test]
+    fn a_malformed_digest_is_baseline_trouble() {
+        let dir = TestDir::new("corpus-baseline-malformed-digest");
+        intact_baseline(&dir.path);
+        std::fs::write(dir.path.join("digest"), "mode leaves\nroot 00\n").unwrap();
+        assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
+    }
+
+    #[test]
+    fn missing_and_malformed_leaves_are_both_baseline_trouble() {
+        let dir = TestDir::new("corpus-baseline-leaves");
+        intact_baseline(&dir.path);
+        std::fs::remove_file(dir.path.join("leaves")).unwrap();
+        assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
+        std::fs::write(dir.path.join("leaves"), "elivagar-corpus-leaves v1\nnot a row\n").unwrap();
+        assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
+    }
+
+    #[test]
+    fn a_real_io_failure_is_not_dressed_up_as_a_verdict() {
+        // `baseline_material` folds only NotFound/InvalidData. Anything else -
+        // here, the archive open that an intact baseline lets step 2 reach -
+        // still propagates as an error rather than becoming a content verdict.
+        let dir = TestDir::new("corpus-baseline-intact");
+        intact_baseline(&dir.path);
+        assert!(check(&dir.path.join("no-such-archive.pmtiles"), &dir.path).is_err());
+    }
 }

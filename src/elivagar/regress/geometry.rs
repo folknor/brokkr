@@ -168,15 +168,19 @@ fn point_in_ring(point: (i32, i32), ring: &[(i32, i32)]) -> bool {
     if ring.len() < 3 {
         return false;
     }
-    let (px, py) = point;
+    // Widen before subtracting, as the rest of the module does: a decodable but
+    // pathological coordinate pair straddling the i32 range overflows the
+    // difference itself - a debug panic, a silent wrap in release - long before
+    // the product it feeds could.
+    let (px, py) = (i64::from(point.0), i64::from(point.1));
     let mut inside = false;
     let mut j = ring.len() - 1;
     for i in 0..ring.len() {
-        let (xi, yi) = ring[i];
-        let (xj, yj) = ring[j];
+        let (xi, yi) = (i64::from(ring[i].0), i64::from(ring[i].1));
+        let (xj, yj) = (i64::from(ring[j].0), i64::from(ring[j].1));
         if (yi > py) != (yj > py) {
-            let lhs = i64::from(px - xi) * i64::from(yj - yi);
-            let rhs = i64::from(xj - xi) * i64::from(py - yi);
+            let lhs = (px - xi) * (yj - yi);
+            let rhs = (xj - xi) * (py - yi);
             let crosses = if yj > yi { lhs < rhs } else { lhs > rhs };
             if crosses {
                 inside = !inside;

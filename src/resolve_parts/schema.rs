@@ -604,12 +604,30 @@ pub(crate) fn pmtiles_archive_name(
 }
 
 /// The canonical filename prefix for a `(dataset, variant)` pair:
-/// `<dataset>-<variant>-`. Retention and `clean --archives` match on this to
-/// scope by variant; anything not matching a constructed prefix is preserved
+/// `<dataset>-<variant>-`.
+fn pmtiles_archive_prefix(dataset: &str, variant: &str) -> String {
+    format!("{dataset}-{variant}-")
+}
+
+/// Does `file_name` name an archive brokkr constructed for this
+/// `(dataset, variant)` pair? Retention and `clean --archives` scope their
+/// keep-N window with this; anything it rejects is preserved unconditionally
 /// (hand-named files and the toml-contract ocean artifact are self-evidently
 /// not brokkr's to delete).
-pub(crate) fn pmtiles_archive_prefix(dataset: &str, variant: &str) -> String {
-    format!("{dataset}-{variant}-")
+///
+/// The prefix alone is not enough to scope a group. A variant that
+/// dash-extends another (`raw` vs `raw-fast`) makes `denmark-raw-` a prefix of
+/// every `denmark-raw-fast-*` file too, so the shorter variant's window fills
+/// with the longer one's archives and evicts the ones per-(dataset, variant)
+/// scoping promised to protect. What follows the prefix in a *constructed* name
+/// is always a single `git rev-parse --short` token (or the `unknown`
+/// fallback), never containing a hyphen - so requiring a hyphen-free remainder
+/// closes the group exactly, without ever parsing a dataset name back out.
+pub(crate) fn pmtiles_archive_matches(file_name: &str, dataset: &str, variant: &str) -> bool {
+    file_name
+        .strip_prefix(&pmtiles_archive_prefix(dataset, variant))
+        .and_then(|rest| rest.strip_suffix(".pmtiles"))
+        .is_some_and(|commit| !commit.is_empty() && !commit.contains('-'))
 }
 
 /// Resolve PMTiles path and its size in one call.

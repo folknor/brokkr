@@ -50,7 +50,20 @@ pub use report::RegressConfig;
 /// reads the same way as a plain tile dump does.
 const OVERLAY_BACKGROUND: &str = "#f2efe9";
 
-/// Run the diff and print the report; `Err(ExitCode(1))` on a failing verdict.
+/// A regress run could not be completed - an unreadable archive, a tile that
+/// will not decode, an overlay that will not write.
+///
+/// This is exit **3**, never 1. Exit 1 is the diff *verdict*, and a caller that
+/// cannot separate "content differs" from "regress never ran" reads a truncated
+/// archive as a regression, with only stderr to say otherwise. 2 stays reserved
+/// for clap's usage errors, so the three outcomes never collide.
+fn failed(message: &str) -> DevError {
+    output::error(message);
+    DevError::ExitCode(3)
+}
+
+/// Run the diff and print the report; `Err(ExitCode(1))` on a failing verdict,
+/// `Err(ExitCode(3))` if the run could not be completed at all.
 ///
 /// Both archives come from elivagar, so the decoder runs **strict**: a wire
 /// field the MVT schema does not name is an error rather than something skipped
@@ -83,14 +96,14 @@ pub fn run(
         &cfg,
         super::eliv::Strictness::Strict,
     )
-    .map_err(|e| DevError::Verify(format!("regress failed: {e}")))?;
+    .map_err(|e| failed(&format!("regress failed: {e}")))?;
     let passed = report.passed(&cfg);
 
     if json {
         println!(
             "{}",
             serde_json::to_string(&report.to_json(passed))
-                .map_err(|e| DevError::Verify(format!("serialize regress report: {e}")))?
+                .map_err(|e| failed(&format!("serialize regress report: {e}")))?
         );
     } else {
         report.print_text();
@@ -109,7 +122,7 @@ pub fn run(
                 strictness: super::eliv::Strictness::Strict,
             },
         )
-        .map_err(|e| DevError::Verify(format!("write overlays: {e}")))?;
+        .map_err(|e| failed(&format!("write overlays: {e}")))?;
         output::run_msg(&format!("overlay: {written} tile(s) -> {}", dir.display()));
     }
 

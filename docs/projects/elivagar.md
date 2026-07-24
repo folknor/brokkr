@@ -155,7 +155,12 @@ instrument, and adjudicating artifact-active vs computed output or pricing a
 config change means diffing two deliberately different contracts. A required
 clap `ArgGroup` over the two `--against*` flags means a missing comparand is a
 usage error at clap's exit **2** - never colliding with regress's own verdict
-codes. Exit 0 is no accountable diff, exit 1 a regression or budget overrun.
+codes. Exit 0 is no accountable diff, exit 1 a regression or budget overrun, and
+exit **3** means the run could not be completed at all (an unreadable archive, a
+tile that will not decode, an overlay that will not write). 3 is separate from 1
+on purpose: exit 1 is the *verdict*, so a caller that could not tell it from an
+operational failure would read a truncated archive as a regression, with nothing
+but stderr to say otherwise.
 Like the inspection subcommands, it takes the non-blocking brokkr lock first -
 the diff itself needs no lock, but the archive resolver still bootstraps through
 `cargo metadata`.
@@ -206,7 +211,10 @@ plus coalesced ranges, displacements are histograms, and examples are capped per
 outcome class by `ExampleSelector`. `--overlay` (`overlay.rs`) renders per-tile
 attribution SVGs for the first differing tile ids - pink current, blue comparand,
 grey matched-exactly, orange attributes-only - with an attribute-diff panel below
-the tile.
+the tile. Grey is keyed to the *class* (`tolerance_moved` at displacement 0, which
+only `matched()` produces), not to displacement alone: the topology changes above
+are `structural_moved` at distance 0, and keying on displacement drew exactly
+those as unchanged backdrop while the report counted them as structural.
 
 One counter difference from the elivagar original: it emitted its `regress_*`
 counters onto the sidecar marker FIFO as a child process. brokkr is the process
@@ -232,10 +240,19 @@ see the pmtiles-corpus section below.
 
 `brokkr compare-tiles <a> <b> [--sample N]` (`src/elivagar/compare_tiles.rs`) is
 the lenient half of the pair. Where `regress` diffs feature by feature and
-returns a verdict, this samples `N` tiles per zoom (default 200, even stride so
-the sample spans the extent rather than one corner of the Hilbert curve) and
-prints per-layer feature counts side by side. It has no pass/fail, gates nothing,
-and never refuses.
+returns a verdict, this samples `N` tiles per zoom (default 200, at indices
+spread across the zoom's whole common run so the sample spans the extent rather
+than one corner of the Hilbert curve) and prints per-layer feature counts side
+by side. It has no pass/fail, gates nothing, and never refuses.
+
+Two things keep the census honest. The sample indices are `i * len / take`
+rather than a `step_by` stride, because an integer stride rounds to 1 whenever
+the zoom holds fewer than `2 * N` common tiles and `take` then truncates from
+the front - silently reinstating the first-N bias the stride existed to avoid.
+And a tile's layers are tallied into per-tile scratch and merged only when
+**both** sides decoded, so a one-sided decode failure cannot leave side A's
+features in a census side B never contributed to - which is precisely the
+half-broken-archive case the tolerant mode is for.
 
 That is why it decodes **tolerant** while regress decodes **strict**: a foreign
 producer's extra wire fields are corruption to the gate and unremarkable here,
@@ -255,21 +272,24 @@ Node-subprocess invocation pattern brokkr doesn't have today.
 
 ## The pmtiles corpus: `brokkr pmtiles-corpus <sub>`
 
-`brokkr pmtiles-corpus` (`src/elivagar/corpus.rs` for the exec runner,
-`cmd::corpus` for the dispatch) is a namespace mirroring elivagar's `corpus`
-subcommands - the standing baseline mechanism that replaced the blessed
-archive. It is named `pmtiles-corpus`, not `corpus`, because `corpus` is
+`brokkr pmtiles-corpus` (`src/elivagar/corpus/` for the gate, `cmd::corpus` for
+the dispatch) is the standing baseline mechanism that replaced the blessed
+archive. It is **native brokkr code** over the linked elivagar crate - brokkr
+owns the digest fold, the gating policy, the verdicts, the SVG render core and
+the calibration instrument, and reads archives in-process through the
+`eliv.rs` seam; there is no `elivagar corpus` subcommand to shell to anymore.
+It is named `pmtiles-corpus`, not `corpus`, because `corpus` is
 already piners' parity-corpus runner and brokkr's command names share one flat
 clap namespace (the same reason `inspect` became `pmtiles-inspect`).
 
-| brokkr | wraps | brokkr resolves |
-|---|---|---|
-| `pmtiles-corpus check [--dataset D] [--variant V] [--commit H \| --file P] [--corpus DIR]` | `elivagar corpus check <archive> --corpus <dir>` | archive, corpus dir |
-| `pmtiles-corpus bless [... ] [--corpus DIR] [--rotate] [--mode M]` | `elivagar corpus bless` | archive, corpus dir |
-| `pmtiles-corpus render-manifest [...] [--corpus DIR] [--style P]` | `elivagar corpus render-manifest` | archive, corpus dir |
-| `pmtiles-corpus render [...] -z Z -x X -y Y [--layers L] [--style P] [-o OUT]` | `elivagar corpus render` | archive only |
-| `pmtiles-corpus rings [...] -o OUT` | `elivagar corpus rings` | archive only |
-| `pmtiles-corpus mutate [...] [-o OUT] --op OP [--tile z/x/y]` | `elivagar corpus mutate` | input archive only |
+| brokkr | brokkr resolves |
+|---|---|
+| `pmtiles-corpus check [--dataset D] [--variant V] [--commit H \| --file P] [--corpus DIR]` | archive, corpus dir |
+| `pmtiles-corpus bless [... ] [--corpus DIR] [--rotate] [--mode M]` | archive, corpus dir |
+| `pmtiles-corpus render-manifest [...] [--corpus DIR] [--style P]` | archive, corpus dir |
+| `pmtiles-corpus render [...] -z Z -x X -y Y [--layers L] [--style P] [-o OUT]` | archive only |
+| `pmtiles-corpus rings [...] -o OUT` | archive only |
+| `pmtiles-corpus mutate [...] [-o OUT] --op OP [--tile z/x/y]` | input archive only |
 
 `mutate`'s `-o` is optional: omitted, it writes a calibrand to
 `data/corpus-calibrands/<dataset>-<variant>-<op>.pmtiles`, a brokkr-designated
@@ -285,20 +305,31 @@ then `brokkr pmtiles-corpus check --dataset denmark --variant locations`; a
 wrong variant fails loudly at resolution (`no locations build for <hash>`)
 before the archive even opens. `--corpus` defaults to `corpus/<dataset>` under the **build root**
 (where the git-committed corpus lives, alongside the code - NOT the
-config/`data/` dir), and is overridable. Every other flag passes through
-verbatim; elivagar owns the value sets (`--mode`, `--op`), so brokkr carries
-them as strings and never re-validates.
+config/`data/` dir), and is overridable. brokkr owns the value sets now that the
+gate is native: `--mode` parses to `DigestMode`, `--op` to `MutationOp`, and an
+unknown spelling is a config error before anything opens.
 
-The wrapper is convenience, never safety: the corpus machinery enforces its
-own guards (contract refusal, dirty-build refusal, `--rotate` protection), so
 brokkr adds no baseline registry, no default comparand, and no filesystem
 inference. There is **no clean-tree gate and no tilegen lock** - a check is
 read-only on the archive and never touches tilegen scratch, and bless writes
 only into the corpus dir (committed with the landing, so a dirty tree is the
-normal state). Exit codes pass through unchanged: **0** pass, **1** content
-mismatch, **2** refusal (missing baseline, invalid archive, contract
-mismatch). The 0/1/2 distinction is load-bearing for the caller, and brokkr
-adds no interpretation of the verdict. Each wrapper still takes the
-non-blocking brokkr lock and rebuilds the elivagar release binary
-(cargo up-to-date check, sub-second) so a stale binary can never silently
-serve the standing gate.
+normal state).
+
+### Exit codes
+
+**0** pass, **1** content mismatch, **2** the archive cannot be judged
+(non-MVT/non-gzip, absent or invalid embedded contract, contract mismatch),
+**3** the baseline is the problem. The distinction is load-bearing for an
+automated caller, which is why 3 exists at all: 1 says *the archive regressed*,
+and merge damage to a committed `digest` is not that.
+
+Every read of committed material in step 1 therefore goes through
+`baseline_material` (`corpus/mod.rs`), which folds `NotFound`/`InvalidData`
+into the exit-3 verdict - a missing or malformed `digest`, `leaves` or
+`contract.json` all report as baseline trouble. Letting the `io::Error` escape
+instead makes the dispatch wrap it as `DevError::Io` and exit **1**, which is
+the misreport this closes. The fold is deliberately narrow: a genuine IO
+failure (permissions, a bad disk) is not a verdict about anything and still
+propagates as an error. Baseline *staleness* (step 4) shares exit 3 with
+baseline damage and stays strictly subordinate to the content walk, so it can
+never mask a mismatch.

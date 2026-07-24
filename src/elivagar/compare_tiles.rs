@@ -84,17 +84,20 @@ fn group_by_zoom(entries: Vec<TileEntry>) -> BTreeMap<u8, Vec<TileEntry>> {
     map
 }
 
-/// Decode one tile and fold its layers into `into`, returning the decompressed
+/// Decode one tile into its own tallies, returning them with the decompressed
 /// size. A tile that will not decode is skipped rather than fatal: this is a
 /// census over a sample, and one bad tile should not deny the other 199.
-fn tally_tile(
-    archive: &ArchiveView,
-    entry: &TileEntry,
-    into: &mut Tallies,
-) -> Option<usize> {
+///
+/// The tallies are per-tile and merged by the caller only when BOTH sides
+/// decoded, which is what keeps the two columns comparable: folding straight
+/// into the running totals would put side A's features in the census for a
+/// tile side B never contributed - a bias in exactly the half-broken-archive
+/// case the tolerant mode exists to survey.
+fn tally_tile(archive: &ArchiveView, entry: &TileEntry) -> Option<(Tallies, usize)> {
     let raw = archive.raw_blob(entry.blob).ok()?;
     let bytes = gzip_decompress(raw).ok()?;
     let tile = decode_detail_tile(&bytes, Strictness::Tolerant).ok()?;
+    let mut into = Tallies::new();
     for layer in &tile.layers {
         let tally = into.entry(layer.name.to_string()).or_default();
         for feature in &layer.features {
@@ -113,7 +116,14 @@ fn tally_tile(
                 .sum::<usize>();
         }
     }
-    Some(bytes.len())
+    Some((into, bytes.len()))
+}
+
+/// Fold one tile's tallies into a running total.
+fn merge(into: &mut Tallies, from: &Tallies) {
+    for (layer, tally) in from {
+        into.entry(layer.clone()).or_default().add(*tally);
+    }
 }
 
 fn percent(a: usize, b: usize) -> String {
@@ -176,12 +186,8 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
             (&archive_b, by_zoom_b.get(&z).unwrap_or(&empty)),
             sample_per_zoom,
         );
-        for (layer, tally) in &zoom_a {
-            grand_a.entry(layer.clone()).or_default().add(*tally);
-        }
-        for (layer, tally) in &zoom_b {
-            grand_b.entry(layer.clone()).or_default().add(*tally);
-        }
+        merge(&mut grand_a, &zoom_a);
+        merge(&mut grand_b, &zoom_b);
     }
 
     println!("\n=== Grand totals (all sampled tiles) ===\n");
@@ -248,23 +254,25 @@ fn compare_zoom(
         return (zoom_a, zoom_b);
     }
 
-    // Even stride rather than the first N, so the sample spans the extent
-    // instead of one corner of the Hilbert curve.
-    let step = if common.len() <= sample_per_zoom {
-        1
-    } else {
-        common.len() / sample_per_zoom
-    };
-    let sampled = common.iter().step_by(step).take(sample_per_zoom);
+    // Indices spread across the whole run rather than the first N, so the sample
+    // spans the extent instead of one corner of the Hilbert curve. Computed as
+    // `i * len / take` rather than a `step_by` stride: an integer stride rounds
+    // to 1 whenever `len < 2 * sample`, and `take` then truncates from the
+    // front - quietly reinstating the first-N bias the stride was there to
+    // avoid, for every zoom whose tile count is merely close to the sample size.
+    let take = sample_per_zoom.min(common.len());
+    let sampled = (0..take).map(|i| common[i * common.len() / take]);
 
     let (mut bytes_a, mut bytes_b) = (0usize, 0usize);
     let (mut decoded, mut errors) = (0usize, 0usize);
-    for &(ai, bi) in sampled {
+    for (ai, bi) in sampled {
         match (
-            tally_tile(archive_a, &za[ai], &mut zoom_a),
-            tally_tile(archive_b, &zb[bi], &mut zoom_b),
+            tally_tile(archive_a, &za[ai]),
+            tally_tile(archive_b, &zb[bi]),
         ) {
-            (Some(la), Some(lb)) => {
+            (Some((ta, la)), Some((tb, lb))) => {
+                merge(&mut zoom_a, &ta);
+                merge(&mut zoom_b, &tb);
                 bytes_a += la;
                 bytes_b += lb;
                 decoded += 1;

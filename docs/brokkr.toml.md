@@ -47,13 +47,19 @@ Top-level keys that aren't `project` are treated as hostname sections
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
 `data/scratch/`, `data/tilegen/`, cargo target dir). `output` is the durable
 tilegen output store (map-data projects): `tilegen` renames each run's archive
-to `<output>/<dataset>-<commit>.pmtiles`, and `pmtiles-inspect`/`diag`/`svg`/
-`regress`/`bless` resolve it by `--commit`. It is kept SEPARATE from `scratch`
+to `<output>/<dataset>-<variant>-<commit>.pmtiles`, and
+`pmtiles-inspect`/`diag`/`svg`/`regress`/`pmtiles-corpus` resolve it by
+`--variant` + `--commit`. It is kept SEPARATE from `scratch`
 on purpose - elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) every run,
 and on some hosts `scratch` points at that same dir, so archives written into
 scratch were destroyed by the next run. `brokkr` refuses to write outputs into
 a dir that coincides with scratch/tmp; retention keeps the last 5 archives per
-dataset. Host `features` are cargo features
+`(dataset, variant)` pair - scoped so that building one variant can never evict
+another's archives at the same commit. Group membership is decided by
+*constructing* the name shape and requiring a hyphen-free commit token after it
+(`resolve::pmtiles_archive_matches`), never by parsing a filename back: dataset
+names carry hyphens, and a prefix test alone would let a variant claim a
+dash-extending sibling's files (`raw` swallowing `raw-fast`) and evict them. Host `features` are cargo features
 appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,

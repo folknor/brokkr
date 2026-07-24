@@ -324,9 +324,23 @@ fn nudge_geometry(input: &[u8]) -> io::Result<Vec<u8>> {
             out.extend_from_slice(&input[at..]);
             return Ok(out);
         }
-        let pairs = usize::try_from(command >> 3)
+        // Skip the command's parameters. Arity is per command id, not uniform:
+        // MoveTo/LineTo carry two varints per count, ClosePath carries none.
+        // (Unreachable for valid MVT, where geometry opens with a MoveTo and
+        // the loop above has already returned - robustness only.)
+        let count = usize::try_from(command >> 3)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "geometry count too large"))?;
-        for _ in 0..pairs.saturating_mul(2) {
+        let parameters = match command & 7 {
+            1 | 2 => count.saturating_mul(2),
+            7 => 0,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unknown geometry command {other}"),
+                ));
+            }
+        };
+        for _ in 0..parameters {
             read_varint(input, &mut at)?;
         }
     }
@@ -346,7 +360,7 @@ mod calibration {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -376,13 +390,6 @@ mod calibration {
         gzip.finish().unwrap()
     }
 
-    fn test_dir() -> PathBuf {
-        let path = PathBuf::from("target").join(format!("corpus-mutation-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
     // A z1 run of 4 tiles sharing one blob; the target is the second tile.
     fn source(path: &Path) -> u64 {
         let payload = fixture_payload();
@@ -409,7 +416,8 @@ mod calibration {
 
     #[test]
     fn mutations_are_isolated_and_regzip_is_semantically_neutral() {
-        let dir = test_dir();
+        let scratch = super::super::fixture::TestDir::new("corpus-mutation");
+        let dir = &scratch.path;
         let input = dir.join("source.pmtiles");
         let target = source(&input);
         let before = ArchiveView::open(&input).unwrap();
@@ -445,7 +453,6 @@ mod calibration {
         assert_eq!(digest.root, before_digest.root, "regzip changed the digest");
         assert_eq!(leaves, before_leaves, "regzip changed the leaves");
         assert_ne!(fs::read(&input).unwrap(), fs::read(&output).unwrap(), "regzip left bytes unchanged");
-
-        let _ = fs::remove_dir_all(&dir);
+        // `scratch` removes the directory on drop.
     }
 }

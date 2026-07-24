@@ -185,18 +185,26 @@ pub(crate) fn render_overlay(collector: &OverlayCollector, background: &str) -> 
                     e.baseline.as_ref(),
                 ));
             }
+            // The unchanged backdrop, and only that: `matched()` is the sole
+            // producer of a ToleranceMoved at displacement 0 (compare.rs routes
+            // a real tolerance move through `record` with distance >= 1). Gating
+            // this on displacement alone swept StructuralMoved in with it, and
+            // StructuralMoved is *deliberately* recorded at distance 0 for the
+            // topology changes - geometry type, component count, ring role,
+            // hole containment, force-zipped pairs - where "moved by N" would be
+            // a false reassurance. Those drew as grey backdrop while the report
+            // counted them as structural.
+            OutcomeClass::ToleranceMoved if e.displacement == 0 => {
+                if let Some(f) = &e.current {
+                    draw(&mut out, f, "#999999", "unchanged", "0.25");
+                }
+            }
             OutcomeClass::ToleranceMoved | OutcomeClass::StructuralMoved => {
-                if e.displacement == 0 {
-                    if let Some(f) = &e.current {
-                        draw(&mut out, f, "#999999", "unchanged", "0.25");
-                    }
-                } else {
-                    if let Some(f) = &e.current {
-                        draw(&mut out, f, "#e91e63", e.class.name(), "0.7");
-                    }
-                    if let Some(f) = &e.baseline {
-                        draw(&mut out, f, "#2196f3", e.class.name(), "0.7");
-                    }
+                if let Some(f) = &e.current {
+                    draw(&mut out, f, "#e91e63", e.class.name(), "0.7");
+                }
+                if let Some(f) = &e.baseline {
+                    draw(&mut out, f, "#2196f3", e.class.name(), "0.7");
                 }
             }
             OutcomeClass::ExtentMismatch => {}
