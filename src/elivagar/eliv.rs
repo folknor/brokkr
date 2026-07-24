@@ -15,11 +15,14 @@
 pub use elivagar::pmtiles_reader::{ArchiveView, BlobRef, RawDirEntry, read_i32_le};
 // Writer surface (mutate) + PMTiles addressing math.
 pub use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};
-// Decoder surface: DetailAttr/CanonRingRole/Strictness and decode_detail_attr
-// feed brokkr's streaming canonical hash. The full DetailTile decoder
-// (`decode_detail_tile`, `gzip_decompress`, `HEADER_SIZE`) is consumed by the
-// regress port and is re-exported here when that lands.
-pub use elivagar::tile_detail::{CanonRingRole, DetailAttr, Strictness, decode_detail_attr};
+// Decoder surface. DetailAttr/CanonRingRole/Strictness + decode_detail_attr feed
+// the streaming canonical hash; the full wire-order DetailTile decoder feeds the
+// detail canonical form (regress's "same tile", pinned against streaming by the
+// equivalence tests).
+pub use elivagar::tile_detail::{
+    CanonRingRole, DetailAttr, DetailComponent, DetailFeature, DetailLayer, DetailRing, DetailTile,
+    Strictness, decode_detail_attr,
+};
 
 /// The tile id that begins the zoom after the one holding `tile_id`. Brokkr-
 /// owned (was `regress`-internal in elivagar; left with the adjudication layer).
