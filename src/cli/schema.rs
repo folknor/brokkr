@@ -1264,6 +1264,28 @@ Examples:
         /// a different package (e.g. `--cargo pbfhogg-cli`).
         #[arg(long, num_args = 0..=1, value_name = "PKG")]
         cargo: Option<Option<String>>,
+
+        /// [elivagar] Prune canonical per-commit archives in the durable output
+        /// store (`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`), keeping
+        /// the newest --keep per (dataset, variant). Groups are built by
+        /// constructing each known (dataset, variant) prefix from config;
+        /// anything not matching (hand-named files, the toml-contract ocean
+        /// artifact, pre-rename archives) is preserved unconditionally.
+        #[arg(long)]
+        archives: bool,
+
+        /// Archives to keep per (dataset, variant) with --archives (default 2:
+        /// the current build plus one comparand, what the tier-3 workflow uses).
+        #[arg(long, default_value_t = 2)]
+        keep: usize,
+
+        /// Everything: --worktrees + --archives + --cargo (default package).
+        #[arg(long)]
+        all: bool,
+
+        /// List what would be removed without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show lock status (who holds the benchmark lock)
     #[command(display_order = 6)]
@@ -2857,9 +2879,10 @@ pub(crate) enum PmtilesCorpusCommand {
     Mutate {
         #[command(flatten)]
         archive: CorpusArchiveArgs,
-        /// Output file path for the mutated archive
+        /// Output path for the mutated archive. Default: a calibrand under
+        /// data/corpus-calibrands/ that a routine `brokkr clean` clears.
         #[arg(short = 'o', long)]
-        output: std::path::PathBuf,
+        output: Option<std::path::PathBuf>,
         /// Mutation op passed through to elivagar
         /// (drop-tile|nudge-geometry|layer-version|regzip)
         #[arg(long)]

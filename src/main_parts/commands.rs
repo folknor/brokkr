@@ -267,20 +267,89 @@ fn cmd_run(
     Ok(())
 }
 
+/// What a `brokkr clean` run should reclaim beyond the routine scratch. `cargo`
+/// is handled at the dispatch site (it shells out); everything else flows
+/// through here.
+#[derive(Clone, Copy)]
+pub(crate) struct CleanOpts {
+    pub(crate) worktrees: bool,
+    pub(crate) archives: bool,
+    pub(crate) keep: usize,
+    pub(crate) dry_run: bool,
+}
+
+impl CleanOpts {
+    /// The routine sweep: scratch/tmp only, nothing durable. Used by the
+    /// interrupt/kill cleanup path.
+    pub(crate) fn routine() -> Self {
+        Self {
+            worktrees: false,
+            archives: false,
+            keep: 2,
+            dry_run: false,
+        }
+    }
+}
+
+/// Removal helper that honours `--dry-run`: in dry-run it reports the path and
+/// removes nothing; otherwise it deletes best-effort. Returns whether the path
+/// existed (i.e. something was, or would be, removed).
+struct Cleaner {
+    dry_run: bool,
+}
+
+impl Cleaner {
+    fn dir(&self, path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        if !self.dry_run {
+            std::fs::remove_dir_all(path).ok();
+        }
+        true
+    }
+
+    fn file(&self, path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        if !self.dry_run {
+            std::fs::remove_file(path).ok();
+        }
+        true
+    }
+
+    /// Verb for "N file(s)" style messages.
+    fn verb(&self) -> &'static str {
+        if self.dry_run { "would remove" } else { "removed" }
+    }
+
+    /// Verb for "X" (named target) style messages.
+    fn past(&self) -> &'static str {
+        if self.dry_run { "would clean" } else { "cleaned" }
+    }
+}
+
 fn cmd_clean(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
-    worktrees: bool,
+    opts: CleanOpts,
 ) -> Result<(), DevError> {
+    let CleanOpts {
+        worktrees,
+        archives,
+        keep,
+        dry_run,
+    } = opts;
+    let c = Cleaner { dry_run };
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
     // Clean verify output (pbfhogg only).
     let verify_dir = paths.target_dir.join("verify");
-    if verify_dir.exists() {
-        std::fs::remove_dir_all(&verify_dir)?;
-        output::run_msg("removed verify output");
+    if c.dir(&verify_dir) {
+        output::run_msg(&format!("{} verify output", c.verb()));
     }
 
     // Reclaim the per-sweep isolated target dirs a `rustflags` `[[check]]`
@@ -288,110 +357,44 @@ fn cmd_clean(
     // cargo's real resolved target dir, where the check/test phase actually
     // built them - not `paths.target_dir` (which a host `target` override can
     // repoint). Routine scratch: reproducible, and nothing else reaches them.
-    clean_rustflags_target_dirs(&pi.target_dir);
+    clean_rustflags_target_dirs(&pi.target_dir, &c);
 
-    // Clean scratch temp files.
-    if paths.scratch_dir.exists() {
-        if project == Project::Elivagar {
-            // Elivagar scratch is tilegen_tmp - remove all contents.
-            std::fs::remove_dir_all(&paths.scratch_dir)?;
-            std::fs::create_dir_all(&paths.scratch_dir)?;
-            output::run_msg("cleaned tilegen_tmp");
-        } else if project == Project::Nidhogg {
-            // Clean nidhogg scratch temp files
-            let ingest_tmp = project_root.join(".ingest_tmp");
-            if ingest_tmp.exists() {
-                std::fs::remove_dir_all(&ingest_tmp)?;
-                output::run_msg("cleaned .ingest_tmp");
-            }
-            let tilegen_tmp = project_root.join(".tilegen_tmp");
-            if tilegen_tmp.exists() {
-                std::fs::remove_dir_all(&tilegen_tmp)?;
-                output::run_msg("cleaned .tilegen_tmp");
-            }
-        } else {
-            let mut removed = 0u32;
-            if let Ok(entries) = std::fs::read_dir(&paths.scratch_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
-                        std::fs::remove_file(&path).ok();
-                        removed += 1;
-                    }
-                    // Clean geocode output directories (geocode-<dataset>/).
-                    if path.is_dir()
-                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    {
-                        if name.starts_with("geocode-") {
-                            std::fs::remove_dir_all(&path).ok();
-                            removed += 1;
-                        }
-                        // Clean orphaned external-join scratch dirs (.pbfhogg-external-join-{pid}).
-                        // These survive OOM kills (SIGKILL prevents Drop cleanup).
-                        if let Some(pid_str) = name.strip_prefix(".pbfhogg-external-join-")
-                            && let Ok(pid) = pid_str.parse::<i32>()
-                        {
-                            let alive = unsafe { libc::kill(pid, 0) } == 0;
-                            if !alive {
-                                std::fs::remove_dir_all(&path).ok();
-                                removed += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            if removed > 0 {
-                output::run_msg(&format!("removed {removed} scratch file(s)"));
-            }
+    clean_scratch(project, project_root, &paths, &c);
+
+    // Elivagar: routine clean also clears the corpus-calibrand scratch dir (the
+    // default `-o` target for `pmtiles-corpus mutate`) and ocean-build's tmp
+    // dir. Both are brokkr-designated locations holding reproducible scratch;
+    // an explicit `-o` elsewhere is the user's file and is never touched.
+    if project == Project::Elivagar {
+        if c.dir(&paths.data_dir.join(CORPUS_CALIBRAND_DIR)) {
+            output::run_msg(&format!("{} corpus-calibrands", c.past()));
+        }
+        if c.dir(&paths.data_dir.join("ocean-build_tmp")) {
+            output::run_msg(&format!("{} ocean-build_tmp", c.past()));
+        }
+        if archives {
+            clean_archives(&paths, keep, &c);
         }
     }
 
-    // Clean ratatoskr artefact tree (`.brokkr/ratatoskr/<test>/run-N/`,
-    // `.brokkr/ratatoskr/sync/<test>/run-N/[iter-K/]`, plus the
-    // `mock/<fixture>/` dirs left by `mock-serve`). The whole tree is
-    // debris by the time `clean` runs because we hold the project lock.
-    if project == Project::Ratatoskr {
-        let ratatoskr_root = project_root.join(".brokkr/ratatoskr");
-        if ratatoskr_root.exists() {
-            let runs = count_run_dirs(&ratatoskr_root);
-            std::fs::remove_dir_all(&ratatoskr_root)?;
-            output::run_msg(&format!("removed {runs} ratatoskr run dir(s)"));
-        }
-    }
-
-    // Clean piners corpus artefact tree (`.brokkr/piners/corpus/run-N/`, each
-    // holding a manifest + captured harness output). These are debris by the
-    // time `clean` runs (we hold the project lock) - but the corpus run store
-    // (`.brokkr/piners/corpus/runs.db`, + its `-wal`/`-shm`) is the source of
-    // truth now and must survive, so only the `run-N/` dirs are removed.
-    if project == Project::Piners {
-        let corpus_root = project_root.join(".brokkr/piners/corpus");
-        let mut removed = 0;
-        if corpus_root.exists() {
-            for entry in std::fs::read_dir(&corpus_root)?.flatten() {
-                let path = entry.path();
-                if path.is_dir() && entry.file_name().to_string_lossy().starts_with("run-") {
-                    std::fs::remove_dir_all(&path).ok();
-                    removed += 1;
-                }
-            }
-        }
-        if removed > 0 {
-            output::run_msg(&format!("removed {removed} piners run dir(s)"));
-        }
-    }
+    clean_artefact_trees(project, project_root, &c);
 
     if worktrees {
         // Deep clean: `--worktrees` reclaims the expensive *persistent* state.
         // The durable tilegen output store is elivagar's analog of piners'
-        // `runs.db` (the source of truth for `regress`/`bless`), so a routine
-        // `brokkr clean` spares it - retention already bounds its growth. Only
-        // the explicit deep clean wipes it, alongside the worktrees.
+        // `runs.db` (the archives `regress` diffs), so a routine `brokkr clean`
+        // spares it - retention already bounds its growth. Only the explicit
+        // deep clean wipes it wholesale, alongside the worktrees.
         if project == Project::Elivagar {
-            clean_elivagar_outputs(&paths);
+            clean_elivagar_outputs(&paths, &c);
         }
-        let removed = worktree::purge_all(project_root)?;
-        output::run_msg(&format!("removed {removed} worktree(s)"));
+        if dry_run {
+            let existing = worktree::list(project_root)?;
+            output::run_msg(&format!("would remove {} worktree(s)", existing.len()));
+        } else {
+            let removed = worktree::purge_all(project_root)?;
+            output::run_msg(&format!("removed {removed} worktree(s)"));
+        }
     } else {
         let existing = worktree::list(project_root)?;
         if !existing.is_empty() {
@@ -424,13 +427,113 @@ fn cargo_clean_package(build_root: &Path, pkg: &str) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Remove the durable tilegen output archives (`<dataset>-<commit>.pmtiles`)
-/// from the output store. They are reproducible (rerun tilegen), so the deep
-/// clean (`brokkr clean --worktrees`) reclaims their space; retention already
-/// bounds normal growth, and a routine `brokkr clean` leaves them in place.
-/// Skipped when the output dir coincides with scratch (already wiped by the
-/// caller).
-fn clean_elivagar_outputs(paths: &config::ResolvedPaths) {
+/// Clean the project's scratch/tmp directory. Each project's scratch is a
+/// different shape: elivagar wipes `tilegen_tmp` wholesale (and recreates it),
+/// nidhogg has two named tmp dirs, and pbfhogg/others sweep loose `.pbf`
+/// scratch, geocode output dirs, and dead external-join dirs.
+fn clean_scratch(project: Project, project_root: &Path, paths: &config::ResolvedPaths, c: &Cleaner) {
+    if !paths.scratch_dir.exists() {
+        return;
+    }
+    if project == Project::Elivagar {
+        // Elivagar scratch is tilegen_tmp - remove all contents and recreate.
+        if c.dir(&paths.scratch_dir) {
+            if !c.dry_run {
+                std::fs::create_dir_all(&paths.scratch_dir).ok();
+            }
+            output::run_msg(&format!("{} tilegen_tmp", c.past()));
+        }
+        return;
+    }
+    if project == Project::Nidhogg {
+        if c.dir(&project_root.join(".ingest_tmp")) {
+            output::run_msg(&format!("{} .ingest_tmp", c.past()));
+        }
+        if c.dir(&project_root.join(".tilegen_tmp")) {
+            output::run_msg(&format!("{} .tilegen_tmp", c.past()));
+        }
+        return;
+    }
+
+    let mut removed = 0u32;
+    if let Ok(entries) = std::fs::read_dir(&paths.scratch_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
+                c.file(&path);
+                removed += 1;
+            }
+            // Clean geocode output directories (geocode-<dataset>/).
+            if path.is_dir()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            {
+                if name.starts_with("geocode-") {
+                    c.dir(&path);
+                    removed += 1;
+                }
+                // Clean orphaned external-join scratch dirs
+                // (.pbfhogg-external-join-{pid}); these survive OOM kills
+                // (SIGKILL prevents Drop cleanup).
+                if let Some(pid_str) = name.strip_prefix(".pbfhogg-external-join-")
+                    && let Ok(pid) = pid_str.parse::<i32>()
+                {
+                    let alive = unsafe { libc::kill(pid, 0) } == 0;
+                    if !alive {
+                        c.dir(&path);
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        output::run_msg(&format!("{} {removed} scratch file(s)", c.verb()));
+    }
+}
+
+/// Clean the ratatoskr and piners run-artefact trees. Both are debris by the
+/// time `clean` runs (we hold the project lock). For piners only the `run-N/`
+/// dirs go - the corpus run store (`runs.db` + wal/shm) is the source of truth
+/// and must survive.
+fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
+    if project == Project::Ratatoskr {
+        let ratatoskr_root = project_root.join(".brokkr/ratatoskr");
+        if ratatoskr_root.exists() {
+            let runs = count_run_dirs(&ratatoskr_root);
+            c.dir(&ratatoskr_root);
+            output::run_msg(&format!("{} {runs} ratatoskr run dir(s)", c.verb()));
+        }
+    }
+
+    if project == Project::Piners {
+        let corpus_root = project_root.join(".brokkr/piners/corpus");
+        let mut removed = 0;
+        if let Ok(entries) = std::fs::read_dir(&corpus_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && entry.file_name().to_string_lossy().starts_with("run-") {
+                    c.dir(&path);
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            output::run_msg(&format!("{} {removed} piners run dir(s)", c.verb()));
+        }
+    }
+}
+
+/// The default `-o` directory for `pmtiles-corpus mutate` calibrands, under the
+/// data dir. A routine `brokkr clean` clears it wholesale; an explicit `-o`
+/// elsewhere is the user's file and is never touched.
+pub(crate) const CORPUS_CALIBRAND_DIR: &str = "corpus-calibrands";
+
+/// Deep-clean (`--worktrees`) the durable tilegen output store: removes ALL
+/// `*.pmtiles` in the output dir. Unlike `--archives` (canonical-name,
+/// per-(dataset,variant), keep-N), the deep clean wipes the store wholesale
+/// because it is reproducible (rerun tilegen). Skipped when the output dir
+/// coincides with scratch (already wiped by the caller).
+fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) {
     if paths.output_dir == paths.scratch_dir || !paths.output_dir.exists() {
         return;
     }
@@ -439,13 +542,66 @@ fn clean_elivagar_outputs(paths: &config::ResolvedPaths) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("pmtiles") {
-                std::fs::remove_file(&path).ok();
+                c.file(&path);
                 removed += 1;
             }
         }
     }
     if removed > 0 {
-        output::run_msg(&format!("removed {removed} tilegen output archive(s)"));
+        output::run_msg(&format!("{} {removed} tilegen output archive(s)", c.verb()));
+    }
+}
+
+/// `--archives`: prune canonical `<dataset>-<variant>-<commit>.pmtiles` archives
+/// in the durable output store, keeping the newest `keep` per (dataset,
+/// variant). Groups are built by CONSTRUCTING each known (dataset, variant)
+/// prefix from config (`resolve::pmtiles_archive_prefix`) - filenames are never
+/// parsed back, since dataset names carry hyphens. The safety property follows:
+/// anything not matching a constructed prefix (hand-named files, the
+/// toml-contract ocean artifact, pre-rename `<dataset>-<commit>` archives) is
+/// preserved unconditionally, because a file brokkr can't name by construction
+/// is self-evidently not brokkr's to delete.
+fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
+    let output_dir = &paths.output_dir;
+    if !output_dir.exists() {
+        return;
+    }
+    let mut removed = 0u32;
+    for (dataset, ds) in &paths.datasets {
+        for variant in ds.pbf.keys() {
+            let prefix = crate::resolve::pmtiles_archive_prefix(dataset, variant);
+            let mut archives: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+            let Ok(entries) = std::fs::read_dir(output_dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_match = path.extension().and_then(|e| e.to_str()) == Some("pmtiles")
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&prefix));
+                if is_match {
+                    let mtime = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    archives.push((mtime, path));
+                }
+            }
+            if archives.len() <= keep {
+                continue;
+            }
+            // Newest first; prune everything past the keep window.
+            archives.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+            for (_, path) in archives.into_iter().skip(keep) {
+                c.file(&path);
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        output::run_msg(&format!("{} {removed} archive(s)", c.verb()));
     }
 }
 
@@ -455,7 +611,7 @@ fn clean_elivagar_outputs(paths: &config::ResolvedPaths) {
 /// recreates them - and nothing else reclaims them: `cargo clean -p` only
 /// touches the default target dir, and editing a sweep's `rustflags` orphans the
 /// old hash's tree permanently. A routine `brokkr clean` sweeps them (S3-06).
-fn clean_rustflags_target_dirs(target_dir: &Path) {
+fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) {
     let mut removed = 0u32;
     if let Ok(entries) = std::fs::read_dir(target_dir) {
         for entry in entries.flatten() {
@@ -466,14 +622,15 @@ fn clean_rustflags_target_dirs(target_dir: &Path) {
                     .to_string_lossy()
                     .starts_with("rustflags-")
             {
-                std::fs::remove_dir_all(&path).ok();
+                c.dir(&path);
                 removed += 1;
             }
         }
     }
     if removed > 0 {
         output::run_msg(&format!(
-            "removed {removed} isolated rustflags target dir(s)"
+            "{} {removed} isolated rustflags target dir(s)",
+            c.verb()
         ));
     }
 }

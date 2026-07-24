@@ -183,7 +183,12 @@ clap namespace (the same reason `inspect` became `pmtiles-inspect`).
 | `pmtiles-corpus render-manifest [...] [--corpus DIR] [--style P]` | `elivagar corpus render-manifest` | archive, corpus dir |
 | `pmtiles-corpus render [...] -z Z -x X -y Y [--layers L] [--style P] [-o OUT]` | `elivagar corpus render` | archive only |
 | `pmtiles-corpus rings [...] -o OUT` | `elivagar corpus rings` | archive only |
-| `pmtiles-corpus mutate [...] -o OUT --op OP [--tile z/x/y]` | `elivagar corpus mutate` | input archive only |
+| `pmtiles-corpus mutate [...] [-o OUT] --op OP [--tile z/x/y]` | `elivagar corpus mutate` | input archive only |
+
+`mutate`'s `-o` is optional: omitted, it writes a calibrand to
+`data/corpus-calibrands/<dataset>-<variant>-<op>.pmtiles`, a brokkr-designated
+scratch dir a routine `brokkr clean` clears wholesale. An explicit `-o`
+elsewhere is the user's file and clean never touches it.
 
 Every subcommand resolves the archive through the SAME
 `resolve_pmtiles_by_commit()` as `pmtiles-inspect`/`diag`/`svg`

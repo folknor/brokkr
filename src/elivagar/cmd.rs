@@ -419,9 +419,19 @@ pub(crate) fn corpus(
             tile,
         } => {
             let path = resolve(archive)?;
+            // Default `-o` to a calibrand under data/corpus-calibrands/ (cleared
+            // by a routine `brokkr clean`); an explicit `-o` is the user's file.
+            let out_path = match output {
+                Some(o) => o.clone(),
+                None => {
+                    let dir = paths.data_dir.join(crate::CORPUS_CALIBRAND_DIR);
+                    std::fs::create_dir_all(&dir).ok();
+                    dir.join(format!("{}-{}-{op}.pmtiles", archive.dataset, archive.variant))
+                }
+            };
             let mut trailing = vec![
                 "-o".to_owned(),
-                output.display().to_string(),
+                out_path.display().to_string(),
                 "--op".to_owned(),
                 op.clone(),
             ];

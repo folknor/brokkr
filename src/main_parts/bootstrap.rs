@@ -142,7 +142,7 @@ fn main() {
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
             if let Ok(d) = project::detect()
-                && let Err(e) = cmd_clean(&d.config, d.project, &d.project_root, false)
+                && let Err(e) = cmd_clean(&d.config, d.project, &d.project_root, CleanOpts::routine())
             {
                 output::error(&format!("cleanup failed: {e}"));
             }
@@ -1014,13 +1014,36 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Invalidate { uuid, commit, force } => {
             invalidate_cmd::cmd_invalidate(&project_root, uuid.as_deref(), commit.as_deref(), force)
         }
-        Command::Clean { worktrees, cargo } => {
+        Command::Clean {
+            worktrees,
+            cargo,
+            archives,
+            keep,
+            all,
+            dry_run,
+        } => {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
+            // `--all` folds in the worktrees, archives, and cargo sweeps.
+            let cargo = if all { Some(cargo.unwrap_or(None)) } else { cargo };
             if let Some(pkg) = cargo {
                 let pkg = pkg.unwrap_or_else(|| project.name().to_owned());
-                cargo_clean_package(&build_root, &pkg)?;
+                if dry_run {
+                    output::run_msg(&format!("would run cargo clean -p {pkg}"));
+                } else {
+                    cargo_clean_package(&build_root, &pkg)?;
+                }
             }
-            cmd_clean(&dev_config, project, &project_root, worktrees)
+            cmd_clean(
+                &dev_config,
+                project,
+                &project_root,
+                CleanOpts {
+                    worktrees: worktrees || all,
+                    archives: archives || all,
+                    keep,
+                    dry_run,
+                },
+            )
         }
         Command::Verify {
             verbose,
