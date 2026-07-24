@@ -27,6 +27,11 @@ rustc_lexer = "0.1.0"
 # terminal. Both are leaf crates with no transitive dependencies of their own.
 pulldown-cmark = { version = "0.13", default-features = false }
 owo-colors = "4"
+# The corpus gate links elivagar in-process (reader/decoder/writer surface) and
+# reuses protohoggr's MVT cursor for the ported streaming tile hash. See
+# src/elivagar/eliv.rs (the seam) and src/elivagar/corpus/canonical.rs.
+elivagar = { path = "../elivagar" }
+protohoggr = "0.4.0"
 
 [lints.clippy]
 uninlined_format_args = "deny"

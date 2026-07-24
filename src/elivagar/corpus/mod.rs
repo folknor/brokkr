@@ -17,6 +17,7 @@
 //! staleness (step 4) does not and is strictly subordinate to the content
 //! verdict, so it can never mask a regression.
 
+pub mod canonical;
 pub mod contract;
 pub mod diff;
 pub mod digest;
@@ -28,9 +29,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::Path;
 
-use super::eliv::{
-    ArchiveView, BlobRef, DecodeScratch, next_zoom_boundary, semantic_hash, tile_id_to_zxy,
-};
+use super::eliv::{ArchiveView, BlobRef, next_zoom_boundary, tile_id_to_zxy};
+use canonical::{DecodeScratch, semantic_hash};
 use contract::{ContractDoc, ContractState};
 use digest::{Baseline, Digest, LeafRun};
 
@@ -192,13 +192,16 @@ fn candidate_contract(a: &ArchiveView) -> io::Result<Result<ContractDoc, String>
 /// manifest`) against digest-equal content.
 enum Gate {
     Refused(Outcome, CheckReport),
-    Passed {
-        view: ArchiveView,
-        base: Baseline,
-        warnings: Vec<String>,
-        tiles: u64,
-        unique: u64,
-    },
+    // Boxed: the open archive view + parsed baseline dwarf the Refused variant.
+    Passed(Box<Passed>),
+}
+
+struct Passed {
+    view: ArchiveView,
+    base: Baseline,
+    warnings: Vec<String>,
+    tiles: u64,
+    unique: u64,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -290,13 +293,13 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
             },
         ));
     }
-    Ok(Gate::Passed {
+    Ok(Gate::Passed(Box::new(Passed {
         view,
         base,
         warnings,
         tiles: d.tiles,
         unique: d.unique,
-    })
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -307,13 +310,7 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
 pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(Outcome, CheckReport)> {
     let (view, base, mut warnings, tiles, unique) = match gate_through_walk(archive, corpus_dir)? {
         Gate::Refused(o, r) => return Ok((o, r)),
-        Gate::Passed {
-            view,
-            base,
-            warnings,
-            tiles,
-            unique,
-        } => (view, base, warnings, tiles, unique),
+        Gate::Passed(p) => (p.view, p.base, p.warnings, p.tiles, p.unique),
     };
 
     // STEP 4 - staleness (subject: the baseline; exit 3, strictly subordinate).
@@ -427,7 +424,7 @@ pub fn render_manifest(
 ) -> io::Result<(Outcome, CheckReport)> {
     let view = match gate_through_walk(archive, corpus_dir)? {
         Gate::Refused(o, r) => return Ok((o, r)),
-        Gate::Passed { view, .. } => view,
+        Gate::Passed(p) => p.view,
     };
     let manifest_path = corpus_dir.join("manifest.toml");
     if !manifest_path.exists() {
