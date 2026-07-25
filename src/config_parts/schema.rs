@@ -18,6 +18,7 @@ pub struct DevConfig {
     pub sluggrs: Option<SluggrsConfig>,
     pub ratatoskr: Option<RatatoskrConfig>,
     pub piners: Option<PinersConfig>,
+    pub dellingr: Option<DellingrConfig>,
     /// Static Cargo package dependency boundary rules enforced by
     /// `brokkr check` before clippy/tests. Empty when the project does
     /// not define any `[[dependency_rule]]` entries.
@@ -1455,6 +1456,66 @@ impl HarnessConfig {
     #[cfg(test)]
     pub fn binary_name(&self) -> &str {
         self.binary.as_deref().unwrap_or(&self.package)
+    }
+}
+
+/// Dellingr-specific configuration from `[dellingr]` in brokkr.toml.
+///
+/// Drives `brokkr dellingr`, the Lua-workload bench harness. Two parts:
+///
+/// - `example` names the cargo `--example` target brokkr builds. The features
+///   are *not* configured: `--bench` builds it bare, `--hotpath` adds
+///   `hotpath`, `--alloc` adds `hotpath-alloc`. Those names are brokkr's
+///   standing convention across every project ([`crate::harness::hotpath_feature`]),
+///   so restating them per project would only create a way for them to disagree.
+/// - `[dellingr.workloads.<name>]` is the registry: `--lua <name>` resolves to
+///   `file`, and `xxh128` pins its content.
+///
+/// The registry is deliberately *not* hostname-keyed, unlike `[<host>.datasets]`.
+/// Workloads are in-repo files identical on every host, so a per-host section
+/// would imply a variability that does not exist.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DellingrConfig {
+    /// The cargo `--example` target implementing the bench harness.
+    pub example: String,
+    /// Registered workloads, keyed by the name `--lua` takes.
+    #[serde(default)]
+    pub workloads: BTreeMap<String, DellingrWorkload>,
+}
+
+/// One registered workload: a repo-relative path plus its pinned digest.
+///
+/// The hash is what makes a stored row mean something. These files are
+/// editable source, not immutable datasets - silently retuning one would
+/// leave every historical row under the same name describing a workload that
+/// no longer exists. Verification turns that into a deliberate
+/// re-registration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DellingrWorkload {
+    /// Path to the `.lua` file, relative to the directory holding `brokkr.toml`.
+    pub file: PathBuf,
+    /// Expected xxh128 hex digest (brokkr's standard file hash).
+    pub xxh128: String,
+}
+
+impl DellingrConfig {
+    /// Look up a workload by the name `--lua` takes, with an error listing
+    /// the registered names when it is absent.
+    pub fn workload(&self, name: &str) -> Result<&DellingrWorkload, DevError> {
+        self.workloads.get(name).ok_or_else(|| {
+            let known: Vec<&str> = self.workloads.keys().map(String::as_str).collect();
+            let known = if known.is_empty() {
+                "none registered".to_owned()
+            } else {
+                known.join(", ")
+            };
+            DevError::Config(format!(
+                "unknown workload {name:?}\n  registered: {known}\n  \
+                 add it as [dellingr.workloads.{name}] in brokkr.toml"
+            ))
+        })
     }
 }
 

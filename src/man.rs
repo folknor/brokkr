@@ -164,6 +164,12 @@ const TOPICS: &[Topic] = &[
         content: include_str!("../docs/commands/lint-corpus.md"),
         visibility: Visibility::Only(&[Project::Piners]),
     },
+    Topic {
+        name: "dellingr",
+        summary: "the lua-workload bench: [dellingr] config, hash pins, --commit",
+        content: include_str!("../docs/projects/dellingr.md"),
+        visibility: Visibility::Only(&[Project::Dellingr]),
+    },
 ];
 
 /// The topics available in `project`, in table order.

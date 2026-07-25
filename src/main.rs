@@ -7,6 +7,7 @@ mod cli;
 mod config;
 mod context;
 mod db;
+mod dellingr;
 mod dependency_rules;
 mod deps;
 mod elivagar;

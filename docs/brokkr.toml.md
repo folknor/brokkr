@@ -16,6 +16,7 @@ For project-specific config blocks see:
 - `[litehtml]` -> `docs/projects/litehtml.md`
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
 - `[piners]` and `[piners.harness]` -> the `[piners]` section below; runner behaviour is in `docs/commands/corpus.md`
+- `[dellingr]` and `[dellingr.workloads.*]` -> `docs/projects/dellingr.md`
 
 For project-specific CLI flags that adjust dataset resolution or cargo
 features (`--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`,

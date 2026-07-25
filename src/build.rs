@@ -238,7 +238,16 @@ pub fn cargo_build_observed(
         return Err(DevError::Build(format!("cargo build failed: {stderr}")));
     }
 
-    let expected = config.bin.as_deref().or(config.package.as_deref());
+    // An `--example` build names its target as surely as `--bin` does, and
+    // cargo emits the example's executable under that name. Without it here
+    // the example path fell through to `find_executable`'s "exactly one
+    // executable" fallback - correct in practice, but by luck rather than by
+    // the name we already know.
+    let expected = config
+        .bin
+        .as_deref()
+        .or(config.example.as_deref())
+        .or(config.package.as_deref());
     let executable = find_executable(&captured.stdout, expected)?;
 
     output::build_msg(&format!(

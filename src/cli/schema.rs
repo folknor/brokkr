@@ -1922,6 +1922,33 @@ Examples:
         force: bool,
     },
 
+    // ----- dellingr-only commands (display_order = 57) -----
+    /// [dellingr] Benchmark a registered Lua workload
+    ///
+    /// Builds the `[dellingr] example` harness target and runs it against the
+    /// workload `--lua` names, resolved through the `[dellingr.workloads.*]`
+    /// registry and verified against its pinned `xxh128`.
+    ///
+    /// The mode selects the build: `--bench` builds the harness bare (the
+    /// uninstrumented walls, the ones worth comparing), `--hotpath` adds the
+    /// `hotpath` feature, `--alloc` adds `hotpath-alloc`. With no mode it runs
+    /// once and stores nothing.
+    ///
+    /// Under `--commit`, the *harness* comes from the old commit's worktree
+    /// but the *workload* still comes from the registration in the current
+    /// tree. A baseline exists to vary the VM while holding the workload
+    /// fixed; taking the old commit's copy of the script would conflate the
+    /// two.
+    #[command(name = "dellingr", display_order = 57)]
+    Dellingr {
+        #[command(flatten)]
+        mode: ModeArgs,
+
+        /// Registered workload name from `[dellingr.workloads.*]`
+        #[arg(long)]
+        lua: String,
+    },
+
     // ----- ratatoskr-only commands (display_order = 60) -----
     /// [ratatoskr] Run a Service-subprocess test script (deterministic harness)
     ///

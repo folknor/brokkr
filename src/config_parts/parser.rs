@@ -36,6 +36,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let sluggrs = parse_sluggrs(table)?;
     let ratatoskr = parse_ratatoskr(table)?;
     let piners = parse_piners(table)?;
+    let dellingr = parse_dellingr(table)?;
     let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
@@ -62,6 +63,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             sluggrs,
             ratatoskr,
             piners,
+            dellingr,
             dependency_rules,
             check,
             test,
@@ -554,6 +556,7 @@ fn parse_hosts(
             || key == "sluggrs"
             || key == "ratatoskr"
             || key == "piners"
+            || key == "dellingr"
             || key == "dependency_rule"
             || key == "check"
             || key == "test"
@@ -659,6 +662,48 @@ fn parse_piners(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("piners: {e}")))?;
+    Ok(Some(config))
+}
+
+/// Parse the optional `[dellingr]` section. Absent -> `None`.
+///
+/// Each workload's `file` is validated as repo-relative here rather than at
+/// resolution time: an absolute path would escape the project root and read a
+/// workload nobody registered, and it is a config mistake worth naming at
+/// parse time rather than as a confusing hash mismatch later.
+fn parse_dellingr(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<DellingrConfig>, DevError> {
+    let Some(value) = table.get("dellingr") else {
+        return Ok(None);
+    };
+    let config: DellingrConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("dellingr: {e}")))?;
+
+    if config.example.trim().is_empty() {
+        return Err(DevError::Config(
+            "[dellingr].example is empty - name the cargo --example target \
+             implementing the bench harness."
+                .into(),
+        ));
+    }
+    for (name, workload) in &config.workloads {
+        if workload.file.is_absolute() {
+            return Err(DevError::Config(format!(
+                "[dellingr.workloads.{name}].file {:?} is absolute; workload \
+                 paths are relative to the directory holding brokkr.toml.",
+                workload.file,
+            )));
+        }
+        if workload.xxh128.trim().is_empty() {
+            return Err(DevError::Config(format!(
+                "[dellingr.workloads.{name}].xxh128 is empty - a workload \
+                 without a pinned digest cannot be checked for drift."
+            )));
+        }
+    }
     Ok(Some(config))
 }
 

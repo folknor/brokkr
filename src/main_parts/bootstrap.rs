@@ -801,6 +801,21 @@ fn run(cli: Cli) -> Result<(), DevError> {
             )
         }
 
+        // ----- dellingr commands -----
+        // Dataset/variant are the `run_measured` scaffolding every measured
+        // command shares; dellingr has neither, so both stay empty rather
+        // than inventing a "denmark" that would land in the DB.
+        Command::Dellingr { mode, lua } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            "",
+            "",
+            &brokkr_args,
+            |req| dellingr::cmd::run(req, &lua),
+        ),
+
         // ----- sluggrs commands -----
         // ----- generic commands -----
         Command::GenericHotpath {

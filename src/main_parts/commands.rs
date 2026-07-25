@@ -505,6 +505,17 @@ fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
         }
     }
 
+    if project == Project::Dellingr {
+        // Only brokkr's own leavings live here (the harness hotpath report and
+        // marker FIFO); results.db and sidecar.db are one level up in
+        // `.brokkr/` and stay out of scope as everywhere else.
+        let dellingr_root = project_root.join(".brokkr/dellingr");
+        if dellingr_root.exists() {
+            c.dir(&dellingr_root);
+            output::run_msg(&format!("{} dellingr scratch dir", c.verb()));
+        }
+    }
+
     if project == Project::Piners {
         let corpus_root = project_root.join(".brokkr/piners/corpus");
         let mut removed = 0;
