@@ -55,6 +55,7 @@ mod visibility_tests {
             Project::Sluggrs,
             Project::Ratatoskr,
             Project::Piners,
+            Project::Dellingr,
             Project::Other("some-foreign-repo"),
         ] {
             for name in ["check", "env", "history", "clean"] {
@@ -79,6 +80,7 @@ mod visibility_tests {
                 Project::Ratatoskr,
                 Project::Sluggrs,
                 Project::Piners,
+                Project::Dellingr,
                 Project::Other("some-foreign-repo"),
             ] {
                 assert!(visible_in(name, project), "`{name}` hidden in {project}");

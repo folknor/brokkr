@@ -1,6 +1,6 @@
 # brokkr
 
-Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs, ratatoskr, and piners. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
+Shared development tooling for pbfhogg, elivagar, nidhogg, litehtml-rs, sluggrs, ratatoskr, piners, and dellingr. Single Rust binary installed via `cargo install --path ~/Programs/brokkr`.
 
 ## Bash rules
 - Never use sed, find, awk, or complex bash commands. Write a script instead.
@@ -29,7 +29,9 @@ echo "Please review the unstaged changes and report your findings." | review bug
 
 ## How it works
 
-Invoked as `brokkr` from any project root. Reads `brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr|piners"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
+Invoked as `brokkr` from any project root. Reads `brokkr.toml` for project detection (`project = "pbfhogg|elivagar|nidhogg|litehtml-rs|sluggrs|ratatoskr|piners|dellingr"`). Commands are gated by project - running a pbfhogg-only command from elivagar's root produces an error.
+
+Dellingr is recognised but has no dedicated commands yet: it was promoted out of `Project::Other("dellingr")` ahead of its benchmark surface, which is being designed on the dellingr side. Until that lands it behaves exactly as before - the shared commands plus `generic-hotpath` - and `src/dellingr/` does not exist. The promotion is what makes a gated `Only(&[Project::Dellingr])` command expressible; nothing else changed.
 
 `brokkr.toml` is looked up in the working directory, or one level up (its immediate parent) if absent there. The one-level-up form is for driving a checkout that isn't ours: the config and everything brokkr owns (`data/`, `.brokkr/` with `results.db`) live in the parent, keeping the foreign repo clean, while git and cargo still run against the working directory. Detection splits these as `project_root` (config dir - data/`.brokkr`) vs `build_root` (cwd - git/cargo); they coincide in the common case (config in cwd). See `src/project.rs`.
 
@@ -158,3 +160,18 @@ Project-specific commands are documented under `docs/commands/` and `docs/projec
 - `DevError` variants for structured error handling (no `.unwrap()`)
 - Project gating via `project::require()` - wrong-project commands fail with helpful message
 - Build uses `--message-format=json` to extract executable path from cargo output. `find_executable` prefers the binary whose file stem matches the package/bin name exactly. When no expected name is provided, requires exactly one executable - errors if multiple are found.
+
+## Session workflow
+
+After a code change, carry it all the way through without checking in first: update the affected markdown (including stale lines adjacent to the change, not only the lines the change touched), run `brokkr check`, commit on master, `cargo install --path .`. Markdown updates land BEFORE the code commit and ride in the same commit (never a pure-markdown commit). Do not end a turn with "want me to commit?" or "should I update the docs too?".
+
+Note: `git add -A` fails in this repo when `scratch/certifies-smoke/` exists - the smoke script generates a nested git repo there - so add paths explicitly.
+
+## Cross-repo state (nautilus_trader)
+
+Coordination state invisible from either repo alone; migrated from session memory 2026-07-24.
+
+- **Convention-engine port: all engines DONE** (gremlins codepoint ranges, `[style]`, `[header]`, `[[textlint]]` incl. region tracking, `join_wrapped_use`, and the context-window gates, `[manifest]`, `brokkr deps` `workspace_dep`). The remaining work is product, not engine: encode nautilus's *curated* rule set into nautilus's own brokkr.toml (priority #1). The only inexpressible hook is `check_docs_conventions` rule 1 (# Panics/# Errors - needs syn, stays a hand-run hook). Spec: `~/Programs/PRs/work/brokkr-hook-port-spec.md`.
+- **Tiered check (`TIERED-CHECK.md`): committed core done, gate GREEN on nautilus** (recorded at c44dd37; the doc's "Continuing this work" section is the handoff). Open items the user is not sure should be done at all: (1) the `[[quarantine]]` ledger reports counts, not membership - an always-too-wide entry or one whose members belong to another issue passes unnoticed; (2) features 6/7 (conditional sweeps, slow-test budget), each with a named re-evaluation criterion in the doc; (3) feature 12 (`requires`), designed-not-built.
+- **Nautilus-side follow-ups recorded nowhere else:** `redis::msgbus::serial_tests::` (11 tests) hang on absent Redis - platform-gated but not availability-gated, ~3.7min watchdog burn per gate run until fixed or quarantined; nautilus brokkr.toml's "runs properly serially" comment is falsified by the gate findings and needs a rewrite; pr-backlog.md bundle IDs (B14, B42, B49, B50...) are load-bearing append-only config now that `[[quarantine]]` entries cite them.
+- When nautilus reports gate runs, findings usually split into a brokkr defect (fix here) and a nautilus test/config issue (theirs); check TIERED-CHECK.md before adding mechanisms - most questions are already decided there.

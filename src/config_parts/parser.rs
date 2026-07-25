@@ -28,6 +28,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "ratatoskr" => Project::Ratatoskr,
         "saehrimnir" => Project::Saehrimnir,
         "piners" => Project::Piners,
+        "dellingr" => Project::Dellingr,
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 

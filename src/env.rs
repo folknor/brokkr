@@ -632,6 +632,7 @@ fn collect_tools(project: Project) -> Vec<(String, String)> {
         | Project::Ratatoskr
         | Project::Saehrimnir
         | Project::Piners
+        | Project::Dellingr
         | Project::Other(_) => {}
     }
 
