@@ -16,11 +16,11 @@ brokkr dellingr --lua same_obj_read --bench --commit <ref>
 ## What makes this project's bench surface different
 
 Almost every resolution step the map-data projects need is absent here.
-Workloads are 20-line `.lua` files tracked in git, so there are no external
+Workloads are short `.lua` files tracked in git, so there are no external
 datasets, no host data dirs, no scratch tree and no drive config. Runs are
-single-threaded, CPU-bound, do no I/O, and target seconds-scale wall times.
+single-threaded, CPU-bound, and do no I/O.
 
-Three things *are* specific:
+Four things *are* specific:
 
 1. **The harness is a cargo example, not a bin.** `[dellingr] example` names
    the target.
@@ -28,6 +28,9 @@ Three things *are* specific:
    input data.
 3. **`--commit` deliberately mixes two trees.** The harness comes from the old
    worktree; the workload does not.
+4. **Instrumented modes resolve a different file.** `--hotpath` / `--alloc`
+   require the workload's `hotpath_file` / `hotpath_xxh128` pair and refuse
+   without it - see below.
 
 ## Configuration
 
@@ -36,12 +39,10 @@ Three things *are* specific:
 example = "hotpath"
 
 [dellingr.workloads.same_obj_read]
-file = "examples/fields/same_obj_read.lua"
+file = "bench/same_obj_read.lua"
 xxh128 = "eaa3cf86979bad6b7d091923e9ddb132"
-
-[dellingr.workloads.patterns]
-file = "examples/strings/patterns.lua"
-xxh128 = "..."
+hotpath_file = "examples/fields/same_obj_read.lua"
+hotpath_xxh128 = "..."
 ```
 
 `example` is the cargo `--example` target implementing the bench harness.
@@ -59,10 +60,41 @@ brokkr's standing convention across every project:
 uninstrumented. Restating the two feature names per project would only create
 a way for them to disagree with `harness::hotpath_feature`.
 
-`file` is relative to the directory holding `brokkr.toml`; absolute paths are
-rejected at parse time. The registry is deliberately **not** hostname-keyed,
+`file` and `hotpath_file` are relative to the directory holding `brokkr.toml`;
+absolute paths are rejected at parse time, as are empty digests and a
+half-registered hotpath pair. The registry is deliberately **not** hostname-keyed,
 unlike `[<host>.datasets.*]` - workloads are in-repo files identical on every
 host, so a per-host section would imply a variability that does not exist.
+
+### Two files per workload: bench scale vs instrumentation scale
+
+The mode families need opposite workload scales, so a workload registers two
+files carrying the same kernel:
+
+- `file` / `xxh128` - resolved by `--bench` and plain runs. Seconds-scale, so
+  wall deltas resolve above launch-to-launch noise.
+- `hotpath_file` / `hotpath_xxh128` - resolved by `--hotpath` / `--alloc`.
+  Instrumentation-scale (tens of ms per `_bench` call).
+
+The split is a hard requirement, not a tuning preference. The hotpath crate
+queues one event per instrumented call in an unbounded per-thread queue; its
+background consumer sweeps every 50ms with a per-queue drain cap, orders of
+magnitude below what a VM dispatch loop produces. A seconds-scale workload
+under instrumentation backlogs tens of GB of RAM and dies (or takes the host
+down with it) before the report exists - observed at 30+ GB RAM + swap per
+run on 2026-07-26. Instrumented runs of an ms-scale variant still peak at a
+few GB of RSS from the same mechanism; that is expected and harmless.
+
+Because the failure mode is that severe, the pair is **required**: an
+instrumented run of a workload without `hotpath_file` refuses with the
+rationale rather than falling back to `file`. A half-registered pair is a
+parse-time config error, so it is named whether or not anyone runs that
+workload. Both pins re-register independently - editing the bench file does
+not invalidate stored hotpath rows, and vice versa.
+
+Instrumented walls were already documented as untrustworthy (read
+distributions, not times), so nothing is lost by the file swap: per-function
+call counts and percentages are scale-invariant for a fixed kernel.
 
 ### Why the hash
 
@@ -76,8 +108,11 @@ before building anything, and refuses on mismatch:
 [error]   preflight: hash mismatch for /home/f/dellingr/examples/fields/same_obj_read.lua
             expected: eaa3cf86979bad6b7d091923e9ddb132
             actual:   7b1d0c9f42ae86530fd1cc2b19e4a7f0
-            origin: [dellingr.workloads.same_obj_read] in brokkr.toml
+            origin: [dellingr.workloads.same_obj_read].hotpath_file in brokkr.toml
 ```
+
+The `origin` line names the *pin*, not just the table: a workload carries two
+of them, and only the one that drifted needs re-registering.
 
 Retuning a workload is then a deliberate re-registration: edit the file, put
 the new digest in `brokkr.toml`, and know that rows on either side of that

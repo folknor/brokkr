@@ -53,26 +53,61 @@ pub(crate) fn config(dev_config: &DevConfig) -> Result<&DellingrConfig, DevError
 ///
 /// The digest check therefore lands on the file actually loaded, which is the
 /// only file anyone resolved.
+///
+/// `instrumented` selects which registered file the run gets: `--hotpath` /
+/// `--alloc` resolve the `hotpath_file` / `hotpath_xxh128` pair, everything
+/// else resolves `file` / `xxh128`. The pair is *required* for instrumented
+/// runs - see [`crate::config::DellingrWorkload`] for why a seconds-scale
+/// workload under hotpath instrumentation is a memory cliff, not a slow run.
 pub(crate) fn resolve(
     dev_config: &DevConfig,
     project_root: &Path,
     name: &str,
+    instrumented: bool,
 ) -> Result<Resolved, DevError> {
     let cfg = config(dev_config)?;
     let entry = cfg.workload(name)?;
-    let path = project_root.join(&entry.file);
+
+    // A half-registered pair is rejected by `parse_dellingr`, so it cannot
+    // reach here; the arm stays as defence rather than a silent fallback to
+    // the wrong scale.
+    let (file, xxh128, origin_key) = match (&entry.hotpath_file, &entry.hotpath_xxh128) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(DevError::Config(format!(
+                "[dellingr.workloads.{name}] registers only half of the hotpath \
+                 pair - `hotpath_file` and `hotpath_xxh128` must come together"
+            )));
+        }
+        (Some(file), Some(hash)) if instrumented => (file, hash, "hotpath_file"),
+        (None, None) if instrumented => {
+            return Err(DevError::Config(format!(
+                "workload {name:?} has no hotpath variant - instrumented modes \
+                 (--hotpath / --alloc) refuse the seconds-scale `file` because \
+                 hotpath's per-call event queue is unbounded and a seconds-scale \
+                 run backlogs tens of GB of RAM.\n  add an instrumentation-scale \
+                 variant (tens-of-ms per _bench call) to the existing \
+                 [dellingr.workloads.{name}] table:\n  \
+                 hotpath_file = \"...\"\n  hotpath_xxh128 = \"...\""
+            )));
+        }
+        _ => (&entry.file, &entry.xxh128, "file"),
+    };
+
+    let path = project_root.join(file);
 
     if !path.exists() {
         return Err(DevError::Config(format!(
             "workload {name:?} not found at {}\n  registered as: {}\n  \
              paths are relative to the directory holding brokkr.toml",
             path.display(),
-            entry.file.display(),
+            file.display(),
         )));
     }
 
-    let origin = format!("[dellingr.workloads.{name}] in brokkr.toml");
-    preflight::verify_file_hash(&path, &entry.xxh128, project_root, Some(&origin))?;
+    // Names the pin, not just the table: a workload has two of them, and the
+    // fix is to re-register the one that actually drifted.
+    let origin = format!("[dellingr.workloads.{name}].{origin_key} in brokkr.toml");
+    preflight::verify_file_hash(&path, xxh128, project_root, Some(&origin))?;
 
     Ok(Resolved {
         name: name.to_owned(),
@@ -135,9 +170,100 @@ mod tests {
              xxh128 = \"{digest}\"\n"
         ));
 
-        let resolved = resolve(&cfg, &root, "read").unwrap();
+        let resolved = resolve(&cfg, &root, "read", false).unwrap();
         assert_eq!(resolved.name, "read");
         assert_eq!(resolved.path, root.join("examples/fields/read.lua"));
+    }
+
+    #[test]
+    fn instrumented_mode_resolves_the_hotpath_variant() {
+        let root = tmpdir("hp_ok");
+        let digest = src_digest(&root);
+        write_workload(&root, "bench/read.lua", SRC);
+        write_workload(&root, "examples/fields/read.lua", SRC);
+        let cfg = config_with(&format!(
+            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+             [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
+             xxh128 = \"{digest}\"\n\
+             hotpath_file = \"examples/fields/read.lua\"\n\
+             hotpath_xxh128 = \"{digest}\"\n"
+        ));
+
+        let bench = resolve(&cfg, &root, "read", false).unwrap();
+        assert_eq!(bench.path, root.join("bench/read.lua"));
+        let instrumented = resolve(&cfg, &root, "read", true).unwrap();
+        assert_eq!(instrumented.path, root.join("examples/fields/read.lua"));
+    }
+
+    #[test]
+    fn instrumented_mode_refuses_a_workload_without_a_hotpath_variant() {
+        let root = tmpdir("hp_missing");
+        let digest = src_digest(&root);
+        write_workload(&root, "bench/read.lua", SRC);
+        let cfg = config_with(&format!(
+            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+             [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
+             xxh128 = \"{digest}\"\n"
+        ));
+
+        assert!(resolve(&cfg, &root, "read", false).is_ok());
+        let err = resolve(&cfg, &root, "read", true).unwrap_err();
+        let DevError::Config(msg) = err else {
+            panic!("expected DevError::Config, got {err:?}");
+        };
+        // The refusal must say what to register and why the bench file is
+        // not an acceptable fallback.
+        assert!(msg.contains("hotpath_file"), "{msg}");
+        assert!(msg.contains("unbounded"), "{msg}");
+    }
+
+    /// A half-registered pair never reaches `resolve` - `parse_dellingr`
+    /// rejects it, so a workload nobody runs today is still reported. The
+    /// parse-time behaviour is pinned in `config_parts/tests.rs`.
+    #[test]
+    fn half_registered_hotpath_pair_is_rejected_before_resolution() {
+        let dir = tmpdir("hp_half");
+        fs::write(
+            dir.join("brokkr.toml"),
+            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+             [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
+             xxh128 = \"00\"\nhotpath_file = \"examples/fields/read.lua\"\n",
+        )
+        .unwrap();
+
+        let err = crate::config::load(&dir).unwrap_err();
+        let DevError::Config(msg) = err else {
+            panic!("expected DevError::Config, got {err:?}");
+        };
+        assert!(msg.contains("hotpath_file without hotpath_xxh128"), "{msg}");
+    }
+
+    #[test]
+    fn refuses_a_hotpath_variant_edited_since_registration() {
+        let root = tmpdir("hp_drift");
+        let digest = src_digest(&root);
+        write_workload(&root, "bench/read.lua", SRC);
+        write_workload(&root, "examples/fields/read.lua", "-- retuned\n");
+        let cfg = config_with(&format!(
+            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+             [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
+             xxh128 = \"{digest}\"\n\
+             hotpath_file = \"examples/fields/read.lua\"\n\
+             hotpath_xxh128 = \"{digest}\"\n"
+        ));
+
+        // The bench side is untouched and still resolves.
+        assert!(resolve(&cfg, &root, "read", false).is_ok());
+        let err = resolve(&cfg, &root, "read", true).unwrap_err();
+        let DevError::Preflight(msgs) = err else {
+            panic!("expected a preflight refusal, got {err:?}");
+        };
+        let joined = msgs.join("\n");
+        assert!(joined.contains("hash mismatch"), "{joined}");
+        // The refusal must name the field, so the re-registration lands on
+        // the hotpath pin and not the bench one.
+        assert!(joined.contains("hotpath_file"), "{joined}");
+        assert!(joined.contains("[dellingr.workloads.read]"), "{joined}");
     }
 
     #[test]
@@ -152,7 +278,7 @@ mod tests {
              [dellingr.workloads.w]\nfile = \"w.lua\"\nxxh128 = \"{digest}\"\n"
         ));
 
-        let err = resolve(&cfg, &root, "w").unwrap_err();
+        let err = resolve(&cfg, &root, "w", false).unwrap_err();
         let DevError::Preflight(msgs) = err else {
             panic!("expected a preflight refusal, got {err:?}");
         };
@@ -172,7 +298,7 @@ mod tests {
              [dellingr.workloads.beta]\nfile = \"b.lua\"\nxxh128 = \"11\"\n",
         );
 
-        let err = resolve(&cfg, &root, "gamma").unwrap_err();
+        let err = resolve(&cfg, &root, "gamma", false).unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
         };
@@ -187,7 +313,7 @@ mod tests {
              [dellingr.workloads.w]\nfile = \"nope/w.lua\"\nxxh128 = \"00\"\n",
         );
 
-        let err = resolve(&cfg, &root, "w").unwrap_err();
+        let err = resolve(&cfg, &root, "w", false).unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
         };

@@ -24,13 +24,19 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
 
     // Resolve before building: a typo'd `--lua` or a drifted workload should
     // cost nothing. The path deliberately comes from the current tree even
-    // under `--commit` - see `workload::resolve`.
-    let resolved = workload::resolve(req.dev_config, req.project_root, lua)?;
+    // under `--commit` - see `workload::resolve`. Instrumented modes resolve
+    // the workload's `hotpath_file` variant, not `file`.
+    let resolved = workload::resolve(req.dev_config, req.project_root, lua, uses_hotpath(req))?;
     let example = workload::config(req.dev_config)?.example.clone();
     let lua_path = resolved.path_str()?.to_owned();
 
     if req.dry_run {
-        output::bench_msg(&format!("[dry-run] workload {lua} -> {lua_path}"));
+        let variant = if uses_hotpath(req) {
+            " (hotpath variant)"
+        } else {
+            ""
+        };
+        output::bench_msg(&format!("[dry-run] workload {lua} -> {lua_path}{variant}"));
         output::bench_msg(&format!(
             "[dry-run] would build --example {example} ({})",
             feature_summary(req)

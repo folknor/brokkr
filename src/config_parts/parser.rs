@@ -667,10 +667,17 @@ fn parse_piners(
 
 /// Parse the optional `[dellingr]` section. Absent -> `None`.
 ///
-/// Each workload's `file` is validated as repo-relative here rather than at
+/// Each workload's file/digest pairs are validated here rather than at
 /// resolution time: an absolute path would escape the project root and read a
 /// workload nobody registered, and it is a config mistake worth naming at
-/// parse time rather than as a confusing hash mismatch later.
+/// parse time rather than as a confusing hash mismatch later. The optional
+/// `hotpath_file` / `hotpath_xxh128` pair gets the identical treatment - it is
+/// resolved by `--hotpath`/`--alloc` exactly the way `file` is by `--bench`,
+/// so a guard that covered only one of them would be half a guard.
+///
+/// The pair must also be whole. Validating that here and not in
+/// [`crate::dellingr::workload::resolve`] means a half-registered workload is
+/// named even when nobody runs *that* workload today.
 fn parse_dellingr(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<DellingrConfig>, DevError> {
@@ -690,21 +697,56 @@ fn parse_dellingr(
         ));
     }
     for (name, workload) in &config.workloads {
-        if workload.file.is_absolute() {
-            return Err(DevError::Config(format!(
-                "[dellingr.workloads.{name}].file {:?} is absolute; workload \
-                 paths are relative to the directory holding brokkr.toml.",
-                workload.file,
-            )));
-        }
-        if workload.xxh128.trim().is_empty() {
-            return Err(DevError::Config(format!(
-                "[dellingr.workloads.{name}].xxh128 is empty - a workload \
-                 without a pinned digest cannot be checked for drift."
-            )));
+        check_workload_pin(name, ("file", "xxh128"), &workload.file, &workload.xxh128)?;
+
+        match (&workload.hotpath_file, &workload.hotpath_xxh128) {
+            (Some(file), Some(digest)) => {
+                check_workload_pin(name, ("hotpath_file", "hotpath_xxh128"), file, digest)?;
+            }
+            (None, None) => {}
+            (present, _) => {
+                let (have, missing) = if present.is_some() {
+                    ("hotpath_file", "hotpath_xxh128")
+                } else {
+                    ("hotpath_xxh128", "hotpath_file")
+                };
+                return Err(DevError::Config(format!(
+                    "[dellingr.workloads.{name}] sets {have} without {missing} - \
+                     the instrumentation-scale variant needs both a path and a \
+                     pinned digest."
+                )));
+            }
         }
     }
     Ok(Some(config))
+}
+
+/// Validate one path/digest workload pin.
+///
+/// `keys` is the `(path, digest)` key pair being checked, so the error points
+/// at the offending line: a workload carries two independent pins (`file` +
+/// `xxh128` and `hotpath_file` + `hotpath_xxh128`) and the fix differs between
+/// them.
+fn check_workload_pin(
+    name: &str,
+    keys: (&str, &str),
+    file: &Path,
+    xxh128: &str,
+) -> Result<(), DevError> {
+    let (path_key, digest_key) = keys;
+    if file.is_absolute() {
+        return Err(DevError::Config(format!(
+            "[dellingr.workloads.{name}].{path_key} {file:?} is absolute; \
+             workload paths are relative to the directory holding brokkr.toml."
+        )));
+    }
+    if xxh128.trim().is_empty() {
+        return Err(DevError::Config(format!(
+            "[dellingr.workloads.{name}].{digest_key} is empty - a workload \
+             without a pinned digest cannot be checked for drift."
+        )));
+    }
+    Ok(())
 }
 
 /// The `[gremlins]` section exactly as it appears in TOML, before `allow`/`ban`

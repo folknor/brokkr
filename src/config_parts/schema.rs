@@ -1491,6 +1491,22 @@ pub struct DellingrConfig {
 /// leave every historical row under the same name describing a workload that
 /// no longer exists. Verification turns that into a deliberate
 /// re-registration.
+///
+/// `hotpath_file` / `hotpath_xxh128` register a second, instrumentation-scale
+/// variant of the same kernel, resolved *instead of* `file` by the
+/// instrumented modes (`--hotpath` / `--alloc`). The split exists because the
+/// two mode families need opposite workload scales: `--bench` wants
+/// seconds-scale files so wall deltas resolve above launch noise, while the
+/// hotpath crate queues one event per instrumented call in an unbounded
+/// per-thread queue that its 50ms-tick consumer drains far slower than a VM
+/// dispatch loop fills it - a seconds-scale file backlogs tens of GB of RAM
+/// before the run ends. Instrumented modes therefore *require* the pair: a
+/// workload without it refuses `--hotpath`/`--alloc` rather than risk the
+/// memory cliff.
+///
+/// Both pins get identical parse-time validation in `parse_dellingr`
+/// (repo-relative path, non-empty digest), and the hotpath pair must be whole
+/// - `hotpath_file` and `hotpath_xxh128` are rejected apart.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DellingrWorkload {
@@ -1498,6 +1514,14 @@ pub struct DellingrWorkload {
     pub file: PathBuf,
     /// Expected xxh128 hex digest (brokkr's standard file hash).
     pub xxh128: String,
+    /// Instrumentation-scale variant resolved by `--hotpath` / `--alloc`
+    /// (tens-of-ms per `_bench` call, not seconds). Must be registered
+    /// together with `hotpath_xxh128`.
+    #[serde(default)]
+    pub hotpath_file: Option<PathBuf>,
+    /// Pinned digest of `hotpath_file`. Must be registered together with it.
+    #[serde(default)]
+    pub hotpath_xxh128: Option<String>,
 }
 
 impl DellingrConfig {

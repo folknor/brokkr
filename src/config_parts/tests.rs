@@ -2035,4 +2035,106 @@ debug = true
             "/data/ocean-tiles.pmtiles"
         );
     }
+
+    // -------------------------------------------------------------------
+    // [dellingr.workloads.*] parsing
+    // -------------------------------------------------------------------
+
+    /// A `[dellingr]` block with the given workload body appended.
+    fn dellingr_table(workload_body: &str) -> toml::map::Map<String, toml::Value> {
+        root_table(&format!(
+            "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
+             [dellingr.workloads.w]\n{workload_body}"
+        ))
+    }
+
+    #[test]
+    fn dellingr_accepts_a_workload_with_both_pins() {
+        let cfg = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
+             hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"11\"\n",
+        ))
+        .unwrap()
+        .unwrap();
+        let w = &cfg.workloads["w"];
+        assert_eq!(w.hotpath_file.as_deref(), Some(Path::new("examples/w.lua")));
+        assert_eq!(w.hotpath_xxh128.as_deref(), Some("11"));
+    }
+
+    #[test]
+    fn dellingr_accepts_a_workload_with_no_hotpath_pin() {
+        let cfg = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n",
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(cfg.workloads["w"].hotpath_file.is_none());
+    }
+
+    /// The absolute-path guard exists so a workload cannot escape the project
+    /// root; `hotpath_file` is resolved the same way `file` is, so it needs the
+    /// same guard - `Path::join` would silently discard the root.
+    #[test]
+    fn dellingr_rejects_an_absolute_hotpath_file() {
+        let err = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
+             hotpath_file = \"/elsewhere/w.lua\"\nhotpath_xxh128 = \"11\"\n",
+        ))
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("hotpath_file"), "{msg}");
+        assert!(msg.contains("absolute"), "{msg}");
+    }
+
+    #[test]
+    fn dellingr_rejects_an_absolute_file() {
+        let err = parse_dellingr(&dellingr_table(
+            "file = \"/elsewhere/w.lua\"\nxxh128 = \"00\"\n",
+        ))
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains(".file"), "{msg}");
+        assert!(msg.contains("absolute"), "{msg}");
+    }
+
+    /// An empty digest would otherwise surface as a hash mismatch at run time,
+    /// which reads like drift rather than the config hole it is.
+    #[test]
+    fn dellingr_rejects_an_empty_digest_on_either_pin() {
+        let err = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"  \"\n",
+        ))
+        .unwrap_err();
+        assert!(format!("{err}").contains(".xxh128 is empty"), "{err}");
+
+        let err = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
+             hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains(".hotpath_xxh128 is empty"),
+            "{err}"
+        );
+    }
+
+    /// Named at parse time, so a half-registered workload is reported even
+    /// when nobody runs *that* workload today.
+    #[test]
+    fn dellingr_rejects_a_half_registered_hotpath_pair() {
+        let err = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
+             hotpath_file = \"examples/w.lua\"\n",
+        ))
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("hotpath_file without hotpath_xxh128"), "{msg}");
+
+        let err = parse_dellingr(&dellingr_table(
+            "file = \"bench/w.lua\"\nxxh128 = \"00\"\nhotpath_xxh128 = \"11\"\n",
+        ))
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("hotpath_xxh128 without hotpath_file"), "{msg}");
+    }
 }

@@ -15,6 +15,12 @@
 //!   immutable input data, so an edit would silently redefine every stored row
 //!   filed under the same name. [`workload::resolve`] verifies the digest and
 //!   refuses on drift.
+//! - **Instrumented modes resolve a different file.** `--hotpath` / `--alloc`
+//!   require and resolve the workload's `hotpath_file` / `hotpath_xxh128`
+//!   pair - an instrumentation-scale variant of the same kernel - because the
+//!   hotpath crate's per-call event queue is unbounded and a seconds-scale
+//!   `file` backlogs tens of GB of RAM under instrumentation. See
+//!   [`crate::config::DellingrWorkload`].
 //! - **A `--commit` baseline mixes trees on purpose.** The harness is built
 //!   from the old worktree; the workload still comes from the registration in
 //!   the current tree. See [`workload::resolve`].
