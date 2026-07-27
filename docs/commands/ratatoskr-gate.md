@@ -103,6 +103,21 @@ scope for v1.
 4. Validate the looked-up row's `gate_name`, `script`, and `fixture`
    match the current invocation. Mismatch is a hard error.
 
+## Bisecting with `--commit`
+
+`sync-bench --gate <name> --commit <ref>` evaluates the gate against a
+harness built from a worktree at `<ref>`, so a breach can be walked back
+to the commit that introduced it. The script and fixture deliberately do
+not move with the build (see `docs/commands/sync.md`), which is what lets
+the baseline's pinned `script` path keep matching across refs - the
+identity check in step 4 above would otherwise hard-error on every
+`--commit` run.
+
+Because a detached worktree is clean by construction, `--commit` also
+gives `--as-baseline` an unambiguous provenance: the row records the ref
+that was built, and no `--force` is involved, so it never carries the
+dirty tag.
+
 ## gate.db lifetime
 
 `gate.db` lives at `<project_root>/.brokkr/ratatoskr/gate.db` - per

@@ -2176,6 +2176,14 @@ Examples:
         /// Requires `--gate`.
         #[arg(long, requires = "gate")]
         as_baseline: bool,
+
+        /// Build and measure the harness from a git worktree at REF
+        /// instead of the current tree. The script, the fixture and
+        /// sæhrimnir still come from the current tree, so the run varies
+        /// the sync code and nothing else. Worktrees persist; remove them
+        /// with `brokkr clean --worktrees`.
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
     },
 
     /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C

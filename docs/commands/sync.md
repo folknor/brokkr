@@ -96,7 +96,7 @@ that didn't run (e.g. a spawn-side failure before the harness started) are
 omitted, and the leading `in <total>` is dropped entirely if no phase
 recorded.
 
-## `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug | --release]`
+## `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug | --release] [--commit REF]`
 
 Measured variant of sync-smoke. Same two-child shape, but sæhrimnir is spawned
 once and reused across `--bench` iterations (default 3), and the harness
@@ -115,6 +115,35 @@ are skipped. Storage is via the standard `BenchHarness`, so `brokkr results
 sidecar provenance (RunInfo) is omitted in v0 because the helper that builds
 it is private to BenchHarness today. `--force` allows recording on a dirty
 git tree (rows land under the `dirty` alias).
+
+### `--commit REF`
+
+Builds and measures the harness from a persistent git worktree at `REF`
+instead of the current tree, for retroactively benchmarking an older sync
+implementation. Worktrees are reused across runs (the cargo `target/`
+inside survives) and removed by `brokkr clean --worktrees`.
+
+**Only the harness build moves.** The script, the fixture, sæhrimnir, the
+artefact dir, `results.db` and `gate.db` all stay anchored to the main
+tree. This is dellingr's split-tree rule, applied for the same reason: a
+comparison should vary the code under test and nothing else, so a
+`--commit` run measures an old sync engine against *today's* test
+definition rather than replaying an old test too. Sluggrs' `hotpath` has
+no such rule because there the example and the renderer are both code;
+here the `.lua` script is the test, not the subject.
+
+Git state is read from the worktree, so the recorded commit describes what
+was built. That also makes a `--commit` run inherently clean - a detached
+worktree has nothing uncommitted in it - so `--force` is not needed and the
+row is not filed under the `dirty` alias.
+
+`--commit` composes with `--gate`. It is the intended way to bisect a
+gate failure: re-run the same gate at successive refs and watch which one
+first breaches. It also composes with `--as-baseline`, which is the
+cleanest way to record one, since the commit being pinned is explicit and
+the tree it came from is guaranteed clean. The gate's script-identity
+check keeps working precisely because the script did not move with the
+build; it would hard-error on a path mismatch otherwise.
 
 Lockfile / kill semantics: sæhrimnir joins the auxiliary `mock_pids` set
 for the lifetime of the bench, and each iteration's harness PID rotates

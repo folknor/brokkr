@@ -477,6 +477,17 @@ fn write_run_toml(
 /// CLI inputs for `brokkr sync-bench`.
 pub struct SyncBenchRequest<'a> {
     pub project_root: &'a Path,
+    /// The code tree to build and read git state from, when it differs from
+    /// `project_root`: the `--commit` worktree, or cwd when `brokkr.toml`
+    /// lives one level up. `None` in the common case.
+    ///
+    /// Only the *harness build* moves. The script, the fixture, sæhrimnir,
+    /// the artefact dir and both databases stay anchored to `project_root`:
+    /// the same split-tree rule dellingr applies to its Lua workload, and
+    /// for the same reason, that a baseline should vary the code under test
+    /// and nothing else. The gate additionally depends on it, since it
+    /// compares the baseline row's script path against the current run's.
+    pub build_root: Option<&'a Path>,
     pub dev_config: &'a DevConfig,
     pub script: &'a str,
     /// Number of measured iterations. Best-of-N reported and stored.

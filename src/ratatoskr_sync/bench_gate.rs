@@ -97,12 +97,23 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // Bootstrap paths and stand up the bench harness. The harness
     // acquires the lockfile internally, so concurrent brokkr
     // invocations block here.
-    let pi = context::bootstrap(None)?;
+    //
+    // `code_root` is where the harness is built and where git state is read
+    // from - the `--commit` worktree when one was requested. Handing it to
+    // `BenchHarness` as the project root (with the real root demoted to
+    // `db_root`) is the same convention `BenchContext` uses: the recorded
+    // commit then describes the code that was actually built, while
+    // results.db stays in the main tree. It also means a `--commit` run
+    // reads as clean, which it is - a detached worktree has nothing
+    // uncommitted in it.
+    let code_root = req.build_root.unwrap_or(req.project_root);
+    let db_root = req.build_root.map(|_| req.project_root);
+    let pi = context::bootstrap(req.build_root)?;
     let paths = context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
     let harness = BenchHarness::new(
         &paths,
-        req.project_root,
-        None,
+        code_root,
+        db_root,
         Project::Ratatoskr,
         "sync-bench",
         req.force,
@@ -113,7 +124,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
 
     let debug = req.profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
-        req.project_root,
+        code_root,
         harness_cfg,
         debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
@@ -470,7 +481,11 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     }
 
     let hostname = crate::config::hostname()?;
-    let git_info = git::collect(ctx.project_root)?;
+    // Git state comes from the tree that was built, so a `--commit` row
+    // records the commit it measured rather than whatever HEAD happens to
+    // be. `gate.db` itself stays under the main `project_root` below - a
+    // worktree is disposable, and the baselines are not.
+    let git_info = git::collect(ctx.req.build_root.unwrap_or(ctx.project_root))?;
     let profile_name = if ctx.debug { "debug" } else { "release" };
 
     let sidecar_blob = sidecar_to_json(ctx.sidecar_data);

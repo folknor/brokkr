@@ -1471,20 +1471,34 @@ fn run(cli: Cli) -> Result<(), DevError> {
             release,
             gate,
             as_baseline,
+            commit,
         } => {
             project::require(project, Project::Ratatoskr, "sync-bench")?;
-            ratatoskr::sync::run_sync_bench(&ratatoskr::sync::SyncBenchRequest {
-                project_root: &project_root,
-                dev_config: &dev_config,
-                script: &script,
-                bench,
-                force,
-                keep_artefacts,
-                profile_override: profile_override(debug, release),
-                brokkr_args: brokkr_args.clone(),
-                gate: gate.as_deref(),
-                as_baseline,
-            })
+            let cwd = std::env::current_dir()
+                .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
+            let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
+            with_worktree(
+                &project_root,
+                parent_build_root,
+                commit.as_deref(),
+                false,
+                dev_config.disable_toolchain,
+                |build_root| {
+                    ratatoskr::sync::run_sync_bench(&ratatoskr::sync::SyncBenchRequest {
+                        project_root: &project_root,
+                        build_root,
+                        dev_config: &dev_config,
+                        script: &script,
+                        bench,
+                        force,
+                        keep_artefacts,
+                        profile_override: profile_override(debug, release),
+                        brokkr_args: brokkr_args.clone(),
+                        gate: gate.as_deref(),
+                        as_baseline,
+                    })
+                },
+            )
         }
         Command::SyncList => {
             project::require(project, Project::Ratatoskr, "sync-list")?;
