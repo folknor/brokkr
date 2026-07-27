@@ -154,6 +154,7 @@ pub fn run(
         harness.run_internal(&config, |_| {
             Ok(BenchResult {
                 elapsed_ms: result.elapsed_ms,
+                elapsed_us: None,
                 kv: result.kv.clone(),
                 iterations: Vec::new(),
                 distribution: None,

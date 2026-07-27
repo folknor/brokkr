@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS runs (
     input_file      TEXT,
     input_mb        REAL,
     elapsed_ms      INTEGER NOT NULL,
+    -- Exact wall in microseconds, NULL unless the harness path knew it (the
+    -- stderr-kv path, from a fractional `elapsed_ms=` line). elapsed_ms stays
+    -- the required, integer, always-present column every query and historical
+    -- row depends on; this is the finer reading beside it, for workloads whose
+    -- interesting deltas are smaller than a millisecond. Where both exist,
+    -- elapsed_ms is this rounded.
+    elapsed_us      INTEGER,
     peak_rss_mb     REAL,
     cargo_features  TEXT,
     cargo_profile   TEXT DEFAULT 'release',
@@ -123,21 +130,21 @@ CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id)
 
 pub(super) const SELECT_COLS: &str = "\
 id, timestamp, hostname, [commit], subject, command, mode, \
-input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
+input_file, input_mb, elapsed_ms, elapsed_us, peak_rss_mb, cargo_features, cargo_profile, \
 kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
 cli_args, project, stop_marker, brokkr_args";
 
 pub(super) const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, mode, \
-    input_file, input_mb, elapsed_ms, peak_rss_mb, cargo_features, cargo_profile, \
+    input_file, input_mb, elapsed_ms, elapsed_us, peak_rss_mb, cargo_features, cargo_profile, \
     kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
     cli_args, project, stop_marker, brokkr_args\
 ) VALUES (\
     datetime('now'), ?1, ?2, ?3, ?4, ?5, \
     ?6, ?7, ?8, ?9, ?10, ?11, \
     ?12, ?13, ?14, ?15, ?16, \
-    ?17, ?18, ?19, ?20\
+    ?17, ?18, ?19, ?20, ?21\
 )";
 
 // ---------------------------------------------------------------------------

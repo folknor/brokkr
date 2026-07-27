@@ -323,6 +323,7 @@ fn run_osmpbf_baseline(
         harness.run_internal(&config, |_i| {
             Ok(BenchResult {
                 elapsed_ms: *elapsed_ms,
+                elapsed_us: None,
                 kv: kv.clone(),
                 iterations: Vec::new(),
                 distribution: None,

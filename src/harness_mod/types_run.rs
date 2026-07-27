@@ -42,6 +42,19 @@ pub struct BenchConfig {
 /// Result of a single benchmark measurement.
 pub struct BenchResult {
     pub elapsed_ms: i64,
+    /// Exact wall in microseconds, when the harness path knows it.
+    ///
+    /// `elapsed_ms` is an integer and always will be - every query, format
+    /// and historical row depends on it. But sluggrs' measured regions are
+    /// single-digit milliseconds and the deltas worth seeing there are
+    /// 100-200us, which integer milliseconds flatten to nothing. Only the
+    /// stderr-kv path currently fills this in, from a fractional
+    /// `elapsed_ms=6.847` line; every other path leaves it `None` and
+    /// `elapsed_ms` remains the only timing available.
+    ///
+    /// Where both exist, `elapsed_ms` is this value rounded - never treat
+    /// them as independent measurements.
+    pub elapsed_us: Option<i64>,
     pub kv: Vec<KvPair>,
     /// Per-iteration wall times in execution order, filled in by the harness
     /// `run_*` loops on the aggregate best-of-N result they return.
@@ -440,6 +453,7 @@ impl BenchHarness {
 
         let bench_result = BenchResult {
             elapsed_ms,
+            elapsed_us: None,
             kv: Vec::new(),
             iterations: walls,
             distribution: None,
@@ -492,6 +506,7 @@ impl BenchHarness {
 
         let result = BenchResult {
             elapsed_ms: min,
+            elapsed_us: None,
             kv: Vec::new(),
             iterations: walls,
             distribution: Some(dist),
@@ -804,6 +819,11 @@ impl BenchHarness {
                 .or_else(|| self.cargo_features.clone()),
             cargo_profile: config.cargo_profile,
             elapsed_ms: result.elapsed_ms,
+            // Carried through, not recomputed: only the harness path that
+            // produced the result knows whether sub-millisecond timing was
+            // ever measured. `None` here means "never measured", which is
+            // not the same as `elapsed_ms * 1000`.
+            elapsed_us: result.elapsed_us,
             kernel: Some(self.env.kernel.clone()),
             cpu_governor: Some(self.env.governor.clone()),
             avail_memory_mb: i64::try_from(self.env.memory_available_mb).ok(),

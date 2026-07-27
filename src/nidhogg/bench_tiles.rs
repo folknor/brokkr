@@ -321,6 +321,7 @@ fn run_lifecycle(
 
     Ok(BenchResult {
         elapsed_ms,
+        elapsed_us: None,
         kv,
         iterations: Vec::new(),
         distribution: None,

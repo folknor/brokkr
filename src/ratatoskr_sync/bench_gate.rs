@@ -371,6 +371,7 @@ fn bench_loop(
 
     let bench_result = BenchResult {
         elapsed_ms,
+        elapsed_us: None,
         kv,
         // Single measured run recorded directly - no best-of-N loop.
         iterations: Vec::new(),

@@ -20,6 +20,84 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
+    // fractional elapsed_ms
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fractional_elapsed_ms_is_kept_as_microseconds() {
+        // The motivating bug: `elapsed_ms=6.847` failed `parse::<i64>()`, so
+        // the timing was treated as absent and the run died on the
+        // "missing elapsed_ms" check - a target reporting more precision
+        // than brokkr asked for was treated as reporting none.
+        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=6.847\n");
+        assert_eq!(us, Some(6847));
+    }
+
+    #[test]
+    fn whole_elapsed_ms_stays_exact() {
+        // Integer values must not make a round trip through f64.
+        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=300\n");
+        assert_eq!(us, Some(300_000));
+    }
+
+    #[test]
+    fn total_ms_alias_also_takes_a_fraction() {
+        let (us, _kv) = parse_kv_lines_us(b"total_ms=1.5\n");
+        assert_eq!(us, Some(1500));
+    }
+
+    #[test]
+    fn elapsed_ms_rounds_to_nearest_not_down() {
+        // 6.847 ms is 7 ms, not 6. The rounded value is what every existing
+        // query and historical row sees, so it must not read as faster than
+        // the run was.
+        let (ms, _kv) = parse_kv_lines(b"elapsed_ms=6.847\n");
+        assert_eq!(ms, Some(7));
+    }
+
+    #[test]
+    fn fractional_timing_is_not_also_a_kv_pair() {
+        // The timing line is consumed as timing, never duplicated into kv.
+        let (_us, kv) = parse_kv_lines_us(b"elapsed_ms=6.847\ncold_prepare_us=214\n");
+        assert!(!kv.iter().any(|p| p.key == "elapsed_ms"));
+        assert!(kv.iter().any(|p| p.key == "cold_prepare_us"));
+    }
+
+    #[test]
+    fn nonsense_timing_is_still_absent() {
+        // A garbage value must not silently become 0 ms - the run should
+        // still fail the missing-elapsed_ms check.
+        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=NaN\n");
+        assert_eq!(us, None);
+        let (us, _kv) = parse_kv_lines_us(b"elapsed_ms=fast\n");
+        assert_eq!(us, None);
+    }
+
+    #[test]
+    fn best_of_n_compares_on_microseconds() {
+        // Both round to 7 ms; only the microsecond reading can tell them
+        // apart, which is the entire point on a sub-10ms workload.
+        let slower = BenchResult {
+            elapsed_ms: 7,
+            elapsed_us: Some(6947),
+            kv: Vec::new(),
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        };
+        let faster = BenchResult {
+            elapsed_ms: 7,
+            elapsed_us: Some(6847),
+            kv: Vec::new(),
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        };
+        let best = pick_best(Some(slower), faster);
+        assert_eq!(best.elapsed_us, Some(6847));
+    }
+
+    // -----------------------------------------------------------------------
     // percentile
     // -----------------------------------------------------------------------
 
@@ -271,6 +349,7 @@ mod tests {
     fn pick_best_none_vs_candidate() {
         let candidate = BenchResult {
             elapsed_ms: 500,
+            elapsed_us: None,
             kv: vec![],
             iterations: vec![],
             distribution: None,
@@ -287,6 +366,7 @@ mod tests {
     fn pick_best_keeps_better() {
         let current = BenchResult {
             elapsed_ms: 100,
+            elapsed_us: None,
             kv: vec![],
             iterations: vec![],
             distribution: None,
@@ -294,6 +374,7 @@ mod tests {
         };
         let candidate = BenchResult {
             elapsed_ms: 200,
+            elapsed_us: None,
             kv: vec![],
             iterations: vec![],
             distribution: None,
@@ -307,6 +388,7 @@ mod tests {
     fn pick_best_replaces_with_better() {
         let current = BenchResult {
             elapsed_ms: 300,
+            elapsed_us: None,
             kv: vec![],
             iterations: vec![],
             distribution: None,
@@ -314,6 +396,7 @@ mod tests {
         };
         let candidate = BenchResult {
             elapsed_ms: 150,
+            elapsed_us: None,
             kv: vec![],
             iterations: vec![],
             distribution: None,
@@ -328,6 +411,7 @@ mod tests {
         // Tie-breaking: current wins (<=)
         let current = BenchResult {
             elapsed_ms: 100,
+            elapsed_us: None,
             kv: vec![KvPair::text("tag", "first")],
             iterations: vec![],
             distribution: None,
@@ -335,6 +419,7 @@ mod tests {
         };
         let candidate = BenchResult {
             elapsed_ms: 100,
+            elapsed_us: None,
             kv: vec![KvPair::text("tag", "second")],
             iterations: vec![],
             distribution: None,

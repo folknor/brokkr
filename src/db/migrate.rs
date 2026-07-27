@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 16;
+pub(super) const SCHEMA_VERSION: i64 = 17;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -64,6 +64,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 16 {
         migrate_v15_to_v16(conn)?;
+    }
+    if current < 17 {
+        migrate_v16_to_v17(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -692,6 +695,19 @@ fn migrate_v14_to_v15(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// render exactly as before.
 fn migrate_v15_to_v16(conn: &rusqlite::Connection) -> Result<(), DevError> {
     conn.execute_batch(super::schema::RUN_ITERATIONS_DDL)?;
+    Ok(())
+}
+
+/// Migration v16 -> v17: add the nullable `elapsed_us` column.
+///
+/// Purely additive. Existing rows keep their integer `elapsed_ms` and get
+/// NULL here - their sub-millisecond detail was discarded at measure time
+/// and cannot be reconstructed, so backfilling `elapsed_ms * 1000` would
+/// manufacture a precision the row never had.
+fn migrate_v16_to_v17(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if !has_column(conn, "runs", "elapsed_us") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN elapsed_us INTEGER")?;
+    }
     Ok(())
 }
 

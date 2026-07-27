@@ -80,6 +80,7 @@ pub fn run(
 
         Ok(BenchResult {
             elapsed_ms: ms,
+            elapsed_us: None,
             #[allow(clippy::cast_possible_wrap)]
             kv: vec![
                 KvPair::int("nodes_millions", nodes_millions as i64),

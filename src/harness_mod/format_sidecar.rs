@@ -12,7 +12,16 @@ fn format_result_line(config: &BenchConfig, result: &BenchResult, git: &GitInfo)
         parts.push(format!("mode={v}"));
     }
 
-    parts.push(format!("elapsed_ms={}", result.elapsed_ms));
+    // Print the exact figure when the target reported one - rounding a 6.847
+    // ms region to `elapsed_ms=7` on the console would hide precisely the
+    // signal a sub-millisecond workload is being measured for.
+    match result.elapsed_us {
+        Some(us) => {
+            #[allow(clippy::cast_precision_loss)]
+            parts.push(format!("elapsed_ms={:.3}", us as f64 / 1000.0));
+        }
+        None => parts.push(format!("elapsed_ms={}", result.elapsed_ms)),
+    }
     parts.push(format!("commit={}", git.commit));
 
     if let Some(ref input) = config.input_file {
@@ -264,6 +273,7 @@ pub fn run_hotpath_capture(
     Ok((
         BenchResult {
             elapsed_ms: ms,
+            elapsed_us: None,
             kv,
             // Single capture - the enclosing run_hotpath loop owns the list.
             iterations: Vec::new(),
@@ -305,12 +315,23 @@ fn percentile(sorted: &[i64], pct: usize) -> i64 {
     }
 }
 
-/// Pick the `BenchResult` with the smaller `elapsed_ms`.
+/// Pick the faster `BenchResult`.
+///
+/// Compares microseconds when both sides have them - on a single-digit
+/// millisecond workload, best-of-N on rounded milliseconds is mostly a
+/// coin toss between ties.
 fn pick_best(current: Option<BenchResult>, candidate: BenchResult) -> BenchResult {
     match current {
-        Some(best) if best.elapsed_ms <= candidate.elapsed_ms => best,
+        Some(best) if bench_ordering_key(&best) <= bench_ordering_key(&candidate) => best,
         _ => candidate,
     }
+}
+
+/// Comparable wall for best-of-N, in microseconds.
+fn bench_ordering_key(result: &BenchResult) -> i64 {
+    result
+        .elapsed_us
+        .unwrap_or_else(|| result.elapsed_ms.saturating_mul(1000))
 }
 
 /// Build a storage notes string from the drive configuration.
@@ -342,8 +363,29 @@ fn push_drive_note(parts: &mut Vec<String>, label: &str, value: &Option<String>)
 /// Parse `key=value` lines from stderr, returning `(elapsed_ms, kv_pairs)`.
 /// `elapsed_ms` is `None` when no `elapsed_ms`/`total_ms` line is found.
 pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
+    let (us, kv) = parse_kv_lines_us(stderr);
+    (us.map(us_to_ms), kv)
+}
+
+/// Round microseconds to the nearest millisecond.
+///
+/// Nearest, not truncating: a 6.847 ms region is 7 ms, not 6. `elapsed_ms`
+/// is a display and back-compat value once `elapsed_us` exists, so being off
+/// by a whole millisecond in the direction of "faster than it was" is the
+/// one error worth avoiding.
+fn us_to_ms(us: i64) -> i64 {
+    (us + 500) / 1000
+}
+
+/// As [`parse_kv_lines`], but returns the timing in microseconds.
+///
+/// The timing line may be fractional (`elapsed_ms=6.847`). It used to be
+/// parsed as `i64`, so a fractional value failed to parse at all and the run
+/// then died on the "missing elapsed_ms" check - a target reporting *more*
+/// precision than brokkr asked for was treated as reporting none.
+pub(crate) fn parse_kv_lines_us(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
     let text = String::from_utf8_lossy(stderr);
-    let mut elapsed_ms: Option<i64> = None;
+    let mut elapsed_us: Option<i64> = None;
     let mut kv = Vec::new();
 
     for line in text.lines() {
@@ -351,8 +393,18 @@ pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
             let key = key.trim();
             let value = value.trim();
             if key == "elapsed_ms" || key == "total_ms" {
+                // Integer first so whole-millisecond values stay exact rather
+                // than making a round trip through f64.
                 if let Ok(ms) = value.parse::<i64>() {
-                    elapsed_ms = Some(ms);
+                    elapsed_us = Some(ms.saturating_mul(1000));
+                } else if let Ok(ms) = value.parse::<f64>()
+                    && ms.is_finite()
+                    && ms >= 0.0
+                {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        elapsed_us = Some((ms * 1000.0).round() as i64);
+                    }
                 }
             } else if let Ok(n) = value.parse::<i64>() {
                 kv.push(KvPair::int(key, n));
@@ -368,13 +420,13 @@ pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
         }
     }
 
-    (elapsed_ms, kv)
+    (elapsed_us, kv)
 }
 
 fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
-    let (elapsed_ms, kv) = parse_kv_lines(stderr);
+    let (elapsed_us, kv) = parse_kv_lines_us(stderr);
 
-    let elapsed_ms = elapsed_ms.ok_or_else(|| {
+    let elapsed_us = elapsed_us.ok_or_else(|| {
         let text = String::from_utf8_lossy(stderr);
         let preview: String = text.chars().take(500).collect();
         DevError::Config(format!(
@@ -383,7 +435,10 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
     })?;
 
     Ok(BenchResult {
-        elapsed_ms,
+        elapsed_ms: us_to_ms(elapsed_us),
+        // This is the one path that knows sub-millisecond timing: the target
+        // reported it directly.
+        elapsed_us: Some(elapsed_us),
         kv,
         // One iteration's parse - the enclosing loop owns the list.
         iterations: Vec::new(),

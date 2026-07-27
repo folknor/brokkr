@@ -373,6 +373,7 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
         let ms = harness::elapsed_to_ms(&captured.elapsed);
         Ok(crate::harness::BenchResult {
             elapsed_ms: ms,
+            elapsed_us: None,
             kv: vec![],
             iterations: Vec::new(),
             distribution: None,

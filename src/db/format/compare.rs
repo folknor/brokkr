@@ -90,6 +90,12 @@ struct ComparisonPair {
     key: String,
     a_ms: Option<i64>,
     b_ms: Option<i64>,
+    /// Exact walls in microseconds, when both rows have them. The delta is
+    /// computed from these in preference to `a_ms`/`b_ms`: on a single-digit
+    /// millisecond benchmark, a percentage taken from rounded milliseconds
+    /// is mostly quantisation noise.
+    a_us: Option<i64>,
+    b_us: Option<i64>,
     a_hotpath: Option<HotpathData>,
     b_hotpath: Option<HotpathData>,
     a_output_bytes: Option<i64>,
@@ -130,6 +136,7 @@ struct HostEnv {
 /// per row so the pairing loop below stays a pairing loop.
 struct RowData {
     elapsed_ms: i64,
+    elapsed_us: Option<i64>,
     hotpath: Option<HotpathData>,
     output_bytes: Option<i64>,
     peak_rss_mb: Option<f64>,
@@ -143,6 +150,7 @@ struct RowData {
 fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
     RowData {
         elapsed_ms: row.elapsed_ms,
+        elapsed_us: row.elapsed_us,
         hotpath: row.hotpath.clone(),
         output_bytes: find_output_bytes(&row.kv),
         peak_rss_mb: row.peak_rss_mb,
@@ -227,6 +235,8 @@ fn build_comparison_pairs(
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
                 b_ms: b.as_ref().map(|r| r.elapsed_ms),
+                a_us: a.as_ref().and_then(|r| r.elapsed_us),
+                b_us: b.as_ref().and_then(|r| r.elapsed_us),
                 a_hotpath: a.and_then(|r| r.hotpath),
                 b_hotpath: b.and_then(|r| r.hotpath),
                 a_output_bytes,
@@ -478,9 +488,9 @@ fn compute_compare_widths(
         w.command = w.command.max(cmd.len());
         w.mode = w.mode.max(var.len());
         w.input = w.input.max(pair.input_display.len());
-        w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms).len());
-        w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms).len());
-        w.change = w.change.max(format_change(pair.a_ms, pair.b_ms).len());
+        w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms, pair.a_us).len());
+        w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms, pair.b_us).len());
+        w.change = w.change.max(format_change_pair(pair).len());
         if has_output {
             w.output_a = w
                 .output_a
@@ -587,9 +597,9 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
 fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths) {
     use std::fmt::Write;
     let (cmd, var, _) = split_pair_key(&pair.key);
-    let a_str = format_ms_or_dash(pair.a_ms);
-    let b_str = format_ms_or_dash(pair.b_ms);
-    let ch = format_change(pair.a_ms, pair.b_ms);
+    let a_str = format_ms_or_dash(pair.a_ms, pair.a_us);
+    let b_str = format_ms_or_dash(pair.b_ms, pair.b_us);
+    let ch = format_change_pair(pair);
     write!(
         out,
         "{:<cmd_w$}  {:<var_w$}  {:<in_w$}  {:>a_w$}  {:>b_w$}  {:>ch_w$}",
@@ -667,10 +677,29 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
     }
 }
 
-fn format_ms_or_dash(ms: Option<i64>) -> String {
-    match ms {
-        Some(v) => format!("{v} ms"),
-        None => String::from("--"),
+/// Render a wall for the A/B columns.
+///
+/// Prefers the microsecond reading when the row has one, so a 6.847 ms
+/// region does not print as `7 ms` next to a delta computed from the finer
+/// value - the column and the change would visibly disagree.
+fn format_ms_or_dash(ms: Option<i64>, us: Option<i64>) -> String {
+    match (ms, us) {
+        (_, Some(v)) => {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                format!("{:.3} ms", v as f64 / 1000.0)
+            }
+        }
+        (Some(v), None) => format!("{v} ms"),
+        (None, None) => String::from("--"),
+    }
+}
+
+/// Percentage change for a pair, from microseconds when both sides have them.
+fn format_change_pair(pair: &ComparisonPair) -> String {
+    match (pair.a_us, pair.b_us) {
+        (Some(a), Some(b)) => format_change(Some(a), Some(b)),
+        _ => format_change(pair.a_ms, pair.b_ms),
     }
 }
 
@@ -789,6 +818,7 @@ mod tests {
             input_file: input_file.to_owned(),
             input_mb: None,
             elapsed_ms,
+            elapsed_us: None,
             cargo_features: String::new(),
             cargo_profile: Some(crate::build::CargoProfile::Release),
             kernel: String::new(),

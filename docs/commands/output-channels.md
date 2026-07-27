@@ -34,7 +34,12 @@ A running binary can hand data to brokkr three ways:
    kv harness path (`parse_kv_lines`, `src/harness_mod/format_sidecar.rs`).
    A `elapsed_ms=` (or its alias `total_ms=`) line is **mandatory** on that
    path - its absence errors the whole run; if both appear, `elapsed_ms`
-   wins. Every other line's value is type-inferred in order: `i64` -> finite
+   wins. The value may be **fractional** (`elapsed_ms=6.847`): it is kept as
+   exact microseconds in the `elapsed_us` column, with `elapsed_ms` holding
+   it rounded to nearest for every existing query and view. Best-of-N and
+   `--compare`'s delta use the microsecond reading when both sides have one -
+   without it a single-digit-millisecond workload's 100-200us deltas round
+   away to nothing. Every other line's value is type-inferred in order: `i64` -> finite
    `f64` -> text (a non-finite float like `NaN`/`inf` falls back to text).
    Those pairs land in the results.db `kv` column and the `[result]` line.
    This is the subprocess's **self-reported** timing, not brokkr's wall-clock

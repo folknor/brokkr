@@ -125,6 +125,10 @@ pub struct RunRow {
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
     pub elapsed_ms: i64,
+    /// Exact wall in microseconds when the harness path knew it; see
+    /// [`crate::harness::BenchResult::elapsed_us`]. `None` for every path
+    /// that only ever had integer milliseconds.
+    pub elapsed_us: Option<i64>,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: Option<String>,
     pub cargo_profile: CargoProfile,
@@ -170,6 +174,10 @@ pub struct StoredRow {
     pub input_file: String,
     pub input_mb: Option<f64>,
     pub elapsed_ms: i64,
+    /// Exact wall in microseconds. `None` for every row recorded before the
+    /// v16->v17 schema bump, and for every harness path that only ever had
+    /// integer milliseconds. Not backfilled - the detail was never measured.
+    pub elapsed_us: Option<i64>,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: String,
     /// `None` for legacy rows whose `cargo_profile` column is `NULL` or
@@ -365,6 +373,7 @@ mod tests {
             input_file: String::new(),
             input_mb: None,
             elapsed_ms: 0,
+            elapsed_us: None,
             peak_rss_mb: None,
             cargo_features: String::new(),
             cargo_profile: None,

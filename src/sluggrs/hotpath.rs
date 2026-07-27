@@ -212,8 +212,18 @@ fn run(
         })?;
     } else {
         output::bench_msg(&format!("sluggrs {command_label}: {runs} run(s)"));
+        // The kv path, not the plain external one: sluggrs' examples
+        // self-report `elapsed_ms=` on stderr covering only the measured
+        // region. Brokkr's own wall would instead time the whole process,
+        // which here is dominated by device init, shader compilation and font
+        // loading - hundreds of milliseconds of setup around a single-digit
+        // millisecond measurement. That wall is nearly constant, so it does
+        // not just add noise, it hides the signal entirely.
+        //
+        // The trade is that `elapsed_ms=` becomes mandatory on stderr: a run
+        // that omits it fails rather than being silently mistimed.
         ctx.harness
-            .run_external(&config, &ctx.binary, &[], build_root)?;
+            .run_external_with_kv(&config, &ctx.binary, &[], build_root)?;
     }
 
     Ok(())

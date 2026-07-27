@@ -26,7 +26,7 @@ The command is named for its default, not its only mode. It takes the shared
 | --- | --- | --- | --- |
 | `--hotpath N` | `hotpath` + host/CLI features | `run_hotpath_capture` | `hotpath` |
 | `--alloc N` | `hotpath-alloc` + host/CLI features | `run_hotpath_capture` | `alloc` |
-| `--bench N` | host/CLI features only (**bare**) | `run_external` | `bench` |
+| `--bench N` | host/CLI features only (**bare**) | `run_external_with_kv` | `bench` |
 
 `--bench` builds the example **bare** on purpose. Instrumentation taxes every
 call it wraps, so an instrumented wall measures the instrument as much as the
@@ -39,6 +39,34 @@ what it has always meant. Every other measured command would resolve that to
 
 `--alloc` prints a `NOTE: alloc profiling -- wall-clock times are not
 meaningful` banner, because the allocator shim dominates the wall.
+
+### `--bench` is on the self-reported timing path
+
+Unlike every other project's `--bench`, sluggrs does **not** use brokkr's
+external wall clock. It uses `run_external_with_kv`, so the timing comes from
+an `elapsed_ms=` line the example writes to stderr.
+
+That is deliberate. Brokkr's wall times the whole process, which for a
+renderer is dominated by device init, shader compilation and font loading -
+hundreds of milliseconds of near-constant setup wrapped around a measurement
+worth single-digit milliseconds. Because the setup cost barely varies, it
+doesn't merely add noise; it swamps the signal, and two genuinely different
+runs both report the same flat number. Self-reporting lets the example time
+only the region that matters.
+
+Two consequences:
+
+- **`elapsed_ms=` on stderr is mandatory.** An example that omits it fails the
+  run rather than being silently mistimed. `total_ms=` is an accepted alias.
+- **The value may be fractional** (`elapsed_ms=6.847`). It is stored as exact
+  microseconds in `elapsed_us`, with `elapsed_ms` holding it rounded. Best-of-N
+  selection and `--compare`'s delta both use the microsecond reading when
+  available, which is what makes 100-200us A/B differences visible at all -
+  rounded to whole milliseconds they vanish.
+
+Any other stderr `key=value` line lands in the results.db `kv` column and
+shows up in `brokkr results`, so metrics like `cold_prepare_us=214` travel
+with the row.
 
 ## `--target` and the two names it picks
 
