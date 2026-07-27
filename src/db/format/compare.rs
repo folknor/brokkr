@@ -170,7 +170,7 @@ fn build_comparison_pairs(
             &row.command,
             &row.mode,
             &row.input_file,
-            &row.brokkr_args,
+            &normalize_brokkr_args(&row.brokkr_args),
             &row.env_fingerprint(),
         )
     };
@@ -379,6 +379,48 @@ fn pair_key(
     env_fp: &str,
 ) -> String {
     format!("{command}\t{mode}\t{input_file}\t{brokkr_args}\t{env_fp}")
+}
+
+/// Drop the `brokkr_args` tokens that name *provenance or presentation*
+/// rather than the benchmark arm, so they cannot enter the pair key.
+///
+/// `brokkr_args` is in the key on purpose: `--direct-io` and its kin define
+/// genuinely different arms, and collapsing them into one row would silently
+/// average two different benchmarks (see
+/// `pair_key_distinguishes_by_brokkr_args`). Two flags invert that logic:
+///
+/// - `--commit REF` is the whole point of the comparison, not part of the
+///   subject's identity. `--compare A B` asks for the same benchmark at two
+///   commits, and `--commit` is *how* one side got its commit - so keying on
+///   it makes the comparison axis part of the identity, and a `--commit` row
+///   can never pair with the current-tree row it exists to be compared
+///   against. That defeats the flag entirely.
+/// - `--verbose`/`-v` only changes what is printed. It cannot move a wall.
+///
+/// Everything else stays. This is a display-level pairing heuristic, not a
+/// correctness gate: a value that happens to be the literal string
+/// `--commit` would consume the token after it, which no real invocation
+/// produces.
+fn normalize_brokkr_args(args: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut skip_value = false;
+
+    for token in args.split_whitespace() {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+
+        match token {
+            // Space-separated form: the ref is the next token.
+            "--commit" => skip_value = true,
+            "--verbose" | "-v" => {}
+            _ if token.starts_with("--commit=") => {}
+            _ => out.push(token),
+        }
+    }
+
+    out.join(" ")
 }
 
 fn split_pair_key(key: &str) -> (&str, &str, &str) {
@@ -823,6 +865,70 @@ mod tests {
             "",
         );
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn normalize_strips_commit_so_retro_rows_pair() {
+        // The motivating bug: a `--commit` run and a current-tree run of the
+        // same benchmark produced different keys, so `--compare` printed two
+        // separate rows with `--` in the change column instead of a delta.
+        // `--commit` is the comparison axis, not part of the subject.
+        let current = normalize_brokkr_args("brokkr hotpath --bench 1");
+        let retro = normalize_brokkr_args("brokkr hotpath --bench 1 --commit 736e18c");
+        assert_eq!(current, retro);
+    }
+
+    #[test]
+    fn normalize_strips_commit_equals_form() {
+        // clap accepts `--commit=REF` as readily as `--commit REF`.
+        let spaced = normalize_brokkr_args("brokkr hotpath --bench 1 --commit 736e18c");
+        let equals = normalize_brokkr_args("brokkr hotpath --bench 1 --commit=736e18c");
+        assert_eq!(spaced, equals);
+    }
+
+    #[test]
+    fn normalize_strips_verbose() {
+        // `-v` changes only what is printed, so it must not split a pair.
+        let quiet = normalize_brokkr_args("brokkr hotpath --bench 1");
+        assert_eq!(normalize_brokkr_args("brokkr hotpath --bench 1 -v"), quiet);
+        assert_eq!(
+            normalize_brokkr_args("brokkr hotpath --bench 1 --verbose"),
+            quiet
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_arm_defining_flags() {
+        // The guard on the fix above: normalization must not reach flags that
+        // define a genuinely different benchmark arm.
+        let plain = normalize_brokkr_args("brokkr apply-changes --bench");
+        let direct = normalize_brokkr_args("brokkr apply-changes --direct-io --bench");
+        assert_ne!(plain, direct);
+        assert!(direct.contains("--direct-io"));
+    }
+
+    #[test]
+    fn normalize_does_not_eat_the_token_after_an_unrelated_flag() {
+        let out = normalize_brokkr_args("brokkr read --dataset denmark --bench 3");
+        assert!(out.contains("denmark"), "got: {out}");
+        assert!(out.contains("--bench 3"), "got: {out}");
+    }
+
+    #[test]
+    fn compare_pairs_retro_and_current_rows() {
+        // End-to-end at the pairing layer: same benchmark, one row recorded
+        // via `--commit`, and they must land on one row with a delta.
+        let mut a = row("render", "bench", "", 300);
+        a.commit = String::from("736e18c");
+        a.brokkr_args = String::from("brokkr hotpath --bench 1 --commit 736e18c");
+        let mut b = row("render", "bench", "", 280);
+        b.commit = String::from("b2371d8");
+        b.brokkr_args = String::from("brokkr hotpath --bench 1");
+
+        let pairs = build_comparison_pairs(&[a], &[b], &DatasetMatcher::empty());
+        assert_eq!(pairs.len(), 1, "retro and current rows should form one pair");
+        assert_eq!(pairs[0].a_ms, Some(300));
+        assert_eq!(pairs[0].b_ms, Some(280));
     }
 
     #[test]

@@ -94,6 +94,15 @@ brokkr results --command render --compare <old-uuid> <new-uuid>
 
 Use `--bench`, not `--hotpath`, for that comparison - see the modes table above.
 
+`--compare` pairs the two rows into a single delta row. Pairing keys on
+`(command, mode, input_file, brokkr_args, env_fingerprint)`, with `--commit`
+and `--verbose` stripped from `brokkr_args` first - otherwise the retro row
+could never pair with the current-tree row, since `--commit` is precisely what
+distinguishes them. Any *other* flag difference between the two invocations
+does split them into separate rows, on purpose: that is how arm-defining flags
+avoid being averaged together. So keep the two invocations identical apart from
+`--commit`.
+
 ## Output and storage
 
 `--verbose` prints the full build/run output; without it brokkr runs quiet, the
