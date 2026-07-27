@@ -1899,27 +1899,25 @@ Examples:
 
     // ----- sluggrs-only commands (display_order = 55) -----
     /// [sluggrs] Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
+    ///
+    /// Builds a cargo example target and runs it through the bench harness.
+    /// `--target hotpath` (the default) builds the `hotpath` example and files
+    /// rows under the command name `render`; any other `--target NAME` builds
+    /// the `NAME_bench` example and files under `NAME`.
+    ///
+    /// The mode selects the build: `--hotpath` adds the `hotpath` feature,
+    /// `--alloc` adds `hotpath-alloc`, and `--bench` builds the example bare -
+    /// the uninstrumented walls, the ones worth comparing across commits. With
+    /// no mode flag this stays `--hotpath 1`, which is what a bare
+    /// `brokkr hotpath` has always meant.
     #[command(name = "hotpath", display_order = 55)]
     Hotpath {
-        /// Per-function allocation tracking instead of timing
-        #[arg(long)]
-        alloc: bool,
-
-        /// Number of runs
-        #[arg(long, short = 'n', default_value = "1")]
-        runs: usize,
+        #[command(flatten)]
+        mode: ModeArgs,
 
         /// Example binary to build and run (default: hotpath)
         #[arg(long, default_value = "hotpath")]
         target: String,
-
-        /// Print full output
-        #[arg(short, long)]
-        verbose: bool,
-
-        /// Run even if the git tree is dirty (results will not be stored)
-        #[arg(long)]
-        force: bool,
     },
 
     // ----- dellingr-only commands (display_order = 57) -----

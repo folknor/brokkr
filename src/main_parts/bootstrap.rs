@@ -1431,32 +1431,24 @@ fn run(cli: Cli) -> Result<(), DevError> {
             litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
         }
         // ----- sluggrs-only commands -----
-        Command::Hotpath { alloc, runs, target, verbose, force } => {
+        Command::Hotpath { mut mode, target } => {
             project::require(project, Project::Sluggrs, "hotpath")?;
-            let mm = if alloc {
-                measure::MeasureMode::Alloc { runs }
-            } else {
-                measure::MeasureMode::Hotpath { runs }
-            };
-            let features = resolve_features(&dev_config, &[]);
-            output::set_quiet(!verbose);
-            let req = measure::MeasureRequest {
-                dev_config: &dev_config,
+            // The command is named for its default. A bare `brokkr hotpath`
+            // has always meant `--hotpath 1`; going through `run_measured`
+            // would otherwise resolve it to `Run`, which stores nothing.
+            if !mode.is_measured() {
+                mode.hotpath = Some(1);
+            }
+            run_measured(
+                &mode,
+                &dev_config,
                 project,
-                project_root: &project_root,
-                build_root: None,
-                dataset: "n/a",
-                variant: "n/a",
-                features: &features,
-                force,
-                mode: mm,
-                brokkr_args: &brokkr_args,
-                // Sluggrs hotpath uses Command::Hotpath, not ModeArgs - no
-                // dry-run or stop-marker surface to plumb from.
-                dry_run: false,
-                stop_marker: None,
-            };
-            sluggrs::hotpath::cmd(&req, &target)
+                &project_root,
+                "n/a",
+                "n/a",
+                &brokkr_args,
+                |req| sluggrs::hotpath::cmd(req, &target),
+            )
         }
         // ----- ratatoskr-only commands -----
         Command::ServiceTest {

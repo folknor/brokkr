@@ -111,6 +111,12 @@ const TOPICS: &[Topic] = &[
         visibility: Visibility::Only(&[Project::Litehtml, Project::Sluggrs]),
     },
     Topic {
+        name: "hotpath",
+        summary: "sluggrs rendering bench: modes, --target naming, --commit",
+        content: include_str!("../docs/commands/hotpath.md"),
+        visibility: Visibility::Only(&[Project::Sluggrs]),
+    },
+    Topic {
         name: "litehtml",
         summary: "litehtml/sluggrs internals: modules, fixtures, Node.js scripts",
         content: include_str!("../docs/projects/litehtml.md"),
