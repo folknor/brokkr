@@ -124,6 +124,17 @@ path for them.
 
 ## Dirty trees
 
+The clean-tree demand exists so the commit a baseline is pinned to
+actually describes the code that produced the numbers. It does not count
+`.brokkr/` against you: every store in there (`gate.db` included) is an
+*output* of the run being measured, so it cannot invalidate the pin.
+Nor does it count `*.md` or `brokkr.toml` - the latter mattering here
+because pinning a baseline means editing `brokkr.toml`. Without those
+exclusions `--as-baseline` was self-blocking, since each gated run
+writes a `gate.db` row and gate.db is tracked: the first recording
+worked and every later one refused until you committed. That is the
+same trap `brokkr approve` hit with `approved.png`.
+
 A gated run under `--force` is recorded in `gate.db` with `dirty = 1`,
 and the run prints a warning saying so. This does not contradict the
 harness's earlier `dirty tree - results will NOT be stored in database`

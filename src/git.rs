@@ -63,7 +63,8 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
 }
 
 fn check_clean(workspace_root: &Path) -> bool {
-    // Exclude .brokkr/results.db (modified by benchmarks), *.md (docs),
+    // Exclude `.brokkr/` (brokkr's own measurement stores - results.db,
+    // sidecar.db, ratatoskr's gate.db, piners' runs.db), *.md (docs),
     // brokkr.toml (host-local dataset/snapshot registrations, e.g. mutated by
     // `--as-snapshot`), and sluggrs' approved.png baselines - none of these
     // change what the built binary does, so they shouldn't mark a measured run
@@ -76,13 +77,23 @@ fn check_clean(workspace_root: &Path) -> bool {
     // commit an approval is pinned to actually describes what rendered the
     // image; approved.png is that operation's *output*, so it cannot invalidate
     // the pin.
+    //
+    // `.brokkr/` is excluded as a directory rather than as `results.db` alone
+    // for the same reason, and it took the same bug to find out: every gated
+    // `sync-bench` writes a row to a tracked gate.db, so once one gated run had
+    // happened, the next `--as-baseline` refused - and recording a baseline is
+    // precisely the operation you cannot work around with `--force`, since a
+    // dirty baseline is the thing the gate warns about forever after. Every
+    // store under `.brokkr/` is an output of the run being measured, so none of
+    // them can invalidate the commit that run is pinned to. This matches the
+    // untracked check below, which has always excluded the whole directory.
     let unstaged = Command::new("git")
         .args([
             "diff",
             "--quiet",
             "HEAD",
             "--",
-            ":(exclude).brokkr/results.db",
+            ":(exclude).brokkr/",
             ":(exclude)*.md",
             ":(exclude)brokkr.toml",
             ":(exclude)snapshots/*/approved.png",
@@ -97,7 +108,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             "--cached",
             "HEAD",
             "--",
-            ":(exclude).brokkr/results.db",
+            ":(exclude).brokkr/",
             ":(exclude)*.md",
             ":(exclude)brokkr.toml",
             ":(exclude)snapshots/*/approved.png",
