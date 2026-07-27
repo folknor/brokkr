@@ -83,6 +83,63 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
 // Shared commands
 // ---------------------------------------------------------------------------
 
+/// `brokkr approve [ID...] [--all]` for both visual-testing projects.
+///
+/// Takes a list because approving one snapshot at a time was impractical:
+/// the natural flow is run `visual`, eyeball the images, approve the ones
+/// that look right, and commit the baselines once. Each ID is resolved and
+/// approved in turn, and the first failure stops the batch - a bad ID should
+/// not be silently skipped.
+fn cmd_approve(
+    dev_config: &config::DevConfig,
+    project: Project,
+    project_root: &Path,
+    fixture: Vec<String>,
+    all: bool,
+) -> Result<(), DevError> {
+    if fixture.is_empty() && !all {
+        return Err(DevError::Config(
+            "specify one or more fixture/snapshot IDs, or --all".into(),
+        ));
+    }
+
+    match project {
+        Project::Litehtml => {
+            let cfg = dev_config
+                .litehtml
+                .as_ref()
+                .ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
+            let ids = if all {
+                cfg.fixtures.iter().map(|f| f.id.clone()).collect()
+            } else {
+                fixture
+            };
+            for id in &ids {
+                litehtml::cmd::approve(project, project_root, cfg, id)?;
+            }
+            Ok(())
+        }
+        Project::Sluggrs => {
+            let cfg = dev_config
+                .sluggrs
+                .as_ref()
+                .ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
+            let ids = if all {
+                cfg.snapshots.iter().map(|s| s.id.clone()).collect()
+            } else {
+                fixture
+            };
+            for id in &ids {
+                sluggrs::cmd::approve(project, project_root, cfg, id)?;
+            }
+            Ok(())
+        }
+        other => Err(DevError::Config(format!(
+            "'approve' is only available for litehtml/sluggrs projects (current: {other})"
+        ))),
+    }
+}
+
 fn cmd_env(
     dev_config: &config::DevConfig,
     project: Project,

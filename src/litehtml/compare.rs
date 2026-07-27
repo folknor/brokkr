@@ -22,6 +22,15 @@ pub(crate) struct ElementMatchResult {
 
 pub(crate) enum Status {
     Pass,
+    /// Rendered fine, but there is no approved baseline to compare against.
+    ///
+    /// Distinct from [`Status::FailThreshold`] on purpose: "nobody has
+    /// approved this yet" is the expected state of every newly registered
+    /// snapshot, not a regression. Folding the two together made a first-ever
+    /// run on a freshly wired project report "4 failed" for what was really
+    /// "4 awaiting approval", with the same exit code as a real divergence.
+    /// This status does not fail a run.
+    NoBaseline,
     FailThreshold,
     Regression,
     ExpectedFail,
@@ -32,6 +41,7 @@ impl Status {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Status::Pass => "PASS",
+            Status::NoBaseline => "NO_BASELINE",
             Status::FailThreshold => "FAIL_THRESHOLD",
             Status::Regression => "REGRESSION",
             Status::ExpectedFail => "EXPECTED_FAIL",

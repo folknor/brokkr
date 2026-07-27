@@ -1380,20 +1380,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )))
             }
         }
-        Command::Approve { fixture } => {
-            match project {
-                Project::Litehtml => {
-                    let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
-                    litehtml::cmd::approve(project, &project_root, cfg, &fixture)
-                }
-                Project::Sluggrs => {
-                    let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
-                    sluggrs::cmd::approve(project, &project_root, cfg, &fixture)
-                }
-                other => Err(DevError::Config(format!(
-                    "'approve' is only available for litehtml/sluggrs projects (current: {other})"
-                )))
-            }
+        Command::Approve { fixture, all } => {
+            cmd_approve(&dev_config, project, &project_root, fixture, all)
         }
         Command::Report { run_id } => {
             match project {

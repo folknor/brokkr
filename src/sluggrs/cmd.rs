@@ -210,9 +210,24 @@ fn run_snapshot(
         ));
     }
 
-    // Parse adapter name from stdout JSON.
-    let meta = parse_snapshot_metadata(&captured.stdout)?;
-    let adapter_name = meta.adapter;
+    // Parse adapter name from stdout JSON. A binary that exits 0 without the
+    // metadata line is this one snapshot's problem, not the run's: degrade to
+    // an ERROR row like every other failure here, rather than propagating and
+    // taking the remaining snapshots down with a half-written run.
+    let adapter_name = match parse_snapshot_metadata(&captured.stdout) {
+        Ok(meta) => meta.adapter,
+        Err(e) => {
+            sluggrs_msg(&format!("  ERROR: {} ({e})", snapshot.id));
+            db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
+            return Ok((
+                SnapshotOutcome {
+                    pixel_diff_pct: None,
+                    status: compare::Status::Error,
+                },
+                None,
+            ));
+        }
+    };
 
     if !output_png.exists() {
         db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
@@ -225,19 +240,24 @@ fn run_snapshot(
         ));
     }
 
-    // If no approved baseline exists, record as FAIL_THRESHOLD (unapproved).
+    // No approved baseline yet: NO_BASELINE, not a threshold failure. This is
+    // the expected state of every newly registered snapshot - see
+    // `compare::Status::NoBaseline`.
     if !approved_png.exists() {
         db.insert_result(
             run_id,
             &snapshot.id,
             None,
-            compare::Status::FailThreshold.as_str(),
+            compare::Status::NoBaseline.as_str(),
         )?;
-        sluggrs_msg(&format!("    no approved baseline for {}", snapshot.id));
+        sluggrs_msg(&format!(
+            "    no approved baseline for {} - run `brokkr approve {}`",
+            snapshot.id, snapshot.id
+        ));
         return Ok((
             SnapshotOutcome {
                 pixel_diff_pct: None,
-                status: compare::Status::FailThreshold,
+                status: compare::Status::NoBaseline,
             },
             Some(adapter_name),
         ));
@@ -309,7 +329,7 @@ pub(crate) fn test(
     sluggrs_msg("");
     print_table_header();
 
-    let mut counts = [0u32; 3]; // pass, fail, error
+    let mut counts = [0u32; 4]; // pass, fail, error, no-baseline
     let mut first_adapter: Option<String> = None;
 
     for snapshot in &snapshots {
@@ -337,6 +357,7 @@ pub(crate) fn test(
         match outcome.status {
             compare::Status::Pass => counts[0] += 1,
             compare::Status::Error => counts[2] += 1,
+            compare::Status::NoBaseline => counts[3] += 1,
             _ => counts[1] += 1,
         }
     }
@@ -350,10 +371,10 @@ pub(crate) fn test(
     Ok(())
 }
 
-fn print_run_summary(counts: &[u32; 3]) -> Result<(), DevError> {
+fn print_run_summary(counts: &[u32; 4]) -> Result<(), DevError> {
     sluggrs_msg(&format!("  {}", "\u{2500}".repeat(50)));
 
-    let labels = ["passed", "failed", "error"];
+    let labels = ["passed", "failed", "error", "awaiting approval"];
     let parts: Vec<String> = counts
         .iter()
         .zip(labels.iter())
@@ -362,6 +383,13 @@ fn print_run_summary(counts: &[u32; 3]) -> Result<(), DevError> {
         .collect();
     sluggrs_msg(&format!("  {}", parts.join(", ")));
 
+    if counts[3] > 0 {
+        sluggrs_msg("  approve new snapshots with `brokkr approve --all`");
+    }
+
+    // A snapshot awaiting its first approval is not a failure - see
+    // `compare::Status::NoBaseline`. Only real divergence and hard errors
+    // set the exit code.
     if counts[1] > 0 || counts[2] > 0 {
         return Err(DevError::ExitCode(1));
     }
@@ -532,21 +560,18 @@ fn format_status_columns(
         _ => "\u{2014}".into(),
     };
 
+    // Only ever an *annotation* on the status, never a repeat of it. This
+    // used to fall through to `format!(" ({s})")` for every non-PASS row,
+    // rendering `FAIL_THRESHOLD (FAIL_THRESHOLD)`.
     let extra = match r.status.as_str() {
-        "PASS" => {
-            if let (Some(current), Some(appr)) = (r.pixel_diff_pct, approval) {
-                if current < appr.pixel_diff_pct - 0.5 {
-                    " (improved)".into()
-                } else {
-                    String::new()
-                }
-            } else if approval.is_none() {
-                " (unapproved)".into()
-            } else {
-                String::new()
+        "PASS" => match (r.pixel_diff_pct, approval) {
+            (Some(current), Some(appr)) if current < appr.pixel_diff_pct - 0.5 => {
+                " (improved)".into()
             }
-        }
-        s => format!(" ({s})"),
+            _ => String::new(),
+        },
+        "NO_BASELINE" => " (run `brokkr approve`)".into(),
+        _ => String::new(),
     };
 
     (px, delta, extra)

@@ -23,11 +23,37 @@ For project-specific fixture conventions and the prepare pipeline see
   element match comparison. `--suite` and `--recapture` are litehtml-only.
 - `list` - show configured fixtures with tags, expected outcome, and approval
   state.
-- `approve <ID>` - record current divergence as accepted baseline (requires
-  clean git tree).
+- `approve <ID>... | --all` - record current divergence as accepted baseline.
+  Takes several IDs, or `--all` for every configured entry, because the
+  natural flow is run `visual`, eyeball the images, approve the good ones,
+  and commit the baselines once. The first bad ID stops the batch.
+
+  Requires a clean git tree, so that the commit an approval is pinned to
+  actually describes what rendered the image. Sluggrs' own
+  `snapshots/*/approved.png` is exempt from that check (`check_clean` in
+  `src/git.rs`, alongside `results.db`, `*.md` and `brokkr.toml`) - it is the
+  approve operation's *output*, so it cannot invalidate the pin. Without the
+  exemption `approve` was self-blocking: the first one succeeded and every
+  later one failed until you committed.
 - `report <run_id>` - show results table for a past test run.
 - `visual-status` - dashboard: all fixtures with approved baseline vs last
   run, delta, improvements.
+
+## Statuses
+
+`PASS`, `NO_BASELINE`, `FAIL_THRESHOLD`, `REGRESSION`, `EXPECTED_FAIL`,
+`ERROR` (`compare::Status`, `src/litehtml/compare.rs`). Sluggrs reaches all
+but `EXPECTED_FAIL`, which needs a per-fixture `expected_fail` flag that
+`[[sluggrs.snapshot]]` does not have.
+
+`NO_BASELINE` means the render succeeded but nothing has been approved yet.
+It is **not** a failure and does not set the exit code - it is the expected
+state of every newly registered snapshot, and folding it into
+`FAIL_THRESHOLD` made a first run on a fresh project report "4 failed" for
+what was really "4 awaiting approval".
+
+A snapshot whose binary exits 0 but omits the `{"adapter":...}` stdout line
+is recorded as one `ERROR` row; it does not abort the remaining snapshots.
 
 ## Fixture preprocessing (litehtml only)
 

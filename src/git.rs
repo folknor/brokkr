@@ -63,10 +63,19 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
 }
 
 fn check_clean(workspace_root: &Path) -> bool {
-    // Exclude .brokkr/results.db (modified by benchmarks), *.md (docs), and
+    // Exclude .brokkr/results.db (modified by benchmarks), *.md (docs),
     // brokkr.toml (host-local dataset/snapshot registrations, e.g. mutated by
-    // `--as-snapshot`) - none of these change what the built binary does, so
-    // they shouldn't mark a measured run dirty.
+    // `--as-snapshot`), and sluggrs' approved.png baselines - none of these
+    // change what the built binary does, so they shouldn't mark a measured run
+    // dirty.
+    //
+    // approved.png is here because `brokkr approve` was otherwise
+    // self-blocking: it demands a clean tree, then writes into the tree, so the
+    // first approval succeeded and every later one failed until you committed.
+    // Approving N snapshots took N commits. The clean-tree demand exists so the
+    // commit an approval is pinned to actually describes what rendered the
+    // image; approved.png is that operation's *output*, so it cannot invalidate
+    // the pin.
     let unstaged = Command::new("git")
         .args([
             "diff",
@@ -76,6 +85,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             ":(exclude).brokkr/results.db",
             ":(exclude)*.md",
             ":(exclude)brokkr.toml",
+            ":(exclude)snapshots/*/approved.png",
         ])
         .current_dir(workspace_root)
         .output();
@@ -90,6 +100,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             ":(exclude).brokkr/results.db",
             ":(exclude)*.md",
             ":(exclude)brokkr.toml",
+            ":(exclude)snapshots/*/approved.png",
         ])
         .current_dir(workspace_root)
         .output();
@@ -103,6 +114,7 @@ fn check_clean(workspace_root: &Path) -> bool {
             ":(exclude).brokkr/",
             ":(exclude)*.md",
             ":(exclude)brokkr.toml",
+            ":(exclude)snapshots/*/approved.png",
         ])
         .current_dir(workspace_root)
         .output();

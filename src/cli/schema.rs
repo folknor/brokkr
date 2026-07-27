@@ -1842,8 +1842,12 @@ Examples:
     /// [litehtml/sluggrs] Record current output as accepted baseline (requires clean git tree)
     #[command(display_order = 50)]
     Approve {
-        /// Fixture/snapshot ID (or unique prefix)
-        fixture: String,
+        /// Fixture/snapshot IDs (or unique prefixes). Repeatable.
+        fixture: Vec<String>,
+
+        /// Approve every configured fixture/snapshot
+        #[arg(long, conflicts_with = "fixture")]
+        all: bool,
     },
     /// [litehtml/sluggrs] Show detailed results for a past run
     #[command(display_order = 50)]
