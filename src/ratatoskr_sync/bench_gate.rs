@@ -496,10 +496,20 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     let uuid = db.insert(&row)?;
     let short = &uuid[..8.min(uuid.len())];
 
+    // Say which database. The harness's earlier "dirty tree - results will
+    // NOT be stored" warning is about results.db and does not govern
+    // gate.db, which records every gated run so a failure is inspectable.
+    // Unqualified, the two lines read as a contradiction.
     output::ratatoskr_msg(&format!(
-        "gate `{}` recorded run {short} on host `{hostname}`",
+        "gate `{}` recorded run {short} in gate.db on host `{hostname}`",
         ctx.gate_name
     ));
+    if row.dirty {
+        output::ratatoskr_msg(
+            "  [warn] this row is tagged dirty (--force); it is stored, but \
+             pinning it as a baseline pins numbers from an uncommitted tree",
+        );
+    }
 
     if ctx.req.as_baseline {
         output::ratatoskr_msg("--as-baseline: skipping evaluation. Add this line to brokkr.toml:");
@@ -510,7 +520,68 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         return Ok(());
     }
 
-    evaluate_against_baseline(&db, &hostname, ctx.gate_name, gate, &row)
+    evaluate_against_baseline(&db, &hostname, ctx.gate_name, gate, &row, &uuid)
+}
+
+/// Build the failure message for a pinned baseline UUID that `gate.db`
+/// does not have under this host.
+///
+/// The old text asserted "recorded on a different machine", which is an
+/// inference the lookup cannot support: all it established was absence
+/// under this hostname. The distinction matters because the remedy is not
+/// the same. A pin someone deliberately made and a missing row point at
+/// local `gate.db` loss - and re-recording there is destructive, since it
+/// rebases every rule (`max_delta = 0` especially) onto current numbers
+/// and blesses whatever regression is in the tree.
+fn missing_baseline_error(
+    db: &GateDb,
+    gate_name: &str,
+    hostname: &str,
+    baseline_uuid: &str,
+    current_uuid: &str,
+) -> DevError {
+    let hosts = db.hosts_with_uuid(baseline_uuid).unwrap_or_default();
+    let others: Vec<&str> = hosts
+        .iter()
+        .filter(|h| h.as_str() != hostname)
+        .map(String::as_str)
+        .collect();
+    let siblings = db
+        .count_for_gate(gate_name, hostname, current_uuid)
+        .unwrap_or(0);
+
+    let cause = if others.is_empty() {
+        if siblings == 0 {
+            format!(
+                "gate.db has no other rows for `{gate_name}` on this host either, \
+                 so the local database looks reset, relocated or newly created - \
+                 not a provenance problem."
+            )
+        } else {
+            format!(
+                "gate.db does have {siblings} other row(s) for `{gate_name}` on this \
+                 host, so the pinned row specifically is gone (pruned, or written to \
+                 a different .brokkr/ratatoskr/gate.db)."
+            )
+        }
+    } else {
+        format!(
+            "that UUID *is* present in gate.db, but under host(s): {}. \
+             The pin is filed under the wrong hostname.",
+            others.join(", ")
+        )
+    };
+
+    DevError::Config(format!(
+        "gate `{gate_name}`: baseline UUID `{baseline_uuid}` is pinned for host \
+         `{hostname}` in brokkr.toml, but no such row exists in gate.db under that \
+         host.\n  {cause}\n  Recovery: restore the gate.db that holds this row \
+         (it is the only copy of the reference numbers).\n  [warn] --as-baseline \
+         is NOT a safe fix here: someone pinned this UUID deliberately, and \
+         re-recording silently rebases every rule onto the current tree's numbers. \
+         If the current tree has regressed, the gate is blessed blind. Only \
+         re-record from a tree you have independently confirmed is good."
+    ))
 }
 
 /// Look up the pinned per-hostname baseline UUID in `brokkr.toml`,
@@ -523,6 +594,7 @@ fn evaluate_against_baseline(
     gate_name: &str,
     gate: &GateConfig,
     current_row: &GateRow,
+    current_uuid: &str,
 ) -> Result<(), DevError> {
     let baseline_uuid = gate.baseline.get(hostname).ok_or_else(|| {
         DevError::Config(format!(
@@ -531,13 +603,11 @@ fn evaluate_against_baseline(
              and add the printed line to brokkr.toml."
         ))
     })?;
-    let baseline_entry = db.lookup_baseline(baseline_uuid, hostname)?.ok_or_else(|| {
-        DevError::Config(format!(
-            "gate `{gate_name}`: baseline UUID `{baseline_uuid}` not found in gate.db \
-             on host `{hostname}` - the pinned UUID was recorded on a different machine. \
-             Record locally with --as-baseline and update brokkr.toml."
-        ))
-    })?;
+    let baseline_entry = db
+        .lookup_baseline(baseline_uuid, hostname)?
+        .ok_or_else(|| {
+            missing_baseline_error(db, gate_name, hostname, baseline_uuid, current_uuid)
+        })?;
     if baseline_entry.gate_name != gate_name {
         return Err(DevError::Config(format!(
             "gate `{gate_name}`: baseline row's gate is `{}` (mismatch)",

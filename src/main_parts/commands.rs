@@ -551,13 +551,27 @@ fn clean_scratch(project: Project, project_root: &Path, paths: &config::Resolved
 /// Clean the ratatoskr and piners run-artefact trees. Both are debris by the
 /// time `clean` runs (we hold the project lock). For piners only the `run-N/`
 /// dirs go - the corpus run store (`runs.db` + wal/shm) is the source of truth
-/// and must survive.
+/// and must survive. Ratatoskr is the same shape: the artefact and `mock/`
+/// *directories* go, but every file directly under `.brokkr/ratatoskr` stays,
+/// because that is where `gate.db` lives. A gate baseline is pinned by UUID in
+/// `brokkr.toml`; deleting the row it points at breaks the gate with no way
+/// back short of re-recording, which silently rebases the reference onto
+/// current numbers. Measurement stores are permanently out of clean's scope.
 fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
     if project == Project::Ratatoskr {
         let ratatoskr_root = project_root.join(".brokkr/ratatoskr");
-        if ratatoskr_root.exists() {
-            let runs = count_run_dirs(&ratatoskr_root);
-            c.dir(&ratatoskr_root);
+        let runs = count_run_dirs(&ratatoskr_root);
+        let mut removed = 0;
+        if let Ok(entries) = std::fs::read_dir(&ratatoskr_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    c.dir(&path);
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
             output::run_msg(&format!("{} {runs} ratatoskr run dir(s)", c.verb()));
         }
     }

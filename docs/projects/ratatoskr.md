@@ -87,8 +87,12 @@ removes the `run-N/` dir on green runs (unless `--keep-artefacts` or
 preserves it, and a panic / early return defaults to preserve so
 diagnostics are never lost. To sweep accumulated dirs from past
 failures, run `brokkr clean` - on ratatoskr projects it removes the
-whole `.brokkr/ratatoskr/` tree (it acquires the project lock first,
-so concurrent harness runs and `mock-serve` are not affected).
+artefact and `mock/` directories under `.brokkr/ratatoskr/` (it acquires
+the project lock first, so concurrent harness runs and `mock-serve` are
+not affected). It spares every *file* at that level, `gate.db`
+especially: that store holds the only copy of the numbers a gate
+baseline pins by UUID, so it is out of clean's scope like `results.db`.
+See `docs/commands/ratatoskr-gate.md`.
 
 ## Cross-cutting design
 

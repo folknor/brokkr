@@ -84,12 +84,52 @@ scope for v1.
 2. Look up `[ratatoskr.gate.<name>.baseline].<hostname>`. If missing,
    fail with: `no baseline pinned for host "<hostname>" in gate "<name>"
    - record one with --as-baseline and add it to brokkr.toml`.
-3. Look up that UUID in `gate.db`. If missing, fail with: `baseline UUID
-   <uuid> not found in gate.db on host "<hostname>" - the pinned UUID
-   was recorded on a different machine; record locally with
-   --as-baseline`.
+3. Look up that UUID in `gate.db`, scoped to this hostname. If missing,
+   fail - but the failure distinguishes three conditions, because the
+   remedies differ and only the lookup's absence is a fact:
+   - the UUID exists under **another** hostname: the pin is filed under
+     the wrong host key;
+   - the UUID is absent and the gate has **no other rows** on this host:
+     the local `gate.db` looks reset, relocated, or newly created;
+   - the UUID is absent but the gate **does** have other rows here: that
+     specific row is gone, or was written to a different `gate.db`.
+
+   In every case the message warns that `--as-baseline` is not a safe
+   fix: someone pinned that UUID deliberately, and re-recording rebases
+   every rule onto the current tree's numbers. On a `max_delta = 0` rule
+   that silently blesses whatever regression is in the tree and leaves
+   the gate permanently blind to it. Re-record only from a tree
+   independently confirmed good.
 4. Validate the looked-up row's `gate_name`, `script`, and `fixture`
    match the current invocation. Mismatch is a hard error.
+
+## gate.db lifetime
+
+`gate.db` lives at `<project_root>/.brokkr/ratatoskr/gate.db` - per
+project, never global. It holds the only copy of every baseline's
+measured numbers; `brokkr.toml` stores nothing but the UUID pointer, so
+a lost row cannot be reconstructed from git.
+
+Accordingly it has no retention or pruning policy (the store is
+insert-and-select only), and `brokkr clean` does not touch it: a clean
+removes the artefact and `mock/` **directories** under
+`.brokkr/ratatoskr` and spares every file at that level. This is the
+same carve-out piners' `runs.db` gets. Note that `brokkr kill`'s
+graceful path runs `brokkr clean`, so this exemption is what keeps a
+SIGTERM'd bench from destroying the baselines.
+
+The sidecar backups under `$XDG_DATA_HOME/brokkr/sidecar-backups/` are
+sidecar profile data only - unrelated to gate baselines and no recovery
+path for them.
+
+## Dirty trees
+
+A gated run under `--force` is recorded in `gate.db` with `dirty = 1`,
+and the run prints a warning saying so. This does not contradict the
+harness's earlier `dirty tree - results will NOT be stored in database`
+warning, which governs `results.db` only: gate rows are always written
+so a gate failure stays inspectable. Pinning a dirty row as a baseline
+is allowed, and every later comparison against it re-warns.
 
 ## Rule kinds
 

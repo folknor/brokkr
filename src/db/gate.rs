@@ -147,6 +147,40 @@ impl GateDb {
             .optional()
             .map_err(DevError::from)
     }
+
+    /// Hostnames that have a row matching `uuid_prefix`, ignoring the
+    /// hostname scope `lookup_baseline` applies. Lets a failed baseline
+    /// lookup say whether the UUID is absent outright or merely filed
+    /// under a different machine - two conditions with different remedies.
+    pub fn hosts_with_uuid(&self, uuid_prefix: &str) -> Result<Vec<String>, DevError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT hostname FROM gate_runs \
+             WHERE uuid LIKE ?1 || '%' ORDER BY hostname",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DevError::from)
+    }
+
+    /// How many rows this gate has on this host, excluding `exclude_uuid`
+    /// (the run being evaluated, which the gate hook has already inserted).
+    /// A pinned-but-missing baseline over an otherwise-empty history is the
+    /// signature of local `gate.db` loss rather than a bad pin.
+    pub fn count_for_gate(
+        &self,
+        gate_name: &str,
+        hostname: &str,
+        exclude_uuid: &str,
+    ) -> Result<i64, DevError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM gate_runs \
+                 WHERE gate_name = ?1 AND hostname = ?2 AND uuid != ?3",
+                rusqlite::params![gate_name, hostname, exclude_uuid],
+                |r| r.get(0),
+            )
+            .map_err(DevError::from)
+    }
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<GateEntry> {
@@ -253,6 +287,36 @@ mod tests {
         let uuid = db.insert(&sample_row()).unwrap();
         // Same UUID, wrong host => not found.
         assert!(db.lookup_baseline(&uuid, "host-b").unwrap().is_none());
+    }
+
+    #[test]
+    fn hosts_with_uuid_ignores_host_scope() {
+        let db = open_mem();
+        let uuid = db.insert(&sample_row()).unwrap();
+        // The row is on host-a; asking from host-b's perspective, the
+        // lookup fails but the UUID is still locatable.
+        assert!(db.lookup_baseline(&uuid, "host-b").unwrap().is_none());
+        assert_eq!(db.hosts_with_uuid(&uuid).unwrap(), vec!["host-a"]);
+        assert!(db.hosts_with_uuid("deadbeef").unwrap().is_empty());
+    }
+
+    #[test]
+    fn count_for_gate_excludes_current_run() {
+        let db = open_mem();
+        let first = db.insert(&sample_row()).unwrap();
+        let current = db.insert(&sample_row()).unwrap();
+        assert_eq!(
+            db.count_for_gate("jmap_small", "host-a", &current).unwrap(),
+            1
+        );
+        assert_eq!(
+            db.count_for_gate("jmap_small", "host-a", &first).unwrap(),
+            1
+        );
+        assert_eq!(
+            db.count_for_gate("other_gate", "host-a", &current).unwrap(),
+            0
+        );
     }
 
     #[test]
