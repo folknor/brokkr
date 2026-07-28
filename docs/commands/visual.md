@@ -73,6 +73,14 @@ pipeline-minus-reference; stale files are removed on clean runs), and the
 top 10 print under the fixture's row when its status is `FAIL_THRESHOLD`
 or `REGRESSION`.
 
+The consumer repo is expected to gitignore `fixtures/*/offenders.txt`
+(litehtml-rs does, d5c9b82) alongside the other run artifacts - it is
+rewritten or deleted every run, so tracking it would dirty the tree in
+both directions and block `approve`'s clean-tree check. Deliberately not
+exempted in `check_clean` instead: git already treats ignored files as
+clean, and the exemption list stays minimal so a pinned approval keeps
+describing the tree.
+
 ## Statuses
 
 `PASS`, `NO_BASELINE`, `FAIL_THRESHOLD`, `REGRESSION`, `EXPECTED_FAIL`,
