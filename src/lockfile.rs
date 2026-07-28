@@ -1,6 +1,6 @@
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::error::DevError;
 
@@ -29,9 +29,15 @@ struct LockState {
     progress: Option<(u32, u32)>,
 }
 
-/// RAII lock guard. Releases the flock on drop; `OwnedFd` closes the fd.
-pub struct LockGuard {
+/// The flock-owning core shared by every [`LockGuard`] handed out for one
+/// hold. Exactly one exists per held lock file; nested [`acquire`] calls in
+/// the same process get another `Arc` to it (see [`acquire`] for why), so
+/// the flock is released only when the *last* guard drops.
+struct LockInner {
     fd: OwnedFd,
+    /// The lock file this flock is on. Re-entry matches on it, so a test
+    /// lock on a scratch path can never alias the real global lock.
+    path: PathBuf,
     state: Mutex<LockState>,
     /// Toolchain-disable guard activated under this lock (when `disable_toolchain`
     /// is armed). Restored on drop *before* the flock is released, so the pinned
@@ -40,7 +46,7 @@ pub struct LockGuard {
     toolchain: Option<crate::toolchain::DisabledToolchain>,
 }
 
-impl Drop for LockGuard {
+impl Drop for LockInner {
     fn drop(&mut self) {
         // Restore the disabled toolchain (if any) while we still hold the flock,
         // then release. Doing it before LOCK_UN keeps the moved-aside window
@@ -54,14 +60,40 @@ impl Drop for LockGuard {
     }
 }
 
+/// RAII lock guard. The underlying flock is released when the last guard for
+/// this hold drops ([`LockInner`]'s drop); in the common non-nested case that
+/// is simply this guard's drop, as before.
+pub struct LockGuard {
+    inner: Arc<LockInner>,
+}
+
+/// The locks this process currently holds, weakly. [`acquire`] consults this
+/// to re-enter an existing hold instead of opening a second fd on the same
+/// file - `flock(2)` treats each fd as an independent contender even within
+/// one process, so that second fd would block forever on a lock the process
+/// itself holds (the self-deadlock trap that makes naive "hoist an acquire
+/// around a loop of acquiring callees" fatal).
+///
+/// `Weak` so the registry never extends a hold: release is driven purely by
+/// guard drops. Dead entries are swept opportunistically on each access.
+static HELD: Mutex<Vec<Weak<LockInner>>> = Mutex::new(Vec::new());
+
+/// Lock the registry, treating poison as recoverable. The critical sections
+/// are tiny and allocation-only; if one somehow panicked, falling back to the
+/// inner value is strictly safer than skipping the re-entry check (which
+/// would send a nested acquire into the flock self-deadlock).
+fn held_registry() -> std::sync::MutexGuard<'static, Vec<Weak<LockInner>>> {
+    HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl LockGuard {
     /// Record the PID of the child process currently running under the lock,
     /// and rewrite the lock file so concurrent `brokkr lock` invocations can
     /// see it.
     pub fn set_child_pid(&self, pid: u32) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.inner.state.lock() {
             state.child_pid = Some(pid);
-            rewrite_from_state(self.fd.as_raw_fd(), &state);
+            rewrite_from_state(self.inner.fd.as_raw_fd(), &state);
         }
     }
 
@@ -71,11 +103,11 @@ impl LockGuard {
     /// SIGKILLs every PID in this set alongside `child_pid` so no mock
     /// leaks when the workload child is the one written to `child_pid`.
     pub fn add_mock_pid(&self, pid: u32) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.inner.state.lock() {
             if !state.mock_pids.contains(&pid) {
                 state.mock_pids.push(pid);
             }
-            rewrite_from_state(self.fd.as_raw_fd(), &state);
+            rewrite_from_state(self.inner.fd.as_raw_fd(), &state);
         }
     }
 
@@ -83,18 +115,18 @@ impl LockGuard {
     /// has drained but others remain (service-suite's suite-scoped
     /// fixture reuse model).
     pub fn remove_mock_pid(&self, pid: u32) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.inner.state.lock() {
             state.mock_pids.retain(|p| *p != pid);
-            rewrite_from_state(self.fd.as_raw_fd(), &state);
+            rewrite_from_state(self.inner.fd.as_raw_fd(), &state);
         }
     }
 
     /// Drop all mock-server PIDs (e.g. after the suite has drained every
     /// mock gracefully).
     pub fn clear_mock_pids(&self) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.inner.state.lock() {
             state.mock_pids.clear();
-            rewrite_from_state(self.fd.as_raw_fd(), &state);
+            rewrite_from_state(self.inner.fd.as_raw_fd(), &state);
         }
     }
 
@@ -102,9 +134,9 @@ impl LockGuard {
     /// captured runner returns so a stale PID can't be SIGKILLed by
     /// `--hard` once the kernel has recycled it.
     pub fn clear_child_pid(&self) {
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.inner.state.lock() {
             state.child_pid = None;
-            rewrite_from_state(self.fd.as_raw_fd(), &state);
+            rewrite_from_state(self.inner.fd.as_raw_fd(), &state);
         }
     }
 
@@ -115,9 +147,9 @@ impl LockGuard {
         if total <= 1 {
             return;
         }
-        if let Ok(mut state) = self.state.lock() {
+        if let Ok(mut state) = self.inner.state.lock() {
             state.progress = Some((run, total));
-            rewrite_from_state(self.fd.as_raw_fd(), &state);
+            rewrite_from_state(self.inner.fd.as_raw_fd(), &state);
         }
     }
 }
@@ -160,12 +192,51 @@ fn lock_path() -> Result<PathBuf, DevError> {
 
 /// Acquire an exclusive lock on the global lock file, blocking until free.
 ///
-/// If the lock is held, prints a waiting message describing the holder and
-/// blocks until it is released. On success, writes PID + context to the
-/// lock file.
+/// If the lock is held by *another process*, prints a waiting message
+/// describing the holder and blocks until it is released. On success, writes
+/// PID + context to the lock file.
+///
+/// **Re-entrant within the process.** If this process already holds the lock,
+/// the call returns immediately with another guard on the same hold, and the
+/// flock is released only when the last guard drops. This exists for the
+/// cohort commands (`sync --all`, `sync --gate all`): they acquire once
+/// around the whole sweep so measurement stays serialized end-to-end, while
+/// each swept member (`run_sync_smoke`, `BenchHarness::new`) still contains
+/// its own acquire for the single-invocation path. Without re-entrancy the
+/// inner acquire would open a second fd on the same file and `flock(2)` would
+/// block it on the lock this very process holds - a self-deadlock.
+///
+/// The trade-off, deliberately accepted: two *threads* of one process
+/// first-acquiring concurrently used to serialize on the flock and now may
+/// share the hold if one registers before the other checks. Brokkr's command
+/// flow is sequential - every acquire on one thread is part of the same
+/// logical work unit - so sharing is the correct semantics here. Cross-process
+/// serialization (the property benchmarks depend on) is untouched.
+///
+/// A nested acquire keeps the outer hold's lock-file contents (project /
+/// command / args): the outer command is the honest holder for `brokkr lock`
+/// to report, and its `ctx` was captured from the same argv anyway.
 pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
-    let c_path = path_to_cstring(&path)?;
+    acquire_at(&path, ctx)
+}
+
+/// Path-explicit body of [`acquire`] - also the unit-test seam, so tests can
+/// exercise nesting on a scratch lock file without touching the real one.
+fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+    {
+        let mut held = held_registry();
+        held.retain(|w| w.strong_count() > 0);
+        for weak in held.iter() {
+            if let Some(inner) = weak.upgrade()
+                && inner.path == *path
+            {
+                return Ok(LockGuard { inner });
+            }
+        }
+    }
+
+    let c_path = path_to_cstring(path)?;
     let fd = open_lock_file(&c_path)?;
 
     // Try non-blocking first to print a message if waiting.
@@ -229,11 +300,16 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let toolchain = crate::toolchain::activate_for_lock()?;
     let state = build_state(ctx);
     rewrite_from_state(owned.as_raw_fd(), &state);
-    Ok(LockGuard {
+    let inner = Arc::new(LockInner {
         fd: owned,
+        path: path.to_owned(),
         state: Mutex::new(state),
         toolchain,
-    })
+    });
+    // Register weakly so a later acquire in this process re-enters this hold
+    // instead of self-deadlocking on a second fd.
+    held_registry().push(Arc::downgrade(&inner));
+    Ok(LockGuard { inner })
 }
 
 /// Check the global lock status. Returns `None` if no lock is held.
@@ -635,4 +711,182 @@ fn path_to_cstring(path: &std::path::Path) -> Result<std::ffi::CString, DevError
 
     std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| DevError::Lock(format!("lock path contains nul byte: {}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// Per-test scratch lock file. Each test gets its own path so parallel
+    /// test threads never contend (or falsely nest) with each other, and
+    /// none of them ever touch the real global lock.
+    fn tmp_lock(name: &str) -> PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp/lockfile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        // Stale file from a previous run is fine - flock state died with
+        // that process - but remove it so contents assertions start clean.
+        std::fs::remove_file(&path).ok();
+        path
+    }
+
+    fn ctx() -> LockContext<'static> {
+        LockContext {
+            project: "test",
+            command: "lock-test",
+            project_root: "/nonexistent",
+        }
+    }
+
+    /// Probe whether the flock on `path` is held, from a *fresh fd* - which
+    /// is exactly the position a second brokkr process (or the naive hoisted
+    /// acquire) would be in, since flock treats each fd independently even
+    /// within one process.
+    fn flock_is_held(path: &Path) -> bool {
+        let c = path_to_cstring(path).unwrap();
+        let fd = open_lock_file(&c).unwrap();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        let held = ret != 0;
+        if !held {
+            unsafe {
+                libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+        // Close the probe fd either way.
+        let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+        held
+    }
+
+    /// The defect scenario: a cohort acquires, then a swept member acquires
+    /// again. Pre-fix this self-deadlocked; post-fix the nested call returns
+    /// a second handle on the same hold.
+    ///
+    /// Run on a worker thread under a watchdog, because the failure mode
+    /// being guarded against is a *block*, not a wrong value. Asserting it
+    /// inline would mean a reintroduced deadlock hangs the whole suite -
+    /// which reads as broken CI rather than as this regression. The
+    /// watchdog turns it back into a named failure.
+    #[test]
+    fn nested_acquire_reenters_the_same_hold() {
+        let path = tmp_lock("nested.lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            let outer = acquire_at(&worker_path, &ctx()).unwrap();
+            let nested = acquire_at(&worker_path, &ctx()).unwrap();
+            tx.send((
+                Arc::ptr_eq(&outer.inner, &nested.inner),
+                Arc::strong_count(&outer.inner),
+            ))
+            .ok();
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok((same_hold, strong)) => {
+                assert!(same_hold, "nested acquire must share the outer's hold");
+                assert_eq!(strong, 2);
+                worker.join().unwrap();
+            }
+            Err(_) => panic!(
+                "nested acquire_at() blocked - lockfile re-entrancy is gone, so a \
+                 cohort hoisting an acquire around acquiring callees will \
+                 self-deadlock on a second flock fd"
+            ),
+        }
+    }
+
+    /// Dropping the inner guard must NOT release the flock - the cohort's
+    /// whole point is that the lock spans the sweep, not each member. Only
+    /// the last guard's drop releases.
+    #[test]
+    fn inner_drop_keeps_lock_until_outer_drop() {
+        let path = tmp_lock("drop-order.lock");
+        let outer = acquire_at(&path, &ctx()).unwrap();
+        let nested = acquire_at(&path, &ctx()).unwrap();
+
+        drop(nested);
+        assert!(
+            flock_is_held(&path),
+            "inner drop must not release the sweep's lock"
+        );
+
+        drop(outer);
+        assert!(
+            !flock_is_held(&path),
+            "outermost drop must release the flock"
+        );
+    }
+
+    /// Guard-drop order is refcounted, not stack-ordered: releasing the
+    /// *outer* handle first while the nested one lives must also keep the
+    /// flock (a swept member is still running under it).
+    #[test]
+    fn outer_drop_before_inner_keeps_lock() {
+        let path = tmp_lock("outer-first.lock");
+        let outer = acquire_at(&path, &ctx()).unwrap();
+        let nested = acquire_at(&path, &ctx()).unwrap();
+
+        drop(outer);
+        assert!(flock_is_held(&path));
+
+        drop(nested);
+        assert!(!flock_is_held(&path));
+    }
+
+    /// The mutating methods on a nested guard reach the one real hold: the
+    /// lock file a concurrent `brokkr lock` reads reflects them.
+    #[test]
+    fn nested_guard_forwards_state_to_the_lock_file() {
+        let path = tmp_lock("forwarding.lock");
+        let outer = acquire_at(&path, &ctx()).unwrap();
+        let nested = acquire_at(&path, &ctx()).unwrap();
+
+        nested.set_child_pid(4242);
+        nested.add_mock_pid(5151);
+        nested.set_progress(2, 5);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("child_pid=4242"), "got: {contents}");
+        assert!(contents.contains("mock_pids=5151"), "got: {contents}");
+        assert!(contents.contains("progress=2/5"), "got: {contents}");
+
+        // And the clears forward too - via the outer handle, proving both
+        // handles mutate the same state.
+        outer.clear_child_pid();
+        nested.clear_mock_pids();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("child_pid="), "got: {contents}");
+        assert!(!contents.contains("mock_pids="), "got: {contents}");
+    }
+
+    /// Re-entry matches on the lock *path* - a hold on one file must not
+    /// satisfy an acquire on another (the test seam depends on this, and it
+    /// keeps the registry honest if a second lock file ever exists).
+    #[test]
+    fn different_paths_do_not_alias() {
+        let path_a = tmp_lock("distinct-a.lock");
+        let path_b = tmp_lock("distinct-b.lock");
+        let a = acquire_at(&path_a, &ctx()).unwrap();
+        let b = acquire_at(&path_b, &ctx()).unwrap();
+        assert!(!Arc::ptr_eq(&a.inner, &b.inner));
+        assert_eq!(Arc::strong_count(&a.inner), 1);
+        assert_eq!(Arc::strong_count(&b.inner), 1);
+    }
+
+    /// A fresh acquire after full release takes a fresh hold (the dead
+    /// registry entry is swept, not resurrected).
+    #[test]
+    fn reacquire_after_release_is_a_fresh_hold() {
+        let path = tmp_lock("reacquire.lock");
+        let first = acquire_at(&path, &ctx()).unwrap();
+        drop(first);
+        assert!(!flock_is_held(&path));
+
+        let second = acquire_at(&path, &ctx()).unwrap();
+        assert_eq!(Arc::strong_count(&second.inner), 1);
+        assert!(flock_is_held(&path));
+    }
 }

@@ -41,7 +41,12 @@ timing contract `--bench` needs. The build-config seam both paths share is
 ## Benchmark harness
 
 `BenchHarness` (in `src/harness.rs`) provides:
-- Exclusive lockfile (prevents parallel bench/verify/hotpath runs)
+- Exclusive lockfile (prevents parallel bench/verify/hotpath runs). The
+  lock is re-entrant *within* one brokkr process: a command that
+  internally invokes another locked command shares the same hold, and
+  the flock releases when the last guard drops. The ratatoskr cohorts
+  (`sync --all`, `sync --gate all`) rely on this to hold the lock across
+  their whole sweep. Cross-process exclusion is unchanged.
 - SQLite result storage with git commit, hostname, env snapshot
 - `run_internal(config, closure)` - in-process timing (N runs, min/avg/max).
   Does **not** store sidecar data (no store step).

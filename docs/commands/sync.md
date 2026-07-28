@@ -81,6 +81,14 @@ one's triage material - there is nothing to protect by stopping, and a
 cohort is most useful when it reports the whole blast radius. Exits
 non-zero if any script failed, listing each.
 
+The cohort holds the global lock for the whole sweep, not per-script:
+each `run_sync_smoke` still acquires internally, but the lockfile is
+re-entrant within the process, so those acquires join the sweep's hold.
+Another brokkr invocation therefore can't interleave a build or bench
+between two scripts, and the sweep can't stall mid-way waiting behind
+one. (`--gate all` does the same, where it is load-bearing for baseline
+comparability - see `docs/commands/ratatoskr-gate.md`.)
+
 `--all` conflicts with SCRIPT and with `--bench`: measuring a cohort
 would interleave N iterations of one script with the sæhrimnir spawn of
 the next, and best-of-N across different scripts means nothing. For

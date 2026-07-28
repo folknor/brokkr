@@ -154,6 +154,21 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
 
     output::ratatoskr_msg(&format!("sync cohort: {} script(s)", selected.len()));
 
+    // Hold the global lock for the whole sweep. Each `run_sync_smoke` call
+    // below still acquires (it is the single-script entry point too), but
+    // `lockfile::acquire` is re-entrant within the process, so those inner
+    // acquires join this hold instead of opening a second flock fd - which
+    // would self-deadlock, since flock treats fds independently even in one
+    // process. Without this outer hold the lock dropped between scripts,
+    // letting another brokkr slot a build or bench into the gap (and letting
+    // the cohort stall mid-sweep waiting behind it).
+    let project_root_str = req.project_root.display().to_string();
+    let _lock = lockfile::acquire(&LockContext {
+        project: "ratatoskr",
+        command: "sync",
+        project_root: &project_root_str,
+    })?;
+
     let mut failures: Vec<(&str, String)> = Vec::new();
     for script in &selected {
         output::ratatoskr_msg(&format!("── {} ──", script.name));

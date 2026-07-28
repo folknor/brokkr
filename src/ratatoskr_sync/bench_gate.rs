@@ -93,6 +93,24 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         req.bench
     ));
 
+    // Hold the global measurement lock for the entire sweep. Each
+    // `run_sync_bench` below re-enters this same hold through
+    // `BenchHarness::new` - `lockfile::acquire` is re-entrant within the
+    // process precisely so this hoist doesn't self-deadlock on a second
+    // flock fd. Without it the lock dropped between gates, so a concurrent
+    // brokkr could run a build or bench in the gap and contaminate the next
+    // gate's timing; those numbers still land in gate.db and get compared
+    // against the pinned baseline, making a contamination-induced breach
+    // indistinguishable from a real regression. Holding across the sweep
+    // also keeps the cohort contiguous in time - it can't stall mid-way
+    // waiting behind someone else's run.
+    let project_root_str = req.project_root.display().to_string();
+    let _lock = lockfile::acquire(&LockContext {
+        project: "ratatoskr",
+        command: "sync",
+        project_root: &project_root_str,
+    })?;
+
     let mut failures: Vec<(&str, String)> = Vec::new();
     for (name, script) in &plan {
         output::ratatoskr_msg(&format!("── gate `{name}` ──"));

@@ -216,6 +216,19 @@ the whole blast radius, not the first provider that tripped, so every
 gate runs, each failure is collected, and the command exits non-zero
 with all of them listed. Fixture-based auto-match remains out of scope.
 
+The sweep holds the global lock for its **whole duration**, not
+per-gate. The per-gate bench still acquires internally (via
+`BenchHarness`), but the lockfile is re-entrant within the process, so
+those acquires join the sweep's hold rather than releasing between
+gates. This matters for comparability against the pinned baselines:
+with per-gate locking, another brokkr invocation could take the lock
+between two gates and run a build or bench, contaminating the next
+gate's timing - and a contaminated number still lands in gate.db and is
+evaluated against the baseline, so the resulting breach would be
+indistinguishable from a real regression. Holding across the sweep also
+keeps the cohort contiguous in time instead of stalling mid-way behind
+someone else's run.
+
 This supersedes the v1 note that ruled `--gate all` out because "multiple
 gates can reference the same script". That hazard was about *implicit*
 selection - a script silently dragging in several gates. An explicit
