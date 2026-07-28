@@ -1334,8 +1334,8 @@ pub struct RatatoskrConfig {
     pub fixtures_dir: Option<PathBuf>,
 
     /// Env-var names ratatoskr's `test-helpers` reads to pick up the
-    /// per-protocol mock endpoints. Consumed by `sync-smoke` /
-    /// `sync-bench` when exporting endpoints to the harness binary -
+    /// per-protocol mock endpoints. Consumed by `sync` (run and bench
+    /// shapes) when exporting endpoints to the harness binary -
     /// `mock-serve` doesn't need them. Brokkr does not hardcode the
     /// spellings so they stay in sync with whatever ratatoskr's
     /// account-config code expects; missing field = "not exposed in
@@ -1352,7 +1352,7 @@ pub struct RatatoskrConfig {
 
     /// Where sync-test scripts live. Defaults to
     /// `crates/app/tests/sync-harness` when unset. Consumed by
-    /// `sync-list`, `sync-smoke`, and `sync-bench`.
+    /// every shape of `sync`.
     pub sync_script_dir: Option<PathBuf>,
 
     /// Named `[ratatoskr.gate.<name>]` blocks. Each gate pins a
@@ -1366,7 +1366,7 @@ pub struct RatatoskrConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateConfig {
-    /// Path to the sync-bench script this gate applies to. Used to
+    /// Path to the sync script this gate applies to. Used to
     /// validate that the looked-up baseline row matches the current
     /// invocation.
     pub script: PathBuf,
@@ -1418,7 +1418,7 @@ pub struct MetricRule {
 
 /// `[ratatoskr.harness]` - self-contained build spec for ratatoskr's
 /// orchestration commands (`service-test`, `service-suite`,
-/// `mock-serve`, `sync-smoke`, `sync-bench`). Decoupled from `[[check]]`
+/// `mock-serve`, `sync`). Decoupled from `[[check]]`
 /// so that the everyday `brokkr check` pass doesn't get conflated with
 /// "which features must the spawned binary have." See
 /// `docs/projects/ratatoskr.md`.

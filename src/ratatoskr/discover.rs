@@ -112,7 +112,7 @@ pub struct ScriptInfo {
     /// Names a fixture in `[ratatoskr] fixtures_dir`.
     pub fixture: Option<String>,
     /// Sync-script frontmatter only; service scripts leave it `None`.
-    /// Informational - tells `sync-list` which protocol the script
+    /// Informational - tells the `sync` index which protocol the script
     /// primarily exercises. Sæhrimnir always binds all five regardless.
     pub protocol: Option<String>,
 }
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn discover_at_uses_arbitrary_root() {
-        // Plan 3's sync-list passes its own root, not SCRIPT_DIR.
+        // Plan 3's sync index passes its own root, not SCRIPT_DIR.
         let root = tmpdir("discover_at");
         let custom = root.join("custom-harness");
         std::fs::create_dir_all(&custom).unwrap();

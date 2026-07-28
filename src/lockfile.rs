@@ -66,8 +66,8 @@ impl LockGuard {
     }
 
     /// Add an auxiliary mock-server PID. `service-suite` calls this once
-    /// per distinct fixture spawned over the suite's lifetime; sync-smoke
-    /// / sync-bench / service-test call it once. `brokkr kill --hard`
+    /// per distinct fixture spawned over the suite's lifetime; `sync`
+    /// (run or bench) and service-test call it once. `brokkr kill --hard`
     /// SIGKILLs every PID in this set alongside `child_pid` so no mock
     /// leaks when the workload child is the one written to `child_pid`.
     pub fn add_mock_pid(&self, pid: u32) {

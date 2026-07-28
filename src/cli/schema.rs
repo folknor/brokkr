@@ -2073,101 +2073,85 @@ Examples:
         repeat: u32,
     },
 
-    /// [ratatoskr] List discovered sync-test scripts (plan 3)
+    /// [ratatoskr] List, run, or bench sync-test scripts against sæhrimnir
     ///
-    /// Walks `[ratatoskr] sync_script_dir` (default
+    /// One command over the sync-harness cohort, in brokkr's usual
+    /// bare-is-an-index shape (`results`, `man`, `deps`): `brokkr sync`
+    /// lists the discovered scripts, `brokkr sync <script>` runs one
+    /// (PASS/FAIL), and `brokkr sync <script> --bench [N]` measures it.
+    ///
+    /// With no SCRIPT, walks `[ratatoskr] sync_script_dir` (default
     /// `crates/app/tests/sync-harness`), parses top-of-file frontmatter
-    /// (`description`, `expected`, `fixture`, `protocol`, `ceiling`),
-    /// prints a sorted table. Empty-state output names the expected
-    /// directory so a fresh checkout (no harness module yet) gets a
-    /// useful response.
-    #[command(name = "sync-list", display_order = 66)]
-    SyncList,
-
-    /// [ratatoskr] Run a sync-test script against sæhrimnir (plan 3)
+    /// (`description`, `expected`, `fixture`, `protocol`, `ceiling`) and
+    /// prints a sorted table. The empty-state output names the expected
+    /// directory so a fresh checkout gets a useful response.
     ///
-    /// Builds the harness binary declared by `[ratatoskr.harness]`,
-    /// spawns sæhrimnir against the script's `-- fixture: <NAME>`
-    /// frontmatter, parses the per-protocol ports out of the readiness
-    /// sentinel, then spawns `<harness binary> --test-harness <SCRIPT>`
-    /// with `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set
-    /// plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT` per protocol whose
-    /// env-var spelling is configured under `[ratatoskr]`. Tears
-    /// sæhrimnir down with a 1.5s SIGTERM budget after the harness
-    /// exits. PASS/FAIL on the harness binary's exit code; on FAIL the
-    /// per-run dir at `.brokkr/ratatoskr/sync/<test>/run-N/` is
+    /// With a SCRIPT, builds the harness binary declared by
+    /// `[ratatoskr.harness]`, spawns sæhrimnir against the script's
+    /// `-- fixture: <NAME>` frontmatter, parses the per-protocol ports out
+    /// of the readiness sentinel, then spawns `<harness binary>
+    /// --test-harness <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR` and
+    /// `BROKKR_TEST_BIN_DIR` set plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT`
+    /// per protocol whose env-var spelling is configured under
+    /// `[ratatoskr]`. Tears sæhrimnir down with a 1.5s SIGTERM budget after
+    /// the harness exits. PASS/FAIL on the harness binary's exit code; on
+    /// FAIL the per-run dir at `.brokkr/ratatoskr/sync/<test>/run-N/` is
     /// preserved with `harness/`, `mock/`, and `run.toml` for triage.
-    #[command(name = "sync-smoke", display_order = 67)]
-    SyncSmoke {
-        /// Path to the sync-test `.lua` script. Frontmatter must declare
-        /// `-- fixture: <NAME>` so brokkr can resolve which fixture to
-        /// load into sæhrimnir.
-        script: String,
-
-        /// Preserve the artefact directory even on success
-        #[arg(long)]
-        keep_artefacts: bool,
-
-        /// Build the harness binary with the dev profile (`<target>/debug/`).
-        /// Default is release. Overrides `[ratatoskr.harness] debug` from
-        /// `brokkr.toml`.
-        #[arg(long, conflicts_with = "release")]
-        debug: bool,
-
-        /// Force the release profile, overriding `[ratatoskr.harness] debug`
-        /// from `brokkr.toml`. Mutually exclusive with `--debug`.
-        #[arg(long)]
-        release: bool,
-    },
-
-    /// [ratatoskr] Bench a sync-test script against sæhrimnir (plan 3)
     ///
-    /// Same spawn shape as `sync-smoke`, measured. Spawns sæhrimnir
-    /// once and reuses it across iterations; spawns the harness binary
-    /// `--bench` times with `BROKKR_MARKER_FIFO` set so the script can
-    /// emit `SYNC_START` / `SYNC_END` markers around the measured
-    /// region. Best-of-N is selected on that marker span (falls back
-    /// to wall-clock elapsed when the script doesn't emit those
-    /// markers); the best iteration's `summary.json` (if the script
-    /// writes one into `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as
-    /// `meta.<key>` rows alongside the result. Stored in
-    /// `.brokkr/results.db` via the standard `BenchHarness` so
-    /// `brokkr results --compare` works.
-    #[command(name = "sync-bench", display_order = 68)]
-    SyncBench {
-        /// Path to the sync-test `.lua` script (frontmatter must
-        /// declare `-- fixture: <NAME>`).
-        script: String,
+    /// `--bench` keeps that spawn shape and measures it: sæhrimnir is
+    /// spawned once and reused across iterations, and the harness binary
+    /// runs N times with `BROKKR_MARKER_FIFO` set so the script can emit
+    /// `SYNC_START` / `SYNC_END` markers around the measured region.
+    /// Best-of-N is selected on that marker span (falls back to wall-clock
+    /// elapsed when the script doesn't emit those markers); the best
+    /// iteration's `summary.json` (if the script writes one into
+    /// `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` rows
+    /// alongside the result. Stored in `.brokkr/results.db` via the
+    /// standard `BenchHarness` so `brokkr results --compare` works.
+    #[command(name = "sync", display_order = 66)]
+    Sync {
+        /// Path to a sync-test `.lua` script (frontmatter must declare
+        /// `-- fixture: <NAME>`). Omit to list the discovered scripts.
+        script: Option<String>,
 
-        /// Number of measured iterations. Default 3.
-        #[arg(long, default_value = "3", value_name = "COUNT")]
-        bench: usize,
+        /// Measure instead of just running: N iterations, best-of-N on the
+        /// `SYNC_START`/`SYNC_END` marker span, recorded in `results.db`.
+        /// Bare `--bench` means 3. Requires SCRIPT.
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_missing_value = "3",
+            value_name = "COUNT",
+            requires = "script"
+        )]
+        bench: Option<usize>,
 
-        /// Allow recording on a dirty git tree (results land under the
-        /// `dirty` alias instead of being skipped).
-        #[arg(long)]
+        /// Allow recording on a dirty git tree (the gate row lands tagged
+        /// `dirty`; `results.db` still skips it). Requires `--bench`.
+        #[arg(long, requires = "bench")]
         force: bool,
 
         /// Preserve the artefact directory even on success
-        #[arg(long)]
+        #[arg(long, requires = "script")]
         keep_artefacts: bool,
 
         /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release for parity with what users will run.
         /// Overrides `[ratatoskr.harness] debug` from `brokkr.toml`.
-        #[arg(long, conflicts_with = "release")]
+        #[arg(long, conflicts_with = "release", requires = "script")]
         debug: bool,
 
         /// Force the release profile, overriding `[ratatoskr.harness] debug`
         /// from `brokkr.toml`. Mutually exclusive with `--debug`.
-        #[arg(long)]
+        #[arg(long, requires = "script")]
         release: bool,
 
         /// Run the named `[ratatoskr.gate.<name>]` gate after the bench
-        /// completes. Records a row in `.brokkr/ratatoskr/gate.db`,
-        /// looks up the per-hostname baseline, and exits non-zero if any
-        /// metric rule fails. See `docs/commands/ratatoskr-gate.md`.
-        #[arg(long, value_name = "NAME")]
+        /// completes. Records a row in `.brokkr/ratatoskr/gate.db`, looks
+        /// up the per-hostname baseline, and exits non-zero if any metric
+        /// rule fails. Requires `--bench` - every rule compares measured
+        /// numbers. See `docs/commands/ratatoskr-gate.md`.
+        #[arg(long, value_name = "NAME", requires = "bench")]
         gate: Option<String>,
 
         /// Record this run as a baseline candidate for `--gate <name>`,
@@ -2181,8 +2165,8 @@ Examples:
         /// instead of the current tree. The script, the fixture and
         /// sæhrimnir still come from the current tree, so the run varies
         /// the sync code and nothing else. Worktrees persist; remove them
-        /// with `brokkr clean --worktrees`.
-        #[arg(long, value_name = "REF")]
+        /// with `brokkr clean --worktrees`. Requires `--bench`.
+        #[arg(long, value_name = "REF", requires = "bench")]
         commit: Option<String>,
     },
 

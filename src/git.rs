@@ -80,7 +80,7 @@ fn check_clean(workspace_root: &Path) -> bool {
     //
     // `.brokkr/` is excluded as a directory rather than as `results.db` alone
     // for the same reason, and it took the same bug to find out: every gated
-    // `sync-bench` writes a row to a tracked gate.db, so once one gated run had
+    // `sync --bench` writes a row to a tracked gate.db, so once one gated run had
     // happened, the next `--as-baseline` refused - and recording a baseline is
     // precisely the operation you cannot work around with `--force`, since a
     // dirty baseline is the thing the gate warns about forever after. Every

@@ -1,8 +1,30 @@
-# Sync orchestration: mock-serve, sync-list, sync-smoke, sync-bench
+# Sync orchestration: sync, mock-serve
 
 Gated to `project = "ratatoskr"`. These commands spawn sæhrimnir (an external
 mock email server) alongside the ratatoskr harness binary so sync scripts can
 exercise real protocol stacks.
+
+`brokkr sync` is one command with three shapes, following the same
+bare-is-an-index convention as `results`, `man` and `deps`:
+
+| Invocation | What it does |
+|---|---|
+| `brokkr sync` | list the discovered scripts |
+| `brokkr sync <SCRIPT>` | run one, PASS/FAIL |
+| `brokkr sync <SCRIPT> --bench [N]` | measure one (default N=3) |
+
+It replaced `sync-list` / `sync-smoke` / `sync-bench`, which were three
+spellings of one workflow. The old names are gone, not aliased. Rows
+recorded by `sync-bench` were rewritten to `sync` by results.db migration
+v17→v18 (both the `command` column and the `brokkr_args` argv, since
+`--compare` keys on both), so pre-rename history still pairs with new
+runs. `gate.db` was untouched - its rows never carried a command name, so
+every pinned baseline survived the rename.
+
+Flags that only make sense while measuring (`--bench`, `--force`,
+`--gate`, `--as-baseline`, `--commit`) are enforced by clap's `requires`,
+so `brokkr sync --gate x` fails at parse time rather than silently
+listing.
 
 For the `[ratatoskr]` config block (mock_server_binary, fixtures_dir, endpoint
 env-var spellings, sync_script_dir) see `docs/brokkr.toml.md`. For the harness
@@ -34,7 +56,7 @@ arriving during the readiness window aborts cleanly with the child reaped
 Auto-build of sæhrimnir is not yet wired - the binary must already exist at
 `mock_server_binary`.
 
-## `sync-list`
+## `sync` (no SCRIPT) - the index
 
 Walk `[ratatoskr] sync_script_dir` (default `crates/app/tests/sync-harness`),
 parse top-of-file frontmatter (`description`, `expected`, `fixture`,
@@ -42,7 +64,7 @@ parse top-of-file frontmatter (`description`, `expected`, `fixture`,
 output names the expected directory and notes that the cohort may not have
 landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
 
-## `sync-smoke <SCRIPT> [--keep-artefacts] [--debug | --release]`
+## `sync <SCRIPT> [--keep-artefacts] [--debug | --release]` - run one
 
 Two-child orchestration. Validates `[ratatoskr.harness]`, `[ratatoskr]
 mock_server_binary`, and `[ratatoskr] fixtures_dir`, parses the script's
@@ -60,14 +82,14 @@ During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
 joins the auxiliary `mock_pids` set, the harness binary lands in
 `child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
 both. PG isolation is opt-in per spawn site: callers pass `isolate_pg = true`
-only when a `SigtermGuard` is active for the spawn's lifetime. Sync-smoke,
-service-test, service-suite, mock-serve, and BenchHarness's sidecar
+only when a `SigtermGuard` is active for the spawn's lifetime. The unmeasured
+`sync` run, service-test, service-suite, mock-serve, and BenchHarness's sidecar
 window all qualify - their tracked children spawn with `process_group(0)`
 and every intentional kill (`--hard`, deadline expiry, cooperative
 SIGTERM, `MockServer::shutdown`) targets the whole group via
 `kill(-pgid, ...)`, so descendants (sæhrimnir's protocol listeners,
 harness helpers, the ratatoskr build's rustc) go down with the leader.
-Sync-bench's pre-bench-loop spawns (cargo build, sæhrimnir mock) and
+The `--bench` path's pre-loop spawns (cargo build, sæhrimnir mock) and
 nidhogg's tile-server lifecycle stay in brokkr's foreground PG instead -
 they're tracked in the lockfile so `brokkr lock` shows them, but
 `--hard` falls back to a single-PID kill that may leave brief helper
@@ -96,9 +118,9 @@ that didn't run (e.g. a spawn-side failure before the harness started) are
 omitted, and the leading `in <total>` is dropped entirely if no phase
 recorded.
 
-## `sync-bench <SCRIPT> [--bench N] [--force] [--keep-artefacts] [--debug | --release] [--commit REF]`
+## `sync <SCRIPT> --bench [N] [--force] [--keep-artefacts] [--debug | --release] [--gate NAME] [--commit REF]` - measure one
 
-Measured variant of sync-smoke. Same two-child shape, but sæhrimnir is spawned
+The measured shape. Same two-child spawn, but sæhrimnir is spawned
 once and reused across `--bench` iterations (default 3), and the harness
 binary runs N times with `BROKKR_MARKER_FIFO` set. Each iteration gets its own
 `iter-K/harness/` subdir under the run dir; the script emits `SYNC_START` and
@@ -151,7 +173,7 @@ through `child_pid` (cleared between iterations so PID-recycling can't
 trip `--hard`), so `brokkr lock` shows both and `brokkr kill --hard`
 SIGKILLs every entry. Cooperative `brokkr kill` (SIGTERM) is handled only by the
 sidecar's own `SigtermGuard` around each measured iteration - no outer
-guard is installed at sync-bench entry because nesting would clobber the
+guard is installed at the bench path's entry because nesting would clobber the
 sidecar's `Drop`. SIGTERM during cargo build, sæhrimnir spawn, or the gap
 between iterations therefore falls through to the default terminate
 action (brokkr dies; mock and any in-flight harness child are reaped via

@@ -9,8 +9,8 @@ ratatoskr exercises two separate harness flows from brokkr:
 1. **Service-subprocess harness** (`service-test`, `service-suite`,
    `service-list`) - lua-driven tests against the ratatoskr binary's
    `--test-harness` mode. See `docs/commands/service.md`.
-2. **Sync orchestration** (`mock-serve`, `sync-list`, `sync-smoke`,
-   `sync-bench`) - two-child orchestration with sæhrimnir (mock email
+2. **Sync orchestration** (`sync`, `mock-serve`) - two-child
+   orchestration with sæhrimnir (mock email
    server) + the ratatoskr harness binary. See `docs/commands/sync.md`.
 
 Both share the harness build pipeline through `[ratatoskr.harness]`. The
@@ -76,9 +76,9 @@ points at the directory containing both binaries.
 
 - `service-test`: `.brokkr/ratatoskr/<test>/run-N/` with `binary-stdout.log`
   / `binary-stderr.log` / `run.toml` plus runtime-emitted artefacts.
-- `sync-smoke`: `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
+- `sync <SCRIPT>`: `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
   `mock/` subdirs (`mock/readiness`, `mock/stderr.log`).
-- `sync-bench`: `.brokkr/ratatoskr/sync/<test>/run-N/iter-K/harness/` per
+- `sync <SCRIPT> --bench N`: `.brokkr/ratatoskr/sync/<test>/run-N/iter-K/harness/` per
   iteration; the best iteration's `summary.json` is ingested as KvPair rows.
 
 Per-run cleanup is the runtime's job: `ArtefactDir::finalize_success`

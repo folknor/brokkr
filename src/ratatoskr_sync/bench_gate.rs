@@ -1,6 +1,6 @@
-/// Drive `brokkr sync-bench` end-to-end:
+/// Drive the measured `brokkr sync <SCRIPT> --bench N` end-to-end:
 ///
-/// 1. Validate config (same as sync-smoke).
+/// 1. Validate config (same as the unmeasured run shape).
 /// 2. Resolve script + fixture from frontmatter.
 /// 3. Bootstrap [`crate::config::ResolvedPaths`] + acquire the bench
 ///    lockfile via [`BenchHarness::new`]; build the harness binary.
@@ -27,14 +27,14 @@
 pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
         DevError::Config(
-            "sync-bench: no [ratatoskr] section in brokkr.toml. \
+            "sync: no [ratatoskr] section in brokkr.toml. \
              Required to locate sæhrimnir and the harness binary."
                 .into(),
         )
     })?;
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
-            "sync-bench: no [ratatoskr.harness] section in brokkr.toml. \
+            "sync: no [ratatoskr.harness] section in brokkr.toml. \
              Declare it with `package = \"<crate>\"` (and optional \
              `binary`, `features`, `debug`)."
                 .into(),
@@ -44,12 +44,12 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let fixtures_dir = require_path(&cfg.fixtures_dir, req.project_root, "fixtures_dir")?;
     if !mock_binary.exists() {
         return Err(DevError::Config(format!(
-            "sync-bench: sæhrimnir binary not found at {}. Build it first.",
+            "sync: sæhrimnir binary not found at {}. Build it first.",
             mock_binary.display()
         )));
     }
     if req.bench == 0 {
-        return Err(DevError::Config("sync-bench: --bench must be >= 1".into()));
+        return Err(DevError::Config("sync: --bench must be >= 1".into()));
     }
 
     // Validate `--gate <name>` references a configured gate before
@@ -57,12 +57,12 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     if let Some(name) = req.gate {
         let gate = cfg.gate.get(name).ok_or_else(|| {
             DevError::Config(format!(
-                "sync-bench: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
+                "sync: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
             ))
         })?;
         if gate.metrics.is_empty() && !req.as_baseline {
             return Err(DevError::Config(format!(
-                "sync-bench: gate `{name}` has no [ratatoskr.gate.{name}.metrics.*] rules. \
+                "sync: gate `{name}` has no [ratatoskr.gate.{name}.metrics.*] rules. \
                  An empty rule set silently passes - add at least one rule, or use \
                  --as-baseline if you only want to record."
             )));
@@ -70,26 +70,26 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     }
 
     let script_abs = Path::new(req.script).canonicalize().map_err(|e| {
-        DevError::Config(format!("sync-bench: canonicalize script: {e}"))
+        DevError::Config(format!("sync: canonicalize script: {e}"))
     })?;
     if !script_abs.is_file() {
         return Err(DevError::Config(format!(
-            "sync-bench: script not found or not a file: {}",
+            "sync: script not found or not a file: {}",
             req.script
         )));
     }
     let test_id = script_abs
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| DevError::Config(format!("sync-bench: script has no stem: {}", req.script)))?
+        .ok_or_else(|| DevError::Config(format!("sync: script has no stem: {}", req.script)))?
         .to_owned();
 
     let parsed = discover::parse_script(&script_abs, &test_id).map_err(|e| {
-        DevError::Config(format!("sync-bench: parse script: {e}"))
+        DevError::Config(format!("sync: parse script: {e}"))
     })?;
     let fixture_name = parsed.fixture.as_ref().ok_or_else(|| {
         DevError::Config(format!(
-            "sync-bench: script {test_id} has no `-- fixture: <NAME>` frontmatter line."
+            "sync: script {test_id} has no `-- fixture: <NAME>` frontmatter line."
         ))
     })?;
     let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
@@ -115,7 +115,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         code_root,
         db_root,
         Project::Ratatoskr,
-        "sync-bench",
+        "sync",
         req.force,
         None,
     )?
@@ -129,7 +129,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
-        // isolate_pg=false: sync-bench has no outer SigtermGuard
+        // isolate_pg=false: the sync bench has no outer SigtermGuard
         // (BenchHarness's sidecar installs its own per-iteration, but
         // it doesn't cover the build phase). PG-isolating cargo here
         // would orphan it on terminal Ctrl-C; --hard accepts the
@@ -364,7 +364,7 @@ fn bench_loop(
 
     bench_outcome?;
 
-    let best = best.ok_or_else(|| DevError::Config("sync-bench: no successful iterations".into()))?;
+    let best = best.ok_or_else(|| DevError::Config("sync: no successful iterations".into()))?;
     let elapsed_ms = best.elapsed_ms();
 
     let mut kv = summary_to_kv(&best.summary);
@@ -391,7 +391,12 @@ fn bench_loop(
     };
 
     let bench_config = BenchConfig {
-        command: "sync-bench".into(),
+        // Rows file under the command name, and the command is now
+        // `sync` - the measurement mode is what `bench` describes, and
+        // it already has its own column. Migration v17->v18 rewrites
+        // historical `sync-bench` rows so old and new runs still pair
+        // under `brokkr results --compare`.
+        command: "sync".into(),
         mode: None,
         input_file: Some(fixture_name.to_owned()),
         input_mb: None,
@@ -452,7 +457,7 @@ struct GateHookCtx<'a> {
 /// Record the gated run into `gate.db`, then either: print the
 /// `--as-baseline` paste-line and return, or look up the configured
 /// per-hostname baseline and evaluate every metric rule. Returns
-/// `DevError::Config` on any rule failure so sync-bench exits non-zero.
+/// `DevError::Config` on any rule failure so the run exits non-zero.
 fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     let gate = ctx
         .cfg
@@ -800,14 +805,14 @@ fn read_summary_json(harness_dir: &Path) -> Result<serde_json::Map<String, serde
     let text = fs::read_to_string(&path).map_err(DevError::Io)?;
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
         DevError::Config(format!(
-            "sync-bench: parse {}: {e}",
+            "sync: parse {}: {e}",
             path.display()
         ))
     })?;
     match value {
         serde_json::Value::Object(map) => Ok(map),
         other => Err(DevError::Config(format!(
-            "sync-bench: {} root must be a JSON object, got {}",
+            "sync: {} root must be a JSON object, got {}",
             path.display(),
             value_kind(&other)
         ))),

@@ -1,19 +1,19 @@
-# Ratatoskr sync-bench gate
+# Ratatoskr sync bench gate
 
-Gated to `project = "ratatoskr"`. Layered on top of `sync-bench` (see
+Gated to `project = "ratatoskr"`. Layered on top of `sync --bench` (see
 `docs/commands/sync.md`) to catch performance and correctness regressions
 against a per-hostname pinned baseline. The gate compares scalar metrics
 from the current run to a baseline row recorded in
 `.brokkr/ratatoskr/gate.db` and exits non-zero on any threshold breach.
 
 For the `[ratatoskr]` config block see `docs/brokkr.toml.md`. For the
-underlying sync-bench mechanics (sæhrimnir spawn, FIFO markers, best-of-N
+underlying bench mechanics (sæhrimnir spawn, FIFO markers, best-of-N
 selection, summary.json ingestion) see `docs/commands/sync.md`.
 
 ## Storage: `.brokkr/ratatoskr/gate.db`
 
 Committed SQLite DB (same convention as `.brokkr/results.db`). One row per
-gated `sync-bench` run. Schema:
+gated `sync --bench` run. Schema:
 
 ```
 CREATE TABLE gate_runs (
@@ -39,7 +39,7 @@ Normalized metric tables can wait until there is a real query need.
 
 ## Write policy
 
-Every `--gate <name>` invocation of `sync-bench` writes a row, regardless
+Every `--gate <name>` invocation of `sync --bench` writes a row, regardless
 of whether `--as-baseline` was passed. Baselines are pure pointers in
 TOML; they don't change the write path. This gives local history for
 free and makes baseline promotion cheap (just paste a UUID).
@@ -105,7 +105,7 @@ scope for v1.
 
 ## Bisecting with `--commit`
 
-`sync-bench --gate <name> --commit <ref>` evaluates the gate against a
+`sync <SCRIPT> --bench N --gate <name> --commit <ref>` evaluates the gate against a
 harness built from a worktree at `<ref>`, so a breach can be walked back
 to the commit that introduced it. The script and fixture deliberately do
 not move with the build (see `docs/commands/sync.md`), which is what lets
@@ -190,9 +190,12 @@ silently treated as zero.
 
 ## CLI
 
-`brokkr sync-bench <SCRIPT> --gate <name> [--bench N] [--force] [--keep-artefacts] [--debug | --release]`
+`brokkr sync <SCRIPT> --bench [N] --gate <name> [--force] [--keep-artefacts] [--debug | --release]`
 
-Runs sync-bench as documented in `docs/commands/sync.md`, writes a row
+`--gate` requires `--bench` - every rule compares measured numbers, so
+there is nothing to evaluate on an unmeasured run.
+
+Runs the bench as documented in `docs/commands/sync.md`, writes a row
 to gate.db, then evaluates every rule under
 `[ratatoskr.gate.<name>.metrics.*]`. Reports each rule with `OK` /
 `FAIL` and a numeric line; exits non-zero if any rule fails.

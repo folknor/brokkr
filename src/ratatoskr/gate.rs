@@ -87,7 +87,7 @@ impl GateRun {
     }
 
     /// Build a `GateRun` directly from in-memory data, skipping the
-    /// JSON serialize+parse round-trip. Used by sync-bench for the
+    /// JSON serialize+parse round-trip. Used by the sync bench for the
     /// just-completed run.
     pub fn from_parts(
         elapsed_ms: i64,

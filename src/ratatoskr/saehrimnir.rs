@@ -162,7 +162,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
 // ---------------------------------------------------------------------------
 // MockServer: spawn sæhrimnir, wait for the readiness sentinel, hand
 // the caller back a handle that owns the child process and the parsed
-// endpoints. Used by both `sync-smoke` and `sync-bench` (and indirectly
+// endpoints. Used by both shapes of `sync` (and indirectly
 // by `mock-serve`, which has its own foreground signal-loop layered
 // on top).
 // ---------------------------------------------------------------------------
@@ -297,8 +297,8 @@ impl MockServer {
     }
 
     /// Wall-clock time from spawning sæhrimnir to parsing its readiness
-    /// sentinel. Surfaced in the per-phase summary printed by sync-smoke
-    /// / sync-bench so a slow cold-start is visible.
+    /// sentinel. Surfaced in the per-phase summary printed by `sync`
+    /// so a slow cold-start is visible.
     pub fn ready_elapsed(&self) -> Duration {
         self.ready_elapsed
     }
@@ -356,7 +356,7 @@ impl Drop for MockServer {
 
 /// Where the readiness sentinel lives for `mock-serve`, relative to the
 /// project root. Stable across runs so `brokkr clean` / manual
-/// inspection both have a known path. `sync-smoke` puts its sentinel
+/// inspection both have a known path. `sync` puts its sentinel
 /// inside the per-run artefact dir instead.
 const MOCK_DIR: &str = ".brokkr/ratatoskr/mock";
 
@@ -530,7 +530,7 @@ pub fn require_path(
 /// HTTP origins for the JSON-over-HTTP protocols, `host:port` for the
 /// stream protocols.
 ///
-/// Shared by sync-smoke / sync-bench (where it originated) and the
+/// Shared by `sync` (where it originated) and the
 /// fixture-aware service-test / service-suite paths.
 pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(String, String)> {
     let mut out = Vec::new();

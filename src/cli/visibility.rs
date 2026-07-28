@@ -144,9 +144,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
         Visibility::Only(&[Project::Pbfhogg, Project::Elivagar, Project::Nidhogg]),
     ),
     ("svg", Visibility::Only(&[Project::Elivagar])),
-    ("sync-bench", Visibility::Only(&[Project::Ratatoskr])),
-    ("sync-list", Visibility::Only(&[Project::Ratatoskr])),
-    ("sync-smoke", Visibility::Only(&[Project::Ratatoskr])),
+    ("sync", Visibility::Only(&[Project::Ratatoskr])),
     ("tags-filter", Visibility::Only(&[Project::Pbfhogg])),
     // Refused in litehtml and sluggrs at `bootstrap.rs`'s dispatch; available
     // everywhere else, including unrecognised `Other(_)` trees.

@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 17;
+pub(super) const SCHEMA_VERSION: i64 = 18;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -67,6 +67,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 17 {
         migrate_v16_to_v17(conn)?;
+    }
+    if current < 18 {
+        migrate_v17_to_v18(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -708,6 +711,45 @@ fn migrate_v16_to_v17(conn: &rusqlite::Connection) -> Result<(), DevError> {
     if !has_column(conn, "runs", "elapsed_us") {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN elapsed_us INTEGER")?;
     }
+    Ok(())
+}
+
+/// Migration v17 -> v18: fold `sync-bench` into `sync` after the
+/// ratatoskr sync CLI consolidated to one command.
+///
+/// Same shape as v14->v15 (a CLI rename reaching back into recorded
+/// rows), but it has to rewrite *two* columns. `--compare` pairs rows on
+/// `(command, mode, input_file, brokkr_args, env_fingerprint)`, and
+/// `brokkr_args` stores the whole argv - so a row invoked as `brokkr
+/// sync-bench x.lua --bench 5` would never pair with the identical run
+/// invoked as `brokkr sync x.lua --bench 5`, even after the `command`
+/// column alone was fixed. Both get rewritten, or the rename silently
+/// orphans every existing baseline comparison.
+///
+/// No project filter is needed: `sync-bench` was only ever written by
+/// ratatoskr, so the command value is unambiguous on its own. `gate.db`
+/// is untouched - `GateRow` has no command column, so pinned baselines
+/// never referred to the old name.
+fn migrate_v17_to_v18(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    // Rewrite brokkr_args first, while `command` still identifies the
+    // rows. The token is bounded by spaces on both sides (the program
+    // path precedes it, the mandatory script argument follows), so a
+    // whole-string replace cannot reach a substring of some other
+    // argument.
+    conn.execute(
+        "UPDATE runs \
+         SET brokkr_args = replace(brokkr_args, ' sync-bench ', ' sync ') \
+         WHERE command = 'sync-bench' \
+           AND brokkr_args IS NOT NULL \
+           AND instr(brokkr_args, ' sync-bench ') > 0",
+        [],
+    )?;
+
+    conn.execute(
+        "UPDATE runs SET command = 'sync' WHERE command = 'sync-bench'",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -1866,6 +1908,108 @@ mod tests {
             "inspect", "diff", "sort", "getid", "inspect",
         ];
         assert_eq!(commands, expected);
+
+        drop(db);
+        cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v17 → v18 folds sync-bench into sync
+    // -----------------------------------------------------------------------
+
+    /// Both halves of the pairing key have to move together. Rewriting
+    /// only `command` would leave `brokkr_args` saying `sync-bench`, and
+    /// `--compare` keys on both - so a migrated row would still refuse to
+    /// pair with the identical run recorded under the new name, which is
+    /// the entire reason the migration exists.
+    #[test]
+    fn migrate_v17_to_v18_folds_sync_bench_into_sync() {
+        let (dir, db_path) = test_db("migrate_v17_v18");
+
+        const INSERT: &str = "\
+            INSERT INTO runs (timestamp, hostname, [commit], subject, command, variant,
+                input_file, input_mb, elapsed_ms, uuid, project, brokkr_args)
+            VALUES ('2026-07-01 00:00:00', 'plantasjen', 'aabb', 'test', ?1, 'bench',
+                'jmap-small', 1.0, 1234, ?2, ?3, ?4)";
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V3_SCHEMA).unwrap();
+            conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")
+                .unwrap();
+            conn.pragma_update(None, "user_version", 17).unwrap();
+
+            conn.execute(
+                INSERT,
+                rusqlite::params![
+                    "sync-bench",
+                    "u1",
+                    "ratatoskr",
+                    "/home/folk/.cargo/bin/brokkr sync-bench crates/app/tests/sync-harness/jmap.lua --bench 5"
+                ],
+            )
+            .unwrap();
+            // A row whose brokkr_args was never captured (pre-v13 rows
+            // leave it NULL) must survive the command rewrite anyway.
+            conn.execute(
+                INSERT,
+                rusqlite::params!["sync-bench", "u2", "ratatoskr", rusqlite::types::Null],
+            )
+            .unwrap();
+            // A different project's row that merely mentions the old name
+            // in its argv must not be rewritten - the command column is
+            // what identifies a sync row.
+            conn.execute(
+                INSERT,
+                rusqlite::params![
+                    "tilegen",
+                    "u3",
+                    "elivagar",
+                    "/home/folk/.cargo/bin/brokkr tilegen --note sync-bench"
+                ],
+            )
+            .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v17 to v18");
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let row = |uuid: &str| -> (String, Option<String>) {
+            db.conn
+                .query_row(
+                    "SELECT command, brokkr_args FROM runs WHERE uuid = ?1",
+                    [uuid],
+                    |r| Ok((r.get(0).unwrap(), r.get(1).unwrap())),
+                )
+                .unwrap()
+        };
+
+        let (cmd, args) = row("u1");
+        assert_eq!(cmd, "sync");
+        assert_eq!(
+            args.as_deref(),
+            Some(
+                "/home/folk/.cargo/bin/brokkr sync crates/app/tests/sync-harness/jmap.lua --bench 5"
+            ),
+            "brokkr_args is half the --compare pairing key and must move with the command"
+        );
+
+        let (cmd, args) = row("u2");
+        assert_eq!(cmd, "sync");
+        assert_eq!(args, None);
+
+        let (cmd, args) = row("u3");
+        assert_eq!(cmd, "tilegen");
+        assert_eq!(
+            args.as_deref(),
+            Some("/home/folk/.cargo/bin/brokkr tilegen --note sync-bench"),
+            "a non-sync row must keep its argv verbatim"
+        );
 
         drop(db);
         cleanup(&dir, &db_path);

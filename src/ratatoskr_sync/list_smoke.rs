@@ -1,10 +1,11 @@
-// Plan-3 sync orchestration: `sync-list` and `sync-smoke`.
+// Plan-3 sync orchestration: the index and run shapes of `brokkr sync`
+// (bare and `<SCRIPT>`). The measured shape lives in `bench_gate.rs`.
 //
-// `sync-list` is pure brokkr - walk the configured sync-script
+// The index shape is pure brokkr - walk the configured sync-script
 // directory, parse frontmatter, print a sorted table. No ratatoskr or
 // sæhrimnir runtime dependency.
 //
-// `sync-smoke` builds the harness binary per `[ratatoskr.harness]`,
+// The run shape builds the harness binary per `[ratatoskr.harness]`,
 // spawns sæhrimnir against the script's declared fixture, parses the
 // per-protocol ports out of the readiness sentinel, then spawns
 // `<harness binary> --test-harness <SCRIPT>` with the
@@ -46,10 +47,10 @@ const DEFAULT_SYNC_SCRIPT_DIR: &str = "crates/app/tests/sync-harness";
 const SYNC_ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/sync";
 
 // ---------------------------------------------------------------------------
-// sync-list
+// sync (no SCRIPT) - the index
 // ---------------------------------------------------------------------------
 
-/// `brokkr sync-list` - discover sync-test scripts under the configured
+/// Bare `brokkr sync` - discover sync-test scripts under the configured
 /// directory and print a sorted table. Empty-state message names the
 /// expected directory so a fresh checkout (no harness scripts yet) gets
 /// a useful response.
@@ -105,10 +106,10 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 }
 
 // ---------------------------------------------------------------------------
-// sync-smoke
+// sync <SCRIPT> - run one
 // ---------------------------------------------------------------------------
 
-/// CLI inputs for `brokkr sync-smoke`. Pulled out so the orchestration
+/// CLI inputs for `brokkr sync <SCRIPT>`. Pulled out so the orchestration
 /// body can be smoke-tested with synthetic paths if needed.
 pub struct SyncSmokeRequest<'a> {
     pub project_root: &'a Path,
@@ -118,7 +119,7 @@ pub struct SyncSmokeRequest<'a> {
     pub profile_override: Option<bool>,
 }
 
-/// Drive `brokkr sync-smoke` end-to-end:
+/// Drive the unmeasured `brokkr sync <SCRIPT>` end-to-end:
 ///
 /// 1. Validate config: `[ratatoskr.harness]`, `mock_server_binary`, and
 ///    `fixtures_dir` are all required. Endpoint env-var names are
@@ -146,14 +147,14 @@ pub struct SyncSmokeRequest<'a> {
 pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
         DevError::Config(
-            "sync-smoke: no [ratatoskr] section in brokkr.toml. \
+            "sync: no [ratatoskr] section in brokkr.toml. \
              Required to locate sæhrimnir and the harness binary."
                 .into(),
         )
     })?;
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
-            "sync-smoke: no [ratatoskr.harness] section in brokkr.toml. \
+            "sync: no [ratatoskr.harness] section in brokkr.toml. \
              Declare it with `package = \"<crate>\"` (and optional \
              `binary`, `features`, `debug`)."
                 .into(),
@@ -163,7 +164,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let fixtures_dir = require_path(&cfg.fixtures_dir, req.project_root, "fixtures_dir")?;
     if !mock_binary.exists() {
         return Err(DevError::Config(format!(
-            "sync-smoke: sæhrimnir binary not found at {}. Build it first.",
+            "sync: sæhrimnir binary not found at {}. Build it first.",
             mock_binary.display()
         )));
     }
@@ -171,27 +172,27 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let script_path = Path::new(req.script);
     if !script_path.is_file() {
         return Err(DevError::Config(format!(
-            "sync-smoke: script not found or not a file: {}",
+            "sync: script not found or not a file: {}",
             req.script
         )));
     }
     let script_abs = script_path.canonicalize().map_err(|e| {
-        DevError::Config(format!("sync-smoke: canonicalize script: {e}"))
+        DevError::Config(format!("sync: canonicalize script: {e}"))
     })?;
     let test_id = script_abs
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| {
-            DevError::Config(format!("sync-smoke: script has no stem: {}", req.script))
+            DevError::Config(format!("sync: script has no stem: {}", req.script))
         })?
         .to_owned();
 
     let parsed = discover::parse_script(&script_abs, &test_id).map_err(|e| {
-        DevError::Config(format!("sync-smoke: parse script: {e}"))
+        DevError::Config(format!("sync: parse script: {e}"))
     })?;
     let fixture_name = parsed.fixture.as_ref().ok_or_else(|| {
         DevError::Config(format!(
-            "sync-smoke: script {test_id} has no `-- fixture: <NAME>` frontmatter line. \
+            "sync: script {test_id} has no `-- fixture: <NAME>` frontmatter line. \
              Required so brokkr knows which sæhrimnir fixture to load."
         ))
     })?;
@@ -200,7 +201,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let project_root_str = req.project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "ratatoskr",
-        command: "sync-smoke",
+        command: "sync",
         project_root: &project_root_str,
     })?;
     // Cooperative SIGTERM for `brokkr kill`. Installed right after the
@@ -267,7 +268,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     }
 }
 
-/// Per-phase wall-clock timings for sync-smoke. Each field is `None`
+/// Per-phase wall-clock timings for an unmeasured `sync` run. Each field is `None`
 /// until the phase completes, so a spawn-side failure still produces a
 /// faithful summary (e.g. `FAIL in 0.4s (mock 0.4s)` if sæhrimnir died
 /// during readiness).
@@ -336,7 +337,7 @@ fn orchestrate(
         mock_dir,
         Some(&|pid| lock.add_mock_pid(pid)),
         Some(&|pid| lock.remove_mock_pid(pid)),
-        true, // isolate_pg: sync-smoke's outer SigtermGuard covers this
+        true, // isolate_pg: this path's outer SigtermGuard covers it
     )?;
     // Don't seed `child_pid` with the mock's PID - the captured runner's
     // `on_spawn` callback will publish the harness PID seconds from now,
@@ -358,7 +359,7 @@ fn orchestrate(
         env_pairs.push((name.as_str(), value.as_str()));
     }
 
-    // No ceiling for v0 - sync-smoke is the smoke shape, not the bench
+    // No ceiling for v0 - this is the smoke shape, not the bench
     // shape. Use the script's frontmatter ceiling if set, else a
     // generous default so a hung script doesn't wedge the lockfile
     // forever.
@@ -384,7 +385,7 @@ fn orchestrate(
 
     // Whatever the harness did, sæhrimnir gets torn down next.
     let mock_outcome = mock.shutdown();
-    // sync-smoke has at most one mock alive at a time; clear all is the
+    // this path has at most one mock alive at a time; clear all is the
     // honest call after that single mock drains.
     lock.clear_mock_pids();
     lock.clear_child_pid();
@@ -418,7 +419,7 @@ fn parsed_ceiling(script: &Path) -> Result<Duration, DevError> {
         .and_then(|s| s.to_str())
         .unwrap_or("sync-script");
     let info = discover::parse_script(script, stem)
-        .map_err(|e| DevError::Config(format!("sync-smoke: re-parse ceiling: {e}")))?;
+        .map_err(|e| DevError::Config(format!("sync: re-parse ceiling: {e}")))?;
     Ok(info.ceiling)
 }
 
@@ -471,10 +472,10 @@ fn write_run_toml(
 }
 
 // ---------------------------------------------------------------------------
-// sync-bench
+// sync <SCRIPT> --bench N - measure one
 // ---------------------------------------------------------------------------
 
-/// CLI inputs for `brokkr sync-bench`.
+/// CLI inputs for `brokkr sync <SCRIPT> --bench N`.
 pub struct SyncBenchRequest<'a> {
     pub project_root: &'a Path,
     /// The code tree to build and read git state from, when it differs from

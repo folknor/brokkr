@@ -1,8 +1,8 @@
-//! Gate database for ratatoskr `sync-bench` regression gating.
+//! Gate database for ratatoskr `sync --bench` regression gating.
 //!
 //! Per-project SQLite DB at `.brokkr/ratatoskr/gate.db` (committed,
 //! same convention as `.brokkr/results.db`). One row per gated
-//! `sync-bench` run. Baselines are pure pointers in `brokkr.toml`
+//! `sync --bench` run. Baselines are pure pointers in `brokkr.toml`
 //! (`[ratatoskr.gate.<name>.baseline].<hostname>`); they don't change
 //! the write path.
 //!

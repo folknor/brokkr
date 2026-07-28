@@ -1462,7 +1462,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             project::require(project, Project::Ratatoskr, "service-list")?;
             ratatoskr::cmd::service_list(&project_root)
         }
-        Command::SyncBench {
+        Command::Sync {
             script,
             bench,
             force,
@@ -1473,7 +1473,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
             as_baseline,
             commit,
         } => {
-            project::require(project, Project::Ratatoskr, "sync-bench")?;
+            project::require(project, Project::Ratatoskr, "sync")?;
+            // Three modes off one shape: no script lists, a script runs,
+            // a script plus --bench measures. clap's `requires` already
+            // rejects every flag combination that would make the
+            // script-less form ambiguous.
+            let Some(script) = script else {
+                return ratatoskr::sync::run_sync_list(&project_root, &dev_config);
+            };
+            let Some(bench) = bench else {
+                return ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
+                    project_root: &project_root,
+                    dev_config: &dev_config,
+                    script: &script,
+                    keep_artefacts,
+                    profile_override: profile_override(debug, release),
+                });
+            };
             let cwd = std::env::current_dir()
                 .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
             let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
@@ -1499,25 +1515,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     })
                 },
             )
-        }
-        Command::SyncList => {
-            project::require(project, Project::Ratatoskr, "sync-list")?;
-            ratatoskr::sync::run_sync_list(&project_root, &dev_config)
-        }
-        Command::SyncSmoke {
-            script,
-            keep_artefacts,
-            debug,
-            release,
-        } => {
-            project::require(project, Project::Ratatoskr, "sync-smoke")?;
-            ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
-                project_root: &project_root,
-                dev_config: &dev_config,
-                script: &script,
-                keep_artefacts,
-                profile_override: profile_override(debug, release),
-            })
         }
         Command::MockServe { fixture } => {
             project::require(project, Project::Ratatoskr, "mock-serve")?;

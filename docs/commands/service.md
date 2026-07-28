@@ -90,7 +90,7 @@ spawns sæhrimnir via `[ratatoskr] mock_server_binary` with
 five-line readiness sentinel for per-protocol ports, then injects the
 configured `RATATOSKR_TEST_*_ENDPOINT` env vars into the harness
 process (HTTP origins for jmap/graph/gmail, `host:port` for imap/smtp -
-same shape as `sync-smoke` / `sync-bench`). After every dependent run,
+same shape as `sync` / `sync --bench`). After every dependent run,
 sæhrimnir is SIGTERM'd with the standard 1.5s drain budget then
 escalated to SIGKILL if it overruns.
 

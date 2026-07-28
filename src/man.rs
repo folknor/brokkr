@@ -130,13 +130,13 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "sync",
-        summary: "mock-serve, sync-list, sync-smoke, sync-bench",
+        summary: "sync (list/run/bench) and mock-serve",
         content: include_str!("../docs/commands/sync.md"),
         visibility: Visibility::Only(&[Project::Ratatoskr]),
     },
     Topic {
         name: "gate",
-        summary: "--gate/--as-baseline, baseline pinning, sync-bench thresholds",
+        summary: "--gate/--as-baseline, baseline pinning, bench thresholds",
         content: include_str!("../docs/commands/ratatoskr-gate.md"),
         visibility: Visibility::Only(&[Project::Ratatoskr]),
     },
