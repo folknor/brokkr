@@ -99,9 +99,9 @@ pub struct ScriptInfo {
     /// extension. Top-level scripts: just the file stem (e.g.
     /// `ping_and_shutdown`). Nested: `t1/journal_replays_after_respawn`.
     pub name: String,
-    /// Used by `service-test` to resolve a script by name; `service-list`
-    /// itself only consumes `name` / `description` / `expected`.
-    #[allow(dead_code)]
+    /// Used by `service-test` to resolve a script by name and by
+    /// `sync --all` to invoke each cohort member; the index listings
+    /// only consume `name` / `description` / `expected`.
     pub path: PathBuf,
     pub description: Option<String>,
     pub expected: Expected,

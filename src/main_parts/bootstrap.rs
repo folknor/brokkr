@@ -1464,6 +1464,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::Sync {
             script,
+            all,
+            filter,
+            include_ignored,
             bench,
             force,
             keep_artefacts,
@@ -1474,18 +1477,48 @@ fn run(cli: Cli) -> Result<(), DevError> {
             commit,
         } => {
             project::require(project, Project::Ratatoskr, "sync")?;
-            // Three modes off one shape: no script lists, a script runs,
-            // a script plus --bench measures. clap's `requires` already
-            // rejects every flag combination that would make the
-            // script-less form ambiguous.
-            let Some(script) = script else {
+            let cohort_gate = gate.as_deref() == Some(ratatoskr::sync::GATE_ALL);
+
+            // Refuse before anything is built: a cohort rebase re-anchors
+            // every baseline-relative rule at once, and a gated sweep
+            // supplies its own scripts.
+            ratatoskr::sync::validate_gate_selection(
+                gate.as_deref(),
+                script.is_some(),
+                as_baseline,
+            )?;
+
+            // Modes off one shape: --all runs the discovered cohort,
+            // --gate all runs the configured gate cohort, no script
+            // lists, a script runs, a script plus --bench measures.
+            if all {
+                return ratatoskr::sync::run_sync_all(&ratatoskr::sync::SyncAllRequest {
+                    project_root: &project_root,
+                    dev_config: &dev_config,
+                    filter: filter.as_deref(),
+                    include_ignored,
+                    keep_artefacts,
+                    profile_override: profile_override(debug, release),
+                });
+            }
+            if script.is_none() && !cohort_gate {
+                if bench.is_some() {
+                    return Err(DevError::Config(
+                        "sync: --bench needs a SCRIPT to measure (or --gate all to \
+                         sweep every configured gate)"
+                            .into(),
+                    ));
+                }
                 return ratatoskr::sync::run_sync_list(&project_root, &dev_config);
-            };
+            }
+            // `--gate all` implies `--bench` (clap `requires`), so a
+            // missing bench here means the plain script-run shape.
             let Some(bench) = bench else {
+                let script = script.as_deref().unwrap_or_default();
                 return ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
                     project_root: &project_root,
                     dev_config: &dev_config,
-                    script: &script,
+                    script,
                     keep_artefacts,
                     profile_override: profile_override(debug, release),
                 });
@@ -1500,11 +1533,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 false,
                 dev_config.disable_toolchain,
                 |build_root| {
-                    ratatoskr::sync::run_sync_bench(&ratatoskr::sync::SyncBenchRequest {
+                    let req = ratatoskr::sync::SyncBenchRequest {
                         project_root: &project_root,
                         build_root,
                         dev_config: &dev_config,
-                        script: &script,
+                        // Empty for the cohort: `run_gate_cohort`
+                        // substitutes each gate's configured script.
+                        script: script.as_deref().unwrap_or_default(),
                         bench,
                         force,
                         keep_artefacts,
@@ -1512,7 +1547,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
                         brokkr_args: brokkr_args.clone(),
                         gate: gate.as_deref(),
                         as_baseline,
-                    })
+                    };
+                    if cohort_gate {
+                        ratatoskr::sync::run_gate_cohort(&req)
+                    } else {
+                        ratatoskr::sync::run_sync_bench(&req)
+                    }
                 },
             )
         }

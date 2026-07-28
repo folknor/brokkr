@@ -106,6 +106,101 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 }
 
 // ---------------------------------------------------------------------------
+// sync --all - run the whole discovered cohort
+// ---------------------------------------------------------------------------
+
+/// `brokkr sync --all [--filter SUB]` - run every discovered sync script
+/// unmeasured, in discovery order.
+///
+/// The sync-side answer to `service-suite`, and the reason a directory
+/// argument can now mean the same thing in both families. Scripts marked
+/// `expected = ignored` in frontmatter are skipped unless
+/// `include_ignored` is set - they reproduce known-broken behaviour and
+/// would block an otherwise clean sweep.
+///
+/// Default is keep-going: a cohort exists to tell you what is broken, so
+/// it reports every failure and exits non-zero if any script failed.
+/// That is the opposite of `service-suite`'s stop-on-first-failure
+/// default, and deliberately so - each sync script owns its own artefact
+/// dir, so a later failure never overwrites an earlier one's triage
+/// material.
+pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
+    let dir = sync_script_dir(req.project_root, req.dev_config.ratatoskr.as_ref());
+    let scripts = discover::discover_at(&dir)?;
+
+    if scripts.is_empty() {
+        return Err(DevError::Config(format!(
+            "sync --all: no sync-test scripts found under {}",
+            dir.display()
+        )));
+    }
+
+    let selected: Vec<&ScriptInfo> = scripts
+        .iter()
+        .filter(|s| {
+            req.filter
+                .is_none_or(|f| s.name.contains(f))
+        })
+        .filter(|s| req.include_ignored || s.expected.as_str() != "ignored")
+        .collect();
+
+    if selected.is_empty() {
+        return Err(DevError::Config(format!(
+            "sync --all: no scripts matched (filter: {}, {} discovered)",
+            req.filter.unwrap_or("none"),
+            scripts.len()
+        )));
+    }
+
+    output::ratatoskr_msg(&format!("sync cohort: {} script(s)", selected.len()));
+
+    let mut failures: Vec<(&str, String)> = Vec::new();
+    for script in &selected {
+        output::ratatoskr_msg(&format!("── {} ──", script.name));
+        let script_path = script.path.display().to_string();
+        let one = SyncSmokeRequest {
+            project_root: req.project_root,
+            dev_config: req.dev_config,
+            script: &script_path,
+            keep_artefacts: req.keep_artefacts,
+            profile_override: req.profile_override,
+        };
+        if let Err(e) = run_sync_smoke(&one) {
+            output::ratatoskr_msg(&format!("{}: FAIL - {e}", script.name));
+            failures.push((script.name.as_str(), e.to_string()));
+        }
+    }
+
+    let passed = selected.len() - failures.len();
+    output::ratatoskr_msg(&format!("sync cohort: {passed}/{} passed", selected.len()));
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let detail = failures
+        .iter()
+        .map(|(name, msg)| format!("  {name}: {msg}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(DevError::Config(format!(
+        "sync --all: {} of {} script(s) failed:\n{detail}",
+        failures.len(),
+        selected.len()
+    )))
+}
+
+/// CLI inputs for `brokkr sync --all`.
+pub struct SyncAllRequest<'a> {
+    pub project_root: &'a Path,
+    pub dev_config: &'a DevConfig,
+    /// Substring match against the script's discovered name.
+    pub filter: Option<&'a str>,
+    /// Include scripts whose frontmatter says `expected: ignored`.
+    pub include_ignored: bool,
+    pub keep_artefacts: bool,
+    pub profile_override: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
 // sync <SCRIPT> - run one
 // ---------------------------------------------------------------------------
 

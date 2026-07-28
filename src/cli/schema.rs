@@ -2114,15 +2114,32 @@ Examples:
         /// `-- fixture: <NAME>`). Omit to list the discovered scripts.
         script: Option<String>,
 
+        /// Run every discovered script instead of one, in discovery
+        /// order, reporting each. Keeps going past a failure and exits
+        /// non-zero if any failed. Mutually exclusive with SCRIPT.
+        #[arg(long, conflicts_with = "script")]
+        all: bool,
+
+        /// Substring filter against the script's discovered name, e.g.
+        /// `jmap` or `t1/`. Only meaningful with `--all`.
+        #[arg(long, value_name = "SUBSTRING", requires = "all")]
+        filter: Option<String>,
+
+        /// Include scripts whose frontmatter says `expected: ignored`.
+        /// They reproduce known-broken behaviour, so `--all` skips them
+        /// by default.
+        #[arg(long, requires = "all")]
+        include_ignored: bool,
+
         /// Measure instead of just running: N iterations, best-of-N on the
         /// `SYNC_START`/`SYNC_END` marker span, recorded in `results.db`.
-        /// Bare `--bench` means 3. Requires SCRIPT.
+        /// Bare `--bench` means 3. Needs a SCRIPT, or `--gate all`.
         #[arg(
             long,
             num_args = 0..=1,
             default_missing_value = "3",
             value_name = "COUNT",
-            requires = "script"
+            conflicts_with = "all"
         )]
         bench: Option<usize>,
 
@@ -2132,32 +2149,39 @@ Examples:
         force: bool,
 
         /// Preserve the artefact directory even on success
-        #[arg(long, requires = "script")]
+        #[arg(long)]
         keep_artefacts: bool,
 
         /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release for parity with what users will run.
         /// Overrides `[ratatoskr.harness] debug` from `brokkr.toml`.
-        #[arg(long, conflicts_with = "release", requires = "script")]
+        #[arg(long, conflicts_with = "release")]
         debug: bool,
 
         /// Force the release profile, overriding `[ratatoskr.harness] debug`
         /// from `brokkr.toml`. Mutually exclusive with `--debug`.
-        #[arg(long, requires = "script")]
+        #[arg(long)]
         release: bool,
 
         /// Run the named `[ratatoskr.gate.<name>]` gate after the bench
         /// completes. Records a row in `.brokkr/ratatoskr/gate.db`, looks
         /// up the per-hostname baseline, and exits non-zero if any metric
         /// rule fails. Requires `--bench` - every rule compares measured
-        /// numbers. See `docs/commands/ratatoskr-gate.md`.
-        #[arg(long, value_name = "NAME", requires = "bench")]
+        /// numbers.
+        ///
+        /// The reserved value `all` runs every configured gate in turn
+        /// (each supplies its own script, so pass no SCRIPT). The sweep
+        /// keeps going past a breach and reports all of them.
+        /// See `docs/commands/ratatoskr-gate.md`.
+        #[arg(long, value_name = "NAME|all", requires = "bench")]
         gate: Option<String>,
 
         /// Record this run as a baseline candidate for `--gate <name>`,
         /// suppress gate evaluation, and print the new UUID plus the TOML
         /// line to paste under `[ratatoskr.gate.<name>.baseline]`.
-        /// Requires `--gate`.
+        /// Requires `--gate`, and refused with `--gate all`: rebasing a
+        /// whole cohort at once re-anchors every baseline-relative rule
+        /// with no per-gate moment to notice a blessed regression.
         #[arg(long, requires = "gate")]
         as_baseline: bool,
 

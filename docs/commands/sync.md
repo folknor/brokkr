@@ -11,7 +11,9 @@ bare-is-an-index convention as `results`, `man` and `deps`:
 |---|---|
 | `brokkr sync` | list the discovered scripts |
 | `brokkr sync <SCRIPT>` | run one, PASS/FAIL |
+| `brokkr sync --all` | run every discovered script |
 | `brokkr sync <SCRIPT> --bench [N]` | measure one (default N=3) |
+| `brokkr sync --gate all --bench [N]` | sweep every configured gate |
 
 It replaced `sync-list` / `sync-smoke` / `sync-bench`, which were three
 spellings of one workflow. The old names are gone, not aliased. Rows
@@ -63,6 +65,27 @@ parse top-of-file frontmatter (`description`, `expected`, `fixture`,
 `protocol`, `ceiling`, `preserve_data_dir`), print a sorted table. Empty-state
 output names the expected directory and notes that the cohort may not have
 landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
+
+## `sync --all [--filter SUB] [--include-ignored]` - run the cohort
+
+Runs every discovered script unmeasured, in discovery order - the
+sync-side counterpart to `service-suite`, and the reason a cohort now
+means the same thing in both families. `--filter` is a substring match
+against the discovered name; scripts whose frontmatter says
+`expected: ignored` are skipped unless `--include-ignored` is passed.
+
+**Keep-going is the default here**, unlike `service-suite`, which stops
+on the first failure. The reason is that each sync script owns its own
+`run-N/` artefact dir, so a later failure can't overwrite an earlier
+one's triage material - there is nothing to protect by stopping, and a
+cohort is most useful when it reports the whole blast radius. Exits
+non-zero if any script failed, listing each.
+
+`--all` conflicts with SCRIPT and with `--bench`: measuring a cohort
+would interleave N iterations of one script with the sæhrimnir spawn of
+the next, and best-of-N across different scripts means nothing. For
+measurement across the cohort, use `--gate all`, which is scoped to the
+gates that have pinned baselines to compare against.
 
 ## `sync <SCRIPT> [--keep-artefacts] [--debug | --release]` - run one
 

@@ -1,3 +1,140 @@
+/// The reserved `--gate` value that means "every configured gate".
+pub const GATE_ALL: &str = "all";
+
+/// Reject the two `--gate all` combinations that have no coherent
+/// meaning, before anything is built.
+///
+/// Split out of the dispatch arm so the refusals can be tested directly:
+/// the `--as-baseline` bar is a safety property, not a convenience, and
+/// it sits behind `project::require` where an end-to-end check would
+/// need a ratatoskr checkout to reach.
+pub fn validate_gate_selection(
+    gate: Option<&str>,
+    has_script: bool,
+    as_baseline: bool,
+) -> Result<(), DevError> {
+    if gate != Some(GATE_ALL) {
+        return Ok(());
+    }
+    if as_baseline {
+        return Err(DevError::Config(
+            "sync: --as-baseline cannot be combined with --gate all. \
+             Rebasing a cohort in one command silently re-anchors every \
+             baseline-relative rule (max_delta = 0 and equal_to_baseline \
+             especially) onto whatever this tree measures, blessing any \
+             regression present. Repin one gate at a time, from a tree you \
+             have independently confirmed good."
+                .into(),
+        ));
+    }
+    if has_script {
+        return Err(DevError::Config(
+            "sync: --gate all takes no SCRIPT - each gate names its own \
+             script in brokkr.toml. Drop the argument, or gate a single \
+             script with --gate <name>."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Run every `[ratatoskr.gate.*]` in `brokkr.toml`, one after another.
+///
+/// Each gate names its own script, so the cohort takes no SCRIPT
+/// argument - the config supplies them. Gates run in name order for a
+/// stable report, and a breach does **not** stop the sweep: after a
+/// refactor the useful answer is the whole blast radius, not the first
+/// provider that happened to trip. Every failure is collected and
+/// re-reported at the end, and the command exits non-zero if any gate
+/// failed.
+///
+/// `--as-baseline` is refused upstream in `bootstrap.rs`, not here, so
+/// the refusal happens before anything is built. Re-recording a whole
+/// cohort in one command would silently re-anchor every
+/// baseline-relative rule at once - on ratatoskr's own config that is 14
+/// zero-drift rules across the entire provider surface, with no per-gate
+/// moment to notice a regression being blessed.
+pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
+    let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
+        DevError::Config(
+            "sync: no [ratatoskr] section in brokkr.toml. \
+             Required to locate sæhrimnir and the harness binary."
+                .into(),
+        )
+    })?;
+
+    if cfg.gate.is_empty() {
+        return Err(DevError::Config(
+            "sync --gate all: no [ratatoskr.gate.*] entries in brokkr.toml".into(),
+        ));
+    }
+
+    // Resolve every script up front. A typo'd path in gate 14 should
+    // surface now, not twenty minutes into a sweep.
+    let mut plan: Vec<(&str, String)> = Vec::new();
+    for (name, gate) in &cfg.gate {
+        let script = if gate.script.is_absolute() {
+            gate.script.clone()
+        } else {
+            req.project_root.join(&gate.script)
+        };
+        if !script.is_file() {
+            return Err(DevError::Config(format!(
+                "sync --gate all: gate `{name}` names a script that does not exist: {}",
+                script.display()
+            )));
+        }
+        plan.push((name.as_str(), script.display().to_string()));
+    }
+
+    output::ratatoskr_msg(&format!(
+        "gate cohort: {} gate(s), {} iteration(s) each",
+        plan.len(),
+        req.bench
+    ));
+
+    let mut failures: Vec<(&str, String)> = Vec::new();
+    for (name, script) in &plan {
+        output::ratatoskr_msg(&format!("── gate `{name}` ──"));
+        let one = SyncBenchRequest {
+            project_root: req.project_root,
+            build_root: req.build_root,
+            dev_config: req.dev_config,
+            script,
+            bench: req.bench,
+            force: req.force,
+            keep_artefacts: req.keep_artefacts,
+            profile_override: req.profile_override,
+            brokkr_args: req.brokkr_args.clone(),
+            gate: Some(name),
+            as_baseline: false,
+        };
+        if let Err(e) = run_sync_bench(&one) {
+            output::ratatoskr_msg(&format!("gate `{name}`: FAIL - {e}"));
+            failures.push((name, e.to_string()));
+        }
+    }
+
+    let passed = plan.len() - failures.len();
+    output::ratatoskr_msg(&format!(
+        "gate cohort: {passed}/{} passed",
+        plan.len()
+    ));
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let detail = failures
+        .iter()
+        .map(|(name, msg)| format!("  {name}: {msg}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(DevError::Config(format!(
+        "sync --gate all: {} of {} gate(s) failed:\n{detail}",
+        failures.len(),
+        plan.len()
+    )))
+}
+
 /// Drive the measured `brokkr sync <SCRIPT> --bench N` end-to-end:
 ///
 /// 1. Validate config (same as the unmeasured run shape).
@@ -50,6 +187,16 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     }
     if req.bench == 0 {
         return Err(DevError::Config("sync: --bench must be >= 1".into()));
+    }
+
+    // `all` is the reserved sweep value, so a gate of that name could
+    // never be selected individually. Refuse rather than silently
+    // shadow it.
+    if cfg.gate.contains_key(GATE_ALL) {
+        return Err(DevError::Config(format!(
+            "sync: `[ratatoskr.gate.{GATE_ALL}]` collides with the reserved \
+             `--gate {GATE_ALL}` sweep value - rename that gate"
+        )));
     }
 
     // Validate `--gate <name>` references a configured gate before
@@ -888,6 +1035,34 @@ mod tests {
     use crate::config::HarnessConfig;
     use crate::ratatoskr::saehrimnir::Endpoints;
     use std::path::Path;
+
+    /// The load-bearing refusal: one command must not be able to rebase
+    /// every gate at once. On ratatoskr's own config that would
+    /// re-anchor 14 zero-drift rules in a single sweep.
+    #[test]
+    fn gate_all_refuses_as_baseline() {
+        let err = validate_gate_selection(Some(GATE_ALL), false, true)
+            .expect_err("--gate all + --as-baseline must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("--as-baseline"), "got: {msg}");
+        assert!(msg.contains("one gate at a time"), "got: {msg}");
+    }
+
+    #[test]
+    fn gate_all_refuses_a_script_argument() {
+        let err = validate_gate_selection(Some(GATE_ALL), true, false)
+            .expect_err("--gate all + SCRIPT must be refused");
+        assert!(err.to_string().contains("takes no SCRIPT"));
+    }
+
+    /// A single named gate keeps every combination it had before the
+    /// sweep existed - the refusals are scoped to the reserved value.
+    #[test]
+    fn single_gate_still_allows_as_baseline_with_a_script() {
+        validate_gate_selection(Some("jmap_steady_state_delta"), true, true).unwrap();
+        validate_gate_selection(None, true, false).unwrap();
+        validate_gate_selection(None, false, false).unwrap();
+    }
 
     fn cfg_with_endpoints() -> RatatoskrConfig {
         RatatoskrConfig {

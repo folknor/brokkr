@@ -200,9 +200,47 @@ to gate.db, then evaluates every rule under
 `[ratatoskr.gate.<name>.metrics.*]`. Reports each rule with `OK` /
 `FAIL` and a numeric line; exits non-zero if any rule fails.
 
-`--gate <name>` runs exactly one gate. Implicit discovery (`--gate all`,
-or fixture-based auto-match) is out of scope for v1 - multiple gates can
-reference the same script, and silent multi-gate execution is a foot-gun.
+## `--gate all` - the cohort sweep
+
+`--gate <name>` runs exactly one gate. The reserved value `all` runs
+every configured gate in name order, each supplying its own script from
+config - so the sweep takes no SCRIPT argument, and passing one is an
+error rather than a silently ignored contradiction.
+
+Every gate's script is resolved and existence-checked **before anything
+is built**, so a typo in the last gate surfaces immediately rather than
+twenty minutes into the sweep.
+
+A breach does not stop the sweep. After a refactor the useful answer is
+the whole blast radius, not the first provider that tripped, so every
+gate runs, each failure is collected, and the command exits non-zero
+with all of them listed. Fixture-based auto-match remains out of scope.
+
+This supersedes the v1 note that ruled `--gate all` out because "multiple
+gates can reference the same script". That hazard was about *implicit*
+selection - a script silently dragging in several gates. An explicit
+sweep names what it runs and reports each by gate name, so two gates
+sharing a script is legible rather than surprising.
+
+### `--as-baseline` is refused with `--gate all`
+
+Hard error, at parse time, before any build:
+
+> `--as-baseline` cannot be combined with `--gate all`.
+
+Repinning is a per-gate decision by design. A cohort rebase re-anchors
+every baseline-relative rule at once onto whatever the tree measures at
+that moment, with no per-gate pause to notice a regression being
+blessed. The rules that make this severe are exactly the ones a sweep
+would silence wholesale: on ratatoskr's own `brokkr.toml`, 14 of the 16
+gates carry `max_delta = 0` and/or `equal_to_baseline`. (The two that
+don't - `contacts_cadence` and `bifrost-consumer-hot-path` - express
+their invariants as literal `equal = <scalar>` rules, which are
+rebase-proof precisely because they aren't anchored to a baseline.)
+
+Record baselines one at a time, from a tree independently confirmed
+good. The single-gate `--as-baseline` path warns when it is repinning
+rather than recording a first baseline; see below.
 
 `--as-baseline` records the row as usual but suppresses gate evaluation,
 prints the new UUID, and prints the exact TOML line to paste:
@@ -238,7 +276,8 @@ that reason. A dirty row additionally prints a `tagged dirty` warning.
 
 ## Out of scope for v1
 
-- `--gate all` and fixture-based auto-discovery.
+- Fixture-based gate auto-discovery (`--gate all` has since landed; see
+  above).
 - `default = "<uuid>"` cross-host fallback in the baseline map.
 - Normalized metric tables / ad-hoc SQL querying.
 - JSON-diff correctness against arbitrary `summary.json` shapes - the
