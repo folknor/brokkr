@@ -22,6 +22,9 @@ struct FixtureOutcome {
     pixel_diff_pct: Option<f64>,
     element_match_pct: Option<f64>,
     status: compare::Status,
+    /// Worst-first geometry offenders from the element comparison; empty
+    /// when the comparison did not run or everything was in tolerance.
+    offenders: Vec<compare::Offender>,
 }
 
 struct TestContext<'a> {
@@ -113,6 +116,7 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
             pixel_diff_pct: None,
             element_match_pct: None,
             status: compare::Status::Error,
+            offenders: Vec::new(),
         });
     }
 
@@ -126,8 +130,6 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
     )?;
 
     let pipeline_png = fixture_dir.join("pipeline.png");
-    let pipeline_json = fixture_dir.join("pipeline.json");
-    let diff_png = fixture_dir.join("diff.png");
 
     if !pipeline_png.exists() {
         ctx.db.insert_result(
@@ -141,10 +143,27 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
             pixel_diff_pct: None,
             element_match_pct: None,
             status: compare::Status::Error,
+            offenders: Vec::new(),
         });
     }
 
-    // Compare pipeline output against Chrome reference.
+    score_fixture(ctx, fixture, &fixture_dir, &ref_png, &ref_json)
+}
+
+/// Compare pipeline output against the Chrome reference, persist the
+/// result row and the offenders file. Split from [`run_fixture`] so the
+/// capture/render orchestration and the scoring stay readable.
+fn score_fixture(
+    ctx: &TestContext,
+    fixture: &LitehtmlFixture,
+    fixture_dir: &Path,
+    ref_png: &Path,
+    ref_json: &Path,
+) -> Result<FixtureOutcome, DevError> {
+    let pipeline_png = fixture_dir.join("pipeline.png");
+    let pipeline_json = fixture_dir.join("pipeline.json");
+    let diff_png = fixture_dir.join("diff.png");
+
     let pixel_threshold = fixture.resolved_pixel_threshold(ctx.config);
     let element_threshold = if fixture.waive_element_threshold {
         None
@@ -152,21 +171,25 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
         Some(fixture.resolved_element_threshold(ctx.config))
     };
     let expected_fail = fixture.expected == "fail";
-    let approved_pixel = ctx.db.get_approval(&fixture.id)?.map(|a| a.pixel_diff_pct);
+    let approval = ctx.db.get_approval(&fixture.id)?;
+    let approved_pixel = approval.as_ref().map(|a| a.pixel_diff_pct);
+    let approved_element = approval.as_ref().and_then(|a| a.element_match_pct);
 
-    let pixel_result = compare::compare_pixels(&pipeline_png, &ref_png, &diff_png);
+    let pixel_result = compare::compare_pixels(&pipeline_png, ref_png, &diff_png);
     let element_result = if ref_json.exists() && pipeline_json.exists() {
-        Some(compare::compare_elements(&pipeline_json, &ref_json))
+        Some(compare::compare_elements(&pipeline_json, ref_json))
     } else {
         None
     };
 
-    let (pixel_diff_pct, element_match_pct, status) = match pixel_result {
+    let (elem_pct, offenders) = match element_result {
+        Some(Ok(em)) => (Some(em.match_pct), em.offenders),
+        _ => (None, Vec::new()),
+    };
+    write_offenders_file(fixture_dir, &offenders)?;
+
+    let (pixel_diff_pct, status) = match pixel_result {
         Ok(px) => {
-            let elem_pct = match element_result {
-                Some(Ok(ref em)) => Some(em.match_pct),
-                _ => None,
-            };
             let s = compare::determine_status(
                 px.diff_pct,
                 elem_pct,
@@ -174,11 +197,13 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
                 element_threshold,
                 expected_fail,
                 approved_pixel,
+                approved_element,
             );
-            (Some(px.diff_pct), elem_pct, s)
+            (Some(px.diff_pct), s)
         }
-        Err(_) => (None, None, compare::Status::Error),
+        Err(_) => (None, compare::Status::Error),
     };
+    let element_match_pct = if pixel_diff_pct.is_some() { elem_pct } else { None };
 
     ctx.db.insert_result(
         ctx.run_id,
@@ -192,7 +217,57 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
         pixel_diff_pct,
         element_match_pct,
         status,
+        offenders,
     })
+}
+
+/// Persist the full offender list next to diff.png so triage survives
+/// the run (the table prints only the top few). Removes a stale file
+/// when the current run has no offenders, so it can't lie.
+fn write_offenders_file(
+    fixture_dir: &Path,
+    offenders: &[compare::Offender],
+) -> Result<(), DevError> {
+    let path = fixture_dir.join("offenders.txt");
+    if offenders.is_empty() {
+        drop(std::fs::remove_file(&path));
+        return Ok(());
+    }
+
+    let mut body = String::from(
+        "# path-matched elements outside geometry tolerance, worst first\n\
+         # deltas are pipeline-minus-reference; x/y parent-relative where possible\n",
+    );
+    for o in offenders {
+        body.push_str(&format_offender(o));
+        body.push('\n');
+    }
+    std::fs::write(&path, body)?;
+    Ok(())
+}
+
+fn format_offender(o: &compare::Offender) -> String {
+    format!(
+        "dx {:+7.1}  dy {:+7.1}  dw {:+7.1}  dh {:+7.1}  {}",
+        o.dx, o.dy, o.dw, o.dh, o.path,
+    )
+}
+
+/// How many offenders the test table prints per fixture; the rest are in
+/// offenders.txt.
+const OFFENDER_PRINT_LIMIT: usize = 10;
+
+fn print_offenders(fixture_id: &str, offenders: &[compare::Offender]) {
+    for o in offenders.iter().take(OFFENDER_PRINT_LIMIT) {
+        output::litehtml_msg(&format!("      {}", format_offender(o)));
+    }
+
+    if offenders.len() > OFFENDER_PRINT_LIMIT {
+        output::litehtml_msg(&format!(
+            "      ... and {} more (fixtures/{fixture_id}/offenders.txt)",
+            offenders.len() - OFFENDER_PRINT_LIMIT,
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +407,16 @@ pub(crate) fn test(
             fixture.id, px, el, outcome.status,
         ));
 
+        // The single most useful debugging output for a bad element
+        // score: which elements, and how far off. Quiet on PASS - a
+        // within-tolerance run's stragglers are noise.
+        if matches!(
+            outcome.status,
+            compare::Status::FailThreshold | compare::Status::Regression
+        ) {
+            print_offenders(&fixture.id, &outcome.offenders);
+        }
+
         match outcome.status {
             compare::Status::Pass => counts[0] += 1,
             compare::Status::ExpectedFail => counts[2] += 1,
@@ -428,7 +513,11 @@ const absPath = path.resolve(htmlPath);
   });
   const page = await browser.newPage();
   await page.setViewport({ width: viewportWidth, height: 600 });
-  await page.goto('file://' + absPath, { waitUntil: 'networkidle0', timeout: 10000 });
+  // 30s: multi-MB data-URI emails get close to the old 10s budget.
+  await page.goto('file://' + absPath, { waitUntil: 'networkidle0', timeout: 30000 });
+  // networkidle0 does not cover data-URI @font-face decoding; without
+  // this the measurement pass can run against fallback-font geometry.
+  await page.evaluate(() => document.fonts.ready.then(() => true));
 
   const elements = await page.evaluate(() => {
     const results = [];
@@ -468,12 +557,25 @@ const absPath = path.resolve(htmlPath);
   fs.writeFileSync(jsonPath, JSON.stringify(elements));
   console.error(`Extracted ${elements.length} elements`);
 
+  // Sidecar so a silent Chrome update changing fractional line heights
+  // is attributable instead of looking like mysterious drift across
+  // every fixture at once. Separate file: neither JSON parser changes.
+  const meta = {
+    browser: await browser.version(),
+    puppeteer: require('puppeteer/package.json').version,
+    viewport: page.viewport(),
+    timestamp: new Date().toISOString(),
+  };
+  const metaPath = path.join(path.dirname(jsonPath), 'chrome.meta.json');
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
+
+  // fullPage captures the whole scrollable document; the viewport stays
+  // at its measurement-pass size so viewport-dependent layout cannot
+  // shift between the JSON dump and the screenshot.
   const bodyHeight = await page.evaluate(() => document.body.scrollHeight);
-  const height = Math.min(bodyHeight, 10000);
-  await page.setViewport({ width: viewportWidth, height });
   fs.mkdirSync(path.dirname(pngPath), { recursive: true });
   await page.screenshot({ path: pngPath, fullPage: true });
-  console.error(`Screenshot: ${height}px`);
+  console.error(`Screenshot: ${bodyHeight}px`);
 
   await browser.close();
 })();

@@ -16,8 +16,37 @@ pub(crate) struct PixelDiffResult {
 #[allow(dead_code)]
 pub(crate) struct ElementMatchResult {
     pub(crate) match_pct: f64,
+    /// Scored elements: reference elements surviving the head/`br`/
+    /// zero-height filters, whether or not the pipeline produced them.
     pub(crate) total_elements: usize,
-    pub(crate) matched_elements: usize,
+    /// Scored elements whose geometry was within tolerance.
+    pub(crate) passing_elements: usize,
+    /// Path-matched elements whose geometry fell outside tolerance,
+    /// sorted worst-first by largest absolute delta.
+    pub(crate) offenders: Vec<Offender>,
+}
+
+/// A path-matched element whose geometry fell outside tolerance. Deltas
+/// are pipeline-minus-reference, in the same frame the comparison used:
+/// parent-relative x/y when the parent resolved on both sides, absolute
+/// otherwise. A coordinate present on only one side reports an infinite
+/// delta.
+pub(crate) struct Offender {
+    pub(crate) path: String,
+    pub(crate) dx: f64,
+    pub(crate) dy: f64,
+    pub(crate) dw: f64,
+    pub(crate) dh: f64,
+}
+
+impl Offender {
+    pub(crate) fn max_delta(&self) -> f64 {
+        self.dx
+            .abs()
+            .max(self.dy.abs())
+            .max(self.dw.abs())
+            .max(self.dh.abs())
+    }
 }
 
 pub(crate) enum Status {
@@ -268,10 +297,13 @@ pub(crate) fn compare_pixels(
 const POS_TOLERANCE: f64 = 2.0;
 const SIZE_TOLERANCE: f64 = 5.0;
 
+/// Below Chrome's 0.1px dump quantum: "the reference says this element
+/// has no height at all".
+const ZERO_HEIGHT: f64 = 0.05;
+
 #[derive(serde::Deserialize)]
 struct LayoutElement {
     path: String,
-    #[allow(dead_code)]
     tag: Option<String>,
     x: Option<f64>,
     y: Option<f64>,
@@ -281,6 +313,23 @@ struct LayoutElement {
 
 fn is_head_path(path: &str) -> bool {
     path.contains("head[") || path == "html>head"
+}
+
+/// Chrome emits `br` boxes; the pipeline folds line breaks into
+/// rich-text leaves and never will emit them. Without this filter every
+/// `br` lands in the chrome-only bucket and drags the score down for a
+/// divergence that is pure convention. Matches on the dumped `tag` when
+/// present, falling back to the path's leaf segment.
+fn is_br(el: &LayoutElement) -> bool {
+    if el.tag.as_deref() == Some("br") {
+        return true;
+    }
+
+    let leaf = el
+        .path
+        .rsplit_once('>')
+        .map_or(el.path.as_str(), |(_, leaf)| leaf);
+    leaf == "br" || leaf.starts_with("br[")
 }
 
 pub(crate) fn compare_elements(
@@ -297,62 +346,142 @@ pub(crate) fn compare_elements(
     let reference_elems: Vec<LayoutElement> = serde_json::from_str(&reference_text)
         .map_err(|e| DevError::Verify(format!("invalid JSON {}: {e}", reference_json.display())))?;
 
+    Ok(compare_element_sets(&pipeline_elems, &reference_elems))
+}
+
+/// The comparison core, split from the file I/O so tests can feed
+/// synthetic element sets directly.
+fn compare_element_sets(
+    pipeline_elems: &[LayoutElement],
+    reference_elems: &[LayoutElement],
+) -> ElementMatchResult {
     let pipeline_by_path: HashMap<&str, &LayoutElement> = pipeline_elems
         .iter()
-        .filter(|e| !is_head_path(&e.path))
+        .filter(|e| !is_head_path(&e.path) && !is_br(e))
         .map(|e| (e.path.as_str(), e))
         .collect();
 
     let reference_by_path: HashMap<&str, &LayoutElement> = reference_elems
         .iter()
-        .filter(|e| !is_head_path(&e.path))
+        .filter(|e| !is_head_path(&e.path) && !is_br(e))
         .map(|e| (e.path.as_str(), e))
         .collect();
 
-    let mut matched = 0usize;
-    let mut exact = 0usize;
-    let mut chrome_only = 0usize;
+    let mut scored = 0usize;
+    let mut passing = 0usize;
+    let mut offenders: Vec<Offender> = Vec::new();
 
     for (path, ref_el) in &reference_by_path {
-        if let Some(pipe_el) = pipeline_by_path.get(path) {
-            matched += 1;
-            if geometry_matches(ref_el, pipe_el) {
-                exact += 1;
-            }
+        // Zero-height reference elements (empty tbody/tr) differ only in
+        // an invisible convention: Chrome reports container width at
+        // h=0, the pipeline reports 0x0. Skip them from scoring; they
+        // stay in the map so they can still anchor a child's frame.
+        if ref_el.h.is_some_and(|h| h.abs() < ZERO_HEIGHT) {
+            continue;
+        }
+        scored += 1;
+
+        // Chrome-only elements count against the denominator but cannot
+        // be offenders - there is no pipeline geometry to delta.
+        let Some(pipe_el) = pipeline_by_path.get(path) else {
+            continue;
+        };
+
+        let d = geometry_deltas(ref_el, pipe_el, &reference_by_path, &pipeline_by_path);
+        if d.within_tolerance() {
+            passing += 1;
         } else {
-            chrome_only += 1;
+            offenders.push(Offender {
+                path: (*path).to_owned(),
+                dx: d.dx,
+                dy: d.dy,
+                dw: d.dw,
+                dh: d.dh,
+            });
         }
     }
 
-    let denominator = matched + chrome_only;
-    let match_pct = if denominator == 0 {
+    offenders.sort_by(|a, b| b.max_delta().total_cmp(&a.max_delta()));
+
+    let match_pct = if scored == 0 {
         100.0
     } else {
         #[allow(clippy::cast_precision_loss)]
         {
-            (exact as f64 / denominator as f64) * 100.0
+            (passing as f64 / scored as f64) * 100.0
         }
     };
 
-    Ok(ElementMatchResult {
+    ElementMatchResult {
         match_pct,
-        total_elements: denominator,
-        matched_elements: exact,
-    })
+        total_elements: scored,
+        passing_elements: passing,
+        offenders,
+    }
 }
 
-fn geometry_matches(a: &LayoutElement, b: &LayoutElement) -> bool {
-    within_tol(a.x, b.x, POS_TOLERANCE)
-        && within_tol(a.y, b.y, POS_TOLERANCE)
-        && within_tol(a.w, b.w, SIZE_TOLERANCE)
-        && within_tol(a.h, b.h, SIZE_TOLERANCE)
+struct GeometryDeltas {
+    dx: f64,
+    dy: f64,
+    dw: f64,
+    dh: f64,
 }
 
-fn within_tol(a: Option<f64>, b: Option<f64>, tol: f64) -> bool {
-    match (a, b) {
-        (Some(va), Some(vb)) => (va - vb).abs() <= tol,
-        (None, None) => true,
-        _ => false,
+impl GeometryDeltas {
+    fn within_tolerance(&self) -> bool {
+        self.dx.abs() <= POS_TOLERANCE
+            && self.dy.abs() <= POS_TOLERANCE
+            && self.dw.abs() <= SIZE_TOLERANCE
+            && self.dh.abs() <= SIZE_TOLERANCE
+    }
+}
+
+/// Position deltas are parent-relative when the parent resolves on BOTH
+/// sides: cumulative document drift (integer-vs-fractional line-height
+/// rounding accumulates ~6px per 10,000px email) cancels out, and the
+/// 2px tolerance means "this element sits wrong inside its parent", not
+/// "everything below the drift point is wrong". Roots and elements whose
+/// parent is missing from either map fall back to absolute coordinates.
+/// Sizes are frame-independent and always compared absolutely.
+fn geometry_deltas(
+    ref_el: &LayoutElement,
+    pipe_el: &LayoutElement,
+    reference_by_path: &HashMap<&str, &LayoutElement>,
+    pipeline_by_path: &HashMap<&str, &LayoutElement>,
+) -> GeometryDeltas {
+    let parent_path = ref_el.path.rsplit_once('>').map(|(parent, _)| parent);
+    let frame = parent_path.and_then(|pp| {
+        Some((*reference_by_path.get(pp)?, *pipeline_by_path.get(pp)?))
+    });
+
+    let (dx, dy) = match frame {
+        Some((ref_parent, pipe_parent)) => (
+            delta(rel(ref_el.x, ref_parent.x), rel(pipe_el.x, pipe_parent.x)),
+            delta(rel(ref_el.y, ref_parent.y), rel(pipe_el.y, pipe_parent.y)),
+        ),
+        None => (delta(ref_el.x, pipe_el.x), delta(ref_el.y, pipe_el.y)),
+    };
+
+    GeometryDeltas {
+        dx,
+        dy,
+        dw: delta(ref_el.w, pipe_el.w),
+        dh: delta(ref_el.h, pipe_el.h),
+    }
+}
+
+/// Child coordinate relative to its parent; `None` if either is missing.
+fn rel(child: Option<f64>, parent: Option<f64>) -> Option<f64> {
+    Some(child? - parent?)
+}
+
+/// Pipeline minus reference. Both-missing is a vacuous match (0.0); a
+/// value on only one side is an unconditional mismatch (infinite).
+fn delta(reference: Option<f64>, pipeline: Option<f64>) -> f64 {
+    match (reference, pipeline) {
+        (Some(r), Some(p)) => p - r,
+        (None, None) => 0.0,
+        _ => f64::INFINITY,
     }
 }
 
@@ -369,6 +498,7 @@ pub(crate) fn determine_status(
     element_threshold: Option<f64>,
     expected_fail: bool,
     approved_pixel: Option<f64>,
+    approved_element: Option<f64>,
 ) -> Status {
     let pixel_exceeds = pixel_diff_pct > pixel_threshold;
 
@@ -389,6 +519,14 @@ pub(crate) fn determine_status(
 
     if let Some(approved) = approved_pixel
         && pixel_diff_pct > approved + REGRESSION_TOLERANCE
+    {
+        return Status::Regression;
+    }
+
+    // The element ratchet: match pct is higher-is-better, so regression
+    // is a *drop* below the approved value.
+    if let (Some(current), Some(approved)) = (element_match_pct, approved_element)
+        && current < approved - REGRESSION_TOLERANCE
     {
         return Status::Regression;
     }
@@ -421,66 +559,31 @@ mod tests {
     )]
     use super::*;
 
-    #[test]
-    fn within_tol_both_present_within() {
-        assert!(within_tol(Some(10.0), Some(12.0), 2.0));
-    }
-
-    #[test]
-    fn within_tol_both_present_outside() {
-        assert!(!within_tol(Some(10.0), Some(13.0), 2.0));
-    }
-
-    #[test]
-    fn within_tol_both_none() {
-        assert!(within_tol(None, None, 5.0));
-    }
-
-    #[test]
-    fn within_tol_one_none() {
-        assert!(!within_tol(Some(10.0), None, 5.0));
-    }
-
-    #[test]
-    fn geometry_matches_exact() {
-        let a = LayoutElement {
-            path: String::new(),
+    fn el(path: &str, x: f64, y: f64, w: f64, h: f64) -> LayoutElement {
+        LayoutElement {
+            path: path.into(),
             tag: None,
-            x: Some(0.0),
-            y: Some(0.0),
-            w: Some(100.0),
-            h: Some(50.0),
-        };
-        let b = LayoutElement {
-            path: String::new(),
-            tag: None,
-            x: Some(1.0),
-            y: Some(1.0),
-            w: Some(103.0),
-            h: Some(54.0),
-        };
-        assert!(geometry_matches(&a, &b));
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+        }
     }
 
     #[test]
-    fn geometry_matches_outside_tolerance() {
-        let a = LayoutElement {
-            path: String::new(),
-            tag: None,
-            x: Some(0.0),
-            y: Some(0.0),
-            w: Some(100.0),
-            h: Some(50.0),
-        };
-        let b = LayoutElement {
-            path: String::new(),
-            tag: None,
-            x: Some(0.0),
-            y: Some(0.0),
-            w: Some(106.0),
-            h: Some(50.0),
-        };
-        assert!(!geometry_matches(&a, &b));
+    fn delta_both_present() {
+        assert_eq!(delta(Some(10.0), Some(12.0)), 2.0);
+    }
+
+    #[test]
+    fn delta_both_none_is_vacuous_match() {
+        assert_eq!(delta(None, None), 0.0);
+    }
+
+    #[test]
+    fn delta_one_sided_is_infinite() {
+        assert!(delta(Some(10.0), None).is_infinite());
+        assert!(delta(None, Some(10.0)).is_infinite());
     }
 
     #[test]
@@ -491,38 +594,176 @@ mod tests {
     }
 
     #[test]
+    fn br_detected_by_tag_or_path() {
+        let mut by_tag = el("html>body[0]>p[0]>span[3]", 0.0, 0.0, 0.0, 16.0);
+        by_tag.tag = Some("br".into());
+        assert!(is_br(&by_tag));
+        assert!(is_br(&el("html>body[0]>p[0]>br[2]", 0.0, 0.0, 0.0, 16.0)));
+        assert!(!is_br(&el("html>body[0]>p[0]>b[0]", 0.0, 0.0, 0.0, 16.0)));
+        // `brXX` tags must not match the `br[` prefix probe.
+        assert!(!is_br(&el("html>body[0]>broken[0]", 0.0, 0.0, 0.0, 16.0)));
+    }
+
+    #[test]
+    fn br_excluded_from_denominator() {
+        // Reference has a br the pipeline will never emit; score should
+        // still be 100%.
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>br[0]", 0.0, 20.0, 0.0, 16.0),
+        ];
+        let pipeline = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 100.0),
+        ];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.total_elements, 2);
+        assert_eq!(r.match_pct, 100.0);
+    }
+
+    #[test]
+    fn zero_height_reference_skipped() {
+        // Empty tbody: Chrome says container width at h=0, pipeline says
+        // 0x0. Must not be scored - but the parent stays usable.
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>table[0]>tbody[0]", 0.0, 50.0, 600.0, 0.0),
+        ];
+        let pipeline = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>table[0]>tbody[0]", 0.0, 0.0, 0.0, 0.0),
+        ];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.total_elements, 1);
+        assert_eq!(r.match_pct, 100.0);
+    }
+
+    #[test]
+    fn parent_relative_immune_to_document_drift() {
+        // The pipeline's whole subtree sits 6px lower (cumulative
+        // line-height drift). Absolute comparison would fail the child;
+        // parent-relative must pass it.
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 10000.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 10000.0),
+            el("html>body[0]>div[0]", 0.0, 5000.0, 800.0, 100.0),
+            el("html>body[0]>div[0]>p[0]", 10.0, 5010.0, 780.0, 20.0),
+        ];
+        let pipeline = vec![
+            el("html", 0.0, 0.0, 800.0, 10004.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 10004.0),
+            el("html>body[0]>div[0]", 0.0, 5006.0, 800.0, 100.0),
+            el("html>body[0]>div[0]>p[0]", 10.0, 5016.0, 780.0, 20.0),
+        ];
+        let r = compare_element_sets(&pipeline, &reference);
+        // div is 6px off within body (a real local offset), but p sits
+        // perfectly inside div. html/body/p pass; div is the offender.
+        assert_eq!(r.total_elements, 4);
+        assert_eq!(r.passing_elements, 3);
+        assert_eq!(r.offenders.len(), 1);
+        assert_eq!(r.offenders[0].path, "html>body[0]>div[0]");
+        assert_eq!(r.offenders[0].dy, 6.0);
+    }
+
+    #[test]
+    fn root_falls_back_to_absolute() {
+        let reference = vec![el("html", 0.0, 0.0, 800.0, 100.0)];
+        let pipeline = vec![el("html", 0.0, 10.0, 800.0, 100.0)];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.passing_elements, 0);
+        assert_eq!(r.offenders[0].dy, 10.0);
+    }
+
+    #[test]
+    fn offenders_sorted_worst_first() {
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>a[0]", 0.0, 10.0, 100.0, 20.0),
+            el("html>body[0]>b[0]", 0.0, 40.0, 100.0, 20.0),
+        ];
+        let pipeline = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>a[0]", 0.0, 14.0, 100.0, 20.0),
+            el("html>body[0]>b[0]", 0.0, 40.0, 170.0, 20.0),
+        ];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.offenders.len(), 2);
+        assert_eq!(r.offenders[0].path, "html>body[0]>b[0]");
+        assert_eq!(r.offenders[0].dw, 70.0);
+        assert_eq!(r.offenders[1].path, "html>body[0]>a[0]");
+        assert_eq!(r.offenders[1].dy, 4.0);
+    }
+
+    #[test]
+    fn chrome_only_counts_against_score() {
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 50.0),
+        ];
+        let pipeline = vec![el("html", 0.0, 0.0, 800.0, 100.0)];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.total_elements, 2);
+        assert_eq!(r.passing_elements, 1);
+        assert_eq!(r.match_pct, 50.0);
+        // Not an offender - no pipeline geometry to report.
+        assert!(r.offenders.is_empty());
+    }
+
+    #[test]
     fn determine_status_pass() {
-        let s = determine_status(5.0, Some(90.0), 10.0, Some(80.0), false, None);
+        let s = determine_status(5.0, Some(90.0), 10.0, Some(80.0), false, None, None);
         assert_eq!(s.as_str(), "PASS");
     }
 
     #[test]
     fn determine_status_fail_pixel() {
-        let s = determine_status(15.0, Some(90.0), 10.0, Some(80.0), false, None);
+        let s = determine_status(15.0, Some(90.0), 10.0, Some(80.0), false, None, None);
         assert_eq!(s.as_str(), "FAIL_THRESHOLD");
     }
 
     #[test]
     fn determine_status_fail_element() {
-        let s = determine_status(5.0, Some(70.0), 10.0, Some(80.0), false, None);
+        let s = determine_status(5.0, Some(70.0), 10.0, Some(80.0), false, None, None);
         assert_eq!(s.as_str(), "FAIL_THRESHOLD");
     }
 
     #[test]
     fn determine_status_expected_fail() {
-        let s = determine_status(15.0, Some(70.0), 10.0, Some(80.0), true, None);
+        let s = determine_status(15.0, Some(70.0), 10.0, Some(80.0), true, None, None);
         assert_eq!(s.as_str(), "EXPECTED_FAIL");
     }
 
     #[test]
     fn determine_status_regression() {
-        let s = determine_status(6.0, Some(90.0), 10.0, Some(80.0), false, Some(4.0));
+        let s = determine_status(6.0, Some(90.0), 10.0, Some(80.0), false, Some(4.0), None);
         assert_eq!(s.as_str(), "REGRESSION");
     }
 
     #[test]
     fn determine_status_within_regression_tolerance() {
-        let s = determine_status(4.3, Some(90.0), 10.0, Some(80.0), false, Some(4.0));
+        let s = determine_status(4.3, Some(90.0), 10.0, Some(80.0), false, Some(4.0), None);
+        assert_eq!(s.as_str(), "PASS");
+    }
+
+    #[test]
+    fn determine_status_element_regression() {
+        // Pixels fine, element match dropped below the approved value.
+        let s = determine_status(1.0, Some(88.0), 10.0, Some(80.0), false, Some(1.0), Some(95.0));
+        assert_eq!(s.as_str(), "REGRESSION");
+    }
+
+    #[test]
+    fn determine_status_element_within_ratchet_tolerance() {
+        let s = determine_status(1.0, Some(94.8), 10.0, Some(80.0), false, Some(1.0), Some(95.0));
+        assert_eq!(s.as_str(), "PASS");
+    }
+
+    #[test]
+    fn determine_status_element_improvement_passes() {
+        let s = determine_status(1.0, Some(97.0), 10.0, Some(80.0), false, Some(1.0), Some(95.0));
         assert_eq!(s.as_str(), "PASS");
     }
 

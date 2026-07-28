@@ -278,6 +278,7 @@ fn run_snapshot(
                 None,
                 false,
                 approved_pixel,
+                None, // no element comparison in the sluggrs snapshot path
             );
             (Some(px.diff_pct), s)
         }
