@@ -49,9 +49,13 @@ img { background-color: #d0d0d0; }
 <body>
 <img src="${redUri}" width="20">
 <img src="${redUri}">
+<table><tr>
+<td background="https://cdn.example.com/banner.jpg">points banner</td>
+<td background="data:image/png;base64,AAAA">stable banner</td>
+<td style="font-family:Courier">styled</td>
+</tr></table>
 <p>${longRun}</p>
 <div><b>x</b> <i>y</i><div>block</div></div>
-<td style="font-family:Courier">styled</td>
 </body>
 </html>
 `;
@@ -106,13 +110,24 @@ check(
 	out.includes("font-family: 'ahem' !important") && !out.includes("Arial"),
 );
 check("plain font decl rewritten", !out.includes("Georgia"));
-check("inline style font rewritten", !out.includes("Courier"));
+check(
+	"inline style font rewritten",
+	!out.includes("Courier") && /style="[^"]*font-family: 'ahem'/.test(out),
+);
 
 // Item 13: long inline runs stay verbatim - adjacent spans must not gain
 // a newline between them; the deliberate space between <b> and <i>
 // survives in the mixed-content run.
 check("long inline run verbatim", out.includes("</span><span>"));
 check("inter-inline space survives", out.includes("</b> <i>"));
+
+// Legacy `background` attribute: remote URL stripped (Chrome would
+// fetch it at capture time), data URI left alone.
+check("remote background attr stripped", !out.includes("cdn.example.com/banner.jpg"));
+check(
+	"data-URI background attr survives",
+	out.includes('background="data:image/png;base64,AAAA"'),
+);
 
 // Item 14: bare img background-color hack stripped, lookalikes intact.
 check("bare img bg rule stripped", !out.includes("#d0d0d0"));

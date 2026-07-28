@@ -311,6 +311,22 @@ function svgDimensions(el) {
 // CSS background-image replacement
 // ---------------------------------------------------------------------------
 
+// The legacy HTML `background` attribute (td/table/body - e.g. Steam's
+// blue Points banner td) carries an image URL that Chrome fetches at
+// capture time: nondeterministic, and an unfixable divergence until the
+// pipeline supports backgrounds. Same policy as the CSS
+// background-image strip below: external URLs are removed, data URIs
+// are left alone (deterministic, and divergence-stable).
+function stripBackgroundAttrs($) {
+	$("[background]").each(function () {
+		const el = $(this);
+		const bg = el.attr("background");
+		if (!bg || bg.startsWith("data:")) return;
+		warn(`stripped background attribute: ${bg.slice(0, 80)}`);
+		el.removeAttr("background");
+	});
+}
+
 function stripBackgroundImages($) {
 	// Inline styles
 	$("[style]").each(function () {
@@ -809,7 +825,8 @@ async function cmdPrepare(input, output, opts) {
 		el.replaceWith(img);
 	});
 
-	// 4. Strip CSS background-images.
+	// 4. Strip CSS background-images and legacy `background` attributes.
+	stripBackgroundAttrs($);
 	stripBackgroundImages($);
 
 	// 5. Strip external @import rules.

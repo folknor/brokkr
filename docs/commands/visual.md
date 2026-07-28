@@ -119,7 +119,8 @@ is recorded as one `ERROR` row; it does not abort the remaining snapshots.
 
 - `prepare <input.html> <output.html>` - normalize raw email HTML into a
   self-contained fixture (replaces images with correctly-sized gray PNGs,
-  strips background-image/external CSS, injects Ahem font, pretty-prints).
+  strips background-image/external CSS and remote-URL legacy `background`
+  attributes, injects Ahem font, pretty-prints).
   Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`;
   failed fetches are negative-cached as `<key>.miss` files (delete to
   retry) and fetches send a browser-like User-Agent.
