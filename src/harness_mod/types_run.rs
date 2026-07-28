@@ -181,11 +181,15 @@ impl BenchHarness {
 
         if !git.is_clean {
             if force {
-                output::warn("dirty tree - results will NOT be stored in database");
+                // Name the database. This governs results.db only - a gated
+                // ratatoskr run still records into gate.db, and unqualified
+                // the two lines read as a contradiction.
+                output::warn("dirty tree - results will NOT be stored in results.db");
             } else {
                 return Err(DevError::Preflight(vec![
                     "dirty tree - commit or stash changes before benchmarking".into(),
-                    "run with --force to bench anyway (results will not be stored)".into(),
+                    "run with --force to bench anyway (results will not be stored in results.db)"
+                        .into(),
                 ]));
             }
         }

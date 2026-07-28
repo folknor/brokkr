@@ -527,6 +527,7 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     }
 
     if ctx.req.as_baseline {
+        warn_if_rebasing(ctx.gate_name, gate, &hostname);
         output::ratatoskr_msg("--as-baseline: skipping evaluation. Add this line to brokkr.toml:");
         output::ratatoskr_msg(&format!(
             "    [ratatoskr.gate.{}.baseline]\n    {hostname} = \"{uuid}\"",
@@ -536,6 +537,57 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     }
 
     evaluate_against_baseline(&db, &hostname, ctx.gate_name, gate, &row, &uuid)
+}
+
+/// Warn, on the `--as-baseline` path, when recording is a *rebase* rather
+/// than a first recording.
+///
+/// The missing-baseline error already says `--as-baseline` is unsafe, but
+/// that text only reaches whoever hits the error. Someone re-recording on
+/// purpose sees nothing, and re-recording is exactly where the damage
+/// happens: a rule that compares against the baseline is re-anchored onto
+/// the numbers in front of it, so a regression present at that moment
+/// becomes the new definition of correct. `max_delta = 0` and
+/// `equal_to_baseline` are the sharp cases - they permit no drift at all,
+/// so the rebase is the only way they can ever be silenced.
+///
+/// This warns rather than refuses: recording a new baseline after a
+/// deliberate change is the command's normal purpose, and brokkr cannot
+/// tell that from an accident. The paste-line still has to be moved into
+/// `brokkr.toml` by hand, so the warning arrives before anything is
+/// actually rebased.
+fn warn_if_rebasing(gate_name: &str, gate: &GateConfig, hostname: &str) {
+    let Some(pinned) = gate.baseline.get(hostname) else {
+        return; // First baseline for this host: nothing to overwrite.
+    };
+
+    let strict: Vec<&str> = gate
+        .metrics
+        .iter()
+        .filter(|(_, rule)| {
+            rule.max_delta == Some(0.0) || rule.equal_to_baseline == Some(true)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    let short = &pinned[..8.min(pinned.len())];
+    output::ratatoskr_msg(&format!(
+        "  [warn] gate `{gate_name}` already pins baseline {short} for host \
+         `{hostname}` - repinning rebases every baseline-relative rule onto \
+         this run's numbers"
+    ));
+    if !strict.is_empty() {
+        let subject = if strict.len() == 1 {
+            format!("rule `{}` admits", strict[0])
+        } else {
+            format!("rules `{}` admit", strict.join("`, `"))
+        };
+        output::ratatoskr_msg(&format!(
+            "  [warn] {subject} no drift at all; if this tree has regressed, \
+             repinning blesses the regression and the gate goes blind to it. \
+             Repin only from a tree you have independently confirmed good."
+        ));
+    }
 }
 
 /// Build the failure message for a pinned baseline UUID that `gate.db`

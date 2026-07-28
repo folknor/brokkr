@@ -212,10 +212,26 @@ folk-desktop = "a344fcc2"
 Brokkr never auto-edits `brokkr.toml`. Promotion is always a manual paste
 so the diff lands in a normal commit.
 
+When the gate *already* pins a baseline for this host, `--as-baseline`
+warns first: repinning re-anchors every baseline-relative rule onto the
+run in front of it, so a regression present at that moment becomes the
+new definition of correct. Rules that admit no drift (`max_delta = 0`,
+`equal_to_baseline`) are named individually, since a rebase is the only
+way they can ever be silenced. It warns rather than refuses - recording a
+new baseline after a deliberate change is the command's purpose, and the
+paste-line still has to be moved into `brokkr.toml` by hand, so the
+warning arrives before anything is actually rebased.
+
 `--force` lets a dirty git tree record (rows land with the real
 `git_commit` SHA plus `dirty = 1`, so the SHA stays useful for
 forensics). Dirty rows are valid baselines but flagged in the gate
 report.
+
+The harness's `dirty tree - results will NOT be stored in results.db`
+warning governs `results.db` only. A gated run still writes to
+`gate.db` - that is the write policy above, not a contradiction - and
+the `recorded run <id> in gate.db` line names its database for exactly
+that reason. A dirty row additionally prints a `tagged dirty` warning.
 
 ## Out of scope for v1
 
