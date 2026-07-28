@@ -4,8 +4,8 @@
   "private": true,
   "description": "Fixture preprocessing for litehtml visual reference testing",
   "dependencies": {
-    "cheerio": "^1.0.0",
-    "image-size": "^1.1.1",
+    "cheerio": "^1.2.0",
+    "image-size": "^2.0.2",
     "pngjs": "^7.0.0"
   }
 }

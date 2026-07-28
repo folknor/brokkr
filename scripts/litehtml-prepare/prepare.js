@@ -9,7 +9,9 @@ const http = require("http");
 const { Buffer } = require("buffer");
 
 const cheerio = require("cheerio");
-const sizeOf = require("image-size");
+// image-size 2.x exports a namespace, not a callable; `imageSize` is the
+// buffer-only sizer (file-path input moved to image-size/fromFile).
+const { imageSize: sizeOf } = require("image-size");
 const { PNG } = require("pngjs");
 
 // ---------------------------------------------------------------------------
