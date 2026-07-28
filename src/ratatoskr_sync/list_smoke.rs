@@ -112,7 +112,7 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 /// `brokkr sync --all [--filter SUB]` - run every discovered sync script
 /// unmeasured, in discovery order.
 ///
-/// The sync-side answer to `service-suite`, and the reason a directory
+/// The sync-side answer to `service --all`, and the reason a directory
 /// argument can now mean the same thing in both families. Scripts marked
 /// `expected = ignored` in frontmatter are skipped unless
 /// `include_ignored` is set - they reproduce known-broken behaviour and
@@ -120,7 +120,7 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 ///
 /// Default is keep-going: a cohort exists to tell you what is broken, so
 /// it reports every failure and exits non-zero if any script failed.
-/// That is the opposite of `service-suite`'s stop-on-first-failure
+/// That is the opposite of `service --all`'s stop-on-first-failure
 /// default, and deliberately so - each sync script owns its own artefact
 /// dir, so a later failure never overwrites an earlier one's triage
 /// material.

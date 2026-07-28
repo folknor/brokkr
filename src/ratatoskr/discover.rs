@@ -1,4 +1,4 @@
-//! Discovery for service-test scripts.
+//! Discovery for service-harness scripts.
 //!
 //! Default location: `<project_root>/crates/app/tests/service-harness/`.
 //! Discovery is recursive (`**/*.lua`), so cohorts can live under
@@ -8,7 +8,7 @@
 //! at the top of each script, before the first non-comment / non-blank
 //! line. Recognized keys:
 //!
-//! - `description` (free text shown by `brokkr service-list`)
+//! - `description` (free text shown by bare `brokkr service`)
 //! - `expected = pass | ignored`
 //! - `ceiling = 60s` / `5m` / `1h` / `90` - per-script wall-clock
 //!   backstop enforced by brokkr around the whole run. Bare numbers are
@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use crate::error::DevError;
 
-/// Where service-test scripts live, relative to the project root.
+/// Where service-harness scripts live, relative to the project root.
 pub const SCRIPT_DIR: &str = "crates/app/tests/service-harness";
 
 /// Default per-script wall-clock ceiling when no `ceiling` frontmatter
@@ -44,7 +44,7 @@ pub const SCRIPT_DIR: &str = "crates/app/tests/service-harness";
 pub const DEFAULT_CEILING: Duration = Duration::from_secs(60);
 
 /// Whether the script is expected to pass or to remain ignored (e.g. a
-/// reproducer for an open Service bug). The `service-test` runner can
+/// reproducer for an open Service bug). The `service` runner can
 /// use this to flip a `Fail`->`Pass` outcome to "expected failure" so
 /// suite runs are not blocked on known-broken cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ pub struct ScriptInfo {
     /// extension. Top-level scripts: just the file stem (e.g.
     /// `ping_and_shutdown`). Nested: `t1/journal_replays_after_respawn`.
     pub name: String,
-    /// Used by `service-test` to resolve a script by name and by
+    /// Used by `service` to resolve a script by name and by
     /// `sync --all` to invoke each cohort member; the index listings
     /// only consume `name` / `description` / `expected`.
     pub path: PathBuf,
@@ -117,7 +117,7 @@ pub struct ScriptInfo {
     pub protocol: Option<String>,
 }
 
-/// Discover all service-test scripts under `<project_root>/<SCRIPT_DIR>/`,
+/// Discover all service-harness scripts under `<project_root>/<SCRIPT_DIR>/`,
 /// recursively.
 ///
 /// Returns an empty list (without error) when the directory does not
@@ -150,7 +150,7 @@ pub fn discover_at(root: &Path) -> Result<Vec<ScriptInfo>, DevError> {
 ///
 /// `display_name` is the name surfaced in user-facing output - typically
 /// the path relative to `SCRIPT_DIR` minus the `.lua` extension. When
-/// `service-test` is invoked with an arbitrary script path, the file
+/// `service` is invoked with an arbitrary script path, the file
 /// stem is a reasonable fallback.
 pub fn parse_script(path: &Path, display_name: &str) -> Result<ScriptInfo, DevError> {
     let body = fs::read_to_string(path)?;

@@ -69,7 +69,7 @@ landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
 ## `sync --all [--filter SUB] [--include-ignored]` - run the cohort
 
 Runs every discovered script unmeasured, in discovery order - the
-sync-side counterpart to `service-suite`, and the reason a cohort now
+sync-side counterpart to `service --all`, and the reason a cohort now
 means the same thing in both families. `--filter` is a substring match
 against the discovered name; scripts whose frontmatter says
 `expected: ignored` are skipped unless `--include-ignored` is passed.
@@ -89,7 +89,7 @@ at the end, not per failure. A 160-script sweep is therefore ~160 lines
 plus a header and a `sync cohort: N/M passed` summary - it used to be
 six lines and a no-op cargo invocation per script.
 
-**Keep-going is the default here**, unlike `service-suite`, which stops
+**Keep-going is the default here**, unlike `service --all`, which stops
 on the first failure. The reason is that each sync script owns its own
 `run-N/` artefact dir, so a later failure can't overwrite an earlier
 one's triage material - there is nothing to protect by stopping, and a
@@ -130,7 +130,7 @@ joins the auxiliary `mock_pids` set, the harness binary lands in
 `child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
 both. PG isolation is opt-in per spawn site: callers pass `isolate_pg = true`
 only when a `SigtermGuard` is active for the spawn's lifetime. The unmeasured
-`sync` run, service-test, service-suite, mock-serve, and BenchHarness's sidecar
+`sync` run, the `service` shapes, mock-serve, and BenchHarness's sidecar
 window all qualify - their tracked children spawn with `process_group(0)`
 and every intentional kill (`--hard`, deadline expiry, cooperative
 SIGTERM, `MockServer::shutdown`) targets the whole group via

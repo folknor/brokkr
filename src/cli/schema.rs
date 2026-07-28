@@ -1952,125 +1952,95 @@ Examples:
     },
 
     // ----- ratatoskr-only commands (display_order = 60) -----
-    /// [ratatoskr] Run a Service-subprocess test script (deterministic harness)
+    /// [ratatoskr] List or run Service-subprocess test scripts (deterministic harness)
     ///
-    /// Accepts either a single `.lua` script or a directory under
-    /// `crates/app/tests/service-harness/`. The directory form is sugar
-    /// for `service-suite --filter <rel>/`: same code path, same artefact
-    /// layout, and `-N` becomes cohort cycles instead of per-script
-    /// repeats. Builds the configured `[[check]]` sweep via
+    /// One command over the service-harness cohort, in brokkr's usual
+    /// bare-is-an-index shape (`sync`, `results`, `man`, `deps`):
+    /// `brokkr service` lists the discovered scripts, `brokkr service
+    /// <script>` runs one (a directory runs that cohort), and
+    /// `brokkr service --all` runs every discovered script against a
+    /// single shared harness build. Replaced the former
+    /// `service-test`/`service-suite`/`service-list` triple; the old
+    /// names are gone, not aliased.
+    ///
+    /// Running builds the configured `[[check]]` sweep via
     /// `[ratatoskr.harness]` (same feature contract `brokkr check`
     /// enforces), allocates a per-run artefact dir at
     /// `.brokkr/ratatoskr/<test>/run-N/`, then spawns
     /// `<binary> --test-harness <SCRIPT>` with
     /// `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set in
-    /// the env. Captures stdout/stderr into the artefact dir alongside
-    /// `run.toml` and a copy of the script. Preserves the dir on
-    /// failure; deletes it on success unless `--keep-artefacts` is set.
-    /// `-N <count>` on a single script repeats that script `<count>`
-    /// times; on a directory it runs the cohort `<count>` times in
-    /// order. Default is stop-on-first-failure; `--keep-going` runs
-    /// every iteration and the summary lists the failures.
-    /// The harness binary itself (Lua VM via dellingr, ServiceClient
-    /// userdata, wait combinator, frame-log tap, /proc snapshot writer)
-    /// lives in ratatoskr's `app` crate and lands in Phase 8; until
-    /// then `app --test-harness` errors out and brokkr captures that
-    /// faithfully.
-    #[command(name = "service-test", display_order = 60)]
-    ServiceTest {
+    /// the env (plus the `RATATOSKR_TEST_*_ENDPOINT` family when the
+    /// script's frontmatter declares a `-- fixture:`). Captures
+    /// stdout/stderr into the artefact dir alongside `run.toml` and a
+    /// copy of the script; preserves the dir on failure, deletes it on
+    /// success unless `--keep-artefacts` is set.
+    ///
+    /// `-N <count>` on a single script repeats it; on a directory or
+    /// `--all` it runs the cohort `<count>` times in order (soak).
+    /// Default is stop-on-first-failure so the failing artefacts land
+    /// fast for triage; `--keep-going` runs everything and the summary
+    /// lists the failures.
+    #[command(
+        name = "service",
+        display_order = 60,
+        group = clap::ArgGroup::new("service_target").args(["script", "all"])
+    )]
+    Service {
         /// Path to a Lua test script, or a directory under
-        /// `crates/app/tests/service-harness/` to run as a cohort
-        /// (sugar for `service-suite --filter <rel>/`).
-        script: String,
+        /// `crates/app/tests/service-harness/` to run as a cohort.
+        /// Omit to list the discovered scripts.
+        script: Option<String>,
+
+        /// Run every discovered script in sequence against a single
+        /// shared harness build. Mutually exclusive with SCRIPT.
+        #[arg(long, conflicts_with = "script")]
+        all: bool,
+
+        /// Substring filter against the script's relative name (e.g.
+        /// `t1/` to run only the T1 cohort). Only meaningful with
+        /// `--all`; a SCRIPT directory scopes the same way.
+        #[arg(long, value_name = "SUBSTRING", requires = "all")]
+        filter: Option<String>,
+
+        /// Include scripts marked `expected = ignored` in the
+        /// frontmatter. By default these are skipped (they reproduce
+        /// known-broken Service behaviour and would block clean runs).
+        #[arg(long, requires = "all")]
+        include_ignored: bool,
 
         /// Preserve the artefact directory even on success
-        #[arg(long)]
+        #[arg(long, requires = "service_target")]
         keep_artefacts: bool,
 
         /// Build the harness binary with the dev profile (`<target>/debug/`).
         /// Default is release for parity with `brokkr test` and to match
         /// what users will run in production. Overrides
         /// `[ratatoskr.harness] debug` from `brokkr.toml`.
-        #[arg(long, conflicts_with = "release")]
+        #[arg(long, conflicts_with = "release", requires = "service_target")]
         debug: bool,
 
         /// Force the release profile, overriding `[ratatoskr.harness] debug`
         /// from `brokkr.toml`. Mutually exclusive with `--debug`.
-        #[arg(long)]
+        #[arg(long, requires = "service_target")]
         release: bool,
 
         /// Repeat count. For a single script: number of iterations
-        /// (each gets its own `run-N/`). For a directory: number of
-        /// cohort cycles, where each cycle invokes every matched
+        /// (each gets its own `run-N/`). For a directory or `--all`:
+        /// cohort cycles, where each cycle invokes every selected
         /// script once. Build is shared across iterations.
-        #[arg(short = 'N', long = "repeat", default_value = "1", value_name = "COUNT")]
+        #[arg(
+            short = 'N',
+            long = "repeat",
+            default_value = "1",
+            value_name = "COUNT",
+            requires = "service_target"
+        )]
         repeat: u32,
 
         /// Keep going after a failed iteration. Default is to stop on
         /// the first failure so the artefact dir lands fast for triage.
-        #[arg(long)]
+        #[arg(long, requires = "service_target")]
         keep_going: bool,
-    },
-
-    /// [ratatoskr] List discovered service-test scripts with descriptions
-    ///
-    /// Scans `crates/app/tests/service-harness/*.lua` under the project
-    /// root, parses a top-of-file `-- key: value` frontmatter for
-    /// `description` and `expected` (`pass` / `ignored`), and prints a
-    /// table. Empty-state output points at the expected directory.
-    #[command(name = "service-list", display_order = 61)]
-    ServiceList,
-
-    /// [ratatoskr] Run every discovered service-test script in sequence
-    ///
-    /// Discovers `crates/app/tests/service-harness/**/*.lua`, optionally
-    /// filters by substring against the script's relative name, builds the
-    /// harness binary once, then runs each script through the same path
-    /// `service-test` uses (per-script artefact dir, ceiling-bounded spawn,
-    /// preserve-on-failure). Scripts marked `expected = ignored` in the
-    /// frontmatter are skipped unless `--include-ignored` is set. Default
-    /// is stop-on-first-failure; `--keep-going` runs every selected script
-    /// and reports a summary listing the failed names. Exits non-zero if
-    /// any selected script failed. `-N <count>` runs the whole cohort
-    /// `<count>` times in order (50 cycles over 11 scripts = 550 runs).
-    #[command(name = "service-suite", display_order = 62)]
-    ServiceSuite {
-        /// Substring filter against the script's relative name (e.g.
-        /// `t1/` to run only the T1 cohort, `boot` for boot-related tests).
-        /// Matches scripts whose name *contains* the substring.
-        #[arg(long, value_name = "SUBSTRING")]
-        filter: Option<String>,
-
-        /// Preserve each script's artefact directory even on success
-        #[arg(long)]
-        keep_artefacts: bool,
-
-        /// Build the harness binary with the dev profile (`<target>/debug/`).
-        /// Default is release. Overrides `[ratatoskr.harness] debug` from
-        /// `brokkr.toml`.
-        #[arg(long, conflicts_with = "release")]
-        debug: bool,
-
-        /// Force the release profile, overriding `[ratatoskr.harness] debug`
-        /// from `brokkr.toml`. Mutually exclusive with `--debug`.
-        #[arg(long)]
-        release: bool,
-
-        /// Keep going after a failed script. Default is to stop on the
-        /// first failure so the artefact dir lands fast for triage.
-        #[arg(long)]
-        keep_going: bool,
-
-        /// Include scripts marked `expected = ignored` in the frontmatter.
-        /// By default these are skipped (they reproduce known-broken
-        /// Service behaviour and would block clean suite runs).
-        #[arg(long)]
-        include_ignored: bool,
-
-        /// Run the cohort this many times in order. Each cycle invokes
-        /// every selected script once. Default 1.
-        #[arg(short = 'N', long = "repeat", default_value = "1", value_name = "COUNT")]
-        repeat: u32,
     },
 
     /// [ratatoskr] List, run, or bench sync-test scripts against sæhrimnir

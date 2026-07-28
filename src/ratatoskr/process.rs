@@ -1,4 +1,4 @@
-//! Process-tree primitives for the service-test harness.
+//! Process-tree primitives for the service harness.
 //!
 //! Generic Linux helpers, written so they lift to a shared module when
 //! a second project needs them. The harness exercises four shapes:

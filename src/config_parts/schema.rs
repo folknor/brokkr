@@ -1309,7 +1309,7 @@ impl SluggrsConfig {
 /// Ratatoskr-specific configuration from `[ratatoskr]` in brokkr.toml.
 ///
 /// Holds two clusters of fields. `[ratatoskr.harness]` (the nested table)
-/// drives `service-test`/`service-suite` builds (plan 1). The flat fields
+/// drives `service` builds (plan 1). The flat fields
 /// drive plan-3 sync orchestration: where sæhrimnir's binary and fixtures
 /// live, which env-var names ratatoskr's `test-helpers` feature reads to
 /// pick up the mock endpoints, and where sync-test scripts live. All flat
@@ -1417,7 +1417,7 @@ pub struct MetricRule {
 }
 
 /// `[ratatoskr.harness]` - self-contained build spec for ratatoskr's
-/// orchestration commands (`service-test`, `service-suite`,
+/// orchestration commands (`service`,
 /// `mock-serve`, `sync`). Decoupled from `[[check]]`
 /// so that the everyday `brokkr check` pass doesn't get conflated with
 /// "which features must the spawned binary have." See

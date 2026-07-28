@@ -531,7 +531,7 @@ pub fn require_path(
 /// stream protocols.
 ///
 /// Shared by `sync` (where it originated) and the
-/// fixture-aware service-test / service-suite paths.
+/// fixture-aware `service` paths.
 pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Some(name) = &cfg.test_endpoint_env_jmap {

@@ -579,7 +579,7 @@ runs). `--sweep` labels under a lanes profile are the lane-qualified form.
 Per-project orchestration blocks (today: `[ratatoskr.harness]`) are **not**
 `[[check]]` sweeps and are invisible to both `brokkr check` and `brokkr test`.
 They describe how to build a binary that ratatoskr's orchestration commands
-(`service-test`, `service-suite`, `mock-serve`, `sync`)
+(`service`, `mock-serve`, `sync`)
 spawn, with their own `package` / `features` / `debug` fields. `[test.profiles]`
 may only reference `[[check]]` entries in its `sweeps` list, never an
 orchestration block.

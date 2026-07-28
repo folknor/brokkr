@@ -6,9 +6,10 @@
 
 ratatoskr exercises two separate harness flows from brokkr:
 
-1. **Service-subprocess harness** (`service-test`, `service-suite`,
-   `service-list`) - lua-driven tests against the ratatoskr binary's
-   `--test-harness` mode. See `docs/commands/service.md`.
+1. **Service-subprocess harness** (`service`: bare lists, `<SCRIPT>`
+   runs one, `--all` runs the cohort) - lua-driven tests against the
+   ratatoskr binary's `--test-harness` mode. See
+   `docs/commands/service.md`.
 2. **Sync orchestration** (`sync`, `mock-serve`) - two-child
    orchestration with sæhrimnir (mock email
    server) + the ratatoskr harness binary. See `docs/commands/sync.md`.
@@ -74,7 +75,7 @@ points at the directory containing both binaries.
 
 ## Artefact layout
 
-- `service-test`: `.brokkr/ratatoskr/<test>/run-N/` with `binary-stdout.log`
+- `service <SCRIPT>`: `.brokkr/ratatoskr/<test>/run-N/` with `binary-stdout.log`
   / `binary-stderr.log` / `run.toml` plus runtime-emitted artefacts.
 - `sync <SCRIPT>`: `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
   `mock/` subdirs (`mock/readiness`, `mock/stderr.log`).

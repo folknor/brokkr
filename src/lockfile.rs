@@ -21,8 +21,8 @@ struct LockState {
     child_pid: Option<u32>,
     /// Auxiliary long-running child PIDs - mock-servers (sæhrimnir) that
     /// live across many `child_pid` rotations. Plural because
-    /// `service-suite` keeps one mock per distinct fixture alive for the
-    /// whole suite. `brokkr kill --hard` SIGKILLs each of these alongside
+    /// `service --all` keeps one mock per distinct fixture alive for the
+    /// whole cohort. `brokkr kill --hard` SIGKILLs each of these alongside
     /// `child_pid` so none leak.
     mock_pids: Vec<u32>,
     /// Current bench-run progress as `(run, total)` (1-based).
@@ -97,9 +97,9 @@ impl LockGuard {
         }
     }
 
-    /// Add an auxiliary mock-server PID. `service-suite` calls this once
-    /// per distinct fixture spawned over the suite's lifetime; `sync`
-    /// (run or bench) and service-test call it once. `brokkr kill --hard`
+    /// Add an auxiliary mock-server PID. `service --all` calls this once
+    /// per distinct fixture spawned over the cohort's lifetime; `sync`
+    /// (run or bench) and single-script `service` call it once. `brokkr kill --hard`
     /// SIGKILLs every PID in this set alongside `child_pid` so no mock
     /// leaks when the workload child is the one written to `child_pid`.
     pub fn add_mock_pid(&self, pid: u32) {
@@ -112,7 +112,7 @@ impl LockGuard {
     }
 
     /// Remove a single mock-server PID. Used when one fixture session
-    /// has drained but others remain (service-suite's suite-scoped
+    /// has drained but others remain (`service --all`'s cohort-scoped
     /// fixture reuse model).
     pub fn remove_mock_pid(&self, pid: u32) {
         if let Ok(mut state) = self.inner.state.lock() {

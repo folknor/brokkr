@@ -23,7 +23,7 @@ use crate::ratatoskr::saehrimnir::{
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
 const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr";
 
-/// Run one or more service-test iterations through the harness binary
+/// Run one or more service-script iterations through the harness binary
 /// built via `[ratatoskr.harness]`.
 ///
 /// Acquires the global lockfile, builds the configured `[[check]]`
@@ -60,17 +60,17 @@ pub fn service_test(
     let script_path = Path::new(script);
     if !script_path.exists() {
         return Err(DevError::Config(format!(
-            "service-test: script not found: {script}"
+            "service: script not found: {script}"
         )));
     }
     if script_path.is_dir() {
-        // Directory form: sugar for `service-suite --filter <rel>` scoped
+        // Directory form: sugar for `service --all --filter <rel>` scoped
         // to the cohort under `<dir>`. Same code path, same artefact
         // layout, same per-script ceiling. `-N` becomes cycles over the
         // cohort; `--keep-going` and `--keep-artefacts` flow through.
         // `include_ignored` is left at the suite default (false); a user
-        // who wants to soak ignored scripts goes through `service-suite`
-        // directly.
+        // who wants to soak ignored scripts goes through `service --all
+        // --include-ignored` directly.
         let filter = directory_filter(project_root, script_path)?;
         return service_suite(
             project_root,
@@ -85,12 +85,12 @@ pub fn service_test(
     }
     if !script_path.is_file() {
         return Err(DevError::Config(format!(
-            "service-test: script path is not a regular file: {script}"
+            "service: script path is not a regular file: {script}"
         )));
     }
     let script_abs = script_path.canonicalize().map_err(|e| {
         DevError::Config(format!(
-            "service-test: failed to canonicalize script path {script}: {e}"
+            "service: failed to canonicalize script path {script}: {e}"
         ))
     })?;
     let test_id = script_path
@@ -98,7 +98,7 @@ pub fn service_test(
         .and_then(|s| s.to_str())
         .ok_or_else(|| {
             DevError::Config(format!(
-                "service-test: script path has no usable file stem: {script}"
+                "service: script path has no usable file stem: {script}"
             ))
         })?
         .to_owned();
@@ -107,7 +107,7 @@ pub fn service_test(
     // preserve-data-dir override apply to every iteration of a soak.
     let parsed = discover::parse_script(&script_abs, &test_id).map_err(|e| {
         DevError::Config(format!(
-            "service-test: failed to read script {script}: {e}"
+            "service: failed to read script {script}: {e}"
         ))
     })?;
     let ceiling = parsed.ceiling;
@@ -120,7 +120,7 @@ pub fn service_test(
         .and_then(|r| r.harness.as_ref())
         .ok_or_else(|| {
             DevError::Config(
-                "service-test: no [ratatoskr.harness] section in brokkr.toml. \
+                "service: no [ratatoskr.harness] section in brokkr.toml. \
                  Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
                  (and optional `binary`, `features`, `debug`)."
                     .into(),
@@ -130,7 +130,7 @@ pub fn service_test(
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "ratatoskr",
-        command: "service-test",
+        command: "service",
         project_root: &project_root_str,
     })?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
@@ -145,11 +145,6 @@ pub fn service_test(
         Some(&|| _lock.clear_child_pid()),
         true, // isolate_pg: outer SigtermGuard active
     )?;
-    output::ratatoskr_msg(&format!(
-        "harness build ok (features={}, binary={})",
-        built.features_label,
-        built.binary.display(),
-    ));
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let repeat = repeat.max(1);
@@ -491,7 +486,7 @@ fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> String {
     }
 }
 
-/// `brokkr service-list` - print every discovered script with its
+/// Bare `brokkr service` - print every discovered script with its
 /// description and expected outcome. Empty-state message points at the
 /// expected location so a fresh checkout (no harness module yet) still
 /// gets a useful response.
@@ -499,7 +494,7 @@ pub fn service_list(project_root: &Path) -> Result<(), DevError> {
     let scripts = discover::discover(project_root)?;
     if scripts.is_empty() {
         output::ratatoskr_msg(&format!(
-            "no service-test scripts found under {SCRIPT_DIR}/"
+            "no service-harness scripts found under {SCRIPT_DIR}/"
         ));
         output::ratatoskr_msg(
             "  (the harness module has not landed in ratatoskr yet, or no scripts have been added)",

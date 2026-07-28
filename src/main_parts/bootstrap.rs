@@ -1439,28 +1439,46 @@ fn run(cli: Cli) -> Result<(), DevError> {
             )
         }
         // ----- ratatoskr-only commands -----
-        Command::ServiceTest {
+        Command::Service {
             script,
+            all,
+            filter,
+            include_ignored,
             keep_artefacts,
             debug,
             release,
             repeat,
             keep_going,
         } => {
-            project::require(project, Project::Ratatoskr, "service-test")?;
-            ratatoskr::cmd::service_test(
-                &project_root,
-                &dev_config,
-                &script,
-                keep_artefacts,
-                profile_override(debug, release),
-                repeat,
-                keep_going,
-            )
-        }
-        Command::ServiceList => {
-            project::require(project, Project::Ratatoskr, "service-list")?;
-            ratatoskr::cmd::service_list(&project_root)
+            project::require(project, Project::Ratatoskr, "service")?;
+
+            // Same bare-is-an-index shape as `sync`: bare lists, SCRIPT
+            // runs one (a directory runs that cohort), --all runs the
+            // discovered cohort.
+            if all {
+                ratatoskr::cmd::service_suite(
+                    &project_root,
+                    &dev_config,
+                    filter.as_deref(),
+                    keep_artefacts,
+                    profile_override(debug, release),
+                    keep_going,
+                    include_ignored,
+                    repeat,
+                )
+            } else if let Some(script) = script {
+                ratatoskr::cmd::service_test(
+                    &project_root,
+                    &dev_config,
+                    &script,
+                    keep_artefacts,
+                    profile_override(debug, release),
+                    repeat,
+                    keep_going,
+                )
+            } else {
+                ratatoskr::cmd::service_list(&project_root)
+            }
         }
         Command::Sync {
             script,
@@ -1571,27 +1589,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 config: cfg,
                 fixture: &fixture,
             })
-        }
-        Command::ServiceSuite {
-            filter,
-            keep_artefacts,
-            debug,
-            release,
-            keep_going,
-            include_ignored,
-            repeat,
-        } => {
-            project::require(project, Project::Ratatoskr, "service-suite")?;
-            ratatoskr::cmd::service_suite(
-                &project_root,
-                &dev_config,
-                filter.as_deref(),
-                keep_artefacts,
-                profile_override(debug, release),
-                keep_going,
-                include_ignored,
-                repeat,
-            )
         }
         // ----- piners-only commands -----
         Command::Corpus {

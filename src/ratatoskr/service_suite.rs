@@ -1,12 +1,12 @@
-/// `brokkr service-suite` - run every discovered script (optionally
+/// `brokkr service --all` - run every discovered script (optionally
 /// filtered) against a single shared harness build.
 ///
 /// Discovery + filter happens first so we can bail with a useful message
 /// when nothing matches before paying the cargo build cost. `expected =
 /// ignored` scripts are skipped by default; `--include-ignored` opts
 /// them in. Each script runs through the same `spawn_and_capture` path
-/// `service-test` uses, so artefact-dir lifecycle and ceiling semantics
-/// are identical. The summary at the end lists failed scripts by name -
+/// the single-script shape uses, so artefact-dir lifecycle and ceiling
+/// semantics are identical. The summary at the end lists failed scripts by name -
 /// not iter index, since each script ran exactly once.
 #[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
 #[allow(clippy::too_many_lines)] // linear orchestration: discover, validate, build, run with fixture grouping, summarize
@@ -45,7 +45,7 @@ pub fn service_suite(
         .and_then(|r| r.harness.as_ref())
         .ok_or_else(|| {
             DevError::Config(
-                "service-suite: no [ratatoskr.harness] section in brokkr.toml. \
+                "service: no [ratatoskr.harness] section in brokkr.toml. \
                  Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
                  (and optional `binary`, `features`, `debug`)."
                     .into(),
@@ -59,13 +59,13 @@ pub fn service_suite(
         let cfg = dev_config.ratatoskr.as_ref().expect("checked above");
         require_path(&cfg.mock_server_binary, project_root, "mock_server_binary").map_err(|e| {
             DevError::Config(format!(
-                "service-suite: script {} needs a mock fixture but {e}",
+                "service: script {} needs a mock fixture but {e}",
                 needy.name
             ))
         })?;
         require_path(&cfg.fixtures_dir, project_root, "fixtures_dir").map_err(|e| {
             DevError::Config(format!(
-                "service-suite: script {} needs a mock fixture but {e}",
+                "service: script {} needs a mock fixture but {e}",
                 needy.name
             ))
         })?;
@@ -74,7 +74,7 @@ pub fn service_suite(
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "ratatoskr",
-        command: "service-suite",
+        command: "service",
         project_root: &project_root_str,
     })?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
@@ -89,11 +89,6 @@ pub fn service_suite(
         Some(&|| _lock.clear_child_pid()),
         true, // isolate_pg: outer SigtermGuard active
     )?;
-    output::ratatoskr_msg(&format!(
-        "harness build ok (features={}, binary={})",
-        built.features_label,
-        built.binary.display(),
-    ));
     output::ratatoskr_msg(&format_suite_header(
         runnable.len(),
         skipped_ignored,
@@ -148,8 +143,8 @@ pub fn service_suite(
                 // artefact dir while keeping the full relative name in output.
                 // Two scripts with the same stem under different parents would
                 // share an artefact-dir prefix and just allocate run-(N+1)/ -
-                // not ideal, but mirrors how `service-test` handles arbitrary
-                // script paths today.
+                // not ideal, but mirrors how the single-script shape handles
+                // arbitrary script paths today.
                 let test_id = script
                     .path
                     .file_stem()
@@ -159,9 +154,11 @@ pub fn service_suite(
                 let keep_on_success =
                     keep_artefacts || script.preserve_data_dir == PreserveDataDir::OnSuccessToo;
 
-                output::ratatoskr_msg(&format_suite_running_line(
-                    cycle, cycles, pos, total, &script.name,
-                ));
+                // No per-script "running" line: the result line lands as
+                // soon as the script exits (one line per run, like `sync
+                // --all`), the ceiling bounds how long a hang can stay
+                // silent, and `brokkr lock` shows live progress + PID for
+                // the in-flight script from another shell.
                 let run_index = (cycle - 1)
                     .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX))
                     .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
@@ -244,21 +241,21 @@ struct CycleRun {
 fn directory_filter(project_root: &Path, dir: &Path) -> Result<String, DevError> {
     let canon = dir.canonicalize().map_err(|e| {
         DevError::Config(format!(
-            "service-test: failed to canonicalize directory {}: {e}",
+            "service: failed to canonicalize directory {}: {e}",
             dir.display()
         ))
     })?;
     let script_root = project_root.join(SCRIPT_DIR);
     let script_root_canon = script_root.canonicalize().map_err(|e| {
         DevError::Config(format!(
-            "service-test: failed to canonicalize script root {}: {e}. \
+            "service: failed to canonicalize script root {}: {e}. \
              Is the harness directory present?",
             script_root.display()
         ))
     })?;
     let rel = canon.strip_prefix(&script_root_canon).map_err(|_| {
         DevError::Config(format!(
-            "service-test: directory {} is not under {}",
+            "service: directory {} is not under {}",
             dir.display(),
             script_root.display()
         ))
@@ -337,23 +334,6 @@ fn format_suite_header(
     parts.join(", ")
 }
 
-/// "running" line emitted before each spawn. For single-cycle runs we
-/// keep the existing `[N/total]` shape; soak runs gain a `[cycle c/C]`
-/// prefix so the log is greppable per-cycle.
-fn format_suite_running_line(
-    cycle: u32,
-    cycles: u32,
-    pos: usize,
-    total: usize,
-    name: &str,
-) -> String {
-    if cycles > 1 {
-        format!("[cycle {cycle}/{cycles}][{pos}/{total}] running {name}")
-    } else {
-        format!("[{pos}/{total}] running {name}")
-    }
-}
-
 /// Empty-state message when no scripts are runnable. Distinguishes
 /// "nothing discovered" from "filter matched nothing" from "everything
 /// was skipped as ignored" so a fresh checkout vs a typo'd filter vs an
@@ -365,7 +345,7 @@ fn format_empty_suite(
     filter: Option<&str>,
 ) -> String {
     if total_discovered == 0 {
-        return format!("no service-test scripts found under {SCRIPT_DIR}/");
+        return format!("no service-harness scripts found under {SCRIPT_DIR}/");
     }
     if let Some(f) = filter {
         if filtered_out == total_discovered {
@@ -424,7 +404,7 @@ fn format_suite_iter_line(
 /// Trailing summary for the suite. Pure for testability.
 ///
 /// Single-cycle (`cycles == 1`) keeps the existing one-liner shapes so
-/// `service-suite` logs don't churn for the common case. Soak mode
+/// cohort logs don't churn for the common case. Soak mode
 /// (`cycles > 1`) emits a cohort-level header line followed by an
 /// indented per-script `pass/total` table so the user can see which
 /// script broke without scrolling through 500 status lines.
@@ -584,7 +564,7 @@ fn write_artefacts(
         git_clean: git.as_ref().map(|g| g.is_clean),
     };
     let serialized = toml::to_string(&meta).map_err(|e| {
-        DevError::Config(format!("service-test: failed to serialize run.toml: {e}"))
+        DevError::Config(format!("service: failed to serialize run.toml: {e}"))
     })?;
     fs::write(artefact_dir.join("run.toml"), serialized)?;
     Ok(())
@@ -596,9 +576,9 @@ fn write_artefacts(
 /// gracefully `shutdown`) once every dependent harness invocation has
 /// returned.
 ///
-/// `service-test` creates one before iteration and drains it after.
-/// `service-suite` creates one per fixture-group transition (see
-/// [`SuiteFixtureSlot`]).
+/// The single-script shape creates one before iteration and drains it
+/// after; the cohort creates one per distinct fixture, lazily on first
+/// use (see the suite loop's `mocks` map).
 struct FixtureSession {
     fixture_name: String,
     mock: MockServer,
@@ -620,7 +600,7 @@ impl FixtureSession {
     ) -> Result<Self, DevError> {
         let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
             DevError::Config(format!(
-                "service-test: script {owner_label} declares `-- fixture: {fixture_name}` \
+                "service: script {owner_label} declares `-- fixture: {fixture_name}` \
                  but no [ratatoskr] section exists in brokkr.toml. \
                  Set mock_server_binary and fixtures_dir to point at sæhrimnir's checkout."
             ))
@@ -629,7 +609,7 @@ impl FixtureSession {
         let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
         if !binary.exists() {
             return Err(DevError::Config(format!(
-                "service-test: sæhrimnir binary not found at {}. \
+                "service: sæhrimnir binary not found at {}. \
                  Build it first: `cargo build --release` in sæhrimnir's repo.",
                 binary.display()
             )));
@@ -647,7 +627,7 @@ impl FixtureSession {
             &mock_dir,
             Some(&|pid| lock.add_mock_pid(pid)),
             Some(&|pid| lock.remove_mock_pid(pid)),
-            true, // isolate_pg: caller (service-test/-suite) has SigtermGuard
+            true, // isolate_pg: caller (service single/cohort) has SigtermGuard
         )?;
         let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();
@@ -1009,7 +989,7 @@ mod tests {
     fn empty_suite_msg_distinguishes_states() {
         assert_eq!(
             format_empty_suite(0, 0, 0, None),
-            format!("no service-test scripts found under {SCRIPT_DIR}/")
+            format!("no service-harness scripts found under {SCRIPT_DIR}/")
         );
         assert_eq!(
             format_empty_suite(5, 5, 0, Some("nope")),
@@ -1087,18 +1067,6 @@ mod tests {
     fn suite_iter_line_includes_cycle_in_soak() {
         let line = format_suite_iter_line(7, 50, 2, 11, "t1/journal", &pass(412));
         assert_eq!(line, "[cycle 7/50][2/11] PASS t1/journal in 412ms");
-    }
-
-    #[test]
-    fn suite_running_line_single_vs_soak() {
-        assert_eq!(
-            format_suite_running_line(1, 1, 2, 7, "t1/journal"),
-            "[2/7] running t1/journal"
-        );
-        assert_eq!(
-            format_suite_running_line(7, 50, 2, 11, "t1/journal"),
-            "[cycle 7/50][2/11] running t1/journal"
-        );
     }
 
     #[test]

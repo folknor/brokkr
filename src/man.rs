@@ -142,7 +142,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "service",
-        summary: "service-test, service-suite, service-list: lua VM, frontmatter",
+        summary: "the service command: lua VM, frontmatter, cohort runs",
         content: include_str!("../docs/commands/service.md"),
         visibility: Visibility::Only(&[Project::Ratatoskr]),
     },

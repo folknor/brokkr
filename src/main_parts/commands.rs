@@ -794,9 +794,9 @@ fn cmd_lock() -> Result<(), DevError> {
         output::lock_msg(&format!("{prefix}child PID {child_pid} {summary}"));
     }
 
-    // Lines 3b...: one per auxiliary mock-server (service-suite keeps
-    // one mock per distinct fixture alive for the whole suite, so this
-    // can be more than one line; sync / service-test
+    // Lines 3b...: one per auxiliary mock-server (`service --all` keeps
+    // one mock per distinct fixture alive for the whole cohort, so this
+    // can be more than one line; sync / single-script service
     // emit at most one).
     for mock_pid in &info.mock_pids {
         if let Some(summary) = lockfile::process_summary(*mock_pid) {
@@ -918,7 +918,7 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
         // state pointing at a live child with no owner).
         //
         // Tracked children may have been spawned with `process_group(0)`
-        // (unmeasured sync / service-test / service-suite / mock-serve /
+        // (unmeasured sync / service / mock-serve /
         // BenchHarness sidecar) or not (the sync bench's pre-loop spawns,
         // nidhogg tile server). The lockfile doesn't carry the policy,
         // so detect at kill time via `getpgid(pid)` and fan out
