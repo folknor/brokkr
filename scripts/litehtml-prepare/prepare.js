@@ -92,7 +92,15 @@ function fetchUrl(url, redirectCount) {
 
 	return new Promise((resolve, reject) => {
 		const mod = url.startsWith("https") ? https : http;
-		const req = mod.get(url, { timeout: 10000 }, (res) => {
+		// Some image CDNs 403 node's default UA; present a browser-like one.
+		const options = {
+			timeout: 10000,
+			headers: {
+				"User-Agent":
+					"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+			},
+		};
+		const req = mod.get(url, options, (res) => {
 			if (
 				res.statusCode >= 300 &&
 				res.statusCode < 400 &&
@@ -135,15 +143,30 @@ function cacheKey(url) {
 function cachedFetch(url, cacheDir) {
 	const key = cacheKey(url);
 	const cachePath = path.join(cacheDir, key);
+	// Failed fetches are negative-cached: dead CDN URLs used to cost a
+	// 10s timeout on every re-prepare. Delete the .miss file to retry.
+	const missPath = cachePath + ".miss";
 
 	if (fs.existsSync(cachePath)) {
 		return Promise.resolve(fs.readFileSync(cachePath));
 	}
+	if (fs.existsSync(missPath)) {
+		const prior = fs.readFileSync(missPath, "utf-8").trim();
+		return Promise.reject(
+			new Error(`negative-cached failure (${prior}); delete ${missPath} to retry`),
+		);
+	}
 
-	return fetchUrl(url).then((buf) => {
-		fs.writeFileSync(cachePath, buf);
-		return buf;
-	});
+	return fetchUrl(url).then(
+		(buf) => {
+			fs.writeFileSync(cachePath, buf);
+			return buf;
+		},
+		(err) => {
+			fs.writeFileSync(missPath, `${err.message || err}\n`);
+			throw err;
+		},
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +187,22 @@ function grayPngDataUri(width, height) {
 	}
 	const buf = PNG.sync.write(png, { colorType: 2 });
 	return `data:image/png;base64,${buf.toString("base64")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Data-URI decoding
+// ---------------------------------------------------------------------------
+
+// Decode a base64 image data URI to a Buffer; null for anything else
+// (non-image media type, URL-encoded payload).
+function decodeImageDataUri(src) {
+	const m = src.match(/^data:image\/[^;,]+;base64,([\s\S]*)$/);
+	if (!m) return null;
+	try {
+		return Buffer.from(m[1], "base64");
+	} catch {
+		return null;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -337,20 +376,29 @@ function stripImgBackgroundColorHack($) {
 		const css = el.html();
 		if (!css) return;
 		// Remove rules like: img { background-color: #d0d0d0; }
-		// This is a best-effort regex for the specific hack pattern.
+		// Best-effort for the specific hack pattern. The selector is
+		// anchored to start-of-stylesheet or a brace so it can never
+		// match mid-selector: an unanchored /img\s*\{/ matched
+		// `.desktop img {` (leaving an orphaned `.desktop ` prefix that
+		// corrupts the following rule) and `.bigimg {`. Deliberately
+		// narrower than matching after whitespace/comma - whitespace is
+		// indistinguishable from a descendant combinator, and a comma
+		// means a shared selector list whose other selectors the rule
+		// must keep serving.
 		const replaced = css.replace(
-			/img\s*\{[^}]*background-color\s*:[^;}]+;?\s*\}/gi,
-			(match) => {
-				// Only strip if the rule body is just background-color (possibly with other whitespace).
-				const body = match
-					.replace(/^img\s*\{/, "")
+			/(^|[{}]\s*)img\s*\{[^}]*background-color\s*:[^;}]+;?\s*\}/gi,
+			(match, prefix) => {
+				const rule = match.slice(prefix.length);
+				// Only strip the whole rule if its body is just background-color.
+				const body = rule
+					.replace(/^img\s*\{/i, "")
 					.replace(/\}$/, "")
 					.trim();
-				if (/^background-color\s*:[^;]+;?\s*$/.test(body)) {
-					return "";
+				if (/^background-color\s*:[^;]+;?\s*$/i.test(body)) {
+					return prefix;
 				}
 				// If there are other properties, just strip the background-color declaration.
-				return match.replace(/background-color\s*:[^;}]+;?\s*/g, "");
+				return prefix + rule.replace(/background-color\s*:[^;}]+;?\s*/gi, "");
 			},
 		);
 		if (replaced !== css) el.html(replaced);
@@ -360,6 +408,41 @@ function stripImgBackgroundColorHack($) {
 // ---------------------------------------------------------------------------
 // Ahem font injection
 // ---------------------------------------------------------------------------
+
+// Rewrite every author font-family declaration to 'ahem' and remove
+// author @font-face rules. The old approach - a zero-specificity
+// `* { font-family: 'ahem' !important }` - loses to any author
+// `!important` font rule; since prepare already rewrites style text,
+// editing the declarations wins the cascade by not entering it. The
+// `!important` flag is preserved on rewritten declarations so their
+// standing against inline styles doesn't change. Residual gap: `font:`
+// shorthand with !important (rare in email HTML; the universal rule
+// still catches the non-important case).
+function rewriteFontFamilies($) {
+	const rewriteDecls = (css) =>
+		css.replace(/font-family\s*:\s*[^;}]+/gi, (m) =>
+			/!important/i.test(m)
+				? "font-family: 'ahem' !important"
+				: "font-family: 'ahem'",
+		);
+
+	$("style").each(function () {
+		const el = $(this);
+		const css = el.html();
+		if (!css) return;
+		let replaced = css.replace(/@font-face\s*\{[^}]*\}/gi, "");
+		replaced = rewriteDecls(replaced);
+		if (replaced !== css) el.html(replaced);
+	});
+
+	$("[style]").each(function () {
+		const el = $(this);
+		const style = el.attr("style");
+		if (!style) return;
+		const replaced = rewriteDecls(style);
+		if (replaced !== style) el.attr("style", replaced);
+	});
+}
 
 function injectAhemFont($, ahemFontPath) {
 	const fontData = fs.readFileSync(ahemFontPath);
@@ -373,6 +456,10 @@ function injectAhemFont($, ahemFontPath) {
 			: ext === ".woff"
 				? "font/woff"
 				: "font/ttf";
+
+	// Author declarations first (also clears author @font-face), then our
+	// @font-face goes in - order matters, or the rewrite pass would strip it.
+	rewriteFontFamilies($);
 
 	const styleContent = `
 @font-face {
@@ -470,11 +557,36 @@ function prettyPrint($) {
 	return lines.join("\n") + "\n";
 }
 
+function isInlineLevelNode(node) {
+	if (node.type === "text") return true;
+	return node.type === "tag" && INLINE_ELEMENTS.has(node.name);
+}
+
 function serializeChildren(parent, depth, lines, $) {
-	const children = parent.contents();
-	children.each(function () {
-		serializeNode($(this), depth, lines, $);
-	});
+	const contents = parent.contents().toArray();
+	const indent = "  ".repeat(depth);
+	let i = 0;
+	while (i < contents.length) {
+		if (isInlineLevelNode(contents[i])) {
+			// Emit a run of consecutive inline/text siblings verbatim on
+			// one line. Whitespace BETWEEN inline siblings is inside the
+			// run and survives exactly - re-indenting used to turn
+			// `<span>a</span><span>b</span>` into two lines, inventing a
+			// space the renderer has fixture-driven logic about. Only the
+			// run's outer edges are trimmed (block-boundary whitespace,
+			// which collapses anyway).
+			let run = "";
+			while (i < contents.length && isInlineLevelNode(contents[i])) {
+				run += $.html($(contents[i]));
+				i++;
+			}
+			const trimmed = run.trim();
+			if (trimmed) lines.push(indent + trimmed);
+		} else {
+			serializeNode($(contents[i]), depth, lines, $);
+			i++;
+		}
+	}
 }
 
 function serializeNode(node, depth, lines, $) {
@@ -541,8 +653,12 @@ function serializeNode(node, depth, lines, $) {
 		return;
 	}
 
+	// All-inline content stays verbatim on one line regardless of length:
+	// re-serializing long inline runs onto indented lines introduced
+	// whitespace between inline siblings that had none, and dropped
+	// whitespace-only text nodes between elements.
 	const allInline = isAllInlineContent(children);
-	if (allInline && node.text().length < 80) {
+	if (allInline) {
 		lines.push(`${indent}<${tagName}${attrStr}>${node.html()}</${tagName}>`);
 		return;
 	}
@@ -603,38 +719,52 @@ async function cmdPrepare(input, output, opts) {
 		const src = el.attr("src");
 		if (!src) continue;
 
-		// Skip data URIs.
-		if (src.startsWith("data:")) continue;
-
-		// Skip non-HTTP URLs.
-		if (!src.startsWith("http://") && !src.startsWith("https://")) continue;
-
 		let dims = null;
-		let fetched = false;
 
-		// Try to fetch and read natural dimensions.
-		if (cacheDir) {
+		if (src.startsWith("data:")) {
+			// Pre-existing data-URI images get normalized too: a JPEG/GIF
+			// data URI left as-is means Chrome renders the real image while
+			// the pipeline cannot even read its dimensions (it only parses
+			// PNG headers) - a guaranteed divergence no renderer work can
+			// fix. Re-encode all image content to the gray placeholder.
+			// (Idempotent on already-prepared fixtures: gray in, gray out.)
+			const decoded = decodeImageDataUri(src);
+			if (!decoded) continue; // non-image or non-base64 data URI
 			try {
-				const buf = await cachedFetch(src, cacheDir);
-				fetched = true;
-				try {
-					const size = sizeOf(buf);
-					if (size.width && size.height) {
-						dims = { width: size.width, height: size.height };
-					}
-				} catch (e) {
-					warn(`could not read dimensions from ${src}: ${e.message}`);
+				const size = sizeOf(decoded);
+				if (size.width && size.height) {
+					dims = { width: size.width, height: size.height };
 				}
 			} catch (e) {
-				warn(`could not fetch ${src}: ${e.message}`);
+				warn(`could not read dimensions from data URI: ${e.message}`);
 			}
+		} else if (src.startsWith("http://") || src.startsWith("https://")) {
+			// Try to fetch and read natural dimensions.
+			if (cacheDir) {
+				try {
+					const buf = await cachedFetch(src, cacheDir);
+					try {
+						const size = sizeOf(buf);
+						if (size.width && size.height) {
+							dims = { width: size.width, height: size.height };
+						}
+					} catch (e) {
+						warn(`could not read dimensions from ${src}: ${e.message}`);
+					}
+				} catch (e) {
+					warn(`could not fetch ${src}: ${e.message}`);
+				}
+			}
+		} else {
+			// Other schemes (cid:, file:) stay untouched.
+			continue;
 		}
 
 		// Fallback dimension chain.
 		if (!dims) {
 			dims = fallbackDimensions(el, fallbackRatio);
 			if (!dims) {
-				warn(`no dimensions for ${src}, using 200x100`);
+				warn(`no dimensions for ${src.slice(0, 60)}, using 200x100`);
 				dims = { width: 200, height: 100 };
 			}
 		}
@@ -648,9 +778,16 @@ async function cmdPrepare(input, output, opts) {
 		const dataUri = grayPngDataUri(dims.width, dims.height);
 		el.attr("src", dataUri);
 
-		// Set explicit width/height attributes.
-		el.attr("width", String(dims.width));
-		el.attr("height", String(dims.height));
+		// Fill in width/height only when the author provided neither.
+		// The natural size is already carried by the placeholder PNG
+		// itself; overwriting an author's `<img width="300">` with the
+		// fetched 600x400 lays out differently from the real email, and
+		// adding a height next to an author width would defeat the
+		// aspect-ratio scaling the real image gets.
+		if (!el.attr("width") && !el.attr("height")) {
+			el.attr("width", String(dims.width));
+			el.attr("height", String(dims.height));
+		}
 
 		// Remove srcset if present.
 		el.removeAttr("srcset");
@@ -783,7 +920,11 @@ function buildExtractedDoc($, headContent, ancestors, targetHtmlFragments) {
 			const wrapper = out(`<${tagName}${attrStr}></${tagName}>`);
 			parent.append(wrapper);
 
-			// Table context: preserve sibling <td>/<th> in the same <tr> as empty stubs.
+			// Table context: preserve sibling <td>/<th> in the same <tr> as
+			// empty stubs. Known limitation: <colgroup> and the other rows
+			// of the table are NOT preserved, so auto-layout column widths
+			// in a sub-fixture can legitimately differ from the full email
+			// (other rows' content no longer influences the columns).
 			if (tagName === "tr") {
 				const nextAncestor = ancestors[i + 1];
 				ancestorNode.children().each(function () {

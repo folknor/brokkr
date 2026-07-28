@@ -120,11 +120,28 @@ is recorded as one `ERROR` row; it does not abort the remaining snapshots.
 - `prepare <input.html> <output.html>` - normalize raw email HTML into a
   self-contained fixture (replaces images with correctly-sized gray PNGs,
   strips background-image/external CSS, injects Ahem font, pretty-prints).
-  Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`.
+  Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`;
+  failed fetches are negative-cached as `<key>.miss` files (delete to
+  retry) and fetches send a browser-like User-Agent.
+
+  Fidelity rules (the prepared fixture should lay out like the raw email):
+  author `width`/`height` attrs are never overwritten - the fetched
+  natural size only fills in when the author provided neither, since the
+  placeholder PNG itself carries the natural size; pre-existing image
+  data URIs (JPEG/GIF/PNG) are re-encoded to gray placeholders too,
+  idempotently; every author `font-family` declaration is rewritten to
+  `'ahem'` (preserving `!important`) and author `@font-face` rules are
+  removed, rather than fighting the cascade with a zero-specificity
+  universal rule; the pretty-printer keeps runs of inline siblings
+  verbatim on one line regardless of length, so it can't invent or drop
+  whitespace between inline elements. `scripts/litehtml-prepare/smoke.js`
+  asserts these offline (`node smoke.js`).
 - `html-extract <input.html> [--selector S | --from S --to S] <output.html>` -
   extract sub-fixture from prepared HTML. `--selector` for single element,
   `--from`/`--to` for sibling range. Preserves ancestor context and table
-  cell stubs.
+  cell stubs. Known limitation: sibling `<td>` stubs are preserved but
+  `<colgroup>` and other rows are not, so auto-layout column widths in a
+  sub-fixture can legitimately differ from the full email.
 - `outline <input.html> [--depth N] [--full] [--selectors]` - structural
   overview of prepared HTML showing sections, image dimensions, text
   previews, and suggested CSS selectors for extract.
