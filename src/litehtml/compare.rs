@@ -315,21 +315,45 @@ fn is_head_path(path: &str) -> bool {
     path.contains("head[") || path == "html>head"
 }
 
-/// Chrome emits `br` boxes; the pipeline folds line breaks into
-/// rich-text leaves and never will emit them. Without this filter every
-/// `br` lands in the chrome-only bucket and drags the score down for a
-/// divergence that is pure convention. Matches on the dumped `tag` when
-/// present, falling back to the path's leaf segment.
-fn is_br(el: &LayoutElement) -> bool {
-    if el.tag.as_deref() == Some("br") {
-        return true;
+/// The element's tag: the dumped `tag` when present, else derived from
+/// the path's leaf segment (`html>body[0]>span[2]` -> `span`).
+fn leaf_tag(el: &LayoutElement) -> &str {
+    if let Some(tag) = el.tag.as_deref() {
+        return tag;
     }
 
     let leaf = el
         .path
         .rsplit_once('>')
         .map_or(el.path.as_str(), |(_, leaf)| leaf);
-    leaf == "br" || leaf.starts_with("br[")
+    leaf.split_once('[').map_or(leaf, |(tag, _)| tag)
+}
+
+/// Chrome emits `br` boxes; the pipeline folds line breaks into
+/// rich-text leaves and never will emit them. Without this filter every
+/// `br` lands in the chrome-only bucket and drags the score down for a
+/// divergence that is pure convention.
+fn is_br(el: &LayoutElement) -> bool {
+    leaf_tag(el) == "br"
+}
+
+/// CSS-inline tags the pipeline folds into rich-text leaves when they
+/// are plain inline. Mirror of litehtml-rs `is_inline_tag`
+/// (src/style.rs) - keep in sync.
+///
+/// Unlike `br`, this filter applies ONLY to the chrome-only bucket:
+/// the pipeline *does* emit these elements when they are
+/// display:inline-block (MJML nav links, buttons, social tables), and
+/// those matched comparisons catch real bugs, so a path-matched inline
+/// element is always scored.
+fn is_inline_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "span" | "a" | "strong" | "em" | "b" | "i" | "u" | "small" | "big" | "sub" | "sup"
+            | "code" | "kbd" | "samp" | "var" | "cite" | "abbr" | "mark" | "del" | "ins" | "s"
+            | "q" | "dfn" | "ruby" | "rt" | "rp" | "bdi" | "bdo" | "wbr" | "time" | "data"
+            | "output" | "font"
+    )
 }
 
 pub(crate) fn compare_elements(
@@ -379,13 +403,19 @@ fn compare_element_sets(
         if ref_el.h.is_some_and(|h| h.abs() < ZERO_HEIGHT) {
             continue;
         }
-        scored += 1;
 
-        // Chrome-only elements count against the denominator but cannot
-        // be offenders - there is no pipeline geometry to delta.
         let Some(pipe_el) = pipeline_by_path.get(path) else {
+            // Chrome-only. A plain inline element here was folded into a
+            // rich-text leaf - a representation choice, not a defect -
+            // so it leaves the denominator. Anything else missing counts
+            // against the score (but cannot be an offender: there is no
+            // pipeline geometry to delta).
+            if !is_inline_tag(leaf_tag(ref_el)) {
+                scored += 1;
+            }
             continue;
         };
+        scored += 1;
 
         let d = geometry_deltas(ref_el, pipe_el, &reference_by_path, &pipeline_by_path);
         if d.within_tolerance() {
@@ -695,6 +725,54 @@ mod tests {
         assert_eq!(r.offenders[0].dw, 70.0);
         assert_eq!(r.offenders[1].path, "html>body[0]>a[0]");
         assert_eq!(r.offenders[1].dy, 4.0);
+    }
+
+    #[test]
+    fn chrome_only_inline_leaves_denominator() {
+        // Chrome emits the folded span/a; the pipeline folded them into
+        // a rich-text leaf. Representation choice, not a defect.
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>p[0]>span[0]", 10.0, 10.0, 80.0, 16.0),
+            el("html>body[0]>p[0]>a[0]", 90.0, 10.0, 40.0, 16.0),
+        ];
+        let pipeline = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]", 0.0, 0.0, 800.0, 100.0),
+        ];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.total_elements, 2);
+        assert_eq!(r.match_pct, 100.0);
+    }
+
+    #[test]
+    fn matched_inline_still_scored() {
+        // display:inline-block spans ARE emitted by the pipeline; when
+        // both sides have one, the comparison must run - these catch
+        // real bugs.
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>span[0]", 10.0, 10.0, 80.0, 16.0),
+        ];
+        let pipeline = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>span[0]", 10.0, 10.0, 30.0, 16.0),
+        ];
+        let r = compare_element_sets(&pipeline, &reference);
+        assert_eq!(r.total_elements, 2);
+        assert_eq!(r.offenders.len(), 1);
+        assert_eq!(r.offenders[0].path, "html>body[0]>span[0]");
+        assert_eq!(r.offenders[0].dw, -50.0);
+    }
+
+    #[test]
+    fn leaf_tag_falls_back_to_path() {
+        assert_eq!(leaf_tag(&el("html>body[0]>span[2]", 0.0, 0.0, 0.0, 0.0)), "span");
+        assert_eq!(leaf_tag(&el("html", 0.0, 0.0, 0.0, 0.0)), "html");
+        let mut tagged = el("html>body[0]>span[2]", 0.0, 0.0, 0.0, 0.0);
+        tagged.tag = Some("a".into());
+        assert_eq!(leaf_tag(&tagged), "a");
     }
 
     #[test]

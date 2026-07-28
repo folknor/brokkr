@@ -29,7 +29,9 @@ For project-specific fixture conventions and the prepare pipeline see
   viewport, timestamp) so a silent Chrome update is attributable rather than
   looking like drift across all fixtures at once. The screenshot is
   `fullPage` at the measurement viewport - the viewport is never resized
-  between the JSON dump and the PNG.
+  between the JSON dump and the PNG. A capture failing with puppeteer's
+  "Could not find Chrome" gets a hint to run `npx puppeteer browsers
+  install chrome` - a puppeteer bump changes the pinned browser build.
 - `list` - show configured fixtures with tags, expected outcome, and approval
   state.
 - `approve <ID>... | --all` - record current divergence as accepted baseline.
@@ -63,15 +65,25 @@ not positional). Scoring is designed to be honest rather than flattering:
   tolerance) are always absolute.
 - **`br` is filtered from both sides.** Chrome emits `br` boxes; the
   pipeline folds line breaks into rich-text leaves and never will.
+- **Chrome-only inline elements leave the denominator.** The pipeline
+  folds plain CSS-inline tags (`span`/`a`/`b`/... - mirror of litehtml-rs
+  `is_inline_tag` in `src/style.rs`, keep in sync) into rich-text leaves,
+  so a chrome-only inline element is a representation choice, not a
+  defect. Deliberately chrome-only-side only, unlike `br`: the pipeline
+  *does* emit inline elements when they are display:inline-block (MJML
+  nav links, buttons, social tables), and those path-matched comparisons
+  catch real bugs, so they are always scored.
 - **Zero-height reference elements are skipped.** Empty `tbody`/`tr`
   differ only in an invisible convention (Chrome: container width at h=0;
   pipeline: 0x0). They still anchor their children's frames.
 
 Matched-but-out-of-tolerance elements are **offenders**: the full list
 lands in `fixtures/<id>/offenders.txt` (worst first, deltas are
-pipeline-minus-reference; stale files are removed on clean runs), and the
-top 10 print under the fixture's row when its status is `FAIL_THRESHOLD`
-or `REGRESSION`.
+pipeline-minus-reference), and the top 10 print under the fixture's row
+when its status is `FAIL_THRESHOLD` or `REGRESSION`. The file is removed
+only when a run finds that fixture completely clean - a PASS whose score
+cleared the threshold can still keep a file listing its out-of-tolerance
+stragglers.
 
 The consumer repo is expected to gitignore `fixtures/*/offenders.txt`
 (litehtml-rs does, d5c9b82) alongside the other run artifacts - it is

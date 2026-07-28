@@ -644,6 +644,14 @@ fn capture_fixture(
 
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
+        // Puppeteer pins a browser build per version; a puppeteer bump
+        // quietly invalidates the previously installed Chrome.
+        if stderr.contains("Could not find Chrome") {
+            output::litehtml_msg(
+                "  puppeteer's pinned Chrome is not installed (a puppeteer bump changes the pinned build)",
+            );
+            output::litehtml_msg("  install it with: npx puppeteer browsers install chrome");
+        }
         return Err(DevError::Verify(format!(
             "Chrome capture failed for {}: {stderr}",
             fixture.id,
