@@ -74,20 +74,36 @@ means the same thing in both families. `--filter` is a substring match
 against the discovered name; scripts whose frontmatter says
 `expected: ignored` are skipped unless `--include-ignored` is passed.
 
+**The harness is built once, before the loop** - the cohort varies the
+script, never the binary - and each script then reports exactly one
+line:
+
+```
+[ratatoskr] account-verify-imap-success: PASS in 0.4s (mock 0.1s, harness 0.4s, shutdown 0.0s)
+[ratatoskr] bifrost-consumer-lag-recovery: FAIL - config: sync: script ... has no `-- fixture: <NAME>` frontmatter line. ...
+```
+
+A failure that got far enough to allocate an artefact dir adds one
+`artefacts preserved at ...` line; the `brokkr clean` hint prints once
+at the end, not per failure. A 160-script sweep is therefore ~160 lines
+plus a header and a `sync cohort: N/M passed` summary - it used to be
+six lines and a no-op cargo invocation per script.
+
 **Keep-going is the default here**, unlike `service-suite`, which stops
 on the first failure. The reason is that each sync script owns its own
 `run-N/` artefact dir, so a later failure can't overwrite an earlier
 one's triage material - there is nothing to protect by stopping, and a
 cohort is most useful when it reports the whole blast radius. Exits
-non-zero if any script failed, listing each.
+non-zero if any script failed; the exit error names the failures
+without repeating the messages already printed inline.
 
-The cohort holds the global lock for the whole sweep, not per-script:
-each `run_sync_smoke` still acquires internally, but the lockfile is
-re-entrant within the process, so those acquires join the sweep's hold.
-Another brokkr invocation therefore can't interleave a build or bench
-between two scripts, and the sweep can't stall mid-way waiting behind
-one. (`--gate all` does the same, where it is load-bearing for baseline
-comparability - see `docs/commands/ratatoskr-gate.md`.)
+The cohort holds the global lock for the whole sweep, not per-script,
+so another brokkr invocation can't interleave a build or bench between
+two scripts and the sweep can't stall mid-way waiting behind one. With
+the build hoisted out of the loop this is the path's only acquire; the
+lockfile's in-process re-entrancy is exercised by `--gate all`, whose
+swept members still acquire internally (see
+`docs/commands/ratatoskr-gate.md`).
 
 `--all` conflicts with SCRIPT and with `--bench`: measuring a cohort
 would interleave N iterations of one script with the sæhrimnir spawn of

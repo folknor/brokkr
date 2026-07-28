@@ -108,7 +108,7 @@ Everything fails open: an undetectable or malformed `brokkr.toml` leaves the ful
 - `src/sidecar.rs` - Monitoring sidecar: `/proc` sampling, FIFO marker protocol. Always-on for measured modes
 - `src/output.rs` - Prefixed console output (`[build]`, `[bench]`, `[verify]`, `[hotpath]`, `[run]`, `[sidecar]`, `[error]`), subprocess runners
 - `src/error.rs` - `DevError` enum (Io, Config, Build, Preflight, Subprocess, Lock, Database, Verify)
-- `src/lockfile.rs` - `LockGuard` (via `OwnedFd`); `acquire` is re-entrant within the process (nested acquires share one flock hold, released when the last guard drops) - what lets the ratatoskr cohorts hold the lock across a whole sweep without self-deadlocking on a second flock fd
+- `src/lockfile.rs` - `LockGuard` (via `OwnedFd`); `acquire` is re-entrant within the process (nested acquires share one flock hold, released when the last guard drops) - what lets ratatoskr's `--gate all` cohort hold the lock across a whole sweep without self-deadlocking on a second flock fd (`sync --all` holds sweep-wide too but no longer nests - it builds once and runs scripts against the prebuilt harness)
 - `src/oom.rs` - OOM protection (`protect_child` marks child as the kernel OOM killer's preferred target)
 - `src/preflight.rs` - Pre-benchmark system checks
 - `src/tools.rs` - External tool discovery and auto-download (osmium, osmosis, tilemaker, shortbread config)

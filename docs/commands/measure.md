@@ -44,9 +44,11 @@ timing contract `--bench` needs. The build-config seam both paths share is
 - Exclusive lockfile (prevents parallel bench/verify/hotpath runs). The
   lock is re-entrant *within* one brokkr process: a command that
   internally invokes another locked command shares the same hold, and
-  the flock releases when the last guard drops. The ratatoskr cohorts
-  (`sync --all`, `sync --gate all`) rely on this to hold the lock across
-  their whole sweep. Cross-process exclusion is unchanged.
+  the flock releases when the last guard drops. Ratatoskr's `sync
+  --gate all` relies on this to hold the lock across its whole sweep
+  (each swept bench still acquires internally); `sync --all` holds it
+  sweep-wide too, with a single acquire. Cross-process exclusion is
+  unchanged.
 - SQLite result storage with git commit, hostname, env snapshot
 - `run_internal(config, closure)` - in-process timing (N runs, min/avg/max).
   Does **not** store sidecar data (no store step).

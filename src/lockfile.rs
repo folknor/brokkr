@@ -199,12 +199,14 @@ fn lock_path() -> Result<PathBuf, DevError> {
 /// **Re-entrant within the process.** If this process already holds the lock,
 /// the call returns immediately with another guard on the same hold, and the
 /// flock is released only when the last guard drops. This exists for the
-/// cohort commands (`sync --all`, `sync --gate all`): they acquire once
-/// around the whole sweep so measurement stays serialized end-to-end, while
-/// each swept member (`run_sync_smoke`, `BenchHarness::new`) still contains
-/// its own acquire for the single-invocation path. Without re-entrancy the
-/// inner acquire would open a second fd on the same file and `flock(2)` would
-/// block it on the lock this very process holds - a self-deadlock.
+/// gate cohort (`sync --gate all`): it acquires once around the whole sweep
+/// so measurement stays serialized end-to-end, while each swept member
+/// (`BenchHarness::new`) still contains its own acquire for the
+/// single-invocation path. Without re-entrancy the inner acquire would open
+/// a second fd on the same file and `flock(2)` would block it on the lock
+/// this very process holds - a self-deadlock. (`sync --all` also holds the
+/// lock sweep-wide, but no longer nests: its per-script runs share the
+/// sweep's prebuilt harness and its single acquire.)
 ///
 /// The trade-off, deliberately accepted: two *threads* of one process
 /// first-acquiring concurrently used to serialize on the flock and now may

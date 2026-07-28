@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::build::CargoProfile;
-use crate::config::{DevConfig, GateConfig, RatatoskrConfig};
+use crate::config::{DevConfig, GateConfig, HarnessConfig, RatatoskrConfig};
 use crate::context;
 use crate::db::gate::{GateDb, GateRow};
 use crate::db::{KvPair, KvValue};
@@ -124,6 +124,13 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 /// default, and deliberately so - each sync script owns its own artefact
 /// dir, so a later failure never overwrites an earlier one's triage
 /// material.
+///
+/// The harness is built once, before the loop - the cohort varies the
+/// script, never the binary - and each script then reports exactly one
+/// line. The alternative (loop over [`run_sync_smoke`]) meant one no-op
+/// cargo invocation and four lines of repeated build boilerplate per
+/// script; a 160-script sweep is read by scanning verdicts, so nothing
+/// invariant belongs in the loop.
 pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     let dir = sync_script_dir(req.project_root, req.dev_config.ratatoskr.as_ref());
     let scripts = discover::discover_at(&dir)?;
@@ -152,54 +159,88 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
         )));
     }
 
+    let (cfg, harness_cfg, mock_binary, fixtures_dir) =
+        validate_sync_config(req.project_root, req.dev_config)?;
+
     output::ratatoskr_msg(&format!("sync cohort: {} script(s)", selected.len()));
 
-    // Hold the global lock for the whole sweep. Each `run_sync_smoke` call
-    // below still acquires (it is the single-script entry point too), but
-    // `lockfile::acquire` is re-entrant within the process, so those inner
-    // acquires join this hold instead of opening a second flock fd - which
-    // would self-deadlock, since flock treats fds independently even in one
-    // process. Without this outer hold the lock dropped between scripts,
-    // letting another brokkr slot a build or bench into the gap (and letting
-    // the cohort stall mid-sweep waiting behind it).
+    // Hold the global lock for the whole sweep, so another brokkr can't
+    // interleave a build or bench between two scripts and the sweep can't
+    // stall mid-way waiting behind one. With the build hoisted out of the
+    // loop this is the path's only acquire; the re-entrant nesting story
+    // lives with `--gate all` (see `lockfile::acquire`).
     let project_root_str = req.project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "ratatoskr",
         command: "sync",
         project_root: &project_root_str,
     })?;
+    // One cooperative-SIGTERM guard for the whole sweep: the build and
+    // every script run poll the same shutdown flag. See run_sync_smoke
+    // for the mechanism.
+    let _sigterm = crate::shutdown::SigtermGuard::install();
 
-    let mut failures: Vec<(&str, String)> = Vec::new();
+    let debug = req
+        .profile_override
+        .unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
+    let built = build::build_for_harness(
+        req.project_root,
+        harness_cfg,
+        debug,
+        Some(&|pid| _lock.set_child_pid(pid)),
+        Some(&|| _lock.clear_child_pid()),
+        true, // isolate_pg: SigtermGuard above bridges terminal signals
+    )?;
+
+    let runner = SyncRunner {
+        project_root: req.project_root,
+        cfg,
+        built: &built,
+        mock_binary: &mock_binary,
+        keep_artefacts: req.keep_artefacts,
+    };
+
+    let mut failures: Vec<&str> = Vec::new();
+    let mut any_preserved = false;
     for script in &selected {
-        output::ratatoskr_msg(&format!("── {} ──", script.name));
-        let script_path = script.path.display().to_string();
-        let one = SyncSmokeRequest {
-            project_root: req.project_root,
-            dev_config: req.dev_config,
-            script: &script_path,
-            keep_artefacts: req.keep_artefacts,
-            profile_override: req.profile_override,
+        let outcome = match resolve_info(script, &fixtures_dir) {
+            Ok(resolved) => runner.run_resolved(&resolved, &_lock),
+            Err(e) => {
+                output::ratatoskr_msg(&format!("{}: FAIL - {e}", script.name));
+                failures.push(script.name.as_str());
+                continue;
+            }
         };
-        if let Err(e) = run_sync_smoke(&one) {
-            output::ratatoskr_msg(&format!("{}: FAIL - {e}", script.name));
-            failures.push((script.name.as_str(), e.to_string()));
+        match outcome.result {
+            Ok(()) => {
+                output::ratatoskr_msg(&format!("{}: PASS{}", script.name, outcome.summary));
+            }
+            Err(e) => {
+                output::ratatoskr_msg(&format!("{}: FAIL{} - {e}", script.name, outcome.summary));
+                if let Some(path) = outcome.preserved {
+                    output::ratatoskr_msg(&format!("  artefacts preserved at {}", path.display()));
+                    any_preserved = true;
+                }
+                failures.push(script.name.as_str());
+            }
         }
     }
 
+    if any_preserved {
+        artefacts::emit_clean_hint();
+    }
     let passed = selected.len() - failures.len();
     output::ratatoskr_msg(&format!("sync cohort: {passed}/{} passed", selected.len()));
     if failures.is_empty() {
         return Ok(());
     }
-    let detail = failures
-        .iter()
-        .map(|(name, msg)| format!("  {name}: {msg}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Each failure already printed its full error inline; the exit error
+    // names them without repeating the messages.
     Err(DevError::Config(format!(
-        "sync --all: {} of {} script(s) failed:\n{detail}",
+        "sync --all: {} of {} script(s) failed: {}",
         failures.len(),
-        selected.len()
+        selected.len(),
+        failures.join(", "),
     )))
 }
 
@@ -235,78 +276,21 @@ pub struct SyncSmokeRequest<'a> {
 ///    `fixtures_dir` are all required. Endpoint env-var names are
 ///    optional - protocols without a configured spelling just don't
 ///    get an env var.
-/// 2. Parse the script's frontmatter; require a `fixture: <NAME>`.
+/// 2. Parse the script's frontmatter; require a `fixture: <NAME>` and
+///    resolve it - both before anything is built, so a bad script fails
+///    fast.
 /// 3. Acquire the global lockfile.
 /// 4. Build the harness binary per `[ratatoskr.harness]`.
-/// 5. Allocate `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/`
-///    and `mock/` subdirs.
-/// 6. Spawn sæhrimnir with `--fixture <PATH>` + `--readiness-file
-///    mock/readiness`; pipe its stderr to `mock/stderr.log` (its
-///    primary log channel per plan 2).
-/// 7. Wait for the readiness sentinel, parse endpoints.
-/// 8. Spawn the harness binary with `BROKKR_HARNESS_ARTEFACT_DIR` ->
-///    `harness/`, `BROKKR_TEST_BIN_DIR` -> the build's bin dir, plus
-///    one `RATATOSKR_TEST_<PROTO>_ENDPOINT=...` per configured spelling.
-///    Wait for exit (no ceiling for v0 - frontmatter ceiling can land
-///    later if needed; matches the "smoke, not bench" framing).
-/// 9. Tear down sæhrimnir: SIGTERM, [`SHUTDOWN_BUDGET`], SIGKILL.
-/// 10. PASS/FAIL on the harness binary's exit code; sæhrimnir's outcome
-///     is logged but not gating (a script may legitimately tear it down
-///     early in scenarios).
-#[allow(clippy::too_many_lines)] // linear orchestration: validate, build, allocate artefacts, run, finalize
+/// 5. Hand off to [`SyncRunner::run_resolved`]: allocate
+///    `.brokkr/ratatoskr/sync/<test>/run-N/`, spawn sæhrimnir and the
+///    harness binary, tear down, finalize the artefact dir.
+/// 6. PASS/FAIL on the harness binary's exit code; sæhrimnir's outcome
+///    is logged but not gating (a script may legitimately tear it down
+///    early in scenarios).
 pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
-    let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr] section in brokkr.toml. \
-             Required to locate sæhrimnir and the harness binary."
-                .into(),
-        )
-    })?;
-    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr.harness] section in brokkr.toml. \
-             Declare it with `package = \"<crate>\"` (and optional \
-             `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
-    let mock_binary = require_path(&cfg.mock_server_binary, req.project_root, "mock_server_binary")?;
-    let fixtures_dir = require_path(&cfg.fixtures_dir, req.project_root, "fixtures_dir")?;
-    if !mock_binary.exists() {
-        return Err(DevError::Config(format!(
-            "sync: sæhrimnir binary not found at {}. Build it first.",
-            mock_binary.display()
-        )));
-    }
-
-    let script_path = Path::new(req.script);
-    if !script_path.is_file() {
-        return Err(DevError::Config(format!(
-            "sync: script not found or not a file: {}",
-            req.script
-        )));
-    }
-    let script_abs = script_path.canonicalize().map_err(|e| {
-        DevError::Config(format!("sync: canonicalize script: {e}"))
-    })?;
-    let test_id = script_abs
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| {
-            DevError::Config(format!("sync: script has no stem: {}", req.script))
-        })?
-        .to_owned();
-
-    let parsed = discover::parse_script(&script_abs, &test_id).map_err(|e| {
-        DevError::Config(format!("sync: parse script: {e}"))
-    })?;
-    let fixture_name = parsed.fixture.as_ref().ok_or_else(|| {
-        DevError::Config(format!(
-            "sync: script {test_id} has no `-- fixture: <NAME>` frontmatter line. \
-             Required so brokkr knows which sæhrimnir fixture to load."
-        ))
-    })?;
-    let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
+    let (cfg, harness_cfg, mock_binary, fixtures_dir) =
+        validate_sync_config(req.project_root, req.dev_config)?;
+    let resolved = resolve_single(req.script, &fixtures_dir)?;
 
     let project_root_str = req.project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
@@ -331,49 +315,186 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         Some(&|| _lock.clear_child_pid()),
         true, // isolate_pg: SigtermGuard above bridges terminal signals
     )?;
+
+    let runner = SyncRunner {
+        project_root: req.project_root,
+        cfg,
+        built: &built,
+        mock_binary: &mock_binary,
+        keep_artefacts: req.keep_artefacts,
+    };
+
     output::ratatoskr_msg(&format!(
-        "harness build ok (features={}, binary={})",
-        built.features_label,
-        built.binary.display(),
+        "running {} (fixture: {})",
+        resolved.test_id, resolved.fixture_name
     ));
 
-    let artefact_parent = req.project_root.join(SYNC_ARTEFACT_PARENT);
-    let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, req.keep_artefacts)?;
-    let harness_dir = artefacts.path().join("harness");
-    let mock_dir = artefacts.path().join("mock");
-    fs::create_dir_all(&harness_dir).map_err(DevError::Io)?;
-    fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
-
-    output::ratatoskr_msg(&format!("running {test_id} (fixture: {fixture_name})"));
-
-    let mut timings = PhaseTimings::default();
-    let outcome = orchestrate(
-        req,
-        cfg,
-        &built,
-        &mock_binary,
-        &fixture_path,
-        &script_abs,
-        &harness_dir,
-        &mock_dir,
-        &mut timings,
-        &_lock,
-    );
-
-    let summary = timings.summary();
-    match outcome {
+    let outcome = runner.run_resolved(&resolved, &_lock);
+    match outcome.result {
         Ok(()) => {
-            output::ratatoskr_msg(&format!("PASS{summary}"));
-            artefacts.finalize_success()?;
+            output::ratatoskr_msg(&format!("PASS{}", outcome.summary));
             Ok(())
         }
         Err(e) => {
-            output::ratatoskr_msg(&format!("FAIL{summary}: {e}"));
-            let path = artefacts.path().to_path_buf();
-            artefacts.finalize_failure();
-            output::ratatoskr_msg(&format!("artefacts preserved at {}", path.display()));
-            artefacts::emit_clean_hint();
+            output::ratatoskr_msg(&format!("FAIL{}: {e}", outcome.summary));
+            if let Some(path) = outcome.preserved {
+                output::ratatoskr_msg(&format!("artefacts preserved at {}", path.display()));
+                artefacts::emit_clean_hint();
+            }
             Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// shared plumbing: config validation, script resolution, the per-script run
+// ---------------------------------------------------------------------------
+
+/// Validate the `[ratatoskr]` surface every sync run needs and resolve
+/// sæhrimnir's paths. Shared by the single-script and cohort shapes so a
+/// cohort fails up front instead of once per script.
+fn validate_sync_config<'a>(
+    project_root: &Path,
+    dev_config: &'a DevConfig,
+) -> Result<(&'a RatatoskrConfig, &'a HarnessConfig, PathBuf, PathBuf), DevError> {
+    let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
+        DevError::Config(
+            "sync: no [ratatoskr] section in brokkr.toml. \
+             Required to locate sæhrimnir and the harness binary."
+                .into(),
+        )
+    })?;
+    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
+        DevError::Config(
+            "sync: no [ratatoskr.harness] section in brokkr.toml. \
+             Declare it with `package = \"<crate>\"` (and optional \
+             `binary`, `features`, `debug`)."
+                .into(),
+        )
+    })?;
+    let mock_binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")?;
+    let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
+    if !mock_binary.exists() {
+        return Err(DevError::Config(format!(
+            "sync: sæhrimnir binary not found at {}. Build it first.",
+            mock_binary.display()
+        )));
+    }
+    Ok((cfg, harness_cfg, mock_binary, fixtures_dir))
+}
+
+/// A sync script resolved to everything a run needs: canonical path,
+/// artefact key, fixture, ceiling. Produced before the lock and build in
+/// the single shape (fail fast) and per script inside the cohort loop.
+struct ResolvedScript {
+    script_abs: PathBuf,
+    /// Artefact-dir key - the script's file stem.
+    test_id: String,
+    fixture_name: String,
+    fixture_path: PathBuf,
+    ceiling: Duration,
+}
+
+/// Resolve a parsed script: canonicalize the path, derive the artefact
+/// key from the stem, require the `fixture:` frontmatter and resolve it.
+fn resolve_info(info: &ScriptInfo, fixtures_dir: &Path) -> Result<ResolvedScript, DevError> {
+    let script_abs = info
+        .path
+        .canonicalize()
+        .map_err(|e| DevError::Config(format!("sync: canonicalize script: {e}")))?;
+    let test_id = script_abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| {
+            DevError::Config(format!("sync: script has no stem: {}", script_abs.display()))
+        })?
+        .to_owned();
+    let fixture_name = info.fixture.clone().ok_or_else(|| {
+        DevError::Config(format!(
+            "sync: script {} has no `-- fixture: <NAME>` frontmatter line. \
+             Required so brokkr knows which sæhrimnir fixture to load.",
+            info.name
+        ))
+    })?;
+    let fixture_path = resolve_fixture(fixtures_dir, &fixture_name)?;
+    Ok(ResolvedScript {
+        script_abs,
+        test_id,
+        fixture_name,
+        fixture_path,
+        ceiling: info.ceiling,
+    })
+}
+
+/// Resolve a script named on the command line: existence check, parse
+/// frontmatter, then the shared [`resolve_info`].
+fn resolve_single(script: &str, fixtures_dir: &Path) -> Result<ResolvedScript, DevError> {
+    let script_path = Path::new(script);
+    if !script_path.is_file() {
+        return Err(DevError::Config(format!(
+            "sync: script not found or not a file: {script}"
+        )));
+    }
+    let stem = script_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| DevError::Config(format!("sync: script has no stem: {script}")))?;
+    let parsed = discover::parse_script(script_path, stem)
+        .map_err(|e| DevError::Config(format!("sync: parse script: {e}")))?;
+    resolve_info(&parsed, fixtures_dir)
+}
+
+/// Everything a per-script run needs that is invariant across a cohort:
+/// validated config, resolved sæhrimnir binary, and the built harness.
+struct SyncRunner<'a> {
+    project_root: &'a Path,
+    cfg: &'a RatatoskrConfig,
+    built: &'a HarnessBuild,
+    mock_binary: &'a Path,
+    keep_artefacts: bool,
+}
+
+/// Outcome of one script run. The caller owns the PASS/FAIL line - the
+/// single and cohort shapes format it differently - so the pieces travel
+/// separately: the phase-summary clause, the preserved artefact dir when
+/// a failed run left one, and the result itself.
+struct ScriptOutcome {
+    summary: String,
+    preserved: Option<PathBuf>,
+    result: Result<(), DevError>,
+}
+
+impl SyncRunner<'_> {
+    /// Run one resolved script against the prebuilt harness: allocate the
+    /// artefact dir, orchestrate the two children, finalize. Prints no
+    /// verdict - that is the caller's line - and never short-circuits the
+    /// artefact-dir lifecycle: an early spawn error still finalizes as a
+    /// failure with the dir preserved.
+    fn run_resolved(&self, resolved: &ResolvedScript, lock: &lockfile::LockGuard) -> ScriptOutcome {
+        let mut timings = PhaseTimings::default();
+        let mut preserved = None;
+        let result = (|| -> Result<(), DevError> {
+            let artefact_parent = self.project_root.join(SYNC_ARTEFACT_PARENT);
+            let artefacts =
+                ArtefactDir::allocate(&artefact_parent, &resolved.test_id, self.keep_artefacts)?;
+            let harness_dir = artefacts.path().join("harness");
+            let mock_dir = artefacts.path().join("mock");
+            fs::create_dir_all(&harness_dir).map_err(DevError::Io)?;
+            fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
+
+            match self.orchestrate(resolved, &harness_dir, &mock_dir, &mut timings, lock) {
+                Ok(()) => artefacts.finalize_success(),
+                Err(e) => {
+                    preserved = Some(artefacts.path().to_path_buf());
+                    artefacts.finalize_failure();
+                    Err(e)
+                }
+            }
+        })();
+        ScriptOutcome {
+            summary: timings.summary(),
+            preserved,
+            result,
         }
     }
 }
@@ -420,117 +541,110 @@ fn format_secs(d: Duration) -> String {
     format!("{:.1}s", d.as_secs_f64())
 }
 
-/// The two-child orchestration body. Pulled into its own function so
-/// the artefact-dir finalize calls are unconditional - even if this
-/// returns early on a spawn error, [`run_sync_smoke`] still records
-/// PASS/FAIL via the artefact-dir lifecycle.
-#[allow(clippy::too_many_arguments)]
-fn orchestrate(
-    req: &SyncSmokeRequest<'_>,
-    cfg: &RatatoskrConfig,
-    built: &HarnessBuild,
-    mock_binary: &Path,
-    fixture_path: &Path,
-    script_abs: &Path,
-    harness_dir: &Path,
-    mock_dir: &Path,
-    timings: &mut PhaseTimings,
-    lock: &lockfile::LockGuard,
-) -> Result<(), DevError> {
-    // Publish the mock PID from INSIDE spawn_observed - before the
-    // readiness wait - so a `brokkr kill --hard` landing during
-    // sæhrimnir startup finds the mock and SIGKILLs it instead of
-    // orphaning it.
-    let mock = MockServer::spawn_observed(
-        mock_binary,
-        fixture_path,
-        mock_dir,
-        Some(&|pid| lock.add_mock_pid(pid)),
-        Some(&|pid| lock.remove_mock_pid(pid)),
-        true, // isolate_pg: this path's outer SigtermGuard covers it
-    )?;
-    // Don't seed `child_pid` with the mock's PID - the captured runner's
-    // `on_spawn` callback will publish the harness PID seconds from now,
-    // and a transient `child_pid == mock_pid` window means a `--hard`
-    // landing in that gap would SIGKILL the mock twice (once via
-    // `mock_pid`, once via `child_pid`) and the harness not at all.
-    timings.mock_ready = Some(mock.ready_elapsed());
-    let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
+impl SyncRunner<'_> {
+    /// The two-child orchestration body. Separate from
+    /// [`SyncRunner::run_resolved`] so the artefact-dir finalize calls
+    /// are unconditional - even if this returns early on a spawn error,
+    /// the caller still records PASS/FAIL via the artefact-dir lifecycle.
+    fn orchestrate(
+        &self,
+        resolved: &ResolvedScript,
+        harness_dir: &Path,
+        mock_dir: &Path,
+        timings: &mut PhaseTimings,
+        lock: &lockfile::LockGuard,
+    ) -> Result<(), DevError> {
+        // Publish the mock PID from INSIDE spawn_observed - before the
+        // readiness wait - so a `brokkr kill --hard` landing during
+        // sæhrimnir startup finds the mock and SIGKILLs it instead of
+        // orphaning it.
+        let mock = MockServer::spawn_observed(
+            self.mock_binary,
+            &resolved.fixture_path,
+            mock_dir,
+            Some(&|pid| lock.add_mock_pid(pid)),
+            Some(&|pid| lock.remove_mock_pid(pid)),
+            true, // isolate_pg: the caller's SigtermGuard covers it
+        )?;
+        // Don't seed `child_pid` with the mock's PID - the captured runner's
+        // `on_spawn` callback will publish the harness PID seconds from now,
+        // and a transient `child_pid == mock_pid` window means a `--hard`
+        // landing in that gap would SIGKILL the mock twice (once via
+        // `mock_pid`, once via `child_pid`) and the harness not at all.
+        timings.mock_ready = Some(mock.ready_elapsed());
+        let endpoint_envs = endpoint_env_pairs(self.cfg, mock.endpoints());
 
-    let bin_dir_str = built.bin_dir.display().to_string();
-    let harness_dir_str = harness_dir.display().to_string();
-    let script_str = script_abs.display().to_string();
+        let bin_dir_str = self.built.bin_dir.display().to_string();
+        let harness_dir_str = harness_dir.display().to_string();
+        let script_str = resolved.script_abs.display().to_string();
 
-    let mut env_pairs: Vec<(&str, &str)> = vec![
-        ("BROKKR_HARNESS_ARTEFACT_DIR", &harness_dir_str),
-        ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
-    ];
-    for (name, value) in &endpoint_envs {
-        env_pairs.push((name.as_str(), value.as_str()));
+        let mut env_pairs: Vec<(&str, &str)> = vec![
+            ("BROKKR_HARNESS_ARTEFACT_DIR", &harness_dir_str),
+            ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
+        ];
+        for (name, value) in &endpoint_envs {
+            env_pairs.push((name.as_str(), value.as_str()));
+        }
+
+        // The frontmatter ceiling (or discover's generous default) keeps
+        // a hung script from wedging the lockfile forever. This is the
+        // smoke shape, not the bench shape - the ceiling is a watchdog,
+        // not a measurement.
+        let ceiling = resolved.ceiling;
+
+        let binary_str = self.built.binary.display().to_string();
+        let deadline_capture = output::run_captured_with_env_and_deadline(
+            &binary_str,
+            &["--test-harness", &script_str],
+            self.project_root,
+            &env_pairs,
+            ceiling,
+            Some(&|pid| lock.set_child_pid(pid)),
+            true, // isolate_pg: the caller's SigtermGuard active
+        );
+
+        // Capture harness elapsed before tearing down sæhrimnir so a
+        // ceiling-kill or non-zero exit still surfaces a harness duration in
+        // the summary line.
+        if let Ok(dc) = deadline_capture.as_ref() {
+            timings.harness = Some(dc.captured.elapsed);
+        }
+
+        // Whatever the harness did, sæhrimnir gets torn down next.
+        let mock_outcome = mock.shutdown();
+        // this path has at most one mock alive at a time; clear all is the
+        // honest call after that single mock drains.
+        lock.clear_mock_pids();
+        lock.clear_child_pid();
+        timings.mock_shutdown = Some(mock_outcome.shutdown_elapsed);
+
+        let dc = deadline_capture?;
+        fs::write(harness_dir.join("binary-stdout.log"), &dc.captured.stdout)
+            .map_err(DevError::Io)?;
+        fs::write(harness_dir.join("binary-stderr.log"), &dc.captured.stderr)
+            .map_err(DevError::Io)?;
+        write_run_toml(
+            harness_dir,
+            mock_dir,
+            &resolved.script_abs,
+            self.built,
+            &dc,
+            &mock_outcome,
+        )?;
+
+        if dc.killed_on_deadline {
+            return Err(DevError::Config(format!(
+                "harness binary exceeded ceiling {ceiling:?}"
+            )));
+        }
+        if !dc.captured.status.success() {
+            return Err(DevError::Config(format!(
+                "harness binary exited with {:?}",
+                dc.captured.status
+            )));
+        }
+        Ok(())
     }
-
-    // No ceiling for v0 - this is the smoke shape, not the bench
-    // shape. Use the script's frontmatter ceiling if set, else a
-    // generous default so a hung script doesn't wedge the lockfile
-    // forever.
-    let ceiling = parsed_ceiling(script_abs)?;
-
-    let binary_str = built.binary.display().to_string();
-    let deadline_capture = output::run_captured_with_env_and_deadline(
-        &binary_str,
-        &["--test-harness", &script_str],
-        req.project_root,
-        &env_pairs,
-        ceiling,
-        Some(&|pid| lock.set_child_pid(pid)),
-        true, // isolate_pg: outer SigtermGuard active
-    );
-
-    // Capture harness elapsed before tearing down sæhrimnir so a
-    // ceiling-kill or non-zero exit still surfaces a harness duration in
-    // the summary line.
-    if let Ok(dc) = deadline_capture.as_ref() {
-        timings.harness = Some(dc.captured.elapsed);
-    }
-
-    // Whatever the harness did, sæhrimnir gets torn down next.
-    let mock_outcome = mock.shutdown();
-    // this path has at most one mock alive at a time; clear all is the
-    // honest call after that single mock drains.
-    lock.clear_mock_pids();
-    lock.clear_child_pid();
-    timings.mock_shutdown = Some(mock_outcome.shutdown_elapsed);
-
-    let dc = deadline_capture?;
-    fs::write(harness_dir.join("binary-stdout.log"), &dc.captured.stdout).map_err(DevError::Io)?;
-    fs::write(harness_dir.join("binary-stderr.log"), &dc.captured.stderr).map_err(DevError::Io)?;
-    write_run_toml(harness_dir, mock_dir, script_abs, built, &dc, &mock_outcome)?;
-
-    if dc.killed_on_deadline {
-        return Err(DevError::Config(format!(
-            "harness binary exceeded ceiling {ceiling:?}"
-        )));
-    }
-    if !dc.captured.status.success() {
-        return Err(DevError::Config(format!(
-            "harness binary exited with {:?}",
-            dc.captured.status
-        )));
-    }
-    Ok(())
-}
-
-/// Re-parse the script's frontmatter to pick up the ceiling. The full
-/// frontmatter was already parsed earlier; this small re-parse keeps
-/// the orchestrate signature shorter at the cost of one extra read.
-fn parsed_ceiling(script: &Path) -> Result<Duration, DevError> {
-    let stem = script
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("sync-script");
-    let info = discover::parse_script(script, stem)
-        .map_err(|e| DevError::Config(format!("sync: re-parse ceiling: {e}")))?;
-    Ok(info.ceiling)
 }
 
 /// Write top-level `run.toml` with reproducibility metadata. Mock and
