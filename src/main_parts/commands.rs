@@ -820,12 +820,15 @@ fn cmd_lock() -> Result<(), DevError> {
     Ok(())
 }
 
-fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
+/// Forward one cargo subcommand with raw args, inheriting stdio, mapping a
+/// non-zero exit (or signal death) to `DevError::Subprocess`. Backs the thin
+/// `fmt`/`run`/`install` wrappers.
+fn forward_cargo(subcommand: &str, args: &[String]) -> Result<(), DevError> {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command as ProcCommand;
 
     let mut cmd = ProcCommand::new("cargo");
-    cmd.arg("fmt");
+    cmd.arg(subcommand);
     cmd.args(args);
     let status = cmd.status().map_err(|e| DevError::Subprocess {
         program: "cargo".into(),
@@ -835,47 +838,38 @@ fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
     if status.success() {
         return Ok(());
     }
+    let program = format!("cargo {subcommand}");
     match status.code() {
         Some(code) => Err(DevError::Subprocess {
-            program: "cargo fmt".into(),
+            program,
             code: Some(code),
             stderr: String::new(),
         }),
         None => Err(DevError::Subprocess {
-            program: "cargo fmt".into(),
+            program,
             code: None,
             stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
         }),
     }
 }
 
-fn cmd_cargo_run(args: &[String]) -> Result<(), DevError> {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::Command as ProcCommand;
+fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
+    forward_cargo("fmt", args)
+}
 
-    let mut cmd = ProcCommand::new("cargo");
-    cmd.arg("run");
-    cmd.args(args);
-    let status = cmd.status().map_err(|e| DevError::Subprocess {
-        program: "cargo".into(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-    if status.success() {
-        return Ok(());
+fn cmd_cargo_run(args: &[String]) -> Result<(), DevError> {
+    forward_cargo("run", args)
+}
+
+/// Bare `brokkr install` installs the current tree (`--path .`); any
+/// user-supplied args replace that default rather than compose with it, so
+/// the full `cargo install` surface stays reachable.
+fn cmd_cargo_install(args: &[String]) -> Result<(), DevError> {
+    if args.is_empty() {
+        let default = vec!["--path".to_owned(), ".".to_owned()];
+        return forward_cargo("install", &default);
     }
-    match status.code() {
-        Some(code) => Err(DevError::Subprocess {
-            program: "cargo run".into(),
-            code: Some(code),
-            stderr: String::new(),
-        }),
-        None => Err(DevError::Subprocess {
-            program: "cargo run".into(),
-            code: None,
-            stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
-        }),
-    }
+    forward_cargo("install", args)
 }
 
 /// `pmtiles-stats` is restricted to the two projects that produce or serve

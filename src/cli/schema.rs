@@ -249,6 +249,15 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run `cargo install`. Bare form installs the current tree
+    /// (`cargo install --path .`); any arguments are forwarded raw instead.
+    #[command(display_order = 0)]
+    Install {
+        /// Raw arguments forwarded to `cargo install` (replacing the
+        /// default `--path .`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// List rust source files above a line-count threshold (default 800).
     ///
     /// Scans tracked and untracked-not-ignored `.rs` files and prints those

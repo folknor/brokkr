@@ -131,6 +131,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("report", Visibility::Only(&[Project::Litehtml, Project::Sluggrs])),
     ("results", Visibility::Except(MEASURED_DB_ABSENT)),
     ("run", Visibility::Any),
+    ("install", Visibility::Any),
     ("serve", Visibility::Only(&[Project::Nidhogg])),
     ("service", Visibility::Only(&[Project::Ratatoskr])),
     ("sidecar", Visibility::Except(MEASURED_DB_ABSENT)),

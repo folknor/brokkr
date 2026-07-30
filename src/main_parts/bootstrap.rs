@@ -251,6 +251,18 @@ fn run(cli: Cli) -> Result<(), DevError> {
         let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
         return cmd_cargo_run(args);
     }
+    if let Command::Install { args } = &cli.command {
+        // Like `run`, `install` builds the code tree (cwd), so it anchors on
+        // the build root and rides the same lock + toolchain-disable window.
+        // The bare form is the session-workflow closer: `cargo install
+        // --path .` from the project root, without reaching for raw cargo.
+        let (project, project_root) = match project::detect_optional()? {
+            Some(d) => (Some(d.project), d.build_root),
+            None => (None, std::env::current_dir()?),
+        };
+        let _lock = acquire_cmd_lock_opt(project, &project_root, "install")?;
+        return cmd_cargo_install(args);
+    }
     if let Command::Wc { threshold } = &cli.command {
         // `wc` lists source files in the code tree (cwd).
         let project_root = match project::detect_optional()? {
@@ -498,6 +510,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Clippy { .. }
         | Command::Fmt { .. }
         | Command::Run { .. }
+        | Command::Install { .. }
         | Command::Wc { .. }
         | Command::Man { .. }
         | Command::Deps { .. } => unreachable!(),

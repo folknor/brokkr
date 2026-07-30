@@ -151,6 +151,7 @@ For details, read the linked docs.
 - `pmtiles-stats` - **[elivagar, nidhogg]** PMTiles v3 file statistics (zoom distribution, tile sizes, compression).
 - `pmtiles-corpus <sub>` - **[elivagar]** wrap elivagar's corpus namespace (`check`/`bless`/`render-manifest`/`render`/`rings`/`mutate`) - the git-committed output corpus that is the standing baseline. Resolves the archive via the same `[--dataset D] [--variant V] [--commit H | --file P]` resolver as `pmtiles-inspect`; `--corpus` defaults to `corpus/<dataset>` under the build root. `mutate` defaults `-o` to `data/corpus-calibrands/` (cleared by a routine `brokkr clean`). Convenience, never safety: exit codes 0 (pass) / 1 (mismatch) / 2 (refusal) pass through unchanged. See `docs/projects/elivagar.md`.
 - `ocean-build [--dry-run]` - **[elivagar]** build the world-ocean pmtiles artifact, wrapping `elivagar ocean-build`. Derives the invocation from `[<host>.tilegen.default].ocean` (shapefile entries → `--ocean` specs, the `.pmtiles` entry → output path); no override flags. See `docs/projects/elivagar.md`.
+- `fmt` / `run` / `install` - locked raw-forwarding cargo wrappers (any project; `fmt` and the others honour `disable_toolchain` by riding the global lock's moved-aside window). `install` with no args defaults to `cargo install --path .` - the session-workflow closer; any args replace the default and forward raw.
 - `history` - browse global command history log (`$XDG_DATA_HOME/brokkr/history.db`). Supports `--command`, `--project`, `--failed`, `--since`, `--slow`, `-n`, `--all`.
 - `kill [--hard]` - cooperatively terminate the brokkr process holding the lock. Default sends SIGTERM (graceful: SIGKILLs child, flushes partial sidecar data under `dirty` alias, releases lock, runs `brokkr clean`). `--hard` sends SIGKILL to brokkr + child. Exits 130 on graceful path.
 - `sidecar <uuid>` - query sidecar profiler data. See `docs/commands/measure.md`.
@@ -168,7 +169,7 @@ Project-specific commands are documented under `docs/commands/` and `docs/projec
 
 ## Session workflow
 
-After a code change, carry it all the way through without checking in first: update the affected markdown (including stale lines adjacent to the change, not only the lines the change touched), run `brokkr check`, commit on master, `cargo install --path .`. Markdown updates land BEFORE the code commit and ride in the same commit (never a pure-markdown commit). Do not end a turn with "want me to commit?" or "should I update the docs too?".
+After a code change, carry it all the way through without checking in first: update the affected markdown (including stale lines adjacent to the change, not only the lines the change touched), run `brokkr check`, commit on master, `brokkr install`. Markdown updates land BEFORE the code commit and ride in the same commit (never a pure-markdown commit). Do not end a turn with "want me to commit?" or "should I update the docs too?".
 
 Note: `git add -A` fails in this repo when `scratch/certifies-smoke/` exists - the smoke script generates a nested git repo there - so add paths explicitly.
 
