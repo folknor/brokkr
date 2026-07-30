@@ -54,7 +54,7 @@ pub(crate) fn cmd_check(
     clippy_allow: &[String],
     features: &[String],
     no_default_features: bool,
-    package: Option<&str>,
+    packages: &[String],
     profile_name: Option<&str>,
     gate: bool,
     raw: bool,
@@ -80,7 +80,7 @@ pub(crate) fn cmd_check(
         None
     };
     let (certifies, skip_phases) = profile_claim(&profile_label, test_cfg);
-    reject_scoped_complete(certifies, package)?;
+    reject_scoped_complete(certifies, packages)?;
     reject_extra_args_complete(certifies, extra_args)?;
 
     announce_profile_header(&active_sweeps, &profile_label, commands);
@@ -145,7 +145,7 @@ pub(crate) fn cmd_check(
                 script_checks,
                 state_root,
                 active_sweeps: &active_sweeps,
-                package,
+                packages,
                 clippy_allow,
                 quarantine,
                 certifies,
@@ -172,13 +172,17 @@ pub(crate) fn cmd_check(
 
     let ran_labels = ran_sweep_labels(&active_sweeps, &clippy_ran, &executed);
 
+    // The summary/trailer scope label: the CLI `-p` set, comma-joined so the
+    // `--json` `package` field stays a string under `schema: 1`.
+    let package_label = (!packages.is_empty()).then(|| packages.join(","));
+
     finish_check(
         &outcome,
         certifies,
         &profile_label,
         &ran_labels,
         skip_phases,
-        package,
+        package_label.as_deref(),
         failing_phase,
         coverage_stats,
         json,
@@ -290,7 +294,7 @@ struct BuildPhaseArgs<'a> {
     /// snapshots must stay out of the foreign repo.
     state_root: &'a Path,
     active_sweeps: &'a [ResolvedSweep],
-    package: Option<&'a str>,
+    packages: &'a [String],
     /// The `[clippy] allow` lint list, suppressed via `-A` on every sweep.
     clippy_allow: &'a [String],
     quarantine: &'a [QuarantineEntry],
@@ -322,7 +326,7 @@ fn run_build_phases(
         run_clippy_phase(
             a.project_root,
             a.active_sweeps,
-            a.package,
+            a.packages,
             a.clippy_allow,
             a.raw,
             a.limit,
@@ -345,7 +349,7 @@ fn run_build_phases(
             a.project_root,
             a.state_root,
             a.active_sweeps,
-            a.package,
+            a.packages,
             a.raw,
             a.all,
             a.doctests,
@@ -480,9 +484,9 @@ fn resolve_gate_profile(
 /// complete profile rejects it before anything compiles.
 fn reject_scoped_complete(
     certifies: Option<Certifies>,
-    package: Option<&str>,
+    packages: &[String],
 ) -> Result<(), DevError> {
-    if certifies == Some(Certifies::Complete) && package.is_some() {
+    if certifies == Some(Certifies::Complete) && !packages.is_empty() {
         return Err(DevError::Config(
             "package scoping (`-p`) is rejected under `certifies = \"complete\"`: \
              a scoped build's green is not comparable to the full build's. Use a \
@@ -666,7 +670,9 @@ struct CheckSummary<'a> {
     profile: Option<&'a str>,
     sweeps: Vec<&'a str>,
     /// The CLI `-p` scope, when one narrowed the run - a consumer must be
-    /// able to see that a green covered one package, not the workspace.
+    /// able to see that a green covered specific packages, not the
+    /// workspace. A multi-package run joins the names with commas (still a
+    /// string, keeping the field additive under `schema: 1`).
     package: Option<&'a str>,
     failed_phase: Option<&'a str>,
     /// Coverage accounting result; present only when the coverage phase
@@ -1255,16 +1261,18 @@ fn run_dependency_rules(
 /// surfaced diagnostic as a hard failure at the call site. `allow` is the
 /// `[clippy] allow` list, emitted as `-A <lint>` so the suppressed lints
 /// never reach the diagnostic stream (no carve-outs in the fail decision).
-fn clippy_args(sweep: &ResolvedSweep, scope: Option<&str>, allow: &[String]) -> Vec<String> {
+fn clippy_args(sweep: &ResolvedSweep, scope: &[&str], allow: &[String]) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "clippy".into(),
         "--keep-going".into(),
         "--all-targets".into(),
         "--message-format=json".into(),
     ];
-    if let Some(pkg) = scope {
-        args.push("--package".into());
-        args.push(pkg.into());
+    if !scope.is_empty() {
+        for pkg in scope {
+            args.push("--package".into());
+            args.push((*pkg).into());
+        }
     } else {
         // Scope to the sweep's packages (`-p <pkg>`) so `--features` is valid
         // in a virtual workspace, where cargo rejects features at the root.
@@ -1287,7 +1295,7 @@ fn clippy_args(sweep: &ResolvedSweep, scope: Option<&str>, allow: &[String]) -> 
 fn run_clippy_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
-    package: Option<&str>,
+    packages: &[String],
     allow: &[String],
     raw: bool,
     limit: usize,
@@ -1326,16 +1334,20 @@ fn run_clippy_phase(
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
     for (i, sweep) in sweeps.iter().enumerate() {
-        // A CLI `-p` replaces the sweep's selection or skips the sweep
-        // entirely when the sweep's config rules the package out - it never
+        // The CLI `-p` set intersects with the sweep's selection - it never
         // combines, because cargo unions selection flags (cli_package_scope).
-        let scope = match cli_package_scope(sweep, package, false) {
+        // Ruled-out packages are dropped with a note; a sweep keeping none
+        // is skipped entirely.
+        let (scope, dropped) = match cli_package_scope(sweep, packages, false) {
             Ok(s) => s,
             Err(reason) => {
                 output::run_msg(&format!("clippy {}: skipped ({reason})", sweep.label));
                 continue;
             }
         };
+        for note in &dropped {
+            output::run_msg(&format!("clippy {}: {note} (dropped)", sweep.label));
+        }
 
         if !seen_shapes.insert(sweep.build_shape_key()) {
             output::run_msg(&format!(
@@ -1348,9 +1360,9 @@ fn run_clippy_phase(
         // the `--json` trailer may honestly list it as clippy-checked (S3-33).
         // `i` indexes `sweeps`, and `clippy_ran` is sized to match, so direct.
         clippy_ran[i] = true;
-        let args = clippy_args(sweep, scope, allow);
+        let args = clippy_args(sweep, &scope, allow);
 
-        output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, scope));
+        output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, &scope));
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         // Apply the sweep's env to the clippy build too, so a build-affecting
@@ -1387,9 +1399,9 @@ fn run_clippy_phase(
     // them means nothing was checked, which must not read as clean.
     if results.is_empty() && !sweeps.is_empty() {
         return Err(DevError::Config(format!(
-            "-p {}: every sweep's config rules the package out; nothing was \
+            "-p {}: every sweep's config rules the package(s) out; nothing was \
              clippy-checked",
-            package.unwrap_or_default()
+            packages.join(" -p ")
         )));
     }
 
@@ -1469,8 +1481,8 @@ pub(crate) fn cmd_clippy(
     )?;
 
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
-    // sweep-label tags. `package: None` because ad-hoc `-p` is already in
-    // sweep.packages (emitted as `-p <pkg>`); the extra `--package` slot stays
+    // sweep-label tags. `packages: &[]` because ad-hoc `-p` is already in
+    // sweep.packages (emitted as `-p <pkg>`); the extra `--package` slots stay
     // unused. `commands = true`: this is the *investigative* runner, invoked to
     // find out what a given target shape actually does, so the full cargo line
     // is the point - unlike `brokkr check`, where it is per-run noise.
@@ -1480,7 +1492,7 @@ pub(crate) fn cmd_clippy(
     match run_clippy_phase(
         project_root,
         std::slice::from_ref(&sweep),
-        None,
+        &[],
         clippy_allow,
         raw,
         limit,
@@ -1971,7 +1983,7 @@ fn run_test_phase(
     project_root: &Path,
     state_root: &Path,
     sweeps: &[ResolvedSweep],
-    package: Option<&str>,
+    packages: &[String],
     raw: bool,
     all: bool,
     doctests: bool,
@@ -1991,11 +2003,18 @@ fn run_test_phase(
 
     let mut ran_any = false;
     for (i, sweep) in sweeps.iter().enumerate() {
-        // A CLI `-p` replaces the sweep's selection or skips the sweep when
-        // the sweep's config rules the package out (cli_package_scope).
-        if let Err(reason) = cli_package_scope(sweep, package, true) {
-            output::run_msg(&format!("test {}: skipped ({reason})", sweep.label));
-            continue;
+        // The CLI `-p` set intersects with the sweep's selection: ruled-out
+        // packages are dropped with a note, and the sweep is skipped only
+        // when nothing survives (cli_package_scope).
+        let (scope, dropped) = match cli_package_scope(sweep, packages, true) {
+            Ok(s) => s,
+            Err(reason) => {
+                output::run_msg(&format!("test {}: skipped ({reason})", sweep.label));
+                continue;
+            }
+        };
+        for note in &dropped {
+            output::run_msg(&format!("test {}: {note} (dropped)", sweep.label));
         }
         ran_any = true;
         // Record before the run: the sweep's tests execute below (pass or
@@ -2016,7 +2035,7 @@ fn run_test_phase(
                 project_root,
                 state_root,
                 sweep,
-                package,
+                &scope,
                 extra_args,
                 &project_env,
                 raw,
@@ -2030,7 +2049,7 @@ fn run_test_phase(
                 project_root,
                 state_root,
                 sweep,
-                package,
+                &scope,
                 extra_args,
                 &project_env,
                 raw,
@@ -2049,8 +2068,8 @@ fn run_test_phase(
     // them means zero tests ran, which must not read as green.
     if !ran_any && !sweeps.is_empty() {
         return Err(DevError::Config(format!(
-            "-p {}: every sweep's config rules the package out; zero tests ran",
-            package.unwrap_or_default()
+            "-p {}: every sweep's config rules the package(s) out; zero tests ran",
+            packages.join(" -p ")
         )));
     }
 
@@ -2401,8 +2420,9 @@ mod complete_rejection_tests {
     #[test]
     fn scoped_complete_still_rejected() {
         // Sanity: the sibling `-p` guard is unchanged.
-        assert!(reject_scoped_complete(Some(Certifies::Complete), Some("pkg")).is_err());
-        reject_scoped_complete(Some(Certifies::Complete), None).unwrap();
-        reject_scoped_complete(Some(Certifies::Partial), Some("pkg")).unwrap();
+        let pkgs = vec!["pkg".to_owned()];
+        assert!(reject_scoped_complete(Some(Certifies::Complete), &pkgs).is_err());
+        reject_scoped_complete(Some(Certifies::Complete), &[]).unwrap();
+        reject_scoped_complete(Some(Certifies::Partial), &pkgs).unwrap();
     }
 }

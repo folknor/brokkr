@@ -414,7 +414,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             &features,
             no_default_features,
-            package.as_deref(),
+            &package,
             profile.as_deref(),
             gate,
             raw,

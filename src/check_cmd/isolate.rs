@@ -29,7 +29,7 @@ fn run_isolated_sweep(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
-    package: Option<&str>,
+    packages: &[&str],
     extra_args: &[String],
     project_env: &[(String, String)],
     raw: bool,
@@ -58,14 +58,14 @@ fn run_isolated_sweep(
         ));
     }
 
-    let selection = sweep_selection_args(sweep, package);
+    let selection = sweep_selection_args(sweep, packages);
     let env_full = merged_env(&sweep.env, project_env);
     let env_refs: Vec<(&str, &str)> = env_full
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    output::run_msg(&sweep_run_line("test", sweep, &[], true, false, package));
+    output::run_msg(&sweep_run_line("test", sweep, &[], true, false, packages));
     let Some(plan) = enumerate_isolated(project_root, sweep, &selection, &env_refs, commands)?
     else {
         return Ok(false);

@@ -70,6 +70,7 @@ Examples:
   brokkr check --no-default-features               # check without default features
   brokkr check --features commands                 # check with specific features
   brokkr check --package pbfhogg-cli               # check only the CLI crate
+  brokkr check -p crate-a -p crate-b               # check two crates
   brokkr check --package pbfhogg-cli -- --test cli # one test file in the CLI crate"
     )]
     Check {
@@ -81,9 +82,11 @@ Examples:
         #[arg(long)]
         no_default_features: bool,
 
-        /// Target a specific package in the workspace
+        /// Target specific workspace packages (repeatable). Each sweep runs
+        /// the subset its config admits; packages a sweep rules out are
+        /// dropped with a note, and a sweep admitting none is skipped.
         #[arg(long, short)]
-        package: Option<String>,
+        package: Vec<String>,
 
         /// Validation profile from `[test.profiles]` in brokkr.toml.
         /// Selects sweeps, libtest filters (--include-ignored, --skip,

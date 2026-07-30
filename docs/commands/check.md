@@ -151,15 +151,18 @@ then proceeds - rather than failing with `lock: already locked`. So a
 concurrent lock never produces an error to handle; just let the command wait.
 
 Flags:
-- `-p/--package <PKG>` - scope every sweep's cargo invocation (clippy + test)
-  to one package. The flag **replaces** each sweep's own package selection -
-  cargo unions selection flags, so composing `--workspace --exclude …` with
-  `--package` would silently un-scope the run. A sweep whose `packages` list
-  or (test phase only) `test_exclude_packages` rules the package out is
-  skipped with a log line, mirroring `brokkr test`'s SKIP; if every sweep
-  skips, the phase fails rather than reading as green. The shape line shows
-  `-p <pkg>` and the `--json` summary carries a `package` field. Rejected
-  under a `certifies = "complete"` profile
+- `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
+  (clippy + test) to the named packages. The set **replaces** each sweep's
+  own package selection - cargo unions selection flags, so composing
+  `--workspace --exclude …` with `--package` would silently un-scope the
+  run. Per sweep the set is *intersected* with the sweep's scope: a package
+  its `packages` list or (test phase only) `test_exclude_packages` rules out
+  is dropped with a log line, a sweep keeping none is skipped (mirroring
+  `brokkr test`'s SKIP) - so `-p a -p b` still reaches `a` in the sweep that
+  admits it when `b` lives in another sweep. If every sweep skips, the phase
+  fails rather than reading as green. The shape line shows `-p <pkg> …` and
+  the `--json` summary carries a `package` field (comma-joined for a
+  multi-package run). Rejected under a `certifies = "complete"` profile
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
 - `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
   `--features` / `--no-default-features`
@@ -189,7 +192,7 @@ Output:
   profiles), `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`),
   `profile` (the profile that drove sweep selection; `null` for ad-hoc and
   legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
-  when the run was not scoped), `failed_phase` (`null` on success, else one
+  when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
   of `gremlins`/`style`/`header`/`textlint`/`manifest`/`script_check`/
   `dependency_rules`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must

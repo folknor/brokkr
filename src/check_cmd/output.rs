@@ -151,45 +151,59 @@ fn describe_features(args: &[String]) -> Option<String> {
 /// it is a single config field: it silently redirects the sweep to an isolated
 /// target dir, and an unexplained full recompile is exactly the thing a
 /// collapsed log must not hide.
-/// Resolve the CLI `-p` flag against one sweep's own package selection.
+/// Resolve the CLI `-p` list against one sweep's own package selection.
 ///
 /// Cargo *unions* package-selection flags: `--workspace --exclude a -p X`
 /// selects the whole workspace minus `a` (the `-p` is silently swallowed),
-/// and `-p a -p X` selects both. So a CLI `-p` must *replace* the sweep's
-/// selection, never combine with it - and a package outside the sweep's
-/// declared scope skips the sweep (mirroring `brokkr test`'s SKIP) rather
-/// than force-running a selection the sweep's config rules out. Returns
-/// `Err(reason)` when the sweep should be skipped.
+/// and `-p a -p X` selects both. So the CLI `-p` set must *replace* the
+/// sweep's selection, never combine with it - and each sweep runs only the
+/// *intersection* of the CLI set with its declared scope, so `-p a -p b`
+/// still reaches `a` in the sweep that admits it when `b` lives elsewhere.
+/// Returns `(kept, dropped)` - the in-scope packages plus a human note per
+/// package this sweep's config rules out (mirroring `brokkr test`'s SKIP) -
+/// or `Err(reason)` when nothing survives and the sweep should be skipped.
+/// An empty CLI list means no scoping: `(empty, empty)`.
 pub(crate) fn cli_package_scope<'a>(
     sweep: &ResolvedSweep,
-    package: Option<&'a str>,
+    packages: &'a [String],
     for_test: bool,
-) -> Result<Option<&'a str>, String> {
-    let Some(pkg) = package else {
-        return Ok(None);
-    };
-    if for_test && sweep.test_exclude_packages.iter().any(|e| e == pkg) {
-        return Err(format!(
-            "-p {pkg} is in this sweep's test_exclude_packages"
-        ));
+) -> Result<(Vec<&'a str>, Vec<String>), String> {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for pkg in packages {
+        if for_test && sweep.test_exclude_packages.iter().any(|e| e == pkg) {
+            dropped.push(format!(
+                "-p {pkg} is in this sweep's test_exclude_packages"
+            ));
+        } else if !sweep.packages.is_empty() && !sweep.packages.iter().any(|p| p == pkg) {
+            dropped.push(format!("-p {pkg} is not in this sweep's packages list"));
+        } else {
+            kept.push(pkg.as_str());
+        }
     }
-    if !sweep.packages.is_empty() && !sweep.packages.iter().any(|p| p == pkg) {
-        return Err(format!("-p {pkg} is not in this sweep's packages list"));
+    if kept.is_empty() && !packages.is_empty() {
+        return Err(dropped.join("; "));
     }
-    Ok(Some(pkg))
+    Ok((kept, dropped))
 }
 
 pub(crate) fn describe_sweep(
     sweep: &ResolvedSweep,
     for_test: bool,
-    cli_package: Option<&str>,
+    cli_packages: &[&str],
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(pkg) = cli_package {
-        // A CLI `-p` replaced the sweep's own selection (cli_package_scope);
+    if !cli_packages.is_empty() {
+        // A CLI `-p` set replaced the sweep's own selection (cli_package_scope);
         // the shape must say what actually runs, not what the config declares.
-        parts.push(format!("-p {pkg}"));
+        parts.push(
+            cli_packages
+                .iter()
+                .map(|pkg| format!("-p {pkg}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
     } else if !sweep.packages.is_empty() {
         parts.push(format!("{} pkgs", sweep.packages.len()));
     } else if for_test && !sweep.test_exclude_packages.is_empty() {
@@ -265,7 +279,7 @@ pub(crate) fn sweep_run_line(
     args: &[String],
     for_test: bool,
     commands: bool,
-    cli_package: Option<&str>,
+    cli_packages: &[&str],
 ) -> String {
     if commands {
         return format!("cargo {}", args.join(" "));
@@ -273,7 +287,7 @@ pub(crate) fn sweep_run_line(
     format!(
         "{phase} {}: {}",
         sweep.label,
-        describe_sweep(sweep, for_test, cli_package)
+        describe_sweep(sweep, for_test, cli_packages)
     )
 }
 
@@ -356,17 +370,19 @@ fn has_target_selector(args: &[String]) -> bool {
 
 /// The cargo-level selection + feature args shared by the standard and
 /// process-isolated test paths, so the two can never diverge on what a
-/// sweep selects. A CLI `-p` *replaces* the sweep's package selection -
+/// sweep selects. A CLI `-p` set *replaces* the sweep's package selection -
 /// cargo unions selection flags, so emitting `--workspace --exclude …
 /// --package X` would silently run the whole workspace (see
-/// cli_package_scope; callers already skipped sweeps whose config rules
-/// the package out).
-fn sweep_selection_args(sweep: &ResolvedSweep, package: Option<&str>) -> Vec<String> {
+/// cli_package_scope; callers already intersected the CLI set with the
+/// sweep's scope and skipped sweeps where nothing survived).
+fn sweep_selection_args(sweep: &ResolvedSweep, packages: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
 
-    if let Some(pkg) = package {
-        args.push("--package".into());
-        args.push(pkg.into());
+    if !packages.is_empty() {
+        for pkg in packages {
+            args.push("--package".into());
+            args.push((*pkg).into());
+        }
     } else {
         // Scope to the sweep's packages (`-p <pkg>`) so `--features` is
         // valid in a virtual workspace, mirroring the clippy phase.
@@ -406,7 +422,7 @@ fn run_one_test_sweep(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
-    package: Option<&str>,
+    packages: &[&str],
     extra_args: &[String],
     project_env: &[(String, String)],
     raw: bool,
@@ -418,7 +434,7 @@ fn run_one_test_sweep(
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
 
     let mut args: Vec<String> = vec!["test".into()];
-    args.extend(sweep_selection_args(sweep, package));
+    args.extend(sweep_selection_args(sweep, packages));
     for c in cargo_extra {
         args.push(c.clone());
     }
@@ -492,7 +508,7 @@ fn run_one_test_sweep(
     let line = if commands && multi {
         format!("cargo {} (sweep: {})", args.join(" "), sweep.label)
     } else {
-        sweep_run_line("test", sweep, &args, true, commands, package)
+        sweep_run_line("test", sweep, &args, true, commands, packages)
     };
     output::run_msg(&line);
 
@@ -668,12 +684,12 @@ fn run_one_test_sweep(
     }
     println!("[test]    {} passed{extra}{label}", parsed.passed);
     let total = parsed.passed + parsed.failed + parsed.ignored;
-    if total == 0
-        && let Some(pkg) = package
-    {
+    if total == 0 && !packages.is_empty() {
+        let flags: Vec<String> = packages.iter().map(|p| format!("-p {p}")).collect();
         output::warn(&format!(
-            "`-p {pkg}` ran no tests - clippy passed, but nothing was validated \
-             (doctests are excluded; its tests may be doctests or live in another crate)",
+            "`{}` ran no tests - clippy passed, but nothing was validated \
+             (doctests are excluded; the tests may be doctests or live in another crate)",
+            flags.join(" "),
         ));
     }
     Ok(true)
@@ -1449,14 +1465,14 @@ warning: z [too_many_lines]
     #[test]
     fn describe_sweep_reports_package_scope() {
         // Whole workspace.
-        assert_eq!(describe_sweep(&sweep("default"), false, None), "workspace");
+        assert_eq!(describe_sweep(&sweep("default"), false, &[]), "workspace");
 
         // `-p` scoped.
         let scoped = ResolvedSweep {
             packages: s(&["nautilus-core", "nautilus-model"]),
             ..sweep("ffi")
         };
-        assert_eq!(describe_sweep(&scoped, false, None), "2 pkgs");
+        assert_eq!(describe_sweep(&scoped, false, &[]), "2 pkgs");
 
         // `--workspace --exclude` is a test-phase-only shape; the clippy line
         // stays workspace-wide, matching what actually runs.
@@ -1464,9 +1480,9 @@ warning: z [too_many_lines]
             test_exclude_packages: s(&["nautilus-pyo3", "nautilus-cli"]),
             ..sweep("default")
         };
-        assert_eq!(describe_sweep(&excluded, false, None), "workspace");
+        assert_eq!(describe_sweep(&excluded, false, &[]), "workspace");
         assert_eq!(
-            describe_sweep(&excluded, true, None),
+            describe_sweep(&excluded, true, &[]),
             "workspace -2 pkgs, serial"
         );
     }
@@ -1477,14 +1493,14 @@ warning: z [too_many_lines]
             cargo_feature_args: s(&["--all-features"]),
             ..sweep("all")
         };
-        assert_eq!(describe_sweep(&all, false, None), "workspace, all-features");
+        assert_eq!(describe_sweep(&all, false, &[]), "workspace, all-features");
 
         let consumer = ResolvedSweep {
             cargo_feature_args: s(&["--no-default-features", "--features", "commands"]),
             ..sweep("consumer")
         };
         assert_eq!(
-            describe_sweep(&consumer, false, None),
+            describe_sweep(&consumer, false, &[]),
             "workspace, no-default +commands"
         );
 
@@ -1493,7 +1509,7 @@ warning: z [too_many_lines]
             cargo_feature_args: s(&["--features=ffi,live"]),
             ..sweep("j")
         };
-        assert_eq!(describe_sweep(&joined, false, None), "workspace, +ffi,live");
+        assert_eq!(describe_sweep(&joined, false, &[]), "workspace, +ffi,live");
     }
 
     #[test]
@@ -1504,9 +1520,9 @@ warning: z [too_many_lines]
             cargo_feature_args: s(&["--all-features"]),
             ..sweep("all-features")
         };
-        assert_eq!(describe_sweep(&legacy, false, None), "workspace");
+        assert_eq!(describe_sweep(&legacy, false, &[]), "workspace");
         assert_eq!(
-            sweep_run_line("clippy", &legacy, &[], false, false, None),
+            sweep_run_line("clippy", &legacy, &[], false, false, &[]),
             "clippy all-features: workspace"
         );
     }
@@ -1519,8 +1535,8 @@ warning: z [too_many_lines]
             rustflags: s(&["--cfg", "madsim"]),
             ..sweep("sim")
         };
-        assert!(describe_sweep(&sim, false, None).contains("rustflags --cfg madsim"));
-        assert!(describe_sweep(&sim, false, None).contains("isolated target"));
+        assert!(describe_sweep(&sim, false, &[]).contains("rustflags --cfg madsim"));
+        assert!(describe_sweep(&sim, false, &[]).contains("isolated target"));
     }
 
     #[test]
@@ -1539,11 +1555,11 @@ warning: z [too_many_lines]
             ..sweep("tier1")
         };
         assert_eq!(
-            describe_sweep(&tier, true, None),
+            describe_sweep(&tier, true, &[]),
             "workspace, 3 skips, include-ignored, parallel"
         );
         // Clippy never takes libtest filters, so its line omits them.
-        assert_eq!(describe_sweep(&tier, false, None), "workspace");
+        assert_eq!(describe_sweep(&tier, false, &[]), "workspace");
     }
 
     #[test]
@@ -1556,7 +1572,7 @@ warning: z [too_many_lines]
             ..sweep("sort")
         };
         assert_eq!(
-            describe_sweep(&one, true, None),
+            describe_sweep(&one, true, &[]),
             "workspace, --test cli_sort, serial"
         );
 
@@ -1566,12 +1582,12 @@ warning: z [too_many_lines]
             ..sweep("sort")
         };
         assert_eq!(
-            describe_sweep(&two, true, None),
+            describe_sweep(&two, true, &[]),
             "workspace, --test cli_sort, --test cli_env, serial"
         );
 
         // Clippy never takes cargo test filters, so its line omits them.
-        assert_eq!(describe_sweep(&one, false, None), "workspace");
+        assert_eq!(describe_sweep(&one, false, &[]), "workspace");
     }
 
     #[test]
@@ -1582,14 +1598,14 @@ warning: z [too_many_lines]
                 test_threads: threads,
                 ..sweep("serial")
             };
-            assert_eq!(describe_sweep(&serial, true, None), "workspace, serial");
+            assert_eq!(describe_sweep(&serial, true, &[]), "workspace, serial");
         }
         for threads in [Some(0), Some(4)] {
             let parallel = ResolvedSweep {
                 test_threads: threads,
                 ..sweep("par")
             };
-            assert_eq!(describe_sweep(&parallel, true, None), "workspace, parallel");
+            assert_eq!(describe_sweep(&parallel, true, &[]), "workspace, parallel");
         }
     }
 
@@ -1597,10 +1613,13 @@ warning: z [too_many_lines]
     fn cli_package_replaces_sweep_selection_or_skips() {
         // Workspace sweep: `-p` applies; without `-p` the sweep stands.
         assert_eq!(
-            cli_package_scope(&sweep("default"), Some("x"), true).unwrap(),
-            Some("x")
+            cli_package_scope(&sweep("default"), &s(&["x"]), true).unwrap(),
+            (vec!["x"], Vec::new())
         );
-        assert_eq!(cli_package_scope(&sweep("default"), None, true).unwrap(), None);
+        assert_eq!(
+            cli_package_scope(&sweep("default"), &[], true).unwrap(),
+            (Vec::new(), Vec::new())
+        );
 
         // The exclusion list rules the package out - but only for the test
         // phase; clippy ignores test_exclude_packages by design.
@@ -1608,10 +1627,10 @@ warning: z [too_many_lines]
             test_exclude_packages: s(&["x"]),
             ..sweep("default")
         };
-        assert!(cli_package_scope(&excluded, Some("x"), true).is_err());
+        assert!(cli_package_scope(&excluded, &s(&["x"]), true).is_err());
         assert_eq!(
-            cli_package_scope(&excluded, Some("x"), false).unwrap(),
-            Some("x")
+            cli_package_scope(&excluded, &s(&["x"]), false).unwrap(),
+            (vec!["x"], Vec::new())
         );
 
         // A `packages` list admits members and skips everything else.
@@ -1619,8 +1638,36 @@ warning: z [too_many_lines]
             packages: s(&["a", "b"]),
             ..sweep("ffi")
         };
-        assert_eq!(cli_package_scope(&scoped, Some("a"), true).unwrap(), Some("a"));
-        assert!(cli_package_scope(&scoped, Some("x"), false).is_err());
+        assert_eq!(
+            cli_package_scope(&scoped, &s(&["a"]), true).unwrap(),
+            (vec!["a"], Vec::new())
+        );
+        assert!(cli_package_scope(&scoped, &s(&["x"]), false).is_err());
+    }
+
+    #[test]
+    fn cli_package_set_intersects_per_sweep() {
+        // A multi `-p` set runs the in-scope subset with a note per dropped
+        // package; the sweep is skipped only when nothing survives.
+        let scoped = ResolvedSweep {
+            packages: s(&["a", "b"]),
+            ..sweep("ffi")
+        };
+        let mixed = s(&["a", "x"]);
+        let (kept, dropped) = cli_package_scope(&scoped, &mixed, true).unwrap();
+        assert_eq!(kept, vec!["a"]);
+        assert_eq!(dropped.len(), 1);
+        assert!(dropped[0].contains("-p x"));
+        assert!(cli_package_scope(&scoped, &s(&["x", "y"]), true).is_err());
+
+        // Test-phase exclusion drops per package too.
+        let excluded = ResolvedSweep {
+            test_exclude_packages: s(&["x"]),
+            ..sweep("default")
+        };
+        let (kept, dropped) = cli_package_scope(&excluded, &mixed, true).unwrap();
+        assert_eq!(kept, vec!["a"]);
+        assert_eq!(dropped.len(), 1);
     }
 
     #[test]
@@ -1632,8 +1679,9 @@ warning: z [too_many_lines]
             test_exclude_packages: s(&["a", "b"]),
             ..sweep("default")
         };
-        assert_eq!(describe_sweep(&excluded, true, Some("x")), "-p x, serial");
-        assert_eq!(describe_sweep(&excluded, false, Some("x")), "-p x");
+        assert_eq!(describe_sweep(&excluded, true, &["x"]), "-p x, serial");
+        assert_eq!(describe_sweep(&excluded, false, &["x"]), "-p x");
+        assert_eq!(describe_sweep(&excluded, false, &["x", "y"]), "-p x -p y");
     }
 
     #[test]
@@ -1646,11 +1694,11 @@ warning: z [too_many_lines]
         let args = s(&["clippy", "-p", "nautilus-core", "--features", "ffi"]);
 
         assert_eq!(
-            sweep_run_line("clippy", &ffi, &args, false, false, None),
+            sweep_run_line("clippy", &ffi, &args, false, false, &[]),
             "clippy ffi: 1 pkgs, +ffi"
         );
         assert_eq!(
-            sweep_run_line("clippy", &ffi, &args, true, true, None),
+            sweep_run_line("clippy", &ffi, &args, true, true, &[]),
             "cargo clippy -p nautilus-core --features ffi"
         );
     }
