@@ -480,7 +480,11 @@ allow = ["clippy::unused_async_trait_impl", "clippy::default_constructed_unit_st
   lints the project's pinned-toolchain CI cannot see. Bare lint names only
   (`clippy::`-qualified or plain rustc names) - a leading `-` or embedded
   whitespace is rejected at parse time. The phase announces the allowed lints
-  at the start of every run. See `docs/commands/check.md`.
+  at the start of every run. Known limit: a site carrying its own lint-level
+  attribute can defeat the injected `-A` - observed on clippy 1.98, where an
+  `#[expect]` for a sibling lint let the allowed lint through at error
+  severity despite `-A` and `--cap-lints=warn`. See `docs/commands/check.md`
+  for the full shape.
 
 ## Datasets and variant-selection flags
 

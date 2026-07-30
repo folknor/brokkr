@@ -365,6 +365,21 @@ allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
 in the reprinted failing command. Entries must be bare lint names
 (`clippy::`-qualified or plain rustc names); flags are rejected at parse time.
 
+**Known limit:** the injected `-A` flags act at the CLI lint level, and a
+source site that carries its own lint-level attribute can override them. The
+observed shape (clippy 1.98, nautilus_trader a930c8afe3): a function with
+`#[expect(clippy::unused_async, ...)]` still fired the sibling lint
+`clippy::unused_async_trait_impl` **at error severity** with both
+`-A clippy::unused_async_trait_impl` and `--cap-lints=warn` on the command
+line - the expectation machinery's diagnostic bypassed both. The same lint
+was suppressed fine at attribute-free sites. Best reading: a clippy
+expectation-machinery interaction, not a brokkr defect - but the practical
+consequence is that `[clippy] allow` cannot be relied on to silence a lint
+at a site holding an `#[expect]` for a sibling lint emitted by the same
+pass. Minimal upstream repro sketch: an inherent `async fn` with a tail
+expression and no `.await`, `#[expect(clippy::unused_async)]`, compiled with
+`-A clippy::unused_async_trait_impl` on clippy 1.98.
+
 Gremlin phase runs first and fails the check if any banned Unicode character
 is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
 untracked-not-gitignored, so new plan docs are caught before staging) - see
