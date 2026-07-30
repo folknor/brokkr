@@ -40,6 +40,7 @@ mod tests {
             manifest: None,
             deps: None,
             clippy: None,
+            bin: None,
             disable_toolchain: false,
         }
     }

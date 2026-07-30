@@ -51,6 +51,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let manifest = parse_manifest(table)?;
     let deps = parse_deps(table)?;
     let clippy = parse_clippy(table)?;
+    let bin = parse_bin(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -78,9 +79,36 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             manifest,
             deps,
             clippy,
+            bin,
             disable_toolchain,
         },
     ))
+}
+
+/// Parse the optional `[bin]` section. Absent -> `None`.
+fn parse_bin(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<BinConfig>, DevError> {
+    let Some(value) = table.get("bin") else {
+        return Ok(None);
+    };
+    let cfg: BinConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[bin]: {e}")))?;
+    if cfg.default.as_deref().is_some_and(|d| d.trim().is_empty()) {
+        return Err(DevError::Config(
+            "[bin] default is blank - name a bin or example target.".into(),
+        ));
+    }
+    for pkg in &cfg.install {
+        if pkg.trim().is_empty() {
+            return Err(DevError::Config(
+                "[bin] install has a blank entry - list package names.".into(),
+            ));
+        }
+    }
+    Ok(Some(cfg))
 }
 
 /// Parse the optional `[clippy]` section. Absent -> `None`. Entries must be
@@ -604,6 +632,7 @@ fn parse_hosts(
             || key == "manifest"
             || key == "deps"
             || key == "clippy"
+            || key == "bin"
             || key == "disable_toolchain"
         {
             continue;

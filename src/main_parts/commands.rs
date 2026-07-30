@@ -821,8 +821,9 @@ fn cmd_lock() -> Result<(), DevError> {
 }
 
 /// Forward one cargo subcommand with raw args, inheriting stdio, mapping a
-/// non-zero exit (or signal death) to `DevError::Subprocess`. Backs the thin
-/// `fmt`/`run`/`install` wrappers.
+/// non-zero exit (or signal death) to `DevError::Subprocess`. Backs `fmt`;
+/// `run`/`install` moved to `crate::runnables`, which resolves targets from
+/// cargo metadata before spawning.
 fn forward_cargo(subcommand: &str, args: &[String]) -> Result<(), DevError> {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command as ProcCommand;
@@ -857,20 +858,6 @@ fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
     forward_cargo("fmt", args)
 }
 
-fn cmd_cargo_run(args: &[String]) -> Result<(), DevError> {
-    forward_cargo("run", args)
-}
-
-/// Bare `brokkr install` installs the current tree (`--path .`); any
-/// user-supplied args replace that default rather than compose with it, so
-/// the full `cargo install` surface stays reachable.
-fn cmd_cargo_install(args: &[String]) -> Result<(), DevError> {
-    if args.is_empty() {
-        let default = vec!["--path".to_owned(), ".".to_owned()];
-        return forward_cargo("install", &default);
-    }
-    forward_cargo("install", args)
-}
 
 /// `pmtiles-stats` is restricted to the two projects that produce or serve
 /// PMTiles archives (elivagar, nidhogg). `project::require` gates a single

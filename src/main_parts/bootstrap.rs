@@ -240,28 +240,41 @@ fn run(cli: Cli) -> Result<(), DevError> {
     };
     toolchain::arm(disable_dir);
 
-    if let Command::Run { args } = &cli.command {
+    if let Command::Run {
+        name,
+        debug,
+        release,
+        args,
+    } = &cli.command
+    {
         // `run` builds and runs the code, so it anchors on the build root
-        // (cwd), not the config dir. Detection is only consulted for the
-        // project label on the lock.
-        let (project, project_root) = match project::detect_optional()? {
-            Some(d) => (Some(d.project), d.build_root),
-            None => (None, std::env::current_dir()?),
+        // (cwd). Detection also supplies the `[bin]` section - target
+        // resolution itself comes from cargo metadata, so `run` still works
+        // with no brokkr.toml at all.
+        let (project, bin_cfg, project_root) = match project::detect_optional()? {
+            Some(d) => (Some(d.project), d.config.bin, d.build_root),
+            None => (None, None, std::env::current_dir()?),
         };
         let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
-        return cmd_cargo_run(args);
+        return runnables::cmd_run(
+            &project_root,
+            bin_cfg.as_ref(),
+            name.as_deref(),
+            *debug,
+            *release,
+            args,
+        );
     }
-    if let Command::Install { args } = &cli.command {
-        // Like `run`, `install` builds the code tree (cwd), so it anchors on
-        // the build root and rides the same lock + toolchain-disable window.
-        // The bare form is the session-workflow closer: `cargo install
-        // --path .` from the project root, without reaching for raw cargo.
-        let (project, project_root) = match project::detect_optional()? {
-            Some(d) => (Some(d.project), d.build_root),
-            None => (None, std::env::current_dir()?),
+    if let Command::Install { debug, release } = &cli.command {
+        // Like `run`, `install` builds the code tree (cwd), riding the same
+        // lock + toolchain-disable window. The session-workflow closer:
+        // install the workspace's bins without reaching for raw cargo.
+        let (project, bin_cfg, project_root) = match project::detect_optional()? {
+            Some(d) => (Some(d.project), d.config.bin, d.build_root),
+            None => (None, None, std::env::current_dir()?),
         };
         let _lock = acquire_cmd_lock_opt(project, &project_root, "install")?;
-        return cmd_cargo_install(args);
+        return runnables::cmd_install(&project_root, bin_cfg.as_ref(), *debug, *release);
     }
     if let Command::Wc { threshold } = &cli.command {
         // `wc` lists source files in the code tree (cwd).

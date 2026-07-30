@@ -73,6 +73,10 @@ pub struct DevConfig {
     /// `brokkr clippy` share it). `None` when the project has no `[clippy]`
     /// section. See [`ClippyConfig`].
     pub clippy: Option<ClippyConfig>,
+    /// `[bin]` config: shared defaults for `brokkr run` and `brokkr install`.
+    /// `None` when the project has no `[bin]` section (discovery still
+    /// works; the section only curates ambiguity). See [`BinConfig`].
+    pub bin: Option<BinConfig>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -80,6 +84,31 @@ pub struct DevConfig {
     /// toolchain we don't have or don't want. `false` by default. See
     /// [`crate::toolchain`].
     pub disable_toolchain: bool,
+}
+
+/// `[bin]` section: shared defaults for `brokkr run` and `brokkr install`.
+///
+/// Both commands discover the workspace's runnables (bin targets, and for
+/// `run` also examples) from cargo metadata; this section exists to curate
+/// what discovery leaves ambiguous, not to enable the commands.
+///
+/// - `default` - the target name bare `brokkr run` launches. Without it, a
+///   sole runnable runs and several runnables list.
+/// - `install` - package names `brokkr install` installs (`cargo install
+///   --path <pkg dir>` each). Without it, the workspace's sole bin-carrying
+///   package installs; several is an error naming this key.
+/// - `debug` - default to the dev profile for `run` and `--debug` for
+///   `install`. Unset means release for both (matching `brokkr test`);
+///   `--debug`/`--release` on the CLI override either way.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BinConfig {
+    /// Target name bare `brokkr run` launches.
+    pub default: Option<String>,
+    /// Package names `brokkr install` installs.
+    pub install: Vec<String>,
+    /// Default both commands to the dev profile.
+    pub debug: bool,
 }
 
 /// `[clippy]` section: tuning for the clippy phase.

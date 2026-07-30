@@ -242,21 +242,45 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run `cargo run`. All arguments are forwarded raw.
+    /// Run a bin or example target by name (`cargo run`).
+    ///
+    /// Targets are discovered from cargo metadata across the whole workspace:
+    /// every bin and every example is runnable by its target name. The bare
+    /// form runs `[bin] default` (or the sole runnable); with several
+    /// candidates and no default it lists them. Trailing arguments are
+    /// forwarded raw to the program after `--`. Flags for brokkr
+    /// (`--debug`/`--release`) go before the name.
     #[command(display_order = 0)]
     Run {
-        /// Raw arguments forwarded to `cargo run`
+        /// Bin or example target name (bare form: `[bin] default`)
+        name: Option<String>,
+
+        /// Dev profile (overrides `[bin] debug`)
+        #[arg(long, conflicts_with = "release")]
+        debug: bool,
+
+        /// Release profile (overrides `[bin] debug = true`)
+        #[arg(long)]
+        release: bool,
+
+        /// Raw arguments forwarded to the program (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run `cargo install`. Bare form installs the current tree
-    /// (`cargo install --path .`); any arguments are forwarded raw instead.
+    /// Install the project's binaries (`cargo install --path ...`).
+    ///
+    /// Installs the packages named by `[bin] install`, or the workspace's
+    /// sole bin-carrying package when the list is absent. `[bin] debug =
+    /// true` installs with `--debug`; `--debug`/`--release` override it.
     #[command(display_order = 0)]
     Install {
-        /// Raw arguments forwarded to `cargo install` (replacing the
-        /// default `--path .`)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        /// Install with `--debug` (overrides `[bin] debug`)
+        #[arg(long, conflicts_with = "release")]
+        debug: bool,
+
+        /// Install release (overrides `[bin] debug = true`)
+        #[arg(long)]
+        release: bool,
     },
     /// List rust source files above a line-count threshold (default 800).
     ///

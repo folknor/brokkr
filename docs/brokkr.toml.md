@@ -439,6 +439,31 @@ workspace_dep_ignore = ["lychee", "cargo-*", "backtest"]
   members whose use cargo metadata can't attribute). An entry ending in `*` is
   a prefix glob. See `docs/commands/deps.md`.
 
+## `[bin]` section
+
+Shared defaults for `brokkr run` and `brokkr install` (optional). Both
+commands discover their targets from cargo metadata - every workspace bin
+target (and, for `run`, example target) is runnable by name with no config at
+all. The section curates what discovery leaves ambiguous:
+
+```toml
+[bin]
+default = "app"              # bare `brokkr run` target (bin or example name)
+install = ["app", "runner"]  # packages `brokkr install` installs
+debug = true                 # dev profile for run + `--debug` for install
+```
+
+- `default` - the target name bare `brokkr run` launches. Without it, a sole
+  runnable runs; several runnables print an index and exit 0.
+- `install` - package names installed via `cargo install --path <pkg dir>`,
+  in order. Without it, the workspace's sole bin-carrying package installs;
+  several is an error naming this key. A package with no bin target is a
+  config error.
+- `debug` - default both commands to the dev profile (`cargo run` without
+  `--release`, `cargo install --debug`). Unset means release for both,
+  matching `brokkr test`. CLI `--debug` / `--release` (mutually exclusive)
+  override in either direction.
+
 ## `[clippy]` section
 
 Tuning for the clippy phase, shared by `brokkr check` and `brokkr clippy`

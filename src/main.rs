@@ -42,6 +42,7 @@ mod ratatoskr;
 mod request;
 mod resolve;
 mod results_cmd;
+mod runnables;
 mod scope;
 mod script_check;
 mod shutdown;
