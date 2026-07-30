@@ -50,6 +50,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let script_checks = parse_script_checks(table)?;
     let manifest = parse_manifest(table)?;
     let deps = parse_deps(table)?;
+    let clippy = parse_clippy(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
@@ -76,9 +77,41 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             script_checks,
             manifest,
             deps,
+            clippy,
             disable_toolchain,
         },
     ))
+}
+
+/// Parse the optional `[clippy]` section. Absent -> `None`. Entries must be
+/// bare lint names: a leading `-` or embedded whitespace means the user is
+/// trying to smuggle arbitrary flags through what is a lint list.
+fn parse_clippy(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<ClippyConfig>, DevError> {
+    let Some(value) = table.get("clippy") else {
+        return Ok(None);
+    };
+    let cfg: ClippyConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[clippy]: {e}")))?;
+    for lint in &cfg.allow {
+        if lint.trim().is_empty() {
+            return Err(DevError::Config(
+                "[clippy] allow has a blank entry - name a lint (e.g. \
+                 \"clippy::unused_async\")."
+                    .into(),
+            ));
+        }
+        if lint.starts_with('-') || lint.chars().any(char::is_whitespace) {
+            return Err(DevError::Config(format!(
+                "[clippy] allow entry '{lint}' is not a bare lint name - list \
+                 lint names only (e.g. \"clippy::unused_async\"), not flags."
+            )));
+        }
+    }
+    Ok(Some(cfg))
 }
 
 /// Parse the optional `[manifest]` section. Absent -> `None`.
@@ -570,6 +603,7 @@ fn parse_hosts(
             || key == "script_check"
             || key == "manifest"
             || key == "deps"
+            || key == "clippy"
             || key == "disable_toolchain"
         {
             continue;

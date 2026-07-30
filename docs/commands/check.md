@@ -350,6 +350,18 @@ graph:
   still dumps clippy's own rendered text verbatim (which shows the capped
   `warning:` wording).
 
+A `[clippy]` section with `allow = ["clippy::unused_async", ...]` appends
+`-A <lint>` after `--cap-lints=warn` on every sweep (and on `brokkr clippy`),
+so the listed lints never reach the diagnostic stream - the
+any-diagnostic-fails rule needs no carve-outs. This is the escape hatch for
+driving a foreign checkout under `disable_toolchain`: brokkr lints on the
+host's (newer) clippy, which surfaces lints the project's own pinned-toolchain
+CI cannot see and its code cannot be expected to satisfy. The phase announces
+the allowed lints up front (`clippy: allowing clippy::unused_async ([clippy]
+allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
+in the reprinted failing command. Entries must be bare lint names
+(`clippy::`-qualified or plain rustc names); flags are rejected at parse time.
+
 Gremlin phase runs first and fails the check if any banned Unicode character
 is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
 untracked-not-gitignored, so new plan docs are caught before staging) - see

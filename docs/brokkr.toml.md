@@ -439,6 +439,24 @@ workspace_dep_ignore = ["lychee", "cargo-*", "backtest"]
   members whose use cargo metadata can't attribute). An entry ending in `*` is
   a prefix glob. See `docs/commands/deps.md`.
 
+## `[clippy]` section
+
+Tuning for the clippy phase, shared by `brokkr check` and `brokkr clippy`
+(optional).
+
+```toml
+[clippy]
+allow = ["clippy::unused_async_trait_impl", "clippy::default_constructed_unit_structs"]
+```
+
+- `allow` - lint names suppressed on every clippy sweep, appended as
+  `-A <lint>` after `--cap-lints=warn`. The escape hatch for driving a foreign
+  checkout under `disable_toolchain`, where the host's newer clippy surfaces
+  lints the project's pinned-toolchain CI cannot see. Bare lint names only
+  (`clippy::`-qualified or plain rustc names) - a leading `-` or embedded
+  whitespace is rejected at parse time. The phase announces the allowed lints
+  at the start of every run. See `docs/commands/check.md`.
+
 ## Datasets and variant-selection flags
 
 Host-scoped `[<host>.datasets.<name>]` tables (pbf/osc/pmtiles entries) and the

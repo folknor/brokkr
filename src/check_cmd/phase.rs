@@ -51,6 +51,7 @@ pub(crate) fn cmd_check(
     textlint_rules: &[TextlintRule],
     script_checks: &[ScriptCheck],
     manifest_cfg: Option<&ManifestConfig>,
+    clippy_allow: &[String],
     features: &[String],
     no_default_features: bool,
     package: Option<&str>,
@@ -145,6 +146,7 @@ pub(crate) fn cmd_check(
                 state_root,
                 active_sweeps: &active_sweeps,
                 package,
+                clippy_allow,
                 quarantine,
                 certifies,
                 doctests,
@@ -289,6 +291,8 @@ struct BuildPhaseArgs<'a> {
     state_root: &'a Path,
     active_sweeps: &'a [ResolvedSweep],
     package: Option<&'a str>,
+    /// The `[clippy] allow` lint list, suppressed via `-A` on every sweep.
+    clippy_allow: &'a [String],
     quarantine: &'a [QuarantineEntry],
     certifies: Option<Certifies>,
     doctests: bool,
@@ -319,6 +323,7 @@ fn run_build_phases(
             a.project_root,
             a.active_sweeps,
             a.package,
+            a.clippy_allow,
             a.raw,
             a.limit,
             a.all,
@@ -1247,8 +1252,10 @@ fn run_dependency_rules(
 /// `--keep-going` so a failing unit doesn't hide lints queued behind it, and
 /// `--cap-lints=warn` so a deny-level lint still yields `.rmeta` and every
 /// downstream crate is checked - brokkr recovers the intent by treating any
-/// surfaced diagnostic as a hard failure at the call site.
-fn clippy_args(sweep: &ResolvedSweep, scope: Option<&str>) -> Vec<String> {
+/// surfaced diagnostic as a hard failure at the call site. `allow` is the
+/// `[clippy] allow` list, emitted as `-A <lint>` so the suppressed lints
+/// never reach the diagnostic stream (no carve-outs in the fail decision).
+fn clippy_args(sweep: &ResolvedSweep, scope: Option<&str>, allow: &[String]) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "clippy".into(),
         "--keep-going".into(),
@@ -1269,6 +1276,10 @@ fn clippy_args(sweep: &ResolvedSweep, scope: Option<&str>) -> Vec<String> {
     args.extend(sweep.cargo_feature_args.iter().cloned());
     args.push("--".into());
     args.push("--cap-lints=warn".into());
+    for lint in allow {
+        args.push("-A".into());
+        args.push(lint.clone());
+    }
     args
 }
 
@@ -1277,6 +1288,7 @@ fn run_clippy_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
     package: Option<&str>,
+    allow: &[String],
     raw: bool,
     limit: usize,
     all: bool,
@@ -1284,6 +1296,16 @@ fn run_clippy_phase(
     clippy_ran: &mut [bool],
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
+
+    // A suppressed lint narrows what "clippy clean" certifies, so the log
+    // must say so up front - like `skip_phases`, a narrowed run must never
+    // read as a full one.
+    if !allow.is_empty() {
+        output::run_msg(&format!(
+            "clippy: allowing {} ([clippy] allow)",
+            allow.join(", ")
+        ));
+    }
 
     // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
     // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
@@ -1326,7 +1348,7 @@ fn run_clippy_phase(
         // the `--json` trailer may honestly list it as clippy-checked (S3-33).
         // `i` indexes `sweeps`, and `clippy_ran` is sized to match, so direct.
         clippy_ran[i] = true;
-        let args = clippy_args(sweep, scope);
+        let args = clippy_args(sweep, scope, allow);
 
         output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, scope));
 
@@ -1430,6 +1452,7 @@ pub(crate) fn cmd_clippy(
     no_default_features: bool,
     sweep_name: Option<&str>,
     env_overrides: &[(String, String)],
+    clippy_allow: &[String],
     raw: bool,
     limit: usize,
     all: bool,
@@ -1458,6 +1481,7 @@ pub(crate) fn cmd_clippy(
         project_root,
         std::slice::from_ref(&sweep),
         None,
+        clippy_allow,
         raw,
         limit,
         all,

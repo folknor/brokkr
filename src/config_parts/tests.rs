@@ -39,6 +39,7 @@ mod tests {
             script_checks: Vec::new(),
             manifest: None,
             deps: None,
+            clippy: None,
             disable_toolchain: false,
         }
     }
@@ -51,6 +52,24 @@ mod tests {
     fn script_checks_of(src: &str) -> Result<Vec<ScriptCheck>, DevError> {
         let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
         parse_script_checks(&table)
+    }
+
+    #[test]
+    fn clippy_allow_parses() {
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[clippy]\nallow = [\"clippy::unused_async\", \"dead_code\"]").unwrap();
+        let cfg = parse_clippy(&table).unwrap().unwrap();
+        assert_eq!(cfg.allow, vec!["clippy::unused_async", "dead_code"]);
+    }
+
+    #[test]
+    fn clippy_allow_rejects_non_lint_entries() {
+        // The list feeds `-A <lint>` argv slots: a leading dash or embedded
+        // whitespace is flag smuggling, not a lint name.
+        for bad in ["[clippy]\nallow = [\"-W clippy::pedantic\"]", "[clippy]\nallow = [\" \"]"] {
+            let table: toml::map::Map<String, toml::Value> = toml::from_str(bad).unwrap();
+            assert!(parse_clippy(&table).is_err(), "accepted: {bad}");
+        }
     }
 
     #[test]

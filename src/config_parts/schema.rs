@@ -69,6 +69,10 @@ pub struct DevConfig {
     /// `[deps]` config: tuning for the `brokkr deps` audit. `None` when the
     /// project has no `[deps]` section. See [`DepsConfig`].
     pub deps: Option<DepsConfig>,
+    /// `[clippy]` config: tuning for the clippy phase (`brokkr check` and
+    /// `brokkr clippy` share it). `None` when the project has no `[clippy]`
+    /// section. See [`ClippyConfig`].
+    pub clippy: Option<ClippyConfig>,
     /// Top-level `disable_toolchain = true`: move the project's
     /// `rust-toolchain.toml` (or legacy `rust-toolchain`) aside for the
     /// duration of every brokkr command, so rustup ignores the pin and falls
@@ -76,6 +80,24 @@ pub struct DevConfig {
     /// toolchain we don't have or don't want. `false` by default. See
     /// [`crate::toolchain`].
     pub disable_toolchain: bool,
+}
+
+/// `[clippy]` section: tuning for the clippy phase.
+///
+/// - `allow` - lint names suppressed on every clippy sweep, passed to the
+///   compiler as `-A <lint>` after `--cap-lints=warn`. The escape hatch for
+///   driving a project whose own tooling runs a *pinned* toolchain: under
+///   `disable_toolchain` brokkr lints on the host's (newer) clippy, which
+///   surfaces lints upstream's CI cannot see and upstream code cannot be
+///   expected to satisfy. Suppression happens at the compiler, so the
+///   any-diagnostic-fails rule needs no carve-outs; the phase announces the
+///   allowed lints up front so a narrowed gate never reads as a full one.
+///   Accepts both `clippy::` lints and plain rustc lint names.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ClippyConfig {
+    /// Lint names to suppress (`-A <lint>`) on every clippy sweep.
+    pub allow: Vec<String>,
 }
 
 /// `[gremlins]` section: tuning for the `brokkr check` gremlin scanner.

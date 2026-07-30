@@ -328,6 +328,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             textlint_rules,
             script_checks,
             manifest_cfg,
+            clippy_cfg,
             project_root,
             state_root,
         ) = match project::detect_optional()? {
@@ -343,6 +344,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 d.config.textlint,
                 d.config.script_checks,
                 d.config.manifest,
+                d.config.clippy,
                 // cargo/git run in the code tree (build_root); brokkr's own
                 // `.brokkr` state anchors to the config dir (project_root).
                 // The two differ only under the one-level-up layout.
@@ -362,6 +364,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     None,
                     Vec::new(),
                     Vec::new(),
+                    None,
                     None,
                     cwd.clone(),
                     cwd,
@@ -383,6 +386,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &textlint_rules,
             &script_checks,
             manifest_cfg.as_ref(),
+            clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             &features,
             no_default_features,
             package.as_deref(),
@@ -415,10 +419,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // above activates when `acquire_cmd_lock_opt` takes the global lock below,
         // so the clippy build honours pin-suppression. Detection is optional -
         // `clippy` runs in any Rust+git repo with no config.
-        let (project, check_entries, project_root) = match project::detect_optional()? {
-            Some(d) => (Some(d.project), d.config.check, d.build_root),
-            None => (None, Vec::new(), std::env::current_dir()?),
-        };
+        let (project, check_entries, clippy_cfg, project_root) =
+            match project::detect_optional()? {
+                Some(d) => (Some(d.project), d.config.check, d.config.clippy, d.build_root),
+                None => (None, Vec::new(), None, std::env::current_dir()?),
+            };
         let env_overrides = parse_env_overrides(&env)?;
         let _lock = acquire_cmd_lock_opt(project, &project_root, "clippy")?;
         return check_cmd::cmd_clippy(
@@ -430,6 +435,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             no_default_features,
             sweep.as_deref(),
             &env_overrides,
+            clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             raw,
             limit,
             all,
