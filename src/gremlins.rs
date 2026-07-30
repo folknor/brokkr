@@ -404,8 +404,7 @@ fn is_scannable(rel: &Path) -> bool {
     SCANNED_EXTENSIONS.contains(&ext)
 }
 
-/// Tracked plus untracked-not-ignored files, via `git ls-files`. Shared with
-/// the `[style]` check (`src/style.rs`), which filters this list to `.rs`.
+/// Tracked plus untracked-not-ignored files, via `git ls-files`.
 pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
     let output = Command::new("git")
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])

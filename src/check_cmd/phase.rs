@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
     Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
-    QuarantineEntry, ScriptCheck, Stage, StyleConfig, TestConfig, TextlintRule,
+    QuarantineEntry, ScriptCheck, Stage, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -46,7 +46,6 @@ pub(crate) fn cmd_check(
     quarantine: &[QuarantineEntry],
     test_cfg: Option<&TestConfig>,
     gremlins_cfg: Option<&GremlinsConfig>,
-    style_cfg: Option<&StyleConfig>,
     header_cfg: Option<&HeaderConfig>,
     textlint_rules: &[TextlintRule],
     script_checks: &[ScriptCheck],
@@ -123,7 +122,6 @@ pub(crate) fn cmd_check(
             &ConventionPhaseArgs {
                 project_root,
                 gremlins_cfg,
-                style_cfg,
                 header_cfg,
                 textlint_rules,
                 manifest_cfg,
@@ -226,7 +224,6 @@ fn announce_skipped_phases(skip_phases: &[String]) {
 struct ConventionPhaseArgs<'a> {
     project_root: &'a Path,
     gremlins_cfg: Option<&'a GremlinsConfig>,
-    style_cfg: Option<&'a StyleConfig>,
     header_cfg: Option<&'a HeaderConfig>,
     textlint_rules: &'a [TextlintRule],
     manifest_cfg: Option<&'a ManifestConfig>,
@@ -248,11 +245,6 @@ fn run_convention_phases(
     if !skip("gremlins") {
         *failing_phase = Some("gremlins");
         run_gremlins(a.project_root, a.gremlins_cfg, a.limit, a.all, a.fix_gremlins)?;
-    }
-
-    if !skip("style") {
-        *failing_phase = Some("style");
-        run_style(a.project_root, a.style_cfg, a.gremlins_cfg, a.limit, a.all)?;
     }
 
     if !skip("header") {
@@ -963,53 +955,6 @@ fn scope_limit_with<T>(
     (part.displayed, trailer)
 }
 
-/// The `[style]` phase: opt-in native Rust style checks. Currently the single
-/// blank-line-above-control-flow rule. Inert unless the project enables a rule
-/// in `[style]`. Reuses the `[gremlins].exclude` list to skip vendored dirs.
-fn run_style(
-    project_root: &Path,
-    style_cfg: Option<&StyleConfig>,
-    gremlins_cfg: Option<&GremlinsConfig>,
-    limit: usize,
-    all: bool,
-) -> Result<(), DevError> {
-    let Some(cfg) = style_cfg else {
-        return Ok(());
-    };
-    if !cfg.rust_blank_line_above_control_flow {
-        return Ok(());
-    }
-
-    let violations = crate::style::scan(project_root, gremlins_cfg)?;
-
-    if violations.is_empty() {
-        output::run_msg("style: ok");
-        return Ok(());
-    }
-
-    output::run_msg("style: blank line above control flow (Rust)");
-    let total = violations.len();
-    let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, all, |v| v.file.as_path());
-    let mut msg = format!("style: {total} violation(s)\n");
-    for v in &displayed {
-        msg.push_str("  ");
-        msg.push_str(&crate::style::format_one(v));
-        msg.push('\n');
-    }
-    if let Some(t) = trailer {
-        msg.push_str("  ");
-        msg.push_str(&t);
-        msg.push('\n');
-    }
-    msg.push_str(
-        "  hint: add a blank line above the construct, or share an identifier with the line above",
-    );
-    output::error(&msg);
-
-    Err(DevError::Build("style check failed".into()))
-}
-
 /// The `[header]` phase: a required file header whose year must be current.
 /// Inert unless the project has a `[header]` section.
 fn run_header(
@@ -1215,7 +1160,7 @@ fn run_dependency_rules(
     // A fixed invocation with no per-project variation - it says strictly less
     // than the `dependency rules: ...` line below it, so it is `--commands`-only
     // like every other cargo line. The phase is otherwise silent until its
-    // result, matching the native phases (style/header/textlint).
+    // result, matching the native phases (header/textlint).
     if commands {
         output::run_msg("cargo metadata --format-version 1 --no-deps (dependency rules)");
     }
@@ -2083,13 +2028,13 @@ mod scope_limit_tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
-    fn style_violation(file: &str) -> crate::style::StyleViolation {
-        crate::style::StyleViolation {
+    struct Violation {
+        file: PathBuf,
+    }
+
+    fn violation(file: &str) -> Violation {
+        Violation {
             file: PathBuf::from(file),
-            line: 1,
-            keyword: "if",
-            content: String::new(),
-            prev: String::new(),
         }
     }
 
@@ -2099,10 +2044,10 @@ mod scope_limit_tests {
         // order, behind enough unscoped hits to overflow limit=2. Scope-first must
         // still surface it in full, capping only the unscoped overflow.
         let violations = vec![
-            style_violation("a.rs"),
-            style_violation("c.rs"),
-            style_violation("d.rs"),
-            style_violation("b.rs"),
+            violation("a.rs"),
+            violation("c.rs"),
+            violation("d.rs"),
+            violation("b.rs"),
         ];
         let changed: HashSet<PathBuf> = ["b.rs"].iter().map(PathBuf::from).collect();
         let (displayed, trailer) =
@@ -2121,7 +2066,7 @@ mod scope_limit_tests {
 
     #[test]
     fn all_shows_everything_without_trailer() {
-        let violations = vec![style_violation("a.rs"), style_violation("b.rs")];
+        let violations = vec![violation("a.rs"), violation("b.rs")];
         let (displayed, trailer) =
             scope_limit_with(violations, 1, true, |v| v.file.as_path(), None);
         assert_eq!(displayed.len(), 2);

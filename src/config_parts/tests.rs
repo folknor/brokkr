@@ -33,7 +33,6 @@ mod tests {
             quarantine: Vec::new(),
             capture_env: Vec::new(),
             gremlins: None,
-            style: None,
             header: None,
             textlint: Vec::new(),
             script_checks: Vec::new(),
@@ -398,40 +397,6 @@ preset = ["a", "b"]
         let cfg = parse_gremlins(&overlap).unwrap().unwrap();
         assert!(cfg.allow.contains('\u{0450}'));
         assert!(cfg.ban.contains('\u{0450}'));
-    }
-
-    #[test]
-    fn parse_style_enabled() {
-        let table: toml::map::Map<String, toml::Value> =
-            toml::from_str("[style]\nrust_blank_line_above_control_flow = true\n").unwrap();
-        let cfg = parse_style(&table).unwrap().unwrap();
-        assert!(cfg.rust_blank_line_above_control_flow);
-    }
-
-    #[test]
-    fn parse_style_absent_or_empty_is_none() {
-        // No section at all.
-        let table: toml::map::Map<String, toml::Value> = toml::from_str("project = \"x\"\n").unwrap();
-        assert!(parse_style(&table).unwrap().is_none());
-        // Present but nothing enabled collapses to None so the phase stays inert.
-        let empty: toml::map::Map<String, toml::Value> = toml::from_str("[style]\n").unwrap();
-        assert!(parse_style(&empty).unwrap().is_none());
-    }
-
-    #[test]
-    fn parse_style_rejects_unknown_key() {
-        let table: toml::map::Map<String, toml::Value> =
-            toml::from_str("[style]\nbogus = true\n").unwrap();
-        assert!(parse_style(&table).is_err());
-    }
-
-    #[test]
-    fn style_section_is_not_treated_as_host() {
-        // `[style]` must be reserved, not parsed as a hostname section.
-        let table: toml::map::Map<String, toml::Value> =
-            toml::from_str("[style]\nrust_blank_line_above_control_flow = true\n").unwrap();
-        let hosts = parse_hosts(&table).unwrap();
-        assert!(hosts.is_empty());
     }
 
     #[test]

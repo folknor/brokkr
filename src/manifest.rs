@@ -4,8 +4,8 @@
 //! check can reason about blank-line dependency groups and key order that a
 //! value-only parse (`toml`) throws away.
 //!
-//! On the `[style]` model: the config is a set of named toggles, not a rule
-//! DSL. The phase is inert unless a project opts a check in.
+//! The config is a set of named toggles, not a rule DSL. The phase is inert
+//! unless a project opts a check in.
 
 use std::path::{Path, PathBuf};
 

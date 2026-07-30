@@ -44,7 +44,6 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     validate_check_against_test(&check, test.as_ref(), &quarantine)?;
     let capture_env = parse_capture_env(table)?;
     let gremlins = parse_gremlins(table)?;
-    let style = parse_style(table)?;
     let header = parse_header(table)?;
     let textlint = parse_textlint(table)?;
     let script_checks = parse_script_checks(table)?;
@@ -72,7 +71,6 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             quarantine,
             capture_env,
             gremlins,
-            style,
             header,
             textlint,
             script_checks,
@@ -514,24 +512,6 @@ fn parse_script_checks(
     Ok(checks)
 }
 
-/// Parse the optional `[style]` section. Absent - or present but with no rule
-/// enabled - collapses to `None` so the style phase stays inert.
-fn parse_style(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<StyleConfig>, DevError> {
-    let Some(value) = table.get("style") else {
-        return Ok(None);
-    };
-    let cfg: StyleConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("[style]: {e}")))?;
-    if cfg.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(cfg))
-}
-
 /// Parse the optional top-level `disable_toolchain = true`. Absent is `false`.
 fn parse_disable_toolchain(
     table: &toml::map::Map<String, toml::Value>,
@@ -624,7 +604,6 @@ fn parse_hosts(
             || key == "quarantine"
             || key == "capture_env"
             || key == "gremlins"
-            || key == "style"
             || key == "header"
             || key == "textlint"
             || key == "textlint_preset"

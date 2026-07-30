@@ -46,10 +46,6 @@ pub struct DevConfig {
     /// docs) that legitimately carries gremlin characters. `None` when the
     /// project has no `[gremlins]` section. See [`GremlinsConfig`].
     pub gremlins: Option<GremlinsConfig>,
-    /// `[style]` config: opt-in native Rust style checks run by `brokkr
-    /// check`. `None` when the project has no `[style]` section. See
-    /// [`StyleConfig`].
-    pub style: Option<StyleConfig>,
     /// `[header]` config: a required file header with a current-year check.
     /// `None` when the project has no `[header]` section. See [`HeaderConfig`].
     pub header: Option<HeaderConfig>,
@@ -197,26 +193,6 @@ impl GremlinsConfig {
             let dir = Path::new(dir.trim_end_matches('/'));
             rel == dir || rel.starts_with(dir)
         })
-    }
-}
-
-/// `[style]` section: opt-in native Rust style checks for `brokkr check`.
-///
-/// Every knob defaults to `false`, so a project that omits `[style]` (or lists
-/// it empty) runs no style checks and sees no behaviour change. Currently one
-/// rule; the section exists to grow more.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct StyleConfig {
-    /// Require a blank line above `if`/`match`/`for`/`while`/`loop`/`spawn`
-    /// constructs, honouring the exemption ladder in [`crate::style`].
-    pub rust_blank_line_above_control_flow: bool,
-}
-
-impl StyleConfig {
-    /// True when no rule in the section is enabled - the phase can short out.
-    pub fn is_empty(&self) -> bool {
-        !self.rust_blank_line_above_control_flow
     }
 }
 
@@ -456,7 +432,7 @@ pub struct TextlintRule {
 }
 
 /// `[manifest]` section: native structural `Cargo.toml` conventions checked by
-/// `brokkr check` on the `[style]` model - discrete named toggles, not a rule
+/// `brokkr check` as discrete named toggles, not a rule
 /// DSL. Inert unless at least one check is enabled. Each check reads a manifest
 /// with `toml_edit` (comment- and order-preserving), so it can see structure a
 /// value-only parse discards (blank-line groups, key order).
@@ -887,9 +863,8 @@ pub enum Isolation {
 /// anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion, and the `skip_phases`
 /// validator subtracts it from this list - so the two roles no longer let
 /// `skip_phases = ["coverage"]` load clean and announce a no-op.
-pub const PHASE_NAMES: [&str; 10] = [
+pub const PHASE_NAMES: [&str; 9] = [
     "gremlins",
-    "style",
     "header",
     "textlint",
     "manifest",
@@ -960,7 +935,7 @@ pub struct ProfileDef {
     /// is included everywhere until opted out, never silently excluded).
     /// Requires `certifies = "partial"` - the claim is what grants the
     /// permission. Valid names are the [`PHASE_NAMES`] identifiers `gremlins`,
-    /// `style`, `header`, `textlint`, `manifest`, `script_check`,
+    /// `header`, `textlint`, `manifest`, `script_check`,
     /// `dependency_rules`, `clippy`, `test` minus [`NON_SKIPPABLE_PHASES`] -
     /// `coverage` is not skippable (it runs only under a complete claim). Not
     /// inherited through `extends`.

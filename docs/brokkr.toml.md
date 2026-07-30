@@ -65,7 +65,7 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`, `style`, `header`, `textlint`, `textlint_preset`, `script_check`,
+`gremlins`, `header`, `textlint`, `textlint_preset`, `script_check`,
 `manifest`, `deps`, `disable_toolchain`.
 
 ## `disable_toolchain`
@@ -135,26 +135,6 @@ codepoint listed on both sides is rejected at parse time. The `U+XXXX` form
 keeps `brokkr.toml` itself free of literal, possibly-invisible gremlin
 characters. Omit the section to scan everything with the built-in set (the
 default).
-
-## `[style]` section
-
-Opt-in native Rust style checks run by `brokkr check` (the style phase, after
-gremlins). Every knob defaults to `false`, so omitting `[style]` - or listing
-it with nothing enabled - runs no style checks and changes no behaviour.
-
-```toml
-[style]
-rust_blank_line_above_control_flow = true
-```
-
-`rust_blank_line_above_control_flow` requires a blank line above
-`if`/`match`/`for`/`while`/`loop`/`spawn` constructs in tracked `.rs` files,
-skipping `[gremlins].exclude` directories. It honours an exemption ladder
-(first expression in a block, comment/attribute above, string continuation,
-an identifier shared with the line above or the first body line, plus
-per-keyword carve-outs for else-if chains, expression position, loop labels,
-and `.spawn` method chains). Ported from nautilus_trader's `check_formatting_rs`
-convention hook; see `src/style.rs` and `docs/commands/check.md`.
 
 ## `[header]` section
 
@@ -359,7 +339,7 @@ entry is named in the output either way.
 ## `[manifest]` section
 
 Native structural `Cargo.toml` conventions (the manifest phase), on the
-`[style]` model - discrete named toggles, not a rule DSL. Each check reads a
+model of discrete named toggles, not a rule DSL. Each check reads a
 manifest with `toml_edit`, so it sees structure a value-only parse discards
 (blank-line groups, key order). Inert unless a check is enabled; absent = the
 phase is skipped.

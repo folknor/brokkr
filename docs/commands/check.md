@@ -2,7 +2,7 @@
 
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
-full validation pass (gremlins + style + header + textlint + dependency rules +
+full validation pass (gremlins + header + textlint + dependency rules +
 clippy + tests); `test`
 runs one named cargo test against the same sweep set.
 
@@ -11,7 +11,7 @@ section, profiles) see `docs/brokkr.toml.md`.
 
 ## `brokkr check`
 
-Gremlins + style + header + textlint + dependency rules + clippy + tests. Trailing args after
+Gremlins + header + textlint + dependency rules + clippy + tests. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -193,7 +193,7 @@ Output:
   `profile` (the profile that drove sweep selection; `null` for ad-hoc and
   legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
   when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
-  of `gremlins`/`style`/`header`/`textlint`/`manifest`/`script_check`/
+  of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
   `dependency_rules`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must
   tolerate unknown fields, and a bump is reserved for renames or semantic
@@ -400,20 +400,6 @@ legitimately carries typographic punctuation, BOMs, and the like. Matching is
 by path prefix on the git-relative path, so `docs/manual` covers
 `docs/manual/` and everything beneath it but not a sibling `docs/manual-extra`.
 Empty and absolute entries are rejected at parse time.
-
-Style phase runs next, only when `[style]` enables a rule (off by default, so
-it is inert for every project that does not opt in). The one current rule,
-`rust_blank_line_above_control_flow`, requires a blank line above
-`if`/`match`/`for`/`while`/`loop`/`spawn` constructs, with an exemption ladder
-(first expression in a block, comment/attribute above, string continuation,
-shared identifier with the line above or the first body line, plus per-keyword
-carve-outs: else-if chains, expression position, loop labels, `.spawn` method
-chains). An `if` that is a **match guard** is exempt outright rather than via
-the ladder - scanning forward from the `if`, a line ending in `=>` before any
-`{` or `;` means the construct opens no block and is the arm's guard clause,
-which is what rustfmt produces when a guard is too long to sit beside its
-pattern. It scans tracked `.rs` files, honouring `[gremlins].exclude`. Ported
-from nautilus_trader's `check_formatting_rs` hook; see `src/style.rs`.
 
 Header phase runs next, only when a `[header]` section is present. A file
 matching `[header].paths` (minus `exempt`) must contain `[header].pattern` with
