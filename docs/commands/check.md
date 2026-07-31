@@ -45,7 +45,22 @@ with the *failing* package, which is generally a workspace member, not the
 brokkr.toml project name that a bare `clean --cargo` would default to. A
 genuinely missing foreign symbol matches neither test, so ordinary link
 errors get the notes but no hint. Detection is `linker_failure_detail` in
-`src/cargo_filter.rs`, on the `filter_test` fallback path.
+`src/cargo_filter.rs`, on the `filter_test` fallback path (shared with
+`brokkr test`'s BUILD FAILED reporter via `filter_test_build_failure`, which
+also relabels the summary line `cargo test:` - the diagnostics ride through
+`filter_clippy`, but the command that produced them was `cargo test`).
+
+The stale-incremental family has a second, hintless face: cargo's
+mtime-based fingerprinting fails to invalidate a dependency crate's rlib
+(seen when a source file lands with an mtime *older* than the cached
+fingerprint - e.g. written by an external tool that preserves timestamps),
+and a `-p`-scoped test build then reports a confident, false `E0599 no
+method named ...` against code that a differently-scoped shape (or the
+clippy phase) compiles fine. Same code, one shape green, one shape phantom
+errors. The remedy is the same `brokkr clean --cargo <pkg>` (with the stale
+*dependency* crate as `<pkg>`); touching any file in the stale crate also
+forces the rebuild. No automatic hint fires here - an E0599 is usually a
+real error, and brokkr can't tell the two apart.
 
 ### Per-sweep rustflags + auto target-dir isolation
 
@@ -413,6 +428,9 @@ announced up front (`clippy: allowing <lint> at <path> ([clippy]
 allow_exact)`), and an entry that suppressed nothing across the run draws a
 `suppressed nothing (stale entry?)` notice - upstream fixed the site or the
 file moved, so the entry should be deleted or re-sited rather than accrete.
+The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
+entry's file when it lives outside the selected packages, so "suppressed
+nothing" there proves nothing.
 `--raw` still shows suppressed diagnostics (it dumps clippy's own rendered
 text verbatim); the pass/fail decision and the formatted output do not
 count them. The path half must match the file exactly as clippy reports it

@@ -510,15 +510,7 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
     });
 
     if !has_test_result && has_compile_error {
-        let mut filtered = filter_clippy(stderr);
-        if filtered.starts_with("cargo clippy:") {
-            filtered = filtered.replacen("cargo clippy:", "cargo test:", 1);
-        }
-        if let Some(extra) = linker_failure_detail(stderr) {
-            filtered.push('\n');
-            filtered.push_str(&extra);
-        }
-        return filtered;
+        return filter_test_build_failure(stderr);
     }
 
     let lines: Vec<&str> = stdout.lines().collect();
@@ -574,6 +566,23 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
 
     // Failures present - format as one-liners.
     format_test_failures(&parsed)
+}
+
+/// Format a `cargo test` run that died in the build phase: the clippy-style
+/// one-line diagnostics relabeled under `cargo test:` - the command that
+/// actually ran - plus [`linker_failure_detail`] when applicable. Shared by
+/// [`filter_test`]'s compile-error branch and `brokkr test`'s BUILD FAILED
+/// reporter, so both paths label the failure identically.
+pub fn filter_test_build_failure(stderr: &str) -> String {
+    let mut filtered = filter_clippy(stderr);
+    if filtered.starts_with("cargo clippy:") {
+        filtered = filtered.replacen("cargo clippy:", "cargo test:", 1);
+    }
+    if let Some(extra) = linker_failure_detail(stderr) {
+        filtered.push('\n');
+        filtered.push_str(&extra);
+    }
+    filtered
 }
 
 /// Extra detail for a `linking with ...` build failure. The one-line

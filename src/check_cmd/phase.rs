@@ -1348,7 +1348,7 @@ fn run_clippy_phase(
         )));
     }
 
-    report_stale_sited_allows(&results, allow_exact);
+    report_stale_sited_allows(&results, allow_exact, packages);
 
     // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
     // the pass/fail decision is brokkr's own: any clippy diagnostic is a
@@ -1418,9 +1418,15 @@ fn announce_allows(allow: &[String], allow_exact: &[SitedAllow]) {
 /// A sited suppression that matched nothing across every sweep is dead
 /// weight: either upstream fixed the site (delete the entry) or the file
 /// moved (re-site it). Say so - a notice, not a failure - so the list never
-/// accretes silently.
-fn report_stale_sited_allows(results: &[SweepResult], allow_exact: &[SitedAllow]) {
-    if allow_exact.is_empty() {
+/// accretes silently. Only an unscoped run can testify: a `-p`-narrowed run
+/// simply doesn't check the entry's file when it lives in another package,
+/// so "suppressed nothing" there is noise, not evidence of staleness.
+fn report_stale_sited_allows(
+    results: &[SweepResult],
+    allow_exact: &[SitedAllow],
+    packages: &[String],
+) {
+    if allow_exact.is_empty() || !packages.is_empty() {
         return;
     }
     let mut matched = vec![false; allow_exact.len()];

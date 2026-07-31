@@ -355,7 +355,12 @@ fn run_pre_build(
             output::error(&stderr);
         }
     } else {
-        let filtered = cargo_filter::filter_clippy(&stderr);
+        // The diagnostics come out of `filter_clippy`, but the command that
+        // produced them is `cargo build` - label it as such.
+        let mut filtered = cargo_filter::filter_clippy(&stderr);
+        if filtered.starts_with("cargo clippy:") {
+            filtered = filtered.replacen("cargo clippy:", "cargo build:", 1);
+        }
         if !filtered.is_empty() {
             output::error(&filtered);
         }
@@ -652,7 +657,7 @@ fn run_one(
         let first = repeat_state.first_sighting("build failed");
         flush_sink(sink, !first);
         if !raw && first {
-            let filtered = cargo_filter::filter_clippy(stderr_text.as_ref());
+            let filtered = cargo_filter::filter_test_build_failure(stderr_text.as_ref());
             if !filtered.is_empty() {
                 output::error(&filtered);
             }
@@ -916,8 +921,9 @@ fn keep_stdout_line(line: &str) -> bool {
 
 /// Strip cargo's compile-phase chatter on stderr: `Compiling`/`Finished`/
 /// `Blocking` progress, `warning:`/`error:` blocks (multi-line, terminated
-/// by a blank line), and the `N warnings emitted` summary. Compile errors are still
-/// shown via `filter_clippy` in the BUILD FAILED path.
+/// by a blank line), the `N warnings emitted` summary, and rustc's trailing
+/// `--explain` hints. Compile errors are still shown via
+/// `filter_test_build_failure` in the BUILD FAILED path.
 fn keep_stderr_compile_line(line: &str, in_block: &mut bool) -> bool {
     let trimmed = line.trim_start();
     if *in_block {
@@ -942,6 +948,13 @@ fn keep_stderr_compile_line(line: &str, in_block: &mut bool) -> bool {
         return false;
     }
     if trimmed.contains("generated") && trimmed.contains("warning") {
+        return false;
+    }
+    // Rustc's trailing hints after the error blocks: the `[error]` summary
+    // already carries the error codes, so these would leak unprefixed.
+    if trimmed.starts_with("Some errors have detailed explanations")
+        || trimmed.starts_with("For more information about")
+    {
         return false;
     }
     true
