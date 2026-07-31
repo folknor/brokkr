@@ -67,6 +67,11 @@ pub struct ResolvedSweep {
     /// process-isolated sweeps (enforced at resolve time). A filter,
     /// never part of the build shape.
     pub qualified_skips: Vec<QualifiedSkip>,
+    /// From the `[[check]]` entry's `curated`: the entry runs a hand-picked
+    /// subset, and its shape's non-run pairs are exempt from the coverage
+    /// universe. Audit policy only - never part of the build shape, and the
+    /// audit exempts a shape only when *every* sweep producing it is curated.
+    pub curated: bool,
 }
 
 impl ResolvedSweep {
@@ -142,6 +147,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         rustflags: entry.rustflags.clone(),
         process_isolation: false,
         qualified_skips: Vec::new(),
+        curated: entry.curated,
     }
 }
 
@@ -365,6 +371,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         rustflags: entry.rustflags.clone(),
         process_isolation: profile.isolation == Some(Isolation::Process),
         qualified_skips,
+        curated: entry.curated,
     }
 }
 
@@ -472,6 +479,33 @@ isolation = "process"
             .env
             .insert("HIGH_PRECISION".into(), "1".into());
         assert_ne!(plain.build_shape_key(), env_sweep.build_shape_key());
+    }
+
+    #[test]
+    fn curated_rides_the_sweep_and_stays_out_of_the_shape() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "sim-live"
+only = ["targeted"]
+curated = true
+
+[test.profiles.sim]
+sweeps = ["sim-live"]
+"#,
+        );
+        let resolved = resolve(&cfg, &checks, "sim").unwrap();
+        assert!(resolved[0].curated);
+        assert!(sweep_from_check_entry(&checks[0]).curated);
+
+        // Audit policy, not build shape: a curated and a plain sweep of an
+        // otherwise-identical entry still dedupe to one clippy run - which
+        // is exactly why the coverage audit must key its exemption on the
+        // member sweeps, not the shape.
+        let mut plain_entry = checks[0].clone();
+        plain_entry.curated = false;
+        let plain = sweep_from_check_entry(&plain_entry);
+        assert_eq!(plain.build_shape_key(), resolved[0].build_shape_key());
     }
 
     #[test]

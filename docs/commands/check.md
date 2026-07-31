@@ -245,14 +245,24 @@ best-effort: its findings print, its counts ride in the JSON, and
 never reached credits **nothing** to the ran-set - the shape still counts
 in the universe, so its pairs surface as non-run rather than being counted
 as run they never were. The unit of coverage is the **(build shape, package, test)
-pair**.
+pair**. `curated = true` entries are the declared narrowing of the
+universe (below); package-level `test_exclude_packages` is the other.
 
 The universe is **every `[[check]]` entry**, not the profile's own sweep
 list: if it were the latter, dropping a sweep from a lane would silently
 shrink the certified set. A `complete` profile that leaves a `[[check]]`
 entry referenced by no sweep or lane is therefore a **load-time error**
 (the entry would be enumerated nowhere, so the audit would print `0
-orphaned` over tests that never ran). Enumeration is per test binary: `cargo test --no-run
+orphaned` over tests that never ran) - **unless the entry declares
+`curated = true`** (see `docs/brokkr.toml.md`): a curated entry's non-run
+pairs are outside the universe by declaration, so leaving it unreferenced
+certifies nothing without running, and the entry may live in its own
+deliberately-run profile instead. When a gate lane does run a curated
+entry, its build shape's non-run pairs are exempted rather than audited -
+counted and trailer-reported like `test_exclude_packages`, never orphaned,
+never credited to a `[[quarantine]]` entry. The exemption is keyed on the
+sweeps, not the shape: a non-curated entry sharing a build shape with a
+curated one keeps that shape fully audited. Enumeration is per test binary: `cargo test --no-run
 --message-format=json` yields each binary with its owning package, then
 each binary runs `--list` directly (env-safe: listing executes no test
 code). The universe is `--list --include-ignored` with no filters, each
@@ -278,7 +288,8 @@ entries, 106 pairs - B51 80, B41 14, B50 10, …`). That keeps both signals
 the per-entry listing carried: the countdown, and the growth warning when a
 substring starts matching more than it used to. `--all` prints the old line
 per entry, with each entry's pattern and package scope. The `--json` summary carries a
-`coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `orphaned`.
+`coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `curated`,
+`orphaned`.
 It is present whenever the audit got as far as classifying pairs - a run
 that fails *on* the audit (stale entries, orphans) still reports its
 counts, so a consumer of a failed gate sees the worksheet's numbers and

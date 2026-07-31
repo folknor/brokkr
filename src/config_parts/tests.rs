@@ -462,6 +462,23 @@ preset = ["a", "b"]
     }
 
     #[test]
+    fn parse_check_rejects_unfiltered_curated_entry() {
+        // Curated means "a hand-picked subset"; without its own filters the
+        // entry is a full sweep that would silently drop out of the coverage
+        // universe.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[[check]]\nname = \"sim-live\"\ncurated = true\n").unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("curated"), "got: {err}");
+
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"sim-live\"\ncurated = true\nonly = [\"targeted\"]\n",
+        )
+        .unwrap();
+        assert!(parse_check(&table).unwrap()[0].curated);
+    }
+
+    #[test]
     fn parse_check_rejects_rustflags_with_env_rustflags() {
         let table: toml::map::Map<String, toml::Value> = toml::from_str(
             "[[check]]\nname = \"sim\"\nrustflags = [\"--cfg\", \"madsim\"]\n\

@@ -37,6 +37,9 @@ struct CoverageStats {
     quarantined: usize,
     /// Non-run pairs whose test is `#[ignore]`d at the source.
     ignored: usize,
+    /// Non-run pairs of shapes whose every sweep is a `curated = true`
+    /// entry - exempt by declaration, reported, never orphaned.
+    curated: usize,
     /// Non-run, unjustified pairs. Any value above zero failed the check.
     orphaned: usize,
 }
@@ -47,6 +50,11 @@ struct CoverageStats {
 /// the coverage pair to (build shape, package, test)).
 struct ShapeCoverage {
     label: String,
+    /// Every sweep producing this shape is `curated = true`, so its
+    /// non-run pairs are exempt from the universe by declaration. Keyed
+    /// on the sweeps, not the shape: one non-curated sweep sharing the
+    /// shape claims the full universe and keeps the shape audited.
+    curated: bool,
     universe: BTreeSet<(String, String)>,
     ignored: BTreeSet<(String, String)>,
     ran: BTreeSet<(String, String)>,
@@ -97,6 +105,40 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
     )
 }
 
+/// The two declared narrowings of the universe, said out loud so a
+/// narrowed claim never reads as a full one: package-level exclusion is
+/// outside the pair audit entirely (the binaries cannot even build), and
+/// curated sweeps have their shapes' non-run pairs exempted by declaration
+/// (`curated_pairs` is the audit's count of those).
+fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
+    let excluding: Vec<String> = sweeps
+        .iter()
+        .filter(|s| !s.test_exclude_packages.is_empty())
+        .map(|s| format!("{} ({})", s.label, s.test_exclude_packages.len()))
+        .collect();
+
+    if !excluding.is_empty() {
+        output::run_msg(&format!(
+            "coverage: sweeps excluding packages from tests - outside the pair \
+             audit: {}",
+            excluding.join(", ")
+        ));
+    }
+    let curated: Vec<&str> = sweeps
+        .iter()
+        .filter(|s| s.curated)
+        .map(|s| s.label.as_str())
+        .collect();
+
+    if !curated.is_empty() {
+        output::run_msg(&format!(
+            "coverage: curated sweeps - non-run pairs exempt from the \
+             universe ({curated_pairs} pairs): {}",
+            curated.join(", ")
+        ));
+    }
+}
+
 fn run_coverage_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
@@ -141,21 +183,7 @@ fn run_coverage_phase(
     } else if !quarantine.is_empty() {
         output::run_msg(&quarantine_rollup(quarantine, &report.per_entry));
     }
-    // Package-level exclusion is outside the pair audit (the binaries
-    // cannot even build); say so rather than hide it.
-    let excluding: Vec<String> = sweeps
-        .iter()
-        .filter(|s| !s.test_exclude_packages.is_empty())
-        .map(|s| format!("{} ({})", s.label, s.test_exclude_packages.len()))
-        .collect();
-
-    if !excluding.is_empty() {
-        output::run_msg(&format!(
-            "coverage: sweeps excluding packages from tests - outside the pair \
-             audit: {}",
-            excluding.join(", ")
-        ));
-    }
+    report_declared_narrowing(sweeps, report.stats.curated);
 
     let stale: Vec<&str> = quarantine
         .iter()
@@ -200,8 +228,13 @@ fn run_coverage_phase(
         return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
     }
 
+    let curated_frag = if report.stats.curated > 0 {
+        format!("{} curated, ", report.stats.curated)
+    } else {
+        String::new()
+    };
     output::run_msg(&format!(
-        "coverage: {} shapes, {} pairs - {} run, {} quarantined, {} ignored, 0 orphaned",
+        "coverage: {} shapes, {} pairs - {} run, {} quarantined, {} ignored, {curated_frag}0 orphaned",
         shapes.len(),
         report.stats.pairs,
         report.stats.run,
@@ -318,6 +351,7 @@ fn enumerate_shapes(
 
         out.push(ShapeCoverage {
             label: first.label.clone(),
+            curated: members.iter().all(|&idx| sweeps[idx].curated),
             universe,
             ignored,
             ran,
@@ -365,6 +399,7 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
         run: 0,
         quarantined: 0,
         ignored: 0,
+        curated: 0,
         orphaned: 0,
     };
     let mut per_entry = vec![0usize; quarantine.len()];
@@ -376,6 +411,13 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
 
             if shape.ran.contains(pair) {
                 stats.run += 1;
+                continue;
+            }
+            // A curated shape's non-run pairs are exempt by declaration -
+            // counted before ignored/quarantine so a curated shape never
+            // credits (or stales) a `[[quarantine]]` entry.
+            if shape.curated {
+                stats.curated += 1;
                 continue;
             }
 
@@ -457,12 +499,14 @@ mod coverage_tests {
         // covered, pair-level accounting reports the ffi pair.
         let shapes = vec![
             ShapeCoverage {
+                curated: false,
                 label: "tier1/default".into(),
                 universe: set(&[("core", "serial_tests::a"), ("core", "plain")]),
                 ignored: set(&[]),
                 ran: set(&[("core", "serial_tests::a"), ("core", "plain")]),
             },
             ShapeCoverage {
+                curated: false,
                 label: "tier1/ffi".into(),
                 universe: set(&[("core", "serial_tests::a"), ("core", "plain")]),
                 ignored: set(&[]),
@@ -483,6 +527,7 @@ mod coverage_tests {
     #[test]
     fn ignored_pairs_count_separately() {
         let shapes = vec![ShapeCoverage {
+            curated: false,
             label: "default".into(),
             universe: set(&[("core", "a"), ("core", "slow_manual")]),
             ignored: set(&[("core", "slow_manual")]),
@@ -500,6 +545,7 @@ mod coverage_tests {
         // declaration order (was first-match-wins, which credited the
         // broader entry and starved the narrower one).
         let shapes = vec![ShapeCoverage {
+            curated: false,
             label: "default".into(),
             universe: set(&[("core", "test_bar_roundtrip")]),
             ignored: set(&[]),
@@ -518,6 +564,7 @@ mod coverage_tests {
         // narrower entry credited zero pairs and was flagged stale, failing
         // the gate. Most-specific-wins gives each entry its own pairs.
         let shapes = vec![ShapeCoverage {
+            curated: false,
             label: "default".into(),
             universe: set(&[
                 ("core", "test_bar_basic"),
@@ -537,11 +584,52 @@ mod coverage_tests {
     }
 
     #[test]
+    fn curated_shape_exempts_non_run_pairs_without_touching_quarantine() {
+        // A curated shape's non-run pairs are exempt by declaration: not
+        // orphaned, and never credited to a quarantine entry (which would
+        // both hide the exemption and un-stale a dead entry).
+        let shapes = vec![ShapeCoverage {
+            curated: true,
+            label: "sim/sim-live".into(),
+            universe: set(&[("live", "targeted"), ("live", "rest_a"), ("live", "rest_b")]),
+            ignored: set(&[]),
+            ran: set(&[("live", "targeted")]),
+        }];
+        let q = vec![entry("rest_", "B60")];
+        let report = classify(&shapes, &q);
+        assert_eq!(report.stats.run, 1);
+        assert_eq!(report.stats.curated, 2);
+        assert_eq!(report.stats.orphaned, 0);
+        assert_eq!(report.per_entry, vec![0]);
+    }
+
+    #[test]
+    fn non_curated_shape_gets_no_exemption() {
+        // The entry-keyed guard: the exemption is decided per shape from
+        // its sweeps (`enumerate_shapes` sets `curated` only when every
+        // member sweep is curated), so a full entry sharing a build shape
+        // with a curated one keeps the shape fully audited. Here the shape
+        // arrives non-curated and its non-run pair must orphan.
+        let shapes = vec![ShapeCoverage {
+            curated: false,
+            label: "sim/sim-common".into(),
+            universe: set(&[("common", "a"), ("common", "b")]),
+            ignored: set(&[]),
+            ran: set(&[("common", "a")]),
+        }];
+        let report = classify(&shapes, &[]);
+        assert_eq!(report.stats.curated, 0);
+        assert_eq!(report.stats.orphaned, 1);
+        assert_eq!(report.orphans, vec!["sim/sim-common/common/b"]);
+    }
+
+    #[test]
     fn package_scoped_entry_does_not_absorb_other_packages() {
         // The over-absorption hazard: a pattern written for infrastructure
         // must not justify a same-named pair in backtest, or a test that
         // later stops running lands as accounted instead of orphaned.
         let shapes = vec![ShapeCoverage {
+            curated: false,
             label: "serial/default".into(),
             universe: set(&[
                 ("nautilus-infrastructure", "serial_tests::t"),

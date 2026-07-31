@@ -1115,6 +1115,20 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         }
     }
     reject_reserved_sweep_env(&entry.env, &format!("[[check]] entry '{}'", entry.name))?;
+    if entry.curated
+        && entry.tests.is_empty()
+        && entry.skip.is_empty()
+        && entry.only.is_empty()
+    {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets `curated = true` but carries no \
+             `tests`/`skip`/`only` filters of its own. Curated means \"this \
+             shape exists to run a hand-picked subset\"; an unfiltered entry \
+             is a full sweep and must stay in the coverage universe - drop \
+             `curated` or add the filters that define the subset.",
+            entry.name
+        )));
+    }
     Ok(())
 }
 
@@ -1535,7 +1549,11 @@ fn referenced_check_entries(
 /// tests that never ran - the exact hole the audit exists to close. Every
 /// `[[check]]` entry is unconditional today (feature 6 `when` is unbuilt),
 /// so a complete profile must reference every one; an omission is a
-/// resolve-time error.
+/// resolve-time error. `curated = true` entries are exempt: a curated
+/// entry's non-run pairs are outside the universe by declaration, so an
+/// unreferenced one certifies nothing without running it - which is what
+/// lets a curated subset live in its own deliberately-run profile while a
+/// complete gate exists.
 fn validate_complete_universe(
     name: &str,
     t: &TestConfig,
@@ -1546,6 +1564,7 @@ fn validate_complete_universe(
     referenced_check_entries(&t.profiles, name, &mut visited, &mut referenced);
     let unreferenced: Vec<&str> = check
         .iter()
+        .filter(|e| !e.curated)
         .map(|e| e.name.as_str())
         .filter(|n| !referenced.contains(*n))
         .collect();
@@ -1560,7 +1579,9 @@ fn validate_complete_universe(
              {entry_word} {} referenced by no sweep or lane. The universe of a \
              complete profile is every [[check]] entry - an unreferenced entry \
              is enumerated nowhere, so its tests would be certified without \
-             running. Reference {it_word} from a lane (or delete the entry).",
+             running. Reference {it_word} from a lane, mark {it_word} \
+             `curated = true` (a filtered hand-picked subset, outside the \
+             universe), or delete the entry.",
             unreferenced.join(", "),
         )));
     }
@@ -1960,6 +1981,36 @@ sweeps = ["live", "sim"]
         .unwrap();
         let check = check_entries(&["default", "ffi", "live", "sim"]);
         validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+    }
+
+    #[test]
+    fn curated_entry_may_go_unreferenced_by_the_complete_profile() {
+        // The sim shape: curated entries live in their own deliberately-run
+        // profile while the gate exists. Their non-run pairs are outside the
+        // universe by declaration, so an unreferenced curated entry certifies
+        // nothing without running - not a hole, not an error. The uncurated
+        // sibling still triggers.
+        let cfg: TestConfig = toml::from_str(
+            r#"
+doctests = true
+[profiles.gate]
+certifies = "complete"
+sweeps = ["default"]
+[profiles.sim]
+sweeps = ["sim-live"]
+"#,
+        )
+        .unwrap();
+        let mut check = check_entries(&["default", "sim-live"]);
+        check[1].curated = true;
+        check[1].only = vec!["targeted".into()];
+        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+
+        check[1].curated = false;
+        let err = validate_check_against_test(&check, Some(&cfg), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sim-live"), "got: {err}");
     }
 
     #[test]

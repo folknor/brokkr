@@ -2403,6 +2403,7 @@ mod json_summary_tests {
                 run: 90,
                 quarantined: 8,
                 ignored: 2,
+                curated: 0,
                 orphaned: 0,
             }),
             elapsed_ms: 10,

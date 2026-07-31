@@ -778,6 +778,15 @@ pub struct CheckEntry {
     /// name contains one of these), ANDed with any profile `only` filters.
     #[serde(default)]
     pub only: Vec<String>,
+    /// This entry exists to run a hand-picked subset: its build shape's
+    /// non-run pairs are exempt from a `complete` profile's coverage
+    /// universe (reported in the trailer, like `test_exclude_packages`),
+    /// and a `complete` profile need not reference it at all. Requires
+    /// the entry to carry its own `tests`/`skip`/`only` filters - an
+    /// unfiltered "curated" entry is just an uncounted full sweep.
+    /// Coverage policy only, never part of the build shape.
+    #[serde(default)]
+    pub curated: bool,
 }
 
 impl CheckEntry {

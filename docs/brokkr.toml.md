@@ -634,6 +634,21 @@ env = { HIGH_PRECISION = "1" }
   substring filters. This lets a curated subset (e.g. one named test per
   package) be expressed as several sibling `[[check]]` entries under one
   profile, rather than one sweep running a whole package set's tests.
+- `curated` (optional, default `false`) - declares the entry a hand-picked
+  subset for coverage purposes, and requires the entry to carry its own
+  `tests`/`skip`/`only` filters (an unfiltered "curated" entry is just an
+  uncounted full sweep - parse error). Two effects, both scoped to
+  `certifies = "complete"` profiles: the entry is **exempt from the
+  complete-universe rule** (a `complete` profile need not reference it, so a
+  curated subset can live in its own deliberately-run profile while a gate
+  exists), and when a gate lane *does* run it, the coverage audit exempts its
+  build shape's non-run pairs from the universe - counted, reported in the
+  trailer (like `test_exclude_packages`) and in the `--json` `coverage.curated`
+  field, never orphaned, and never credited to a `[[quarantine]]` entry. The
+  exemption is keyed on the sweeps, not the shape: a non-curated entry sharing
+  a build shape with a curated one keeps that shape fully audited. Coverage
+  policy only - never part of the build shape, so a curated and a plain sweep
+  of the same shape still dedupe to one clippy run.
 
 A worked example - a deterministic-simulation (madsim) gate as several sibling
 sweeps sharing one isolated madsim target dir, each running its own curated
@@ -652,10 +667,17 @@ packages = ["nautilus-core"]
 features = ["simulation"]
 rustflags = ["--cfg", "madsim"]
 only = ["virtual_time"]
+curated = true
 
 [test.profiles.sim]
 sweeps = ["sim-common", "sim-core"]
 ```
+
+Here `sim-common` runs its package's full test set, so under a complete gate
+it must join the gate's lanes like any other entry; `sim-core` runs only a
+`virtual_time` subset and is `curated`, so its remaining pairs are exempt and
+the `sim` profile stays legal alongside the gate whether or not the gate's
+lanes reference it.
 
 The legacy `[check]` table form (with `consumer_features`) is rejected at
 parse time with a migration message - move the flags into a `[[check]]` entry.
