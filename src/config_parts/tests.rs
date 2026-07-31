@@ -73,6 +73,37 @@ mod tests {
     }
 
     #[test]
+    fn clippy_allow_exact_parses() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[clippy]\nallow_exact = [\"clippy::unused_async@src/lib.rs\", \"dead_code@src/a.rs\"]",
+        )
+        .unwrap();
+        let cfg = parse_clippy(&table).unwrap().unwrap();
+        assert_eq!(cfg.allow_exact.len(), 2);
+        assert_eq!(cfg.allow_exact[0].lint, "clippy::unused_async");
+        assert_eq!(cfg.allow_exact[0].path, "src/lib.rs");
+        assert_eq!(cfg.allow_exact[1].to_string(), "dead_code@src/a.rs");
+    }
+
+    #[test]
+    fn clippy_allow_exact_rejects_malformed_entries() {
+        // No '@' (a blanket allow belongs in `allow`), empty halves, flag
+        // smuggling, whitespace, and a second '@' are all parse errors.
+        for bad in [
+            "clippy::unused_async",
+            "@src/lib.rs",
+            "clippy::unused_async@",
+            "-W clippy::pedantic@src/lib.rs",
+            "dead_code@src/a b.rs",
+            "dead_code@src@lib.rs",
+        ] {
+            let src = format!("[clippy]\nallow_exact = [\"{bad}\"]");
+            let table: toml::map::Map<String, toml::Value> = toml::from_str(&src).unwrap();
+            assert!(parse_clippy(&table).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
     fn script_check_stage_defaults_to_pre_clippy() {
         // An entry written before `stage` existed keeps running where it always
         // did - the key's absence must not move a gate.

@@ -118,11 +118,83 @@ pub struct BinConfig {
 ///   any-diagnostic-fails rule needs no carve-outs; the phase announces the
 ///   allowed lints up front so a narrowed gate never reads as a full one.
 ///   Accepts both `clippy::` lints and plain rustc lint names.
+/// - `allow_exact` - sited suppressions, `"lint@path"` entries filtered on
+///   brokkr's side of the pipe. `allow` acts at the compiler CLI level, and a
+///   source site carrying its own lint-level attribute can defeat it (the
+///   `#[expect]`-sibling interaction documented in `docs/commands/check.md`).
+///   An `allow_exact` entry instead drops matching diagnostics at JSON
+///   ingestion - after clippy has spoken, before the pass/fail decision - so
+///   it holds regardless of attribute games at the site. Deliberately narrow:
+///   one lint in one file (every occurrence in that file), never
+///   workspace-wide, and no `-A` is injected for it.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ClippyConfig {
     /// Lint names to suppress (`-A <lint>`) on every clippy sweep.
     pub allow: Vec<String>,
+    /// Sited suppressions (`"lint@path"`), filtered at diagnostic ingestion.
+    pub allow_exact: Vec<SitedAllow>,
+}
+
+/// One `[clippy] allow_exact` entry: a lint suppressed in one file only.
+///
+/// Deserialized from the `"lint@path"` string form; the split and both
+/// halves are validated during deserialization, so a constructed value is
+/// always well-formed. `path` is relative to the tree cargo compiles in
+/// (the build root) - exactly the path clippy's own diagnostics carry.
+#[derive(Debug, Clone)]
+pub struct SitedAllow {
+    /// Bare lint name (`clippy::`-qualified or plain rustc name).
+    pub lint: String,
+    /// Build-root-relative file the suppression is scoped to.
+    pub path: String,
+}
+
+impl SitedAllow {
+    /// Parse the `"lint@path"` form, rejecting anything that isn't a bare
+    /// lint name plus a relative path - the same flag-smuggling guards as
+    /// `allow`, and an explicit rejection of the `@`-less form so a blanket
+    /// allow can't land in the sited key by accident.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let Some((lint, path)) = s.split_once('@') else {
+            return Err(format!(
+                "allow_exact entry '{s}' has no '@' - the form is \
+                 \"lint@path\" (for a workspace-wide suppression use `allow`)."
+            ));
+        };
+        if lint.is_empty() || lint.starts_with('-') || lint.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "allow_exact entry '{s}' does not start with a bare lint name \
+                 (e.g. \"clippy::unused_async@src/lib.rs\")."
+            ));
+        }
+        if path.is_empty() || path.chars().any(char::is_whitespace) || path.contains('@') {
+            return Err(format!(
+                "allow_exact entry '{s}' does not end with a single relative \
+                 path (e.g. \"clippy::unused_async@src/lib.rs\")."
+            ));
+        }
+        Ok(Self {
+            lint: lint.to_string(),
+            path: path.to_string(),
+        })
+    }
+}
+
+impl std::fmt::Display for SitedAllow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.lint, self.path)
+    }
+}
+
+impl<'de> Deserialize<'de> for SitedAllow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 /// `[gremlins]` section: tuning for the `brokkr check` gremlin scanner.

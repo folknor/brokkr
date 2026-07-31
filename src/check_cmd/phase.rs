@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
     Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
-    QuarantineEntry, ScriptCheck, Stage, TestConfig, TextlintRule,
+    QuarantineEntry, ScriptCheck, SitedAllow, Stage, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::error::DevError;
@@ -51,6 +51,7 @@ pub(crate) fn cmd_check(
     script_checks: &[ScriptCheck],
     manifest_cfg: Option<&ManifestConfig>,
     clippy_allow: &[String],
+    clippy_allow_exact: &[SitedAllow],
     features: &[String],
     no_default_features: bool,
     packages: &[String],
@@ -145,6 +146,7 @@ pub(crate) fn cmd_check(
                 active_sweeps: &active_sweeps,
                 packages,
                 clippy_allow,
+                clippy_allow_exact,
                 quarantine,
                 certifies,
                 doctests,
@@ -289,6 +291,8 @@ struct BuildPhaseArgs<'a> {
     packages: &'a [String],
     /// The `[clippy] allow` lint list, suppressed via `-A` on every sweep.
     clippy_allow: &'a [String],
+    /// The `[clippy] allow_exact` sited list, filtered at JSON ingestion.
+    clippy_allow_exact: &'a [SitedAllow],
     quarantine: &'a [QuarantineEntry],
     certifies: Option<Certifies>,
     doctests: bool,
@@ -320,6 +324,7 @@ fn run_build_phases(
             a.active_sweeps,
             a.packages,
             a.clippy_allow,
+            a.clippy_allow_exact,
             a.raw,
             a.limit,
             a.all,
@@ -1242,6 +1247,7 @@ fn run_clippy_phase(
     sweeps: &[ResolvedSweep],
     packages: &[String],
     allow: &[String],
+    allow_exact: &[SitedAllow],
     raw: bool,
     limit: usize,
     all: bool,
@@ -1250,15 +1256,7 @@ fn run_clippy_phase(
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
 
-    // A suppressed lint narrows what "clippy clean" certifies, so the log
-    // must say so up front - like `skip_phases`, a narrowed run must never
-    // read as a full one.
-    if !allow.is_empty() {
-        output::run_msg(&format!(
-            "clippy: allowing {} ([clippy] allow)",
-            allow.join(", ")
-        ));
-    }
+    announce_allows(allow, allow_exact);
 
     // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
     // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
@@ -1350,6 +1348,8 @@ fn run_clippy_phase(
         )));
     }
 
+    report_stale_sited_allows(&results, allow_exact);
+
     // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
     // the pass/fail decision is brokkr's own: any clippy diagnostic is a
     // failure, whatever its (capped) level. `any_failed` still catches genuine
@@ -1357,7 +1357,7 @@ fn run_clippy_phase(
     // without emitting parseable diagnostics.
     let any_failed = results.iter().any(|r| !r.success);
     let any_diag = results.iter().any(|r| {
-        !cargo_json::parse_cargo_diagnostics(&r.stdout).is_empty()
+        !gated_diags(&r.stdout, allow_exact).is_empty()
     });
     let failed = any_failed || any_diag;
 
@@ -1370,7 +1370,7 @@ fn run_clippy_phase(
     // exactly where the copy-pasteable line earns its place.
     if !commands {
         for r in results.iter().filter(|r| {
-            !r.success || !cargo_json::parse_cargo_diagnostics(&r.stdout).is_empty()
+            !r.success || !gated_diags(&r.stdout, allow_exact).is_empty()
         }) {
             output::error(&format!("failing command: {}", r.command));
         }
@@ -1392,8 +1392,85 @@ fn run_clippy_phase(
         limit,
         all,
         multi,
+        allow_exact,
     ));
     Err(DevError::Build("clippy failed".into()))
+}
+
+/// A suppressed lint narrows what "clippy clean" certifies, so the log must
+/// say so up front - like `skip_phases`, a narrowed run must never read as a
+/// full one. Blanket allows on one line, each sited allow on its own.
+fn announce_allows(allow: &[String], allow_exact: &[SitedAllow]) {
+    if !allow.is_empty() {
+        output::run_msg(&format!(
+            "clippy: allowing {} ([clippy] allow)",
+            allow.join(", ")
+        ));
+    }
+    for s in allow_exact {
+        output::run_msg(&format!(
+            "clippy: allowing {} at {} ([clippy] allow_exact)",
+            s.lint, s.path
+        ));
+    }
+}
+
+/// A sited suppression that matched nothing across every sweep is dead
+/// weight: either upstream fixed the site (delete the entry) or the file
+/// moved (re-site it). Say so - a notice, not a failure - so the list never
+/// accretes silently.
+fn report_stale_sited_allows(results: &[SweepResult], allow_exact: &[SitedAllow]) {
+    if allow_exact.is_empty() {
+        return;
+    }
+    let mut matched = vec![false; allow_exact.len()];
+    for r in results {
+        for d in cargo_json::parse_cargo_diagnostics(&r.stdout) {
+            for (i, s) in allow_exact.iter().enumerate() {
+                if sited_match(s, &d) {
+                    matched[i] = true;
+                }
+            }
+        }
+    }
+    for (s, hit) in allow_exact.iter().zip(&matched) {
+        if !hit {
+            output::run_msg(&format!(
+                "clippy: allow_exact {s} suppressed nothing (stale entry?)"
+            ));
+        }
+    }
+}
+
+/// Does a `[clippy] allow_exact` entry suppress this diagnostic? Lint names
+/// match with or without the `clippy::` qualifier (mirroring what `allow`
+/// accepts); the file must equal the entry's path exactly - cargo emits
+/// build-root-relative paths, which is also what the entry is written from.
+fn sited_match(s: &SitedAllow, d: &cargo_json::DiagnosticEvent) -> bool {
+    let Some(code) = &d.code else {
+        return false;
+    };
+    let lint_matches = code == &s.lint
+        || code.strip_prefix("clippy::") == Some(s.lint.as_str())
+        || s.lint.strip_prefix("clippy::") == Some(code.as_str());
+    lint_matches && d.file.as_deref() == Some(s.path.as_str())
+}
+
+/// Parse a sweep's stdout and drop every diagnostic a `[clippy] allow_exact`
+/// entry suppresses. This is the ingestion-side gate the sited allows act
+/// through: unlike `allow`'s `-A`, which a source site's own lint-level
+/// attribute can defeat (the `#[expect]`-sibling interaction in
+/// `docs/commands/check.md`), a diagnostic filtered here is gone from the
+/// pass/fail decision no matter how clippy leveled it.
+fn gated_diags(
+    stdout: &str,
+    allow_exact: &[SitedAllow],
+) -> Vec<cargo_json::DiagnosticEvent> {
+    let mut events = cargo_json::parse_cargo_diagnostics(stdout);
+    if !allow_exact.is_empty() {
+        events.retain(|d| !allow_exact.iter().any(|s| sited_match(s, d)));
+    }
+    events
 }
 
 /// Investigative single-phase clippy runner (`brokkr clippy`). Builds one
@@ -1410,6 +1487,7 @@ pub(crate) fn cmd_clippy(
     sweep_name: Option<&str>,
     env_overrides: &[(String, String)],
     clippy_allow: &[String],
+    clippy_allow_exact: &[SitedAllow],
     raw: bool,
     limit: usize,
     all: bool,
@@ -1439,6 +1517,7 @@ pub(crate) fn cmd_clippy(
         std::slice::from_ref(&sweep),
         &[],
         clippy_allow,
+        clippy_allow_exact,
         raw,
         limit,
         all,
@@ -1692,11 +1771,12 @@ fn format_clippy_capped_multi(
     limit: usize,
     all: bool,
     multi: bool,
+    allow_exact: &[SitedAllow],
 ) -> String {
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
         .map(|r| {
-            let parse = parse_clippy_from_json(&r.stdout, !r.success, true);
+            let parse = parse_clippy_from_json(&r.stdout, !r.success, true, allow_exact);
             (r.label.clone(), parse)
         })
         .collect();
@@ -1787,8 +1867,9 @@ fn parse_clippy_from_json(
     stdout: &str,
     sweep_failed: bool,
     gate: bool,
+    allow_exact: &[SitedAllow],
 ) -> cargo_filter::ClippyParse {
-    let events = cargo_json::parse_cargo_diagnostics(stdout);
+    let events = gated_diags(stdout, allow_exact);
     let mut diagnostics: Vec<cargo_filter::ClippyDiagnostic> = events
         .iter()
         .map(|d| event_to_clippy(d, gate))

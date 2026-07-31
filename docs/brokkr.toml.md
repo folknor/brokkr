@@ -452,6 +452,7 @@ Tuning for the clippy phase, shared by `brokkr check` and `brokkr clippy`
 ```toml
 [clippy]
 allow = ["clippy::unused_async_trait_impl", "clippy::default_constructed_unit_structs"]
+allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
 ```
 
 - `allow` - lint names suppressed on every clippy sweep, appended as
@@ -465,6 +466,16 @@ allow = ["clippy::unused_async_trait_impl", "clippy::default_constructed_unit_st
   `#[expect]` for a sibling lint let the allowed lint through at error
   severity despite `-A` and `--cap-lints=warn`. See `docs/commands/check.md`
   for the full shape.
+- `allow_exact` - sited suppressions in the `"lint@path"` form, the remedy
+  for that known limit: matching diagnostics (same lint, `clippy::`
+  qualifier optional; same build-root-relative file, copied from the failing
+  diagnostic's location) are dropped at brokkr's JSON ingestion, after the
+  compiler has spoken, so no attribute at the site can defeat them. One lint
+  in one file - every occurrence in that file, but never workspace-wide, and
+  no `-A` is injected, so other sites of the same lint still fail. Each
+  entry is announced up front; one that suppressed nothing draws a stale
+  notice. Parse-time rejection mirrors `allow`, plus the `@` split: exactly
+  one `@`, non-empty halves, no whitespace. See `docs/commands/check.md`.
 
 ## Datasets and variant-selection flags
 

@@ -82,7 +82,10 @@ capped `warning` is promoted back to `error` in the output.
 
 A `[clippy] allow` list in `brokkr.toml` applies here exactly as in `check`'s
 clippy phase: each entry is appended as `-A <lint>` after `--cap-lints=warn`,
-and the run announces the allowed lints up front. See `docs/commands/check.md`.
+and the run announces the allowed lints up front. `[clippy] allow_exact`
+(`"lint@path"` sited suppressions, filtered on brokkr's side at JSON
+ingestion rather than via `-A`) applies here too. See
+`docs/commands/check.md`.
 
 - default: one line per diagnostic, capped at `--limit N` (default 20), with
   branch-changed files surfaced first and a trailer summarising what is hidden.
