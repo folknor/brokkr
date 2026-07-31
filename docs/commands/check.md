@@ -29,6 +29,24 @@ nothing, an extra warning notes the green validated clippy, not tests. The
 warning is scoped to the hand-typed `-p` path so a whole-workspace run never
 nags.
 
+### Test-phase build errors and the stale-incremental linker hint
+
+When a test sweep dies building (no `test result:` lines, compile errors on
+stderr), the errors are condensed one-per-line like the clippy phase. A
+`linking with ... failed` error additionally keeps its undefined-symbol linker
+notes (dropped by the one-line condensation, but they carry the actual cause -
+wild's `Undefined symbol X, referenced by` and GNU ld's `undefined reference
+to` shapes both surface, prefixed `linker:`). When the undefined symbol lives
+in the failing crate's *own* namespace and is referenced by an `.rcgu.o`
+(an incremental codegen unit), that's the stale-incremental phantom-symbol
+signature, and the output names the fix directly:
+`stale incremental cache suspected ... run: brokkr clean --cargo <pkg>` -
+with the *failing* package, which is generally a workspace member, not the
+brokkr.toml project name that a bare `clean --cargo` would default to. A
+genuinely missing foreign symbol matches neither test, so ordinary link
+errors get the notes but no hint. Detection is `linker_failure_detail` in
+`src/cargo_filter.rs`, on the `filter_test` fallback path.
+
 ### Per-sweep rustflags + auto target-dir isolation
 
 A `[[check]]` entry may carry `rustflags` (a token list, e.g.

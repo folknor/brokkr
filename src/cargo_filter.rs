@@ -510,9 +510,13 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
     });
 
     if !has_test_result && has_compile_error {
-        let filtered = filter_clippy(stderr);
+        let mut filtered = filter_clippy(stderr);
         if filtered.starts_with("cargo clippy:") {
-            return filtered.replacen("cargo clippy:", "cargo test:", 1);
+            filtered = filtered.replacen("cargo clippy:", "cargo test:", 1);
+        }
+        if let Some(extra) = linker_failure_detail(stderr) {
+            filtered.push('\n');
+            filtered.push_str(&extra);
         }
         return filtered;
     }
@@ -570,6 +574,58 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
 
     // Failures present - format as one-liners.
     format_test_failures(&parsed)
+}
+
+/// Extra detail for a `linking with ...` build failure. The one-line
+/// condensation keeps `error: linking with \`clang\` failed` and drops the
+/// `= note:` block - which is where the linker put the actual cause. Pull
+/// the undefined-symbol lines back out, and when they carry the
+/// stale-incremental signature - a symbol in the failing crate's own
+/// namespace, referenced by an `.rcgu.o` incremental codegen unit - name
+/// the fix: `brokkr clean --cargo <pkg>`. A genuinely missing symbol from
+/// another crate matches neither the namespace nor the rcgu test, so the
+/// hint stays off the ordinary link-error path.
+fn linker_failure_detail(stderr: &str) -> Option<String> {
+    if !stderr.contains("linking with ") {
+        return None;
+    }
+    let undefined: Vec<&str> = stderr
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            t.strip_prefix("= note: ").unwrap_or(t)
+        })
+        .filter(|t| {
+            let lower = t.to_lowercase();
+            lower.contains("undefined symbol") || lower.contains("undefined reference")
+        })
+        .collect();
+    if undefined.is_empty() {
+        return None;
+    }
+
+    let mut out: Vec<String> = undefined
+        .iter()
+        .map(|t| format!("  linker: {t}"))
+        .collect();
+
+    // `error: could not compile `pkg` (lib test)` names the crate whose
+    // build cache is suspect; its symbols are `pkg`-with-underscores paths.
+    let package = stderr.lines().find_map(|l| {
+        let rest = l.trim_start().strip_prefix("error: could not compile `")?;
+        let (pkg, _) = rest.split_once('`')?;
+        Some(pkg.to_string())
+    });
+    if let Some(pkg) = package {
+        let ident = format!("{}::", pkg.replace('-', "_"));
+        if stderr.contains(".rcgu.o") && undefined.iter().any(|t| t.contains(&ident)) {
+            out.push(format!(
+                "  stale incremental cache suspected (phantom symbol in an \
+                 incremental codegen unit) - run: brokkr clean --cargo {pkg}"
+            ));
+        }
+    }
+    Some(out.join("\n"))
 }
 
 /// True when stderr carries a cargo/libtest harness-level failure that
@@ -876,6 +932,47 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+
+    #[test]
+    fn linker_failure_surfaces_symbol_and_stale_hint() {
+        // The wild-linker stale-incremental shape: a phantom symbol in the
+        // failing crate's own namespace, referenced by an .rcgu.o.
+        let stderr = "\
+error: linking with `clang` failed: exit status: 1
+  |
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: wild: error: Undefined symbol broadarrow_web_bridge::tests::sample_identity, referenced by
+              /home/folk/Programs/broadarrow/target/debug/deps/broadarrow_web_bridge-49b43a2d64958f14.ba4nwrzbiwcfuixpjcdn6vpzx.02tc9cg.rcgu.o
+          clang: error: linker command failed with exit code 255 (use -v to see invocation)
+
+error: could not compile `broadarrow-web-bridge` (lib test) due to 1 previous error
+";
+        let result = filter_test("", stderr);
+        assert!(
+            result.contains("Undefined symbol broadarrow_web_bridge::tests::sample_identity"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("brokkr clean --cargo broadarrow-web-bridge"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn linker_failure_foreign_symbol_gets_no_stale_hint() {
+        // A genuinely missing symbol from another crate: surface the linker
+        // note, but the stale-incremental hint must not fire.
+        let stderr = "\
+error: linking with `cc` failed: exit status: 1
+  |
+  = note: /usr/bin/ld: main.o: undefined reference to `sqlite3_open'
+
+error: could not compile `mycrate` (bin \"mycrate\") due to 1 previous error
+";
+        let result = filter_test("", stderr);
+        assert!(result.contains("undefined reference to `sqlite3_open'"), "got: {result}");
+        assert!(!result.contains("brokkr clean"), "got: {result}");
+    }
 
     #[test]
     fn clippy_clean() {
