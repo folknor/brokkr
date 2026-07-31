@@ -79,8 +79,10 @@ fn capture_brokkr_args() -> String {
 /// hiding commands on the strength of a guess. A `brokkr.toml` so broken that
 /// the project is unknown must not also cost the user their `--help`.
 fn parse_cli() -> Cli {
+    let argv = crate::runnables::bare_run_sentinel(std::env::args().collect());
+
     let Some(project) = project::detect_optional().ok().flatten().map(|d| d.project) else {
-        return Cli::parse();
+        return Cli::parse_from(argv);
     };
 
     let mut cmd = <Cli as clap::CommandFactory>::command();
@@ -95,7 +97,7 @@ fn parse_cli() -> Cli {
         }
     }
 
-    let matches = cmd.get_matches();
+    let matches = cmd.get_matches_from(argv);
     match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
         Ok(cli) => cli,
         // The matches came from the same derived command, so a conversion

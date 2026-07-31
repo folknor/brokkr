@@ -14,6 +14,34 @@ use crate::config::BinConfig;
 use crate::error::DevError;
 use crate::output;
 
+/// Stand-in for an absent `brokkr run` target name.
+///
+/// `brokkr run --release -- ARGS` puts `--` in the name position as far as
+/// clap is concerned, so the first raw argument would be swallowed as a
+/// target name. `bare_run_sentinel` rewrites that `--` into this token
+/// before parsing; `cmd_run` reads it back as `None` and falls through to
+/// `[bin] default` / the sole runnable. It contains a NUL, so no real
+/// target name can collide with it.
+pub const NO_NAME: &str = "\u{0}brokkr-bare-run";
+
+/// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
+/// name position. Returns the argv unchanged in every other shape,
+/// including `run NAME -- ARGS...`.
+pub fn bare_run_sentinel(args: Vec<String>) -> Vec<String> {
+    let Some(run_at) = args.iter().position(|a| a == "run") else {
+        return args;
+    };
+    let mut i = run_at + 1;
+    while args.get(i).is_some_and(|a| a.starts_with('-') && a != "--") {
+        i += 1;
+    }
+    let mut args = args;
+    if args.get(i).is_some_and(|a| a == "--") {
+        args[i] = NO_NAME.to_owned();
+    }
+    args
+}
+
 /// One discovered runnable target.
 struct Runnable {
     /// Target name (`cargo run`'s `--bin`/`--example` namespace).
@@ -126,6 +154,7 @@ pub fn cmd_run(
         ));
     }
 
+    let name = name.filter(|n| *n != NO_NAME);
     let default = cfg.and_then(|c| c.default.as_deref());
     let wanted = name.or(default);
     let target = match wanted {
@@ -172,10 +201,10 @@ pub fn cmd_run(
     }
     cargo_args.push("-p".into());
     cargo_args.push(target.package.clone());
-    if target.example {
-        cargo_args.push("--example".into());
-        cargo_args.push(target.name.clone());
-    }
+    // Always name the target explicitly. `-p` alone leaves a multi-bin
+    // package ambiguous, and cargo bails rather than guessing.
+    cargo_args.push(if target.example { "--example" } else { "--bin" }.into());
+    cargo_args.push(target.name.clone());
     if !args.is_empty() {
         cargo_args.push("--".into());
         cargo_args.extend(args.iter().cloned());
@@ -281,5 +310,34 @@ fn forward_cargo(args: &[String], project_root: &Path) -> Result<(), DevError> {
             code: None,
             stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rewrite(args: &[&str]) -> Vec<String> {
+        bare_run_sentinel(args.iter().map(|s| (*s).to_owned()).collect())
+    }
+
+    #[test]
+    fn bare_run_with_separator_yields_sentinel() {
+        assert_eq!(
+            rewrite(&["brokkr", "run", "--release", "--", "--variations", "64"]),
+            vec!["brokkr", "run", "--release", NO_NAME, "--variations", "64"]
+        );
+    }
+
+    #[test]
+    fn named_run_is_untouched() {
+        let argv = ["brokkr", "run", "--release", "bench", "--", "--threads", "1"];
+        assert_eq!(rewrite(&argv), argv.to_vec());
+    }
+
+    #[test]
+    fn other_commands_are_untouched() {
+        let argv = ["brokkr", "check", "--", "x"];
+        assert_eq!(rewrite(&argv), argv.to_vec());
     }
 }
