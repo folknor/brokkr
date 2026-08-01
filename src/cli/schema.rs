@@ -307,9 +307,10 @@ Examples:
     Man {
         /// Topic to read; omit to list the topics available here.
         topic: Option<String>,
-        /// Section of the topic to read; omit to list the topic's sections.
-        /// Matched exactly, then by prefix, then as a substring.
-        section: Option<String>,
+        /// Sections of the topic to read; omit to list the topic's sections.
+        /// Each is matched exactly, then by prefix, then as a substring.
+        /// Several are rendered together in document order.
+        sections: Vec<String>,
         /// Render the whole topic even when it is long enough to be indexed.
         #[arg(long)]
         full: bool,

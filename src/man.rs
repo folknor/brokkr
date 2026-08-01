@@ -218,7 +218,7 @@ const INDEX_MIN_SECTIONS: usize = 8;
 /// pretending the doc does not exist.
 pub fn run(
     topic: Option<&str>,
-    section: Option<&str>,
+    queries: &[String],
     full: bool,
     project: Project,
 ) -> Result<(), crate::error::DevError> {
@@ -243,14 +243,22 @@ pub fn run(
 
     let secs = sections::sections(found.content);
 
-    if let Some(query) = section {
-        let hit = sections::find(&secs, query).map_err(|e| {
-            crate::error::DevError::Config(format!(
-                "{e} in `brokkr man {name}`. Run `brokkr man {name}` to list \
-                 its sections."
-            ))
-        })?;
-        write_stdout(&render::render(&found.content[hit.start..hit.end], no_color()));
+    if !queries.is_empty() {
+        // Every query must resolve before anything prints: a run that rendered
+        // two of three sections and then failed would leave the reader to work
+        // out which one is missing from a screenful of prose.
+        let mut hits = Vec::with_capacity(queries.len());
+        for query in queries {
+            hits.push(sections::find(&secs, query).map_err(|e| {
+                crate::error::DevError::Config(format!(
+                    "{e} in `brokkr man {name}`. Run `brokkr man {name}` to \
+                     list its sections."
+                ))
+            })?);
+        }
+        for hit in sections::merge(hits) {
+            write_stdout(&render::render(&found.content[hit.start..hit.end], no_color()));
+        }
         return Ok(());
     }
 

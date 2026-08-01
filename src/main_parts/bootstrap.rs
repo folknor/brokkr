@@ -213,7 +213,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             _ => return cmd_fmt(args),
         }
     }
-    if let Command::Man { topic, section, full } = &cli.command {
+    if let Command::Man { topic, sections, full } = &cli.command {
         // Reading the docs must work in a tree brokkr knows nothing about, so
         // an undetectable project falls back to `Other("")` and gets the
         // project-agnostic topics rather than an error. This sits ABOVE the
@@ -226,7 +226,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             .ok()
             .flatten()
             .map_or(Project::Other(""), |d| d.project);
-        return man::run(topic.as_deref(), section.as_deref(), *full, project);
+        return man::run(topic.as_deref(), sections, *full, project);
     }
 
     // When `disable_toolchain` is set, arm the build root whose pinned

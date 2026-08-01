@@ -155,10 +155,31 @@ fn pick(sections: &[Section], f: impl Fn(&Section) -> bool) -> Vec<&Section> {
     sections.iter().filter(|s| f(s)).collect()
 }
 
+/// Put several resolved sections into document order and drop any whose text
+/// another already carries.
+///
+/// Asking for a `##` and one of its `###` children is a normal thing to type
+/// (`brokkr man check clippy allow_exact`) and printing the child twice, once
+/// inside its parent, would read as a rendering bug. Document order rather
+/// than argv order, because the reader is getting a slice of one document and
+/// the doc's own sequencing is the one that makes sense of it.
+pub(crate) fn merge(mut hits: Vec<&Section>) -> Vec<&Section> {
+    // Widest-first at a shared start, so a container is always seen before
+    // anything it contains.
+    hits.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
+    let mut out: Vec<&Section> = Vec::with_capacity(hits.len());
+    for hit in hits {
+        if !matches!(out.last(), Some(prev) if hit.end <= prev.end) {
+            out.push(hit);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{find, sections, slugify};
+    use super::{find, merge, sections, slugify};
 
     const DOC: &str = "\
 # Title
@@ -241,6 +262,33 @@ tail
         let err = find(&secs, "allow").unwrap_err();
         assert!(err.contains("clippy-allow"), "{err}");
         assert!(err.contains("clippy-allow_exact"), "{err}");
+    }
+
+    /// Several sections come back in document order regardless of the order
+    /// they were asked for.
+    #[test]
+    fn merge_orders_by_document_position() {
+        let secs = sections(DOC);
+        let hits = vec![
+            find(&secs, "log lines").unwrap(),
+            find(&secs, "script_check").unwrap(),
+        ];
+        let slugs: Vec<&str> = merge(hits).iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(slugs, ["script_check-array", "per-sweep-log-lines-collapsed-by-default"]);
+    }
+
+    /// A child whose parent is also selected is already on screen; printing it
+    /// again would read as a bug.
+    #[test]
+    fn merge_drops_a_section_its_neighbour_contains() {
+        let secs = sections(DOC);
+        let hits = vec![
+            find(&secs, "allow_exact").unwrap(),
+            find(&secs, "clippy").unwrap(),
+            find(&secs, "allow_exact").unwrap(),
+        ];
+        let slugs: Vec<&str> = merge(hits).iter().map(|s| s.slug.as_str()).collect();
+        assert_eq!(slugs, ["clippy-phase"]);
     }
 
     #[test]

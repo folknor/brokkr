@@ -5,7 +5,8 @@ Per-project config consumed by brokkr. Lives at the project root (`./brokkr.toml
 This file documents the **schema-universal** parts of brokkr.toml - every
 section below applies in any project. Each `##` heading is addressable on its
 own: `brokkr man config script_check` prints that section and nothing else,
-and bare `brokkr man config` lists them.
+`brokkr man config header textlint` prints two, and bare `brokkr man config`
+lists them.
 
 Project-specific config blocks live in their own docs, so a checkout only ever
 reads the ones that apply to it:
