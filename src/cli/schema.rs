@@ -299,7 +299,7 @@ Examples:
     ///
     /// The `docs/**.md` files are compiled into the binary and rendered to the
     /// terminal. Topics are filtered by the detected project, except the
-    /// project-agnostic ones (check, clippy, deps, config, measure,
+    /// project-agnostic ones (check, clippy, deps, config, measure, run,
     /// output-channels), which are listed everywhere. A long topic lists its
     /// sections instead of dumping the file: `brokkr man config script_check`
     /// reads one, `--full` reads the lot.

@@ -70,6 +70,12 @@ const TOPICS: &[Topic] = &[
         visibility: Visibility::Any,
     },
     Topic {
+        name: "run",
+        summary: "run + install: target discovery, the bare index, [bin]",
+        content: include_str!("../docs/commands/run.md"),
+        visibility: Visibility::Any,
+    },
+    Topic {
         name: "measure",
         summary: "--bench/--hotpath/--alloc, the sidecar profiler, marker FIFOs",
         content: include_str!("../docs/commands/measure.md"),
@@ -350,7 +356,7 @@ mod tests {
             Project::Other("some-foreign-repo"),
         ] {
             let names: Vec<&str> = visible(project).iter().map(|t| t.name).collect();
-            for expected in ["check", "clippy", "deps", "config", "measure"] {
+            for expected in ["check", "clippy", "deps", "config", "measure", "run"] {
                 assert!(names.contains(&expected), "`{expected}` missing in {project}");
             }
         }
