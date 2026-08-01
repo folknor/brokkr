@@ -5,6 +5,12 @@
 //! With no topic, list what is available; with a topic, render it (colour
 //! auto-disabled when stdout is not a TTY or `NO_COLOR` is set).
 //!
+//! A long doc is addressed one section at a time: `brokkr man config
+//! script_check` renders that `##` section alone, and bare `brokkr man
+//! <topic>` on a doc past [`INDEX_MIN_SECTIONS`] lists its sections instead of
+//! dumping the whole file (`--full` forces the dump). Slugs come from the
+//! headings themselves - see [`sections`].
+//!
 //! Topics are filtered by the detected project, the same way `--help` filters
 //! subcommands: a pbfhogg tree has no use for the piners corpus reference. The
 //! project-agnostic topics - the ones about `check`, `deps`, `clippy`,
@@ -17,6 +23,7 @@
 //! rather than rotting silently.
 
 mod render;
+mod sections;
 
 use std::io::{IsTerminal, Write};
 
@@ -79,6 +86,12 @@ const TOPICS: &[Topic] = &[
         summary: "[<host>.datasets.*] pbf/osc/pmtiles entries and variant selection",
         content: include_str!("../docs/brokkr.toml.datasets.md"),
         visibility: Visibility::Only(&[Project::Pbfhogg, Project::Elivagar, Project::Nidhogg]),
+    },
+    Topic {
+        name: "elivagar-config",
+        summary: "[<host>.tilegen.*] blocks: the elivagar tilegen contract",
+        content: include_str!("../docs/brokkr.toml.elivagar.md"),
+        visibility: Visibility::Only(&[Project::Elivagar]),
     },
     Topic {
         name: "pbfhogg",
@@ -191,13 +204,24 @@ fn no_color() -> bool {
     std::env::var_os("NO_COLOR").is_some() || !std::io::stdout().is_terminal()
 }
 
-/// Render `topic` to the terminal, or list the available topics when `None`.
+/// A doc with at least this many `##` sections is indexed rather than dumped
+/// when no section is named. Below it, the whole doc is short enough to be its
+/// own index and an extra hop would just be in the way.
+const INDEX_MIN_SECTIONS: usize = 8;
+
+/// Render `topic` (or one `section` of it) to the terminal, or list the
+/// available topics when `None`.
 ///
 /// An unknown topic is an error rather than a silent listing, and one that
 /// exists but belongs to another project says so - the same courtesy
 /// `project::require()` extends to a wrong-project command, rather than
 /// pretending the doc does not exist.
-pub fn run(topic: Option<&str>, project: Project) -> Result<(), crate::error::DevError> {
+pub fn run(
+    topic: Option<&str>,
+    section: Option<&str>,
+    full: bool,
+    project: Project,
+) -> Result<(), crate::error::DevError> {
     let Some(name) = topic else {
         write_stdout(&list_topics(project));
         return Ok(());
@@ -217,8 +241,42 @@ pub fn run(topic: Option<&str>, project: Project) -> Result<(), crate::error::De
         )));
     }
 
-    write_stdout(&render::render(found.content, no_color()));
+    let secs = sections::sections(found.content);
+
+    if let Some(query) = section {
+        let hit = sections::find(&secs, query).map_err(|e| {
+            crate::error::DevError::Config(format!(
+                "{e} in `brokkr man {name}`. Run `brokkr man {name}` to list \
+                 its sections."
+            ))
+        })?;
+        write_stdout(&render::render(&found.content[hit.start..hit.end], no_color()));
+        return Ok(());
+    }
+
+    let tops = secs.iter().filter(|s| s.level == 2).count();
+    if full || tops < INDEX_MIN_SECTIONS {
+        write_stdout(&render::render(found.content, no_color()));
+    } else {
+        write_stdout(&list_sections(found, &secs));
+    }
     Ok(())
+}
+
+/// The bare-`brokkr man <topic>` index for a long doc: its `##` sections, each
+/// with its `###` children indented under it.
+fn list_sections(topic: &Topic, secs: &[sections::Section]) -> String {
+    let mut out = format!(
+        "{summary}\n\nRun `brokkr man {name} <section>` to read one, or \
+         `brokkr man {name} --full` for the whole doc.\n\n",
+        summary = topic.summary,
+        name = topic.name
+    );
+    for section in secs {
+        let indent = if section.level == 2 { "  " } else { "      " };
+        out.push_str(&format!("{indent}{}\n", section.slug));
+    }
+    out
 }
 
 /// Write to stdout, treating a closed downstream pipe (EPIPE, e.g. `| less`

@@ -300,11 +300,19 @@ Examples:
     /// The `docs/**.md` files are compiled into the binary and rendered to the
     /// terminal. Topics are filtered by the detected project, except the
     /// project-agnostic ones (check, clippy, deps, config, measure,
-    /// output-channels), which are listed everywhere.
+    /// output-channels), which are listed everywhere. A long topic lists its
+    /// sections instead of dumping the file: `brokkr man config script_check`
+    /// reads one, `--full` reads the lot.
     #[command(display_order = 0)]
     Man {
         /// Topic to read; omit to list the topics available here.
         topic: Option<String>,
+        /// Section of the topic to read; omit to list the topic's sections.
+        /// Matched exactly, then by prefix, then as a substring.
+        section: Option<String>,
+        /// Render the whole topic even when it is long enough to be indexed.
+        #[arg(long)]
+        full: bool,
     },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///

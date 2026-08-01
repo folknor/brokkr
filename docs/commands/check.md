@@ -2,17 +2,21 @@
 
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
-full validation pass (gremlins + header + textlint + dependency rules +
-publish cycle + clippy + tests); `test`
-runs one named cargo test against the same sweep set.
+full validation pass (gremlins + header + textlint + manifest + script checks +
+dependency rules + publish cycle + clippy + tests); `test` runs one named cargo
+test against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
 section, profiles) see `docs/brokkr.toml.md`.
 
+Sections below follow the pipeline: the command itself, then one section per
+phase in the order they run, then the machinery layered on top (coverage,
+`certifies`, log lines, sweep selection), then `brokkr test`.
+
 ## `brokkr check`
 
-Gremlins + header + textlint + dependency rules + publish cycle + clippy +
-tests. Trailing args after
+Gremlins + header + textlint + manifest + script checks + dependency rules +
+publish cycle + clippy + tests. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -29,6 +33,340 @@ excludes doctests) still passes; on an explicit `-p <pkg>` spot-check that ran
 nothing, an extra warning notes the green validated clippy, not tests. The
 warning is scoped to the hand-typed `-p` path so a whole-workspace run never
 nags.
+
+Like every locked brokkr command, `check` and `test` acquire the global
+per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
+holds it, the command prints `[lock] waiting for …` and waits until released,
+then proceeds - rather than failing with `lock: already locked`. So a
+concurrent lock never produces an error to handle; just let the command wait.
+
+Flags:
+- `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
+  (clippy + test) to the named packages. The set **replaces** each sweep's
+  own package selection - cargo unions selection flags, so composing
+  `--workspace --exclude …` with `--package` would silently un-scope the
+  run. Per sweep the set is *intersected* with the sweep's scope: a package
+  its `packages` list or (test phase only) `test_exclude_packages` rules out
+  is dropped with a log line, a sweep keeping none is skipped (mirroring
+  `brokkr test`'s SKIP) - so `-p a -p b` still reaches `a` in the sweep that
+  admits it when `b` lives in another sweep. If every sweep skips, the phase
+  fails rather than reading as green. The shape line shows `-p <pkg> …` and
+  the `--json` summary carries a `package` field (comma-joined for a
+  multi-package run). Rejected under a `certifies = "complete"` profile
+- `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
+- `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
+  `--features` / `--no-default-features`
+- `--gate` - run the profile named by `[test] gate_profile` (load-validated
+  to certify "complete"). The stable pre-commit invocation. Conflicts with
+  `--profile`, `--features`, `--no-default-features`, and `-p`. Trailing
+  `-- …` test args are rejected under any `complete` claim (see `certifies`)
+- `--raw` - unfiltered cargo output (terminal-style rendering)
+- `--json` - append one machine-readable summary line (a JSON object) as the
+  last line of stdout; human output is unchanged
+- `--limit N` - max diagnostics shown per phase, default 20
+- `--all` - show everything, no cap
+- `--fix-gremlins` - rewrite banned chars in place before scan
+- `--commands` - log each sweep's full cargo command instead of the collapsed
+  form (see the log-lines section)
+
+Output:
+- Default text mode: each diagnostic becomes one line, compilation noise
+  stripped, passing tests aggregated.
+- `--raw` reconstructs cargo's terminal-style output by concatenating each
+  diagnostic's `rendered` field plus the cargo status messages on stderr -
+  one cargo invocation.
+- When hits exceed `--limit`, both the gremlin and clippy phases prefer files
+  changed on the current branch (computed via git merge-base against
+  `@{upstream}` / `origin/master` / `origin/main`) and append a trailer
+  summarising what's hidden; see `src/scope.rs`.
+- `--json` appends one summary object as the **last line of stdout**, leaving
+  the human output untouched (the old NDJSON per-event mode is gone; this is
+  the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
+  1), `certifies` (the resolved profile's claim, `null` for unclaimed
+  profiles), `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`),
+  `profile` (the profile that drove sweep selection; `null` for ad-hoc and
+  legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
+  when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
+  of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
+  `dependency_rules`/`publish_cycle`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
+  and additive: fields are only ever added under `schema: 1`, consumers must
+  tolerate unknown fields, and a bump is reserved for renames or semantic
+  changes. A config error before the phases run (bad profile name,
+  conflicting flags, a certifies violation) emits no summary - resolve-time
+  errors are not run verdicts.
+
+## `gremlins` phase
+
+Runs first and fails the check if any banned Unicode character
+is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
+untracked-not-gitignored, so new plan docs are caught before staging) - see
+`src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
+spaces, bidi overrides, em/en dashes, typographic quotes, and emoji /
+pictographs: Misc Symbols, Dingbats, the emoji planes, and emoji variation
+selectors). The Arrows block (`→` and friends) and box-drawing / geometric
+shapes (`U+2500..=25FF`) are deliberately spared - both are used legitimately
+in comments, formatter output, and tree/table rendering. `--fix-gremlins`
+rewrites every banned char in place with its ASCII equivalent (or deletes it
+for zero-width/bidi/emoji noise, which have none) before the scan runs, so the
+subsequent check finds zero and passes.
+
+A `[gremlins]` section with `exclude = ["docs/manual", ...]` skips listed
+directories in both the scan and `--fix-gremlins`. Use it for vendored
+material from an outside source (reference manuals, imported docs) that
+legitimately carries typographic punctuation, BOMs, and the like. Matching is
+by path prefix on the git-relative path, so `docs/manual` covers
+`docs/manual/` and everything beneath it but not a sibling `docs/manual-extra`.
+Empty and absolute entries are rejected at parse time.
+
+## `header` phase
+
+Runs next, only when a `[header]` section is present. A file
+matching `[header].paths` (minus `exempt`) must contain `[header].pattern` with
+`{year}` expanded to the current UTC year; a missing header or a stale year
+fails. Ported from `check_copyright_year`; see `src/header.rs`.
+
+## `textlint` phase
+
+Runs next, only when `[[textlint]]` rules exist. Each rule
+forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
+`exclude` globs); a match is a violation, subject to bounded modifiers:
+`allow_marker` (+ `allow_marker_above = N` for a marker up to N lines above),
+`except`, `in_toml_section`, `table_row_only`, `skip_after` (a regex past which
+the rest of a file is exempt, e.g. to ignore a test module),
+`only_if_file_matches` (a file-scope precondition regex; add
+`only_if_file_matches_above = true` to require the precondition at or above each
+match rather than anywhere in the file, so an import below the match - e.g.
+inside a test module - no longer arms the rule), `region`
+(`code`/`string`/`comment` - scope the pattern to a lexical region of a Rust
+file, tokenized with `rustc_lexer`, so a rule never fires on a match quoted in
+a comment or string), `join_wrapped_use` (match against whole `use ...;`
+statements, reconstructing a rustfmt-wrapped import onto one line first), and
+the four **context-window gates** `except_above` / `except_below` /
+`require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
+A gate filters a match by the raw physical lines around it: all four have the
+same behavior - the match is suppressed iff `pattern` is found within `lines`
+lines in that direction (excluding the match line, clamped at the file edges) -
+and the names differ only to document intent (`except_above` reads for a
+preceding `#[cfg(...)]` exemption, `require_below` for a required token like
+`biased;` that must follow a `tokio::select!`). Multiple gates AND together
+(the violation stands only when every window is clear). Windows read raw text -
+no region masking, no `use`-joining - so because the test is per-line, write
+context patterns fragment-tolerant (match `madsim`, not a full single-line
+attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
+engine behind most grep-style convention hooks; see `src/textlint.rs`.
+
+## `manifest` phase
+
+Runs next, only when a `[manifest]` section enables a check
+(off by default, inert otherwise). It parses each `Cargo.toml` matching
+`[manifest].paths` (minus `exclude`) with `toml_edit` and enforces structural
+conventions - today `sort_dependencies` (dependency keys sorted within each
+blank-line group; `[dependencies.<name>]` dotted sections, which TOML forces
+physically after the inline table, are their own group and never ordered against
+it). `shape_exclude` globs excuse a manifest from the structural checks only
+(section/crate-type/package-field order, `[lints] workspace`, bin/example flags
+- the same set a `cargo-fuzz = true` stub skips) while still sort-checking it;
+`exclude` skips the file entirely. See `src/manifest.rs`.
+
+## `script_check` phase
+
+Runs next, only when `[[script_check]]` entries exist (inert
+otherwise). This is the phase's default `pre-clippy` stage; an entry can instead
+name `pre-test` or `post-test` and run at that point in the pipeline (see
+`stage` below). Each entry runs `command` via `sh -c` (so pipes/redirects/env
+expansion work) with cwd = the code tree, and **passes iff the captured output
+matches `expect`**. Asserting on a success sentinel - not the exit code - is the
+point: it catches a check silently stubbed to `exit 0`, because the script must
+prove it ran to completion by emitting the sentinel. The command's exit code is
+therefore ignored; only a spawn failure is a hard error. Every entry runs (no
+fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
+each failure prints the full captured stdout/stderr (the diagnostic, never
+truncated by `--limit`). It fills the gap for gates brokkr's native phases can't
+express - semantic analysers (`# Panics`/`# Errors` doc checks) or external
+formatter conventions - that were previously hand-run before every commit.
+
+- `match` = `exact` (whole trimmed stream equals `expect`; suits quiet lints
+  that print only the sentinel), `last-line` (the last non-empty line, trimmed,
+  equals `expect` - the **default**; tolerates progress output above a final
+  verdict), or `contains` (`expect` is a substring).
+- `stream` = `stdout` (default), `stderr`, or `both` (stdout, a newline, then
+  stderr - for tools that split progress and results across the two).
+- Sentinel tip: a non-ASCII sentinel (e.g. a `U+2713` check mark) would itself
+  trip the gremlin scan on `brokkr.toml`. Use an ASCII sentinel, or
+  `match = "contains"` on an ASCII marker substring of the real success line.
+- `stage` = `pre-clippy` (default - here, with the other convention phases),
+  `pre-test` (after clippy, before the test phase), or `post-test` (after the
+  test phase and the coverage audit). One value per entry; an entry runs once.
+
+`post-test` entries are skipped when the test phase failed: it fails fast, so
+its later lanes never ran and there is no partial-run reading for a sentinel
+gate (the coverage audit, which deliberately does run there, wants built
+binaries rather than green tests). All three stages share the one
+`script_check` phase name for `skip_phases` and the JSON `failed_phase`; the
+failing entry is named in the output regardless.
+
+See `src/script_check.rs`.
+
+## `dependency_rules` phase
+
+Runs next only when `[[dependency_rule]]` entries exist
+in `brokkr.toml`; without entries it is skipped silently. It reads
+`cargo metadata --no-deps` and fails on configured direct dependency boundary
+violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`. A rule
+can scope the forbidden match by dependency `kinds` (`normal`/`dev`/`build`,
+default all) and `optional` (e.g. `optional = false` to require a dep be
+optional), so manifest conventions like "tokio only as a dev-dependency" are
+expressible.
+
+## `publish_cycle` phase
+
+The last convention phase, running after `dependency_rules`: it refuses a
+dependency cycle among publishable workspace members. `cargo build`
+resolves the whole workspace at once and is perfectly happy with one, so
+every clippy sweep and test lane stays green; `cargo publish` uploads a
+crate at a time and needs each dependency in the published manifest to
+already exist on the registry, so a cycle has no valid publication order
+and blows up at release time instead.
+
+**Needs no config to arm it.** Unlike its neighbours there is nothing to
+declare - a publication cycle is derivable from the manifests alone, is
+never intentional, and is invisible to every other phase. It costs one
+`cargo metadata --format-version 1 --no-deps`, which is why it can sit in
+the always-on tier rather than in a command someone has to remember to
+run.
+
+**Ignores the CLI `-p` scope**, deliberately: publication order is a
+property of the whole workspace, and a cycle a narrowed run hid would be a
+cycle that lands on master. So `brokkr check -p one-crate` still catches
+it.
+
+The analysis is `brokkr deps`' `publish_cycle` phase - literally the same
+function and the same renderer - so the two commands can never disagree
+about a tree. That includes its two exclusions: a version-less
+dev-dependency is stripped by cargo on publish and so cannot close a
+cycle, while one that names a version does (and gets called out by name,
+since deleting the `version` key usually fixes things without
+restructuring anything); `publish = false` members are excluded outright.
+See `docs/commands/deps.md` for the full rationale.
+
+Prints `publish cycle: ok` when clean - unlike the `deps` section, which
+is silent on a clean tree, because a check phase that printed nothing
+would be indistinguishable from one that didn't run. On a finding it fails
+the check with the loop rendered as a chain:
+
+```
+[error]   publish cycle: 1 cargo publication cycle(s)
+            nautilus-execution -[dev]-> nautilus-testkit -> nautilus-trading -> nautilus-execution
+              dev-dependency nautilus-execution -> nautilus-testkit names a version, so cargo
+              publish keeps it; dropping the version key leaves a path-only dev-dep that publish
+              strips
+              that fix only helps a consumer that keys on the published manifest - a release
+              planner ordering every `path =` edge regardless of kind still sees this one, and
+              needs the dependency removed outright
+```
+
+Every finding closes with a caveat line: the list may be partial, because
+cycles sharing a member can surface one at a time (see
+`docs/commands/deps.md` for why). Harmless for gating - any cycle fails
+the check - but it matters when you are using the output to *scope* a fix,
+so re-run after each one rather than trusting a single report as the
+complete inventory. The phase points at `brokkr deps` for that, since
+scoping is investigation.
+
+Honours `--limit`/`--all` like the other finding phases, and is skippable
+as `publish_cycle` in a partial profile's `skip_phases`.
+
+## `clippy` phase
+
+The clippy phase always invokes cargo with `--message-format=json` and ingests
+via `cargo_json::parse_cargo_diagnostics` regardless of `--raw` - the text
+formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every
+warning keeps its lint code in the header, even for repeats of the same rule
+(cargo's pretty-printed text only annotates the first occurrence per crate,
+which is why the JSON ingestion path was needed; see `src/cargo_filter.rs`
+module header).
+
+The invocation is `cargo clippy --keep-going --all-targets
+--message-format=json <sweep features> -- --cap-lints=warn`. The last two
+flags make a single run surface **every** lint across a whole workspace,
+instead of the "one error per run" treadmill you get on a large multi-crate
+graph:
+
+- `--cap-lints=warn` caps every lint at warn level, so a deny-level lint no
+  longer aborts its crate's compile. The crate still produces its `.rmeta`,
+  which means every crate *downstream* of a linty one is checked too - the
+  whole dependency graph completes in one pass. (Genuine, non-lint compile
+  errors are unaffected: they still fail the crate, and `--keep-going` then
+  keeps checking the independent branches of the graph rather than stopping
+  at the first failure.)
+- Because a capped lint lets cargo exit 0, pass/fail is brokkr's own decision,
+  not cargo's exit status: **any clippy diagnostic fails the check.** brokkr
+  treats a capped `warning` as the deny it really is - `event_to_clippy`
+  promotes it back to `error` for counting and the header, so the output never
+  misleads with "0 errors, N warnings" while failing. The `--raw` escape hatch
+  still dumps clippy's own rendered text verbatim (which shows the capped
+  `warning:` wording).
+
+### `[clippy] allow`
+
+A `[clippy]` section with `allow = ["clippy::unused_async", ...]` appends
+`-A <lint>` after `--cap-lints=warn` on every sweep (and on `brokkr clippy`),
+so the listed lints never reach the diagnostic stream - the
+any-diagnostic-fails rule needs no carve-outs. This is the escape hatch for
+driving a foreign checkout under `disable_toolchain`: brokkr lints on the
+host's (newer) clippy, which surfaces lints the project's own pinned-toolchain
+CI cannot see and its code cannot be expected to satisfy. The phase announces
+the allowed lints up front (`clippy: allowing clippy::unused_async ([clippy]
+allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
+in the reprinted failing command. Entries must be bare lint names
+(`clippy::`-qualified or plain rustc names); flags are rejected at parse time.
+
+**Known limit of `allow`:** the injected `-A` flags act at the CLI lint
+level, and a source site that carries its own lint-level attribute can
+override them. The observed shape (clippy 1.98, nautilus_trader
+a930c8afe3): a function with `#[expect(clippy::unused_async, ...)]` still
+fired the sibling lint `clippy::unused_async_trait_impl` **at error
+severity** with both `-A clippy::unused_async_trait_impl` and
+`--cap-lints=warn` on the command line - the expectation machinery's
+diagnostic bypassed both. The same lint was suppressed fine at
+attribute-free sites. Best reading: a clippy expectation-machinery
+interaction, not a brokkr defect - but the practical consequence is that
+`[clippy] allow` cannot be relied on to silence a lint at a site holding an
+`#[expect]` for a sibling lint emitted by the same pass. Minimal upstream
+repro sketch: an inherent `async fn` with a tail expression and no
+`.await`, `#[expect(clippy::unused_async)]`, compiled with
+`-A clippy::unused_async_trait_impl` on clippy 1.98.
+
+### `[clippy] allow_exact`
+
+`[clippy] allow_exact` is the remedy for exactly that shape: `"lint@path"`
+entries suppressed on **brokkr's side of the pipe** instead of the
+compiler's. A matching diagnostic - same lint (with or without the
+`clippy::` qualifier), same build-root-relative file - is dropped at JSON
+ingestion, after clippy has spoken and before the any-diagnostic-fails
+decision, so no lint-level attribute at the site can defeat it. It is
+deliberately narrow where `allow` is broad: one lint in one file (every
+occurrence in that file - file-granular by design, since line numbers drift
+with unrelated edits), never workspace-wide, and no `-A` is injected for it,
+so other sites of the same lint keep failing the check. Each entry is
+announced up front (`clippy: allowing <lint> at <path> ([clippy]
+allow_exact)`), and an entry that suppressed nothing across the run draws a
+`suppressed nothing (stale entry?)` notice - upstream fixed the site or the
+file moved, so the entry should be deleted or re-sited rather than accrete.
+The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
+entry's file when it lives outside the selected packages, so "suppressed
+nothing" there proves nothing.
+`--raw` still shows suppressed diagnostics (it dumps clippy's own rendered
+text verbatim); the pass/fail decision and the formatted output do not
+count them. The path half must match the file exactly as clippy reports it
+(relative to the tree cargo compiles in - copy it from the failing
+diagnostic's location).
+
+## `test` phase
+
+Runs after clippy, one lane per selected sweep. The subsections below cover
+build-error reporting, per-sweep `rustflags`, the serial and parallel lanes,
+process isolation, and doctest policy.
 
 ### Test-phase build errors and the stale-incremental linker hint
 
@@ -97,9 +435,9 @@ example in `docs/brokkr.toml.md`.
 ### Serial vs parallel test sweeps
 
 By default the test phase runs each sweep serial (`--test-threads=1`) under
-the per-test hang watchdog (see below), attributing a stall to a named test
+the per-test hang watchdog, attributing a stall to a named test
 from libtest's sequential output. The parallel lane keeps the same watchdog via
-libtest's JSON event stream (see below). A profile can opt a sweep into
+libtest's JSON event stream. A profile can opt a sweep into
 parallel execution with `test_threads`:
 
 - unset or `test_threads = 1` - serial, per-test watchdog (the default; nothing
@@ -178,122 +516,7 @@ namespace with unit tests, so skipping them by pattern would eat legitimate
 module tests too. `brokkr test <name>` is unaffected - it runs the full
 `cargo test` default so a deliberately named doctest still runs.
 
-### The `publish_cycle` phase
-
-The last convention phase, running after `dependency_rules`: it refuses a
-dependency cycle among publishable workspace members. `cargo build`
-resolves the whole workspace at once and is perfectly happy with one, so
-every clippy sweep and test lane stays green; `cargo publish` uploads a
-crate at a time and needs each dependency in the published manifest to
-already exist on the registry, so a cycle has no valid publication order
-and blows up at release time instead.
-
-**Needs no config to arm it.** Unlike its neighbours there is nothing to
-declare - a publication cycle is derivable from the manifests alone, is
-never intentional, and is invisible to every other phase. It costs one
-`cargo metadata --format-version 1 --no-deps`, which is why it can sit in
-the always-on tier rather than in a command someone has to remember to
-run.
-
-**Ignores the CLI `-p` scope**, deliberately: publication order is a
-property of the whole workspace, and a cycle a narrowed run hid would be a
-cycle that lands on master. So `brokkr check -p one-crate` still catches
-it.
-
-The analysis is `brokkr deps`' `publish_cycle` phase - literally the same
-function and the same renderer - so the two commands can never disagree
-about a tree. That includes its two exclusions: a version-less
-dev-dependency is stripped by cargo on publish and so cannot close a
-cycle, while one that names a version does (and gets called out by name,
-since deleting the `version` key usually fixes things without
-restructuring anything); `publish = false` members are excluded outright.
-See `docs/commands/deps.md` for the full rationale.
-
-Prints `publish cycle: ok` when clean - unlike the `deps` section, which
-is silent on a clean tree, because a check phase that printed nothing
-would be indistinguishable from one that didn't run. On a finding it fails
-the check with the loop rendered as a chain:
-
-```
-[error]   publish cycle: 1 cargo publication cycle(s)
-            nautilus-execution -[dev]-> nautilus-testkit -> nautilus-trading -> nautilus-execution
-              dev-dependency nautilus-execution -> nautilus-testkit names a version, so cargo
-              publish keeps it; dropping the version key leaves a path-only dev-dep that publish
-              strips
-              that fix only helps a consumer that keys on the published manifest - a release
-              planner ordering every `path =` edge regardless of kind still sees this one, and
-              needs the dependency removed outright
-```
-
-Every finding closes with a caveat line: the list may be partial, because
-cycles sharing a member can surface one at a time (see
-`docs/commands/deps.md` for why). Harmless for gating - any cycle fails
-the check - but it matters when you are using the output to *scope* a fix,
-so re-run after each one rather than trusting a single report as the
-complete inventory. The phase points at `brokkr deps` for that, since
-scoping is investigation.
-
-Honours `--limit`/`--all` like the other finding phases, and is skippable
-as `publish_cycle` in a partial profile's `skip_phases`.
-
-Like every locked brokkr command, `check` and `test` acquire the global
-per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
-holds it, the command prints `[lock] waiting for …` and waits until released,
-then proceeds - rather than failing with `lock: already locked`. So a
-concurrent lock never produces an error to handle; just let the command wait.
-
-Flags:
-- `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
-  (clippy + test) to the named packages. The set **replaces** each sweep's
-  own package selection - cargo unions selection flags, so composing
-  `--workspace --exclude …` with `--package` would silently un-scope the
-  run. Per sweep the set is *intersected* with the sweep's scope: a package
-  its `packages` list or (test phase only) `test_exclude_packages` rules out
-  is dropped with a log line, a sweep keeping none is skipped (mirroring
-  `brokkr test`'s SKIP) - so `-p a -p b` still reaches `a` in the sweep that
-  admits it when `b` lives in another sweep. If every sweep skips, the phase
-  fails rather than reading as green. The shape line shows `-p <pkg> …` and
-  the `--json` summary carries a `package` field (comma-joined for a
-  multi-package run). Rejected under a `certifies = "complete"` profile
-- `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
-- `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
-  `--features` / `--no-default-features`
-- `--gate` - run the profile named by `[test] gate_profile` (load-validated
-  to certify "complete"). The stable pre-commit invocation. Conflicts with
-  `--profile`, `--features`, `--no-default-features`, and `-p`. Trailing
-  `-- …` test args are rejected under any `complete` claim (see below)
-- `--raw` - unfiltered cargo output (terminal-style rendering)
-- `--json` - append one machine-readable summary line (a JSON object) as the
-  last line of stdout; human output is unchanged
-- `--limit N` - max diagnostics shown per phase, default 20
-- `--all` - show everything, no cap
-- `--fix-gremlins` - rewrite banned chars in place before scan
-- `--commands` - log each sweep's full cargo command instead of the collapsed
-  form (see below)
-
-Output:
-- Default text mode: each diagnostic becomes one line, compilation noise
-  stripped, passing tests aggregated.
-- `--raw` reconstructs cargo's terminal-style output by concatenating each
-  diagnostic's `rendered` field plus the cargo status messages on stderr -
-  one cargo invocation.
-- `--json` appends one summary object as the **last line of stdout**, leaving
-  the human output untouched (the old NDJSON per-event mode is gone; this is
-  the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
-  1), `certifies` (the resolved profile's claim, `null` for unclaimed
-  profiles), `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`),
-  `profile` (the profile that drove sweep selection; `null` for ad-hoc and
-  legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
-  when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
-  of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
-  `dependency_rules`/`publish_cycle`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
-  and additive: fields are only ever added under `schema: 1`, consumers must
-  tolerate unknown fields, and a bump is reserved for renames or semantic
-  changes. A config error before the phases run (bad profile name,
-  conflicting flags, a certifies violation) emits no summary - resolve-time
-  errors are not run verdicts.
-
-### Coverage accounting (complete profiles)
+## `coverage` phase (complete profiles)
 
 Under `certifies = "complete"` a tenth phase, `coverage`, runs after the
 test phase - including when the tests **failed**, since the audit needs
@@ -355,7 +578,7 @@ counts, so a consumer of a failed gate sees the worksheet's numbers and
 not `null`. Only an enumeration failure, which predates any counts,
 leaves it null.
 
-### `certifies` and the exit-code contract
+## `certifies` and the exit-code contract
 
 A profile may declare `certifies = "complete"` or `"partial"` (see
 `docs/brokkr.toml.md`); the claim decides the success word, the exit code,
@@ -379,7 +602,7 @@ same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
 the real run but not the coverage audit, so the audit would count tests
 that never ran. 2 = clap usage errors, 130 = interrupt.
 
-### Per-sweep log lines (collapsed by default)
+## Per-sweep log lines (collapsed by default)
 
 Each sweep announces itself as `<phase> <name>: <shape>` rather than its full
 cargo command:
@@ -427,201 +650,55 @@ and `build_packages` pre-build failures.
 is the investigative runner, invoked precisely to find out what a given target
 shape does.
 
-The clippy phase always invokes cargo with `--message-format=json` and ingests
-via `cargo_json::parse_cargo_diagnostics` regardless of `--raw` - the text
-formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every
-warning keeps its lint code in the header, even for repeats of the same rule
-(cargo's pretty-printed text only annotates the first occurrence per crate,
-which is why the JSON ingestion path was needed; see `src/cargo_filter.rs`
-module header).
+## Sweep selection table (`brokkr check`)
 
-The invocation is `cargo clippy --keep-going --all-targets
---message-format=json <sweep features> -- --cap-lints=warn`. The last two
-flags make a single run surface **every** lint across a whole workspace,
-instead of the "one error per run" treadmill you get on a large multi-crate
-graph:
+| invocation | sweep set | libtest filters |
+|---|---|---|
+| no `[[check]]`, no flags | one `--all-features` sweep (legacy default) | none |
+| `[[check]]` configured, no `default_profile`, no flags | every `[[check]]` entry in declaration order | none |
+| `[[check]]` + `default_profile = "tier1"`, no flags | the entries `tier1.sweeps` references | tier1's filters |
+| `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
+| `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | none |
 
-- `--cap-lints=warn` caps every lint at warn level, so a deny-level lint no
-  longer aborts its crate's compile. The crate still produces its `.rmeta`,
-  which means every crate *downstream* of a linty one is checked too - the
-  whole dependency graph completes in one pass. (Genuine, non-lint compile
-  errors are unaffected: they still fail the crate, and `--keep-going` then
-  keeps checking the independent branches of the graph rather than stopping
-  at the first failure.)
-- Because a capped lint lets cargo exit 0, pass/fail is brokkr's own decision,
-  not cargo's exit status: **any clippy diagnostic fails the check.** brokkr
-  treats a capped `warning` as the deny it really is - `event_to_clippy`
-  promotes it back to `error` for counting and the header, so the output never
-  misleads with "0 errors, N warnings" while failing. The `--raw` escape hatch
-  still dumps clippy's own rendered text verbatim (which shows the capped
-  `warning:` wording).
+A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
+labels lane-qualified (`tier1/default`, `serial/default`). The test phase
+runs each lane's entry separately - contradictory filter sets are the point -
+while the clippy phase dedupes sweeps whose build shape (packages, features,
+rustflags, env, build_packages) is identical, logging
+`clippy <label>: deduped`.
 
-A `[clippy]` section with `allow = ["clippy::unused_async", ...]` appends
-`-A <lint>` after `--cap-lints=warn` on every sweep (and on `brokkr clippy`),
-so the listed lints never reach the diagnostic stream - the
-any-diagnostic-fails rule needs no carve-outs. This is the escape hatch for
-driving a foreign checkout under `disable_toolchain`: brokkr lints on the
-host's (newer) clippy, which surfaces lints the project's own pinned-toolchain
-CI cannot see and its code cannot be expected to satisfy. The phase announces
-the allowed lints up front (`clippy: allowing clippy::unused_async ([clippy]
-allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
-in the reprinted failing command. Entries must be bare lint names
-(`clippy::`-qualified or plain rustc names); flags are rejected at parse time.
+`brokkr test <name>` follows the same ladder except: filters are dropped (the
+user's `<name>` argument is the filter), there's no CLI ad-hoc path (the
+test runner doesn't accept `--features`), and a lanes profile keeps one
+sweep per build shape (with filters dropped, lane duplicates are identical
+runs). `--sweep` labels under a lanes profile are the lane-qualified form.
 
-**Known limit of `allow`:** the injected `-A` flags act at the CLI lint
-level, and a source site that carries its own lint-level attribute can
-override them. The observed shape (clippy 1.98, nautilus_trader
-a930c8afe3): a function with `#[expect(clippy::unused_async, ...)]` still
-fired the sibling lint `clippy::unused_async_trait_impl` **at error
-severity** with both `-A clippy::unused_async_trait_impl` and
-`--cap-lints=warn` on the command line - the expectation machinery's
-diagnostic bypassed both. The same lint was suppressed fine at
-attribute-free sites. Best reading: a clippy expectation-machinery
-interaction, not a brokkr defect - but the practical consequence is that
-`[clippy] allow` cannot be relied on to silence a lint at a site holding an
-`#[expect]` for a sibling lint emitted by the same pass. Minimal upstream
-repro sketch: an inherent `async fn` with a tail expression and no
-`.await`, `#[expect(clippy::unused_async)]`, compiled with
-`-A clippy::unused_async_trait_impl` on clippy 1.98.
+Per-project orchestration blocks (today: `[ratatoskr.harness]`) are **not**
+`[[check]]` sweeps and are invisible to both `brokkr check` and `brokkr test`.
+They describe how to build a binary that ratatoskr's orchestration commands
+(`service`, `mock-serve`, `sync`)
+spawn, with their own `package` / `features` / `debug` fields. `[test.profiles]`
+may only reference `[[check]]` entries in its `sweeps` list, never an
+orchestration block.
 
-`[clippy] allow_exact` is the remedy for exactly that shape: `"lint@path"`
-entries suppressed on **brokkr's side of the pipe** instead of the
-compiler's. A matching diagnostic - same lint (with or without the
-`clippy::` qualifier), same build-root-relative file - is dropped at JSON
-ingestion, after clippy has spoken and before the any-diagnostic-fails
-decision, so no lint-level attribute at the site can defeat it. It is
-deliberately narrow where `allow` is broad: one lint in one file (every
-occurrence in that file - file-granular by design, since line numbers drift
-with unrelated edits), never workspace-wide, and no `-A` is injected for it,
-so other sites of the same lint keep failing the check. Each entry is
-announced up front (`clippy: allowing <lint> at <path> ([clippy]
-allow_exact)`), and an entry that suppressed nothing across the run draws a
-`suppressed nothing (stale entry?)` notice - upstream fixed the site or the
-file moved, so the entry should be deleted or re-sited rather than accrete.
-The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
-entry's file when it lives outside the selected packages, so "suppressed
-nothing" there proves nothing.
-`--raw` still shows suppressed diagnostics (it dumps clippy's own rendered
-text verbatim); the pass/fail decision and the formatted output do not
-count them. The path half must match the file exactly as clippy reports it
-(relative to the tree cargo compiles in - copy it from the failing
-diagnostic's location).
+## Env vars exported to `cargo test`
 
-Gremlin phase runs first and fails the check if any banned Unicode character
-is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
-untracked-not-gitignored, so new plan docs are caught before staging) - see
-`src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
-spaces, bidi overrides, em/en dashes, typographic quotes, and emoji /
-pictographs: Misc Symbols, Dingbats, the emoji planes, and emoji variation
-selectors). The Arrows block (`→` and friends) and box-drawing / geometric
-shapes (`U+2500..=25FF`) are deliberately spared - both are used legitimately
-in comments, formatter output, and tree/table rendering. `--fix-gremlins`
-rewrites every banned char in place with its ASCII equivalent (or deletes it
-for zero-width/bidi/emoji noise, which have none) before the scan runs, so the
-subsequent check finds zero and passes.
+Both `brokkr check` (test phase) and `brokkr test` set the following on every
+`cargo test` invocation, including sweeps with empty `build_packages`:
 
-A `[gremlins]` section with `exclude = ["docs/manual", ...]` skips listed
-directories in both the scan and `--fix-gremlins`. Use it for vendored
-material from an outside source (reference manuals, imported docs) that
-legitimately carries typographic punctuation, BOMs, and the like. Matching is
-by path prefix on the git-relative path, so `docs/manual` covers
-`docs/manual/` and everything beneath it but not a sibling `docs/manual-extra`.
-Empty and absolute entries are rejected at parse time.
-
-Header phase runs next, only when a `[header]` section is present. A file
-matching `[header].paths` (minus `exempt`) must contain `[header].pattern` with
-`{year}` expanded to the current UTC year; a missing header or a stale year
-fails. Ported from `check_copyright_year`; see `src/header.rs`.
-
-Textlint phase runs next, only when `[[textlint]]` rules exist. Each rule
-forbids a linear-time regex `pattern` on lines of files matching `paths` (minus
-`exclude` globs); a match is a violation, subject to bounded modifiers:
-`allow_marker` (+ `allow_marker_above = N` for a marker up to N lines above),
-`except`, `in_toml_section`, `table_row_only`, `skip_after` (a regex past which
-the rest of a file is exempt, e.g. to ignore a test module),
-`only_if_file_matches` (a file-scope precondition regex; add
-`only_if_file_matches_above = true` to require the precondition at or above each
-match rather than anywhere in the file, so an import below the match - e.g.
-inside a test module - no longer arms the rule), `region`
-(`code`/`string`/`comment` - scope the pattern to a lexical region of a Rust
-file, tokenized with `rustc_lexer`, so a rule never fires on a match quoted in
-a comment or string), `join_wrapped_use` (match against whole `use ...;`
-statements, reconstructing a rustfmt-wrapped import onto one line first), and
-the four **context-window gates** `except_above` / `except_below` /
-`require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
-A gate filters a match by the raw physical lines around it: all four have the
-same behavior - the match is suppressed iff `pattern` is found within `lines`
-lines in that direction (excluding the match line, clamped at the file edges) -
-and the names differ only to document intent (`except_above` reads for a
-preceding `#[cfg(...)]` exemption, `require_below` for a required token like
-`biased;` that must follow a `tokio::select!`). Multiple gates AND together
-(the violation stands only when every window is clear). Windows read raw text -
-no region masking, no `use`-joining - so because the test is per-line, write
-context patterns fragment-tolerant (match `madsim`, not a full single-line
-attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
-engine behind most grep-style convention hooks; see `src/textlint.rs`.
-
-Manifest phase runs next, only when a `[manifest]` section enables a check
-(off by default, inert otherwise). It parses each `Cargo.toml` matching
-`[manifest].paths` (minus `exclude`) with `toml_edit` and enforces structural
-conventions - today `sort_dependencies` (dependency keys sorted within each
-blank-line group; `[dependencies.<name>]` dotted sections, which TOML forces
-physically after the inline table, are their own group and never ordered against
-it). `shape_exclude` globs excuse a manifest from the structural checks only
-(section/crate-type/package-field order, `[lints] workspace`, bin/example flags
-- the same set a `cargo-fuzz = true` stub skips) while still sort-checking it;
-`exclude` skips the file entirely. See `src/manifest.rs`.
-
-Script-check phase runs next, only when `[[script_check]]` entries exist (inert
-otherwise). This is the phase's default `pre-clippy` stage; an entry can instead
-name `pre-test` or `post-test` and run at that point in the pipeline (see
-`stage` below). Each entry runs `command` via `sh -c` (so pipes/redirects/env
-expansion work) with cwd = the code tree, and **passes iff the captured output
-matches `expect`**. Asserting on a success sentinel - not the exit code - is the
-point: it catches a check silently stubbed to `exit 0`, because the script must
-prove it ran to completion by emitting the sentinel. The command's exit code is
-therefore ignored; only a spawn failure is a hard error. Every entry runs (no
-fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
-each failure prints the full captured stdout/stderr (the diagnostic, never
-truncated by `--limit`). It fills the gap for gates brokkr's native phases can't
-express - semantic analysers (`# Panics`/`# Errors` doc checks) or external
-formatter conventions - that were previously hand-run before every commit.
-
-- `match` = `exact` (whole trimmed stream equals `expect`; suits quiet lints
-  that print only the sentinel), `last-line` (the last non-empty line, trimmed,
-  equals `expect` - the **default**; tolerates progress output above a final
-  verdict), or `contains` (`expect` is a substring).
-- `stream` = `stdout` (default), `stderr`, or `both` (stdout, a newline, then
-  stderr - for tools that split progress and results across the two).
-- Sentinel tip: a non-ASCII sentinel (e.g. a `U+2713` check mark) would itself
-  trip the gremlin scan on `brokkr.toml`. Use an ASCII sentinel, or
-  `match = "contains"` on an ASCII marker substring of the real success line.
-- `stage` = `pre-clippy` (default - here, with the other convention phases),
-  `pre-test` (after clippy, before the test phase), or `post-test` (after the
-  test phase and the coverage audit). One value per entry; an entry runs once.
-
-`post-test` entries are skipped when the test phase failed: it fails fast, so
-its later lanes never ran and there is no partial-run reading for a sentinel
-gate (the coverage audit, which deliberately does run there, wants built
-binaries rather than green tests). All three stages share the one
-`script_check` phase name for `skip_phases` and the JSON `failed_phase`; the
-failing entry is named in the output regardless.
-
-See `src/script_check.rs`.
-
-Dependency-rule phase runs next only when `[[dependency_rule]]` entries exist
-in `brokkr.toml`; without entries it is skipped silently. It reads
-`cargo metadata --no-deps` and fails on configured direct dependency boundary
-violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`. A rule
-can scope the forbidden match by dependency `kinds` (`normal`/`dev`/`build`,
-default all) and `optional` (e.g. `optional = false` to require a dep be
-optional), so manifest conventions like "tokio only as a dev-dependency" are
-expressible.
-
-When hits exceed `--limit`, both the gremlin and clippy phases prefer files
-changed on the current branch (computed via git merge-base against
-`@{upstream}` / `origin/master` / `origin/main`) and append a trailer
-summarising what's hidden; see `src/scope.rs`.
+- `BROKKR_TEST_BIN_DIR` - directory containing the just-rebuilt
+  `build_packages` artefacts. `brokkr check` always sets it to
+  `<target>/debug` (the test phase runs without `--release`); `brokkr test`
+  sets it to `<target>/release` by default and `<target>/debug` when
+  `--debug` is passed. The profile tracks the cargo invocation 1:1 - it does
+  *not* track whatever profile cargo happens to compile the test harness with.
+  `<target>` comes from `cargo metadata --no-deps`. Tests that spawn the
+  rebuilt binary should read this var as the primary source of truth and fall
+  back to `cfg!(debug_assertions)` only when it's unset (e.g. plain
+  `cargo test` outside brokkr). The `cfg!(debug_assertions)` heuristic is
+  unreliable because `[profile.test]` overrides can flip
+  `debug-assertions = false` in the test binary even though the rebuilt
+  binary lives under `debug/`.
 
 ## `brokkr test [-p <PKG>] <NAME>`
 
@@ -695,53 +772,3 @@ matches more than one test in any sweep the command errors before running
 anything. Sweeps where the name matches zero tests (feature-gated out) are
 fine and still `SKIP`. There is no way to disable the ceiling entirely - 280s
 is the cap.
-
-## Sweep selection table (`brokkr check`)
-
-| invocation | sweep set | libtest filters |
-|---|---|---|
-| no `[[check]]`, no flags | one `--all-features` sweep (legacy default) | none |
-| `[[check]]` configured, no `default_profile`, no flags | every `[[check]]` entry in declaration order | none |
-| `[[check]]` + `default_profile = "tier1"`, no flags | the entries `tier1.sweeps` references | tier1's filters |
-| `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
-| `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | none |
-
-A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
-labels lane-qualified (`tier1/default`, `serial/default`). The test phase
-runs each lane's entry separately - contradictory filter sets are the point -
-while the clippy phase dedupes sweeps whose build shape (packages, features,
-rustflags, env, build_packages) is identical, logging
-`clippy <label>: deduped`.
-
-`brokkr test <name>` follows the same ladder except: filters are dropped (the
-user's `<name>` argument is the filter), there's no CLI ad-hoc path (the
-test runner doesn't accept `--features`), and a lanes profile keeps one
-sweep per build shape (with filters dropped, lane duplicates are identical
-runs). `--sweep` labels under a lanes profile are the lane-qualified form.
-
-Per-project orchestration blocks (today: `[ratatoskr.harness]`) are **not**
-`[[check]]` sweeps and are invisible to both `brokkr check` and `brokkr test`.
-They describe how to build a binary that ratatoskr's orchestration commands
-(`service`, `mock-serve`, `sync`)
-spawn, with their own `package` / `features` / `debug` fields. `[test.profiles]`
-may only reference `[[check]]` entries in its `sweeps` list, never an
-orchestration block.
-
-## Env vars exported to `cargo test`
-
-Both `brokkr check` (test phase) and `brokkr test` set the following on every
-`cargo test` invocation, including sweeps with empty `build_packages`:
-
-- `BROKKR_TEST_BIN_DIR` - directory containing the just-rebuilt
-  `build_packages` artefacts. `brokkr check` always sets it to
-  `<target>/debug` (the test phase runs without `--release`); `brokkr test`
-  sets it to `<target>/release` by default and `<target>/debug` when
-  `--debug` is passed. The profile tracks the cargo invocation 1:1 - it does
-  *not* track whatever profile cargo happens to compile the test harness with.
-  `<target>` comes from `cargo metadata --no-deps`. Tests that spawn the
-  rebuilt binary should read this var as the primary source of truth and fall
-  back to `cfg!(debug_assertions)` only when it's unset (e.g. plain
-  `cargo test` outside brokkr). The `cfg!(debug_assertions)` heuristic is
-  unreliable because `[profile.test]` overrides can flip
-  `debug-assertions = false` in the test binary even though the rebuilt
-  binary lives under `debug/`.
