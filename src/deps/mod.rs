@@ -383,6 +383,9 @@ fn load_metadata(project_root: &Path) -> Result<CargoMetadata, DevError> {
 /// cycle identically.
 pub(crate) use publish_cycle::render_lines as publish_cycle_lines;
 
+/// The shared "this list may be partial" clause, printed by both reports.
+pub(crate) use publish_cycle::INVENTORY_CAVEAT as PUBLISH_CYCLE_CAVEAT;
+
 /// Run the `publish_cycle` phase on its own, for `brokkr check`.
 ///
 /// The phase reads declared manifests only, so this loads `--no-deps`
@@ -499,6 +502,9 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
     render_section(&cycles, "cargo publication cycle", "cargo publication cycles", "", limit, all, render_cycle_text);
+    if !cycles.is_empty() {
+        output::deps_msg(&format!("  {}", publish_cycle::INVENTORY_CAVEAT));
+    }
     render_section(&ws, "unused workspace dependency", "unused workspace dependencies", "not inherited by any member", limit, all, render_ws_text);
     render_section(&native, "dependency with native code", "dependencies with native code", "", limit, all, render_native_text);
     render_outdated_section(&outdated, outdated_ran, limit, all);

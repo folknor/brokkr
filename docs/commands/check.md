@@ -225,6 +225,14 @@ the check with the loop rendered as a chain:
               needs the dependency removed outright
 ```
 
+Every finding closes with a caveat line: the list may be partial, because
+cycles sharing a member can surface one at a time (see
+`docs/commands/deps.md` for why). Harmless for gating - any cycle fails
+the check - but it matters when you are using the output to *scope* a fix,
+so re-run after each one rather than trusting a single report as the
+complete inventory. The phase points at `brokkr deps` for that, since
+scoping is investigation.
+
 Honours `--limit`/`--all` like the other finding phases, and is skippable
 as `publish_cycle` in a partial profile's `skip_phases`.
 

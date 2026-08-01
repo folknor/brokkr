@@ -32,6 +32,12 @@
 //! This phase reads the declared manifests (`packages[].dependencies`)
 //! rather than the resolve graph, because publication is a property of
 //! what the manifest says, not of what the resolver picked.
+//!
+//! The enumeration is **not exhaustive**, by choice - see
+//! [`INVENTORY_CAVEAT`], which every report prints. Exhaustiveness would
+//! cost either the `visited` pruning (exponential worst case) or a
+//! Johnson's-algorithm implementation, and buys nothing for gating; the
+//! caveat covers the scoping case that the missing cycles would mislead.
 
 use std::collections::{HashMap, HashSet};
 
@@ -222,6 +228,25 @@ fn record<'a>(
     });
 }
 
+/// Printed once per report whenever any cycle is found, by both `deps`
+/// and the `check` phase.
+///
+/// The walk reports one cycle per back edge and prunes on `visited`, so a
+/// back edge into an already-finished node is never examined: several
+/// loops through one member can surface one at a time. That is harmless
+/// for gating - any cycle fails the run - but actively misleading for
+/// *scoping*, which is the decision this output actually feeds. Reading a
+/// lone finding as the complete inventory is how you pick "delete this
+/// edge" when the answer was "restructure the crate". So the report says
+/// what it is rather than implying an exhaustiveness it doesn't have.
+///
+/// Deliberately command-neutral: `deps` prints it while the reader is
+/// already in `deps`, so naming that command here would be noise. The
+/// `check` phase appends its own pointer to `deps` instead - that is the
+/// investigative command, and a `check` reader is one step further away.
+pub const INVENTORY_CAVEAT: &str =
+    "this inventory may be partial - cycles sharing a member can surface one at a time, so re-run after each fix rather than scoping the fix to what is listed here";
+
 /// Render one cycle as the chain line, followed by the one-line fix for
 /// each versioned dev-dep edge - that edge is removable without
 /// restructuring anything, so it is the actionable part of the report.
@@ -335,6 +360,24 @@ mod tests {
         ];
         packages[1].publish = Some(Vec::new());
         assert!(run(&meta(packages)).is_empty());
+    }
+
+    #[test]
+    fn overlapping_cycles_are_why_the_caveat_exists() {
+        // `a -> b -> a` and `a -> c -> b -> a` both exist. The walk
+        // finishes `b` while exploring the first, so the second's back
+        // edge is never examined and only one cycle is reported. Pinned
+        // as the documented shape of the limitation, not as desired
+        // behaviour - if this ever reports two, the caveat can go.
+        let m = meta(vec![
+            pkg("a", vec![dep("b", None, "0.1"), dep("c", None, "0.1")]),
+            pkg("b", vec![dep("a", None, "0.1")]),
+            pkg("c", vec![dep("b", None, "0.1")]),
+        ]);
+        let events = run(&m);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].members, vec!["a", "b"]);
+        assert!(INVENTORY_CAVEAT.contains("re-run after each fix"));
     }
 
     #[test]

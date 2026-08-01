@@ -1261,6 +1261,12 @@ fn run_publish_cycle(
             total - displayed.len()
         ));
     }
+    // Never let the list read as the complete inventory: the fix someone
+    // picks depends on knowing whether anything else is still entangled.
+    // Point at `deps` too - scoping a fix is investigation, and that is
+    // the command for it.
+    msg.push_str(&format!("  {}\n", crate::deps::PUBLISH_CYCLE_CAVEAT));
+    msg.push_str("  `brokkr deps` reports these alongside the rest of the dependency picture\n");
     output::error(msg.trim_end());
 
     Err(DevError::Build("publish cycle failed".into()))

@@ -187,6 +187,23 @@ other section, it prints nothing rather than an all-clear line. See
 `src/deps/publish_cycle.rs`; `scripts/publish-cycle-fixture.py` writes a
 throwaway workspace in both shapes for manual end-to-end checks.
 
+**The list may be partial, and says so.** The walk reports one cycle per
+back edge and prunes on a `visited` set, so a back edge into an
+already-finished member is never examined: several loops through one
+member can surface one at a time. Every report carrying a cycle therefore
+ends with a caveat line telling you to re-run after each fix.
+
+This is a deliberate trade - exhaustive enumeration means dropping the
+pruning (exponential worst case) or implementing Johnson's algorithm, and
+the limitation costs nothing where the output is used as a *gate*: any
+cycle fails the run. It matters where the output is used for **scoping**,
+which is the likelier reading. Deciding between "delete this one edge" and
+"restructure the crate" depends on knowing whether removing the named edge
+leaves anything else entangled - and a lone finding read as the complete
+inventory is exactly how you pick too small a fix. Re-run after each fix
+until the report is empty; that loop is sound even though a single report
+isn't complete.
+
 This is the one phase `brokkr check` also runs, as its `publish_cycle`
 convention phase - same function, same renderer, so the two commands can
 never disagree about a tree. `deps` remains the place to *investigate* a
