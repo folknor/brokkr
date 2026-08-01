@@ -198,6 +198,11 @@ pub struct SummaryEvent {
 pub(crate) struct CargoMetadata {
     pub packages: Vec<CargoPackage>,
     pub workspace_members: Vec<String>,
+    /// Null under `cargo metadata --no-deps`, which `publish_cycle`'s
+    /// standalone entry point uses - it reads declared manifests only, so
+    /// paying for the resolve graph would buy nothing. Defaults to empty
+    /// rather than erroring so that loader stays a one-liner.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub resolve: CargoResolve,
     /// Absolute path to the workspace root directory (holds the root
     /// `Cargo.toml` with `[workspace.dependencies]`). Used by
@@ -242,9 +247,19 @@ pub(crate) struct PackageDep {
     pub req: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub(crate) struct CargoResolve {
     pub nodes: Vec<ResolveNode>,
+}
+
+/// `serde` treats an explicit `null` as a hard error even on a `default`
+/// field; cargo writes `"resolve": null` under `--no-deps`, so map it.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -362,6 +377,25 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
 
 fn load_metadata(project_root: &Path) -> Result<CargoMetadata, DevError> {
     run_metadata(project_root, &["metadata", "--format-version", "1"])
+}
+
+/// The shared renderer: `deps` and the `check` phase print an identical
+/// cycle identically.
+pub(crate) use publish_cycle::render_lines as publish_cycle_lines;
+
+/// Run the `publish_cycle` phase on its own, for `brokkr check`.
+///
+/// The phase reads declared manifests only, so this loads `--no-deps`
+/// metadata - the cheap call, no resolve graph, no lockfile update. It is
+/// deliberately the *same* `publish_cycle::run` the `deps` command drives:
+/// a cycle that fails `brokkr deps` must fail `brokkr check` identically,
+/// or the two commands would disagree about the same tree.
+pub(crate) fn publication_cycles(project_root: &Path) -> Result<Vec<PublishCycleEvent>, DevError> {
+    let metadata = run_metadata(
+        project_root,
+        &["metadata", "--format-version", "1", "--no-deps"],
+    )?;
+    Ok(publish_cycle::run(&metadata))
 }
 
 /// Same as `load_metadata` but adds `--filter-platform=<host>` so the
@@ -624,24 +658,12 @@ fn render_path_text(path: &PathDependencyEvent) {
 
 /// Prints the loop as a chain, then - when the cycle is closed by a
 /// dev-dependency that names a version - the one-line fix, since that
-/// edge is removable without restructuring anything.
+/// edge is removable without restructuring anything. The lines themselves
+/// come from `publish_cycle`, shared with the `brokkr check` phase so the
+/// two commands describe an identical cycle identically.
 fn render_cycle_text(c: &PublishCycleEvent) {
-    let mut chain = String::new();
-    for edge in &c.edges {
-        chain.push_str(&edge.from);
-        if edge.kind == "normal" {
-            chain.push_str(" -> ");
-        } else {
-            chain.push_str(&format!(" -[{}]-> ", edge.kind));
-        }
-    }
-    chain.push_str(&c.edges[0].from);
-    output::deps_msg(&format!("  {chain}"));
-    for edge in c.edges.iter().filter(|e| e.kind == "dev") {
-        output::deps_msg(&format!(
-            "    dev-dependency {} -> {} names a version, so cargo publish keeps it; drop the version key to leave a path-only dev-dep and the edge disappears from the published manifest",
-            edge.from, edge.to,
-        ));
+    for line in publish_cycle::render_lines(c) {
+        output::deps_msg(&format!("  {line}"));
     }
 }
 

@@ -3,7 +3,7 @@
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
 full validation pass (gremlins + header + textlint + dependency rules +
-clippy + tests); `test`
+publish cycle + clippy + tests); `test`
 runs one named cargo test against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
@@ -11,7 +11,8 @@ section, profiles) see `docs/brokkr.toml.md`.
 
 ## `brokkr check`
 
-Gremlins + header + textlint + dependency rules + clippy + tests. Trailing args after
+Gremlins + header + textlint + dependency rules + publish cycle + clippy +
+tests. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -177,6 +178,56 @@ namespace with unit tests, so skipping them by pattern would eat legitimate
 module tests too. `brokkr test <name>` is unaffected - it runs the full
 `cargo test` default so a deliberately named doctest still runs.
 
+### The `publish_cycle` phase
+
+The last convention phase, running after `dependency_rules`: it refuses a
+dependency cycle among publishable workspace members. `cargo build`
+resolves the whole workspace at once and is perfectly happy with one, so
+every clippy sweep and test lane stays green; `cargo publish` uploads a
+crate at a time and needs each dependency in the published manifest to
+already exist on the registry, so a cycle has no valid publication order
+and blows up at release time instead.
+
+**Needs no config to arm it.** Unlike its neighbours there is nothing to
+declare - a publication cycle is derivable from the manifests alone, is
+never intentional, and is invisible to every other phase. It costs one
+`cargo metadata --format-version 1 --no-deps`, which is why it can sit in
+the always-on tier rather than in a command someone has to remember to
+run.
+
+**Ignores the CLI `-p` scope**, deliberately: publication order is a
+property of the whole workspace, and a cycle a narrowed run hid would be a
+cycle that lands on master. So `brokkr check -p one-crate` still catches
+it.
+
+The analysis is `brokkr deps`' `publish_cycle` phase - literally the same
+function and the same renderer - so the two commands can never disagree
+about a tree. That includes its two exclusions: a version-less
+dev-dependency is stripped by cargo on publish and so cannot close a
+cycle, while one that names a version does (and gets called out by name,
+since deleting the `version` key usually fixes things without
+restructuring anything); `publish = false` members are excluded outright.
+See `docs/commands/deps.md` for the full rationale.
+
+Prints `publish cycle: ok` when clean - unlike the `deps` section, which
+is silent on a clean tree, because a check phase that printed nothing
+would be indistinguishable from one that didn't run. On a finding it fails
+the check with the loop rendered as a chain:
+
+```
+[error]   publish cycle: 1 cargo publication cycle(s)
+            nautilus-execution -[dev]-> nautilus-testkit -> nautilus-trading -> nautilus-execution
+              dev-dependency nautilus-execution -> nautilus-testkit names a version, so cargo
+              publish keeps it; dropping the version key leaves a path-only dev-dep that publish
+              strips
+              that fix only helps a consumer that keys on the published manifest - a release
+              planner ordering every `path =` edge regardless of kind still sees this one, and
+              needs the dependency removed outright
+```
+
+Honours `--limit`/`--all` like the other finding phases, and is skippable
+as `publish_cycle` in a partial profile's `skip_phases`.
+
 Like every locked brokkr command, `check` and `test` acquire the global
 per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
 holds it, the command prints `[lock] waiting for …` and waits until released,
@@ -227,7 +278,7 @@ Output:
   legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
   when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
   of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
-  `dependency_rules`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
+  `dependency_rules`/`publish_cycle`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must
   tolerate unknown fields, and a bump is reserved for renames or semantic
   changes. A config error before the phases run (bad profile name,
@@ -362,9 +413,9 @@ failures, test failures, hung tests, parallel-sweep timeouts, zero-test runs,
 and `build_packages` pre-build failures.
 
 `--commands` restores the full command on every line, and additionally logs the
-dependency-rule phase's `cargo metadata` invocation (suppressed by default: it
-is a fixed string that says less than the `dependency rules: ok (…)` line
-following it). `brokkr clippy` is unaffected and always prints its command: it
+`cargo metadata` invocations of the dependency-rule and publish-cycle phases
+(suppressed by default: each is a fixed string that says less than the
+`dependency rules: ok (…)` / `publish cycle: ok` line following it). `brokkr clippy` is unaffected and always prints its command: it
 is the investigative runner, invoked precisely to find out what a given target
 shape does.
 

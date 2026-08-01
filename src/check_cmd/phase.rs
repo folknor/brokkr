@@ -273,6 +273,11 @@ fn run_convention_phases(
         *failing_phase = Some("dependency_rules");
         run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.all, a.commands)?;
     }
+
+    if !skip("publish_cycle") {
+        *failing_phase = Some("publish_cycle");
+        run_publish_cycle(a.project_root, a.limit, a.all, a.commands)?;
+    }
     Ok(())
 }
 
@@ -1200,6 +1205,65 @@ fn run_dependency_rules(
     output::error(msg.trim_end());
 
     Err(DevError::Build("dependency rules failed".into()))
+}
+
+/// The `publish_cycle` phase: refuse a dependency cycle among publishable
+/// workspace members.
+///
+/// Unlike its neighbours this phase needs no config to arm it. There is
+/// nothing to declare - a publication cycle is derivable from the
+/// manifests alone, is never intentional, and is invisible to every other
+/// phase, since `cargo build`, clippy and the test lanes all resolve the
+/// workspace at once and are perfectly happy with one. It surfaces at
+/// release time instead, which is precisely why it belongs in the cheap
+/// always-on tier rather than in a command someone has to remember to run.
+///
+/// Ignores the CLI `-p` scope deliberately: publication order is a
+/// property of the whole workspace, and a cycle that a narrowed run hid
+/// would be a cycle that lands on master. `cargo metadata --no-deps` is
+/// the one subprocess, and it is cheap.
+///
+/// The analysis is `deps`' - literally the same `publish_cycle::run` - so
+/// `brokkr check` and `brokkr deps` can never disagree about a tree.
+fn run_publish_cycle(
+    project_root: &Path,
+    limit: usize,
+    all: bool,
+    commands: bool,
+) -> Result<(), DevError> {
+    if commands {
+        output::run_msg("cargo metadata --format-version 1 --no-deps (publish cycle)");
+    }
+    let cycles = crate::deps::publication_cycles(project_root)?;
+
+    if cycles.is_empty() {
+        output::run_msg("publish cycle: ok");
+        return Ok(());
+    }
+
+    let total = cycles.len();
+    let displayed = if all || total <= limit {
+        &cycles[..]
+    } else {
+        &cycles[..limit]
+    };
+    let mut msg = format!("publish cycle: {total} cargo publication cycle(s)\n");
+    for cycle in displayed {
+        for line in crate::deps::publish_cycle_lines(cycle) {
+            msg.push_str("  ");
+            msg.push_str(&line);
+            msg.push('\n');
+        }
+    }
+    if displayed.len() < total {
+        msg.push_str(&format!(
+            "  +{} more (--all to see)\n",
+            total - displayed.len()
+        ));
+    }
+    output::error(msg.trim_end());
+
+    Err(DevError::Build("publish cycle failed".into()))
 }
 
 /// Assemble the `cargo clippy` argv for one sweep. Always

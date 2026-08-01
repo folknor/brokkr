@@ -944,13 +944,14 @@ pub enum Isolation {
 /// anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion, and the `skip_phases`
 /// validator subtracts it from this list - so the two roles no longer let
 /// `skip_phases = ["coverage"]` load clean and announce a no-op.
-pub const PHASE_NAMES: [&str; 9] = [
+pub const PHASE_NAMES: [&str; 10] = [
     "gremlins",
     "header",
     "textlint",
     "manifest",
     "script_check",
     "dependency_rules",
+    "publish_cycle",
     "clippy",
     "test",
     "coverage",

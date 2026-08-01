@@ -14,8 +14,17 @@
 //! helpers can point back at their dependents. Such an edge exists for
 //! the local build and vanishes on publish, so it must not count here.
 //! A dev-dependency that also names a version does get published, and
-//! does close the cycle - that is the one worth flagging, and the fix is
-//! usually to delete the `version` key rather than to restructure crates.
+//! does close the cycle - that is the one worth flagging, and deleting
+//! the `version` key is usually enough, without restructuring crates.
+//!
+//! That last part is a claim about *cargo publish*, and the renderer says
+//! so rather than stating it flat. A project whose release path is its own
+//! planner may order the graph off local `path =` edges regardless of
+//! dependency kind (nautilus_trader's `scripts/ci/publish-cargo-crates.sh`
+//! does exactly this, deliberately), and such a planner still sees a
+//! path-only dev-dep. The detection is unaffected either way - the edge
+//! genuinely does vanish from the published manifest - but the advice is
+//! consumer-specific, so it ships with its caveat attached.
 //!
 //! Members with `publish = false` are excluded entirely: they are never
 //! uploaded, so no edge into or out of them can block a release.
@@ -213,6 +222,41 @@ fn record<'a>(
     });
 }
 
+/// Render one cycle as the chain line, followed by the one-line fix for
+/// each versioned dev-dep edge - that edge is removable without
+/// restructuring anything, so it is the actionable part of the report.
+///
+/// Returned unindented, so each caller supplies its own: `deps` prefixes
+/// two spaces per section convention, the `check` phase folds the lines
+/// into one error block.
+pub fn render_lines(c: &PublishCycleEvent) -> Vec<String> {
+    let mut chain = String::new();
+    for edge in &c.edges {
+        chain.push_str(&edge.from);
+        if edge.kind == KIND_NORMAL {
+            chain.push_str(" -> ");
+        } else {
+            chain.push_str(&format!(" -[{}]-> ", edge.kind));
+        }
+    }
+    // Close the loop back onto its first member: `edges` has one entry per
+    // member, so the last edge's `to` is `edges[0].from`.
+    chain.push_str(&c.edges[0].from);
+
+    let mut lines = vec![chain];
+    for edge in c.edges.iter().filter(|e| e.kind == KIND_DEV_VERSIONED) {
+        lines.push(format!(
+            "  dev-dependency {} -> {} names a version, so cargo publish keeps it; dropping the version key leaves a path-only dev-dep that publish strips",
+            edge.from, edge.to,
+        ));
+        lines.push(
+            "  that fix only helps a consumer that keys on the published manifest - a release planner ordering every `path =` edge regardless of kind still sees this one, and needs the dependency removed outright"
+                .to_string(),
+        );
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +353,33 @@ mod tests {
     fn self_dev_dep_is_not_a_cycle() {
         let m = meta(vec![pkg("a", vec![dep("a", Some("dev"), "0.1")])]);
         assert!(run(&m).is_empty());
+    }
+
+    #[test]
+    fn render_names_the_chain_and_the_removable_edge() {
+        let m = meta(vec![
+            pkg("exec", vec![dep("testkit", Some("dev"), "0.1")]),
+            pkg("testkit", vec![dep("trading", None, "0.1")]),
+            pkg("trading", vec![dep("exec", None, "0.1")]),
+        ]);
+        let events = run(&m);
+        let lines = render_lines(&events[0]);
+        assert_eq!(lines[0], "exec -[dev]-> testkit -> trading -> exec");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("dev-dependency exec -> testkit names a version"));
+        // The caveat travels with the fix, never alone: a planner keying on
+        // local `path =` edges is unmoved by deleting a version key.
+        assert!(lines[2].contains("keys on the published manifest"));
+    }
+
+    #[test]
+    fn render_of_an_all_normal_cycle_is_the_chain_alone() {
+        let m = meta(vec![
+            pkg("a", vec![dep("b", None, "0.1")]),
+            pkg("b", vec![dep("a", None, "0.1")]),
+        ]);
+        let lines = render_lines(&run(&m)[0]);
+        assert_eq!(lines, vec!["a -> b -> a"]);
     }
 
     #[test]

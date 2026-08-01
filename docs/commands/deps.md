@@ -167,7 +167,14 @@ Two exclusions carry the phase's whole subtlety:
   on publish. A dev-dep that *also* names a version does get published and
   does close the cycle - and since deleting the `version` key usually
   fixes it without restructuring anything, the renderer calls that edge
-  out by name.
+  out by name. With a caveat, deliberately: that fix is a fact about
+  `cargo publish`. A project that releases through its own planner may
+  order the graph off local `path =` edges regardless of dependency kind
+  (nautilus_trader's `scripts/ci/publish-cargo-crates.sh` does, on
+  purpose), and such a planner still sees a path-only dev-dep - so the
+  hint ships with the qualifier attached rather than promising a fix that
+  would leave some gates red. Detection is unaffected; only the advice is
+  consumer-specific.
 - **`publish = false` members are excluded.** They are never uploaded, so
   no edge through them can block a release.
 
@@ -179,6 +186,11 @@ counts toward the exit-1 tally. Silent when there is no cycle - like every
 other section, it prints nothing rather than an all-clear line. See
 `src/deps/publish_cycle.rs`; `scripts/publish-cycle-fixture.py` writes a
 throwaway workspace in both shapes for manual end-to-end checks.
+
+This is the one phase `brokkr check` also runs, as its `publish_cycle`
+convention phase - same function, same renderer, so the two commands can
+never disagree about a tree. `deps` remains the place to *investigate* a
+cycle; `check` is what stops one from landing. See `docs/commands/check.md`.
 
 ### workspace_dep [v1]
 
