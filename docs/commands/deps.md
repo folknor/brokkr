@@ -142,6 +142,44 @@ workspace is usually a dev shortcut (forgot to publish a fork) or a hand-
 patched dependency that wouldn't reproduce on a clean checkout. Emits
 `PathDependency` with the resolved manifest path.
 
+### publish_cycle [v1]
+
+A dependency cycle among publishable workspace members. `cargo build`
+resolves the whole workspace at once and is perfectly happy with one;
+`cargo publish` uploads a crate at a time and needs every dependency in
+the published manifest to already exist on the registry, so a cycle has
+no valid publication order. The failure surfaces at release time, long
+after the PR that introduced it merged - which is exactly what makes it
+worth a phase.
+
+Reads the declared manifests (`packages[].dependencies`) rather than the
+resolve graph, because publication is a property of what the manifest
+says, not of what the resolver picked. For the same reason it uses the
+unfiltered metadata: a cycle closed by a target-specific dep still blocks
+the release on every host.
+
+Two exclusions carry the phase's whole subtlety:
+
+- **Version-less dev-dependencies don't count.** Cargo strips a dev-dep
+  with no version requirement (the `{ path = "..." }`-only form) from the
+  published manifest, precisely so intra-workspace test helpers may point
+  back at their own dependents. Such an edge exists locally and vanishes
+  on publish. A dev-dep that *also* names a version does get published and
+  does close the cycle - and since deleting the `version` key usually
+  fixes it without restructuring anything, the renderer calls that edge
+  out by name.
+- **`publish = false` members are excluded.** They are never uploaded, so
+  no edge through them can block a release.
+
+Emits `PublishCycle` with `members` (the loop, rotated to start at its
+lexicographically smallest member so the same cycle found from different
+roots dedups to one event) and `edges` (one per member, closing back to
+`members[0]`, each tagged `normal` / `build` / `dev`). An offline finding:
+counts toward the exit-1 tally. Silent when there is no cycle - like every
+other section, it prints nothing rather than an all-clear line. See
+`src/deps/publish_cycle.rs`; `scripts/publish-cycle-fixture.py` writes a
+throwaway workspace in both shapes for manual end-to-end checks.
+
 ### workspace_dep [v1]
 
 Every `[workspace.dependencies]` entry in the root manifest should be inherited
@@ -264,7 +302,8 @@ brokkr deps --all                 # no per-phase cap
 brokkr deps --no-fail             # exit 0 even when findings exist
 ```
 
-Exit code: `1` if any findings (duplicate / git / path) exist, `0`
+Exit code: `1` if any findings (duplicate / git / path / publish cycle /
+unused workspace dep) exist, `0`
 otherwise. Outdated, stale, and tool-missing events are informational
 and don't drive the exit code. `--no-fail` always exits 0.
 
@@ -277,6 +316,8 @@ src/deps/
   focus.rs               # `brokkr deps <pkg>` chain trace
   git_dependency.rs      # git+ source scanning with ref parsing
   path_dependency.rs     # non-workspace path deps
+  publish_cycle.rs       # cargo publication cycles among members
+  workspace_dep.rs       # unused [workspace.dependencies] entries
   native_code.rs         # links= + cc/cmake/... build-dep detection
   ccu.rs                 # ccu --json shell-out (outdated + stale)
 ```

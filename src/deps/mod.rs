@@ -20,6 +20,7 @@ mod focus;
 mod git_dependency;
 mod native_code;
 mod path_dependency;
+mod publish_cycle;
 mod workspace_dep;
 
 use focus::run_focus;
@@ -32,6 +33,7 @@ pub enum DepsEvent {
     DuplicateVersion(DuplicateVersionEvent),
     GitDependency(GitDependencyEvent),
     PathDependency(PathDependencyEvent),
+    PublishCycle(PublishCycleEvent),
     UnusedWorkspaceDep(workspace_dep::UnusedWorkspaceDepEvent),
     NativeDependency(NativeDependencyEvent),
     Outdated(OutdatedEvent),
@@ -142,6 +144,26 @@ pub struct ToolMissingEvent {
     pub reason: String,
 }
 
+/// A dependency cycle among publishable workspace members. `members` is
+/// the loop in walk order, rotated to start at its lexicographically
+/// smallest member; `edges` has one entry per member, closing back to
+/// `members[0]`. See `publish_cycle.rs` for why dev-dependencies only
+/// sometimes count.
+#[derive(Serialize)]
+pub struct PublishCycleEvent {
+    pub members: Vec<String>,
+    pub edges: Vec<CycleEdge>,
+}
+
+#[derive(Serialize)]
+pub struct CycleEdge {
+    pub from: String,
+    pub to: String,
+    /// `normal`, `build`, or `dev` (a dev-dep carrying a version, the
+    /// only kind that survives into the published manifest).
+    pub kind: &'static str,
+}
+
 #[derive(Serialize)]
 pub struct DuplicateVersionEvent {
     #[serde(rename = "crate")]
@@ -196,6 +218,28 @@ pub(crate) struct CargoPackage {
     /// crate that links a native library. Used by `native_code`.
     #[serde(default)]
     pub links: Option<String>,
+    /// The manifest's `publish` key. `Some([])` is `publish = false`;
+    /// `None` is the unrestricted default. Used by `publish_cycle`.
+    #[serde(default)]
+    pub publish: Option<Vec<String>>,
+    /// Declared dependencies from this package's own manifest - what
+    /// `cargo publish` writes out, as opposed to `resolve`'s picked
+    /// graph. Used by `publish_cycle`.
+    #[serde(default)]
+    pub dependencies: Vec<PackageDep>,
+}
+
+/// One entry of `packages[].dependencies`.
+#[derive(Deserialize)]
+pub(crate) struct PackageDep {
+    pub name: String,
+    /// `None` is Normal; `Some("dev")` / `Some("build")` are the others.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The version requirement. Cargo renders "none specified" - the
+    /// path-only form that publish strips from a dev-dep - as `*`.
+    #[serde(default)]
+    pub req: String,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +302,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
         "duplicate_version",
         "git_dependency",
         "path_dependency",
+        "publish_cycle",
         "workspace_dep",
         "native_code",
         "outdated",
@@ -270,6 +315,10 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     let dup_events = duplicate_version::run(&host_metadata);
     let git_events = git_dependency::run(&metadata);
     let path_events = path_dependency::run(&metadata);
+    // Unfiltered metadata: publication is a property of the declared
+    // manifests, so a cycle closed by a target-specific dep still blocks
+    // the release even when this host doesn't build that edge.
+    let cycle_events = publish_cycle::run(&metadata);
     // native_code uses host-filtered metadata like duplicate_version so
     // wasm-only native bundlers (e.g. sqlite-wasm-rs) don't show up on a
     // native host.
@@ -280,11 +329,16 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     // findings. `native_code` is offline but informational (native code
     // is a heads-up, not a defect), as are the network phases
     // (`outdated`/`stale`) - a patch bump shouldn't fail your build.
-    let findings = dup_events.len() + git_events.len() + path_events.len() + ws_events.len();
+    let findings = dup_events.len()
+        + git_events.len()
+        + path_events.len()
+        + cycle_events.len()
+        + ws_events.len();
 
     events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
     events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
     events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
+    events.extend(cycle_events.into_iter().map(DepsEvent::PublishCycle));
     events.extend(ws_events.into_iter().map(DepsEvent::UnusedWorkspaceDep));
     events.extend(native_events.into_iter().map(DepsEvent::NativeDependency));
     events.extend(ccu::run(project_root));
@@ -373,6 +427,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     let mut dups = Vec::new();
     let mut gits = Vec::new();
     let mut paths = Vec::new();
+    let mut cycles = Vec::new();
     let mut ws = Vec::new();
     let mut native = Vec::new();
     let mut outdated = Vec::new();
@@ -384,6 +439,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
             DepsEvent::DuplicateVersion(d) => dups.push(d),
             DepsEvent::GitDependency(g) => gits.push(g),
             DepsEvent::PathDependency(p) => paths.push(p),
+            DepsEvent::PublishCycle(c) => cycles.push(c),
             DepsEvent::UnusedWorkspaceDep(w) => ws.push(w),
             DepsEvent::NativeDependency(n) => native.push(n),
             DepsEvent::Outdated(o) => outdated.push(o),
@@ -408,6 +464,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     render_dup_section(&dups, limit, all);
     render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
     render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
+    render_section(&cycles, "cargo publication cycle", "cargo publication cycles", "", limit, all, render_cycle_text);
     render_section(&ws, "unused workspace dependency", "unused workspace dependencies", "not inherited by any member", limit, all, render_ws_text);
     render_section(&native, "dependency with native code", "dependencies with native code", "", limit, all, render_native_text);
     render_outdated_section(&outdated, outdated_ran, limit, all);
@@ -563,6 +620,29 @@ fn render_path_text(path: &PathDependencyEvent) {
         "  {} {}  {}",
         path.krate, path.version, path.manifest_path
     ));
+}
+
+/// Prints the loop as a chain, then - when the cycle is closed by a
+/// dev-dependency that names a version - the one-line fix, since that
+/// edge is removable without restructuring anything.
+fn render_cycle_text(c: &PublishCycleEvent) {
+    let mut chain = String::new();
+    for edge in &c.edges {
+        chain.push_str(&edge.from);
+        if edge.kind == "normal" {
+            chain.push_str(" -> ");
+        } else {
+            chain.push_str(&format!(" -[{}]-> ", edge.kind));
+        }
+    }
+    chain.push_str(&c.edges[0].from);
+    output::deps_msg(&format!("  {chain}"));
+    for edge in c.edges.iter().filter(|e| e.kind == "dev") {
+        output::deps_msg(&format!(
+            "    dev-dependency {} -> {} names a version, so cargo publish keeps it; drop the version key to leave a path-only dev-dep and the edge disappears from the published manifest",
+            edge.from, edge.to,
+        ));
+    }
 }
 
 fn render_ws_text(w: &workspace_dep::UnusedWorkspaceDepEvent) {
