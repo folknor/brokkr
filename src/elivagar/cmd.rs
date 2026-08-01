@@ -1,6 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::cli::{CorpusArchiveArgs, PmtilesCorpusCommand};
+// `PathBuf` and `CorpusArchiveArgs` are used only by the corpus/regress bodies,
+// commented out while the `elivagar` path dep is disabled (see Cargo.toml).
+use crate::cli::PmtilesCorpusCommand;
 use crate::config;
 use crate::context::{HarnessContext, bootstrap, bootstrap_config};
 use crate::error::DevError;
@@ -93,14 +95,25 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
 
 /// `brokkr compare-tiles` - the lenient per-layer census. Native since the
 /// corpus redesign, so it needs no build and no lock.
+///
+/// TEMPORARILY DISABLED with the `elivagar` path dep (see Cargo.toml).
 pub(crate) fn compare_tiles(
     project: Project,
-    file_a: &str,
-    file_b: &str,
-    sample: Option<usize>,
+    _file_a: &str,
+    _file_b: &str,
+    _sample: Option<usize>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "compare-tiles")?;
-    super::compare_tiles::run(file_a, file_b, sample)
+    Err(disabled("compare-tiles"))
+}
+
+/// The error every elivagar-linking command returns while the `elivagar` path
+/// dependency is disabled in Cargo.toml.
+fn disabled(what: &str) -> DevError {
+    DevError::Config(format!(
+        "{what} is disabled: it links the elivagar crate in-process, and the \
+         elivagar path dependency is currently commented out in brokkr's Cargo.toml"
+    ))
 }
 
 pub(crate) fn download_ocean(
@@ -235,7 +248,9 @@ pub(crate) fn svg(
 /// include deliberate cross-contract diffs; comparability is the caller's
 /// responsibility (`brokkr pmtiles-inspect` reads the provenance blocks). A
 /// missing comparand is refused by clap's required ArgGroup, not here.
-#[allow(clippy::too_many_arguments)]
+///
+/// TEMPORARILY DISABLED with the `elivagar` path dep (see Cargo.toml).
+#[allow(clippy::too_many_arguments, unused_variables)]
 pub(crate) fn regress(
     dev_config: &config::DevConfig,
     project: Project,
@@ -256,45 +271,50 @@ pub(crate) fn regress(
     json: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "regress")?;
-    let pi = bootstrap(None)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let current = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
-    // The comparand is one of the two --against* flags (clap's required
-    // ArgGroup guarantees exactly one is present). An explicit path is checked
-    // for existence; a commit resolves through the same durable-output resolver
-    // as the current side, but with its OWN variant: a cross-variant diff is a
-    // legitimate regress use (it is the attribution instrument), so the
-    // comparand's variant is addressed independently via --against-variant.
-    let comparand = match against {
-        Some(p) => {
-            let path = std::path::PathBuf::from(p);
-            if !path.exists() {
-                return Err(DevError::Config(format!(
-                    "comparand archive not found: {}",
-                    path.display()
-                )));
-            }
-            path
-        }
-        None => resolve_pmtiles_by_commit(
-            dataset,
-            against_variant,
-            against_commit,
-            None,
-            &paths,
-            build_root,
-        )?,
-    };
-    super::regress::run(
-        &current,
-        &comparand,
-        tol,
-        max_moved,
-        max_examples,
-        overlay,
-        overlay_max,
-        json,
-    )
+    Err(disabled("regress"))
+
+    // Body retained, commented out, until the elivagar path dep is restored:
+    // return Err(disabled("regress"));
+    // #[allow(unreachable_code)]
+    // let pi = bootstrap(None)?;
+    // let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    // let current = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    // // The comparand is one of the two --against* flags (clap's required
+    // // ArgGroup guarantees exactly one is present). An explicit path is checked
+    // // for existence; a commit resolves through the same durable-output resolver
+    // // as the current side, but with its OWN variant: a cross-variant diff is a
+    // // legitimate regress use (it is the attribution instrument), so the
+    // // comparand's variant is addressed independently via --against-variant.
+    // let comparand = match against {
+    // Some(p) => {
+    // let path = std::path::PathBuf::from(p);
+    // if !path.exists() {
+    // return Err(DevError::Config(format!(
+    // "comparand archive not found: {}",
+    // path.display()
+    // )));
+    // }
+    // path
+    // }
+    // None => resolve_pmtiles_by_commit(
+    // dataset,
+    // against_variant,
+    // against_commit,
+    // None,
+    // &paths,
+    // build_root,
+    // )?,
+    // };
+    // super::regress::run(
+    // &current,
+    // &comparand,
+    // tol,
+    // max_moved,
+    // max_examples,
+    // overlay,
+    // overlay_max,
+    // json,
+    // )
 }
 
 /// `brokkr pmtiles-corpus <sub>` - the corpus gate, now native brokkr code over
@@ -306,7 +326,9 @@ pub(crate) fn regress(
 /// `lock` is currently unused: the gate is read-only on the archive (check /
 /// render) or writes only into the committed corpus dir (bless / render-manifest
 /// / mutate output), neither of which touches tilegen scratch or the global lock.
-#[allow(clippy::too_many_lines)]
+///
+/// TEMPORARILY DISABLED with the `elivagar` path dep (see Cargo.toml).
+#[allow(clippy::too_many_lines, unused_variables)]
 pub(crate) fn corpus(
     dev_config: &config::DevConfig,
     project: Project,
@@ -315,159 +337,166 @@ pub(crate) fn corpus(
     cmd: &PmtilesCorpusCommand,
     _lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
-    use super::corpus::{self as gate, MutationOp};
-
     project::require(project, Project::Elivagar, "pmtiles-corpus")?;
-    let pi = bootstrap(None)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    Err(disabled("pmtiles-corpus"))
 
-    // Resolve an archive through the same commit/file resolver as
-    // pmtiles-inspect/diag/svg.
-    let resolve = |a: &CorpusArchiveArgs| -> Result<PathBuf, DevError> {
-        resolve_pmtiles_by_commit(
-            &a.dataset,
-            &a.variant,
-            a.commit.as_deref(),
-            a.file.as_deref(),
-            &paths,
-            build_root,
-        )
-    };
-    // Corpus dir default: corpus/<dataset> under the repo root (build_root),
-    // where the git-committed corpus lives - NOT project_root (config/data dir).
-    // Overridable with --corpus.
-    let corpus_dir = |a: &CorpusArchiveArgs, over: &Option<PathBuf>| -> PathBuf {
-        over.clone()
-            .unwrap_or_else(|| build_root.join("corpus").join(&a.dataset))
-    };
-
-    match cmd {
-        PmtilesCorpusCommand::Check { archive, corpus } => {
-            let path = resolve(archive)?;
-            let (outcome, report) = gate::check(&path, &corpus_dir(archive, corpus))
-                .map_err(DevError::Io)?;
-            emit_corpus(outcome, &report)
-        }
-        PmtilesCorpusCommand::Bless {
-            archive,
-            corpus,
-            rotate,
-            mode,
-        } => {
-            let path = resolve(archive)?;
-            let mode = parse_mode(mode.as_deref())?;
-            let (outcome, report) = gate::bless(&path, &corpus_dir(archive, corpus), mode, *rotate)
-                .map_err(DevError::Io)?;
-            emit_corpus(outcome, &report)
-        }
-        PmtilesCorpusCommand::RenderManifest {
-            archive,
-            corpus,
-            style,
-        } => {
-            let path = resolve(archive)?;
-            let dir = corpus_dir(archive, corpus);
-            let style_path = style
-                .clone()
-                .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
-            let (outcome, report) = gate::render_manifest(&path, &dir, &style_path)
-                .map_err(DevError::Io)?;
-            emit_corpus(outcome, &report)
-        }
-        PmtilesCorpusCommand::Render {
-            archive,
-            z,
-            x,
-            y,
-            layers,
-            style,
-            output,
-        } => {
-            let path = resolve(archive)?;
-            let style_path = style
-                .clone()
-                .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
-            let layer_list: Option<Vec<String>> = layers
-                .as_ref()
-                .map(|l| l.split(',').map(str::to_owned).collect());
-            gate::render_tile(
-                &path,
-                *z,
-                *x,
-                *y,
-                &style_path,
-                layer_list.as_deref(),
-                output.as_deref(),
-            )
-            .map_err(DevError::Io)
-        }
-        PmtilesCorpusCommand::Rings { archive, output } => {
-            let path = resolve(archive)?;
-            gate::rings(&path, output).map_err(DevError::Io)
-        }
-        PmtilesCorpusCommand::Mutate {
-            archive,
-            output,
-            op,
-            tile,
-        } => {
-            let path = resolve(archive)?;
-            let mop = MutationOp::parse(op)
-                .ok_or_else(|| DevError::Config(format!("unknown mutate op: {op}")))?;
-            // Default `-o` to a calibrand under data/corpus-calibrands/ (cleared
-            // by a routine `brokkr clean`); an explicit `-o` is the user's file.
-            let out_path = match output {
-                Some(o) => o.clone(),
-                None => {
-                    let dir = paths.data_dir.join(crate::CORPUS_CALIBRAND_DIR);
-                    std::fs::create_dir_all(&dir).ok();
-                    dir.join(format!("{}-{}-{op}.pmtiles", archive.dataset, archive.variant))
-                }
-            };
-            let target = tile.as_deref().map(parse_tile).transpose()?;
-            gate::mutate::mutate(&path, &out_path, target, mop).map_err(DevError::Io)?;
-            crate::output::result_msg(&format!("mutated -> {}", out_path.display()));
-            Ok(())
-        }
-    }
+    // Body + helpers retained, commented out, until the elivagar path dep is restored:
+    // use super::corpus::{self as gate, MutationOp};
+    //
+    // project::require(project, Project::Elivagar, "pmtiles-corpus")?;
+    // let pi = bootstrap(None)?;
+    // let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    //
+    // // Resolve an archive through the same commit/file resolver as
+    // // pmtiles-inspect/diag/svg.
+    // let resolve = |a: &CorpusArchiveArgs| -> Result<PathBuf, DevError> {
+    // resolve_pmtiles_by_commit(
+    // &a.dataset,
+    // &a.variant,
+    // a.commit.as_deref(),
+    // a.file.as_deref(),
+    // &paths,
+    // build_root,
+    // )
+    // };
+    // // Corpus dir default: corpus/<dataset> under the repo root (build_root),
+    // // where the git-committed corpus lives - NOT project_root (config/data dir).
+    // // Overridable with --corpus.
+    // let corpus_dir = |a: &CorpusArchiveArgs, over: &Option<PathBuf>| -> PathBuf {
+    // over.clone()
+    // .unwrap_or_else(|| build_root.join("corpus").join(&a.dataset))
+    // };
+    //
+    // match cmd {
+    // PmtilesCorpusCommand::Check { archive, corpus } => {
+    // let path = resolve(archive)?;
+    // let (outcome, report) = gate::check(&path, &corpus_dir(archive, corpus))
+    // .map_err(DevError::Io)?;
+    // emit_corpus(outcome, &report)
+    // }
+    // PmtilesCorpusCommand::Bless {
+    // archive,
+    // corpus,
+    // rotate,
+    // mode,
+    // } => {
+    // let path = resolve(archive)?;
+    // let mode = parse_mode(mode.as_deref())?;
+    // let (outcome, report) = gate::bless(&path, &corpus_dir(archive, corpus), mode, *rotate)
+    // .map_err(DevError::Io)?;
+    // emit_corpus(outcome, &report)
+    // }
+    // PmtilesCorpusCommand::RenderManifest {
+    // archive,
+    // corpus,
+    // style,
+    // } => {
+    // let path = resolve(archive)?;
+    // let dir = corpus_dir(archive, corpus);
+    // let style_path = style
+    // .clone()
+    // .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
+    // let (outcome, report) = gate::render_manifest(&path, &dir, &style_path)
+    // .map_err(DevError::Io)?;
+    // emit_corpus(outcome, &report)
+    // }
+    // PmtilesCorpusCommand::Render {
+    // archive,
+    // z,
+    // x,
+    // y,
+    // layers,
+    // style,
+    // output,
+    // } => {
+    // let path = resolve(archive)?;
+    // let style_path = style
+    // .clone()
+    // .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
+    // let layer_list: Option<Vec<String>> = layers
+    // .as_ref()
+    // .map(|l| l.split(',').map(str::to_owned).collect());
+    // gate::render_tile(
+    // &path,
+    // *z,
+    // *x,
+    // *y,
+    // &style_path,
+    // layer_list.as_deref(),
+    // output.as_deref(),
+    // )
+    // .map_err(DevError::Io)
+    // }
+    // PmtilesCorpusCommand::Rings { archive, output } => {
+    // let path = resolve(archive)?;
+    // gate::rings(&path, output).map_err(DevError::Io)
+    // }
+    // PmtilesCorpusCommand::Mutate {
+    // archive,
+    // output,
+    // op,
+    // tile,
+    // } => {
+    // let path = resolve(archive)?;
+    // let mop = MutationOp::parse(op)
+    // .ok_or_else(|| DevError::Config(format!("unknown mutate op: {op}")))?;
+    // // Default `-o` to a calibrand under data/corpus-calibrands/ (cleared
+    // // by a routine `brokkr clean`); an explicit `-o` is the user's file.
+    // let out_path = match output {
+    // Some(o) => o.clone(),
+    // None => {
+    // let dir = paths.data_dir.join(crate::CORPUS_CALIBRAND_DIR);
+    // std::fs::create_dir_all(&dir).ok();
+    // dir.join(format!("{}-{}-{op}.pmtiles", archive.dataset, archive.variant))
+    // }
+    // };
+    // let target = tile.as_deref().map(parse_tile).transpose()?;
+    // gate::mutate::mutate(&path, &out_path, target, mop).map_err(DevError::Io)?;
+    // crate::output::result_msg(&format!("mutated -> {}", out_path.display()));
+    // Ok(())
+    // }
+    // }
+    // }
+    //
+    // /// Print a corpus report and translate the verdict into the process exit code.
+    // fn emit_corpus(outcome: super::corpus::Outcome, report: &super::corpus::CheckReport) -> Result<(), DevError> {
+    // use super::corpus::Outcome;
+    // for w in &report.warnings {
+    // crate::output::run_msg(&format!("warning: {w}"));
+    // }
+    // for d in &report.contract_diffs {
+    // crate::output::run_msg(&format!("contract {d}"));
+    // }
+    // if !report.message.is_empty() {
+    // for line in report.message.lines() {
+    // crate::output::run_msg(line);
+    // }
+    // }
+    // if report.changed > 0 {
+    // crate::output::run_msg(&format!("{} changed run(s)", report.changed));
+    // }
+    // match outcome {
+    // Outcome::Pass => {
+    // crate::output::result_msg("corpus: pass");
+    // Ok(())
+    // }
+    // other => Err(DevError::ExitCode(other.exit_code())),
+    // }
+    // }
+    //
+    // fn parse_mode(mode: Option<&str>) -> Result<super::corpus::DigestMode, DevError> {
+    // use super::corpus::DigestMode;
+    // match mode {
+    // None | Some("leaves") => Ok(DigestMode::Leaves),
+    // Some("buckets") => Ok(DigestMode::Buckets),
+    // Some(other) => Err(DevError::Config(format!("unknown digest mode: {other}"))),
+    // }
+    // }
 }
 
-/// Print a corpus report and translate the verdict into the process exit code.
-fn emit_corpus(outcome: super::corpus::Outcome, report: &super::corpus::CheckReport) -> Result<(), DevError> {
-    use super::corpus::Outcome;
-    for w in &report.warnings {
-        crate::output::run_msg(&format!("warning: {w}"));
-    }
-    for d in &report.contract_diffs {
-        crate::output::run_msg(&format!("contract {d}"));
-    }
-    if !report.message.is_empty() {
-        for line in report.message.lines() {
-            crate::output::run_msg(line);
-        }
-    }
-    if report.changed > 0 {
-        crate::output::run_msg(&format!("{} changed run(s)", report.changed));
-    }
-    match outcome {
-        Outcome::Pass => {
-            crate::output::result_msg("corpus: pass");
-            Ok(())
-        }
-        other => Err(DevError::ExitCode(other.exit_code())),
-    }
-}
-
-fn parse_mode(mode: Option<&str>) -> Result<super::corpus::DigestMode, DevError> {
-    use super::corpus::DigestMode;
-    match mode {
-        None | Some("leaves") => Ok(DigestMode::Leaves),
-        Some("buckets") => Ok(DigestMode::Buckets),
-        Some(other) => Err(DevError::Config(format!("unknown digest mode: {other}"))),
-    }
-}
-
-/// Parse a `z/x/y` mutate/render target.
+/// Parse a `z/x/y` mutate/render target. Only the corpus body calls this, so it
+/// is dead while the `elivagar` path dep is disabled (see Cargo.toml).
+#[allow(dead_code)]
 fn parse_tile(s: &str) -> Result<(u8, u32, u32), DevError> {
     let mut p = s.split('/');
     let bad = || DevError::Config(format!("invalid tile spec (want z/x/y): {s}"));

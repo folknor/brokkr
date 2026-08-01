@@ -117,6 +117,8 @@ Single crate, single binary. No workspace.
 
 ### Project-specific modules
 
+> **Temporarily disabled:** the `elivagar` path dependency is commented out in `Cargo.toml`, and with it the four modules that link the crate in-process - `src/elivagar/{eliv,corpus,regress,compare_tiles}` (commented out in `src/elivagar/mod.rs`). `brokkr compare-tiles`, `regress` and `pmtiles-corpus` still parse but return a "disabled" config error; their handler bodies sit commented out in `src/elivagar/cmd.rs`. Re-enable the dep and the modules together.
+
 - `src/pbfhogg/` - benchmarks, verify (11 commands + all), download. See `docs/projects/pbfhogg.md`.
 - `src/osc.rs` - Minimal `.osc` / `.osc.gz` reader for verify-side delta analysis. See module header and `docs/projects/pbfhogg.md`.
 - `src/profile.rs` - Validation profile resolver for `[test.profiles.*]`. See module header and `docs/commands/check.md`.

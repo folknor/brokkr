@@ -11,16 +11,18 @@ pub mod bench_self;
 pub mod bench_tilemaker;
 pub(crate) mod cmd;
 pub mod commands;
-pub mod compare_tiles;
-pub mod corpus;
+// TEMPORARILY DISABLED with the `elivagar` path dep in Cargo.toml: these four
+// modules link the elivagar crate in-process. Re-enable them together with it.
+// pub mod compare_tiles;
+// pub mod corpus;
 pub mod diag;
 pub mod dispatch;
-pub mod eliv;
+// pub mod eliv;
 pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod inspect;
 pub mod ocean_build;
-pub mod regress;
+// pub mod regress;  // see the disabled block above
 pub mod svg;
 pub mod verify;
 
