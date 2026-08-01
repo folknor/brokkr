@@ -368,7 +368,7 @@ Runs after clippy, one lane per selected sweep. The subsections below cover
 build-error reporting, per-sweep `rustflags`, the serial and parallel lanes,
 process isolation, and doctest policy.
 
-### Test-phase build errors and the stale-incremental linker hint
+### Build errors and the linker hint
 
 When a test sweep dies building (no `test result:` lines, compile errors on
 stderr), the errors are condensed one-per-line like the clippy phase. A
@@ -401,7 +401,7 @@ errors. The remedy is the same `brokkr clean --cargo <pkg>` (with the stale
 forces the rebuild. No automatic hint fires here - an E0599 is usually a
 real error, and brokkr can't tell the two apart.
 
-### Per-sweep rustflags + auto target-dir isolation
+### Per-sweep rustflags
 
 A `[[check]]` entry may carry `rustflags` (a token list, e.g.
 `["--cfg", "madsim"]`), exported as `RUSTFLAGS` on that sweep's cargo processes
@@ -432,7 +432,7 @@ one crate runs a single named test and another runs a `virtual_time`-filtered
 set, all under the same shared isolated target dir. See the `sim` worked
 example in `docs/brokkr.toml.md`.
 
-### Serial vs parallel test sweeps
+### Serial vs parallel sweeps
 
 By default the test phase runs each sweep serial (`--test-threads=1`) under
 the per-test hang watchdog, attributing a stall to a named test
@@ -578,7 +578,7 @@ counts, so a consumer of a failed gate sees the worksheet's numbers and
 not `null`. Only an enumeration failure, which predates any counts,
 leaves it null.
 
-## `certifies` and the exit-code contract
+## `certifies` and exit codes
 
 A profile may declare `certifies = "complete"` or `"partial"` (see
 `docs/brokkr.toml.md`); the claim decides the success word, the exit code,
@@ -650,7 +650,7 @@ and `build_packages` pre-build failures.
 is the investigative runner, invoked precisely to find out what a given target
 shape does.
 
-## Sweep selection table (`brokkr check`)
+## Sweep selection
 
 | invocation | sweep set | libtest filters |
 |---|---|---|
@@ -700,9 +700,9 @@ Both `brokkr check` (test phase) and `brokkr test` set the following on every
   `debug-assertions = false` in the test binary even though the rebuilt
   binary lives under `debug/`.
 
-## `brokkr test [-p <PKG>] <NAME>`
+## `brokkr test`
 
-(All cargo projects except litehtml/sluggrs - those are rejected with a
+`brokkr test [-p <PKG>] <NAME>`. (All cargo projects except litehtml/sluggrs - those are rejected with a
 pointer to `brokkr visual`.)
 
 Run one specific cargo test. Defaults to release; pass `--debug` to run the

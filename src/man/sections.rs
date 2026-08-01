@@ -65,14 +65,26 @@ pub(crate) fn sections(markdown: &str) -> Vec<Section> {
         })
         .collect();
 
+    // A subsection is addressed through its parent unless it already names it.
+    // `### stage` under `## [[script_check]]` is a fine heading to read *in
+    // place* and a useless thing to type at a shell - `script_check-stage`
+    // says which stage. `### [clippy] allow` already leads with its parent, so
+    // it is left alone rather than stuttering into `clippy-clippy-allow`.
+    let mut parent = String::new();
     heads
         .into_iter()
         .zip(ends)
-        .map(|((level, title, start), end)| Section {
-            level,
-            slug: slugify(&title),
-            start,
-            end,
+        .map(|((level, title, start), end)| {
+            let slug = slugify(&title);
+            let slug = if level == 2 {
+                parent.clone_from(&slug);
+                slug
+            } else if parent.is_empty() || slug.starts_with(parent.as_str()) {
+                slug
+            } else {
+                format!("{parent}-{slug}")
+            };
+            Section { level, slug, start, end }
         })
         .collect()
 }
@@ -94,21 +106,48 @@ fn parse_heading(line: &str) -> Option<(u8, String)> {
     (!title.is_empty()).then(|| (level, title.to_string()))
 }
 
+/// Words that name a heading's *shape* rather than its subject. A trailing one
+/// is dropped: the section on `[[script_check]]` is addressed as
+/// `script_check`, not `script_check-array`, because nobody looking it up is
+/// thinking about whether the TOML spelling is an array or a table.
+const SHAPE_WORDS: &[&str] = &["section", "array", "entries", "entry", "blocks", "block", "phase"];
+
 /// Heading text -> slug: alphanumerics and `_` survive (so `script_check` and
 /// `allow_exact` stay typeable as themselves), every other run of characters
 /// collapses to a single `-`.
+///
+/// Two subtractions keep the result to the subject itself: a parenthesised
+/// tail is dropped (it qualifies the heading for a reader, but `coverage` is
+/// the name of the thing, not `coverage-complete-profiles`), and so is a
+/// trailing [`SHAPE_WORDS`] token.
 fn slugify(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut pending_sep = false;
+    let mut depth = 0u32;
     for ch in title.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            if pending_sep && !out.is_empty() {
-                out.push('-');
+        match ch {
+            '(' => {
+                depth += 1;
+                pending_sep = true;
             }
-            pending_sep = false;
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            pending_sep = true;
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            _ if ch.is_ascii_alphanumeric() || ch == '_' => {
+                if pending_sep && !out.is_empty() {
+                    out.push('-');
+                }
+                pending_sep = false;
+                out.push(ch.to_ascii_lowercase());
+            }
+            _ => pending_sep = true,
+        }
+    }
+
+    for word in SHAPE_WORDS {
+        if let Some(head) = out.strip_suffix(word)
+            && let Some(head) = head.strip_suffix('-')
+        {
+            return head.to_string();
         }
     }
     out
@@ -211,9 +250,21 @@ tail
 
     #[test]
     fn slugs_keep_underscores_and_collapse_the_rest() {
-        assert_eq!(slugify("`[[script_check]]` array"), "script_check-array");
+        assert_eq!(slugify("`[[script_check]]` array"), "script_check");
         assert_eq!(slugify("`[clippy] allow_exact`"), "clippy-allow_exact");
-        assert_eq!(slugify("`certifies` and the exit-code contract"), "certifies-and-the-exit-code-contract");
+        assert_eq!(slugify("`certifies` and exit codes"), "certifies-and-exit-codes");
+    }
+
+    /// The shape word is the last token or it is part of the subject - a
+    /// `[[dependency_rule]]` array is addressed as `dependency_rule`, but a
+    /// heading whose subject *is* the word keeps it.
+    #[test]
+    fn shape_words_and_parenthesised_tails_drop() {
+        assert_eq!(slugify("`[gremlins]` section"), "gremlins");
+        assert_eq!(slugify("`coverage` phase (complete profiles)"), "coverage");
+        assert_eq!(slugify("Per-sweep log lines (collapsed by default)"), "per-sweep-log-lines");
+        assert_eq!(slugify("Doctests"), "doctests");
+        assert_eq!(slugify("`stage`"), "stage");
     }
 
     #[test]
@@ -223,12 +274,12 @@ tail
         assert_eq!(
             slugs,
             [
-                "script_check-array",
-                "stage",
-                "clippy-phase",
+                "script_check",
+                "script_check-stage",
+                "clippy",
                 "clippy-allow",
                 "clippy-allow_exact",
-                "per-sweep-log-lines-collapsed-by-default",
+                "per-sweep-log-lines",
             ]
         );
     }
@@ -250,8 +301,17 @@ tail
     #[test]
     fn prefix_and_substring_both_resolve() {
         let secs = sections(DOC);
-        assert_eq!(find(&secs, "script_check").unwrap().slug, "script_check-array");
-        assert_eq!(find(&secs, "log lines").unwrap().slug, "per-sweep-log-lines-collapsed-by-default");
+        assert_eq!(find(&secs, "script").unwrap().slug, "script_check");
+        assert_eq!(find(&secs, "log lines").unwrap().slug, "per-sweep-log-lines");
+    }
+
+    /// The point of qualifying a subsection: `stage` is what the heading says,
+    /// and both spellings must reach it.
+    #[test]
+    fn a_subsection_is_reachable_through_its_parent_or_its_own_name() {
+        let secs = sections(DOC);
+        assert_eq!(find(&secs, "script_check-stage").unwrap().slug, "script_check-stage");
+        assert_eq!(find(&secs, "stage").unwrap().slug, "script_check-stage");
     }
 
     /// Two `###` siblings under one `##` have no parent to collapse to, so the
@@ -274,7 +334,7 @@ tail
             find(&secs, "script_check").unwrap(),
         ];
         let slugs: Vec<&str> = merge(hits).iter().map(|s| s.slug.as_str()).collect();
-        assert_eq!(slugs, ["script_check-array", "per-sweep-log-lines-collapsed-by-default"]);
+        assert_eq!(slugs, ["script_check", "per-sweep-log-lines"]);
     }
 
     /// A child whose parent is also selected is already on screen; printing it
@@ -288,7 +348,7 @@ tail
             find(&secs, "allow_exact").unwrap(),
         ];
         let slugs: Vec<&str> = merge(hits).iter().map(|s| s.slug.as_str()).collect();
-        assert_eq!(slugs, ["clippy-phase"]);
+        assert_eq!(slugs, ["clippy"]);
     }
 
     #[test]

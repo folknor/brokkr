@@ -226,9 +226,9 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
 No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
 statements). See `src/textlint.rs` and `src/lex.rs`.
 
-## `[textlint_preset.<name>]` blocks
+## `[textlint_preset]` blocks
 
-A named bundle of textlint scope/predicate fields that rules pull in with
+`[textlint_preset.<name>]` - a named bundle of textlint scope/predicate fields that rules pull in with
 `preset`. For a family of rules that differ only in `pattern` and `message` but
 share a long `exclude` list - the shape a ported hook suite converges on - this
 single-sources the scope, so adding one exempt file is a one-line edit rather

@@ -5,10 +5,10 @@ The elivagar-only parts of `brokkr.toml`. For the schema-universal sections
 `docs/brokkr.toml.md`; for the host-scoped `[<host>.datasets.*]` tables the
 map-data projects share, see `docs/brokkr.toml.datasets.md`.
 
-## `[<host>.tilegen.<name>]` blocks
+## `tilegen` blocks
 
-The elivagar tilegen contract. `brokkr tilegen` is configured entirely from
-here: **either it is explicit in the block, or it is not set.** There are no
+`[<host>.tilegen.<name>]` - the elivagar tilegen contract. `brokkr tilegen` is
+configured entirely from here: **either it is explicit in the block, or it is not set.** There are no
 override flags, and nothing is inferred from the filesystem.
 
 ```toml

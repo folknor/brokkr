@@ -281,7 +281,7 @@ fn list_sections(topic: &Topic, secs: &[sections::Section]) -> String {
         name = topic.name
     );
     for section in secs {
-        let indent = if section.level == 2 { "  " } else { "      " };
+        let indent = if section.level == 2 { "  " } else { "    " };
         out.push_str(&format!("{indent}{}\n", section.slug));
     }
     out
@@ -375,6 +375,22 @@ mod tests {
         let out = list_topics(Project::Other("some-foreign-repo"));
         assert!(out.contains("check"), "{out}");
         assert!(!out.contains("corpus"), "{out}");
+    }
+
+    /// Slugs shorten (a trailing shape word and a parenthesised tail are
+    /// dropped), so two headings that differ only in that scaffolding would
+    /// collide and make one of them unreachable - `find` takes the first
+    /// match. Nothing about writing a heading warns you; this does.
+    #[test]
+    fn section_slugs_are_unique_within_each_doc() {
+        for topic in TOPICS {
+            let secs = super::sections::sections(topic.content);
+            let mut slugs: Vec<&str> = secs.iter().map(|s| s.slug.as_str()).collect();
+            slugs.sort_unstable();
+            let before = slugs.len();
+            slugs.dedup();
+            assert_eq!(before, slugs.len(), "duplicate section slug in `{}`", topic.name);
+        }
     }
 
     /// The no-project fallback is `Other("")`, whose empty name must not leave
