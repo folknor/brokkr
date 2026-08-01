@@ -76,6 +76,20 @@ const TOPICS: &[Topic] = &[
         visibility: Visibility::Any,
     },
     Topic {
+        name: "clean",
+        summary: "what clean removes, what is permanently out of scope",
+        content: include_str!("../docs/commands/clean.md"),
+        visibility: Visibility::Any,
+    },
+    Topic {
+        name: "results",
+        summary: "query results.db: filters, --grep, --compare pairing",
+        content: include_str!("../docs/commands/results.md"),
+        // Mirrors the `results` subcommand's own visibility - litehtml has no
+        // results.db worth querying, so the topic follows the command.
+        visibility: Visibility::Except(crate::cli::MEASURED_DB_ABSENT),
+    },
+    Topic {
         name: "measure",
         summary: "--bench/--hotpath/--alloc, the sidecar profiler, marker FIFOs",
         content: include_str!("../docs/commands/measure.md"),

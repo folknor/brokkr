@@ -52,7 +52,7 @@ pub(crate) enum Visibility {
 /// is on both lists - `MechanicalDb` for visual work, real result rows from
 /// hotpath), piners for its hotpath/alloc runs, and any `Other(_)` tree
 /// through the ungated `generic-hotpath`.
-const MEASURED_DB_ABSENT: &[Project] = &[Project::Litehtml];
+pub(crate) const MEASURED_DB_ABSENT: &[Project] = &[Project::Litehtml];
 
 /// Table of every top-level subcommand name -> the projects it applies to.
 ///

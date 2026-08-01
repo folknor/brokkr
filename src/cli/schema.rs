@@ -71,7 +71,9 @@ Examples:
   brokkr check --features commands                 # check with specific features
   brokkr check --package pbfhogg-cli               # check only the CLI crate
   brokkr check -p crate-a -p crate-b               # check two crates
-  brokkr check --package pbfhogg-cli -- --test cli # one test file in the CLI crate"
+  brokkr check --package pbfhogg-cli -- --test cli # one test file in the CLI crate
+
+In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
     )]
     Check {
         /// Cargo features to enable
@@ -194,7 +196,9 @@ Examples:
   brokkr clippy --features a,b -p mycrate    # a virtual workspace needs -p
   brokkr clippy --sweep ffi                  # replay the 'ffi' [[check]] entry
   brokkr clippy --sweep ffi --env HIGH_PRECISION=0
-  brokkr clippy --all                        # bulk-triage, sorted by lint"
+  brokkr clippy --all                        # bulk-triage, sorted by lint
+
+In depth: `brokkr man clippy`."
     )]
     Clippy {
         /// Target package (repeatable). No `-p` uses cargo's default package
@@ -253,6 +257,8 @@ Examples:
     /// candidates and no default it lists them. Trailing arguments are
     /// forwarded raw to the program after `--`. Flags for brokkr
     /// (`--debug`/`--release`) go before the name.
+    ///
+    /// In depth: `brokkr man run`.
     #[command(display_order = 0)]
     Run {
         /// Bin or example target name (bare form: `[bin] default`)
@@ -275,6 +281,8 @@ Examples:
     /// Installs the packages named by `[bin] install`, or the workspace's
     /// sole bin-carrying package when the list is absent. `[bin] debug =
     /// true` installs with `--debug`; `--debug`/`--release` override it.
+    ///
+    /// In depth: `brokkr man run`.
     #[command(display_order = 0)]
     Install {
         /// Install with `--debug` (overrides `[bin] debug`)
@@ -319,7 +327,9 @@ Examples:
     ///
     /// Phase-based; each phase emits zero or more findings. v1 ships
     /// `duplicate_version` with blame attribution (which of your direct
-    /// deps is anchoring an old version). See `docs/commands/deps.md`.
+    /// deps is anchoring an old version).
+    ///
+    /// In depth: `brokkr man deps`.
     #[command(display_order = 0)]
     Deps {
         /// Emit NDJSON events on stdout (one JSON object per line). No
@@ -937,6 +947,9 @@ Examples:
     /// no override flags: either it is explicit in the block, or it is not
     /// set. What remains here is the input axis (dataset/variant), the
     /// measurement mode, and the per-invocation resume point.
+    ///
+    /// In depth: `brokkr man elivagar-config` (the block), `brokkr man
+    /// elivagar` (the pipeline).
     #[command(name = "tilegen", display_order = 3)]
     Tilegen {
         #[command(flatten)]
@@ -1105,7 +1118,9 @@ Examples:
   brokkr results --compare a65a 911c --mode bench   # compare, filtered
 
 In a piners project this queries the same .brokkr/results.db (hotpath/alloc
-runs). The corpus run store has its own command - see `brokkr corpus-results`."
+runs). The corpus run store has its own command - see `brokkr corpus-results`.
+
+In depth: `brokkr man results`."
     )]
     Results {
         /// UUID prefix to look up specific result(s)
@@ -1201,7 +1216,9 @@ Examples:
   brokkr sidecar <uuid> --durations                   # START/END pair timings
   brokkr sidecar <uuid> --counters                    # application counters
   brokkr sidecar <uuid> --stat rss                    # min/max/avg/p50/p95 for a field
-  brokkr sidecar --compare a65a 911c                  # two results, phase-aligned",
+  brokkr sidecar --compare a65a 911c                  # two results, phase-aligned
+
+In depth: `brokkr man measure`.",
         group(ArgGroup::new("sample_view").args(&["samples", "stat"]).multiple(false)),
         group(ArgGroup::new("phased_view").args(&["samples", "stat", "counters"]).multiple(false)),
     )]
@@ -1294,7 +1311,14 @@ Examples:
         #[arg(long, requires = "sample_view")]
         tail: Option<usize>,
     },
-    /// Clean build artifacts and scratch data
+    /// Clean build artifacts and scratch data.
+    ///
+    /// Removes only what brokkr created, identified by a brokkr-designated
+    /// directory or a constructed canonical name. The measurement stores
+    /// (results.db, sidecar.db, history.db, piners' runs.db, ratatoskr's
+    /// gate.db) are permanently out of scope.
+    ///
+    /// In depth: `brokkr man clean`.
     #[command(display_order = 5)]
     Clean {
         /// Also remove all persistent benchmark worktrees
@@ -1452,7 +1476,9 @@ Examples:
         #[arg(short = 'f', long)]
         force: bool,
     },
-    /// Cross-validate output against reference tools
+    /// Cross-validate output against reference tools.
+    ///
+    /// In depth: `brokkr man pbfhogg`.
     #[command(display_order = 11)]
     Verify {
         /// Stream every check's full detail. Default is quiet on pass (one
@@ -1540,7 +1566,9 @@ the --ocean specs; the .pmtiles entry becomes the output path. There are no \
 override flags: to build a different artifact, edit the block.
 
 Rotating the artifact is an output-changing event - the next `pmtiles-corpus \
-check` refuses on the artifact key until the corpus is re-blessed."
+check` refuses on the artifact key until the corpus is re-blessed.
+
+In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
     )]
     OceanBuild {
         /// Validate the derived invocation and input paths without building
@@ -1634,7 +1662,9 @@ Comparability is YOUR responsibility. regress reads no provenance contract by \
 design - it is the attribution instrument, and cross-contract diffs (artifact-\
 active vs computed, an intended config change) are legitimate uses. Read the \
 provenance blocks via `brokkr pmtiles-inspect` first: comparing across \
-variants or configs reports a six-figure diff on two correct builds.",
+variants or configs reports a six-figure diff on two correct builds.
+
+In depth: `brokkr man elivagar`.",
         group(
             ArgGroup::new("comparand")
                 .args(&["against", "against_commit"])
@@ -1684,7 +1714,9 @@ variants or configs reports a six-figure diff on two correct builds.",
         #[arg(long)]
         json: bool,
     },
-    /// [elivagar] The corpus gate: adjudicate an archive against the committed baseline (check/bless/render/...)
+    /// [elivagar] The corpus gate: adjudicate an archive against the committed baseline (check/bless/render/...).
+    ///
+    /// In depth: `brokkr man elivagar`.
     #[command(display_order = 37, subcommand_help_heading = "Corpus subcommands")]
     PmtilesCorpus {
         #[command(subcommand)]
@@ -1735,7 +1767,9 @@ Examples:
   brokkr serve --dataset denmark --tiles none   # query + geocode, no tiles
   brokkr serve --tiles elivagar                 # explicit pmtiles variant
   brokkr serve --tiles ./data/custom.pmtiles    # direct file path
-  brokkr serve --data-dir /mnt/fast/nidhogg     # override data directory"
+  brokkr serve --data-dir /mnt/fast/nidhogg     # override data directory
+
+In depth: `brokkr man nidhogg`."
     )]
     Serve {
         /// Override data directory path (ingested disk format).
@@ -1793,7 +1827,9 @@ Examples:
         term: String,
     },
     // ----- visual testing commands (litehtml + sluggrs, display_order = 50) -----
-    /// [litehtml/sluggrs] Run visual tests against reference artifacts
+    /// [litehtml/sluggrs] Run visual tests against reference artifacts.
+    ///
+    /// In depth: `brokkr man visual`.
     #[command(display_order = 50)]
     Visual {
         /// Fixture or snapshot ID (or unique prefix)
@@ -1843,6 +1879,8 @@ Examples:
     ///   brokkr test -p calendar extract_tag_value_flattens_nested_text
     ///   brokkr test roundtrip_uring_tiny_output -N 5
     ///   brokkr test some_unit_test --debug
+    ///
+    /// In depth: `brokkr man check brokkr-test`.
     #[command(display_order = 10)]
     Test {
         /// Exact test name to run (substring filter, case-sensitive)
@@ -1959,6 +1997,8 @@ Examples:
     /// the uninstrumented walls, the ones worth comparing across commits. With
     /// no mode flag this stays `--hotpath 1`, which is what a bare
     /// `brokkr hotpath` has always meant.
+    ///
+    /// In depth: `brokkr man hotpath`.
     #[command(name = "hotpath", display_order = 55)]
     Hotpath {
         #[command(flatten)]
@@ -1986,6 +2026,8 @@ Examples:
     /// tree. A baseline exists to vary the VM while holding the workload
     /// fixed; taking the old commit's copy of the script would conflate the
     /// two.
+    ///
+    /// In depth: `brokkr man dellingr`.
     #[command(name = "dellingr", display_order = 57)]
     Dellingr {
         #[command(flatten)]
@@ -2025,6 +2067,8 @@ Examples:
     /// Default is stop-on-first-failure so the failing artefacts land
     /// fast for triage; `--keep-going` runs everything and the summary
     /// lists the failures.
+    ///
+    /// In depth: `brokkr man service`.
     #[command(
         name = "service",
         display_order = 60,
@@ -2123,6 +2167,8 @@ Examples:
     /// `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` rows
     /// alongside the result. Stored in `.brokkr/results.db` via the
     /// standard `BenchHarness` so `brokkr results --compare` works.
+    ///
+    /// In depth: `brokkr man sync` (gates: `brokkr man gate`).
     #[command(name = "sync", display_order = 66)]
     Sync {
         /// Path to a sync-test `.lua` script (frontmatter must declare
@@ -2187,7 +2233,7 @@ Examples:
         /// The reserved value `all` runs every configured gate in turn
         /// (each supplies its own script, so pass no SCRIPT). The sweep
         /// keeps going past a breach and reports all of them.
-        /// See `docs/commands/ratatoskr-gate.md`.
+        /// In depth: `brokkr man gate`.
         #[arg(long, value_name = "NAME|all", requires = "bench")]
         gate: Option<String>,
 
@@ -2220,6 +2266,8 @@ Examples:
     /// with a 1.5s budget on shutdown before escalating to SIGKILL.
     /// Auto-build of sæhrimnir is not yet wired - the binary must
     /// already exist at `mock_server_binary`.
+    ///
+    /// In depth: `brokkr man sync`.
     #[command(name = "mock-serve", display_order = 65)]
     MockServe {
         /// Fixture name. Resolves to `<fixtures_dir>/<NAME>.toml` or
@@ -2251,6 +2299,8 @@ Examples:
     /// hard error. The run fails on a real break (compile/runtime) or a
     /// non-zero harness exit; parity tiers are reported but do not fail the
     /// run yet (baseline work is deferred). Default profile is debug.
+    ///
+    /// In depth: `brokkr man corpus`.
     #[command(name = "corpus", display_order = 70)]
     Corpus {
         /// Keyword grouping to select (repeatable or comma-separated;
@@ -2372,7 +2422,9 @@ Examples:
   brokkr corpus-results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
   brokkr corpus-results --runtimes --over 269                      # probes whose runtime nears the wall
   brokkr corpus-results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
-  brokkr corpus-results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch"
+  brokkr corpus-results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch
+
+In depth: `brokkr man piners`."
     )]
     CorpusResults {
         /// Corpus run id (default: latest). A bare positional, also accepted
@@ -2448,7 +2500,9 @@ Run a keyword-selected slice of the lint corpus through two offline
 validators - piners (this dirty tree) and pine-lint - diff their
 diagnostics on a (line, col, severity) grain, and gate on a pinned
 agreement disposition per snippet. `--reanchor` consults TradingView
-(pine-lint --tv) to re-ground the pins. See docs/commands/lint-corpus.md."
+(pine-lint --tv) to re-ground the pins.
+
+In depth: `brokkr man lint-corpus`."
     )]
     LintCorpus {
         /// Keyword grouping to select (repeatable or comma-separated; union
@@ -2528,7 +2582,9 @@ Query the lint corpus run store written by `brokkr lint-corpus`
 Examples:
   brokkr lint-results            # table of recent lint runs
   brokkr lint-results 42         # run 42's per-probe dispositions (deviations only)
-  brokkr lint-results 42 --full  # every probe in run 42"
+  brokkr lint-results 42 --full  # every probe in run 42
+
+In depth: `brokkr man lint-corpus`."
     )]
     LintResults {
         /// Lint run id (default: latest). A bare positional, also accepted as
