@@ -30,11 +30,7 @@ owo-colors = "4"
 # The corpus gate links elivagar in-process (reader/decoder/writer surface) and
 # reuses protohoggr's MVT cursor for the ported streaming tile hash. See
 # src/elivagar/eliv.rs (the seam) and src/elivagar/corpus/canonical.rs.
-#
-# TEMPORARILY DISABLED: the path dep is off, so the modules that link elivagar
-# in-process (eliv/corpus/regress/compare_tiles) are commented out in
-# src/elivagar/mod.rs and their commands error out. Re-enable both together.
-# elivagar = { path = "../elivagar" }
+elivagar = "0.1.0"
 protohoggr = "0.4.0"
 # `brokkr regress`: the three-pass engine fans the raw/canonical/detail passes
 # over blob pairs, and the matcher/grouping code is keyed by hash maps hot enough
