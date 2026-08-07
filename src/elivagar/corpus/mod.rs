@@ -453,6 +453,19 @@ fn svg_staleness(view: &ArchiveView, corpus_dir: &Path, _base: &Baseline) -> io:
 // render-manifest
 // ---------------------------------------------------------------------------
 
+/// The style path as written into the committed `contract.json`: relative to
+/// the corpus root, never the caller's absolute path - the contract is a
+/// committed file and must not carry machine-specific text. The record is
+/// diagnostic; loaders anchor at `<root>/style.toml` (`corpus_style_path`).
+fn recorded_style_path(corpus_dir: &Path, style_path: &Path) -> String {
+    let root = corpus_dir.parent().unwrap_or(corpus_dir);
+    style_path
+        .strip_prefix(root)
+        .unwrap_or_else(|_| Path::new(style_path.file_name().unwrap_or(style_path.as_os_str())))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Re-render every committed manifest target after proving the archive equals
 /// the digest baseline (steps 1-3 only - SVG/style staleness are exactly what
 /// this command fixes, so they must not block it). Writes the tiles and records
@@ -504,7 +517,7 @@ pub fn render_manifest(
         Err(msg) => return Ok(archive_refused(msg)),
     };
     let style_json = serde_json::json!({
-        "path": style_path.to_string_lossy(),
+        "path": recorded_style_path(corpus_dir, style_path),
         "xxh3_128": style.hash_hex(),
     });
     digest::write_atomic(
@@ -695,6 +708,33 @@ pub fn bless(
             ..Default::default()
         },
     ))
+}
+
+#[cfg(test)]
+mod recorded_style_path_tests {
+    //! `contract.json` is committed, so the style record must be corpus-relative
+    //! whatever absolute path the caller handed in.
+
+    use super::{recorded_style_path, Path};
+
+    #[test]
+    fn canonical_style_records_relative() {
+        assert_eq!(
+            recorded_style_path(
+                Path::new("/home/x/elivagar/corpus/planet"),
+                Path::new("/home/x/elivagar/corpus/style.toml")
+            ),
+            "style.toml"
+        );
+    }
+
+    #[test]
+    fn foreign_style_records_file_name() {
+        assert_eq!(
+            recorded_style_path(Path::new("/a/corpus/planet"), Path::new("/tmp/other.toml")),
+            "other.toml"
+        );
+    }
 }
 
 #[cfg(test)]
