@@ -246,6 +246,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
         name,
         debug,
         release,
+        features,
+        all_features,
+        no_default_features,
         args,
     } = &cli.command
     {
@@ -264,6 +267,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             name.as_deref(),
             *debug,
             *release,
+            &runnables::FeatureArgs {
+                features,
+                all: *all_features,
+                no_default: *no_default_features,
+            },
             args,
         );
     }

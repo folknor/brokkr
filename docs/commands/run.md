@@ -14,13 +14,14 @@ leaves ambiguous - see `docs/brokkr.toml.md` (`brokkr man config bin`).
 ## `brokkr run`
 
 ```
-brokkr run [NAME] [--debug|--release] [-- ARGS...]
+brokkr run [NAME] [--debug|--release] [--features LIST] [--all-features]
+           [--no-default-features] [-- ARGS...]
 ```
 
 Resolves `NAME` to a discovered target and runs
 
 ```
-cargo run [--release] -p <pkg> --bin|--example <NAME> [-- ARGS...]
+cargo run [--release] -p <pkg> --bin|--example <NAME> [feature flags] [-- ARGS...]
 ```
 
 from the build root (the working directory). The target is **always named
@@ -37,6 +38,27 @@ between two targets that share a name, and the fix belongs in `Cargo.toml`.
 
 A non-zero exit from the program propagates as brokkr's own failure, carrying
 cargo's exit code; a target killed by a signal is reported as such.
+
+## Features
+
+`--features` (short `-F`), `--all-features` and `--no-default-features` are
+**forwarded verbatim** to `cargo run`. Brokkr does not resolve feature names
+against the workspace and does not validate them: cargo owns that grammar
+(comma- or space-separated, and `--features` is repeatable), and a typo should
+fail with cargo's own message rather than be silently dropped. This is what
+makes a feature-gated instrument - `--features opcode-counts`, a bench
+built with an extra probe - invocable without reaching for raw cargo.
+
+`--all-features` and `--features` conflict (clap-rejected): asking for
+everything and asking for a list are two different questions.
+
+There is deliberately **no `[bin]` feature default**. A per-target default
+would change what bare `brokkr run <name>` builds without saying so, which is
+exactly the way a keep/revert measurement gets corrupted - the flag has to be
+visible in the invocation that produced the number.
+
+The feature flags belong to `run` only. `install` ships the project's
+binaries as configured, and has no feature surface (see below).
 
 ## Target discovery
 
@@ -82,6 +104,12 @@ leading flags, and if the next token is `--`, replaces it with a sentinel that
 target name can collide with it. `brokkr run NAME -- ARGS` is left untouched,
 as is every other command's argv.
 
+Walking past the leading flags means the pre-pass has to know which of them
+take a **separate value**: `RUN_VALUE_FLAGS` lists `--features` / `-F`, so
+`brokkr run --features a,b -- --help` skips the `a,b` and still finds the `--`.
+A value-taking flag added to `run` and not to that list would silently
+reintroduce the swallowed-first-argument bug.
+
 ## `brokkr install`
 
 ```
@@ -92,6 +120,12 @@ Runs `cargo install [--debug] --path <pkg dir>` once per selected package, in
 the order `[bin] install` lists them, announcing each invocation. `cargo
 install --path` installs every bin the package carries, so the selection is by
 *package*, not by target.
+
+`install` takes **no feature flags**. It is the session-workflow closer -
+it ships the project as configured, and what it ships should not depend on
+which instrument you last enabled to take a measurement. The two commands
+share only `resolve_debug` and the `[bin]` section; `run`'s feature selection
+is per-invocation and reaches nothing else.
 
 A multi-crate workspace names its shippable packages explicitly:
 

@@ -24,6 +24,11 @@ use crate::output;
 /// target name can collide with it.
 pub const NO_NAME: &str = "\u{0}brokkr-bare-run";
 
+/// Flags of `brokkr run` that take a separate value argument. The
+/// pre-pass has to know them, or `run --features x -- ARGS` stops its scan
+/// on `x` and never sees the `--` it was looking for.
+const RUN_VALUE_FLAGS: [&str; 2] = ["--features", "-F"];
+
 /// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
 /// name position. Returns the argv unchanged in every other shape,
 /// including `run NAME -- ARGS...`.
@@ -33,13 +38,44 @@ pub fn bare_run_sentinel(args: Vec<String>) -> Vec<String> {
     };
     let mut i = run_at + 1;
     while args.get(i).is_some_and(|a| a.starts_with('-') && a != "--") {
-        i += 1;
+        // `--features=a` carries its value inline; `--features a` does not.
+        let takes_value = RUN_VALUE_FLAGS.contains(&args[i].as_str());
+        i += if takes_value { 2 } else { 1 };
     }
     let mut args = args;
     if args.get(i).is_some_and(|a| a == "--") {
         args[i] = NO_NAME.to_owned();
     }
     args
+}
+
+/// `run`'s cargo feature selection, forwarded verbatim.
+///
+/// Brokkr stays out of feature resolution: the value of `--features` goes to
+/// cargo unparsed, so cargo's grammar and cargo's error message both apply.
+pub struct FeatureArgs<'a> {
+    /// Each `--features` occurrence, in order.
+    pub features: &'a [String],
+    /// `--all-features` (clap-exclusive with `features`).
+    pub all: bool,
+    /// `--no-default-features`.
+    pub no_default: bool,
+}
+
+impl FeatureArgs<'_> {
+    /// Append the cargo flags this selection implies.
+    fn extend(&self, cargo_args: &mut Vec<String>) {
+        for list in self.features {
+            cargo_args.push("--features".into());
+            cargo_args.push(list.clone());
+        }
+        if self.all {
+            cargo_args.push("--all-features".into());
+        }
+        if self.no_default {
+            cargo_args.push("--no-default-features".into());
+        }
+    }
 }
 
 /// One discovered runnable target.
@@ -145,6 +181,7 @@ pub fn cmd_run(
     name: Option<&str>,
     debug: bool,
     release: bool,
+    feat: &FeatureArgs<'_>,
     args: &[String],
 ) -> Result<(), DevError> {
     let runnables = discover(project_root)?;
@@ -205,6 +242,7 @@ pub fn cmd_run(
     // package ambiguous, and cargo bails rather than guessing.
     cargo_args.push(if target.example { "--example" } else { "--bin" }.into());
     cargo_args.push(target.name.clone());
+    feat.extend(&mut cargo_args);
     if !args.is_empty() {
         cargo_args.push("--".into());
         cargo_args.extend(args.iter().cloned());
@@ -332,6 +370,28 @@ mod tests {
     #[test]
     fn named_run_is_untouched() {
         let argv = ["brokkr", "run", "--release", "bench", "--", "--threads", "1"];
+        assert_eq!(rewrite(&argv), argv.to_vec());
+    }
+
+    #[test]
+    fn value_flag_does_not_end_the_scan() {
+        assert_eq!(
+            rewrite(&["brokkr", "run", "--features", "a,b", "--", "--help"]),
+            vec!["brokkr", "run", "--features", "a,b", NO_NAME, "--help"]
+        );
+    }
+
+    #[test]
+    fn inline_value_flag_does_not_end_the_scan() {
+        assert_eq!(
+            rewrite(&["brokkr", "run", "--features=a", "--", "--help"]),
+            vec!["brokkr", "run", "--features=a", NO_NAME, "--help"]
+        );
+    }
+
+    #[test]
+    fn named_run_after_features_is_untouched() {
+        let argv = ["brokkr", "run", "--features", "a", "bench", "--", "-h"];
         assert_eq!(rewrite(&argv), argv.to_vec());
     }
 

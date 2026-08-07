@@ -256,7 +256,7 @@ In depth: `brokkr man clippy`."
     /// form runs `[bin] default` (or the sole runnable); with several
     /// candidates and no default it lists them. Trailing arguments are
     /// forwarded raw to the program after `--`. Flags for brokkr
-    /// (`--debug`/`--release`) go before the name.
+    /// (`--debug`/`--release`, `--features`) go before the name.
     ///
     /// In depth: `brokkr man run`.
     #[command(display_order = 0)]
@@ -271,6 +271,19 @@ In depth: `brokkr man clippy`."
         /// Release profile (overrides `[bin] debug = true`)
         #[arg(long)]
         release: bool,
+
+        /// Cargo features to enable. Forwarded verbatim to `cargo run`,
+        /// which validates them - comma- or space-separated, repeatable.
+        #[arg(long, short = 'F', value_name = "LIST")]
+        features: Vec<String>,
+
+        /// Enable all Cargo features.
+        #[arg(long, conflicts_with = "features")]
+        all_features: bool,
+
+        /// Disable default Cargo features.
+        #[arg(long)]
+        no_default_features: bool,
 
         /// Raw arguments forwarded to the program (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
