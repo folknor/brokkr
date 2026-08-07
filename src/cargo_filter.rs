@@ -49,6 +49,27 @@ impl ClippyDiagnostic {
         Some(Path::new(file))
     }
 
+    /// True when this is a cargo *manifest* warning about a `Cargo.toml`
+    /// outside `project_root`.
+    ///
+    /// Manifest warnings carry no span, so cargo prints the manifest path as
+    /// the head of the message (`warning: /abs/path/Cargo.toml: <complaint>`)
+    /// rather than in a `file:line:col` location. Matching on that shape - and
+    /// requiring an absolute path, since a relative one is by definition in
+    /// this tree - keeps the rule from swallowing ordinary lints.
+    pub fn is_foreign_manifest_warning(&self, project_root: &Path) -> bool {
+        if self.is_error || self.location.is_some() {
+            return false;
+        }
+        let Some((path, _)) = self.message.split_once(": ") else {
+            return false;
+        };
+        let path = Path::new(path);
+        path.is_absolute()
+            && path.file_name().is_some_and(|n| n == "Cargo.toml")
+            && !path.starts_with(project_root)
+    }
+
     /// Format as a single line, matching [`filter_clippy`]'s shape.
     pub fn format_one(&self) -> String {
         let base = match &self.location {
@@ -137,9 +158,27 @@ pub fn parse_clippy(output: &str) -> ClippyParse {
 ///   warning[clippy::needless_return] src/d.rs:4:5 this could be simplified
 /// ```
 pub fn filter_clippy(output: &str) -> String {
-    let parsed = parse_clippy(output);
+    filter_clippy_in_tree(output, None)
+}
+
+/// Like [`filter_clippy`], but drops manifest-level warnings raised against a
+/// `Cargo.toml` outside `project_root`.
+///
+/// Cargo prints its own manifest complaints (deprecated `lints.*` keys, unused
+/// manifest keys) once per dependency it loads, path dependencies included. A
+/// project that builds against a vendored fork therefore gets dozens of lines
+/// about a manifest it does not own and cannot edit, on every `brokkr check`.
+/// They are not diagnostics about this repo, so they are cut here rather than
+/// merely deprioritised. Warnings about the project's own manifests survive.
+pub fn filter_clippy_in_tree(output: &str, project_root: Option<&Path>) -> String {
+    let mut parsed = parse_clippy(output);
     if parsed.parse_failed {
         return output.to_string();
+    }
+    if let Some(root) = project_root {
+        parsed
+            .diagnostics
+            .retain(|d| !d.is_foreign_manifest_warning(root));
     }
     if parsed.diagnostics.is_empty() {
         return "cargo clippy: no issues".into();
@@ -941,6 +980,32 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+
+    #[test]
+    fn foreign_manifest_warnings_are_dropped() {
+        let output = "\
+warning: /elsewhere/iced/Cargo.toml: `lints.clippy.map-entry` is deprecated
+warning: /home/me/proj/Cargo.toml: `lints.clippy.map-entry` is deprecated
+warning: unused variable: `x`
+ --> src/a.rs:1:9
+";
+        let filtered =
+            filter_clippy_in_tree(output, Some(Path::new("/home/me/proj")));
+        assert!(!filtered.contains("/elsewhere/"));
+        assert!(filtered.contains("/home/me/proj/Cargo.toml"));
+        assert!(filtered.contains("unused variable"));
+        assert!(filtered.starts_with("cargo clippy: 0 errors, 2 warnings"));
+    }
+
+    #[test]
+    fn foreign_manifest_warnings_only_dropped_when_scoped() {
+        let output = "warning: /elsewhere/iced/Cargo.toml: `lints.clippy.map-entry` is deprecated\n";
+        assert!(filter_clippy(output).contains("/elsewhere/"));
+        assert_eq!(
+            filter_clippy_in_tree(output, Some(Path::new("/home/me/proj"))),
+            "cargo clippy: no issues"
+        );
+    }
 
     #[test]
     fn linker_failure_surfaces_symbol_and_stale_hint() {

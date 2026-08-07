@@ -630,7 +630,7 @@ fn run_one_test_sweep(
             print!("{stdout}");
         }
     } else {
-        let filtered = cargo_filter::filter_clippy(&stderr);
+        let filtered = cargo_filter::filter_clippy_in_tree(&stderr, Some(project_root));
         if filtered != "cargo clippy: no issues" {
             let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
             output::warn(&relabeled);

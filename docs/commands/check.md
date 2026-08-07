@@ -401,6 +401,24 @@ errors. The remedy is the same `brokkr clean --cargo <pkg>` (with the stale
 forces the rebuild. No automatic hint fires here - an E0599 is usually a
 real error, and brokkr can't tell the two apart.
 
+### Foreign manifest warnings
+
+A *passing* test sweep still renders whatever cargo wrote to stderr, condensed
+through `filter_clippy` and relabelled `cargo test:`. Cargo emits its own
+manifest complaints there - deprecated `lints.*` keys, unused manifest keys -
+once per dependency manifest it loads, path dependencies included. A project
+that builds against a vendored fork therefore collected dozens of lines about a
+`Cargo.toml` it does not own and cannot edit, on every run.
+
+The test phase calls `filter_clippy_in_tree` with the project root instead, and
+warnings whose message heads with an absolute `Cargo.toml` path outside that
+root are dropped, not merely deprioritised - they are not diagnostics about
+this repo. The shape is specific (no span, absolute path, filename
+`Cargo.toml`), so ordinary lints are untouched, and warnings about the
+project's own manifests still print. The clippy phase never needed this: it
+ingests `--message-format=json` compiler messages, which exclude cargo's own
+stderr.
+
 ### Per-sweep rustflags
 
 A `[[check]]` entry may carry `rustflags` (a token list, e.g.
