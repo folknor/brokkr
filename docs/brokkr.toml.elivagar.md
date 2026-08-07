@@ -28,6 +28,8 @@ threads = 16                   # -j; default logical CPUs
 sort_budget = "1G"             # per-chunk sort buffer, min 64M
 way_budget = "128M"            # in-flight way processing, min 1M
 assemble_budget = "32M"        # tile assembly batch, min 1M
+dedup_cap = 60000000           # payload dedup map entry cap; plain integer,
+                               # no size suffix. Absent = elivagar's 1M default
 fanout_cap_default = 0         # 0/absent = uncapped
 polygon_simplify_factor = 1.0
 seam_reconcile_layers = { boundaries = 8 }   # layer -> maxzoom
@@ -67,6 +69,15 @@ PBF produced different ocean geometry with nothing in `cli_args` saying which.
 On 2026-07-14 a denmark archive was built, verified and blessed as the regress
 baseline while `ocean-tiles.pmtiles` was missing; it took the computed path
 throughout and every gate passed.
+
+### `dedup_cap`
+
+Caps the PMTiles payload dedup map. Like the budgets and `threads`, it sits
+outside elivagar's provenance comparability contract: it can only change how
+many duplicate payload copies the archive stores and the map's RAM (~56
+bytes/entry), never what a consumer decodes from a tile. brokkr applies no
+default of its own - the key is either set or the flag is absent - so
+`brokkr results --grep dedup-cap` separates the arms after the fact.
 
 ### What lives elsewhere
 

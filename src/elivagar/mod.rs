@@ -99,6 +99,10 @@ impl PipelineOpts<'_> {
             args.push("--assemble-budget".into());
             args.push(s.clone());
         }
+        if let Some(n) = tg.dedup_cap {
+            args.push("--dedup-cap".into());
+            args.push(n.to_string());
+        }
         if !tg.seam_reconcile_layers.is_empty() {
             let spec: Vec<String> = tg
                 .seam_reconcile_layers

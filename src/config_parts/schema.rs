@@ -1270,6 +1270,11 @@ pub struct TilegenConfig {
     pub sort_budget: Option<String>,
     pub way_budget: Option<String>,
     pub assemble_budget: Option<String>,
+    /// Entry cap for the PMTiles payload dedup map. Plain integer, no size
+    /// suffix. Absent = elivagar's 1M default. Outside the comparability
+    /// contract: it changes how many duplicate payload copies the archive
+    /// stores, never what a consumer decodes from a tile.
+    pub dedup_cap: Option<u64>,
     /// Polygon layers getting shared-edge seam reconciliation, layer -> maxzoom.
     #[serde(default)]
     pub seam_reconcile_layers: BTreeMap<String, u32>,
