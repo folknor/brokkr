@@ -3,11 +3,17 @@
 use crate::context::BenchContext;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::MeasureRequest;
+use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::project::{self, Project};
 
 use super::targets;
+
+/// Scratch dir for the harness's hotpath report and marker FIFO.
+///
+/// Under `.brokkr/` rather than the configured `scratch_dir`, whose default
+/// (`data/scratch`) would create a `data/` tree in a project that has none.
+const SCRATCH_REL: &str = ".brokkr/mogwai";
 
 /// Build and run one invocation. `target` names a harness; `None` is the CLI.
 pub(crate) fn run(
@@ -28,7 +34,23 @@ pub(crate) fn run(
         return Ok(());
     }
 
-    let resolved = targets::resolve(cfg, target, req.features)?;
+    // An instrumented mode contributes its own feature on top of whatever the
+    // target registered. `hotpath` is what compiles the annotations in at all,
+    // and `hotpath-alloc` is additionally required for `--alloc` - alloc alone
+    // tracks nothing. Union, not replacement: the registered list is what makes
+    // the target buildable (an instrumented example commonly carries
+    // `required-features`), so dropping it under `--bench` would fail the build
+    // rather than produce a leaner one.
+    let mode_features: Vec<String> = if uses_hotpath(req) {
+        req.hotpath_features()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        req.features.to_vec()
+    };
+
+    let resolved = targets::resolve(cfg, target, &mode_features)?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
 
     if req.dry_run {
@@ -74,6 +96,37 @@ pub(crate) fn run(
         metadata: vec![],
     };
 
+    // The instrumented modes need their own runner, not just their own build.
+    // `run_external` measures a wall and stores nothing else, so a `--hotpath`
+    // run built with every right feature still records a row with no profile in
+    // it - the hotpath report is written to a file the child is told about, and
+    // something has to set that up and read it back.
+    if uses_hotpath(req) {
+        let scratch_dir = req.project_root.join(SCRATCH_REL);
+        std::fs::create_dir_all(&scratch_dir)?;
+
+        let label = harness::hotpath_feature(req.is_alloc());
+        output::hotpath_msg(&format!("=== mogwai {label}: {} ===", resolved.name));
+        if req.is_alloc() {
+            output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
+        }
+
+        ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+            let (result, _stderr, sidecar) = harness::run_hotpath_capture(
+                &binary_str,
+                &argv,
+                &scratch_dir,
+                req.project_root,
+                &[],
+                &[],
+                req.stop_marker,
+                Some(ctx.harness.lock()),
+            )?;
+            Ok((result, sidecar))
+        })?;
+        return Ok(());
+    }
+
     output::bench_msg(&format!(
         "mogwai {}: {} run(s)",
         resolved.name, config.runs
@@ -82,10 +135,17 @@ pub(crate) fn run(
     // External wall-clock, with the stderr counters that ride along for free.
     // Phase decomposition is the sidecar's job, not a second definition of
     // what `elapsed` means: markers keep the excluded setup visible as its own
-    // phase instead of deleting it from the record, which is what a
-    // self-reported window did.
+    // phase instead of deleting it from the record.
     ctx.harness
         .run_external(&config, &ctx.binary, &argv, req.project_root)?;
 
     Ok(())
+}
+
+/// Whether this mode builds and runs with hotpath instrumentation.
+fn uses_hotpath(req: &MeasureRequest) -> bool {
+    matches!(
+        req.mode,
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
+    )
 }

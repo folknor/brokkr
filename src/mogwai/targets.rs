@@ -62,11 +62,20 @@ pub(crate) fn resolve(
     };
 
     let entry = cfg.target(target)?;
-    // Registered features first, call-site ones appended: the registration is
-    // what makes the target measurable at all, and a call-site `-F` adds an
-    // arm rather than replacing the shape.
+    // Registered features first, mode and call-site ones appended: the
+    // registration is what makes the target buildable at all, so an addition
+    // adds an arm rather than replacing the shape.
+    //
+    // Deduped because the overlap is the common case, not the exception - a
+    // target registers `hotpath` and `--hotpath` asks for it again. Cargo
+    // tolerates a repeat, but the recorded feature string is read by humans
+    // comparing two rows, and `hotpath,hotpath` reads as a mistake.
     let mut features = entry.features.clone();
-    features.extend(extra_features.iter().cloned());
+    for feature in extra_features {
+        if !features.contains(feature) {
+            features.push(feature.clone());
+        }
+    }
 
     Ok(Resolved {
         name: target.to_owned(),
@@ -188,6 +197,19 @@ mod tests {
         let extra = vec![String::from("hotpath-alloc")];
         let resolved = resolve(config(&cfg).unwrap(), Some("walk"), &extra).unwrap();
         assert_eq!(resolved.build.features, vec!["hotpath", "hotpath-alloc"]);
+    }
+
+    #[test]
+    fn a_feature_already_registered_is_not_repeated() {
+        // `--hotpath` asks for the feature the target already registers, which
+        // is the common case rather than an edge one.
+        let cfg = config_with(&format!(
+            "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
+             features = [\"hotpath\"]\n"
+        ));
+        let extra = vec![String::from("hotpath")];
+        let resolved = resolve(config(&cfg).unwrap(), Some("walk"), &extra).unwrap();
+        assert_eq!(resolved.build.features, vec!["hotpath"]);
     }
 
     #[test]

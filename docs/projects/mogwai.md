@@ -52,14 +52,25 @@ xxh128 = "280ade40376bd49f50c579bb127f3fbd"
   (preset, window, seed, cell), so an argument-free harness would need a new
   entry per shape: the enumeration trap at one remove.
 - **`--bench`, `--hotpath` and `--alloc` apply uniformly to both kinds.** One row
-  shape, one query surface.
+  shape, one query surface. The instrumented modes run through
+  `run_hotpath_capture`, which points the child at a report file and reads it
+  back; `--bench` measures an external wall.
 
 `features` is the field that earns its place. `--hotpath` and `--alloc` are
 inert without the feature that compiles the instrumentation in, so a target that
 has to be *remembered* to be built with `--features hotpath` is a target that
-records profile-less rows. A call-site `-F` appends to the registered list
-rather than replacing it, so an extra feature adds an arm instead of silently
-dropping the shape that makes the mode work at all.
+records profile-less rows.
+
+The registered list is a **union** with whatever the mode and the call site add,
+not a thing they replace: `--hotpath` contributes `hotpath`, `--alloc`
+contributes `hotpath-alloc` (alloc alone tracks nothing), a call-site `-F` adds
+an arm, and a feature already registered is not repeated. Union rather than
+replacement because the registration is often what makes the target *buildable*
+at all - an instrumented example commonly carries `required-features`, so
+dropping the list under `--bench` would fail the build rather than produce a
+leaner one. The consequence worth knowing: if a target registers `hotpath`, its
+`--bench` walls are measured on an instrumented build. Register the feature on
+the target that needs it, not on every target.
 
 ## Why there is no workload registry
 
