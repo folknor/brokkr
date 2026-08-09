@@ -49,6 +49,8 @@ pub enum DatasetStatus {
     HashMismatch(String),
     /// File does not exist.
     Missing,
+    /// The digest could not be computed. Contains why.
+    HashError(String),
     /// Dataset has no files configured.
     NoFiles,
 }
@@ -204,8 +206,14 @@ fn format_dataset(name: &str, status: &DatasetStatus) -> String {
             format!("{name} \u{2717} (hash mismatch, actual: {hash})")
         }
         DatasetStatus::Missing => format!("{name} \u{2717} (missing)"),
+        DatasetStatus::HashError(why) => format!("{name} \u{2717} (cannot hash: {why})"),
         DatasetStatus::NoFiles => format!("{name} (no files configured)"),
     }
+}
+
+/// First line of a multi-line error, for the one-line-per-entry status list.
+fn first_line(msg: &str) -> String {
+    msg.lines().next().unwrap_or(msg).trim().to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -780,8 +788,14 @@ fn check_file_entries<E: crate::resolve::FileEntry>(
 }
 
 fn check_hash_status(path: &Path, expected: Option<&str>, project_root: &Path) -> DatasetStatus {
-    let hash = crate::preflight::cached_xxh128(path, project_root)
-        .unwrap_or_else(|_| String::from("error"));
+    // A digest that could not be computed is reported WITH its reason. The
+    // previous bare "error" was indistinguishable between an unreadable file,
+    // an empty directory and a permission problem - and `brokkr env` is
+    // precisely where someone goes to find out why a pin will not take.
+    let hash = match crate::preflight::cached_xxh128(path, project_root) {
+        Ok(hash) => hash,
+        Err(e) => return DatasetStatus::HashError(first_line(&e.to_string())),
+    };
 
     match expected {
         None => DatasetStatus::Present(hash),

@@ -240,6 +240,28 @@ rejected, and so is a `{corpus}` token with nothing to fill it.
 Relative paths resolve against the directory holding `brokkr.toml`; absolute
 paths are allowed, because a delivery commonly sits outside the repository.
 
+`path` may name a **directory**. A delivery is frequently a directory rather
+than a file - a Databento delivery is two `.csv.zst` archives beside
+`manifest.json`, `metadata.json` and `condition.json`, and the consuming CLI
+takes the directory - so `{corpus}` expands to it and the digest covers the
+whole tree. A directory digests as the fold, sorted by path relative to the
+root, of `<relative path>\0<file digest>` over every file beneath it:
+
+- Sorting makes it reproducible; readdir order is a filesystem detail and
+  differs between two copies of identical data.
+- The relative path is inside the fold, so a rename, or two files swapping
+  contents, changes the digest. A delivery is its layout as well as its bytes -
+  the consumer resolves files inside it by name.
+- Per-file digests go through the same mtime cache, so re-running over an
+  unchanged multi-gigabyte delivery is a stat per file, not a re-read.
+- Symlinks are recorded by their target text and never followed: following
+  admits cycles and silently pulls in data from outside the tree being pinned.
+- An empty directory is refused. It is a wrong path far more often than an
+  input, and a digest over nothing verifies happily forever.
+
+Pinning one file *inside* a delivery is not a substitute. It reads as verified
+while covering a 4 KB descriptor and leaving the actual input unpinned.
+
 > [!IMPORTANT]
 > The digest is **XXH128**, brokkr's standard file hash - not the SHA-256 the
 > delivery manifests carry. Transcribing a manifest is therefore not enough:

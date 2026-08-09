@@ -260,9 +260,25 @@ pub fn verify_file_hash(
     }
 }
 
-/// Return the XXH128 hex digest of a file, using the mtime cache when possible.
+/// Return the XXH128 hex digest of a file or directory, using the mtime cache
+/// when possible.
+///
+/// A DIRECTORY digests as the fold of its contents - see
+/// [`compute_xxh128_tree`]. Some inputs are delivered as a directory rather
+/// than a file (a Databento delivery is two `.csv.zst` archives beside three
+/// JSON descriptors, and the consuming CLI takes the directory), and a pin that
+/// could only name one file inside it would either leave the real input
+/// unpinned or read as verified while covering a 4 KB descriptor.
 pub fn cached_xxh128(path: &Path, project_root: &Path) -> Result<String, DevError> {
     let meta = std::fs::metadata(path)?;
+    if meta.is_dir() {
+        // Deliberately not cached against the directory's own mtime: a
+        // directory's mtime tracks its entry list, not its contents, so a file
+        // rewritten in place leaves it untouched and the cache would serve a
+        // digest for data that no longer exists. The per-file caches inside the
+        // fold are what keep a multi-gigabyte delivery from being re-read.
+        return compute_xxh128_tree(path, project_root);
+    }
     let mtime = file_mtime(&meta);
     let size = meta.len();
 
@@ -300,6 +316,86 @@ pub(crate) fn compute_xxh128(path: &Path) -> Result<String, DevError> {
 
     let digest = hasher.digest128();
     Ok(format!("{digest:032x}"))
+}
+
+/// Compute the XXH128 digest of a directory tree.
+///
+/// The digest is a fold over every file beneath `root`, sorted by path relative
+/// to `root`, of `<relative path>\0<file digest>\n`. Sorting is what makes it
+/// reproducible - readdir order is a filesystem detail and varies between two
+/// copies of identical data. The relative path is inside the fold so that
+/// renaming a file, or two files swapping contents, changes the digest: a
+/// delivery is its layout as well as its bytes.
+///
+/// Per-file digests go through [`cached_xxh128`], so re-running over an
+/// unchanged multi-gigabyte delivery is a stat per file rather than a re-read.
+///
+/// Symlinks are recorded by their TARGET TEXT and never followed. Following
+/// them would admit cycles and would silently pull in data from outside the
+/// tree being pinned; the target string is what the delivery actually contains.
+///
+/// An empty tree is refused. A directory with no files in it is a wrong path
+/// far more often than it is a real input, and a digest over nothing would
+/// verify happily forever.
+pub fn compute_xxh128_tree(root: &Path, project_root: &Path) -> Result<String, DevError> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    collect_tree_entries(root, root, project_root, &mut entries)?;
+
+    if entries.is_empty() {
+        return Err(DevError::Preflight(vec![format!(
+            "{} is an empty directory - nothing to digest.\n  \
+             A directory with no files is a wrong path more often than it is \
+             an input, and a digest over nothing would verify forever.",
+            root.display()
+        )]));
+    }
+
+    entries.sort();
+
+    let mut hasher = Xxh3::new();
+    for (rel, digest) in &entries {
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hasher.digest128();
+    Ok(format!("{digest:032x}"))
+}
+
+/// Walk `dir`, pushing `(path relative to root, digest)` for every entry.
+fn collect_tree_entries(
+    root: &Path,
+    dir: &Path,
+    project_root: &Path,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), DevError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        // `symlink_metadata`, not `metadata`: the distinction between a symlink
+        // and what it points at is the whole reason links are not followed.
+        let meta = std::fs::symlink_metadata(&path)?;
+
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+
+        if meta.is_dir() {
+            collect_tree_entries(root, &path, project_root, out)?;
+        } else if meta.is_symlink() {
+            let target = std::fs::read_link(&path)?;
+            let mut hasher = Xxh3::new();
+            hasher.update(b"symlink\0");
+            hasher.update(target.as_os_str().as_encoded_bytes());
+            out.push((rel, format!("{:032x}", hasher.digest128())));
+        } else {
+            out.push((rel, cached_xxh128(&path, project_root)?));
+        }
+    }
+    Ok(())
 }
 
 /// Extract mtime as seconds since epoch from metadata.
@@ -353,5 +449,111 @@ fn append_cache_entry(cache_path: &Path, path: &Path, mtime: u64, size: u64, hex
     if std::fs::write(&tmp_path, lines.join("\n") + "\n").is_ok() {
         // Best-effort rename; don't fail the whole command if cache write fails.
         std::fs::rename(&tmp_path, cache_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod tree_hash_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Scratch dir under the crate's gitignored `target/` (project rules
+    /// forbid `/tmp`).
+    fn tmpdir(name: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("tree-{name}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Build a delivery-shaped tree: two archives beside their descriptors.
+    fn delivery(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("mnq-0.csv.zst"), b"first archive").unwrap();
+        std::fs::write(root.join("mnq-1.csv.zst"), b"second archive").unwrap();
+        std::fs::write(root.join("manifest.json"), b"{\"files\":[]}").unwrap();
+        std::fs::write(root.join("metadata.json"), b"{}").unwrap();
+    }
+
+    #[test]
+    fn identical_trees_digest_identically() {
+        let base = tmpdir("identical");
+        let a = base.join("a");
+        let b = base.join("b");
+        delivery(&a);
+        delivery(&b);
+        // Two copies of the same delivery must agree despite living at
+        // different paths and being read in whatever order readdir gives -
+        // which is a filesystem detail, and is why the fold sorts.
+        assert_eq!(
+            compute_xxh128_tree(&a, &base).unwrap(),
+            compute_xxh128_tree(&b, &base).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_changed_file_changes_the_tree_digest() {
+        let base = tmpdir("changed");
+        let root = base.join("d");
+        delivery(&root);
+        let before = compute_xxh128_tree(&root, &base).unwrap();
+        std::fs::write(root.join("mnq-0.csv.zst"), b"different archive").unwrap();
+        assert_ne!(before, compute_xxh128_tree(&root, &base).unwrap());
+    }
+
+    #[test]
+    fn a_renamed_file_changes_the_tree_digest() {
+        let base = tmpdir("renamed");
+        let root = base.join("d");
+        delivery(&root);
+        let before = compute_xxh128_tree(&root, &base).unwrap();
+        std::fs::rename(root.join("mnq-0.csv.zst"), root.join("mnq-2.csv.zst")).unwrap();
+        // Same bytes, different layout. A delivery is its layout too - the
+        // consuming CLI resolves files inside it by name.
+        assert_ne!(before, compute_xxh128_tree(&root, &base).unwrap());
+    }
+
+    #[test]
+    fn nested_directories_are_included() {
+        let base = tmpdir("nested");
+        let root = base.join("d");
+        delivery(&root);
+        let before = compute_xxh128_tree(&root, &base).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/extra.json"), b"{}").unwrap();
+        assert_ne!(before, compute_xxh128_tree(&root, &base).unwrap());
+    }
+
+    #[test]
+    fn an_empty_tree_is_refused() {
+        let base = tmpdir("empty");
+        let root = base.join("d");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = compute_xxh128_tree(&root, &base).unwrap_err();
+        let DevError::Preflight(msgs) = err else {
+            panic!("expected a preflight refusal, got {err:?}");
+        };
+        assert!(msgs.join(" ").contains("empty directory"), "{msgs:?}");
+    }
+
+    #[test]
+    fn cached_xxh128_dispatches_on_file_versus_directory() {
+        let base = tmpdir("dispatch");
+        let root = base.join("d");
+        delivery(&root);
+        // The entry point the corpus registry and `brokkr env` both go through.
+        let tree = cached_xxh128(&root, &base).unwrap();
+        assert_eq!(tree, compute_xxh128_tree(&root, &base).unwrap());
+        // A directory's digest is not any one file's digest - which is exactly
+        // the failure mode of pinning `manifest.json` and calling the delivery
+        // pinned.
+        let manifest = cached_xxh128(&root.join("manifest.json"), &base).unwrap();
+        assert_ne!(tree, manifest);
     }
 }
