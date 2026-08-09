@@ -200,6 +200,20 @@ paths are allowed, because a delivery commonly sits outside the repository.
 > nothing against what this defends (drift, not tampering) and would forfeit the
 > mtime cache that keeps a multi-gigabyte archive from being re-read every run.
 
+`xxh128` is therefore OPTIONAL, and `brokkr env` is where the value comes from.
+Register the path, run `brokkr env`, and the entry appears under `corpus:` with
+the digest computed from the file on disk:
+
+```
+corpus:      july-delivery <tick> (no hash configured, actual: 3f2a...)
+```
+
+Paste that back into the entry. A workload over an unregistered digest still
+runs - refusing would leave no way to reach the first run - but warns that it
+is UNVERIFIED on every run. A digest that is registered and does not match
+refuses, as before. This is exactly how `[<host>.datasets.*]` already behaves,
+and the two registries print in the same shape for that reason.
+
 Generated workloads never consult the host registry, so a machine holding no
 deliveries can still run every generated workload without registering anything.
 

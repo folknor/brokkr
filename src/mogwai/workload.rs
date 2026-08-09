@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::config::{CORPUS_TOKEN, DevConfig, MogwaiConfig, MogwaiWorkload};
 use crate::error::DevError;
+use crate::output;
 use crate::preflight;
 
 /// A workload resolved from the registry, ready to run.
@@ -127,12 +128,7 @@ fn resolve_corpus(
         ))
     })?;
 
-    // Absolute paths pass through: a delivery commonly lives outside the repo.
-    let path = if entry.path.is_absolute() {
-        entry.path.clone()
-    } else {
-        project_root.join(&entry.path)
-    };
+    let path = entry.resolve_path(project_root);
 
     if !path.exists() {
         return Err(DevError::Config(format!(
@@ -143,8 +139,23 @@ fn resolve_corpus(
         )));
     }
 
-    let origin = format!("[{hostname}.corpus.{corpus}].xxh128 in brokkr.toml");
-    preflight::verify_file_hash(&path, &entry.xxh128, project_root, Some(&origin))?;
+    // No registered digest means the archive cannot be checked for drift. Say
+    // so on every run rather than refusing: the digest is XXH128, which no
+    // delivery manifest carries, so it has to be read off this machine before
+    // it can be registered - and `brokkr env` is where it is read off.
+    match &entry.xxh128 {
+        Some(expected) => {
+            let origin = format!("[{hostname}.corpus.{corpus}].xxh128 in brokkr.toml");
+            preflight::verify_file_hash(&path, expected, project_root, Some(&origin))?;
+        }
+        None => {
+            output::warn(&format!(
+                "corpus {corpus:?} has no xxh128 registered - running UNVERIFIED. \
+                 `brokkr env` prints the digest to paste into \
+                 [{hostname}.corpus.{corpus}]."
+            ));
+        }
+    }
 
     path.to_str().map(str::to_owned).ok_or_else(|| {
         DevError::Config(format!(
@@ -355,6 +366,27 @@ mod tests {
         assert_eq!(args, vec!["measure", "--input", expected.to_str().unwrap()]);
         // The row files under the registry key, not the host-specific path.
         assert_eq!(resolved.corpus(), Some("july"));
+    }
+
+    /// A digest nobody has read off this machine yet must not block the first
+    /// run - `brokkr env` is where it gets read, and that comes after the entry
+    /// exists. The run is unverified and says so; only a WRONG digest refuses.
+    #[test]
+    fn corpus_without_a_registered_digest_still_resolves() {
+        let root = tmpdir("corpus_nodigest");
+        write_archive(&root, "july.bin");
+        let cfg = config_in(
+            &root,
+            &format!(
+                "{BASE}[mogwai.workloads.w]\nargs = [\"m\", \"{{corpus}}\"]\n\
+                 corpus = \"july\"\n\n\
+                 [frigg.corpus.july]\npath = \"july.bin\"\n"
+            ),
+        );
+
+        let resolved = resolve(&cfg, "frigg", &root, "w").unwrap();
+        let expected = root.join("july.bin");
+        assert_eq!(resolved.args(), vec!["m", expected.to_str().unwrap()]);
     }
 
     #[test]

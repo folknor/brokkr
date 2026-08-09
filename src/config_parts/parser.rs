@@ -1965,6 +1965,8 @@ pub fn resolve_paths(
 
     let datasets = host.map(|h| h.datasets.clone()).unwrap_or_default();
 
+    let corpus = host.map(|h| h.corpus.clone()).unwrap_or_default();
+
     ResolvedPaths {
         hostname: hostname.to_owned(),
         data_dir,
@@ -1974,6 +1976,7 @@ pub fn resolve_paths(
         drives,
         features,
         datasets,
+        corpus,
     }
 }
 

@@ -46,6 +46,7 @@ mod tests {
             drives: None,
             features: Vec::new(),
             datasets,
+            corpus: HashMap::new(),
         }
     }
 

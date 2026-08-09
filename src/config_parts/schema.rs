@@ -1349,7 +1349,9 @@ pub struct HostConfig {
 /// implementation for no gain in what is being defended against (drift, not
 /// tampering), and it would forfeit the mtime cache that keeps a multi-gigabyte
 /// archive from being re-read on every run. Transcribing a delivery manifest is
-/// therefore not enough: register the digest brokkr reports.
+/// therefore not enough: register the digest brokkr reports. `brokkr env` is
+/// where it reports it: an entry with no `xxh128` is listed there with the
+/// digest computed from the file on disk, ready to paste back into the entry.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusEntry {
@@ -1358,7 +1360,25 @@ pub struct CorpusEntry {
     /// commonly sits outside the repository.
     pub path: PathBuf,
     /// Expected XXH128 hex digest.
-    pub xxh128: String,
+    ///
+    /// Optional so a delivery can be registered before its digest is known -
+    /// the archive is multi-gigabyte and the digest is not something anyone
+    /// types from memory. Absent means the workload runs UNVERIFIED and says
+    /// so; `brokkr env` prints the digest to fill in.
+    #[serde(default)]
+    pub xxh128: Option<String>,
+}
+
+impl CorpusEntry {
+    /// Absolute path to the archive on this host. Absolute registrations pass
+    /// through: a delivery commonly lives outside the repository.
+    pub fn resolve_path(&self, project_root: &Path) -> PathBuf {
+        if self.path.is_absolute() {
+            self.path.clone()
+        } else {
+            project_root.join(&self.path)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1960,6 +1980,10 @@ pub struct ResolvedPaths {
     pub drives: Option<DriveConfig>,
     pub features: Vec<String>,
     pub datasets: HashMap<String, Dataset>,
+    /// This host's `[<host>.corpus.*]` archives. Carried here so `brokkr env`
+    /// can report their on-disk status beside the datasets without reloading
+    /// the config.
+    pub corpus: HashMap<String, CorpusEntry>,
 }
 
 // ---------------------------------------------------------------------------
