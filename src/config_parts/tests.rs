@@ -27,6 +27,7 @@ mod tests {
             ratatoskr: None,
             piners: None,
             dellingr: None,
+            mogwai: None,
             dependency_rules: Vec::new(),
             check: Vec::new(),
             test: None,

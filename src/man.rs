@@ -209,6 +209,12 @@ const TOPICS: &[Topic] = &[
         content: include_str!("../docs/projects/dellingr.md"),
         visibility: Visibility::Only(&[Project::Dellingr]),
     },
+    Topic {
+        name: "mogwai",
+        summary: "the frozen-workload regression bench: [mogwai] config, lineage, timing",
+        content: include_str!("../docs/projects/mogwai.md"),
+        visibility: Visibility::Only(&[Project::Mogwai]),
+    },
 ];
 
 /// The topics available in `project`, in table order.

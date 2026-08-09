@@ -18,6 +18,7 @@ pub enum Project {
     Saehrimnir,
     Piners,
     Dellingr,
+    Mogwai,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
     /// The `&'static str` is leaked once at startup from the TOML value.
@@ -37,6 +38,7 @@ impl Project {
             Self::Saehrimnir => "saehrimnir",
             Self::Piners => "piners",
             Self::Dellingr => "dellingr",
+            Self::Mogwai => "mogwai",
             Self::Other(s) => s,
         }
     }
@@ -58,6 +60,10 @@ impl Project {
             | Self::Saehrimnir
             | Self::Piners
             | Self::Dellingr
+            // The CLI package is named by `[mogwai] package`, not hardcoded:
+            // mogwai is a multi-crate workspace and the contract already has a
+            // place to say which crate carries the binary.
+            | Self::Mogwai
             | Self::Other(_) => None,
         }
     }

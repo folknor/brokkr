@@ -19,6 +19,7 @@ pub struct DevConfig {
     pub ratatoskr: Option<RatatoskrConfig>,
     pub piners: Option<PinersConfig>,
     pub dellingr: Option<DellingrConfig>,
+    pub mogwai: Option<MogwaiConfig>,
     /// Static Cargo package dependency boundary rules enforced by
     /// `brokkr check` before clippy/tests. Empty when the project does
     /// not define any `[[dependency_rule]]` entries.
@@ -1651,6 +1652,124 @@ impl DellingrConfig {
             DevError::Config(format!(
                 "unknown workload {name:?}\n  registered: {known}\n  \
                  add it as [dellingr.workloads.{name}] in brokkr.toml"
+            ))
+        })
+    }
+}
+
+/// Mogwai-specific configuration from `[mogwai]` in brokkr.toml.
+///
+/// Drives `brokkr mogwai`, the layer-1 regression bench: the durable numbers
+/// tracked across months, one row series per named workload.
+///
+/// Unlike dellingr's registry - which pins *files* - a mogwai workload pins an
+/// INVOCATION. Mogwai's commands take config-shaped arguments (preset, window,
+/// seed set, probe mode), so there is no single file whose digest stands for
+/// "the work". The frozen argv is the contract instead, and it is stated in
+/// full: nothing defaulted, nothing auto-detected. That rule is elivagar's, and
+/// it is here for elivagar's reason - auto-detection once let two runs of the
+/// same binary on the same input do different work with nothing in the
+/// invocation saying which.
+///
+/// A workload NAME is therefore a promise that its rows are comparable across
+/// months. Changing an invocation is a new name, never a quiet edit - see
+/// [`MogwaiWorkload::successor`] for how a superseded name keeps its lineage.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MogwaiConfig {
+    /// The cargo package holding the CLI (`-p`). `None` builds the workspace
+    /// default.
+    #[serde(default)]
+    pub package: Option<String>,
+    /// The bin target to build and run. Defaults to `package` when absent.
+    #[serde(default)]
+    pub bin: Option<String>,
+    /// Registered workloads, keyed by the name `brokkr mogwai <NAME>` takes.
+    #[serde(default)]
+    pub workloads: BTreeMap<String, MogwaiWorkload>,
+}
+
+/// One frozen workload: the exact argv, plus the metadata that makes its rows
+/// interpretable months later.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MogwaiWorkload {
+    /// What this workload measures, for `brokkr mogwai` with no arguments.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The complete argv passed to the mogwai binary, stated in full.
+    ///
+    /// Measurement flags (`--bench`, `--hotpath`, `--alloc`) do not belong
+    /// here: the mode is brokkr's axis, independent of the target, and baking
+    /// one into the contract would make a workload mean two different things
+    /// depending on how it was invoked.
+    pub args: Vec<String>,
+    /// Repeat count for this workload. Absent falls back to the global default.
+    ///
+    /// Per-workload because the right N is a property of the workload's
+    /// duration, not of the runner: three runs of a seconds-scale screen probe
+    /// is a coffee break, three runs of a month-long walk is an evening.
+    #[serde(default)]
+    pub runs: Option<usize>,
+    /// Rough expected duration, recorded so the cost of a baseline refresh is
+    /// legible before it is paid. Never enforced - it is documentation that
+    /// lives next to the thing it describes.
+    #[serde(default)]
+    pub expect_seconds: Option<u64>,
+    /// Work-size counters that MUST be identical between any two compared rows.
+    ///
+    /// Every benched workload is seeded, so the work is bit-identical run to
+    /// run and across both sides of an A/B at the same seed. A counter listed
+    /// here is one whose movement means the comparison is invalid - the classic
+    /// optimization failure of accidentally doing less work and calling it a
+    /// speedup.
+    ///
+    /// Deliberately a declared SET rather than "all counters must match":
+    /// counters like `cells_evaluated` are exactly what a real optimization is
+    /// supposed to move, and a blanket rule would fire on the first legitimate
+    /// win, earn a bypass flag, and then be passed habitually until it meant
+    /// nothing. Counters absent from this list are still recorded and diffed,
+    /// just never fatal.
+    #[serde(default)]
+    pub identity_counters: Vec<String>,
+    /// The workload that replaced this one, when its invocation had to change.
+    ///
+    /// Present means RETIRED: the entry no longer runs, and names its heir.
+    /// The rows stay, and the pointer is what lets a comparison across the
+    /// rename report the lineage instead of silently finding nothing. Without
+    /// it a renamed workload's history is unreachable, because nothing on disk
+    /// records that the two names describe the same measurement.
+    #[serde(default)]
+    pub successor: Option<String>,
+}
+
+impl MogwaiConfig {
+    /// The bin target to build: explicit `bin`, else the package name.
+    pub fn bin_target(&self) -> Option<&str> {
+        self.bin.as_deref().or(self.package.as_deref())
+    }
+
+    /// Look up a workload by name, with an error listing the live ones.
+    ///
+    /// Retired entries are excluded from the suggestion list but resolve to
+    /// their own dedicated error in [`crate::mogwai::workload::resolve`], which
+    /// can name the successor.
+    pub fn workload(&self, name: &str) -> Result<&MogwaiWorkload, DevError> {
+        self.workloads.get(name).ok_or_else(|| {
+            let known: Vec<&str> = self
+                .workloads
+                .iter()
+                .filter(|(_, w)| w.successor.is_none())
+                .map(|(k, _)| k.as_str())
+                .collect();
+            let known = if known.is_empty() {
+                "none registered".to_owned()
+            } else {
+                known.join(", ")
+            };
+            DevError::Config(format!(
+                "unknown workload {name:?}\n  registered: {known}\n  \
+                 add it as [mogwai.workloads.{name}] in brokkr.toml"
             ))
         })
     }

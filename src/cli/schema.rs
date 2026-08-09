@@ -2051,6 +2051,35 @@ In depth: `brokkr man nidhogg`."
         lua: String,
     },
 
+    // ----- mogwai-only commands (display_order = 58) -----
+    /// [mogwai] Benchmark a frozen regression workload
+    ///
+    /// The layer-1 instrument: the durable numbers tracked across months, one
+    /// row series per named workload. In brokkr's bare-is-an-index shape -
+    /// `brokkr mogwai` lists the registered workloads, `brokkr mogwai <NAME>`
+    /// runs one.
+    ///
+    /// A workload is a frozen INVOCATION, not a file: mogwai's commands take
+    /// config-shaped arguments, so `[mogwai.workloads.<name>].args` states the
+    /// argv in full - nothing defaulted, nothing auto-detected. The name is a
+    /// promise that its rows are comparable across months, so changing an
+    /// invocation means a new name and a `successor` pointer on the old one,
+    /// never a quiet edit.
+    ///
+    /// Rows are filed under the workload name with an empty dataset, and the
+    /// invocation is kept out of the pairing key - so re-registering a workload
+    /// cannot silently sever its history.
+    ///
+    /// In depth: `brokkr man mogwai`.
+    #[command(name = "mogwai", display_order = 58)]
+    Mogwai {
+        #[command(flatten)]
+        mode: ModeArgs,
+
+        /// Registered workload name from `[mogwai.workloads.*]` (bare lists them)
+        workload: Option<String>,
+    },
+
     // ----- ratatoskr-only commands (display_order = 60) -----
     /// [ratatoskr] List or run Service-subprocess test scripts (deterministic harness)
     ///

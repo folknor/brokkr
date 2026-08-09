@@ -29,6 +29,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "saehrimnir" => Project::Saehrimnir,
         "piners" => Project::Piners,
         "dellingr" => Project::Dellingr,
+        "mogwai" => Project::Mogwai,
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
 
@@ -37,6 +38,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let ratatoskr = parse_ratatoskr(table)?;
     let piners = parse_piners(table)?;
     let dellingr = parse_dellingr(table)?;
+    let mogwai = parse_mogwai(table)?;
     let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
@@ -65,6 +67,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             ratatoskr,
             piners,
             dellingr,
+            mogwai,
             dependency_rules,
             check,
             test,
@@ -598,6 +601,7 @@ fn parse_hosts(
             || key == "ratatoskr"
             || key == "piners"
             || key == "dellingr"
+            || key == "mogwai"
             || key == "dependency_rule"
             || key == "check"
             || key == "test"
@@ -789,6 +793,80 @@ fn check_workload_pin(
         )));
     }
     Ok(())
+}
+
+/// Parse the optional `[mogwai]` section. Absent -> `None`.
+///
+/// The validation here defends the one property the whole layer-1 design rests
+/// on: that a workload name means the same measurement every time it appears.
+/// Each rule below is a way that promise could be broken silently.
+fn parse_mogwai(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<MogwaiConfig>, DevError> {
+    let Some(value) = table.get("mogwai") else {
+        return Ok(None);
+    };
+    let config: MogwaiConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("mogwai: {e}")))?;
+
+    for (name, workload) in &config.workloads {
+        if workload.args.is_empty() {
+            return Err(DevError::Config(format!(
+                "[mogwai.workloads.{name}].args is empty - a workload is its \
+                 invocation, stated in full."
+            )));
+        }
+
+        // The mode is brokkr's axis. A measurement flag frozen into the
+        // contract would make one name mean two different measurements.
+        for arg in &workload.args {
+            if matches!(arg.as_str(), "--bench" | "--hotpath" | "--alloc") {
+                return Err(DevError::Config(format!(
+                    "[mogwai.workloads.{name}].args carries the measurement \
+                     flag {arg} - mode is an independent axis brokkr supplies, \
+                     not part of the workload. Drop it and use \
+                     `brokkr mogwai {name} {arg}`."
+                )));
+            }
+        }
+
+        if workload.runs == Some(0) {
+            return Err(DevError::Config(format!(
+                "[mogwai.workloads.{name}].runs is 0 - a benchmark needs at \
+                 least one run."
+            )));
+        }
+
+        for counter in &workload.identity_counters {
+            if counter.trim().is_empty() {
+                return Err(DevError::Config(format!(
+                    "[mogwai.workloads.{name}].identity_counters contains an \
+                     empty name."
+                )));
+            }
+        }
+
+        // A lineage pointer that leads nowhere is worse than none: it claims
+        // the history is reachable and it is not.
+        if let Some(successor) = &workload.successor {
+            if successor == name {
+                return Err(DevError::Config(format!(
+                    "[mogwai.workloads.{name}].successor names itself - a \
+                     retired workload points at the one that replaced it."
+                )));
+            }
+            if !config.workloads.contains_key(successor) {
+                return Err(DevError::Config(format!(
+                    "[mogwai.workloads.{name}].successor names {successor:?}, \
+                     which is not registered - the pointer exists so a \
+                     comparison across the rename can find the new series."
+                )));
+            }
+        }
+    }
+    Ok(Some(config))
 }
 
 /// The `[gremlins]` section exactly as it appears in TOML, before `allow`/`ban`

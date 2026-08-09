@@ -856,6 +856,21 @@ fn run(cli: Cli) -> Result<(), DevError> {
             |req| dellingr::cmd::run(req, &lua),
         ),
 
+        // ----- mogwai commands -----
+        // Dataset/variant stay empty for the same reason they do for dellingr:
+        // a generated workload's inputs are part of its definition, not a file
+        // on disk, so inventing a dataset name would put a fiction in the DB.
+        Command::Mogwai { mode, workload } => run_measured(
+            &mode,
+            &dev_config,
+            project,
+            &project_root,
+            "",
+            "",
+            &brokkr_args,
+            |req| mogwai::cmd::run(req, workload.as_deref()),
+        ),
+
         // ----- sluggrs commands -----
         // ----- generic commands -----
         Command::GenericHotpath {

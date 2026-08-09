@@ -75,6 +75,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("corpus-results", Visibility::Only(&[Project::Piners])),
     ("degrade", Visibility::Only(&[Project::Pbfhogg])),
     ("dellingr", Visibility::Only(&[Project::Dellingr])),
+    ("mogwai", Visibility::Only(&[Project::Mogwai])),
     ("deps", Visibility::Any),
     ("diag", Visibility::Only(&[Project::Elivagar])),
     ("diff", Visibility::Only(&[Project::Pbfhogg])),
