@@ -1748,6 +1748,46 @@ pub struct MogwaiConfig {
     pub workloads: BTreeMap<String, MogwaiWorkload>,
 }
 
+/// Which clock a workload's `elapsed_ms` comes from.
+///
+/// Brokkr's two external harness paths disagree about this, and the choice is a
+/// property of the WORKLOAD rather than of the runner - so the registry states
+/// it, with its reason, rather than the command picking one for everybody.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MogwaiTiming {
+    /// Brokkr's wall-clock around the child process. The DEFAULT.
+    ///
+    /// Needs nothing inside mogwai, which is what lets a baseline be recorded
+    /// at any commit whose CLI still parses the frozen argv - including
+    /// retroactively via `--commit`, before any self-reporting existed. Setup
+    /// cost is inside the window, which for a whole CLI invocation is usually
+    /// the honest reading.
+    #[default]
+    External,
+    /// The target's own `elapsed_ms=` on stderr; brokkr's wall is discarded.
+    ///
+    /// For a workload with real setup that is not the code under test - a
+    /// multi-gigabyte corpus verified and a walk cache loaded before any
+    /// measured work - where an external wall would fold that constant cost
+    /// into every reading of the thing actually being optimized.
+    ///
+    /// The cost is that history reaches back only to the commit that first
+    /// emitted the line: there is nothing to back-fill from. Choose it when the
+    /// setup genuinely dominates, not by default.
+    SelfReported,
+}
+
+impl MogwaiTiming {
+    /// The value as it is written in `brokkr.toml`, for messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::SelfReported => "self_reported",
+        }
+    }
+}
+
 /// One frozen workload: the exact argv, plus the metadata that makes its rows
 /// interpretable months later.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1775,6 +1815,23 @@ pub struct MogwaiWorkload {
     /// lives next to the thing it describes.
     #[serde(default)]
     pub expect_seconds: Option<u64>,
+    /// Which clock this workload's `elapsed_ms` comes from. Defaults to
+    /// [`MogwaiTiming::External`].
+    ///
+    /// Changing it changes what the number MEANS, so it is subject to the
+    /// same new-name rule as `args`: a series must not switch clocks mid-way.
+    /// Rows record the choice (`meta.timing`) and `--compare` refuses to read a
+    /// delta across a switch, which catches the edit that forgot the rule.
+    #[serde(default)]
+    pub timing: MogwaiTiming,
+    /// Why this workload's timing is what it is.
+    ///
+    /// REQUIRED for `self_reported` and optional otherwise. Not decoration: the
+    /// reason is the part that gets forgotten, and a self-reported window is
+    /// exactly the choice someone reverses a year later because the entry does
+    /// not say what it was excluding or why that was legitimate.
+    #[serde(default)]
+    pub timing_reason: Option<String>,
     /// Work-size counters that MUST be identical between any two compared rows.
     ///
     /// Every benched workload is seeded, so the work is bit-identical run to

@@ -862,6 +862,25 @@ fn parse_mogwai(
             _ => {}
         }
 
+        // A self-reported window is a claim about what is being excluded from
+        // the measurement, and the claim is the part that gets forgotten. An
+        // external wall needs no defence - it is the default and it measures
+        // the whole invocation - so only the deviation has to argue for itself.
+        if workload.timing == MogwaiTiming::SelfReported
+            && workload
+                .timing_reason
+                .as_ref()
+                .is_none_or(|r| r.trim().is_empty())
+        {
+            return Err(DevError::Config(format!(
+                "[mogwai.workloads.{name}].timing is \"self_reported\" but no \
+                 `timing_reason` is given.\n  Self-reporting narrows the \
+                 measured window and costs the ability to back-fill history \
+                 before the commit that first emitted `elapsed_ms=`. State what \
+                 the window excludes and why that is not the code under test."
+            )));
+        }
+
         for counter in &workload.identity_counters {
             if counter.trim().is_empty() {
                 return Err(DevError::Config(format!(

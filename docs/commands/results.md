@@ -104,4 +104,35 @@ in `src/db/format/compare.rs`):
 Pairs whose **host conditions differed** (memory, governor, kernel) are
 annotated rather than silently rendered as a clean delta: the same numbers mean
 something different across a governor change, and a comparison that hides that
-is worse than no comparison.
+is worse than no comparison. Differing **captured env** is annotated the same
+way.
+
+### The counter contract
+
+A row that carries `meta.identity_counters` opted into a stronger reading of its
+stderr counters, and gets three further annotations. Today only `brokkr mogwai`
+writes that key; every other project's rows are untouched by this, because their
+kv numbers were never declared to mean anything about comparability.
+
+```
+    WORK CHANGED: parents 1240 -> 1180 - the wall delta above is not a speedup
+    counters: cells_evaluated 5000 -> 4000
+    TIMING CHANGED: external -> self_reported - ...
+```
+
+- `WORK CHANGED` fires when a counter the workload DECLARED identity-bearing
+  moved, appeared, or vanished. The wall delta beside it is then measuring two
+  different jobs, not a faster one. A blanket "every counter must match" was
+  rejected: doing less work is what most optimization past the free-lane stage
+  actually is, so the blanket rule would fire on the first real win, earn a
+  bypass flag, and be passed habitually until it meant nothing.
+- `counters:` is the non-fatal other half - the undeclared counters that moved,
+  which is what turns "12% faster" into "12% faster on 8% fewer cells".
+- `TIMING CHANGED` fires when the two rows recorded different clocks
+  (`meta.timing`: brokkr's external wall vs the target's self-reported
+  `elapsed_ms`). The difference between those windows can be the entire delta
+  and nothing else on either row would reveal it.
+
+Every declaration is read off the ROW, never from today's config, so
+re-declaring a workload's set cannot retroactively change what a comparison
+between two older rows asserted. See `brokkr man mogwai`.

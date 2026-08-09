@@ -49,6 +49,8 @@ identity_counters = ["parents", "prints"]
 | `runs` | Repeat count for this workload; falls back to the global default. |
 | `expect_seconds` | Rough duration. Never enforced - it makes the cost of a baseline refresh legible before it is paid. |
 | `identity_counters` | Work-size counters that must not move between compared rows. |
+| `timing` | `external` (default) or `self_reported`. Which clock the row's `elapsed_ms` comes from. |
+| `timing_reason` | Why. Required for `self_reported`, optional otherwise. |
 | `corpus` | Names a `[<host>.corpus.*]` archive; absent means a generated workload. |
 | `successor` | Names the workload that replaced this one. Present means retired. |
 
@@ -66,22 +68,48 @@ brokkr mogwai screen-probe --bench # record a row
 
 ## Timing
 
-Workloads are timed EXTERNALLY - brokkr's wall-clock around the child, best of
-N - not from a self-reported `elapsed_ms` on stderr. Counters are still scraped
-from stderr beside it (`run_external_with_counters`; see
-`brokkr man output-channels`). An `elapsed_ms` on stderr is optional here, and
-if present is kept as an ordinary counter rather than replacing the measured
+Timing is a PER-WORKLOAD declaration, because which clock is honest is a
+property of the workload rather than of the runner. Both modes scrape stderr
+`key=value` counters; they differ only in where the recorded `elapsed_ms` comes
+from.
+
+**`timing = "external"`** (the default) takes brokkr's wall-clock around the
+child, best of N (`run_external_with_counters`; see
+`brokkr man output-channels`). An `elapsed_ms` on stderr is optional here and,
+if present, is kept as an ordinary counter rather than replacing the measured
 wall, so the two numbers stay independently visible.
 
-These are whole CLI invocations whose setup cost is part of what is being
-measured. External timing also means a baseline can be recorded at any commit
-whose CLI still parses the frozen argv, including retroactively via `--commit`,
-because `--compare` strips `--commit` from the pairing key. Nothing has to land
-inside mogwai before the first row exists.
+External is the default for a reason worth stating plainly: it needs NOTHING
+inside mogwai. A baseline can be recorded at any commit whose CLI still parses
+the frozen argv, including retroactively via `--commit`, because `--compare`
+strips `--commit` from the pairing key. History exists before the
+instrumentation does.
 
-A workload that one day needs its own measured window - excluding, say, an
-expensive corpus load - is the case for a self-reported wall, and it should say
-so in its registration rather than change this default underneath the rest.
+**`timing = "self_reported"`** takes the target's own `elapsed_ms=` and
+discards brokkr's wall (`run_external_with_kv`). For a workload with real setup
+that is not the code under test - a multi-gigabyte corpus verified and a cache
+loaded before any measured work - where an external wall would fold that
+constant cost into every reading of the thing being optimized. A missing
+`elapsed_ms=` is a hard error in this mode.
+
+The cost is that history reaches back only to the commit that first emitted the
+line; there is nothing to back-fill from. So `timing_reason` is REQUIRED here
+and the config is rejected without it. The reason is the part that gets
+forgotten, and a narrowed window is exactly the choice someone reverses a year
+later because the entry never said what it excluded or why that was legitimate.
+
+> [!WARNING]
+> Switching a live workload's `timing` changes what its number MEANS, so it is
+> subject to the same new-name rule as `args`. Rows record their clock as
+> `meta.timing`, and `--compare` refuses to read a delta across a switch:
+>
+> ```
+>     TIMING CHANGED: external -> self_reported - the two walls measure
+>     different windows and their delta is not a speedup
+> ```
+>
+> One side lacking the key is not a disagreement: rows predating `meta.timing`
+> are all external, which is also the default.
 
 ## What a row looks like, and why two columns are empty
 
@@ -147,6 +175,25 @@ that is what instrumentation appearing or vanishing mid-series looks like, and
 it makes the pair no more comparable than a changed value does. A counter absent
 from *both* sides is silent: the declaration may simply be ahead of the
 instrumentation that will emit it.
+
+The UNDECLARED counters that moved are reported too, on their own non-fatal
+line:
+
+```
+    counters: cells_evaluated 5000 -> 4000, sessions 23 -> 23
+```
+
+That is the other half of the declared/undeclared split, and it is what turns
+"12% faster" into "12% faster on 8% fewer cells". Recorded and diffed, never
+fatal - a counter the workload did not declare is one it expects a real
+optimization to move.
+
+Both lines are emitted only for rows that opted into the counter contract, which
+means rows carrying `meta.identity_counters` - written by `brokkr mogwai` on
+every row, even when the declared set is empty. Every project puts numbers in
+its kv; only a declared workload asked for them to be read as a statement about
+whether two runs did the same work. Reading an elivagar row that way would be
+inventing a claim it never made.
 
 The declaration travels WITH each row (`meta.identity_counters`), not read from
 config at comparison time. Re-declaring a workload's set must not retroactively

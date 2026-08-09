@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::config::{CORPUS_TOKEN, DevConfig, MogwaiConfig, MogwaiWorkload};
+use crate::config::{CORPUS_TOKEN, DevConfig, MogwaiConfig, MogwaiTiming, MogwaiWorkload};
 use crate::error::DevError;
 use crate::output;
 use crate::preflight;
@@ -192,7 +192,14 @@ pub(crate) fn format_index(cfg: &MogwaiConfig) -> String {
             (None, Some(s)) => format!(" [~{s}s each]"),
             (None, None) => String::new(),
         };
-        out.push_str(&format!("  {name:<width$}  {detail}{cost}\n"));
+        // Only the deviation is worth a column: external is the default and
+        // marking every row with it would bury the one entry that differs.
+        let clock = if workload.timing == MogwaiTiming::SelfReported {
+            " [self-reported]"
+        } else {
+            ""
+        };
+        out.push_str(&format!("  {name:<width$}  {detail}{cost}{clock}\n"));
     }
     out
 }
@@ -472,6 +479,59 @@ mod tests {
         };
         // Otherwise the literal "{corpus}" reaches the child as a filename.
         assert!(msg.contains("literally"), "{msg}");
+    }
+
+    #[test]
+    fn self_reported_timing_without_a_reason_is_rejected() {
+        let dir = tmpdir("timing_no_reason");
+        fs::write(
+            dir.join("brokkr.toml"),
+            format!(
+                "{BASE}[mogwai.workloads.w]\nargs = [\"m\"]\n\
+                 timing = \"self_reported\"\n"
+            ),
+        )
+        .unwrap();
+        let err = crate::config::load(&dir).unwrap_err();
+        let DevError::Config(msg) = err else {
+            panic!("expected DevError::Config, got {err:?}");
+        };
+        assert!(msg.contains("timing_reason"), "{msg}");
+    }
+
+    #[test]
+    fn self_reported_timing_with_a_reason_is_accepted() {
+        let cfg = config_with(&format!(
+            "{BASE}[mogwai.workloads.w]\nargs = [\"m\"]\n\
+             timing = \"self_reported\"\n\
+             timing_reason = \"the corpus hash pass is not the engine\"\n"
+        ));
+        let resolved = resolve(&cfg, "nohost", Path::new("."), "w").unwrap();
+        assert_eq!(resolved.entry.timing, MogwaiTiming::SelfReported);
+    }
+
+    /// The default has to be external, or a registry that says nothing about
+    /// timing would quietly forfeit the back-fill that makes retroactive
+    /// baselines possible.
+    #[test]
+    fn timing_defaults_to_external() {
+        let cfg = config_with(&format!("{BASE}[mogwai.workloads.w]\nargs = [\"m\"]\n"));
+        let resolved = resolve(&cfg, "nohost", Path::new("."), "w").unwrap();
+        assert_eq!(resolved.entry.timing, MogwaiTiming::External);
+    }
+
+    #[test]
+    fn index_marks_the_self_reported_entry_only() {
+        let cfg = config_with(&format!(
+            "{BASE}[mogwai.workloads.alpha]\nargs = [\"a\"]\n\n\
+             [mogwai.workloads.beta]\nargs = [\"b\"]\n\
+             timing = \"self_reported\"\ntiming_reason = \"setup dominates\"\n"
+        ));
+        let index = format_index(config(&cfg).unwrap());
+        let alpha = index.lines().find(|l| l.contains("alpha")).unwrap();
+        let beta = index.lines().find(|l| l.contains("beta")).unwrap();
+        assert!(!alpha.contains("self-reported"), "{index}");
+        assert!(beta.contains("self-reported"), "{index}");
     }
 
     #[test]

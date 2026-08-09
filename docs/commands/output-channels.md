@@ -76,8 +76,8 @@ derived one. None of these apply on the no-kv `run_external_ok` path except
 |---|---|---|---|---|
 | `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | all `--` run mode (no `--bench`) |
 | `run_external_ok` | captured, dropped | no | yes | every pbfhogg bench command + elivagar `tilegen` |
-| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
-| `run_external_with_counters` | captured, dropped | **yes** (counters only) | yes | `brokkr mogwai` workloads |
+| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`); `brokkr mogwai` workloads declaring `timing = "self_reported"` |
+| `run_external_with_counters` | captured, dropped | **yes** (counters only) | yes | `brokkr mogwai` workloads (default `timing = "external"`) |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
 | `run_hotpath_capture` (stored via `run_hotpath`) | captured | via JSON report | yes | `--hotpath` / `--alloc`, all projects |
 
@@ -94,6 +94,11 @@ self-reports nothing at all still produces a usable row - so a baseline can be
 recorded at any commit whose CLI parses the invocation, including retroactively.
 On this path a stderr `elapsed_ms` is optional and, if present, is kept as an
 ordinary counter rather than replacing the measured wall.
+
+A mogwai workload picks between this path and `run_external_with_kv` per entry,
+via `timing` in its registration - see `brokkr man mogwai timing`. The choice is
+recorded on the row as `meta.timing`, so `--compare` can refuse a delta between
+two rows measured on different clocks.
 
 Two consequences worth internalizing:
 

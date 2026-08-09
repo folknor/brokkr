@@ -19,6 +19,15 @@ use crate::error::DevError;
 /// comparison between two older rows asserted.
 pub const IDENTITY_COUNTERS_KEY: &str = "meta.identity_counters";
 
+/// The metadata key naming which clock produced this row's `elapsed_ms`
+/// (`external` or `self_reported`).
+///
+/// Present makes the row a participant in the counter contract: `--compare`
+/// reads it to refuse a delta across a clock switch, which is otherwise
+/// invisible - both sides are just a number of milliseconds, and one of them
+/// silently stopped counting the setup.
+pub const TIMING_KEY: &str = "meta.timing";
+
 /// A typed key-value pair for benchmark metadata and subprocess metrics.
 #[derive(Clone)]
 pub struct KvPair {
