@@ -797,9 +797,11 @@ fn check_workload_pin(
 
 /// Parse the optional `[mogwai]` section. Absent -> `None`.
 ///
-/// The validation here defends the one property the whole layer-1 design rests
-/// on: that a workload name means the same measurement every time it appears.
-/// Each rule below is a way that promise could be broken silently.
+/// Almost nothing to validate, which is the point. The registry holds cargo
+/// coordinates, and cargo rejects a target that does not exist far better than
+/// a pre-check here could. The predecessor's validation - measurement flags
+/// frozen into an argv, lineage pointers, corpus tokens agreeing in both
+/// directions - existed to defend a promise the registry no longer makes.
 fn parse_mogwai(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<MogwaiConfig>, DevError> {
@@ -811,101 +813,12 @@ fn parse_mogwai(
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("mogwai: {e}")))?;
 
-    for (name, workload) in &config.workloads {
-        if workload.args.is_empty() {
+    for (name, target) in &config.targets {
+        if target.example.trim().is_empty() {
             return Err(DevError::Config(format!(
-                "[mogwai.workloads.{name}].args is empty - a workload is its \
-                 invocation, stated in full."
+                "[mogwai.targets.{name}].example is empty - name the \
+                 [[example]] target as registered in that crate's Cargo.toml."
             )));
-        }
-
-        // The mode is brokkr's axis. A measurement flag frozen into the
-        // contract would make one name mean two different measurements.
-        for arg in &workload.args {
-            if matches!(arg.as_str(), "--bench" | "--hotpath" | "--alloc") {
-                return Err(DevError::Config(format!(
-                    "[mogwai.workloads.{name}].args carries the measurement \
-                     flag {arg} - mode is an independent axis brokkr supplies, \
-                     not part of the workload. Drop it and use \
-                     `brokkr mogwai {name} {arg}`."
-                )));
-            }
-        }
-
-        if workload.runs == Some(0) {
-            return Err(DevError::Config(format!(
-                "[mogwai.workloads.{name}].runs is 0 - a benchmark needs at \
-                 least one run."
-            )));
-        }
-
-        // The token and the registration have to agree in both directions: a
-        // corpus workload whose argv never places the path would run against
-        // whatever default the CLI picks, and a `{corpus}` token with nothing
-        // to fill it would reach the child literally.
-        let has_token = workload.args.iter().any(|a| a.contains(CORPUS_TOKEN));
-        match (&workload.corpus, has_token) {
-            (Some(corpus), false) => {
-                return Err(DevError::Config(format!(
-                    "[mogwai.workloads.{name}] names corpus {corpus:?} but its \
-                     args never place it - put {CORPUS_TOKEN} where the \
-                     archive path belongs."
-                )));
-            }
-            (None, true) => {
-                return Err(DevError::Config(format!(
-                    "[mogwai.workloads.{name}].args uses {CORPUS_TOKEN} but the \
-                     workload declares no `corpus` - the token would be passed \
-                     to the child literally."
-                )));
-            }
-            _ => {}
-        }
-
-        // A self-reported window is a claim about what is being excluded from
-        // the measurement, and the claim is the part that gets forgotten. An
-        // external wall needs no defence - it is the default and it measures
-        // the whole invocation - so only the deviation has to argue for itself.
-        if workload.timing == MogwaiTiming::SelfReported
-            && workload
-                .timing_reason
-                .as_ref()
-                .is_none_or(|r| r.trim().is_empty())
-        {
-            return Err(DevError::Config(format!(
-                "[mogwai.workloads.{name}].timing is \"self_reported\" but no \
-                 `timing_reason` is given.\n  Self-reporting narrows the \
-                 measured window and costs the ability to back-fill history \
-                 before the commit that first emitted `elapsed_ms=`. State what \
-                 the window excludes and why that is not the code under test."
-            )));
-        }
-
-        for counter in &workload.identity_counters {
-            if counter.trim().is_empty() {
-                return Err(DevError::Config(format!(
-                    "[mogwai.workloads.{name}].identity_counters contains an \
-                     empty name."
-                )));
-            }
-        }
-
-        // A lineage pointer that leads nowhere is worse than none: it claims
-        // the history is reachable and it is not.
-        if let Some(successor) = &workload.successor {
-            if successor == name {
-                return Err(DevError::Config(format!(
-                    "[mogwai.workloads.{name}].successor names itself - a \
-                     retired workload points at the one that replaced it."
-                )));
-            }
-            if !config.workloads.contains_key(successor) {
-                return Err(DevError::Config(format!(
-                    "[mogwai.workloads.{name}].successor names {successor:?}, \
-                     which is not registered - the pointer exists so a \
-                     comparison across the rename can find the new series."
-                )));
-            }
         }
     }
     Ok(Some(config))
@@ -1984,8 +1897,6 @@ pub fn resolve_paths(
 
     let datasets = host.map(|h| h.datasets.clone()).unwrap_or_default();
 
-    let corpus = host.map(|h| h.corpus.clone()).unwrap_or_default();
-
     ResolvedPaths {
         hostname: hostname.to_owned(),
         data_dir,
@@ -1995,7 +1906,6 @@ pub fn resolve_paths(
         drives,
         features,
         datasets,
-        corpus,
     }
 }
 

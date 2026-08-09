@@ -2052,23 +2052,24 @@ In depth: `brokkr man nidhogg`."
     },
 
     // ----- mogwai-only commands (display_order = 58) -----
-    /// [mogwai] Benchmark a frozen regression workload
+    /// [mogwai] Benchmark a mogwai surface (CLI invocation or harness target)
     ///
-    /// The layer-1 instrument: the durable numbers tracked across months, one
-    /// row series per named workload. In brokkr's bare-is-an-index shape -
-    /// `brokkr mogwai` lists the registered workloads, `brokkr mogwai <NAME>`
-    /// runs one.
+    /// Two kinds of surface, one row shape, no layers.
     ///
-    /// A workload is a frozen INVOCATION, not a file: mogwai's commands take
-    /// config-shaped arguments, so `[mogwai.workloads.<name>].args` states the
-    /// argv in full - nothing defaulted, nothing auto-detected. The name is a
-    /// promise that its rows are comparable across months, so changing an
-    /// invocation means a new name and a `successor` pointer on the old one,
-    /// never a quiet edit.
+    /// ARGV-SHAPED surfaces go through the shipped bin and need no
+    /// registration: `brokkr mogwai -- gen --type summary --seed 1`. Benching
+    /// the release binary measures what ships, startup and argument parsing
+    /// included.
     ///
-    /// Rows are filed under the workload name with an empty dataset, and the
-    /// invocation is kept out of the pairing key - so re-registering a workload
-    /// cannot silently sever its history.
+    /// HARNESS-SHAPED surfaces have no command line, so the harness is the
+    /// addressable thing: `brokkr mogwai screen_projection -- --cells 4`
+    /// resolves `[mogwai.targets.screen_projection]` to a cargo example plus
+    /// the features it must be built with. Those features are why `--hotpath`
+    /// and `--alloc` produce a profile rather than an empty row.
+    ///
+    /// Bare `brokkr mogwai` lists both. Invocations are composed at the call
+    /// site and captured verbatim, so selecting an arm is a query
+    /// (`brokkr results --grep`) rather than a name lookup.
     ///
     /// In depth: `brokkr man mogwai`.
     #[command(name = "mogwai", display_order = 58)]
@@ -2076,8 +2077,12 @@ In depth: `brokkr man nidhogg`."
         #[command(flatten)]
         mode: ModeArgs,
 
-        /// Registered workload name from `[mogwai.workloads.*]` (bare lists them)
-        workload: Option<String>,
+        /// Harness target from `[mogwai.targets.*]`; omit for the CLI (bare lists both)
+        target: Option<String>,
+
+        /// Arguments forwarded to the binary or harness (after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     // ----- ratatoskr-only commands (display_order = 60) -----

@@ -857,10 +857,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         ),
 
         // ----- mogwai commands -----
-        // Dataset/variant stay empty for the same reason they do for dellingr:
-        // a generated workload's inputs are part of its definition, not a file
-        // on disk, so inventing a dataset name would put a fiction in the DB.
-        Command::Mogwai { mode, workload } => run_measured(
+        // Dataset/variant stay empty: an input a mogwai surface reads is named
+        // in its argv, which the row captures verbatim, so filling these would
+        // duplicate it under a second name that pairing also keys on.
+        Command::Mogwai { mode, target, args } => run_measured(
             &mode,
             &dev_config,
             project,
@@ -868,7 +868,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             "",
             "",
             &brokkr_args,
-            |req| mogwai::cmd::run(req, workload.as_deref()),
+            |req| mogwai::cmd::run(req, target.as_deref(), &args),
         ),
 
         // ----- sluggrs commands -----

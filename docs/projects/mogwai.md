@@ -1,293 +1,189 @@
 # brokkr mogwai
 
-The layer-1 regression bench: the durable numbers, tracked across months, one
-row series per named workload, paired with the commit that produced them.
+Benchmark a mogwai surface. Two kinds of surface, one row shape, no layers.
 
-Mogwai is a CLI, a pipeline and a library of building blocks at once, so its
-benchmarking borrows from three siblings - elivagar's config-owned workload
-contract, sluggrs' harness mechanics, pbfhogg's sidecar channel. This command
-is the first of those: the durable layer. The optimization instruments that
-churn during a round (harness examples, `hotpath` annotations) are a separate
-layer and deliberately not managed here.
+```
+brokkr mogwai                                  # list both kinds
+brokkr mogwai -- gen --type summary --seed 1   # CLI surface
+brokkr mogwai screen_projection --hotpath      # harness surface
+```
 
-## The unit is a frozen invocation
+## The two surfaces
 
-Not a subcommand mirror, and not a pinned file.
+**Argv-shaped**, through the shipped bin: `gen` and its `--type` variants,
+`tick-composition`, `preflight`, `measure`, `fit`, `cache`, `synth`,
+`arrival-screen`. A process, an argv, a wall. Benching these through
+`target/release/mogwai` measures what ships, startup and argument parsing
+included, which is the honest end-to-end number.
 
-Mogwai's commands take config-shaped arguments - preset, window, seed set,
-probe mode - so no single file's digest stands for "the work" the way
-dellingr's `.lua` does, and a row filed under a bare subcommand name would say
-nothing about which arguments produced it. The registry pins the argv instead,
-stated in full: nothing defaulted, nothing auto-detected.
+**Harness-shaped**, through a cargo example: the engine's matching loop and
+divergence seam, the `TickSource` implementations, the arrival draw, the
+screen's projection, and eventually the serving path and the adapter. These have
+no command line, so the harness is the addressable thing.
 
-That rule is elivagar's, and it is here for elivagar's reason. Auto-detection
-once let two runs of the same binary on the same input do different work with
-nothing in the invocation saying which.
+The second kind is the majority of the eventual measurable surface. A registry
+that could only hold argv is what forced everything else into a second "layer".
 
-A workload NAME is therefore a promise: that its rows are comparable across
-months. Changing an invocation is a new name, never a quiet edit.
+## What the registry holds
 
-## Configuration
+Targets and their feature shapes, plus out-of-git inputs. Nothing else.
 
 ```toml
 [mogwai]
-package = "mogwai-cli"     # cargo -p; the crate carrying the CLI
-bin = "mogwai"             # optional, defaults to the package name
+package = "mogwai-cli"     # cargo -p for the CLI
+bin     = "mogwai"         # optional, defaults to the package name
 
-[mogwai.workloads.screen-probe]
-description = "coarse+refine screen over the standard probe window"
-args = ["screen", "--preset", "standard", "--probe", "--seed", "7"]
-runs = 3
-expect_seconds = 20
-identity_counters = ["parents", "prints"]
+[mogwai.targets.screen_projection]
+package  = "mogwai-lab"    # optional, defaults to [mogwai] package
+example  = "screen_projection_bench"
+features = ["hotpath"]
+
+[bygg.datasets.mnq-tbbo-july]
+path   = "research/market-data/databento/mnqv/2026-07.full.tbbo"
+xxh128 = "280ade40376bd49f50c579bb127f3fbd"
 ```
 
-| Field | Meaning |
+- **CLI surfaces need no registration.** The bin is registered once; the argv is
+  composed at the call site.
+- **Harness surfaces resolve by name** against `[mogwai.targets.*]`. Adding one
+  to the measurable set is registering a target - work you were going to do the
+  moment you wanted to optimize it.
+- **Harnesses take an argv**, like the bin. Every surface here is config-shaped
+  (preset, window, seed, cell), so an argument-free harness would need a new
+  entry per shape: the enumeration trap at one remove.
+- **`--bench`, `--hotpath` and `--alloc` apply uniformly to both kinds.** One row
+  shape, one query surface.
+
+`features` is the field that earns its place. `--hotpath` and `--alloc` are
+inert without the feature that compiles the instrumentation in, so a target that
+has to be *remembered* to be built with `--features hotpath` is a target that
+records profile-less rows. A call-site `-F` appends to the registered list
+rather than replacing it, so an extra feature adds an arm instead of silently
+dropping the shape that makes the mode work at all.
+
+## Why there is no workload registry
+
+The predecessor registered a name per hand-written argv, with `args`, `runs`,
+`expect_seconds`, `timing`, `timing_reason`, `identity_counters`, `corpus` and
+`successor` per entry. It is gone.
+
+The surface it needed to cover is the whole product of commands, presets,
+windows, seeds, cells and flag axes, plus every library-level loop with no
+command at all. That product cannot be enumerated, and a registry that must be
+edited before a new question can be asked will not survive a decade of asking
+them.
+
+pbfhogg is the precedent: roughly 25 commands across several flag axes and ten
+datasets, and its `brokkr.toml` registers **zero** workloads. It registers
+inputs. Invocations are composed at the call site and captured verbatim, and
+pairing rows is a query rather than a name lookup.
+
+What went with it, and why:
+
+| Removed | Why |
 |---|---|
-| `args` | The complete argv, stated in full. Required, non-empty. |
-| `description` | What the workload measures; shown by the bare index. |
-| `runs` | Repeat count for this workload; falls back to the global default. |
-| `expect_seconds` | Rough duration. Never enforced - it makes the cost of a baseline refresh legible before it is paid. |
-| `identity_counters` | Work-size counters that must not move between compared rows. |
-| `timing` | `external` (default) or `self_reported`. Which clock the row's `elapsed_ms` comes from. |
-| `timing_reason` | Why. Required for `self_reported`, optional otherwise. |
-| `corpus` | Names a `[<host>.corpus.*]` archive; absent means a generated workload. |
-| `successor` | Names the workload that replaced this one. Present means retired. |
+| `timing` / `timing_reason` | Redefined what the `elapsed` column MEANS per entry, so one row's elapsed was an external wall and another's was internal phases with setup excluded, and nothing in the row said which. Markers plus `brokkr sidecar --durations` produce the same narrowing with the excluded setup still visible as its own phase, instead of deleted from the record. |
+| `expect_seconds` | An estimate the first stored row supersedes. The history is the expectation. |
+| `runs` | Already a call-site flag everywhere else. How much time to spend is a decision made on the day. |
+| `identity_counters` | Only controlled fatality - undeclared counters were captured and diffed anyway. See below. |
+| `{corpus}` and its token | Datasets, under a different name and without the query surface. |
+| `successor`, name-as-promise | The DB pairs on the captured argv, which is stronger than a name because it cannot lie. |
+| `args` | The invocation belongs at the call site, captured verbatim. |
 
-Measurement flags (`--bench`, `--hotpath`, `--alloc`) are rejected inside
-`args`. Mode is brokkr's axis, independent of the target; baking one into the
-contract would make a single name mean two different measurements.
+**The exposure this accepts:** a harness with an argv can be invoked in a shape
+nobody meant, and no registry entry prevents it. pbfhogg carries the same
+exposure across every command it has. What answers it is not a config constraint
+but the captured argv - an invocation that is not comparable is *visible* in the
+row rather than prevented, and reading rules turn that into a verdict.
 
-## Usage
+## Rows and pairing
 
-```
-brokkr mogwai                      # list the registry (bare-is-an-index)
-brokkr mogwai screen-probe         # run once, store nothing
-brokkr mogwai screen-probe --bench # record a row
-```
+Rows file under the target name, or the bin name for a CLI invocation. The
+invocation is captured verbatim in `cli_args` and `brokkr_args`, and
+`brokkr_args` stays in the pairing key - two different invocations must not
+average into one row.
 
-## Timing
+Selecting an arm is therefore a query. `brokkr results --grep` and `--grep-v`
+run over the whole invocation, which is the only way to select an arm defined by
+an *absent* flag. See `brokkr man results`.
 
-Timing is a PER-WORKLOAD declaration, because which clock is honest is a
-property of the workload rather than of the runner. Both modes scrape stderr
-`key=value` counters; they differ only in where the recorded `elapsed_ms` comes
-from.
+`input_file` stays empty: an input a surface reads is named in its argv, which
+the row already carries, and duplicating it into that column would key pairing
+on the same fact twice.
 
-**`timing = "external"`** (the default) takes brokkr's wall-clock around the
-child, best of N (`run_external_with_counters`; see
-`brokkr man output-channels`). An `elapsed_ms` on stderr is optional here and,
-if present, is kept as an ordinary counter rather than replacing the measured
-wall, so the two numbers stay independently visible.
+## Counters
 
-External is the default for a reason worth stating plainly: it needs NOTHING
-inside mogwai. A baseline can be recorded at any commit whose CLI still parses
-the frozen argv, including retroactively via `--commit`, because `--compare`
-strips `--commit` from the pairing key. History exists before the
-instrumentation does.
-
-**`timing = "self_reported"`** takes the target's own `elapsed_ms=` and
-discards brokkr's wall (`run_external_with_kv`). For a workload with real setup
-that is not the code under test - a multi-gigabyte corpus verified and a cache
-loaded before any measured work - where an external wall would fold that
-constant cost into every reading of the thing being optimized. A missing
-`elapsed_ms=` is a hard error in this mode.
-
-The cost is that history reaches back only to the commit that first emitted the
-line; there is nothing to back-fill from. So `timing_reason` is REQUIRED here
-and the config is rejected without it. The reason is the part that gets
-forgotten, and a narrowed window is exactly the choice someone reverses a year
-later because the entry never said what it excluded or why that was legitimate.
-
-> [!WARNING]
-> Switching a live workload's `timing` changes what its number MEANS, so it is
-> subject to the same new-name rule as `args`. Rows record their clock as
-> `meta.timing`, and `--compare` refuses to read a delta across a switch:
->
-> ```
->     TIMING CHANGED: external -> self_reported - the two walls measure
->     different windows and their delta is not a speedup
-> ```
->
-> One side lacking the key is not a disagreement: rows predating `meta.timing`
-> are all external, which is also the default.
-
-## What a row looks like, and why two columns are empty
-
-Rows are filed under the workload name, following dellingr. Two fields are
-deliberately empty rather than merely unused:
-
-- `input_file`, for a GENERATED workload, because its inputs are part of its
-  definition. It is seeded, not read; duplicating the name into that column
-  would only widen the table. A corpus workload does fill it - with the registry
-  key, per below.
-- `brokkr_args`, because it is a `pair_key` component. The expanded argv is
-  recorded in `cli_args`, where `brokkr results` and `--grep` still see it, but
-  keeping it out of the key is what lets a workload's rows keep pairing across
-  a re-registration that did not change the work.
-
-The guard against a registration that DID change the work is the new-name rule,
-enforced at resolution - not the pairing key.
-
-## Retirement and lineage
-
-When an invocation must change, register a new name and point the old entry at
-it:
-
-```toml
-[mogwai.workloads.screen-probe-v1]
-args = ["screen", "--preset", "standard", "--probe"]
-successor = "screen-probe"
-```
-
-A retired workload refuses to run, and the refusal names its heir. That refusal
-is the point: the alternative is a name that still works but no longer measures
-what its historical rows measured.
-
-The old rows stay queryable (`brokkr results --command screen-probe-v1`). The
-pointer is what lets a reader crossing the rename find the new series instead of
-concluding the history was deleted. A `successor` naming an unregistered
-workload is rejected at parse time - a lineage pointer that leads nowhere is
-worse than none, because it claims the history is reachable and it is not.
-
-## Determinism, and what it is for
-
-Every benched workload is seeded, so the work is bit-identical run to run and
-across both sides of an A/B at the same seed. Variance is scheduler noise only,
-and a wall move outside noise is a finding rather than a shrug.
-
-`identity_counters` is the declared set of work-size counters whose movement
-invalidates a comparison - the classic optimization failure of accidentally
-doing less work and calling it a speedup. It is a declared SET rather than
-"every counter must match" on purpose: counters like `cells_evaluated` are
-exactly what a real optimization is supposed to move, and a blanket rule would
-fire on the first legitimate win, earn a bypass flag, and then be passed
-habitually until it meant nothing.
-
-When a declared counter moves between two compared rows, `--compare` annotates
-the pair:
+Every external run scrapes the winning run's stderr for `key=value` counters -
+free, because stderr is captured either way. `--compare` reports the ones that
+moved:
 
 ```
-    WORK CHANGED: parents 1240 -> 1180 - the wall delta above is not a speedup
+    counters: cells_evaluated 5000 -> 4000, prints 1240 -> 1180
 ```
 
-A counter present on one side and absent on the other is reported the same way -
-that is what instrumentation appearing or vanishing mid-series looks like, and
-it makes the pair no more comparable than a changed value does. A counter absent
-from *both* sides is silent: the declaration may simply be ahead of the
-instrumentation that will emit it.
+A wall on its own cannot distinguish "the code got faster" from "the code did
+less". This is what turns "12% faster" into "12% faster on 8% fewer cells".
 
-The UNDECLARED counters that moved are reported too, on their own non-fatal
-line:
+It is reported, never fatal. A predecessor let an entry declare which counters
+were identity-bearing, making a move in one of them an error rather than a
+reading - but the declaration only controlled fatality, and a gate that fires on
+the first legitimate win (doing less work is what most optimization past the
+free-lane stage actually is) earns a bypass flag and then gets passed out of
+habit. Where a moved count really does invalidate a series - a seeded tape whose
+draw moved - that owes a `TAPE_PROTOCOL_VERSION` bump, which is unconditional
+and cannot be waived per comparison.
 
-```
-    counters: cells_evaluated 5000 -> 4000, sessions 23 -> 23
-```
+Counters from the winning run only: averaging across iterations would hide an
+iteration that differed rather than surface it. `meta.`, `env.` and `prev.`
+pairs are excluded as provenance.
 
-That is the other half of the declared/undeclared split, and it is what turns
-"12% faster" into "12% faster on 8% fewer cells". Recorded and diffed, never
-fatal - a counter the workload did not declare is one it expects a real
-optimization to move.
+## Datasets
 
-Both lines are emitted only for rows that opted into the counter contract, which
-means rows carrying `meta.identity_counters` - written by `brokkr mogwai` on
-every row, even when the declared set is empty. Every project puts numbers in
-its kv; only a declared workload asked for them to be read as a statement about
-whether two runs did the same work. Reading an elivagar row that way would be
-inventing a claim it never made.
+`[<host>.datasets.<name>]` records an out-of-git input: which delivery, and
+whether the file under that path drifted since a row was recorded against it.
+Per host, because deliveries live wherever the machine holding them put them.
 
-The declaration travels WITH each row (`meta.identity_counters`), not read from
-config at comparison time. Re-declaring a workload's set must not retroactively
-change what a comparison between two older rows asserted - those rows were
-produced under the old declaration, and that is the one their delta was judged
-against.
-
-Counters reach the row from the winning run's stderr `key=value` lines. Only the
-winner's are kept: the work is seeded and therefore identical every iteration,
-so averaging across runs would hide an iteration that somehow differed rather
-than surface it.
-
-## Corpus workloads
-
-A workload that reads a delivered archive names it, and marks where the path
-belongs with `{corpus}`:
-
-```toml
-[mogwai.workloads.measure12a]
-args = ["measure", "--input", "{corpus}", "--protocol", "12a"]
-corpus = "july-delivery"
-runs = 1
-expect_seconds = 900
-
-[frigg.corpus.july-delivery]
-path = "research/market-data/july.parquet"
-xxh128 = "..."
-```
-
-The registry is per host because these are multi-gigabyte deliveries that live
-wherever the machine holding them put them. The NAME is not per host, which is
-what keeps a corpus row comparable across machines: rows file their `input_file`
-under the registry key, never the resolved path. That column is a `pair_key`
-component, so filing the path would make the same measurement on two machines
-look like two different benchmarks - while filing the key correctly keeps two
-runs over *different* corpora from pairing.
-
-The token exists so "stated in full" survives a per-host path: the invocation
-still says exactly which input it takes, naming it by registry key rather than
-by a path that means nothing on another machine. The two halves are checked
-against each other at parse time - a `corpus` whose args never place it is
-rejected, and so is a `{corpus}` token with nothing to fill it.
-
-Relative paths resolve against the directory holding `brokkr.toml`; absolute
-paths are allowed, because a delivery commonly sits outside the repository.
-
-`path` may name a **directory**. A delivery is frequently a directory rather
-than a file - a Databento delivery is two `.csv.zst` archives beside
-`manifest.json`, `metadata.json` and `condition.json`, and the consuming CLI
-takes the directory - so `{corpus}` expands to it and the digest covers the
-whole tree. A directory digests as the fold, sorted by path relative to the
-root, of `<relative path>\0<file digest>` over every file beneath it:
-
-- Sorting makes it reproducible; readdir order is a filesystem detail and
-  differs between two copies of identical data.
-- The relative path is inside the fold, so a rename, or two files swapping
-  contents, changes the digest. A delivery is its layout as well as its bytes -
-  the consumer resolves files inside it by name.
-- Per-file digests go through the same mtime cache, so re-running over an
-  unchanged multi-gigabyte delivery is a stat per file, not a re-read.
-- Symlinks are recorded by their target text and never followed: following
-  admits cycles and silently pulls in data from outside the tree being pinned.
-- An empty directory is refused. It is a wrong path far more often than an
-  input, and a digest over nothing verifies happily forever.
-
-Pinning one file *inside* a delivery is not a substitute. It reads as verified
-while covering a 4 KB descriptor and leaving the actual input unpinned.
+This is **not** a substitute for the run's own content verification, which asks a
+different question - whether the data is what the ledger says. This asks whether
+the bytes moved under a recorded row.
 
 > [!IMPORTANT]
 > The digest is **XXH128**, brokkr's standard file hash - not the SHA-256 the
-> delivery manifests carry. Transcribing a manifest is therefore not enough:
-> register the digest brokkr reports. A second hash implementation would buy
-> nothing against what this defends (drift, not tampering) and would forfeit the
-> mtime cache that keeps a multi-gigabyte archive from being re-read every run.
+> delivery manifests carry. There is nothing to transcribe. Register the path,
+> run `brokkr env`, and the entry lists with the digest computed from disk:
+>
+> ```
+> datasets:    mnq-tbbo-july <tick> (no hash configured, actual: 280ade40...)
+> ```
+>
+> Paste it back. A digest that cannot be computed reports why rather than a bare
+> `error`.
 
-`xxh128` is therefore OPTIONAL, and `brokkr env` is where the value comes from.
-Register the path, run `brokkr env`, and the entry appears under `corpus:` with
-the digest computed from the file on disk:
+`path` may name a **directory**. Deliveries frequently are one - a Databento
+delivery is two `.csv.zst` archives beside `manifest.json`, `metadata.json` and
+`condition.json`, and `measure --corpus` takes the directory. A directory
+digests as the fold, sorted by path relative to the root, of
+`<relative path>\0<file digest>` over every file beneath it:
 
-```
-corpus:      july-delivery <tick> (no hash configured, actual: 3f2a...)
-```
+- Sorting makes it reproducible; readdir order is a filesystem detail that
+  differs between two copies of identical data.
+- The relative path is inside the fold, so a rename, or two files swapping
+  contents, changes the digest. A delivery is its layout as well as its bytes.
+- Per-file digests reuse the mtime cache, so an unchanged multi-gigabyte
+  delivery is a stat per file, not a re-read.
+- Symlinks are recorded by target text and never followed.
+- An empty directory is refused - a wrong path far more often than an input.
 
-Paste that back into the entry. A workload over an unregistered digest still
-runs - refusing would leave no way to reach the first run - but warns that it
-is UNVERIFIED on every run. A digest that is registered and does not match
-refuses, as before. This is exactly how `[<host>.datasets.*]` already behaves,
-and the two registries print in the same shape for that reason.
+Pinning one file *inside* a delivery is not a substitute: it reads as verified
+while covering a 4 KB descriptor and leaving the actual input unpinned.
 
-Generated workloads never consult the host registry, so a machine holding no
-deliveries can still run every generated workload without registering anything.
+## Deferred
 
-## Not covered
+**The serving path** is designed for, not measured yet. It is harness-shaped and
+fits the scheme when it arrives. Excluding it on principle, as the retired
+registry did, would have written off the class the entire end state lives in.
 
-**The serving path** (sockets, pacing) is excluded by design, not omission. It
-is a different measurement class - wall-clock- and environment-sensitive - and
-it does not gate the offline work.
+**Mogwai's reading rules** - what makes a delta real - live in mogwai's
+`reference/performance.md`, not here. pbfhogg's are load-bearing and almost
+entirely inapplicable: it is I/O bound, so its error model is drive state, trim
+debt and page cache, while the screen and the walk are CPU and RNG bound.

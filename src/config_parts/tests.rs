@@ -737,6 +737,8 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            path: None,
+            xxh128: None,
         }
     }
 
@@ -777,7 +779,6 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 features: Vec::new(),
                 datasets: host_ds,
                 tilegen: HashMap::new(),
-                corpus: HashMap::new(),
             },
         );
         let config = make_config(hosts);
@@ -842,7 +843,6 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 features: Vec::new(),
                 datasets: host_ds,
                 tilegen: HashMap::new(),
-                corpus: HashMap::new(),
             },
         );
         let config = make_config(hosts);
@@ -894,7 +894,6 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 features: Vec::new(),
                 datasets: host_ds,
                 tilegen: HashMap::new(),
-                corpus: HashMap::new(),
             },
         );
         let config = make_config(hosts);
@@ -1000,7 +999,6 @@ xxhash = "feedface"
             features: Vec::new(),
             datasets: HashMap::new(),
             tilegen: HashMap::new(),
-            corpus: HashMap::new(),
         };
         let mut ds = Dataset {
             origin: None,
@@ -1011,6 +1009,8 @@ xxhash = "feedface"
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            path: None,
+            xxh128: None,
         };
         ds.snapshot.insert(
             "base".into(),
@@ -1041,7 +1041,6 @@ xxhash = "feedface"
             features: Vec::new(),
             datasets: HashMap::new(),
             tilegen: HashMap::new(),
-            corpus: HashMap::new(),
         };
         let mut ds = Dataset {
             origin: None,
@@ -1052,6 +1051,8 @@ xxhash = "feedface"
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            path: None,
+            xxh128: None,
         };
         ds.snapshot.insert(
             "bad key".into(),
@@ -1986,7 +1987,6 @@ debug = true
                 features: Vec::new(),
                 datasets: HashMap::new(),
                 tilegen,
-                corpus: HashMap::new(),
             },
         );
         hosts

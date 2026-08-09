@@ -3,7 +3,7 @@ use std::process::Command;
 
 use std::collections::HashMap;
 
-use crate::config::{CorpusEntry, Dataset, ResolvedPaths};
+use crate::config::{Dataset, ResolvedPaths};
 use crate::project::Project;
 
 /// Environment information for the `dev env` subcommand.
@@ -21,9 +21,6 @@ pub struct EnvInfo {
     pub storage: Vec<StorageInfo>,
     pub tools: Vec<(String, String)>,
     pub datasets: Vec<(String, DatasetStatus)>,
-    /// This host's `[<host>.corpus.*]` archives, same status shape as the
-    /// datasets. Empty on a host that registers none.
-    pub corpus: Vec<(String, DatasetStatus)>,
 }
 
 /// Probed details for a configured storage path.
@@ -74,7 +71,6 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         storage: collect_storage(paths),
         tools: collect_tools(project),
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
-        corpus: check_corpus(&paths.corpus, project_root),
     }
 }
 
@@ -85,7 +81,6 @@ pub fn print(info: &EnvInfo) {
     print_storage(info);
     print_tools(info);
     print_datasets(info);
-    print_corpus(info);
 }
 
 fn print_header(info: &EnvInfo) {
@@ -185,13 +180,6 @@ fn print_tools(info: &EnvInfo) {
 fn print_datasets(info: &EnvInfo) {
     for (i, (name, status)) in info.datasets.iter().enumerate() {
         let label = if i == 0 { "datasets:" } else { "" };
-        println!("{:<12} {}", label, format_dataset(name, status));
-    }
-}
-
-fn print_corpus(info: &EnvInfo) {
-    for (i, (name, status)) in info.corpus.iter().enumerate() {
-        let label = if i == 0 { "corpus:" } else { "" };
         println!("{:<12} {}", label, format_dataset(name, status));
     }
 }
@@ -709,35 +697,6 @@ fn read_git_rev() -> String {
 // Datasets
 // ---------------------------------------------------------------------------
 
-/// Status of this host's `[<host>.corpus.*]` archives.
-///
-/// The point of listing them is the entry with no `xxh128`: the digest is not
-/// something anyone transcribes from a delivery manifest (brokkr hashes with
-/// XXH128, the manifests carry SHA-256), so `Present` here is the workflow -
-/// register the path, run `brokkr env`, paste the digest back.
-///
-/// Corpus paths resolve against the project root, not `data_dir`: a delivery
-/// commonly sits outside the repository entirely.
-fn check_corpus(
-    corpus: &HashMap<String, CorpusEntry>,
-    project_root: &Path,
-) -> Vec<(String, DatasetStatus)> {
-    let mut out: Vec<(String, DatasetStatus)> = Vec::new();
-
-    for (name, entry) in corpus {
-        let path = entry.resolve_path(project_root);
-        let status = if path.exists() {
-            check_hash_status(&path, entry.xxh128.as_deref(), project_root)
-        } else {
-            DatasetStatus::Missing
-        };
-        out.push((name.clone(), status));
-    }
-
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
 fn check_datasets(
     datasets: &HashMap<String, Dataset>,
     data_dir: &Path,
@@ -756,6 +715,22 @@ fn check_datasets(
             data_dir,
             project_root,
         );
+
+        // A plain out-of-git input: one path, one digest, no variants. Listing
+        // it here is how its digest gets registered in the first place - brokkr
+        // hashes XXH128 and delivery manifests carry SHA-256, so there is
+        // nothing to transcribe. Register the path, read the digest off this
+        // line, paste it back. Resolves against the project root rather than
+        // `data_dir`: a delivery commonly sits outside the repository.
+        if let Some(path) = ds.resolve_path(project_root) {
+            let status = if path.exists() {
+                check_hash_status(&path, ds.xxh128.as_deref(), project_root)
+            } else {
+                DatasetStatus::Missing
+            };
+            out.push((name.clone(), status));
+            continue;
+        }
 
         if ds.pbf.is_empty() && ds.osc.is_empty() && ds.pmtiles.is_empty() {
             out.push((name.clone(), DatasetStatus::NoFiles));

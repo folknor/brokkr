@@ -211,7 +211,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "mogwai",
-        summary: "the frozen-workload regression bench: [mogwai] config, lineage, timing",
+        summary: "benching mogwai surfaces: the [mogwai.targets.*] registry, counters, datasets",
         content: include_str!("../docs/projects/mogwai.md"),
         visibility: Visibility::Only(&[Project::Mogwai]),
     },

@@ -51,6 +51,7 @@ pub struct UnknownCargoProfile(pub String);
 // Build configuration
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct BuildConfig {
     pub package: Option<String>,
     pub bin: Option<String>,

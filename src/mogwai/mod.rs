@@ -1,25 +1,31 @@
-//! `brokkr mogwai` - the layer-1 regression bench.
+//! `brokkr mogwai` - benchmark a mogwai surface.
 //!
-//! The durable numbers: one row series per named workload, tracked across
-//! months, paired with the commit that produced them.
+//! Two kinds of surface, one row shape, no layers.
 //!
-//! The unit here is a frozen INVOCATION rather than a subcommand mirror or a
-//! pinned file. Mogwai's commands take config-shaped arguments (preset, window,
-//! seed set, probe mode), so no single file's digest stands for "the work" the
-//! way dellingr's `.lua` does, and mirroring the subcommand set would file rows
-//! under a name that says nothing about which arguments produced them. The argv
-//! stated in full is the contract instead.
+//! ARGV-SHAPED surfaces go through the shipped bin: `gen`, `tick-composition`,
+//! `preflight`, `measure`, `fit`, `cache`, `synth`, `arrival-screen`. A
+//! process, an argv, a wall. Benching them through the release binary measures
+//! what ships - startup and argument parsing included - which is the honest
+//! end-to-end number. None of them are registered: the bin is registered once
+//! and the argv is composed at the call site.
 //!
-//! Two properties of that contract are load-bearing and easy to lose:
+//! HARNESS-SHAPED surfaces go through a cargo example: the matching loop and
+//! divergence seam, the `TickSource` implementations, the arrival draw, the
+//! screen's projection, and eventually the serving path. These have no command
+//! line, so there is nothing an argv registry could hold - the harness itself
+//! is the addressable thing, and `[mogwai.targets.*]` names it.
 //!
-//! - Rows are filed under the WORKLOAD NAME, with the invocation kept out of
-//!   `brokkr_args`. `pair_key` includes `brokkr_args` on purpose - flags like
-//!   `--direct-io` define genuinely different arms elsewhere - so letting the
-//!   expanded argv reach it would mean any edit to `brokkr.toml` silently
-//!   stopped a workload's new rows from pairing with its old ones. Silently,
-//!   because unpaired rows render as two one-sided lines rather than an error.
-//! - The dataset column stays empty for generated workloads, following
-//!   dellingr: the workload is the operation, not a file.
+//! The predecessor registered a name per hand-written argv, which addressed
+//! only the first kind and forced the second - the majority of the eventual
+//! surface - into a "layer 2" that was an escape hatch with a name. What a
+//! registry must hold is only what the invocation cannot recover: which cargo
+//! target a name means, and which features it needs to be built with. That
+//! second half is why `--hotpath` and `--alloc` previously recorded rows with
+//! no profile in them.
+//!
+//! Rows carry the invocation verbatim in `cli_args` and `brokkr_args`, so
+//! pairing is a query - `--grep` selects an arm, including the arm defined by
+//! an *absent* flag - rather than a name lookup that can lie.
 
 pub(crate) mod cmd;
-pub(crate) mod workload;
+pub(crate) mod targets;

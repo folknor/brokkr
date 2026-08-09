@@ -75,30 +75,27 @@ derived one. None of these apply on the no-kv `run_external_ok` path except
 | Harness fn | stdout | stderr kv -> results.db | FIFO -> sidecar.db | Used by |
 |---|---|---|---|---|
 | `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | all `--` run mode (no `--bench`) |
-| `run_external_ok` | captured, dropped | no | yes | every pbfhogg bench command + elivagar `tilegen` |
-| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`); `brokkr mogwai` workloads declaring `timing = "self_reported"` |
-| `run_external_with_counters` | captured, dropped | **yes** (counters only) | yes | `brokkr mogwai` workloads (default `timing = "external"`) |
+| `run_external_ok` | captured, dropped | **yes** (counters only) | yes | every pbfhogg bench command + elivagar `tilegen` + `brokkr mogwai` |
+| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
 | `run_hotpath_capture` (stored via `run_hotpath`) | captured | via JSON report | yes | `--hotpath` / `--alloc`, all projects |
 
-`run_external_with_counters` is the third external path, and the only one that
-takes half of each of the other two. `run_external_ok` times the child from
-outside but never reads stderr; `run_external_with_kv_raw` reads stderr but then
-*believes* its `elapsed_ms` and discards the external wall. The counters path
-keeps brokkr's wall and reads stderr for the work-size counters beside it.
+The two external paths differ in exactly one thing: **which clock the recorded
+`elapsed_ms` comes from.** `run_external_ok` measures the child from outside;
+`run_external_with_kv_raw` believes the target's own `elapsed_ms=` and discards
+the external wall.
 
-The distinction matters for what a comparison can assert. A wall on its own
-cannot distinguish "the code got faster" from "the code did less"; the counters
-are what answer that. And because the wall is brokkr's, a target that
-self-reports nothing at all still produces a usable row - so a baseline can be
-recorded at any commit whose CLI parses the invocation, including retroactively.
-On this path a stderr `elapsed_ms` is optional and, if present, is kept as an
-ordinary counter rather than replacing the measured wall.
+Both scrape stderr for `key=value` counters, because stderr is captured either
+way and the scrape is free. A wall on its own cannot distinguish "the code got
+faster" from "the code did less"; the counters are what answer that, and they
+drive `--compare`'s `counters:` line. On the external path a stderr `elapsed_ms`
+is kept as an ordinary counter rather than replacing the measured wall - that
+substitution is the whole difference between the two paths, and it should not
+happen by accident.
 
-A mogwai workload picks between this path and `run_external_with_kv` per entry,
-via `timing` in its registration - see `brokkr man mogwai timing`. The choice is
-recorded on the row as `meta.timing`, so `--compare` can refuse a delta between
-two rows measured on different clocks.
+There was briefly a third path combining an external wall with counter scraping.
+It differed from `run_external_ok` by a bool that the shared body already took,
+so it is gone: scraping is now unconditional.
 
 Two consequences worth internalizing:
 

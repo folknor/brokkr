@@ -1166,6 +1166,53 @@ pub struct Dataset {
     /// because it's the CLI sentinel for the legacy top-level data.
     #[serde(default)]
     pub snapshot: HashMap<String, Snapshot>,
+    /// A plain out-of-git input: one path, one digest, no variant structure.
+    ///
+    /// The map-data fields above describe a dataset that HAS variants - a PBF
+    /// in three forms, a run of OSC deltas anchored to it. A delivered archive
+    /// has none of that: it is a path, and the only question worth asking is
+    /// whether what is under it drifted since a row was recorded against it.
+    ///
+    /// May name a DIRECTORY. Deliveries frequently are one (a Databento
+    /// delivery is two `.csv.zst` archives beside three JSON descriptors, and
+    /// the consuming CLI takes the directory), and a pin that could only name
+    /// one file inside it would leave the real input unpinned while reading as
+    /// verified. See [`crate::preflight::compute_xxh128_tree`].
+    ///
+    /// This is not a substitute for the run's own content verification, which
+    /// asks a different question - whether the data is what the ledger says.
+    /// This asks whether the bytes moved under a recorded row.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Expected XXH128 digest of [`Dataset::path`].
+    ///
+    /// XXH128 is brokkr's standard file hash, NOT the SHA-256 that delivery
+    /// manifests carry, so transcribing a manifest is not enough - register the
+    /// digest brokkr reports. A second hash implementation would buy nothing
+    /// against what this defends (drift, not tampering) and would forfeit the
+    /// mtime cache that keeps a multi-gigabyte delivery from being re-read.
+    ///
+    /// Optional, because the digest has to be read off this machine before it
+    /// can be registered: `brokkr env` lists an entry without one and prints
+    /// the digest computed from disk, ready to paste back.
+    #[serde(default)]
+    pub xxh128: Option<String>,
+}
+
+impl Dataset {
+    /// Absolute path to a plain input, if this dataset is one.
+    ///
+    /// Relative registrations resolve against the directory holding
+    /// `brokkr.toml`; absolute ones pass through, because a delivery commonly
+    /// sits outside the repository.
+    pub fn resolve_path(&self, project_root: &Path) -> Option<PathBuf> {
+        let path = self.path.as_ref()?;
+        Some(if path.is_absolute() {
+            path.clone()
+        } else {
+            project_root.join(path)
+        })
+    }
 }
 
 /// One ocean input, in elivagar's `--ocean` spec spelling.
@@ -1324,61 +1371,6 @@ pub struct HostConfig {
     /// than an implicit bare run.
     #[serde(default)]
     pub tilegen: HashMap<String, TilegenConfig>,
-    /// Delivered archives a corpus workload reads, keyed by the name the
-    /// workload references (`[<host>.corpus.<name>]`).
-    ///
-    /// Per-host because these are multi-gigabyte deliveries that live wherever
-    /// the machine holding them put them - unlike a `[mogwai.workloads.*]`
-    /// entry, which is identical everywhere. The NAME is what a workload
-    /// references and what its rows are filed under, so a row stays comparable
-    /// across hosts even though the path is not.
-    #[serde(default)]
-    pub corpus: HashMap<String, CorpusEntry>,
-}
-
-/// One delivered archive: where it is on this host, and what it must contain.
-///
-/// The digest is what makes a corpus row mean something a month later. These
-/// are inputs nobody edits, but they are also inputs that get re-delivered,
-/// re-exported and re-downloaded, and a silently different archive under the
-/// same name would leave every historical row describing work that no longer
-/// exists.
-///
-/// The digest is XXH128 - brokkr's standard file hash - and NOT the SHA-256 the
-/// delivery manifests carry. Adding SHA-256 for this would mean a second hash
-/// implementation for no gain in what is being defended against (drift, not
-/// tampering), and it would forfeit the mtime cache that keeps a multi-gigabyte
-/// archive from being re-read on every run. Transcribing a delivery manifest is
-/// therefore not enough: register the digest brokkr reports. `brokkr env` is
-/// where it reports it: an entry with no `xxh128` is listed there with the
-/// digest computed from the file on disk, ready to paste back into the entry.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CorpusEntry {
-    /// Path to the archive. Relative paths resolve against the directory
-    /// holding `brokkr.toml`; absolute paths are allowed, because a delivery
-    /// commonly sits outside the repository.
-    pub path: PathBuf,
-    /// Expected XXH128 hex digest.
-    ///
-    /// Optional so a delivery can be registered before its digest is known -
-    /// the archive is multi-gigabyte and the digest is not something anyone
-    /// types from memory. Absent means the workload runs UNVERIFIED and says
-    /// so; `brokkr env` prints the digest to fill in.
-    #[serde(default)]
-    pub xxh128: Option<String>,
-}
-
-impl CorpusEntry {
-    /// Absolute path to the archive on this host. Absolute registrations pass
-    /// through: a delivery commonly lives outside the repository.
-    pub fn resolve_path(&self, project_root: &Path) -> PathBuf {
-        if self.path.is_absolute() {
-            self.path.clone()
-        } else {
-            project_root.join(&self.path)
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1712,27 +1704,24 @@ impl DellingrConfig {
     }
 }
 
-/// The placeholder a corpus workload's `args` uses to mark where the resolved
-/// archive path belongs.
-pub const CORPUS_TOKEN: &str = "{corpus}";
-
 /// Mogwai-specific configuration from `[mogwai]` in brokkr.toml.
 ///
-/// Drives `brokkr mogwai`, the layer-1 regression bench: the durable numbers
-/// tracked across months, one row series per named workload.
+/// Drives `brokkr mogwai`. The registry holds TARGETS and their feature shapes,
+/// and nothing else - no workloads, no frozen invocations.
 ///
-/// Unlike dellingr's registry - which pins *files* - a mogwai workload pins an
-/// INVOCATION. Mogwai's commands take config-shaped arguments (preset, window,
-/// seed set, probe mode), so there is no single file whose digest stands for
-/// "the work". The frozen argv is the contract instead, and it is stated in
-/// full: nothing defaulted, nothing auto-detected. That rule is elivagar's, and
-/// it is here for elivagar's reason - auto-detection once let two runs of the
-/// same binary on the same input do different work with nothing in the
-/// invocation saying which.
+/// The predecessor registered a name per hand-written argv, which could only
+/// address the argv-shaped surfaces. Mogwai's measurable set is the product of
+/// commands, presets, windows, seeds, cells and flag axes, plus every
+/// library-level loop that has no command line at all; that product cannot be
+/// enumerated, and everything it could not hold got pushed into a second
+/// "layer" that was an escape hatch with a name rather than an architecture.
 ///
-/// A workload NAME is therefore a promise that its rows are comparable across
-/// months. Changing an invocation is a new name, never a quiet edit - see
-/// [`MogwaiWorkload::successor`] for how a superseded name keeps its lineage.
+/// pbfhogg is the precedent: ~25 commands over several flag axes and ten
+/// datasets, and it registers ZERO workloads. It registers inputs. Invocations
+/// are composed at the call site and captured verbatim, and pairing rows is a
+/// query rather than a name lookup. What a registry must hold is only what
+/// cannot be recovered from the invocation: which cargo target a name means,
+/// and which features it needs to be built with.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MogwaiConfig {
@@ -1741,136 +1730,48 @@ pub struct MogwaiConfig {
     #[serde(default)]
     pub package: Option<String>,
     /// The bin target to build and run. Defaults to `package` when absent.
+    ///
+    /// Registered ONCE. Every argv-shaped surface goes through this binary, so
+    /// the argv is composed at the call site rather than enumerated here.
     #[serde(default)]
     pub bin: Option<String>,
-    /// Registered workloads, keyed by the name `brokkr mogwai <NAME>` takes.
+    /// Harness targets, keyed by the name `brokkr mogwai <NAME>` takes.
+    ///
+    /// These are the surfaces with no command line - the matching loop, the
+    /// tick sources, the arrival draw, the screen's projection - where the
+    /// harness itself is the addressable thing. They are the majority of the
+    /// eventual measurable surface, which is why they are what the registry
+    /// holds.
     #[serde(default)]
-    pub workloads: BTreeMap<String, MogwaiWorkload>,
+    pub targets: BTreeMap<String, MogwaiTarget>,
 }
 
-/// Which clock a workload's `elapsed_ms` comes from.
+/// One harness target: which cargo example, and the features it needs.
 ///
-/// Brokkr's two external harness paths disagree about this, and the choice is a
-/// property of the WORKLOAD rather than of the runner - so the registry states
-/// it, with its reason, rather than the command picking one for everybody.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MogwaiTiming {
-    /// Brokkr's wall-clock around the child process. The DEFAULT.
-    ///
-    /// Needs nothing inside mogwai, which is what lets a baseline be recorded
-    /// at any commit whose CLI still parses the frozen argv - including
-    /// retroactively via `--commit`, before any self-reporting existed. Setup
-    /// cost is inside the window, which for a whole CLI invocation is usually
-    /// the honest reading.
-    #[default]
-    External,
-    /// The target's own `elapsed_ms=` on stderr; brokkr's wall is discarded.
-    ///
-    /// For a workload with real setup that is not the code under test - a
-    /// multi-gigabyte corpus verified and a walk cache loaded before any
-    /// measured work - where an external wall would fold that constant cost
-    /// into every reading of the thing actually being optimized.
-    ///
-    /// The cost is that history reaches back only to the commit that first
-    /// emitted the line: there is nothing to back-fill from. Choose it when the
-    /// setup genuinely dominates, not by default.
-    SelfReported,
-}
-
-impl MogwaiTiming {
-    /// The value as it is written in `brokkr.toml`, for messages.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::External => "external",
-            Self::SelfReported => "self_reported",
-        }
-    }
-}
-
-/// One frozen workload: the exact argv, plus the metadata that makes its rows
-/// interpretable months later.
+/// Registering a target is the work you were going to do the moment you wanted
+/// to optimize the surface anyway. It carries no invocation: a harness takes an
+/// argv exactly like the bin does, because every surface here is config-shaped
+/// (preset, window, seed, cell) and an argument-free harness would need a new
+/// registry entry per shape - the enumeration trap again at one remove.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MogwaiWorkload {
-    /// What this workload measures, for `brokkr mogwai` with no arguments.
+pub struct MogwaiTarget {
+    /// The cargo package owning the example (`-p`). Falls back to
+    /// `[mogwai] package`.
     #[serde(default)]
-    pub description: Option<String>,
-    /// The complete argv passed to the mogwai binary, stated in full.
+    pub package: Option<String>,
+    /// The `[[example]]` target name, as registered in that crate's
+    /// `Cargo.toml`. Required.
+    pub example: String,
+    /// Cargo features to build the example with.
     ///
-    /// Measurement flags (`--bench`, `--hotpath`, `--alloc`) do not belong
-    /// here: the mode is brokkr's axis, independent of the target, and baking
-    /// one into the contract would make a workload mean two different things
-    /// depending on how it was invoked.
-    pub args: Vec<String>,
-    /// Repeat count for this workload. Absent falls back to the global default.
-    ///
-    /// Per-workload because the right N is a property of the workload's
-    /// duration, not of the runner: three runs of a seconds-scale screen probe
-    /// is a coffee break, three runs of a month-long walk is an evening.
+    /// The reason a feature list belongs in the registry rather than at the
+    /// call site: `--hotpath` and `--alloc` are useless without the feature
+    /// that compiles the instrumentation in, and the predecessor recorded
+    /// profile-less rows for exactly that reason - it named a bin with no
+    /// feature shape attached. A target plus its features is the fix.
     #[serde(default)]
-    pub runs: Option<usize>,
-    /// Rough expected duration, recorded so the cost of a baseline refresh is
-    /// legible before it is paid. Never enforced - it is documentation that
-    /// lives next to the thing it describes.
-    #[serde(default)]
-    pub expect_seconds: Option<u64>,
-    /// Which clock this workload's `elapsed_ms` comes from. Defaults to
-    /// [`MogwaiTiming::External`].
-    ///
-    /// Changing it changes what the number MEANS, so it is subject to the
-    /// same new-name rule as `args`: a series must not switch clocks mid-way.
-    /// Rows record the choice (`meta.timing`) and `--compare` refuses to read a
-    /// delta across a switch, which catches the edit that forgot the rule.
-    #[serde(default)]
-    pub timing: MogwaiTiming,
-    /// Why this workload's timing is what it is.
-    ///
-    /// REQUIRED for `self_reported` and optional otherwise. Not decoration: the
-    /// reason is the part that gets forgotten, and a self-reported window is
-    /// exactly the choice someone reverses a year later because the entry does
-    /// not say what it was excluding or why that was legitimate.
-    #[serde(default)]
-    pub timing_reason: Option<String>,
-    /// Work-size counters that MUST be identical between any two compared rows.
-    ///
-    /// Every benched workload is seeded, so the work is bit-identical run to
-    /// run and across both sides of an A/B at the same seed. A counter listed
-    /// here is one whose movement means the comparison is invalid - the classic
-    /// optimization failure of accidentally doing less work and calling it a
-    /// speedup.
-    ///
-    /// Deliberately a declared SET rather than "all counters must match":
-    /// counters like `cells_evaluated` are exactly what a real optimization is
-    /// supposed to move, and a blanket rule would fire on the first legitimate
-    /// win, earn a bypass flag, and then be passed habitually until it meant
-    /// nothing. Counters absent from this list are still recorded and diffed,
-    /// just never fatal.
-    #[serde(default)]
-    pub identity_counters: Vec<String>,
-    /// The delivered archive this workload reads, naming a `[<host>.corpus.*]`
-    /// entry.
-    ///
-    /// Absent means a GENERATED workload: self-contained given its preset,
-    /// window and seeds, with no file on disk. Present makes it a CORPUS
-    /// workload, and the resolved absolute path is substituted for the
-    /// `{corpus}` token in `args`.
-    ///
-    /// The token exists so that "stated in full" survives a per-host path. The
-    /// invocation still says exactly which input it takes - it names it by
-    /// registry key rather than by a path that means nothing on another
-    /// machine.
-    #[serde(default)]
-    pub corpus: Option<String>,
-    /// The workload that replaced this one, when its invocation had to change.
-    ///
-    /// Present means RETIRED: the entry no longer runs, and names its heir.
-    /// The rows stay, and the pointer is what lets a comparison across the
-    /// rename report the lineage instead of silently finding nothing. Without
-    /// it a renamed workload's history is unreachable, because nothing on disk
-    /// records that the two names describe the same measurement.
-    #[serde(default)]
-    pub successor: Option<String>,
+    pub features: Vec<String>,
 }
 
 impl MogwaiConfig {
@@ -1879,27 +1780,20 @@ impl MogwaiConfig {
         self.bin.as_deref().or(self.package.as_deref())
     }
 
-    /// Look up a workload by name, with an error listing the live ones.
-    ///
-    /// Retired entries are excluded from the suggestion list but resolve to
-    /// their own dedicated error in [`crate::mogwai::workload::resolve`], which
-    /// can name the successor.
-    pub fn workload(&self, name: &str) -> Result<&MogwaiWorkload, DevError> {
-        self.workloads.get(name).ok_or_else(|| {
-            let known: Vec<&str> = self
-                .workloads
-                .iter()
-                .filter(|(_, w)| w.successor.is_none())
-                .map(|(k, _)| k.as_str())
-                .collect();
+    /// Look up a harness target by name, with an error listing the registered
+    /// ones.
+    pub fn target(&self, name: &str) -> Result<&MogwaiTarget, DevError> {
+        self.targets.get(name).ok_or_else(|| {
+            let known: Vec<&str> = self.targets.keys().map(String::as_str).collect();
             let known = if known.is_empty() {
                 "none registered".to_owned()
             } else {
                 known.join(", ")
             };
             DevError::Config(format!(
-                "unknown workload {name:?}\n  registered: {known}\n  \
-                 add it as [mogwai.workloads.{name}] in brokkr.toml"
+                "unknown target {name:?}\n  registered: {known}\n  \
+                 add it as [mogwai.targets.{name}] in brokkr.toml, or drop the \
+                 name to run the CLI: brokkr mogwai -- <args>"
             ))
         })
     }
@@ -2037,10 +1931,6 @@ pub struct ResolvedPaths {
     pub drives: Option<DriveConfig>,
     pub features: Vec<String>,
     pub datasets: HashMap<String, Dataset>,
-    /// This host's `[<host>.corpus.*]` archives. Carried here so `brokkr env`
-    /// can report their on-disk status beside the datasets without reloading
-    /// the config.
-    pub corpus: HashMap<String, CorpusEntry>,
 }
 
 // ---------------------------------------------------------------------------

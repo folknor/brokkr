@@ -46,7 +46,6 @@ mod tests {
             drives: None,
             features: Vec::new(),
             datasets,
-            corpus: HashMap::new(),
         }
     }
 
@@ -60,6 +59,8 @@ mod tests {
             osc: HashMap::new(),
             pmtiles: HashMap::new(),
             snapshot: HashMap::new(),
+            path: None,
+            xxh128: None,
         }
     }
 
