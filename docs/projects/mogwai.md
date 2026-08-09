@@ -49,6 +49,7 @@ identity_counters = ["parents", "prints"]
 | `runs` | Repeat count for this workload; falls back to the global default. |
 | `expect_seconds` | Rough duration. Never enforced - it makes the cost of a baseline refresh legible before it is paid. |
 | `identity_counters` | Work-size counters that must not move between compared rows. |
+| `corpus` | Names a `[<host>.corpus.*]` archive; absent means a generated workload. |
 | `successor` | Names the workload that replaced this one. Present means retired. |
 
 Measurement flags (`--bench`, `--hotpath`, `--alloc`) are rejected inside
@@ -66,7 +67,11 @@ brokkr mogwai screen-probe --bench # record a row
 ## Timing
 
 Workloads are timed EXTERNALLY - brokkr's wall-clock around the child, best of
-N - not from a self-reported `elapsed_ms` on stderr.
+N - not from a self-reported `elapsed_ms` on stderr. Counters are still scraped
+from stderr beside it (`run_external_with_counters`; see
+`brokkr man output-channels`). An `elapsed_ms` on stderr is optional here, and
+if present is kept as an ordinary counter rather than replacing the measured
+wall, so the two numbers stay independently visible.
 
 These are whole CLI invocations whose setup cost is part of what is being
 measured. External timing also means a baseline can be recorded at any commit
@@ -83,9 +88,10 @@ so in its registration rather than change this default underneath the rest.
 Rows are filed under the workload name, following dellingr. Two fields are
 deliberately empty rather than merely unused:
 
-- `input_file`, because a generated workload's inputs are part of its
+- `input_file`, for a GENERATED workload, because its inputs are part of its
   definition. It is seeded, not read; duplicating the name into that column
-  would only widen the table.
+  would only widen the table. A corpus workload does fill it - with the registry
+  key, per below.
 - `brokkr_args`, because it is a `pair_key` component. The expanded argv is
   recorded in `cli_args`, where `brokkr results` and `--grep` still see it, but
   keeping it out of the key is what lets a workload's rows keep pairing across
@@ -129,20 +135,76 @@ exactly what a real optimization is supposed to move, and a blanket rule would
 fire on the first legitimate win, earn a bypass flag, and then be passed
 habitually until it meant nothing.
 
-> [!NOTE]
-> The field is validated and stored today, but nothing enforces it yet -
-> capturing counters requires a harness path that keeps external timing while
-> scraping stderr `key=value`, which does not exist yet (`run_external` ignores
-> stderr; `run_external_with_kv` switches to self-reported timing). Until both
-> land, `identity_counters` is a declaration, not a gate.
+When a declared counter moves between two compared rows, `--compare` annotates
+the pair:
 
-## Not covered yet
+```
+    WORK CHANGED: parents 1240 -> 1180 - the wall delta above is not a speedup
+```
 
-- **Corpus workloads.** Workloads reading delivered archives (`measure12a`,
-  `fit`, `preflight`, `characterize-pair`) need a per-host, hash-pinned path
-  registry. Only generated workloads - self-contained given preset, window and
-  seeds - are supported today.
-- **Work-size counters**, per the note above.
-- **The serving path** (sockets, pacing) is excluded by design, not omission. It
-  is a different measurement class, wall-clock- and environment-sensitive, and
-  it does not gate the offline work.
+A counter present on one side and absent on the other is reported the same way -
+that is what instrumentation appearing or vanishing mid-series looks like, and
+it makes the pair no more comparable than a changed value does. A counter absent
+from *both* sides is silent: the declaration may simply be ahead of the
+instrumentation that will emit it.
+
+The declaration travels WITH each row (`meta.identity_counters`), not read from
+config at comparison time. Re-declaring a workload's set must not retroactively
+change what a comparison between two older rows asserted - those rows were
+produced under the old declaration, and that is the one their delta was judged
+against.
+
+Counters reach the row from the winning run's stderr `key=value` lines. Only the
+winner's are kept: the work is seeded and therefore identical every iteration,
+so averaging across runs would hide an iteration that somehow differed rather
+than surface it.
+
+## Corpus workloads
+
+A workload that reads a delivered archive names it, and marks where the path
+belongs with `{corpus}`:
+
+```toml
+[mogwai.workloads.measure12a]
+args = ["measure", "--input", "{corpus}", "--protocol", "12a"]
+corpus = "july-delivery"
+runs = 1
+expect_seconds = 900
+
+[frigg.corpus.july-delivery]
+path = "research/market-data/july.parquet"
+xxh128 = "..."
+```
+
+The registry is per host because these are multi-gigabyte deliveries that live
+wherever the machine holding them put them. The NAME is not per host, which is
+what keeps a corpus row comparable across machines: rows file their `input_file`
+under the registry key, never the resolved path. That column is a `pair_key`
+component, so filing the path would make the same measurement on two machines
+look like two different benchmarks - while filing the key correctly keeps two
+runs over *different* corpora from pairing.
+
+The token exists so "stated in full" survives a per-host path: the invocation
+still says exactly which input it takes, naming it by registry key rather than
+by a path that means nothing on another machine. The two halves are checked
+against each other at parse time - a `corpus` whose args never place it is
+rejected, and so is a `{corpus}` token with nothing to fill it.
+
+Relative paths resolve against the directory holding `brokkr.toml`; absolute
+paths are allowed, because a delivery commonly sits outside the repository.
+
+> [!IMPORTANT]
+> The digest is **XXH128**, brokkr's standard file hash - not the SHA-256 the
+> delivery manifests carry. Transcribing a manifest is therefore not enough:
+> register the digest brokkr reports. A second hash implementation would buy
+> nothing against what this defends (drift, not tampering) and would forfeit the
+> mtime cache that keeps a multi-gigabyte archive from being re-read every run.
+
+Generated workloads never consult the host registry, so a machine holding no
+deliveries can still run every generated workload without registering anything.
+
+## Not covered
+
+**The serving path** (sockets, pacing) is excluded by design, not omission. It
+is a different measurement class - wall-clock- and environment-sensitive - and
+it does not gate the offline work.

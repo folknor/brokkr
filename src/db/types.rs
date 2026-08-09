@@ -10,6 +10,15 @@ use crate::error::DevError;
 // Key-value pairs
 // ---------------------------------------------------------------------------
 
+/// The metadata key carrying a workload's declared identity-bearing counters,
+/// as a comma-separated list of counter names.
+///
+/// Written by the workload runner at record time and read back by `--compare`.
+/// It lives on the ROW rather than being looked up in config at comparison
+/// time, so re-declaring a workload's set cannot retroactively change what a
+/// comparison between two older rows asserted.
+pub const IDENTITY_COUNTERS_KEY: &str = "meta.identity_counters";
+
 /// A typed key-value pair for benchmark metadata and subprocess metrics.
 #[derive(Clone)]
 pub struct KvPair {

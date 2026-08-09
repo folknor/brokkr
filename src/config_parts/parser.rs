@@ -839,6 +839,29 @@ fn parse_mogwai(
             )));
         }
 
+        // The token and the registration have to agree in both directions: a
+        // corpus workload whose argv never places the path would run against
+        // whatever default the CLI picks, and a `{corpus}` token with nothing
+        // to fill it would reach the child literally.
+        let has_token = workload.args.iter().any(|a| a.contains(CORPUS_TOKEN));
+        match (&workload.corpus, has_token) {
+            (Some(corpus), false) => {
+                return Err(DevError::Config(format!(
+                    "[mogwai.workloads.{name}] names corpus {corpus:?} but its \
+                     args never place it - put {CORPUS_TOKEN} where the \
+                     archive path belongs."
+                )));
+            }
+            (None, true) => {
+                return Err(DevError::Config(format!(
+                    "[mogwai.workloads.{name}].args uses {CORPUS_TOKEN} but the \
+                     workload declares no `corpus` - the token would be passed \
+                     to the child literally."
+                )));
+            }
+            _ => {}
+        }
+
         for counter in &workload.identity_counters {
             if counter.trim().is_empty() {
                 return Err(DevError::Config(format!(

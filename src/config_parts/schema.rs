@@ -1324,6 +1324,41 @@ pub struct HostConfig {
     /// than an implicit bare run.
     #[serde(default)]
     pub tilegen: HashMap<String, TilegenConfig>,
+    /// Delivered archives a corpus workload reads, keyed by the name the
+    /// workload references (`[<host>.corpus.<name>]`).
+    ///
+    /// Per-host because these are multi-gigabyte deliveries that live wherever
+    /// the machine holding them put them - unlike a `[mogwai.workloads.*]`
+    /// entry, which is identical everywhere. The NAME is what a workload
+    /// references and what its rows are filed under, so a row stays comparable
+    /// across hosts even though the path is not.
+    #[serde(default)]
+    pub corpus: HashMap<String, CorpusEntry>,
+}
+
+/// One delivered archive: where it is on this host, and what it must contain.
+///
+/// The digest is what makes a corpus row mean something a month later. These
+/// are inputs nobody edits, but they are also inputs that get re-delivered,
+/// re-exported and re-downloaded, and a silently different archive under the
+/// same name would leave every historical row describing work that no longer
+/// exists.
+///
+/// The digest is XXH128 - brokkr's standard file hash - and NOT the SHA-256 the
+/// delivery manifests carry. Adding SHA-256 for this would mean a second hash
+/// implementation for no gain in what is being defended against (drift, not
+/// tampering), and it would forfeit the mtime cache that keeps a multi-gigabyte
+/// archive from being re-read on every run. Transcribing a delivery manifest is
+/// therefore not enough: register the digest brokkr reports.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorpusEntry {
+    /// Path to the archive. Relative paths resolve against the directory
+    /// holding `brokkr.toml`; absolute paths are allowed, because a delivery
+    /// commonly sits outside the repository.
+    pub path: PathBuf,
+    /// Expected XXH128 hex digest.
+    pub xxh128: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1657,6 +1692,10 @@ impl DellingrConfig {
     }
 }
 
+/// The placeholder a corpus workload's `args` uses to mark where the resolved
+/// archive path belongs.
+pub const CORPUS_TOKEN: &str = "{corpus}";
+
 /// Mogwai-specific configuration from `[mogwai]` in brokkr.toml.
 ///
 /// Drives `brokkr mogwai`, the layer-1 regression bench: the durable numbers
@@ -1732,6 +1771,20 @@ pub struct MogwaiWorkload {
     /// just never fatal.
     #[serde(default)]
     pub identity_counters: Vec<String>,
+    /// The delivered archive this workload reads, naming a `[<host>.corpus.*]`
+    /// entry.
+    ///
+    /// Absent means a GENERATED workload: self-contained given its preset,
+    /// window and seeds, with no file on disk. Present makes it a CORPUS
+    /// workload, and the resolved absolute path is substituted for the
+    /// `{corpus}` token in `args`.
+    ///
+    /// The token exists so that "stated in full" survives a per-host path. The
+    /// invocation still says exactly which input it takes - it names it by
+    /// registry key rather than by a path that means nothing on another
+    /// machine.
+    #[serde(default)]
+    pub corpus: Option<String>,
     /// The workload that replaced this one, when its invocation had to change.
     ///
     /// Present means RETIRED: the entry no longer runs, and names its heir.

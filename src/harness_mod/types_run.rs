@@ -363,6 +363,53 @@ impl BenchHarness {
         cwd: &Path,
         ok_codes: &[i32],
     ) -> Result<BenchResult, DevError> {
+        self.run_external_inner(config, program, args, cwd, ok_codes, false)
+    }
+
+    /// External wall-clock timing PLUS stderr `key=value` counters.
+    ///
+    /// The third external path, and the only one that combines the two halves
+    /// the other two split between them: `run_external` times the child from
+    /// outside but never looks at stderr, while `run_external_with_kv` reads
+    /// stderr but then *believes* its `elapsed_ms` and discards the external
+    /// wall entirely.
+    ///
+    /// A workload wanting both wants it for a specific reason: the wall should
+    /// be brokkr's, so that a baseline can be recorded at any commit whose CLI
+    /// still parses the invocation - including retroactively, with nothing
+    /// self-reporting inside the target yet - while the counters describe how
+    /// much WORK that wall covered. Comparing two walls without the work sizes
+    /// beside them cannot distinguish "the code got faster" from "the code did
+    /// less".
+    ///
+    /// `elapsed_ms` on stderr is therefore optional here, unlike the kv path:
+    /// if the target reports one it is kept as a counter like any other rather
+    /// than replacing the measured wall, so the two numbers stay independently
+    /// visible instead of one silently overwriting the other.
+    pub fn run_external_with_counters(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+    ) -> Result<BenchResult, DevError> {
+        self.run_external_inner(config, program, args, cwd, &[], true)
+    }
+
+    /// Shared body of the external-timing paths.
+    ///
+    /// `capture_kv` scrapes the winning run's stderr for counters. The winner
+    /// is chosen by external wall either way - the counters never influence
+    /// which iteration is "best", they only describe it.
+    fn run_external_inner(
+        &self,
+        config: &BenchConfig,
+        program: &Path,
+        args: &[&str],
+        cwd: &Path,
+        ok_codes: &[i32],
+        capture_kv: bool,
+    ) -> Result<BenchResult, DevError> {
         let scratch_dir = &self.db_dir;
         use crate::sidecar;
 
@@ -373,6 +420,7 @@ impl BenchHarness {
 
         let mut best_ms: Option<i64> = None;
         let mut best_run_idx: usize = 0;
+        let mut best_stderr: Vec<u8> = Vec::new();
         let mut last_pid: u32 = 0;
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
@@ -447,6 +495,9 @@ impl BenchHarness {
             if best_ms.is_none_or(|best| ms < best) {
                 best_ms = Some(ms);
                 best_run_idx = i;
+                if capture_kv {
+                    best_stderr = captured.stderr;
+                }
             }
         }
 
@@ -455,10 +506,21 @@ impl BenchHarness {
         let elapsed_ms =
             best_ms.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
+        // Counters from the winning run only. Averaging them across iterations
+        // would be wrong for the property they exist to support: the work is
+        // seeded and therefore identical every iteration, so a mean would hide
+        // a run that somehow differed rather than surface it.
+        let kv = if capture_kv {
+            let (_self_reported_us, kv) = parse_kv_lines_us(&best_stderr);
+            kv
+        } else {
+            Vec::new()
+        };
+
         let bench_result = BenchResult {
             elapsed_ms,
             elapsed_us: None,
-            kv: Vec::new(),
+            kv,
             iterations: walls,
             distribution: None,
             hotpath: None,

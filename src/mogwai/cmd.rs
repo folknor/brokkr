@@ -23,8 +23,12 @@ pub(crate) fn run(req: &MeasureRequest, name: Option<&str>) -> Result<(), DevErr
         return Ok(());
     };
 
-    // Resolve before building: a typo'd or retired name should cost nothing.
-    let resolved = workload::resolve(req.dev_config, name)?;
+    // Resolve before building: a typo'd name, a retired one, or a drifted
+    // corpus should cost nothing. Hashing a multi-gigabyte delivery ahead of a
+    // release build looks backwards, but `verify_file_hash` is mtime-cached, so
+    // it is a stat on every run after the first.
+    let hostname = crate::config::hostname()?;
+    let resolved = workload::resolve(req.dev_config, &hostname, req.project_root, name)?;
     let args = resolved.args();
 
     if req.dry_run {
@@ -71,17 +75,35 @@ pub(crate) fn run(req: &MeasureRequest, name: Option<&str>) -> Result<(), DevErr
     //   rows keep pairing across a re-registration that did not change the
     //   work. The guard against a registration that DID change the work is the
     //   new-name rule, enforced at resolution, not the pairing key.
+    // The identity-counter declaration travels WITH the run, rather than being
+    // read from config at comparison time. A workload that re-declares its set
+    // next month must not retroactively change what a comparison between two
+    // old rows asserts - the rows were produced under the old declaration, and
+    // that is the one their delta was judged against.
+    let metadata = if resolved.entry.identity_counters.is_empty() {
+        vec![]
+    } else {
+        vec![crate::db::KvPair::text(
+            crate::db::IDENTITY_COUNTERS_KEY,
+            resolved.entry.identity_counters.join(","),
+        )]
+    };
+
     let config = BenchConfig {
         command: resolved.name.clone(),
         mode: None,
-        input_file: None,
+        // The corpus registry KEY, never the resolved path: the key is the same
+        // on every host, so a corpus row stays comparable across machines. It
+        // is also a `pair_key` component, which is right here - two runs over
+        // different corpora are different benchmarks and must not pair.
+        input_file: resolved.corpus().map(str::to_owned),
         input_mb: None,
         cargo_features: None,
         cargo_profile: build::CargoProfile::Release,
         runs: resolved.entry.runs.unwrap_or_else(|| req.runs()),
         cli_args: Some(harness::format_cli_args(&binary_str, &args)),
         brokkr_args: None,
-        metadata: vec![],
+        metadata,
     };
 
     output::bench_msg(&format!(
@@ -89,16 +111,19 @@ pub(crate) fn run(req: &MeasureRequest, name: Option<&str>) -> Result<(), DevErr
         resolved.name, config.runs
     ));
 
-    // External wall-clock, not a self-reported `elapsed_ms`. These workloads
-    // are whole CLI invocations whose setup cost is part of what is being
-    // measured, and external timing is what lets a baseline be recorded at any
-    // commit whose CLI still parses the frozen argv - including retroactively,
-    // since `--compare` strips `--commit` from the pairing key. A workload that
-    // one day needs its own measured window (excluding, say, an expensive
-    // corpus load) is the case for a self-reported wall, and it should say so
-    // in its registration rather than change this default underneath the rest.
+    // External wall-clock plus stderr counters. The wall is brokkr's, not a
+    // self-reported `elapsed_ms`: these workloads are whole CLI invocations
+    // whose setup cost is part of what is being measured, and an externally
+    // measured wall is what lets a baseline be recorded at any commit whose CLI
+    // still parses the frozen argv - including retroactively, since
+    // `--compare` strips `--commit` from the pairing key. The counters beside
+    // it are what make a wall interpretable: seeded work is bit-identical run
+    // to run, so a counter that moved means the comparison is measuring two
+    // different jobs. A workload needing its own measured window (excluding,
+    // say, an expensive corpus load) is the case for a self-reported wall, and
+    // should say so in its registration rather than change this default.
     ctx.harness
-        .run_external(&config, &ctx.binary, &args, req.project_root)?;
+        .run_external_with_counters(&config, &ctx.binary, &args, req.project_root)?;
 
     Ok(())
 }

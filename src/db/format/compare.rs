@@ -1,4 +1,4 @@
-use super::super::{HotpathData, StoredRow};
+use super::super::{HotpathData, IDENTITY_COUNTERS_KEY, KvPair, StoredRow};
 use super::DatasetMatcher;
 use super::table::{compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input};
 
@@ -116,6 +116,11 @@ struct ComparisonPair {
     /// they differ.
     a_host: HostEnv,
     b_host: HostEnv,
+    /// Work-size counters declared identity-bearing by the workload, and their
+    /// values on each side. See [`format_counter_diff`].
+    identity_counters: Vec<String>,
+    a_counters: std::collections::BTreeMap<String, String>,
+    b_counters: std::collections::BTreeMap<String, String>,
 }
 
 /// The host-condition fields of a row, pulled out for pairwise diffing.
@@ -145,6 +150,38 @@ struct RowData {
     input_display: String,
     captured_env: std::collections::BTreeMap<String, String>,
     host: HostEnv,
+    /// Names this row's workload declared identity-bearing, recorded WITH the
+    /// run rather than read from today's config - so a later re-declaration
+    /// cannot retroactively change what a historical comparison asserted.
+    identity_counters: Vec<String>,
+    /// Every non-`meta.` counter on the row, stringified for comparison.
+    counters: std::collections::BTreeMap<String, String>,
+}
+
+/// Split the recorded identity-counter declaration into names.
+fn parse_identity_counters(kv: &[KvPair]) -> Vec<String> {
+    kv.iter()
+        .find(|p| p.key == IDENTITY_COUNTERS_KEY)
+        .map(|p| {
+            p.value
+                .to_string()
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Collect a row's runtime counters, keyed by name.
+///
+/// `meta.` pairs are provenance rather than measurement and are excluded: they
+/// legitimately differ between two runs without meaning the work did.
+fn collect_counters(kv: &[KvPair]) -> std::collections::BTreeMap<String, String> {
+    kv.iter()
+        .filter(|p| !p.key.starts_with("meta.") && !p.key.starts_with("env."))
+        .map(|p| (p.key.clone(), p.value.to_string()))
+        .collect()
 }
 
 fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
@@ -158,6 +195,8 @@ fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
         blobs: format_blob_counts(&row.kv),
         input_display: format_input(&row.input_file, row.input_mb, matcher),
         captured_env: row.captured_env.clone(),
+        identity_counters: parse_identity_counters(&row.kv),
+        counters: collect_counters(&row.kv),
         host: HostEnv {
             memory_mb: row.avail_memory_mb,
             governor: row.cpu_governor.clone(),
@@ -231,6 +270,18 @@ fn build_comparison_pairs(
                 .unwrap_or_default();
             let a_host = a.as_ref().map(|r| r.host.clone()).unwrap_or_default();
             let b_host = b.as_ref().map(|r| r.host.clone()).unwrap_or_default();
+            // Either side's declaration will do: they are the same workload by
+            // construction, and taking A's - falling back to B's - means a
+            // comparison still checks the set when only one side recorded it,
+            // which is exactly the case when the declaration was just added.
+            let identity_counters = a
+                .as_ref()
+                .map(|r| r.identity_counters.clone())
+                .filter(|v| !v.is_empty())
+                .or_else(|| b.as_ref().map(|r| r.identity_counters.clone()))
+                .unwrap_or_default();
+            let a_counters = a.as_ref().map(|r| r.counters.clone()).unwrap_or_default();
+            let b_counters = b.as_ref().map(|r| r.counters.clone()).unwrap_or_default();
             ComparisonPair {
                 key: k,
                 a_ms: a.as_ref().map(|r| r.elapsed_ms),
@@ -252,6 +303,9 @@ fn build_comparison_pairs(
                 b_env,
                 a_host,
                 b_host,
+                identity_counters,
+                a_counters,
+                b_counters,
             }
         })
         .collect()
@@ -275,6 +329,62 @@ fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
         out.push_str(&annotation);
         out.push('\n');
     }
+    if let Some(annotation) = format_counter_diff(
+        &pair.identity_counters,
+        &pair.a_counters,
+        &pair.b_counters,
+    ) {
+        out.push_str(&annotation);
+        out.push('\n');
+    }
+}
+
+/// Format the work-size annotation when a declared identity-bearing counter
+/// moved between the two sides.
+///
+/// The comparison this guards is the one a seeded benchmark makes possible: the
+/// work is bit-identical run to run and across both sides of an A/B at the same
+/// seed, so a counter that moved means the two rows describe different jobs and
+/// the wall delta between them is not a speedup measurement. It catches the
+/// classic optimization failure - accidentally doing less work and reading the
+/// shorter wall as a win.
+///
+/// Only counters the workload DECLARED are checked. A blanket "every counter
+/// must match" would fire on the first legitimate win, because doing less work
+/// is what most optimization past the free-lane stage actually is; it would
+/// then earn a bypass flag and be passed habitually until it meant nothing.
+/// Undeclared counters are still recorded and still visible - just not fatal.
+///
+/// A counter present on one side and absent on the other is reported too: that
+/// is what instrumentation appearing or disappearing mid-series looks like, and
+/// it makes the pair no more comparable than a changed value does.
+fn format_counter_diff(
+    identity: &[String],
+    a: &std::collections::BTreeMap<String, String>,
+    b: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if identity.is_empty() {
+        return None;
+    }
+    let mut moved: Vec<String> = Vec::new();
+    for name in identity {
+        match (a.get(name), b.get(name)) {
+            (Some(av), Some(bv)) if av == bv => {}
+            (Some(av), Some(bv)) => moved.push(format!("{name} {av} -> {bv}")),
+            // Absence on both sides is not a finding: the declaration may
+            // simply be ahead of the instrumentation that will emit it.
+            (None, None) => {}
+            (Some(av), None) => moved.push(format!("{name} {av} -> (absent)")),
+            (None, Some(bv)) => moved.push(format!("{name} (absent) -> {bv}")),
+        }
+    }
+    if moved.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "    WORK CHANGED: {} - the wall delta above is not a speedup",
+        moved.join(", ")
+    ))
 }
 
 /// Format a per-pair env annotation when A and B captured different
@@ -1129,6 +1239,89 @@ mod tests {
     fn format_change_same_value() {
         let result = format_change(Some(500), Some(500));
         assert_eq!(result, "+0.0%");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_counter_diff - the work-size identity check
+    // -----------------------------------------------------------------------
+
+    fn counters(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn counter_diff_silent_when_declared_counters_match() {
+        let a = counters(&[("parents", "100"), ("cells_evaluated", "5000")]);
+        let b = counters(&[("parents", "100"), ("cells_evaluated", "4000")]);
+        // cells_evaluated moved, but it is NOT declared identity-bearing -
+        // doing fewer of those is what an optimization is supposed to look
+        // like, and firing here is what would train everyone to ignore the line.
+        let identity = vec!["parents".to_owned()];
+        assert_eq!(format_counter_diff(&identity, &a, &b), None);
+    }
+
+    #[test]
+    fn counter_diff_reports_a_moved_identity_counter() {
+        let a = counters(&[("parents", "100")]);
+        let b = counters(&[("parents", "90")]);
+        let identity = vec!["parents".to_owned()];
+        let out = format_counter_diff(&identity, &a, &b).expect("a moved counter must annotate");
+        assert!(out.contains("parents 100 -> 90"), "{out}");
+        // The line has to say what it means for the delta above it, or it
+        // reads as trivia next to a number that looks like a win.
+        assert!(out.contains("not a speedup"), "{out}");
+    }
+
+    #[test]
+    fn counter_diff_reports_instrumentation_appearing_or_vanishing() {
+        let identity = vec!["prints".to_owned()];
+        let present = counters(&[("prints", "7")]);
+        let absent = counters(&[]);
+        let out = format_counter_diff(&identity, &present, &absent).expect("vanishing is a finding");
+        assert!(out.contains("(absent)"), "{out}");
+        let out = format_counter_diff(&identity, &absent, &present).expect("appearing is a finding");
+        assert!(out.contains("(absent)"), "{out}");
+    }
+
+    #[test]
+    fn counter_diff_silent_when_neither_side_emits_the_counter() {
+        // The declaration may simply be ahead of the instrumentation that will
+        // emit it; annotating every pair until then would be pure noise.
+        let identity = vec!["prints".to_owned()];
+        let empty = counters(&[]);
+        assert_eq!(format_counter_diff(&identity, &empty, &empty), None);
+    }
+
+    #[test]
+    fn counter_diff_silent_without_a_declaration() {
+        // No declared set means no assertion: every other project's rows go
+        // through this same path and must be unaffected.
+        let a = counters(&[("parents", "100")]);
+        let b = counters(&[("parents", "1")]);
+        assert_eq!(format_counter_diff(&[], &a, &b), None);
+    }
+
+    #[test]
+    fn identity_counters_round_trip_through_row_kv() {
+        let kv = vec![KvPair::text(IDENTITY_COUNTERS_KEY, "parents, prints")];
+        assert_eq!(parse_identity_counters(&kv), vec!["parents", "prints"]);
+    }
+
+    #[test]
+    fn collect_counters_excludes_provenance_pairs() {
+        let kv = vec![
+            KvPair::int("parents", 5),
+            KvPair::text(IDENTITY_COUNTERS_KEY, "parents"),
+            KvPair::text("env.MALLOC_CONF", "x"),
+        ];
+        let got = collect_counters(&kv);
+        // meta./env. pairs legitimately differ between two runs without the
+        // work differing, so they must not be comparable counters.
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got.get("parents").map(String::as_str), Some("5"));
     }
 
     #[test]

@@ -1,7 +1,10 @@
 //! Workload registry resolution: a name -> a verified, frozen invocation.
 
-use crate::config::{DevConfig, MogwaiConfig, MogwaiWorkload};
+use std::path::Path;
+
+use crate::config::{CORPUS_TOKEN, DevConfig, MogwaiConfig, MogwaiWorkload};
 use crate::error::DevError;
+use crate::preflight;
 
 /// A workload resolved from the registry, ready to run.
 #[derive(Debug)]
@@ -11,12 +14,25 @@ pub(crate) struct Resolved<'a> {
     pub(crate) name: String,
     /// The frozen entry, borrowed from the parsed config.
     pub(crate) entry: &'a MogwaiWorkload,
+    /// The argv with `{corpus}` already substituted. Identical to
+    /// `entry.args` for a generated workload.
+    args: Vec<String>,
 }
 
 impl Resolved<'_> {
     /// The argv passed to the mogwai binary, as borrowed `&str`s.
     pub(crate) fn args(&self) -> Vec<&str> {
-        self.entry.args.iter().map(String::as_str).collect()
+        self.args.iter().map(String::as_str).collect()
+    }
+
+    /// The corpus name this workload reads, if any.
+    ///
+    /// This is what a corpus row's `input_file` carries - the registry KEY, not
+    /// the resolved path. The path is per-host; the key is not, and filing rows
+    /// under a path would make the same measurement on two machines look like
+    /// two different benchmarks to `--compare`, whose pairing key includes it.
+    pub(crate) fn corpus(&self) -> Option<&str> {
+        self.entry.corpus.as_deref()
     }
 }
 
@@ -42,6 +58,8 @@ pub(crate) fn config(dev_config: &DevConfig) -> Result<&MogwaiConfig, DevError> 
 /// is the one failure this registry exists to prevent.
 pub(crate) fn resolve<'a>(
     dev_config: &'a DevConfig,
+    hostname: &str,
+    project_root: &Path,
     name: &str,
 ) -> Result<Resolved<'a>, DevError> {
     let cfg = config(dev_config)?;
@@ -57,9 +75,82 @@ pub(crate) fn resolve<'a>(
         )));
     }
 
+    // Generated workloads are self-contained; only a corpus workload needs a
+    // host lookup, so a machine holding no deliveries can still run three of
+    // the four critical-path workloads without registering anything.
+    let args = match &entry.corpus {
+        None => entry.args.clone(),
+        Some(corpus) => {
+            let path = resolve_corpus(dev_config, hostname, project_root, name, corpus)?;
+            entry
+                .args
+                .iter()
+                .map(|a| a.replace(CORPUS_TOKEN, &path))
+                .collect()
+        }
+    };
+
     Ok(Resolved {
         name: name.to_owned(),
         entry,
+        args,
+    })
+}
+
+/// Resolve a corpus name to a verified absolute path on this host.
+fn resolve_corpus(
+    dev_config: &DevConfig,
+    hostname: &str,
+    project_root: &Path,
+    workload: &str,
+    corpus: &str,
+) -> Result<String, DevError> {
+    let host = dev_config.hosts.get(hostname).ok_or_else(|| {
+        DevError::Config(format!(
+            "workload {workload:?} reads corpus {corpus:?}, but this host \
+             ({hostname}) has no section in brokkr.toml.\n  add:\n\n  \
+             [{hostname}.corpus.{corpus}]\n  path = \"...\"\n  xxh128 = \"...\""
+        ))
+    })?;
+
+    let entry = host.corpus.get(corpus).ok_or_else(|| {
+        let known: Vec<&str> = host.corpus.keys().map(String::as_str).collect();
+        let known = if known.is_empty() {
+            "none registered".to_owned()
+        } else {
+            known.join(", ")
+        };
+        DevError::Config(format!(
+            "workload {workload:?} reads corpus {corpus:?}, which is not \
+             registered for this host ({hostname}).\n  registered here: \
+             {known}\n  add it as [{hostname}.corpus.{corpus}]"
+        ))
+    })?;
+
+    // Absolute paths pass through: a delivery commonly lives outside the repo.
+    let path = if entry.path.is_absolute() {
+        entry.path.clone()
+    } else {
+        project_root.join(&entry.path)
+    };
+
+    if !path.exists() {
+        return Err(DevError::Config(format!(
+            "corpus {corpus:?} not found at {}\n  registered as: {}\n  \
+             origin: [{hostname}.corpus.{corpus}].path",
+            path.display(),
+            entry.path.display(),
+        )));
+    }
+
+    let origin = format!("[{hostname}.corpus.{corpus}].xxh128 in brokkr.toml");
+    preflight::verify_file_hash(&path, &entry.xxh128, project_root, Some(&origin))?;
+
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        DevError::Config(format!(
+            "corpus path is not valid UTF-8: {}",
+            path.display()
+        ))
     })
 }
 
@@ -121,14 +212,28 @@ mod tests {
         crate::config::load(&dir).unwrap().1
     }
 
+    /// Load a config into an EXISTING dir. Takes the dir rather than a name
+    /// because a corpus test writes its archive first and `tmpdir` wipes.
+    fn config_in(dir: &Path, toml_src: &str) -> DevConfig {
+        fs::write(dir.join("brokkr.toml"), toml_src).unwrap();
+        crate::config::load(dir).unwrap().1
+    }
+
     const BASE: &str = "project = \"mogwai\"\n\n[mogwai]\npackage = \"mogwai-cli\"\n\n";
+
+    /// Hostname and root for the generated-workload tests, which never consult
+    /// either - only a corpus workload triggers a host lookup.
+    fn anyhost() -> (&'static str, &'static Path) {
+        ("nohost", Path::new("."))
+    }
 
     #[test]
     fn resolves_a_registered_workload() {
         let cfg = config_with(&format!(
             "{BASE}[mogwai.workloads.screen-probe]\nargs = [\"screen\", \"--probe\"]\n"
         ));
-        let resolved = resolve(&cfg, "screen-probe").unwrap();
+        let (host, root) = anyhost();
+        let resolved = resolve(&cfg, host, root, "screen-probe").unwrap();
         assert_eq!(resolved.name, "screen-probe");
         assert_eq!(resolved.args(), vec!["screen", "--probe"]);
     }
@@ -140,7 +245,8 @@ mod tests {
              successor = \"screen-v2\"\n\n\
              [mogwai.workloads.screen-v2]\nargs = [\"screen\", \"--wide\"]\n"
         ));
-        let err = resolve(&cfg, "screen-v1").unwrap_err();
+        let (host, root) = anyhost();
+        let err = resolve(&cfg, host, root, "screen-v1").unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
         };
@@ -156,7 +262,8 @@ mod tests {
             "{BASE}[mogwai.workloads.alpha]\nargs = [\"a\"]\n\n\
              [mogwai.workloads.beta]\nargs = [\"b\"]\nsuccessor = \"alpha\"\n"
         ));
-        let err = resolve(&cfg, "gamma").unwrap_err();
+        let (host, root) = anyhost();
+        let err = resolve(&cfg, host, root, "gamma").unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
         };
@@ -208,6 +315,131 @@ mod tests {
             panic!("expected DevError::Config, got {err:?}");
         };
         assert!(msg.contains("stated in full"), "{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Corpus workloads
+    // -----------------------------------------------------------------------
+
+    const ARCHIVE: &str = "delivered bytes\n";
+
+    /// Write the archive and return its digest, computed the way
+    /// `verify_file_hash` does - so the test pins behaviour, not a literal.
+    fn write_archive(root: &Path, rel: &str) -> String {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, ARCHIVE).unwrap();
+        preflight::compute_xxh128(&path).unwrap()
+    }
+
+    #[test]
+    fn corpus_token_is_replaced_with_the_resolved_path() {
+        let root = tmpdir("corpus_ok");
+        let digest = write_archive(&root, "deliveries/july.bin");
+        let cfg = config_in(
+            &root,
+            &format!(
+                "{BASE}[mogwai.workloads.measure12a]\n\
+                 args = [\"measure\", \"--input\", \"{{corpus}}\"]\n\
+                 corpus = \"july\"\n\n\
+                 [frigg.corpus.july]\npath = \"deliveries/july.bin\"\n\
+                 xxh128 = \"{digest}\"\n"
+            ),
+        );
+
+        let resolved = resolve(&cfg, "frigg", &root, "measure12a").unwrap();
+        let args = resolved.args();
+        let expected = root.join("deliveries/july.bin");
+        assert_eq!(args, vec!["measure", "--input", expected.to_str().unwrap()]);
+        // The row files under the registry key, not the host-specific path.
+        assert_eq!(resolved.corpus(), Some("july"));
+    }
+
+    #[test]
+    fn corpus_refuses_an_archive_that_drifted_since_registration() {
+        let root = tmpdir("corpus_drift");
+        write_archive(&root, "july.bin");
+        let cfg = config_in(
+            &root,
+            &format!(
+                "{BASE}[mogwai.workloads.w]\nargs = [\"m\", \"{{corpus}}\"]\n\
+                 corpus = \"july\"\n\n\
+                 [frigg.corpus.july]\npath = \"july.bin\"\n\
+                 xxh128 = \"{}\"\n",
+                "0".repeat(32)
+            ),
+        );
+        fs::write(root.join("july.bin"), ARCHIVE).unwrap();
+
+        let err = resolve(&cfg, "frigg", &root, "w").unwrap_err();
+        let DevError::Preflight(msgs) = err else {
+            panic!("expected a preflight refusal, got {err:?}");
+        };
+        let joined = msgs.join("\n");
+        assert!(joined.contains("hash mismatch"), "{joined}");
+        // Naming the registration is what makes the fix "re-register
+        // deliberately" rather than "why is this path wrong".
+        assert!(joined.contains("[frigg.corpus.july]"), "{joined}");
+    }
+
+    #[test]
+    fn corpus_unregistered_on_this_host_says_what_to_add() {
+        let root = tmpdir("corpus_nohost");
+        let cfg = config_in(
+            &root,
+            &format!(
+                "{BASE}[mogwai.workloads.w]\nargs = [\"m\", \"{{corpus}}\"]\n\
+                 corpus = \"july\"\n"
+            ),
+        );
+        let err = resolve(&cfg, "unknownbox", &root, "w").unwrap_err();
+        let DevError::Config(msg) = err else {
+            panic!("expected DevError::Config, got {err:?}");
+        };
+        assert!(msg.contains("unknownbox.corpus.july"), "{msg}");
+    }
+
+    #[test]
+    fn generated_workload_never_consults_the_host() {
+        // The point of the split: a machine holding no deliveries can still run
+        // every generated workload without registering anything.
+        let cfg = config_with(&format!(
+            "{BASE}[mogwai.workloads.w]\nargs = [\"screen\"]\n"
+        ));
+        assert!(resolve(&cfg, "a-host-that-does-not-exist", Path::new("/nonexistent"), "w").is_ok());
+    }
+
+    #[test]
+    fn corpus_without_a_token_is_rejected() {
+        let dir = tmpdir("corpus_no_token");
+        fs::write(
+            dir.join("brokkr.toml"),
+            format!("{BASE}[mogwai.workloads.w]\nargs = [\"m\"]\ncorpus = \"july\"\n"),
+        )
+        .unwrap();
+        let err = crate::config::load(&dir).unwrap_err();
+        let DevError::Config(msg) = err else {
+            panic!("expected DevError::Config, got {err:?}");
+        };
+        assert!(msg.contains("{corpus}"), "{msg}");
+    }
+
+    #[test]
+    fn token_without_a_corpus_is_rejected() {
+        let dir = tmpdir("token_no_corpus");
+        fs::write(
+            dir.join("brokkr.toml"),
+            format!("{BASE}[mogwai.workloads.w]\nargs = [\"m\", \"{{corpus}}\"]\n"),
+        )
+        .unwrap();
+        let err = crate::config::load(&dir).unwrap_err();
+        let DevError::Config(msg) = err else {
+            panic!("expected DevError::Config, got {err:?}");
+        };
+        // Otherwise the literal "{corpus}" reaches the child as a filename.
+        assert!(msg.contains("literally"), "{msg}");
     }
 
     #[test]

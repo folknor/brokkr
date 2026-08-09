@@ -77,8 +77,23 @@ derived one. None of these apply on the no-kv `run_external_ok` path except
 | `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | all `--` run mode (no `--bench`) |
 | `run_external_ok` | captured, dropped | no | yes | every pbfhogg bench command + elivagar `tilegen` |
 | `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
+| `run_external_with_counters` | captured, dropped | **yes** (counters only) | yes | `brokkr mogwai` workloads |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
 | `run_hotpath_capture` (stored via `run_hotpath`) | captured | via JSON report | yes | `--hotpath` / `--alloc`, all projects |
+
+`run_external_with_counters` is the third external path, and the only one that
+takes half of each of the other two. `run_external_ok` times the child from
+outside but never reads stderr; `run_external_with_kv_raw` reads stderr but then
+*believes* its `elapsed_ms` and discards the external wall. The counters path
+keeps brokkr's wall and reads stderr for the work-size counters beside it.
+
+The distinction matters for what a comparison can assert. A wall on its own
+cannot distinguish "the code got faster" from "the code did less"; the counters
+are what answer that. And because the wall is brokkr's, a target that
+self-reports nothing at all still produces a usable row - so a baseline can be
+recorded at any commit whose CLI parses the invocation, including retroactively.
+On this path a stderr `elapsed_ms` is optional and, if present, is kept as an
+ordinary counter rather than replacing the measured wall.
 
 Two consequences worth internalizing:
 
