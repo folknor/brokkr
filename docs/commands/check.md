@@ -63,8 +63,11 @@ Flags:
 - `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
-- `--limit N` - max diagnostics shown per phase, default 20
-- `--all` - show everything, no cap
+- `--limit N` - max diagnostics shown per phase (gremlins, clippy, and the
+  `--timings` list), default 20
+- `--all` - show every gremlins/clippy diagnostic and every `--timings` row, no
+  cap, no changed-files scoping. Does *not* widen the test phase - the failure
+  list is never capped or scoped in the first place
 - `--fix-gremlins` - rewrite banned chars in place before scan
 - `--commands` - log each sweep's full cargo command instead of the collapsed
   form (see the log-lines section)

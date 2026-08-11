@@ -45,14 +45,17 @@ Output (default text mode, no flags):
     `--message-format=json` so every warning carries its lint code,
     not just the first occurrence per rule.
   - Tests: one line per failure on failure, compact summary on pass.
+    Never capped or scoped - every failing test in every suite is
+    listed, and `--all` does not change that.
 
-Capping and scoping (clippy + gremlins):
+Capping and scoping (clippy + gremlins, and the `--timings` list):
   Output is capped at `--limit N` (default 20). When the cap kicks in,
   diagnostics in files changed on the current branch (vs upstream /
   origin/master / origin/main) are surfaced first, and a trailer
   summarises what's hidden.
   - `--all` shows everything, sorted by (level, lint code, file, line)
     so every hit of a single rule clumps together for bulk triage.
+    The test phase is not affected - it was never capped.
 
 Output mode:
   - `--raw`: reconstruct cargo's terminal-style output by concatenating
@@ -127,9 +130,12 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
-        /// Show every diagnostic without capping or scoping to changed
-        /// files. Sorted by (level, lint code, file, line) so every hit
-        /// of a single rule clumps together for bulk triage.
+        /// Show every gremlins/clippy diagnostic (and every `--timings`
+        /// row) without capping or scoping to changed files. Sorted by
+        /// (level, lint code, file, line) so every hit of a single rule
+        /// clumps together for bulk triage. Does NOT widen the test
+        /// phase: the failure list is never capped or scoped, so a red
+        /// run reports the same failures with or without this flag.
         #[arg(long)]
         all: bool,
 
