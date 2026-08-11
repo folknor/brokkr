@@ -365,8 +365,32 @@ diagnostic's location).
 ## `test` phase
 
 Runs after clippy, one lane per selected sweep. The subsections below cover
-build-error reporting, per-sweep `rustflags`, the serial and parallel lanes,
-process isolation, and doctest policy.
+the failure list, build-error reporting, per-sweep `rustflags`, the serial and
+parallel lanes, process isolation, and doctest policy.
+
+### The failure list
+
+A sweep's `cargo test` invocation runs several test binaries - the lib unit
+tests, then one per `tests/*.rs` integration file, then doctests - and cargo
+concatenates their output into one stream. Each binary prints its own pair of
+`failures:` sections (the captured detail blocks, then the bare name list), and
+the parser resets its section state at every `running N tests` line, so the
+rendered `cargo test: N failures` list names failures from **every** binary,
+not just the first one that failed.
+
+That reset is load-bearing and has a regression test
+(`failures_in_every_suite_are_reported_not_just_the_first`). Before it, the
+state latched on the first suite: a failing lib test masked every integration
+failure behind it. The exit code stayed correct, so the run was honestly red -
+only the *which-tests* list was short, which is the worse shape of the two,
+because a fixer who clears every listed failure concludes the run is
+understood. Forwarding `--no-fail-fast` did not help: cargo ran every binary,
+but the renderer still showed one. Note that `--all` does not widen test
+reporting either - it governs clippy and gremlins capping and scoping.
+
+Unrelated but worth knowing beside it: a failing sweep ends the run before the
+later `[[check]]` sweeps test at all, so their results are simply absent from
+a red run. That follows from phase ordering, not from any reporting limit.
 
 ### Build errors and the linker hint
 

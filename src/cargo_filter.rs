@@ -219,8 +219,11 @@ pub struct ParsedTestResults {
 
 /// Parse cargo test stdout into structured results.
 ///
-/// Handles the two `failures:` sections (detail then name-list), extracts
-/// panic locations and messages, and aggregates `test result:` summary lines.
+/// Handles each suite's two `failures:` sections (detail then name-list),
+/// extracts panic locations and messages, and aggregates `test result:`
+/// summary lines. The stream may carry many suites back to back - one per
+/// test binary - and the section state resets at every `running N tests`,
+/// so a failure in the second and later binaries is reported too.
 /// Works on any iterator of lines - callers can pre-filter JSON lines out
 /// before passing non-JSON lines here.
 pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
@@ -258,11 +261,39 @@ pub fn parse_test_output_with_stderr(
     let mut in_name_list = false;
 
     for line in lines {
+        // Start of a new test binary. Cargo concatenates every suite's
+        // output into one stream and each suite prints its own *pair* of
+        // `failures:` sections (detail, then name list), so the section
+        // state is per-suite. Latching `seen_failure_section` across the
+        // whole stream made suite 2's detail block parse as a name list,
+        // and every failure after the first failing binary's was dropped
+        // from the rendered list - the exit code stayed honest, so a red
+        // run silently under-reported which tests failed.
+        //
+        // Guarded on `!in_failure_detail`: a captured `---- x stdout ----`
+        // block can contain the test's own output, `running ...` included,
+        // and that is not a suite boundary.
+        let suite_start = line.starts_with("running ") && !in_failure_detail;
+        if suite_start {
+            flush_parsed_failure(
+                &current_name,
+                &current_panic_loc,
+                &current_panic_msg,
+                &mut failures,
+            );
+            current_name.clear();
+            current_panic_loc.clear();
+            current_panic_msg.clear();
+            seen_failure_section = false;
+            in_name_list = false;
+        }
+
         let trimmed = line.trim_start();
-        if trimmed.starts_with("Compiling")
+        if suite_start
+            || line.starts_with("running ")
+            || trimmed.starts_with("Compiling")
             || trimmed.starts_with("Downloading")
             || trimmed.starts_with("Finished")
-            || line.starts_with("running ")
             || (line.starts_with("test ") && line.ends_with("... ok"))
         {
             continue;
@@ -1417,6 +1448,98 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         let parsed = parse_test_output(&lines);
         assert_eq!(parsed.failures.len(), 1);
         assert_eq!(parsed.failures[0].name, "foo::test_b");
+    }
+
+    #[test]
+    fn failures_in_every_suite_are_reported_not_just_the_first() {
+        // The masking bug: cargo runs the lib unit tests and each
+        // integration binary in one stream, and the section state used to
+        // latch on the first suite - so a lib failure hid every failure
+        // after it, exit code honest, list short. Both must be named.
+        let stdout = "\
+running 2 tests
+test validator::tests::rejects_empty ... FAILED
+
+failures:
+
+---- validator::tests::rejects_empty stdout ----
+thread 'validator::tests::rejects_empty' panicked at src/validator.rs:88:9:
+assertion failed: parsed.is_err()
+
+failures:
+    validator::tests::rejects_empty
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+running 1 test
+test provider_hints_prioritize_binance_for_perpetuals ... FAILED
+
+failures:
+
+---- provider_hints_prioritize_binance_for_perpetuals stdout ----
+thread 'provider_hints_prioritize_binance_for_perpetuals' panicked at tests/provider_hints.rs:17:5:
+assertion `left == right` failed
+
+failures:
+    provider_hints_prioritize_binance_for_perpetuals
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+";
+        let lines: Vec<&str> = stdout.lines().collect();
+        let parsed = parse_test_output(&lines);
+        assert_eq!(parsed.suites, 2);
+        assert_eq!(parsed.failed, 2);
+        let names: Vec<&str> = parsed.failures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "validator::tests::rejects_empty",
+                "provider_hints_prioritize_binance_for_perpetuals",
+            ],
+            "second suite's failure was dropped from the rendered list",
+        );
+        assert_eq!(
+            parsed.failures[1].location.as_deref(),
+            Some("tests/provider_hints.rs:17:5"),
+        );
+
+        // ...and it survives the render, since that is what the user reads.
+        let rendered = filter_test(stdout, "");
+        assert!(rendered.contains("cargo test: 2 failures"), "{rendered}");
+        assert!(
+            rendered.contains("provider_hints_prioritize_binance_for_perpetuals"),
+            "{rendered}",
+        );
+    }
+
+    #[test]
+    fn suite_boundary_inside_a_captured_stdout_block_is_not_a_boundary() {
+        // A test that prints `running ...` itself must not reset the
+        // per-suite state mid-detail-block and split its own failure off.
+        let stdout = "\
+running 1 test
+
+failures:
+
+---- foo::chatty stdout ----
+running the widget pipeline
+thread 'foo::chatty' panicked at src/foo.rs:3:1:
+boom
+
+failures:
+    foo::chatty
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+";
+        let lines: Vec<&str> = stdout.lines().collect();
+        let parsed = parse_test_output(&lines);
+        assert_eq!(parsed.suites, 1);
+        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(parsed.failures[0].name, "foo::chatty");
+        assert_eq!(
+            parsed.failures[0].location.as_deref(),
+            Some("src/foo.rs:3:1")
+        );
     }
 
     #[test]
