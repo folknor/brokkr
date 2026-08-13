@@ -171,8 +171,10 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
             let target = discover::resolve(&targets, wanted)?;
 
             match (&compare, &baseline) {
-                (Some((a, b)), _) => compare_baselines(&home, build_root, target, a, b, args),
-                (None, Some(name)) => measure(&home, build_root, target, name, args),
+                (Some((a, b)), _) => {
+                    compare_baselines(&home, build_root, target, a, b, args, &_lock)
+                }
+                (None, Some(name)) => measure(&home, build_root, target, name, args, &_lock),
                 // Unreachable: a named target with no `--compare` always
                 // resolved a baseline above.
                 (None, None) => Ok(()),
@@ -188,6 +190,7 @@ fn measure(
     target: &BenchTarget,
     baseline: &str,
     args: &BenchArgs,
+    lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
     let mut criterion_args = vec!["--save-baseline".to_owned(), baseline.to_owned()];
     criterion_args.extend(args.args.iter().cloned());
@@ -196,7 +199,7 @@ fn measure(
         "measuring {} into baseline '{baseline}'",
         target.name
     ));
-    cargo_bench(home, build_root, target, &criterion_args)?;
+    cargo_bench(home, build_root, target, &criterion_args, lock)?;
 
     // Written only after a successful run: a stamp for a baseline that doesn't
     // exist would make a later comparison claim comparability it can't have.
@@ -216,8 +219,10 @@ fn compare_baselines(
     a: &str,
     b: &str,
     args: &BenchArgs,
+    lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
     for name in [a, b] {
+        stamp::validate_label(name)?;
         if !stamp::stamp_path(home, name).exists() {
             return Err(DevError::Build(format!(
                 "no baseline '{name}' recorded; `brokkr bench --baselines` lists what exists"
@@ -238,7 +243,7 @@ fn compare_baselines(
     criterion_args.extend(args.args.iter().cloned());
 
     output::bench_msg(&format!("comparing '{b}' against '{a}' (no sampling)"));
-    cargo_bench(home, build_root, target, &criterion_args)
+    cargo_bench(home, build_root, target, &criterion_args, lock)
 }
 
 /// Refuse a comparison across differing build environments.
@@ -283,6 +288,7 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
 /// be derived at all. The config directory above it may not even be a git repo.
 fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, DevError> {
     if let Some(name) = &args.name {
+        stamp::validate_label(name)?;
         return Ok(name.clone());
     }
     // A `--commit` run measures a fresh checkout of exactly that ref, so the
@@ -361,15 +367,19 @@ fn list_baselines(home: &Path) -> Result<(), DevError> {
 
 /// Spawn `cargo bench` with stdio inherited and `CRITERION_HOME` pointed at
 /// brokkr's store.
+///
+/// Goes through the protected passthrough runner, not a bare `Command`: a bench
+/// is the longest-running child brokkr spawns, so it is the worst one to leave
+/// unkillable. Without this the cargo PID never reaches the lockfile, so
+/// `brokkr lock` can't show it and `kill --hard` can't target it, and a SIGTERM
+/// to brokkr orphans a benchmark that then runs on unattended.
 fn cargo_bench(
     home: &Path,
     build_root: &Path,
     target: &BenchTarget,
     criterion_args: &[String],
+    lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::Command as ProcCommand;
-
     std::fs::create_dir_all(home)?;
 
     let mut cargo_args: Vec<String> = vec![
@@ -387,10 +397,7 @@ fn cargo_bench(
 
     output::build_msg(&format!("cargo {}", cargo_args.join(" ")));
 
-    let mut cmd = ProcCommand::new("cargo");
-    cmd.args(&cargo_args);
-    cmd.current_dir(build_root);
-    cmd.env("CRITERION_HOME", home.join("criterion"));
+    let criterion_home = home.join("criterion").display().to_string();
 
     // Isolate a `--commit` worktree's build into its own target dir, the same
     // rule `build::cargo_build_observed` applies. Without it, every worktree
@@ -400,35 +407,25 @@ fn cargo_bench(
     // artifact a later commit built, so cargo calls it fresh, skips the rebuild,
     // and the run measures the wrong commit's code under the right commit's
     // baseline name. It reports success, and the number looks entirely ordinary.
-    //
-    // This is the one build path that spawned cargo directly rather than going
-    // through `build`, which is how it missed the protection everything else has.
-    if crate::worktree::is_brokkr_worktree(build_root) {
-        let dir = build_root.join("target");
-        output::build_msg(&format!(
-            "isolating worktree build target dir -> {}",
-            dir.display()
-        ));
-        cmd.env("CARGO_TARGET_DIR", &dir);
+    let target_dir = crate::worktree::is_brokkr_worktree(build_root)
+        .then(|| build_root.join("target").display().to_string());
+    if let Some(dir) = &target_dir {
+        output::build_msg(&format!("isolating worktree build target dir -> {dir}"));
     }
-    let status = cmd.status().map_err(|e| DevError::Subprocess {
-        program: "cargo".into(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-    if status.success() {
+
+    let mut env: Vec<(&str, &str)> = vec![("CRITERION_HOME", criterion_home.as_str())];
+    if let Some(dir) = &target_dir {
+        env.push(("CARGO_TARGET_DIR", dir.as_str()));
+    }
+
+    let arg_refs: Vec<&str> = cargo_args.iter().map(String::as_str).collect();
+    let out = output::run_passthrough_in("cargo", &arg_refs, Some(build_root), &env, Some(lock))?;
+    if out.code == 0 {
         return Ok(());
     }
-    match status.code() {
-        Some(code) => Err(DevError::Subprocess {
-            program: "cargo bench".into(),
-            code: Some(code),
-            stderr: String::new(),
-        }),
-        None => Err(DevError::Subprocess {
-            program: "cargo bench".into(),
-            code: None,
-            stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
-        }),
-    }
+    Err(DevError::Subprocess {
+        program: "cargo bench".into(),
+        code: Some(out.code),
+        stderr: String::new(),
+    })
 }

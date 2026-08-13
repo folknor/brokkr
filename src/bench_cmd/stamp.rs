@@ -67,6 +67,16 @@ impl Stamp {
         if let Some(digest) = cargo_config_digest() {
             fields.insert("cargo_config".into(), digest);
         }
+        // The repo's own `.cargo/config.toml` and those of its ancestors, which
+        // is where a project pins `target-cpu`, a linker, or target-specific
+        // rustflags. Cargo merges these with the user-level file, so a stamp
+        // reading only `$CARGO_HOME` can call two baselines compatible while
+        // the code generated for them differs - and a `--commit` run is exactly
+        // the case where this file can legitimately change between the two
+        // sides being compared.
+        for (depth, digest) in repo_config_digests(build_root) {
+            fields.insert(format!("repo_cargo_config_d{depth}"), digest);
+        }
 
         Self { fields }
     }
@@ -160,6 +170,65 @@ fn cargo_config_digest() -> Option<String> {
     None
 }
 
+/// Digests of every `.cargo/config{.toml}` from `build_root` upwards, paired
+/// with the depth at which each was found (0 = `build_root` itself).
+///
+/// Keyed by depth rather than discovery order on purpose. Order-based keys
+/// shift when one side of a comparison has a config the other lacks, so the
+/// shared-fields rule in [`Stamp::differences`] would line up a repo config
+/// against a workspace one and report a difference that is really a
+/// misalignment. Depth is stable, and it is the same in a `--commit` worktree
+/// as in the live tree because the layout below the root is identical.
+fn repo_config_digests(build_root: &Path) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (depth, dir) in build_root.ancestors().enumerate() {
+        for name in ["config.toml", "config"] {
+            let path = dir.join(".cargo").join(name);
+            if path.exists() {
+                if let Ok(d) = preflight::compute_xxh128(&path) {
+                    out.push((depth, d));
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Reject a baseline label that isn't a single path component.
+///
+/// The label reaches two joins: this module's stamp path, and criterion's own
+/// output paths, which brokkr hands it verbatim. `Path::join` with an absolute
+/// argument *replaces* the base rather than extending it, so `--name /tmp/x`
+/// writes `/tmp/x.txt` and puts criterion's data somewhere else entirely, while
+/// `../` walks out of `.brokkr/`. Neither is a privilege boundary - it is the
+/// user's own shell either way - but both quietly relocate a store the rest of
+/// the command assumes it owns, and `--baselines` would then list a baseline
+/// whose data is not where it says.
+///
+/// Same rule and same reasoning as `artefacts::validate_test_id`.
+pub fn validate_label(label: &str) -> Result<(), DevError> {
+    if label.is_empty() {
+        return Err(DevError::Config("baseline name is empty".into()));
+    }
+    if label == "." || label == ".." {
+        return Err(DevError::Config(format!(
+            "baseline name must not be '.' or '..' (got {label:?})"
+        )));
+    }
+    if label.starts_with('.') {
+        return Err(DevError::Config(format!(
+            "baseline name must not start with '.' (got {label:?})"
+        )));
+    }
+    if label.contains('/') || label.contains('\\') || label.contains('\0') {
+        return Err(DevError::Config(format!(
+            "baseline name must be a single path component, no separators (got {label:?})"
+        )));
+    }
+    Ok(())
+}
+
 /// Where a baseline's stamp lives. Keyed by baseline name alone, matching
 /// criterion's own scoping: a baseline name spans every bench in a run.
 pub fn stamp_path(bench_home: &Path, baseline: &str) -> PathBuf {
@@ -213,6 +282,29 @@ mod tests {
         let new = Stamp::parse("rustc=1.90.0\ncargo_config=abc123\n");
         assert!(old.differences(&new).is_empty());
         assert!(new.differences(&old).is_empty());
+    }
+
+    #[test]
+    fn label_rejects_separators_and_traversal() {
+        // An absolute label is the sharp case: `Path::join` replaces the base
+        // rather than extending it, so this would write outside `.brokkr`
+        // entirely rather than producing a mangled name inside it.
+        for bad in ["", ".", "..", "../escape", "/tmp/absolute", "a/b", "a\\b", ".hidden"] {
+            assert!(
+                super::validate_label(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn label_accepts_ordinary_names() {
+        for good in ["03062cce", "pre-4709", "my_baseline", "v1.2.3"] {
+            assert!(
+                super::validate_label(good).is_ok(),
+                "expected {good:?} to be accepted"
+            );
+        }
     }
 
     #[test]

@@ -543,11 +543,33 @@ pub fn run_passthrough_timed(
     args: &[&str],
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<PassthroughOutput, DevError> {
+    run_passthrough_in(program, args, None, &[], lock)
+}
+
+/// [`run_passthrough_timed`] with a working directory and environment.
+///
+/// Same lifecycle guarantees - that is the point of having it. A caller needing
+/// to set `cwd` or an env var previously had to reach for a bare
+/// `Command::status()`, which silently gave up the `SigtermGuard`, the OOM
+/// marking and the lockfile PID publication. `brokkr bench` did exactly that.
+pub fn run_passthrough_in(
+    program: &str,
+    args: &[&str],
+    dir: Option<&std::path::Path>,
+    env: &[(&str, &str)],
+    lock: Option<&crate::lockfile::LockGuard>,
+) -> Result<PassthroughOutput, DevError> {
     use std::os::unix::process::ExitStatusExt;
 
     let start = Instant::now();
     let mut cmd = Command::new(program);
     cmd.args(args);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     crate::oom::protect_child(&mut cmd);
 
     // A passthrough child (elivagar `regress`, elivagar run-mode dispatch) is a

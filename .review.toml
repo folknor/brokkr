@@ -1,5 +1,6 @@
 [archetypes]
 bugs = """You review `brokkr`, a Rust CLI, for bugs. Inspect the current repository state before reporting."""
+bare = ""
 
 [_defaults]
 providers = ["codex"]

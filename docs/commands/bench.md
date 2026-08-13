@@ -50,7 +50,9 @@ tree: the worktree is a fresh checkout of exactly that commit, so there is
 nothing uncommitted for the name to misrepresent.
 
 For a run against the working tree, a dirty tree is **refused** unless you pass
-`--name LABEL`. The obvious
+`--name LABEL`. A label must be a single path component: it is joined into
+brokkr's store and handed to criterion for its own paths, and an absolute or
+`../` label would quietly relocate both. The obvious
 fallback of `<hash>-dirty` is the worst option available, because
 edit-measure-edit-measure is the most common way to use this command and every
 iteration would silently overwrite the last - destroying data in exactly the
@@ -69,8 +71,12 @@ sizes this command exists to resolve - a percent or two, near criterion's own
 nothing in the output would look wrong.
 
 Each saved baseline therefore gets a stamp recording `rustc` version, host
-triple, CPU model, any `RUSTFLAGS` in the environment, and a digest of
-`~/.cargo/config.toml`. `--compare` refuses when the two disagree. `--lenient`
+triple, CPU model, any `RUSTFLAGS` in the environment, and digests of both
+`~/.cargo/config.toml` and every `.cargo/config.toml` from the build root
+upwards. The repo-local ones matter as much as the user-level file - that is
+where a project pins `target-cpu`, a linker, or target-specific rustflags, and
+cargo merges the two - and a `--commit` run is exactly the case where such a
+file can legitimately differ between the sides being compared. `--compare` refuses when the two disagree. `--lenient`
 downgrades the refusal to a warning, because "these differ and I know why" is a
 legitimate position - what is not legitimate is not being told.
 
