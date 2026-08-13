@@ -124,7 +124,10 @@ project.
 
 Worktrees are siblings of the **build** root, since that is the git repo they
 are cut from and the directory name that goes into their prefix. Discovery is
-anchored there for the same reason. Under the config-one-level-up layout the
+anchored there for the same reason, and the root is threaded in from the
+dispatch layer rather than re-derived from cwd here - the two must agree, and a
+function that recomputes a root it was not given is stating an invariant it
+cannot enforce. Under the config-one-level-up layout the
 project root would give both the wrong parent directory *and* the wrong prefix,
 so a purge would report zero and reclaim nothing - which is why the count now
 reads `removed N of M worktree(s) found` whenever those differ. "Removed 0" and

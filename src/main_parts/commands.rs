@@ -403,6 +403,7 @@ fn cmd_clean(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     opts: CleanOpts,
 ) -> Result<(), DevError> {
     let CleanOpts {
@@ -418,9 +419,15 @@ fn cmd_clean(
     // that prefix from whatever root it is handed, so handing it the project
     // root under the config-one-level-up layout misses on both counts at once
     // and reports zero - a silent no-op for the flag whose whole job is
-    // reclaiming gigabytes. `build_root` is cwd by construction.
-    let worktree_root = std::env::current_dir()?;
-    let pi = bootstrap(None)?;
+    // reclaiming gigabytes.
+    //
+    // Passed in rather than re-derived from cwd. It is the same value today -
+    // `project::detect` sets the build root to cwd - but re-deriving it here
+    // states an invariant this function cannot enforce, and the caller already
+    // holds the real one. Two roots that must agree should be threaded, not
+    // independently recomputed and hoped to match.
+    let worktree_root = build_root;
+    let pi = bootstrap(Some(build_root))?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
     // Clean verify output (pbfhogg only).
@@ -466,11 +473,11 @@ fn cmd_clean(
             clean_elivagar_outputs(&paths, &c);
         }
         if dry_run {
-            let existing = worktree::list(&worktree_root)?;
+            let existing = worktree::list(worktree_root)?;
             output::run_msg(&format!("would remove {} worktree(s)", existing.len()));
         } else {
-            let existing = worktree::list(&worktree_root)?.len();
-            let removed = worktree::purge_all(&worktree_root)?;
+            let existing = worktree::list(worktree_root)?.len();
+            let removed = worktree::purge_all(worktree_root)?;
             // Report found as well as removed. A bare "removed 0" reads as
             // "nothing to do", which is indistinguishable from "looked in the
             // wrong place" - and these worktrees carry an isolated target dir
@@ -485,7 +492,7 @@ fn cmd_clean(
             }
         }
     } else {
-        let existing = worktree::list(&worktree_root)?;
+        let existing = worktree::list(worktree_root)?;
         if !existing.is_empty() {
             output::run_msg(&format!(
                 "{} persistent worktree(s); run `brokkr clean --worktrees` to remove",

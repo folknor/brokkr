@@ -148,6 +148,8 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
             .map_err(|e| DevError::Build(format!("cannot determine current directory: {e}")))?,
     };
 
+    require_cargo_tree(&project_root)?;
+
     let captured = output::run_captured(
         "cargo",
         &["metadata", "--format-version", "1", "--no-deps"],
@@ -167,6 +169,39 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
     Ok(ProjectInfo {
         target_dir: PathBuf::from(target_dir),
     })
+}
+
+/// Refuse, in brokkr's own words, to run cargo somewhere that is not a Rust
+/// tree.
+///
+/// Cargo's message for this walks to the filesystem root and names the
+/// directory it started from, which reads as "your project is broken" when the
+/// truth is that brokkr chose the wrong directory to stand in. The build root
+/// is always cwd (`project::detect`), so under the config-one-level-up layout -
+/// where `brokkr.toml` governs a checkout beside it - standing in the config
+/// directory points every cargo-driving command at a directory that was never
+/// meant to hold code. There is deliberately no step that descends to find the
+/// checkout: one config directory may sit above several, and guessing which one
+/// was meant is how a command silently operates on the wrong tree.
+///
+/// The check mirrors cargo's own search (the directory and its ancestors) so it
+/// can only ever fire where cargo was going to fail anyway.
+fn require_cargo_tree(dir: &Path) -> Result<(), DevError> {
+    if dir.ancestors().any(|d| d.join("Cargo.toml").exists()) {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "no Cargo.toml in {} or any parent - brokkr runs cargo in the working \
+         directory, and this one is not a Rust tree",
+        dir.display()
+    );
+    if dir.join("brokkr.toml").exists() {
+        msg.push_str(
+            ". This directory holds the brokkr.toml governing a checkout beside it; \
+             run the command from inside that checkout, not from here",
+        );
+    }
+    Err(DevError::Build(msg))
 }
 
 /// Extract a string field from a JSON value, returning a `DevError::Build` on

@@ -27,6 +27,33 @@ features (`--snapshot`, `--as-snapshot`, `--direct-io`, `--io-uring`,
 `--compression`, `--locations-on-ways`) see `docs/projects/pbfhogg.md` -
 those are pbfhogg-only.
 
+## Where brokkr.toml lives
+
+Looked up in the working directory, or failing that in its **immediate parent** -
+one level, never a walk to the filesystem root. A deeper search would silently
+attach to a stray `brokkr.toml` in a home directory or to an unrelated enclosing
+project.
+
+Finding it one level up is the layout for driving a checkout that is not ours:
+brokkr's state (`.brokkr/`, `data/`) stays in the parent and the foreign repo
+stays clean. That splits two roots which coincide in the ordinary case:
+
+- **project root** - the directory holding `brokkr.toml`. Anchors `.brokkr/`,
+  `data/`, and every other brokkr-owned store.
+- **build root** - the working directory, where cargo and git run.
+
+The build root is always cwd, and there is deliberately no step that descends
+from the config directory to find the checkout: one config directory may sit
+above several, and guessing which was meant is how a command operates on the
+wrong tree.
+
+**So run brokkr from inside the checkout, not from the directory holding
+`brokkr.toml`.** Standing in the config directory points every cargo-driving
+command at a directory that holds no `Cargo.toml`; brokkr refuses by name
+(`no Cargo.toml in <dir> or any parent`) rather than forwarding cargo's own
+error, which walks to the root and reads as though the project were broken.
+Config-only commands (`man`, `results`, `history`) work from either directory.
+
 ## Top-level shape
 
 ```toml

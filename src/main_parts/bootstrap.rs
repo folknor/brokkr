@@ -145,7 +145,13 @@ fn main() {
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
             if let Ok(d) = project::detect()
-                && let Err(e) = cmd_clean(&d.config, d.project, &d.project_root, CleanOpts::routine())
+                && let Err(e) = cmd_clean(
+                    &d.config,
+                    d.project,
+                    &d.project_root,
+                    &d.build_root,
+                    CleanOpts::routine(),
+                )
             {
                 output::error(&format!("cleanup failed: {e}"));
             }
@@ -1142,6 +1148,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &dev_config,
                 project,
                 &project_root,
+                &build_root,
                 CleanOpts {
                     worktrees: worktrees || all,
                     archives: archives || all,
