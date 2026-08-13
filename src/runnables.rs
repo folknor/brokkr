@@ -175,6 +175,7 @@ fn index_line(r: &Runnable) -> String {
 
 /// `brokkr run [NAME]`: resolve the runnable, then exec
 /// `cargo run [--release] -p <pkg> [--example <name>] [-- <args>]`.
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_run(
     project_root: &Path,
     cfg: Option<&BinConfig>,
@@ -183,6 +184,7 @@ pub fn cmd_run(
     release: bool,
     feat: &FeatureArgs<'_>,
     args: &[String],
+    lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
     let runnables = discover(project_root)?;
     if runnables.is_empty() {
@@ -247,7 +249,7 @@ pub fn cmd_run(
         cargo_args.push("--".into());
         cargo_args.extend(args.iter().cloned());
     }
-    forward_cargo(&cargo_args, project_root)
+    forward_cargo(&cargo_args, lock)
 }
 
 /// `brokkr install`: install `[bin] install`'s packages, or the sole
@@ -257,6 +259,7 @@ pub fn cmd_install(
     cfg: Option<&BinConfig>,
     debug: bool,
     release: bool,
+    lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
     let runnables = discover(project_root)?;
     let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
@@ -314,41 +317,41 @@ pub fn cmd_install(
         cargo_args.push("--path".into());
         cargo_args.push(r.package_dir.display().to_string());
         output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
-        forward_cargo(&cargo_args, project_root)?;
+        forward_cargo(&cargo_args, lock)?;
     }
     Ok(())
 }
 
-/// Spawn cargo with inherited stdio in `project_root`, mapping a non-zero
-/// exit (or signal death) to `DevError::Subprocess`.
-fn forward_cargo(args: &[String], project_root: &Path) -> Result<(), DevError> {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::Command as ProcCommand;
-
-    let mut cmd = ProcCommand::new("cargo");
-    cmd.args(args);
-    cmd.current_dir(project_root);
-    let status = cmd.status().map_err(|e| DevError::Subprocess {
-        program: "cargo".into(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
-    if status.success() {
+/// Spawn cargo with inherited stdio, mapping a non-zero exit to
+/// `DevError::Subprocess`.
+///
+/// Goes through [`output::run_passthrough_timed`] rather than a bare
+/// `Command::status()`. A `brokkr run` child is a real, long-running workload,
+/// and a bare status call leaves brokkr with the default SIGTERM disposition:
+/// `brokkr kill` signals brokkr's PID alone, so brokkr dies and the child is
+/// orphaned and keeps running. The passthrough runner installs a `SigtermGuard`,
+/// marks the child for the OOM killer ahead of brokkr, and publishes its PID
+/// into the lockfile so `kill --hard` and `brokkr lock` can see it. This is the
+/// same regression `run_passthrough_timed` was written to fix for elivagar's
+/// passthrough paths; `run`/`install` were spawning cargo directly and so never
+/// got the fix.
+///
+/// No `current_dir`: `build_root` is cwd by construction, which is where the
+/// caller's `project_root` argument comes from.
+fn forward_cargo(
+    args: &[String],
+    lock: Option<&crate::lockfile::LockGuard>,
+) -> Result<(), DevError> {
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = output::run_passthrough_timed("cargo", &arg_refs, lock)?;
+    if out.code == 0 {
         return Ok(());
     }
-    let program = format!("cargo {}", args.first().map_or("", String::as_str));
-    match status.code() {
-        Some(code) => Err(DevError::Subprocess {
-            program,
-            code: Some(code),
-            stderr: String::new(),
-        }),
-        None => Err(DevError::Subprocess {
-            program,
-            code: None,
-            stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
-        }),
-    }
+    Err(DevError::Subprocess {
+        program: format!("cargo {}", args.first().map_or("", String::as_str)),
+        code: Some(out.code),
+        stderr: String::new(),
+    })
 }
 
 #[cfg(test)]

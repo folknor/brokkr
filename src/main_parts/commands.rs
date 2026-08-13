@@ -412,6 +412,14 @@ fn cmd_clean(
         dry_run,
     } = opts;
     let c = Cleaner { dry_run };
+    // Worktrees are siblings of the *build* root, because that is the git repo
+    // `Worktree::create` cuts them from and the tree whose directory name goes
+    // into their prefix. `worktree::list` derives both the search directory and
+    // that prefix from whatever root it is handed, so handing it the project
+    // root under the config-one-level-up layout misses on both counts at once
+    // and reports zero - a silent no-op for the flag whose whole job is
+    // reclaiming gigabytes. `build_root` is cwd by construction.
+    let worktree_root = std::env::current_dir()?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
@@ -458,14 +466,26 @@ fn cmd_clean(
             clean_elivagar_outputs(&paths, &c);
         }
         if dry_run {
-            let existing = worktree::list(project_root)?;
+            let existing = worktree::list(&worktree_root)?;
             output::run_msg(&format!("would remove {} worktree(s)", existing.len()));
         } else {
-            let removed = worktree::purge_all(project_root)?;
-            output::run_msg(&format!("removed {removed} worktree(s)"));
+            let existing = worktree::list(&worktree_root)?.len();
+            let removed = worktree::purge_all(&worktree_root)?;
+            // Report found as well as removed. A bare "removed 0" reads as
+            // "nothing to do", which is indistinguishable from "looked in the
+            // wrong place" - and these worktrees carry an isolated target dir
+            // each, so a cleanup that silently reclaims nothing is how the
+            // cargo volume fills up.
+            if removed == existing {
+                output::run_msg(&format!("removed {removed} worktree(s)"));
+            } else {
+                output::run_msg(&format!(
+                    "removed {removed} of {existing} worktree(s) found"
+                ));
+            }
         }
     } else {
-        let existing = worktree::list(project_root)?;
+        let existing = worktree::list(&worktree_root)?;
         if !existing.is_empty() {
             output::run_msg(&format!(
                 "{} persistent worktree(s); run `brokkr clean --worktrees` to remove",

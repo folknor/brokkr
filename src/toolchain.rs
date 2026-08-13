@@ -88,10 +88,10 @@ pub fn activate_for_lock() -> Result<Option<DisabledToolchain>, DevError> {
 }
 
 /// The toolchain files rustup recognises, in the order we disable them.
-const FILES: [&str; 2] = ["rust-toolchain.toml", "rust-toolchain"];
+pub const FILES: [&str; 2] = ["rust-toolchain.toml", "rust-toolchain"];
 
 /// Suffix appended to a disabled toolchain file while it is moved aside.
-const SUFFIX: &str = ".brokkr-disabled";
+pub const SUFFIX: &str = ".brokkr-disabled";
 
 /// Guard that has moved a project's toolchain file(s) aside and restores them
 /// when dropped. An empty guard (no files found) is a harmless no-op.

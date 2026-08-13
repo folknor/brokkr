@@ -152,7 +152,11 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         disable_toolchain,
         |wt| {
             let build_root = wt.unwrap_or(&build_root);
-            let _lock = acquire_cmd_lock_opt(project, build_root, "bench")?;
+            // The lock context's root is the *project* root everywhere else in
+            // brokkr - it is what `brokkr lock` displays and what the
+            // `.sidecar-status` lookup keys on - so pass that, not the worktree
+            // or build root this closure happens to be building in.
+            let _lock = acquire_cmd_lock_opt(project, &project_root, "bench")?;
 
             let targets = discover::discover(build_root)?;
             if targets.is_empty() {

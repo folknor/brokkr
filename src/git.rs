@@ -62,6 +62,37 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Pathspecs excluding whatever toolchain file brokkr *itself* has currently
+/// moved aside, and the sidecar it moved it to.
+///
+/// The lock activates the toolchain-disable (see [`crate::toolchain`]), which
+/// renames `rust-toolchain.toml` to a `.brokkr-disabled` sidecar. That is a
+/// tracked-file deletion plus an untracked file - a dirty tree by any ordinary
+/// reading. Since the harness collects git state *after* taking the lock, a
+/// `disable_toolchain` project would refuse every measured run against a
+/// spotless checkout, and `--force` would silently decline to store the row.
+///
+/// The exclusion is conditional on the sidecar actually being present, which is
+/// what keeps it honest: brokkr only hides a file it can see it moved. A user's
+/// own edit to `rust-toolchain.toml` leaves no sidecar, still marks the tree
+/// dirty, and still blocks the run - correctly, because changing the toolchain
+/// absolutely does change what the built binary does. That is the difference
+/// between this and the unconditional exclusions above, all of which are for
+/// files that cannot affect the binary at all.
+fn toolchain_exclusions(workspace_root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in crate::toolchain::FILES {
+        if workspace_root
+            .join(format!("{name}{}", crate::toolchain::SUFFIX))
+            .exists()
+        {
+            out.push(format!(":(exclude){name}"));
+            out.push(format!(":(exclude){name}{}", crate::toolchain::SUFFIX));
+        }
+    }
+    out
+}
+
 fn check_clean(workspace_root: &Path) -> bool {
     // Exclude `.brokkr/` (brokkr's own measurement stores - results.db,
     // sidecar.db, ratatoskr's gate.db, piners' runs.db), *.md (docs),
@@ -87,48 +118,27 @@ fn check_clean(workspace_root: &Path) -> bool {
     // store under `.brokkr/` is an output of the run being measured, so none of
     // them can invalidate the commit that run is pinned to. This matches the
     // untracked check below, which has always excluded the whole directory.
-    let unstaged = Command::new("git")
-        .args([
-            "diff",
-            "--quiet",
-            "HEAD",
-            "--",
-            ":(exclude).brokkr/",
-            ":(exclude)*.md",
-            ":(exclude)brokkr.toml",
-            ":(exclude)snapshots/*/approved.png",
-        ])
-        .current_dir(workspace_root)
-        .output();
+    const EXCLUDES: [&str; 4] = [
+        ":(exclude).brokkr/",
+        ":(exclude)*.md",
+        ":(exclude)brokkr.toml",
+        ":(exclude)snapshots/*/approved.png",
+    ];
+    let mut excludes: Vec<String> = EXCLUDES.iter().map(|s| (*s).to_owned()).collect();
+    excludes.extend(toolchain_exclusions(workspace_root));
 
-    let staged = Command::new("git")
-        .args([
-            "diff",
-            "--quiet",
-            "--cached",
-            "HEAD",
-            "--",
-            ":(exclude).brokkr/",
-            ":(exclude)*.md",
-            ":(exclude)brokkr.toml",
-            ":(exclude)snapshots/*/approved.png",
-        ])
-        .current_dir(workspace_root)
-        .output();
+    let run = |args: &[&str]| {
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        cmd.arg("--");
+        cmd.args(&excludes);
+        cmd.current_dir(workspace_root);
+        cmd.output()
+    };
 
-    let untracked = Command::new("git")
-        .args([
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "--",
-            ":(exclude).brokkr/",
-            ":(exclude)*.md",
-            ":(exclude)brokkr.toml",
-            ":(exclude)snapshots/*/approved.png",
-        ])
-        .current_dir(workspace_root)
-        .output();
+    let unstaged = run(&["diff", "--quiet", "HEAD"]);
+    let staged = run(&["diff", "--quiet", "--cached", "HEAD"]);
+    let untracked = run(&["ls-files", "--others", "--exclude-standard"]);
 
     let unstaged_ok = unstaged.as_ref().ok().is_some_and(|o| o.status.success());
 

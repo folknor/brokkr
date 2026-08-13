@@ -114,6 +114,16 @@ and pre-rename `<dataset>-<commit>` archives all survive untouched.
 Purge every persistent benchmark worktree (the sibling
 `.brokkr-worktree-<project>-*` dirs that `--commit` creates).
 
+Worktrees are siblings of the **build** root, since that is the git repo they
+are cut from and the directory name that goes into their prefix. Discovery is
+anchored there for the same reason. Under the config-one-level-up layout the
+project root would give both the wrong parent directory *and* the wrong prefix,
+so a purge would report zero and reclaim nothing - which is why the count now
+reads `removed N of M worktree(s) found` whenever those differ. "Removed 0" and
+"looked in the wrong place" are otherwise the same message, and these
+directories carry an isolated `target/` each: on the nautilus workload, ~1.3G
+apiece.
+
 On elivagar this also wipes the durable output store **wholesale** - every
 `*.pmtiles` in the output dir, not the keep-N pruning of `--archives`. The deep
 clean is the one place the store is treated as what it is, reproducible; rerun

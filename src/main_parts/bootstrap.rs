@@ -273,6 +273,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 no_default: *no_default_features,
             },
             args,
+            Some(&_lock),
         );
     }
     if let Command::Install { debug, release } = &cli.command {
@@ -284,7 +285,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
             None => (None, None, std::env::current_dir()?),
         };
         let _lock = acquire_cmd_lock_opt(project, &project_root, "install")?;
-        return runnables::cmd_install(&project_root, bin_cfg.as_ref(), *debug, *release);
+        return runnables::cmd_install(
+            &project_root,
+            bin_cfg.as_ref(),
+            *debug,
+            *release,
+            Some(&_lock),
+        );
     }
     if let Command::Wc { threshold } = &cli.command {
         // `wc` lists source files in the code tree (cwd).
@@ -1410,6 +1417,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         // ----- visual testing commands (litehtml + sluggrs) -----
         Command::Visual { fixture, suite, all, recapture } => {
+            // `visual` builds the renderer with cargo, so it takes the global
+            // lock like every other build path: the lock is what serialises it
+            // against a concurrent measured run (whose timings it would
+            // otherwise contaminate) and what activates the armed
+            // toolchain-disable. It was the one cargo-driving command reaching
+            // its handler unlocked.
+            let _lock = acquire_cmd_lock(project, &project_root, "visual")?;
             match project {
                 Project::Litehtml => {
                     let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {

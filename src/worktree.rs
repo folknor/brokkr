@@ -137,6 +137,10 @@ impl Worktree {
 
 /// Collect every persistent brokkr worktree sibling for the given project
 /// (matching `<parent>/.brokkr-worktree-<project>-*`) without touching them.
+/// `root` must be the **build** root - the same root [`Worktree::create`] was
+/// given. Both the directory searched and the name prefix are derived from it,
+/// so passing the project root when the two differ (config one level up) looks
+/// in the wrong parent for the wrong prefix and silently finds nothing.
 pub fn list(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
     let parent = project_root
         .parent()
