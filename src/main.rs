@@ -1,4 +1,5 @@
 mod artefacts;
+mod bench_cmd;
 mod build;
 mod cargo_filter;
 mod cargo_json;

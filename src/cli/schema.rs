@@ -342,6 +342,48 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         full: bool,
     },
+    /// Run a criterion bench target, or compare two stored baselines.
+    ///
+    /// Bare lists the workspace's bench targets. A measuring run saves a
+    /// baseline named for the commit; `--compare A B` diffs two stored
+    /// baselines without sampling anything.
+    ///
+    /// In depth: `brokkr man bench`.
+    #[command(display_order = 0)]
+    Bench {
+        /// Bench target to run. Omit for the index.
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+
+        /// Measure this commit in a persistent worktree rather than the
+        /// working tree.
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
+
+        /// Compare two stored baselines, reading B against A. Samples
+        /// nothing - both sides come from disk.
+        #[arg(long, num_args = 2, value_names = ["A", "B"])]
+        compare: Option<Vec<String>>,
+
+        /// List the baselines recorded for this project.
+        #[arg(long)]
+        baselines: bool,
+
+        /// Name for the baseline this run saves. Required when the tree is
+        /// dirty, since no commit identifies what was measured.
+        #[arg(long, value_name = "LABEL")]
+        name: Option<String>,
+
+        /// Compare baselines whose build environments differ, warning
+        /// instead of refusing.
+        #[arg(long)]
+        lenient: bool,
+
+        /// Arguments forwarded verbatim to the criterion harness
+        /// (`--sample-size`, `--measurement-time`, `--noise-threshold`, ...).
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///
     /// Phase-based; each phase emits zero or more findings. v1 ships

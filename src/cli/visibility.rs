@@ -63,6 +63,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ("api", Visibility::Only(&[Project::Nidhogg])),
     ("apply-changes", Visibility::Only(&[Project::Pbfhogg])),
     ("approve", Visibility::Only(&[Project::Litehtml, Project::Sluggrs])),
+    ("bench", Visibility::Any),
     ("build-geocode-index", Visibility::Only(&[Project::Pbfhogg])),
     ("cat", Visibility::Only(&[Project::Pbfhogg])),
     ("check", Visibility::Any),

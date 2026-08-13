@@ -70,6 +70,12 @@ const TOPICS: &[Topic] = &[
         visibility: Visibility::Any,
     },
     Topic {
+        name: "bench",
+        summary: "the criterion runner: baselines, the environment gate, --compare",
+        content: include_str!("../docs/commands/bench.md"),
+        visibility: Visibility::Any,
+    },
+    Topic {
         name: "run",
         summary: "run + install: target discovery, the bare index, [bin]",
         content: include_str!("../docs/commands/run.md"),

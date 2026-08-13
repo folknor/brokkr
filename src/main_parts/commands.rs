@@ -145,6 +145,18 @@ fn cmd_env(
     project: Project,
     project_root: &Path,
 ) -> Result<(), DevError> {
+    // `bootstrap` shells out to `cargo metadata`, which rustup mediates - so in
+    // a tree pinning a toolchain we don't have installed, `env` fails outright
+    // unless the pin is moved aside. That window is the *locked* window (see
+    // `crate::toolchain`), so reporting the environment has to take the lock
+    // for the same reason `fmt` does, despite touching nothing. Only when
+    // `disable_toolchain` is set: with nothing to move, `env` stays lock-free
+    // and can still be run alongside a long build.
+    let _lock = if dev_config.disable_toolchain {
+        Some(acquire_cmd_lock(project, project_root, "env")?)
+    } else {
+        None
+    };
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 

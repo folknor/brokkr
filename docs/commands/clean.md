@@ -38,6 +38,15 @@ The measurement stores are never removed, by any flag combination:
 | `$XDG_DATA_HOME/brokkr/history.db` | global command history |
 | `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
 | `.brokkr/ratatoskr/gate.db` | the gate baselines |
+| `.brokkr/bench/` | criterion baselines + their environment stamps |
+
+`.brokkr/bench/` is why `brokkr bench` points `CRITERION_HOME` there instead of
+leaving criterion in its default `target/criterion`. A baseline costs minutes to
+produce and cannot be reconstructed from the source tree, so it is a result, not
+an artifact - and a result must not live in a directory whose whole purpose is
+being safe to delete. Parking it in a brokkr-designated directory means the
+existing rule spares it, no special case required, and a user's own
+`cargo clean` cannot reach it either.
 
 `gate.db` is the sharpest case. A gate baseline is pinned **by UUID** in
 `brokkr.toml`; deleting the row that UUID points at breaks the gate with no way

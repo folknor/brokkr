@@ -294,6 +294,32 @@ fn run(cli: Cli) -> Result<(), DevError> {
         };
         return wc::run(&project_root, *threshold);
     }
+    if let Command::Bench {
+        target,
+        commit,
+        compare,
+        baselines,
+        name,
+        lenient,
+        args,
+    } = cli.command
+    {
+        // Project detection, the lock and the toolchain window all live inside
+        // `bench_cmd::run`, not here: a `--commit` run must re-arm the
+        // toolchain-disable at the worktree *before* the lock activates it, or
+        // the pin moved aside would be the live tree's rather than the one
+        // being built. That ordering is the command's business, so `run` stays
+        // a one-line handoff.
+        return bench_cmd::run(&bench_cmd::BenchArgs {
+            target,
+            commit,
+            compare,
+            baselines,
+            name,
+            lenient,
+            args,
+        });
+    }
     if let Command::Deps {
         json,
         limit,
@@ -530,6 +556,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Check { .. }
         | Command::Clippy { .. }
         | Command::Fmt { .. }
+        | Command::Bench { .. }
         | Command::Run { .. }
         | Command::Install { .. }
         | Command::Wc { .. }
