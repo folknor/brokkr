@@ -113,13 +113,20 @@ pub(crate) enum Disposition {
     /// audited set silently - a drifting count is not something anyone tracks
     /// across runs. That needs the resolved default-filter pinned and diffed,
     /// so a change reports "default-filter changed from X to Y, N pairs moved
-    /// out of the audited set" once, for a decision. Not implemented here, and
-    /// the obvious route is closed: `CompiledDefaultFilter` exposes `profile`
-    /// and `section` but its `expr` is a `CompiledExpr` AST with no `Display`
-    /// or `Serialize`, and the raw source accessor is private to
-    /// nextest-runner's config module. So the pin has to come from reading the
-    /// project's `.config/nextest.toml` directly, which is diffable and names
-    /// the file to edit but does not capture which platform override won.
+    /// out of the audited set" once, for a decision. Not implemented here, but
+    /// the design is closed and needs no private API.
+    ///
+    /// The compiled expression cannot be the pin: `CompiledExpr` is an AST with
+    /// no `Display` or `Serialize`, and the raw source accessor is private to
+    /// nextest-runner's config module. Pin `(profile, section, raw string)`
+    /// instead. `CompiledDefaultFilter` exposes `profile` and `section`
+    /// publicly, and `CompiledDefaultFilterSection` is `Profile` or
+    /// `Override(usize)` - the INDEX of the override that won. That is a config
+    /// address, so the raw string is read from `profile.<name>.default-filter`
+    /// or from override #N of `profile.<name>.overrides`, rather than assumed
+    /// to be the top-level one. No override-resolution hole survives: editing
+    /// an override that did not win cannot move the pin, because the pin
+    /// records which one did.
     DefaultFiltered,
     /// A reason the ledger has no policy for: benchmark-mode filtering,
     /// partitioning, rerun-already-passed, string filters, or a variant added
@@ -134,6 +141,96 @@ impl Disposition {
     #[allow(dead_code)] // Not yet wired - see NextestPair.
     pub(crate) fn is_terminal(self) -> bool {
         matches!(self, Disposition::Selected | Disposition::Ignored)
+    }
+}
+
+/// Where a resolved `default-filter` came from in the project's nextest
+/// config - the address half of the pin described on
+/// [`Disposition::DefaultFiltered`].
+///
+/// Mirrors nextest's own `CompiledDefaultFilterSection`, which is what supplies
+/// these values: `Profile` for a top-level `profile.<name>.default-filter`, and
+/// `Override(usize)` for the winning entry of `profile.<name>.overrides`.
+/// Reproduced rather than reused because the pin is *stored* - it has to
+/// survive across runs and nextest upgrades as plain data, and a foreign enum
+/// with no `Serialize` cannot.
+#[allow(dead_code)] // Not yet wired - see NextestPair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilterAddress {
+    /// `profile.<profile>.default-filter`.
+    Profile { profile: String },
+    /// `profile.<profile>.overrides[<index>].default-filter`.
+    Override { profile: String, index: usize },
+}
+
+impl FilterAddress {
+    /// The address as a config path, for a report that has to tell the reader
+    /// which line to go and look at.
+    #[allow(dead_code)] // Not yet wired - see NextestPair.
+    pub(crate) fn config_path(&self) -> String {
+        match self {
+            FilterAddress::Profile { profile } => {
+                format!("profile.{profile}.default-filter")
+            }
+            FilterAddress::Override { profile, index } => {
+                format!("profile.{profile}.overrides[{index}].default-filter")
+            }
+        }
+    }
+}
+
+/// Read the raw `default-filter` string at `address` out of a nextest config.
+///
+/// The pin's value half. Deliberately reads the SOURCE text rather than
+/// rendering the compiled expression: the compiled form cannot be stored
+/// (`CompiledExpr` has no `Display`/`Serialize`, and nextest's raw accessor is
+/// private), and the source text is what a human diffs and edits anyway.
+///
+/// `Ok(None)` means the address exists but carries no `default-filter`, which
+/// is a legitimate state - not every profile or override sets one. A missing
+/// profile, or an override index past the end of the list, is an error: the
+/// address came from nextest's own resolution, so it not being there means the
+/// config moved under us and the pin is meaningless rather than absent.
+#[allow(dead_code)] // Not yet wired - see NextestPair.
+pub(crate) fn read_default_filter(
+    config: &str,
+    address: &FilterAddress,
+) -> Result<Option<String>, DevError> {
+    let doc: toml::Value = toml::from_str(config)
+        .map_err(|e| DevError::Config(format!("nextest config: {e}")))?;
+
+    let profile_name = match address {
+        FilterAddress::Profile { profile } | FilterAddress::Override { profile, .. } => profile,
+    };
+    let profile = doc
+        .get("profile")
+        .and_then(|p| p.get(profile_name))
+        .ok_or_else(|| {
+            DevError::Config(format!(
+                "nextest config has no profile.{profile_name} (pin address: {})",
+                address.config_path()
+            ))
+        })?;
+
+    let table = match address {
+        FilterAddress::Profile { .. } => profile,
+        FilterAddress::Override { index, .. } => profile
+            .get("overrides")
+            .and_then(|o| o.as_array())
+            .and_then(|o| o.get(*index))
+            .ok_or_else(|| {
+                DevError::Config(format!(
+                    "nextest config has no {} - the overrides list moved",
+                    address.config_path()
+                ))
+            })?,
+    };
+
+    match table.get("default-filter") {
+        None => Ok(None),
+        Some(v) => v.as_str().map(|s| Some(s.to_owned())).ok_or_else(|| {
+            DevError::Config(format!("{} is not a string", address.config_path()))
+        }),
     }
 }
 
@@ -192,6 +289,91 @@ pub(crate) fn nextest_disposition(filter_match: &FilterMatch) -> Disposition {
             | MismatchReason::RerunAlreadyPassed => Disposition::Unclassified,
             _ => Disposition::Unclassified,
         },
+    }
+}
+
+#[cfg(test)]
+mod nextest_pin_tests {
+    use super::*;
+
+    // The shape the probe workspace used, plus an overrides list so both
+    // address forms are exercised against one document.
+    const CONFIG: &str = r#"
+[profile.default]
+default-filter = "not test(~shared_name)"
+
+[profile.ci]
+retries = 2
+
+[[profile.ci.overrides]]
+platform = "aarch64-apple-darwin"
+default-filter = "not package(slow-crate)"
+
+[[profile.ci.overrides]]
+filter = "test(~flaky)"
+retries = 5
+"#;
+
+    fn profile(name: &str) -> FilterAddress {
+        FilterAddress::Profile {
+            profile: name.to_owned(),
+        }
+    }
+
+    fn override_at(name: &str, index: usize) -> FilterAddress {
+        FilterAddress::Override {
+            profile: name.to_owned(),
+            index,
+        }
+    }
+
+    #[test]
+    fn reads_the_profile_level_filter() {
+        let got = read_default_filter(CONFIG, &profile("default"));
+        assert_eq!(got.ok().flatten().as_deref(), Some("not test(~shared_name)"));
+    }
+
+    // The whole point of carrying the override INDEX: override 0 sets a
+    // default-filter and override 1 does not, so an address that ignored the
+    // index would read the wrong entry (or the profile's, which is absent here).
+    #[test]
+    fn reads_the_winning_override_not_the_first_or_the_profile() {
+        let got = read_default_filter(CONFIG, &override_at("ci", 0));
+        assert_eq!(
+            got.ok().flatten().as_deref(),
+            Some("not package(slow-crate)")
+        );
+
+        // Override 1 exists but sets no filter - a legitimate None, not an error.
+        let got = read_default_filter(CONFIG, &override_at("ci", 1));
+        assert!(matches!(got, Ok(None)));
+
+        // And profile.ci itself carries none, so a Profile address there is
+        // None rather than override 0's value leaking upward.
+        assert!(matches!(read_default_filter(CONFIG, &profile("ci")), Ok(None)));
+    }
+
+    // An address comes from nextest's own resolution, so if it is not in the
+    // config the config moved underneath the pin - that is an error, and
+    // distinguishable from "present but unset".
+    #[test]
+    fn a_moved_address_errors_rather_than_reading_as_absent() {
+        assert!(read_default_filter(CONFIG, &profile("nonexistent")).is_err());
+        assert!(read_default_filter(CONFIG, &override_at("ci", 7)).is_err());
+    }
+
+    #[test]
+    fn config_paths_name_the_line_to_edit() {
+        assert_eq!(profile("default").config_path(), "profile.default.default-filter");
+        assert_eq!(
+            override_at("ci", 3).config_path(),
+            "profile.ci.overrides[3].default-filter"
+        );
+    }
+
+    #[test]
+    fn malformed_config_is_an_error() {
+        assert!(read_default_filter("not = = toml", &profile("default")).is_err());
     }
 }
 

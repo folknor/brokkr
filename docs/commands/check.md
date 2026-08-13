@@ -587,8 +587,18 @@ depend on them:
   path's `(package, test)`. A package with several test targets has one binary
   id per target, so two integration binaries defining the same test path are two
   pairs rather than one. Package-qualified `[[quarantine]]` and skip entries keep
-  their meaning (`package(X)` spans every binary id in X), but per-entry pair
-  counts shift upward once on adoption.
+  their meaning (`package(X)` spans every binary id in X).
+
+  Whether any per-entry **count** moves is empirical and unresolved. It requires
+  two binaries in one package to define the same full test path - a stricter
+  condition than an entry merely spanning several binaries. nautilus' B51 entry
+  does span five binary ids in `nautilus-infrastructure` (four
+  `crates/infrastructure/tests/` binaries plus `src/redis/msgbus.rs`, since
+  `serial_tests::` is the top-level module name in seven files), so it is the
+  candidate; whether those binaries collide on a test path is not knowable from
+  the config alone. Settle it before adoption by listing a shape and looking for
+  a test path appearing under more than one binary id of the same package - the
+  answer is then a number to hand forward rather than a caveat.
 - **`MismatchReason` is priority-ordered, not a partition.** A test that is both
   `#[ignore]`d and unmatched by a lane's filterset reports `ignored`, so on a
   single listing it cannot be detected as an orphan. brokkr takes one listing and
@@ -612,11 +622,28 @@ either, so failing on them would make the gate stricter than the CI it exists to
 predict, and the only way to clear such a failure would be a quarantine entry for
 a test nobody meant to run. It stays distinct from an ordinary filterset mismatch
 because the remedy lives in the project's `.config/nextest.toml` rather than in
-`brokkr.toml`. Not yet implemented: pinning the resolved default-filter so a
-change reports once rather than drifting a count nobody tracks - the compiled
-expression is not readable as text (`CompiledExpr` has no `Display`/`Serialize`,
-and the raw accessor is private to nextest-runner), so the pin has to be read
-from the project's nextest config directly.
+`brokkr.toml`.
+
+The counted bucket alone does not stop upstream shrinking the audited set
+quietly, because a drifting number is not something anyone tracks between runs.
+That needs the resolved default-filter **pinned**, so a change reports once, for
+a decision. The pin is `(profile, section, raw string)`: the compiled expression
+cannot be stored (`CompiledExpr` has no `Display`/`Serialize`, and nextest's raw
+accessor is private), but `CompiledDefaultFilter` publicly exposes `profile` and
+`section`, and `CompiledDefaultFilterSection` is `Profile` or `Override(usize)` -
+the *index* of the override that won. That is a config address, so the string is
+read from `profile.<name>.default-filter` or from override #N of
+`profile.<name>.overrides` rather than assumed to be the top-level one. No
+override-resolution hole survives: editing an override that did not win cannot
+move the pin, because the pin records which one did.
+
+Built today: `FilterAddress` and `read_default_filter` resolve an address to its
+raw source text, distinguishing "present but sets no filter" (`Ok(None)`, a
+legitimate state) from "the address is gone" (an error - it came from nextest's
+own resolution, so its absence means the config moved and the pin is meaningless
+rather than empty). Still waiting on the lane: producing the address, which needs
+a resolved profile, and storing plus comparing the pin, which needs somewhere in
+`brokkr.toml` to keep it and a phase to report from.
 
 Filterset translation is mechanical for the existing constructs: substring
 `skip`/`only` entries become `test(~X)`, and a `{ package, pattern }` qualified
