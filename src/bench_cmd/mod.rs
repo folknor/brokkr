@@ -94,17 +94,27 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
     // stays clean. Anchoring the baseline store to the build root would write
     // into that repo and, worse, dirty the very tree whose cleanliness decides
     // whether a baseline may be saved.
-    let (project, project_root, build_root, disable_toolchain) =
+    let (project, project_root, build_root, disable_toolchain, keep) =
         match crate::project::detect_optional()? {
-            Some(d) => (
-                Some(d.project),
-                d.project_root,
-                d.build_root,
-                d.config.disable_toolchain,
-            ),
+            Some(d) => {
+                let keep = d.config.worktree_keep(&crate::config::hostname()?);
+                (
+                    Some(d.project),
+                    d.project_root,
+                    d.build_root,
+                    d.config.disable_toolchain,
+                    keep,
+                )
+            }
             None => {
                 let cwd = std::env::current_dir()?;
-                (None, cwd.clone(), cwd, false)
+                (
+                    None,
+                    cwd.clone(),
+                    cwd,
+                    false,
+                    crate::worktree_record::DEFAULT_KEEP,
+                )
             }
         };
     let home = bench_home(&project_root);
@@ -150,6 +160,7 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         args.commit.as_deref(),
         false,
         disable_toolchain,
+        keep,
         |wt| {
             let build_root = wt.unwrap_or(&build_root);
             // The lock context's root is the *project* root everywhere else in

@@ -276,6 +276,7 @@ pub(crate) fn with_worktree<F, T>(
     commit: Option<&str>,
     dry_run: bool,
     disable_toolchain: bool,
+    keep: usize,
     f: F,
 ) -> Result<T, DevError>
 where
@@ -292,7 +293,22 @@ where
             f(parent_build_root)
         }
         Some(hash) => {
+            // Enforce retention BEFORE cutting the new worktree, so the cost
+            // lands beside a build you are already paying for rather than as an
+            // unexplained pause, and so no run is turned into a destructive
+            // operation merely by happening. A project that stops growing
+            // therefore never shrinks on its own - `clean --worktrees` is the
+            // explicit hammer for that. Never fatal: housekeeping must not fail
+            // the measurement that was actually asked for.
+            if let Err(e) = crate::worktree_record::enforce(project_root, git_root, keep) {
+                output::error(&format!("worktree retention: {e}"));
+            }
             let wt = worktree::Worktree::create(git_root, hash)?;
+            if let Some(name) = wt.path.file_name().and_then(|n| n.to_str())
+                && let Err(e) = crate::worktree_record::Store::touch(project_root, name)
+            {
+                output::error(&format!("worktree bookkeeping: {e}"));
+            }
             output::bench_msg(&format!(
                 "benchmarking commit {} ({})",
                 wt.commit, wt.subject,

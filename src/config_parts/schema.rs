@@ -1344,6 +1344,19 @@ impl TilegenConfig {
     }
 }
 
+impl DevConfig {
+    /// Worktree retention for `hostname`, or the default.
+    pub fn worktree_keep(&self, hostname: &str) -> usize {
+        self.hosts
+            .get(hostname)
+            .and_then(|h| h.worktree_keep)
+            // Zero would evict every worktree the moment a second one is
+            // wanted, which is indistinguishable from the feature being broken.
+            .filter(|n| *n > 0)
+            .unwrap_or(crate::worktree_record::DEFAULT_KEEP)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
@@ -1359,6 +1372,13 @@ pub struct HostConfig {
     /// bounds its growth instead.
     pub output: Option<String>,
     pub target: Option<String>,
+    /// How many persistent `--commit` worktrees to keep for this project
+    /// before the least-recently-used ones are evicted. Defaults to
+    /// [`crate::worktree_record::DEFAULT_KEEP`]. Per host because the disk is a
+    /// host property; per project because the store is - so the disk-wide total
+    /// is this times the number of projects in play, which is why it is a
+    /// growth damper rather than a bound.
+    pub worktree_keep: Option<usize>,
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
     /// Cargo features to enable by default for all build commands on this host.

@@ -161,6 +161,13 @@ name, reports success, and produces a number with nothing obviously wrong about
 it. The cost is a full build per worktree; the alternative is baselines that are
 silently attributed to the wrong commit.
 
+Worktrees persist and are reused, so the cost is one cold build per commit
+rather than per run. They are also expensive to keep - the isolated `target/` is
+the bulk of a worktree's footprint - so cutting a new one first evicts the
+least-recently-used beyond `worktree_keep` (default 6). Eviction costs a rebuild
+and never data: baselines live in `.brokkr/bench/`, not in the worktree. See
+`brokkr man config worktree_keep`.
+
 Note that *not* recompiling is correct and expected when re-measuring a commit
 whose worktree already built - that is the whole reason worktrees persist. The
 isolation is what makes a skipped rebuild safe, so a fast run is not by itself a

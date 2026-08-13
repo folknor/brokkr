@@ -114,6 +114,14 @@ and pre-rename `<dataset>-<commit>` archives all survive untouched.
 Purge every persistent benchmark worktree (the sibling
 `.brokkr-worktree-<project>-*` dirs that `--commit` creates).
 
+This is the explicit hammer. Routine growth is damped automatically: cutting a
+new `--commit` worktree first evicts the least-recently-used ones beyond
+`worktree_keep` (default 6, per host - see `brokkr man config worktree_keep`).
+That bound only applies when a *new* worktree is created, so a project that has
+stopped growing never shrinks by itself, which is exactly what `--worktrees` is
+for. It also cannot promise the disk stays clear, since the count is per
+project.
+
 Worktrees are siblings of the **build** root, since that is the git repo they
 are cut from and the directory name that goes into their prefix. Discovery is
 anchored there for the same reason. Under the config-one-level-up layout the

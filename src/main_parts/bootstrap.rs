@@ -29,6 +29,7 @@ where
         mode.commit.as_deref(),
         mode.dry_run,
         dev_config.disable_toolchain,
+        dev_config.worktree_keep(&config::hostname()?),
         |build_root| {
             let req = measure::MeasureRequest {
                 dev_config,
@@ -1186,7 +1187,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let cwd = std::env::current_dir()
                 .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
             let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
-            with_worktree(&project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, |build_root| {
+            with_worktree(&project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, dev_config.worktree_keep(&config::hostname()?), |build_root| {
                 cmd_verify(
                     &dev_config,
                     project,
@@ -1646,6 +1647,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 commit.as_deref(),
                 false,
                 dev_config.disable_toolchain,
+                dev_config.worktree_keep(&config::hostname()?),
                 |build_root| {
                     let req = ratatoskr::sync::SyncBenchRequest {
                         project_root: &project_root,

@@ -202,6 +202,27 @@ pub fn purge_all(project_root: &Path) -> Result<usize, DevError> {
     Ok(removed)
 }
 
+/// Remove one worktree: ask git, then fall back to a directory removal if git
+/// left it behind, then prune git's bookkeeping.
+///
+/// Shared by `purge_all` and by retention eviction
+/// ([`crate::worktree_record::enforce`]) so both go through the same
+/// git-then-filesystem sequence. Eviction decides *whether* to remove; this
+/// decides *how*.
+pub fn remove_one(git_root: &Path, path: &Path) -> Result<(), DevError> {
+    drop(run_git(
+        git_root,
+        &["worktree", "remove", "--force", &path.display().to_string()],
+    ));
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|e| {
+            DevError::Config(format!("cannot remove worktree at {}: {e}", path.display()))
+        })?;
+    }
+    drop(run_git(git_root, &["worktree", "prune"]));
+    Ok(())
+}
+
 /// Run a git command in the given directory and return trimmed stdout.
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DevError> {
     let output = Command::new("git")

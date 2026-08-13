@@ -779,6 +779,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 features: Vec::new(),
                 datasets: host_ds,
                 tilegen: HashMap::new(),
+                worktree_keep: None,
             },
         );
         let config = make_config(hosts);
@@ -843,6 +844,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 features: Vec::new(),
                 datasets: host_ds,
                 tilegen: HashMap::new(),
+                worktree_keep: None,
             },
         );
         let config = make_config(hosts);
@@ -894,6 +896,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
                 features: Vec::new(),
                 datasets: host_ds,
                 tilegen: HashMap::new(),
+                worktree_keep: None,
             },
         );
         let config = make_config(hosts);
@@ -999,6 +1002,7 @@ xxhash = "feedface"
             features: Vec::new(),
             datasets: HashMap::new(),
             tilegen: HashMap::new(),
+                worktree_keep: None,
         };
         let mut ds = Dataset {
             origin: None,
@@ -1041,6 +1045,7 @@ xxhash = "feedface"
             features: Vec::new(),
             datasets: HashMap::new(),
             tilegen: HashMap::new(),
+                worktree_keep: None,
         };
         let mut ds = Dataset {
             origin: None,
@@ -1987,6 +1992,7 @@ debug = true
                 features: Vec::new(),
                 datasets: HashMap::new(),
                 tilegen,
+                worktree_keep: None,
             },
         );
         hosts

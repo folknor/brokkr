@@ -59,6 +59,7 @@ mod toolchain;
 mod tools;
 mod wc;
 mod worktree;
+mod worktree_record;
 
 use std::path::Path;
 use std::process;

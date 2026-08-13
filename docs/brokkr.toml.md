@@ -37,6 +37,7 @@ data = "data"
 scratch = "data/scratch"
 output = "data/tilegen"   # durable tilegen output store (map-data projects)
 target = "target"
+worktree_keep = 6         # persistent --commit worktrees kept before LRU eviction
 port = 3033
 drives.source = "nvme"
 drives.data = "ssd"
@@ -72,6 +73,60 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
 `gremlins`, `header`, `textlint`, `textlint_preset`, `script_check`,
 `manifest`, `deps`, `disable_toolchain`.
+
+## `worktree_keep`
+
+```toml
+[plantasjen]
+worktree_keep = 6
+```
+
+How many persistent `--commit` worktrees this project keeps before the
+least-recently-used are evicted. Default 6. Per host because the disk is a host
+property. `0` is ignored and the default applies - zero would evict every
+worktree the moment a second was wanted, which is indistinguishable from the
+feature being broken.
+
+Eviction runs when a **new** worktree is cut, never on reuse and never on a
+plain run. That keeps the cost adjacent to a build you are already paying for
+rather than appearing as an unexplained pause, and it stops a measurement from
+becoming a destructive operation merely by happening. The consequence is that a
+project which stops growing never shrinks on its own; `brokkr clean
+--worktrees` is the explicit hammer for that.
+
+**This is a growth damper, not a bound.** The count is per project, so the
+disk-wide total is this number times however many projects you have worktrees
+for. Only a global byte budget could promise "never fills the disk", and a count
+is in any case a proxy for the real constraint, which is bytes. brokkr caches
+each worktree's measured size in its bookkeeping so a size-based rule can be
+added later without walking the tree at eviction time.
+
+The default of 6 is chosen for the **heaviest** dependency graph, not the
+lightest. A cold worktree build is ~36s on a mid-sized workspace but minutes on
+elivagar, and a silent multi-minute stall is a worse failure than some gigabytes
+that were not strictly needed. Six also clears the shape of a real comparison -
+a baseline, the commit under test, the head, a rework, and room to iterate the
+rework twice without evicting the baseline you are still comparing against.
+Projects with cheap builds can lower it.
+
+Two rules the eviction obeys:
+
+- **A worktree with uncommitted work is never evicted**, regardless of whether
+  git would have succeeded in removing it. That is correctness, not courtesy: a
+  dirty worktree is the one place where removal destroys something
+  unrecoverable. If git cannot be consulted at all, the worktree is assumed
+  dirty and kept.
+- **Failures skip and continue**, because housekeeping must not fail the
+  measurement you actually asked for. Since skips can hold the count above the
+  limit, brokkr reports the overage on *every* run where it is exceeded, not
+  once when a removal fails - a damper that has quietly stopped working is the
+  original problem, and you should not learn about it from the volume filling.
+
+Bookkeeping lives in `.brokkr/worktrees.toml` at the project root, written on
+both create and reuse. It is safe to delete; losing it costs a suboptimal
+eviction order, never data. A worktree with no record sorts as oldest, since it
+predates the bookkeeping - treating it as freshest would make pre-existing
+worktrees permanently un-evictable.
 
 ## `disable_toolchain`
 
