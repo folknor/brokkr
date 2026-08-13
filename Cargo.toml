@@ -38,6 +38,25 @@ protohoggr = "0.4.0"
 # before the adjudication layer moved here; they carry the same roles.
 rayon = "1.11"
 rustc-hash = "2"
+# nextest, BUNDLED rather than shelled out to. brokkr links the engine and
+# drives `list::TestList` + `runner` in-process, the same seam as the elivagar
+# corpus gate (src/elivagar/eliv.rs): no `cargo-nextest` on PATH, no per-host
+# install step, and no JSON round-trip - the coverage enumeration reads typed
+# values straight off the list.
+#
+# The trade taken deliberately: the nextest version is now brokkr's pin, not
+# whatever the host happens to have, so skew against a project's CI nextest is a
+# choice we make here rather than a fact we observe. Record the linked version in
+# run provenance so a gate result says which engine produced it.
+#
+# nextest-runner is a 0.x with no API stability promise; Cargo.lock is committed,
+# so upgrades are deliberate work rather than drift. Default features only -
+# `self-update` (rustls/aws-lc-rs/ureq), `config-schema` and `usdt` stay off.
+nextest-runner = "0.122.1"
+# The summary/ID types (RustBinaryId, TestCaseName, FilterMatch, MismatchReason).
+# A dependency of nextest-runner too, declared explicitly because brokkr names
+# these types directly rather than reaching through the runner for them.
+nextest-metadata = "0.15"
 
 [lints.clippy]
 uninlined_format_args = "deny"

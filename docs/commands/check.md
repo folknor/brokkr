@@ -561,6 +561,70 @@ namespace with unit tests, so skipping them by pattern would eat legitimate
 module tests too. `brokkr test <name>` is unaffected - it runs the full
 `cargo test` default so a deliberately named doctest still runs.
 
+## nextest (bundled; groundwork, not yet selectable)
+
+brokkr links cargo-nextest's engine (`nextest-runner`) rather than shelling out
+to a `cargo-nextest` on PATH - the same in-process seam as the elivagar corpus
+gate. No per-host install step, and the coverage enumeration reads
+`list::TestList` as typed values with no JSON round-trip. The trade is that the
+nextest version is brokkr's pin rather than whatever a host happens to have, so
+skew against a project's CI nextest is a choice made in `Cargo.toml`.
+
+Motivation is CI parity. Where a project's CI runs `cargo nextest run`, brokkr's
+in-process libtest lanes exercise a shape CI never runs, and the whole
+process-global-state class (a global logger installed by two tests in one
+binary) is a local-only failure. `isolation = "process"` (see the `test` phase's
+process-isolation section) is the small-scale answer to that; nextest's
+process-per-test isolation is the general one.
+
+No `[[check]]` entry can select the nextest harness yet. What exists is the
+coverage key and the disposition classifier (`src/check_cmd/nextest.rs`), landed
+first because the coverage pair is the audit's key type. Three behaviours were
+measured against cargo-nextest 0.9.143 and are recorded at the code sites that
+depend on them:
+
+- **The coverage pair becomes `(binary-id, test)`**, finer than the libtest
+  path's `(package, test)`. A package with several test targets has one binary
+  id per target, so two integration binaries defining the same test path are two
+  pairs rather than one. Package-qualified `[[quarantine]]` and skip entries keep
+  their meaning (`package(X)` spans every binary id in X), but per-entry pair
+  counts shift upward once on adoption.
+- **`MismatchReason` is priority-ordered, not a partition.** A test that is both
+  `#[ignore]`d and unmatched by a lane's filterset reports `ignored`, so on a
+  single listing it cannot be detected as an orphan. brokkr takes one listing and
+  inherits that precedence: the only thing a second `--run-ignored all` listing
+  would detect is a test that is both ignored and uncovered, which needs neither
+  covering nor quarantining. The scheme self-heals when it matters - remove the
+  `#[ignore]` and the verdict flips to `expression`, the pair orphans, and the
+  gate fails.
+- **The universe must come from its own listing, with `--ignore-default-filter`.**
+  A lane listing normally carries every testcase, marking unselected ones
+  `mismatch/expression` - but a package-scoped filterset reports the excluded
+  package's suite as `skipped` with an empty testcase map, silently shrinking the
+  universe. `-E 'all()'` is not a fix: the profile's `default-filter` composes
+  with the expression rather than being overridden by it, and a default-filter
+  can drop a whole binary (`skipped-default-filter`, empty testcase map) as well
+  as individual tests. Lane listings are read only for their selections.
+
+A `default-filter` exclusion is **not** an orphan. It is a third non-fatal
+counted bucket alongside `ignored` and `quarantined`: CI does not run those tests
+either, so failing on them would make the gate stricter than the CI it exists to
+predict, and the only way to clear such a failure would be a quarantine entry for
+a test nobody meant to run. It stays distinct from an ordinary filterset mismatch
+because the remedy lives in the project's `.config/nextest.toml` rather than in
+`brokkr.toml`. Not yet implemented: pinning the resolved default-filter so a
+change reports once rather than drifting a count nobody tracks - the compiled
+expression is not readable as text (`CompiledExpr` has no `Display`/`Serialize`,
+and the raw accessor is private to nextest-runner), so the pin has to be read
+from the project's nextest config directly.
+
+Filterset translation is mechanical for the existing constructs: substring
+`skip`/`only` entries become `test(~X)`, and a `{ package, pattern }` qualified
+skip becomes `package(X) & test(~Y)` - which folds the one predicate brokkr
+still evaluates itself (libtest has no package scoping) back into the tool.
+Note `test(=X)` matches the **full** test path, so an exact-match translation of
+a bare test name silently matches nothing.
+
 ## `coverage` phase (complete profiles)
 
 Under `certifies = "complete"` a tenth phase, `coverage`, runs after the
