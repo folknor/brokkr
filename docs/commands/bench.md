@@ -45,7 +45,12 @@ cheap, not instant.
 A clean tree names its baseline after the short commit hash: stable,
 meaningful, and recoverable from the git log.
 
-A dirty tree is **refused** unless you pass `--name LABEL`. The obvious
+A `--commit` run takes its name from the ref and never consults the working
+tree: the worktree is a fresh checkout of exactly that commit, so there is
+nothing uncommitted for the name to misrepresent.
+
+For a run against the working tree, a dirty tree is **refused** unless you pass
+`--name LABEL`. The obvious
 fallback of `<hash>-dirty` is the worst option available, because
 edit-measure-edit-measure is the most common way to use this command and every
 iteration would silently overwrite the last - destroying data in exactly the
@@ -124,7 +129,13 @@ brokkr.
 
 `bench` takes the global lock, so a `disable_toolchain` project's pinned
 `rust-toolchain.toml` is moved aside for the window cargo runs in - the same
-mechanism every build path uses. A `--commit` run re-arms the disable at the
+mechanism every build path uses.
+
+That move is a rename to a `.brokkr-disabled` sidecar, which `git status` sees
+as a deletion plus an untracked file. The baseline name is therefore resolved
+*before* the lock is taken: the dirty-tree guard exists to catch changes that
+would make a commit hash a lie about what was measured, so it has to be asked at
+a moment when the only thing that could have dirtied the tree is the user. A `--commit` run re-arms the disable at the
 worktree before taking the lock, so the pin moved aside is the one in the tree
 being built rather than the live root's.
 

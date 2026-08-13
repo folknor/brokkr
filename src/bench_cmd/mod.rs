@@ -119,6 +119,24 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         _ => None,
     };
 
+    // Resolve the baseline name HERE, before the lock and therefore before
+    // brokkr has touched the tree. Taking the lock activates the
+    // toolchain-disable, which renames `rust-toolchain.toml` to a
+    // `.brokkr-disabled` sidecar - a deletion plus an untracked file, which is
+    // exactly what `git status --porcelain` reports as a dirty tree. Asking
+    // afterwards means the guard reads brokkr's own side effect as the user's
+    // uncommitted work and refuses every run in a `disable_toolchain` project.
+    //
+    // The guard exists to catch changes that make a commit hash a lie about
+    // what was measured. It therefore has to be asked at a moment when the only
+    // thing that could have made the tree dirty is the user.
+    let baseline = match (&compare, args.target.as_deref()) {
+        // Comparison samples nothing, and the bare index measures nothing;
+        // neither needs a name, and neither should be blocked by a dirty tree.
+        (Some(_), _) | (_, None) => None,
+        (None, Some(_)) => Some(resolve_baseline_name(&build_root, args)?),
+    };
+
     // `with_worktree` re-arms the toolchain-disable at the worktree before the
     // closure runs, so the lock taken *inside* moves that tree's pin aside
     // rather than the live root's. Hence lock-inside-closure, not outside.
@@ -148,9 +166,12 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
             };
             let target = discover::resolve(&targets, wanted)?;
 
-            match &compare {
-                Some((a, b)) => compare_baselines(&home, build_root, target, a, b, args),
-                None => measure(&home, build_root, target, args),
+            match (&compare, &baseline) {
+                (Some((a, b)), _) => compare_baselines(&home, build_root, target, a, b, args),
+                (None, Some(name)) => measure(&home, build_root, target, name, args),
+                // Unreachable: a named target with no `--compare` always
+                // resolved a baseline above.
+                (None, None) => Ok(()),
             }
         },
     )
@@ -161,11 +182,10 @@ fn measure(
     home: &Path,
     build_root: &Path,
     target: &BenchTarget,
+    baseline: &str,
     args: &BenchArgs,
 ) -> Result<(), DevError> {
-    let baseline = resolve_baseline_name(build_root, args)?;
-
-    let mut criterion_args = vec!["--save-baseline".to_owned(), baseline.clone()];
+    let mut criterion_args = vec!["--save-baseline".to_owned(), baseline.to_owned()];
     criterion_args.extend(args.args.iter().cloned());
 
     output::bench_msg(&format!(
@@ -176,7 +196,7 @@ fn measure(
 
     // Written only after a successful run: a stamp for a baseline that doesn't
     // exist would make a later comparison claim comparability it can't have.
-    stamp::write(home, &baseline, &stamp::Stamp::capture(build_root))?;
+    stamp::write(home, baseline, &stamp::Stamp::capture(build_root))?;
     output::bench_msg(&format!(
         "saved baseline '{baseline}' - compare with `brokkr bench {} --compare {baseline} <other>`",
         target.name
@@ -260,6 +280,13 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
 fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, DevError> {
     if let Some(name) = &args.name {
         return Ok(name.clone());
+    }
+    // A `--commit` run measures a fresh checkout of exactly that ref, so the
+    // ref names the baseline and the working tree's state is irrelevant - there
+    // is nothing uncommitted in a tree nobody has edited. Resolved against the
+    // live repo, before the worktree exists.
+    if let Some(commit) = &args.commit {
+        return git(build_root, &["rev-parse", "--short", commit]);
     }
     let short = git(build_root, &["rev-parse", "--short", "HEAD"])?;
     if is_dirty(build_root)? {
