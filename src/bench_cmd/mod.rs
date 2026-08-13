@@ -360,6 +360,26 @@ fn cargo_bench(
     cmd.args(&cargo_args);
     cmd.current_dir(build_root);
     cmd.env("CRITERION_HOME", home.join("criterion"));
+
+    // Isolate a `--commit` worktree's build into its own target dir, the same
+    // rule `build::cargo_build_observed` applies. Without it, every worktree
+    // writes to one shared target tree at an artifact path that doesn't encode
+    // the worktree, so successive commits overwrite each other's binary. Cargo's
+    // freshness is mtime-based and a reused worktree's sources predate the
+    // artifact a later commit built, so cargo calls it fresh, skips the rebuild,
+    // and the run measures the wrong commit's code under the right commit's
+    // baseline name. It reports success, and the number looks entirely ordinary.
+    //
+    // This is the one build path that spawned cargo directly rather than going
+    // through `build`, which is how it missed the protection everything else has.
+    if crate::worktree::is_brokkr_worktree(build_root) {
+        let dir = build_root.join("target");
+        output::build_msg(&format!(
+            "isolating worktree build target dir -> {}",
+            dir.display()
+        ));
+        cmd.env("CARGO_TARGET_DIR", &dir);
+    }
     let status = cmd.status().map_err(|e| DevError::Subprocess {
         program: "cargo".into(),
         code: None,

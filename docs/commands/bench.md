@@ -128,6 +128,27 @@ mechanism every build path uses. A `--commit` run re-arms the disable at the
 worktree before taking the lock, so the pin moved aside is the one in the tree
 being built rather than the live root's.
 
+## Worktree isolation
+
+A `--commit` run builds in a persistent worktree, and that build is pinned to a
+worktree-local `CARGO_TARGET_DIR` - the same rule every other brokkr build path
+applies.
+
+This is load-bearing, not tidiness. On a host pointing every checkout at one
+shared target dir, the artifact path does not encode which worktree produced it,
+so successive commits overwrite each other's bench binary. Cargo's freshness
+check is mtime-based, and a reused worktree's sources are older than an artifact
+a later commit built, so cargo declares it fresh and skips the rebuild. The run
+then measures a different commit's code under the requested commit's baseline
+name, reports success, and produces a number with nothing obviously wrong about
+it. The cost is a full build per worktree; the alternative is baselines that are
+silently attributed to the wrong commit.
+
+Note that *not* recompiling is correct and expected when re-measuring a commit
+whose worktree already built - that is the whole reason worktrees persist. The
+isolation is what makes a skipped rebuild safe, so a fast run is not by itself a
+symptom.
+
 ## Criterion versus iai
 
 Nothing distinguishes a criterion bench target from an iai (or plain libtest)
