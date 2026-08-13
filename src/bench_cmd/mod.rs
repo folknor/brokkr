@@ -67,9 +67,14 @@ pub struct BenchArgs {
 }
 
 /// `.brokkr/bench` under the project root - the criterion home and the stamp
-/// store both live here. Anchored to the *project* root, not a `--commit`
-/// worktree's build root, so baselines measured at different commits land in
-/// one store and can be compared against each other.
+/// store both live here.
+///
+/// The project root is the directory holding `brokkr.toml`, which is what
+/// anchors every other `.brokkr/` store (`results.db`, `sidecar.db`,
+/// artefacts). Two consequences: baselines measured at different commits land
+/// in one store rather than following each `--commit` worktree, and when the
+/// config lives one level above a foreign checkout, the baselines stay in the
+/// parent instead of appearing as untracked files in a repo that isn't ours.
 fn bench_home(project_root: &Path) -> PathBuf {
     project_root.join(".brokkr").join("bench")
 }
@@ -80,12 +85,29 @@ fn bench_home(project_root: &Path) -> PathBuf {
 /// works in a tree with no `brokkr.toml` at all - target discovery comes from
 /// cargo metadata, and the config only supplies `disable_toolchain`.
 pub fn run(args: &BenchArgs) -> Result<(), DevError> {
-    let (project, project_root, disable_toolchain) = match crate::project::detect_optional()? {
-        Some(d) => (Some(d.project), d.build_root, d.config.disable_toolchain),
-        None => (None, std::env::current_dir()?, false),
-    };
-    let project_root = project_root.as_path();
-    let home = bench_home(project_root);
+    // The two roots are distinct and both matter here. `project_root` holds
+    // `brokkr.toml` and anchors everything brokkr owns, including `.brokkr/`;
+    // `build_root` is the working directory where cargo and git run. They
+    // differ when the config sits one level *above* cwd, which is the layout
+    // for driving a checkout that isn't ours - and in that layout the whole
+    // point is that brokkr's state stays in the parent and the foreign repo
+    // stays clean. Anchoring the baseline store to the build root would write
+    // into that repo and, worse, dirty the very tree whose cleanliness decides
+    // whether a baseline may be saved.
+    let (project, project_root, build_root, disable_toolchain) =
+        match crate::project::detect_optional()? {
+            Some(d) => (
+                Some(d.project),
+                d.project_root,
+                d.build_root,
+                d.config.disable_toolchain,
+            ),
+            None => {
+                let cwd = std::env::current_dir()?;
+                (None, cwd.clone(), cwd, false)
+            }
+        };
+    let home = bench_home(&project_root);
 
     // Listing what we recorded needs neither cargo nor the lock.
     if args.baselines {
@@ -100,14 +122,18 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
     // `with_worktree` re-arms the toolchain-disable at the worktree before the
     // closure runs, so the lock taken *inside* moves that tree's pin aside
     // rather than the live root's. Hence lock-inside-closure, not outside.
+    // `with_worktree` cuts its worktree from the build root when the two roots
+    // differ, so the tree checked out is the code tree rather than the config
+    // directory above it.
+    let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
     with_worktree(
-        project_root,
-        None,
+        &project_root,
+        parent_build_root,
         args.commit.as_deref(),
         false,
         disable_toolchain,
-        |build_root| {
-            let build_root = build_root.unwrap_or(project_root);
+        |wt| {
+            let build_root = wt.unwrap_or(&build_root);
             let _lock = acquire_cmd_lock_opt(project, build_root, "bench")?;
 
             let targets = discover::discover(build_root)?;
@@ -124,7 +150,7 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
 
             match &compare {
                 Some((a, b)) => compare_baselines(&home, build_root, target, a, b, args),
-                None => measure(&home, project_root, build_root, target, args),
+                None => measure(&home, build_root, target, args),
             }
         },
     )
@@ -133,12 +159,11 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
 /// Sample the current tree (or the `--commit` worktree) into a named baseline.
 fn measure(
     home: &Path,
-    project_root: &Path,
     build_root: &Path,
     target: &BenchTarget,
     args: &BenchArgs,
 ) -> Result<(), DevError> {
-    let baseline = resolve_baseline_name(project_root, build_root, args)?;
+    let baseline = resolve_baseline_name(build_root, args)?;
 
     let mut criterion_args = vec!["--save-baseline".to_owned(), baseline.clone()];
     criterion_args.extend(args.args.iter().cloned());
@@ -229,16 +254,15 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
 /// command and every iteration would silently overwrite the last. So a dirty
 /// tree must be named explicitly. `--name` is also how you label a baseline
 /// you want to keep for reasons git can't express.
-fn resolve_baseline_name(
-    project_root: &Path,
-    build_root: &Path,
-    args: &BenchArgs,
-) -> Result<String, DevError> {
+/// Both git questions are asked of the *build* root: that is the repo whose
+/// commit names the baseline, and whose cleanliness decides whether a name can
+/// be derived at all. The config directory above it may not even be a git repo.
+fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, DevError> {
     if let Some(name) = &args.name {
         return Ok(name.clone());
     }
     let short = git(build_root, &["rev-parse", "--short", "HEAD"])?;
-    if is_dirty(project_root)? {
+    if is_dirty(build_root)? {
         return Err(DevError::Preflight(vec![
             format!(
                 "the tree has uncommitted changes, so '{short}' would not \
@@ -252,8 +276,8 @@ fn resolve_baseline_name(
 }
 
 /// True when the tree has uncommitted tracked changes or untracked files.
-fn is_dirty(project_root: &Path) -> Result<bool, DevError> {
-    Ok(!git(project_root, &["status", "--porcelain"])?.is_empty())
+fn is_dirty(build_root: &Path) -> Result<bool, DevError> {
+    Ok(!git(build_root, &["status", "--porcelain"])?.is_empty())
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, DevError> {

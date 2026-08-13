@@ -84,6 +84,14 @@ Two limits worth knowing:
 Under `.brokkr/bench/`, via criterion's `CRITERION_HOME`, rather than the
 default `target/criterion`.
 
+`.brokkr/` is anchored to the **project root** - the directory holding
+`brokkr.toml` - like every other brokkr state directory, not to the build root
+where cargo runs. The two differ when the config sits one level above cwd, the
+layout used to drive a checkout that isn't ours: there, baselines stay in the
+parent and the foreign repo picks up no untracked files. That matters twice
+over, since the build root's cleanliness is also what decides whether a baseline
+can be named after its commit.
+
 Baselines are results, not build artifacts. They cost minutes each and are not
 reconstructible from the source tree, so they must not sit in a directory whose
 entire purpose is being safe to delete. Keeping them in a brokkr-designated
