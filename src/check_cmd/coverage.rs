@@ -139,16 +139,18 @@ fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_coverage_phase(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
     executed: &[bool],
     quarantine: &[QuarantineEntry],
+    allow_flags: &[String],
     limit: usize,
     all: bool,
     commands: bool,
 ) -> CoverageOutcome {
-    let shapes = match enumerate_shapes(project_root, sweeps, executed, commands) {
+    let shapes = match enumerate_shapes(project_root, sweeps, executed, allow_flags, commands) {
         Ok(s) => s,
         Err(e) => return CoverageOutcome::aborted(e),
     };
@@ -248,10 +250,17 @@ fn run_coverage_phase(
 /// Group active sweeps by build shape and enumerate each shape once:
 /// universe (`--include-ignored`, no filters), plain listing (to derive
 /// the ignored set), and every lane's filtered ran-set.
+/// `allow_flags` is the test phase's `[lints] allow` set, and it is not
+/// optional here: enumeration COMPILES (`cargo test --no-run`), so it is in the
+/// test phase's class rather than clippy's - a lint the project's `-Dwarnings`
+/// turns into an error kills the build before any diagnostic exists to filter.
+/// Omitting it cost a whole gate: every lane green, then the audit failing last
+/// on two `deprecated` errors the injection exists to suppress.
 fn enumerate_shapes(
     project_root: &Path,
     sweeps: &[ResolvedSweep],
     executed: &[bool],
+    allow_flags: &[String],
     commands: bool,
 ) -> Result<Vec<ShapeCoverage>, DevError> {
     let mut order: Vec<profile::BuildShapeKey> = Vec::new();
@@ -276,18 +285,27 @@ fn enumerate_shapes(
         // Same shape => same env by construction (env is in the key), and
         // rustflags shapes keep their isolated target dir so enumeration
         // never causes a cross-shape rebuild.
+        //
+        // The lint allows resolve per shape, exactly as the test phase resolves
+        // them per sweep, and for the same reason: a shape carrying `rustflags`
+        // exports an env var, so the env is the live layer for it whatever the
+        // config chain says. Resolving them here rather than taking the test
+        // phase's answer also keeps the rebuild rule intact - a mismatch in
+        // either direction re-fingerprints the shape and rebuilds it.
+        let (env_allows, allow_args) =
+            rustflags::plumbing(project_root, !first.rustflags.is_empty(), allow_flags);
         let mut env_owned: Vec<(String, String)> = first
             .env
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        env_owned.extend(sweep_cargo_env(first, &meta_target_dir));
+        env_owned.extend(sweep_cargo_env(first, &meta_target_dir, env_allows));
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let bare = shape_selection_args(first);
+        let bare = shape_enumeration_args(first, allow_args);
         // Per-binary enumeration (feature 11): the artifact stream gives
         // package attribution, direct-binary `--list` gives the names.
         // libtest's `--list` includes `#[ignore]`d tests regardless of
@@ -380,6 +398,18 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
     args
 }
 
+/// The enumeration build's selection: the lint allows first, then the shape.
+///
+/// Prepended rather than appended, matching the process-isolated lane, and a
+/// named function rather than two lines at the call site so the property is
+/// testable without spawning cargo: the enumeration is assembled from exactly
+/// one selection, so an allow that lives in it cannot be dropped on the way.
+fn shape_enumeration_args(sweep: &ResolvedSweep, allow_args: Vec<String>) -> Vec<String> {
+    let mut args = allow_args;
+    args.extend(shape_selection_args(sweep));
+    args
+}
+
 struct CoverageReport {
     stats: CoverageStats,
     /// Pair count justified per `[[quarantine]]` entry, index-aligned.
@@ -468,8 +498,37 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
 mod coverage_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{classify, CoverageStats, QuarantineEntry, ShapeCoverage};
+    use super::{
+        classify, shape_enumeration_args, CoverageStats, QuarantineEntry, ResolvedSweep,
+        ShapeCoverage,
+    };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn enumeration_selection_carries_the_lint_allows() {
+        // The audit's `cargo test --no-run` compiles, so it is in the test
+        // phase's class: a lint the project's `-Dwarnings` turns into an error
+        // kills the build before any diagnostic exists to filter. A green gate
+        // failing on its last phase is what a missing injection here costs.
+        let sweep = ResolvedSweep {
+            packages: vec!["pkg".into()],
+            ..ResolvedSweep::default()
+        };
+        let allows = vec![
+            "--config".to_owned(),
+            "target.\"cfg(all())\".rustflags=[\"-A\",\"deprecated\"]".to_owned(),
+        ];
+        let args = shape_enumeration_args(&sweep, allows.clone());
+        // Prepended, and the shape survives intact behind it.
+        assert_eq!(args[..2], allows[..]);
+        assert_eq!(&args[2..], &["-p".to_owned(), "pkg".to_owned()][..]);
+        // An env-sink project passes none, and the selection is then the shape
+        // alone - no empty-arg residue for cargo to choke on.
+        assert_eq!(
+            shape_enumeration_args(&sweep, Vec::new()),
+            vec!["-p".to_owned(), "pkg".to_owned()]
+        );
+    }
 
     fn set(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {
         pairs

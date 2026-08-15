@@ -373,6 +373,9 @@ fn run_build_phases(
     if a.certifies == Some(Certifies::Complete) {
         // Stays "test" on a failing run - the audit is best-effort there.
         *failing_phase = Some(if test_failure.is_some() { "test" } else { "coverage" });
+        // The audit's enumeration compiles, so it needs the test phase's lint
+        // allows for the same reason the test phase does - derived from the
+        // same source here rather than passed down, so the two cannot drift.
         let audit = audit_coverage(
             a.project_root,
             a.active_sweeps,
@@ -381,6 +384,7 @@ fn run_build_phases(
             a.limit,
             a.all,
             a.commands,
+            &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
             test_failure.as_ref(),
         );
         // Counts first, verdict second: the summary carries them even when
@@ -424,12 +428,20 @@ fn audit_coverage(
     limit: usize,
     all: bool,
     commands: bool,
+    allow_flags: &[String],
     test_failure: Option<&DevError>,
 ) -> CoverageOutcome {
     match test_failure {
-        None => {
-            run_coverage_phase(project_root, sweeps, executed, quarantine, limit, all, commands)
-        }
+        None => run_coverage_phase(
+            project_root,
+            sweeps,
+            executed,
+            quarantine,
+            allow_flags,
+            limit,
+            all,
+            commands,
+        ),
         Some(DevError::Build(msg)) if msg == "tests failed" => {
             // The test failure is the run's verdict; the audit only
             // contributes its worksheet and its counts.
@@ -438,6 +450,7 @@ fn audit_coverage(
                 sweeps,
                 executed,
                 quarantine,
+                allow_flags,
                 limit,
                 all,
                 commands,
@@ -1414,7 +1427,11 @@ fn run_clippy_phase(
         // Plain sweeps contribute nothing here; only rustflags sweeps do, and
         // for those `meta_target_dir` is `Some` (computed above).
         if let Some(dir) = &meta_target_dir {
-            env_owned.extend(sweep_cargo_env(sweep, dir));
+            // No lint allows in the env here: clippy passes the same `-A` set
+            // on its own argv (`clippy_args`), and a second copy in RUSTFLAGS
+            // would only change the build fingerprint away from the test
+            // phase's, costing a rebuild for no change in what is suppressed.
+            env_owned.extend(sweep_cargo_env(sweep, dir, &[]));
         }
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()

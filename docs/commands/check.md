@@ -413,9 +413,18 @@ phase compiles rather than reads diagnostics:
   [`[lints]`](../brokkr.toml.md#lints-section) for the full rule, including why
   an injection can be deliberately inert.
 
-The flags reach the sweep pre-build as well as the `cargo test` invocation - a
-pre-build compiling the same crate under the unsuppressed lint would fail
-before `cargo test` was ever reached.
+The flags reach **every call site in the run that compiles**, not only the
+`cargo test` invocation: the sweep pre-build (which would otherwise fail on the
+unsuppressed lint before `cargo test` was ever reached), the process-isolated
+lane's enumeration and per-test invocations, and the coverage audit's
+`cargo test --no-run` enumeration.
+
+That last one is worth stating because it is where the rule was learned. The
+audit runs last, so a call site missing the injection turns a run whose every
+lane went green into a failure with no verdict - from the caller's side
+indistinguishable from a real one until you read which phase the error came
+from. The test that guards it asserts the property rather than the call site:
+enumeration is assembled from the same selection the allows are prepended to.
 
 ### The failure list
 

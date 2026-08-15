@@ -551,6 +551,13 @@ debug = true                 # dev profile for run + `--debug` for install
 Lint suppressions, applied to **every phase that compiles** - `brokkr check`'s
 clippy phase and its test phase, plus `brokkr clippy` (optional).
 
+"Every phase that compiles" is the literal rule and includes the parts of a
+phase that are not the obvious cargo run: the sweep pre-builds, the
+process-isolated lane's enumeration, and the coverage audit's `cargo test
+--no-run`. Anything that invokes the compiler fails on a lint the project's
+`-Dwarnings` promotes to an error, whether or not brokkr would have read its
+diagnostics.
+
 Spelled `[clippy]` before the test phase started reading it, and that spelling
 still parses. The two are a true alias: if both are present their lists are
 unioned, so a project part-way through the rename never has one section
