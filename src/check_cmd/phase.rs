@@ -1500,40 +1500,71 @@ fn announce_test_allows(
     // The sink can differ per sweep (a `rustflags` sweep exports an env var and
     // so always lands in the env layer); report the shape the plain sweeps get.
     let sink = rustflags::sink(project_root, sweeps.iter().all(|s| !s.rustflags.is_empty()));
+    // One clause, not a second line: that a sited entry widens here is a
+    // property of the phase, not news about any particular entry, so it does
+    // not earn a line of its own - let alone one per entry.
+    let widened = if allow_exact.is_empty() {
+        ""
+    } else {
+        "; allow_exact applies build-wide here"
+    };
     output::run_msg(&format!(
-        "test: allowing {} via {} ([lints] allow)",
+        "test: allowing {} via {} ([lints]{widened})",
         lints.join(", "),
         sink.describe()
     ));
-    // The file scope of an `allow_exact` is enforceable only where brokkr sees
-    // diagnostics. A lint that stops a build stops it during compilation, so
-    // here the entry is honoured by lint name across the build - a wider
-    // suppression than the config asks for, and the run has to say so.
+}
+
+/// Announce the clippy phase's suppressions in one line.
+///
+/// A narrowed gate must not read as a full one, so the allowed lints are named
+/// on every run - but *naming the lints* is the whole requirement, and this
+/// used to print one line per `allow_exact` entry. At three entries that reads
+/// as a list; at seventy it is a wall that buries the rest of the run, and the
+/// paths in it are already in `brokkr.toml` where they can be read at leisure.
+/// So sited entries collapse to their distinct lints with a count each.
+///
+/// The per-entry detail that is *not* in the config - which entries matched
+/// nothing - is reported separately by [`report_stale_sited_allows`], and that
+/// one still prints per entry. It is the inverse: rare, actionable, and the
+/// only part of this a reader has to act on.
+fn announce_allows(allow: &[String], allow_exact: &[SitedAllow]) {
+    if !allow.is_empty() {
+        output::run_msg(&format!(
+            "clippy: allowing {} ([lints] allow)",
+            allow.join(", ")
+        ));
+    }
     if !allow_exact.is_empty() {
         output::run_msg(&format!(
-            "test:   {} applied build-wide (allow_exact cannot scope a build failure to a file)",
-            allow_exact
-                .iter()
-                .map(|s| s.lint.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "clippy: allowing {} ([lints] allow_exact)",
+            summarize_sited(allow_exact)
         ));
     }
 }
 
-fn announce_allows(allow: &[String], allow_exact: &[SitedAllow]) {
-    if !allow.is_empty() {
-        output::run_msg(&format!(
-            "clippy: allowing {} ([clippy] allow)",
-            allow.join(", ")
-        ));
-    }
+/// `lint (n files)` per distinct lint, in first-seen order - or `lint at path`
+/// when a lint has just the one site, since the path is short and is the more
+/// useful thing to see.
+fn summarize_sited(allow_exact: &[SitedAllow]) -> String {
+    let mut order: Vec<&str> = Vec::new();
+    let mut sites: HashMap<&str, Vec<&str>> = HashMap::new();
     for s in allow_exact {
-        output::run_msg(&format!(
-            "clippy: allowing {} at {} ([clippy] allow_exact)",
-            s.lint, s.path
-        ));
+        let entry = sites.entry(s.lint.as_str()).or_default();
+        if entry.is_empty() {
+            order.push(s.lint.as_str());
+        }
+        entry.push(s.path.as_str());
     }
+    order
+        .iter()
+        .map(|lint| match sites.get(lint).map(Vec::as_slice) {
+            Some([one]) => format!("{lint} at {one}"),
+            Some(many) => format!("{lint} ({} files)", many.len()),
+            _ => (*lint).to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A sited suppression that matched nothing across every sweep is dead
@@ -2249,6 +2280,59 @@ fn run_test_phase(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod sited_summary_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::summarize_sited;
+    use crate::config::SitedAllow;
+
+    fn sited(entries: &[&str]) -> Vec<SitedAllow> {
+        entries.iter().map(|s| SitedAllow::parse(s).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_lone_site_keeps_its_path() {
+        // One entry: the path is short and is the useful part.
+        let s = sited(&["deprecated@src/a.rs"]);
+        assert_eq!(summarize_sited(&s), "deprecated at src/a.rs");
+    }
+
+    #[test]
+    fn repeated_lint_collapses_to_a_count() {
+        // The regression this exists for: a project with 59 sited entries for
+        // one lint printed 59 lines and buried the rest of the run.
+        let s = sited(&[
+            "clippy::assert_is_empty@a.rs",
+            "clippy::assert_is_empty@b.rs",
+            "clippy::assert_is_empty@c.rs",
+        ]);
+        assert_eq!(summarize_sited(&s), "clippy::assert_is_empty (3 files)");
+    }
+
+    #[test]
+    fn distinct_lints_are_listed_in_first_seen_order() {
+        let s = sited(&[
+            "deprecated@a.rs",
+            "clippy::foo@b.rs",
+            "deprecated@c.rs",
+            "clippy::foo@d.rs",
+        ]);
+        assert_eq!(
+            summarize_sited(&s),
+            "deprecated (2 files), clippy::foo (2 files)"
+        );
+    }
+
+    #[test]
+    fn the_summary_is_one_line_however_many_entries() {
+        let entries: Vec<String> = (0..70).map(|i| format!("deprecated@src/f{i}.rs")).collect();
+        let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+        let out = summarize_sited(&sited(&refs));
+        assert!(!out.contains('\n'), "got: {out}");
+        assert_eq!(out, "deprecated (70 files)");
+    }
 }
 
 #[cfg(test)]

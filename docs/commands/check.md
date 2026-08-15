@@ -320,7 +320,7 @@ any-diagnostic-fails rule needs no carve-outs. This is the escape hatch for
 driving a foreign checkout under `disable_toolchain`: brokkr lints on the
 host's (newer) clippy, which surfaces lints the project's own pinned-toolchain
 CI cannot see and its code cannot be expected to satisfy. The phase announces
-the allowed lints up front (`clippy: allowing clippy::unused_async ([clippy]
+the allowed lints up front (`clippy: allowing clippy::unused_async ([lints]
 allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
 in the reprinted failing command. Entries must be bare lint names
 (`clippy::`-qualified or plain rustc names); flags are rejected at parse time.
@@ -353,8 +353,13 @@ deliberately narrow where `allow` is broad: one lint in one file (every
 occurrence in that file - file-granular by design, since line numbers drift
 with unrelated edits), never workspace-wide, and no `-A` is injected for it,
 so other sites of the same lint keep failing the check. Each entry is
-announced up front (`clippy: allowing <lint> at <path> ([clippy]
-allow_exact)`), and an entry that suppressed nothing across the run draws a
+announced up front, but *collapsed*: entries are grouped by lint with a file
+count (`clippy: allowing clippy::assert_is_empty (59 files), deprecated (3
+files) ([lints] allow_exact)`), and a lint with a single site keeps its path
+instead. Naming the lints is what keeps a narrowed gate from reading as a full
+one; the paths are already in `brokkr.toml`, and one line per entry buries the
+rest of the run once a project has more than a handful. An entry that
+suppressed nothing across the run still draws a
 `suppressed nothing (stale entry?)` notice - upstream fixed the site or the
 file moved, so the entry should be deleted or re-sited rather than accrete.
 The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
