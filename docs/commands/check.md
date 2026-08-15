@@ -158,6 +158,13 @@ context patterns fragment-tolerant (match `madsim`, not a full single-line
 attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
 engine behind most grep-style convention hooks; see `src/textlint.rs`.
 
+A clean run reports what it covered - `textlint: ok (21 rule(s), 812 file(s))`
+- rather than a bare `ok`, matching the `dependency rules` line. The file count
+is files at least one rule applied to, not the tracked-file total, so it is a
+statement about the corpus that was actually scanned: a rule whose `paths` glob
+has stopped matching anything still passes, and a shrinking count is the only
+thing that gives it away.
+
 ## `manifest` phase
 
 Runs next, only when a `[manifest]` section enables a check
@@ -184,7 +191,11 @@ prove it ran to completion by emitting the sentinel. The command's exit code is
 therefore ignored; only a spawn failure is a hard error. Every entry runs (no
 fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
 each failure prints the full captured stdout/stderr (the diagnostic, never
-truncated by `--limit`). It fills the gap for gates brokkr's native phases can't
+truncated by `--limit`). A clean stage prints a single collapsed line -
+`script-check: ok (21 check(s))` - rather than one per entry; the count keeps
+the line falsifiable (a stage that quietly stopped running its checks shows a
+shrinking number) while a passing gate's name carries nothing to act on. A
+partly-failing stage prints `script-check: M of N ok` above the failure block. It fills the gap for gates brokkr's native phases can't
 express - semantic analysers (`# Panics`/`# Errors` doc checks) or external
 formatter conventions - that were previously hand-run before every commit.
 

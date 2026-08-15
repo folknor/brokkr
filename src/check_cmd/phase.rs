@@ -1021,10 +1021,18 @@ fn run_textlint(
         return Ok(());
     }
 
-    let violations = crate::textlint::scan(project_root, rules)?;
+    let scan = crate::textlint::scan(project_root, rules)?;
+    let violations = scan.violations;
 
     if violations.is_empty() {
-        output::run_msg("textlint: ok");
+        // Counts on the green line, matching `dependency rules`: "ok" alone
+        // cannot distinguish a clean tree from a rule whose `paths` glob has
+        // stopped matching anything.
+        output::run_msg(&format!(
+            "textlint: ok ({} rule(s), {} file(s))",
+            rules.len(),
+            scan.files
+        ));
         return Ok(());
     }
 
@@ -1103,18 +1111,30 @@ fn run_script_checks(
         return Ok(());
     }
 
+    let total = checks.len();
     let mut failures: Vec<(&ScriptCheck, crate::script_check::Outcome)> = Vec::new();
     for check in checks {
         let outcome = crate::script_check::run_one(check, project_root)?;
-        if outcome.passed {
-            output::run_msg(&format!("script-check {}: ok", check.name));
-        } else {
+        if !outcome.passed {
             failures.push((check, outcome));
         }
     }
 
+    // One line for the stage, not one per check: a passing gate's name carries
+    // no information a reader can act on, and a project with twenty of them
+    // buried the rest of the run under a wall of `ok`. The count is what makes
+    // the line falsifiable - it says which corpus passed, so a stage that
+    // silently stopped running its checks is visible as a shrinking number.
+    // Failures are unaffected; each one still prints its captured output below.
     if failures.is_empty() {
+        output::run_msg(&format!("script-check: ok ({total} check(s))"));
         return Ok(());
+    }
+    if failures.len() < total {
+        output::run_msg(&format!(
+            "script-check: {} of {total} ok",
+            total - failures.len()
+        ));
     }
 
     // The full captured output is the diagnostic - never truncated by `--limit`,

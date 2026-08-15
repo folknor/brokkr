@@ -244,17 +244,31 @@ fn join_incompatible_predicate(rule: &TextlintRule) -> Option<&'static str> {
     }
 }
 
+/// What a scan found, and how much it looked at.
+///
+/// A green phase reports the second half so "ok" is a statement about a known
+/// corpus rather than an unfalsifiable one - a rule whose `paths` glob stopped
+/// matching anything still passes, and `0 file(s)` is the only thing that
+/// distinguishes that from a rule doing its job.
+pub struct TextlintScan {
+    pub violations: Vec<TextlintViolation>,
+    /// Files at least one rule applied to - not the tracked-file total, which
+    /// would credit the phase with files no rule looks at.
+    pub files: usize,
+}
+
 /// Scan tracked files against every rule, one pass per file.
-pub fn scan(
-    project_root: &Path,
-    rules: &[TextlintRule],
-) -> Result<Vec<TextlintViolation>, DevError> {
+pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan, DevError> {
     if rules.is_empty() {
-        return Ok(Vec::new());
+        return Ok(TextlintScan {
+            violations: Vec::new(),
+            files: 0,
+        });
     }
     let compiled = compile(rules)?;
     let files = gremlins::tracked_files(project_root)?;
     let mut out = Vec::new();
+    let mut scanned = 0usize;
     for rel in &files {
         let applicable: Vec<&Compiled> = compiled.iter().filter(|c| applies(c, rel)).collect();
         if applicable.is_empty() {
@@ -264,9 +278,13 @@ pub fn scan(
         let Ok(content) = std::fs::read_to_string(&abs) else {
             continue;
         };
+        scanned += 1;
         scan_file(rel, &content, &applicable, &mut out);
     }
-    Ok(out)
+    Ok(TextlintScan {
+        violations: out,
+        files: scanned,
+    })
 }
 
 /// Whether a compiled rule scans `rel`: matched by `paths` and not excused by
@@ -570,6 +588,15 @@ fn toml_section(trimmed: &str) -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn no_rules_scans_nothing_and_says_so() {
+        // The early return must not report a file count it never earned - the
+        // green line's whole value is that the number is falsifiable.
+        let scan = scan(Path::new("/nonexistent"), &[]).unwrap();
+        assert!(scan.violations.is_empty());
+        assert_eq!(scan.files, 0);
+    }
 
     /// Compile one rule and scan a source string; return (line, rule) hits.
     fn run(rule: TextlintRule, src: &str) -> Vec<(usize, String)> {
