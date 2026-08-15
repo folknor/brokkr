@@ -310,9 +310,10 @@ graph:
   still dumps clippy's own rendered text verbatim (which shows the capped
   `warning:` wording).
 
-### `[clippy] allow`
+### `[lints] allow`
 
-A `[clippy]` section with `allow = ["clippy::unused_async", ...]` appends
+A `[lints]` section (spelled `[clippy]` historically; the two are unioned)
+with `allow = ["clippy::unused_async", ...]` appends
 `-A <lint>` after `--cap-lints=warn` on every sweep (and on `brokkr clippy`),
 so the listed lints never reach the diagnostic stream - the
 any-diagnostic-fails rule needs no carve-outs. This is the escape hatch for
@@ -334,15 +335,15 @@ severity** with both `-A clippy::unused_async_trait_impl` and
 diagnostic bypassed both. The same lint was suppressed fine at
 attribute-free sites. Best reading: a clippy expectation-machinery
 interaction, not a brokkr defect - but the practical consequence is that
-`[clippy] allow` cannot be relied on to silence a lint at a site holding an
+`[lints] allow` cannot be relied on to silence a lint at a site holding an
 `#[expect]` for a sibling lint emitted by the same pass. Minimal upstream
 repro sketch: an inherent `async fn` with a tail expression and no
 `.await`, `#[expect(clippy::unused_async)]`, compiled with
 `-A clippy::unused_async_trait_impl` on clippy 1.98.
 
-### `[clippy] allow_exact`
+### `[lints] allow_exact`
 
-`[clippy] allow_exact` is the remedy for exactly that shape: `"lint@path"`
+`[lints] allow_exact` is the remedy for exactly that shape: `"lint@path"`
 entries suppressed on **brokkr's side of the pipe** instead of the
 compiler's. A matching diagnostic - same lint (with or without the
 `clippy::` qualifier), same build-root-relative file - is dropped at JSON
@@ -368,8 +369,37 @@ diagnostic's location).
 ## `test` phase
 
 Runs after clippy, one lane per selected sweep. The subsections below cover
-the failure list, build-error reporting, per-sweep `rustflags`, the serial and
-parallel lanes, process isolation, and doctest policy.
+the failure list, build-error reporting, lint suppression, per-sweep
+`rustflags`, the serial and parallel lanes, process isolation, and doctest
+policy.
+
+### Lint suppression in the test phase
+
+`[lints] allow` and `[lints] allow_exact` are read by this phase too, not only
+by clippy. They have to be: a lint that a project's `-Dwarnings` turns into a
+compile error fails the *build*, and a suppression that cleared clippy but not
+the test build left `brokkr check` green on one phase and red on the other for
+the identical diagnostic, with no config key that reached the second.
+
+Two things differ from the clippy phase, both forced by the fact that this
+phase compiles rather than reads diagnostics:
+
+- **`allow_exact` loses its file scope here.** The build fails during
+  compilation, before any diagnostic reaches brokkr to be filtered, and `-A`
+  has no path-scoped form - so each entry contributes its lint name build-wide.
+  The run says so on its notice line.
+- **The flags travel through cargo's rustflags,** since `cargo test` has no
+  `-- <rustc flags>` passthrough. Cargo picks exactly one rustflags source, so
+  brokkr finds the layer already live for this build and adds to *that* one
+  with `--config` (the highest-precedence config source) rather than exporting
+  `RUSTFLAGS`, which would discard the project's own flags wholesale. The
+  notice line names the layer it used. See
+  [`[lints]`](../brokkr.toml.md#lints-section) for the full rule, including why
+  an injection can be deliberately inert.
+
+The flags reach the sweep pre-build as well as the `cargo test` invocation - a
+pre-build compiling the same crate under the unsuppressed lint would fail
+before `cargo test` was ever reached.
 
 ### The failure list
 

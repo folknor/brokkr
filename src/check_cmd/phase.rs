@@ -28,6 +28,7 @@ use crate::config::{
     QuarantineEntry, ScriptCheck, SitedAllow, Stage, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
+use crate::rustflags;
 use crate::error::DevError;
 use crate::gremlins;
 use crate::output;
@@ -357,6 +358,8 @@ fn run_build_phases(
             a.doctests,
             a.commands,
             a.extra_args,
+            a.clippy_allow,
+            a.clippy_allow_exact,
             collected_timings,
             executed,
         )
@@ -1470,6 +1473,54 @@ fn run_clippy_phase(
 /// A suppressed lint narrows what "clippy clean" certifies, so the log must
 /// say so up front - like `skip_phases`, a narrowed run must never read as a
 /// full one. Blanket allows on one line, each sited allow on its own.
+/// Announce the test phase's lint suppressions, and where they were injected.
+///
+/// The clippy phase can say "allowing X" and leave it there - it passes `-A` on
+/// its own argv. The test phase cannot: it has no rustc passthrough, so the
+/// flags go into cargo's rustflags at whichever layer [`rustflags::sink`] found
+/// live, and injecting at the `build.rustflags` layer while some
+/// `target.<cfg>` table actually wins is inert. That case is not an error - it
+/// is the deliberately safe direction, since the alternative silently discards
+/// the project's own flags - but it must be visible, or a suppression that
+/// quietly does nothing reads as a brokkr bug.
+fn announce_test_allows(
+    project_root: &Path,
+    sweeps: &[ResolvedSweep],
+    allow_flags: &[String],
+    allow_exact: &[SitedAllow],
+) {
+    if allow_flags.is_empty() {
+        return;
+    }
+    let lints: Vec<&str> = allow_flags
+        .iter()
+        .filter(|f| *f != "-A")
+        .map(String::as_str)
+        .collect();
+    // The sink can differ per sweep (a `rustflags` sweep exports an env var and
+    // so always lands in the env layer); report the shape the plain sweeps get.
+    let sink = rustflags::sink(project_root, sweeps.iter().all(|s| !s.rustflags.is_empty()));
+    output::run_msg(&format!(
+        "test: allowing {} via {} ([lints] allow)",
+        lints.join(", "),
+        sink.describe()
+    ));
+    // The file scope of an `allow_exact` is enforceable only where brokkr sees
+    // diagnostics. A lint that stops a build stops it during compilation, so
+    // here the entry is honoured by lint name across the build - a wider
+    // suppression than the config asks for, and the run has to say so.
+    if !allow_exact.is_empty() {
+        output::run_msg(&format!(
+            "test:   {} applied build-wide (allow_exact cannot scope a build failure to a file)",
+            allow_exact
+                .iter()
+                .map(|s| s.lint.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
 fn announce_allows(allow: &[String], allow_exact: &[SitedAllow]) {
     if !allow.is_empty() {
         output::run_msg(&format!(
@@ -2091,10 +2142,14 @@ fn run_test_phase(
     doctests: bool,
     commands: bool,
     extra_args: &[String],
+    allow: &[String],
+    allow_exact: &[SitedAllow],
     mut timings: Option<&mut Vec<TestTiming>>,
     executed: &mut [bool],
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
+    let allow_flags = crate::config::test_phase_allow_flags(allow, allow_exact);
+    announce_test_allows(project_root, sweeps, &allow_flags, allow_exact);
     // `brokkr check`'s test phase always runs `cargo test` without
     // `--release`, so each sweep's `build_packages` artefacts land in
     // `<target>/debug`. Tests that spawn the just-rebuilt binary read
@@ -2127,9 +2182,25 @@ fn run_test_phase(
         // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
         // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
         // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps.
-        let project_env = sweep_runtime_env(sweep, project, &target_dir, "debug");
+        // A lint allow reaches this build through exactly one layer, and which
+        // one is per sweep: a sweep carrying `rustflags` exports an env var, so
+        // the env is live for it whatever the config chain says. Whichever it
+        // is, it must reach the pre-build and the test run alike - a pre-build
+        // compiling the same crate under the unsuppressed lint fails before
+        // `cargo test` is ever reached.
+        let (env_allows, allow_args) =
+            rustflags::plumbing(project_root, !sweep.rustflags.is_empty(), &allow_flags);
+        let project_env = sweep_runtime_env(sweep, project, &target_dir, "debug", env_allows);
         for pkg in &sweep.build_packages {
-            run_sweep_pre_build(project_root, sweep, pkg, &project_env, raw, commands)?;
+            run_sweep_pre_build(
+                project_root,
+                sweep,
+                pkg,
+                &project_env,
+                &allow_args,
+                raw,
+                commands,
+            )?;
         }
 
         let success = if sweep.process_isolation {
@@ -2140,6 +2211,7 @@ fn run_test_phase(
                 &scope,
                 extra_args,
                 &project_env,
+                &allow_args,
                 raw,
                 all,
                 doctests,
@@ -2154,6 +2226,7 @@ fn run_test_phase(
                 &scope,
                 extra_args,
                 &project_env,
+                &allow_args,
                 raw,
                 doctests,
                 multi,

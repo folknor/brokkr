@@ -417,7 +417,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 d.config.textlint,
                 d.config.script_checks,
                 d.config.manifest,
-                d.config.clippy,
+                d.config.lints,
                 // cargo/git run in the code tree (build_root); brokkr's own
                 // `.brokkr` state anchors to the config dir (project_root).
                 // The two differ only under the one-level-up layout.
@@ -493,7 +493,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // `clippy` runs in any Rust+git repo with no config.
         let (project, check_entries, clippy_cfg, project_root) =
             match project::detect_optional()? {
-                Some(d) => (Some(d.project), d.config.check, d.config.clippy, d.build_root),
+                Some(d) => (Some(d.project), d.config.check, d.config.lints, d.build_root),
                 None => (None, Vec::new(), None, std::env::current_dir()?),
             };
         let env_overrides = parse_env_overrides(&env)?;

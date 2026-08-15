@@ -39,7 +39,7 @@ mod tests {
             script_checks: Vec::new(),
             manifest: None,
             deps: None,
-            clippy: None,
+            lints: None,
             bin: None,
             disable_toolchain: false,
         }
@@ -59,7 +59,7 @@ mod tests {
     fn clippy_allow_parses() {
         let table: toml::map::Map<String, toml::Value> =
             toml::from_str("[clippy]\nallow = [\"clippy::unused_async\", \"dead_code\"]").unwrap();
-        let cfg = parse_clippy(&table).unwrap().unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
         assert_eq!(cfg.allow, vec!["clippy::unused_async", "dead_code"]);
     }
 
@@ -69,7 +69,7 @@ mod tests {
         // whitespace is flag smuggling, not a lint name.
         for bad in ["[clippy]\nallow = [\"-W clippy::pedantic\"]", "[clippy]\nallow = [\" \"]"] {
             let table: toml::map::Map<String, toml::Value> = toml::from_str(bad).unwrap();
-            assert!(parse_clippy(&table).is_err(), "accepted: {bad}");
+            assert!(parse_lints(&table).is_err(), "accepted: {bad}");
         }
     }
 
@@ -79,7 +79,7 @@ mod tests {
             "[clippy]\nallow_exact = [\"clippy::unused_async@src/lib.rs\", \"dead_code@src/a.rs\"]",
         )
         .unwrap();
-        let cfg = parse_clippy(&table).unwrap().unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
         assert_eq!(cfg.allow_exact.len(), 2);
         assert_eq!(cfg.allow_exact[0].lint, "clippy::unused_async");
         assert_eq!(cfg.allow_exact[0].path, "src/lib.rs");
@@ -100,8 +100,59 @@ mod tests {
         ] {
             let src = format!("[clippy]\nallow_exact = [\"{bad}\"]");
             let table: toml::map::Map<String, toml::Value> = toml::from_str(&src).unwrap();
-            assert!(parse_clippy(&table).is_err(), "accepted: {bad}");
+            assert!(parse_lints(&table).is_err(), "accepted: {bad}");
         }
+    }
+
+    #[test]
+    fn lints_section_parses_under_its_own_name() {
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[lints]\nallow = [\"deprecated\"]").unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
+        assert_eq!(cfg.allow, vec!["deprecated"]);
+    }
+
+    #[test]
+    fn lints_and_clippy_alias_union_rather_than_shadow() {
+        // A project mid-rename must not have one section silently swallow the
+        // other - that would drop a live suppression on a schema change.
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[lints]\nallow = [\"deprecated\"]\n\
+             [clippy]\nallow = [\"dead_code\"]\nallow_exact = [\"unused@src/a.rs\"]",
+        )
+        .unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
+        assert_eq!(cfg.allow, vec!["deprecated", "dead_code"]);
+        assert_eq!(cfg.allow_exact.len(), 1);
+    }
+
+    #[test]
+    fn lints_validation_names_the_section_it_read() {
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[lints]\nallow = [\"-Wpedantic\"]").unwrap();
+        let err = parse_lints(&table).unwrap_err().to_string();
+        assert!(err.contains("[lints]"), "got: {err}");
+    }
+
+    #[test]
+    fn test_phase_flags_fold_allow_exact_in_and_dedupe() {
+        // The test phase cannot scope by file, so an allow_exact contributes
+        // its lint name; a name present in both lists appears once.
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[lints]\nallow = [\"deprecated\"]\n\
+             allow_exact = [\"deprecated@src/a.rs\", \"dead_code@src/b.rs\"]",
+        )
+        .unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
+        assert_eq!(
+            test_phase_allow_flags(&cfg.allow, &cfg.allow_exact),
+            vec!["-A", "deprecated", "-A", "dead_code"]
+        );
+    }
+
+    #[test]
+    fn test_phase_flags_empty_without_config() {
+        assert!(test_phase_allow_flags(&[], &[]).is_empty());
     }
 
     #[test]

@@ -66,10 +66,11 @@ pub struct DevConfig {
     /// `[deps]` config: tuning for the `brokkr deps` audit. `None` when the
     /// project has no `[deps]` section. See [`DepsConfig`].
     pub deps: Option<DepsConfig>,
-    /// `[clippy]` config: tuning for the clippy phase (`brokkr check` and
-    /// `brokkr clippy` share it). `None` when the project has no `[clippy]`
-    /// section. See [`ClippyConfig`].
-    pub clippy: Option<ClippyConfig>,
+    /// `[lints]` config: lint suppressions consumed by *both* build phases
+    /// (`brokkr check`'s clippy and test phases, and `brokkr clippy`). `None`
+    /// when the project has neither `[lints]` nor its `[clippy]` alias. See
+    /// [`LintsConfig`].
+    pub lints: Option<LintsConfig>,
     /// `[bin]` config: shared defaults for `brokkr run` and `brokkr install`.
     /// `None` when the project has no `[bin]` section (discovery still
     /// works; the section only curates ambiguity). See [`BinConfig`].
@@ -108,17 +109,26 @@ pub struct BinConfig {
     pub debug: bool,
 }
 
-/// `[clippy]` section: tuning for the clippy phase.
+/// `[lints]` section: lint suppressions, applied to every phase that compiles.
 ///
-/// - `allow` - lint names suppressed on every clippy sweep, passed to the
-///   compiler as `-A <lint>` after `--cap-lints=warn`. The escape hatch for
-///   driving a project whose own tooling runs a *pinned* toolchain: under
-///   `disable_toolchain` brokkr lints on the host's (newer) clippy, which
-///   surfaces lints upstream's CI cannot see and upstream code cannot be
-///   expected to satisfy. Suppression happens at the compiler, so the
-///   any-diagnostic-fails rule needs no carve-outs; the phase announces the
-///   allowed lints up front so a narrowed gate never reads as a full one.
-///   Accepts both `clippy::` lints and plain rustc lint names.
+/// Spelled `[clippy]` historically, and that spelling still parses (the two are
+/// unioned). The rename is the honest name for what the section does: a lint
+/// that stops a *build* is not a clippy-phase concern. A suppression that
+/// cleared clippy but not the test build left `brokkr check` green on one phase
+/// and red on the other for the identical diagnostic, with no key that reached
+/// the second - so both phases now read this one section.
+///
+/// - `allow` - lint names suppressed on every sweep. The clippy phase passes
+///   them as `-A <lint>` after `--cap-lints=warn`; the test phase, which has no
+///   rustc passthrough of its own, routes them through
+///   [`crate::rustflags`]. The escape hatch for driving a project whose own
+///   tooling runs a *pinned* toolchain: under `disable_toolchain` brokkr builds
+///   on the host's (newer) compiler, which surfaces lints upstream's CI cannot
+///   see and upstream code cannot be expected to satisfy - and under a project
+///   `-Dwarnings` those arrive as hard compile errors. Suppression happens at
+///   the compiler, so the any-diagnostic-fails rule needs no carve-outs; each
+///   phase announces the allowed lints up front so a narrowed gate never reads
+///   as a full one. Accepts both `clippy::` lints and plain rustc names.
 /// - `allow_exact` - sited suppressions, `"lint@path"` entries filtered on
 ///   brokkr's side of the pipe. `allow` acts at the compiler CLI level, and a
 ///   source site carrying its own lint-level attribute can defeat it (the
@@ -128,16 +138,61 @@ pub struct BinConfig {
 ///   it holds regardless of attribute games at the site. Deliberately narrow:
 ///   one lint in one file (every occurrence in that file), never
 ///   workspace-wide, and no `-A` is injected for it.
+///
+///   **In the test phase the file scoping cannot be honoured.** A lint that
+///   fails the build fails it during compilation, before any diagnostic reaches
+///   brokkr to be filtered, and `-A` has no path-scoped form. So the test phase
+///   takes the *lint name* of each entry and suppresses it across that build,
+///   and says so on the notice line. The narrow guarantee still holds where it
+///   can be enforced (the clippy phase); the alternative was an `allow_exact`
+///   that silently does nothing about the failure it was written for.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct ClippyConfig {
-    /// Lint names to suppress (`-A <lint>`) on every clippy sweep.
+pub struct LintsConfig {
+    /// Lint names to suppress (`-A <lint>`) on every sweep, both phases.
     pub allow: Vec<String>,
-    /// Sited suppressions (`"lint@path"`), filtered at diagnostic ingestion.
+    /// Sited suppressions (`"lint@path"`), filtered at diagnostic ingestion in
+    /// the clippy phase, degraded to a build-wide `-A <lint>` in the test phase.
     pub allow_exact: Vec<SitedAllow>,
 }
 
-/// One `[clippy] allow_exact` entry: a lint suppressed in one file only.
+impl LintsConfig {
+    /// Union of two parsed sections, for the `[lints]` / `[clippy]` alias.
+    pub fn merge(&mut self, other: Self) {
+        self.allow.extend(other.allow);
+        self.allow_exact.extend(other.allow_exact);
+    }
+}
+
+/// The `-A <lint>` flag pairs the test phase injects into the build's
+/// rustflags: `allow` plus the lint names behind `allow_exact`, deduped and
+/// order-preserving.
+///
+/// `clippy::`-qualified names are kept rather than filtered: rustc accepts
+/// tool-qualified lint flags for tools it knows, so they are inert in a plain
+/// `cargo test` build, and dropping them would mean a project could not
+/// suppress a lint that clippy and rustc happen to share a name for.
+///
+/// A free function taking the two slices because that is how the check phases
+/// carry them - unbundled, straight off the config - so there is one definition
+/// of which lints reach a build rather than one per caller shape.
+pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let names = allow
+        .iter()
+        .map(String::as_str)
+        .chain(allow_exact.iter().map(|s| s.lint.as_str()));
+    for name in names {
+        if seen.insert(name) {
+            out.push("-A".to_string());
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// One `[lints] allow_exact` entry: a lint suppressed in one file only.
 ///
 /// Deserialized from the `"lint@path"` string form; the split and both
 /// halves are validated during deserialization, so a constructed value is

@@ -52,8 +52,14 @@ fn isolated_target_dir(sweep: &ResolvedSweep, meta_target_dir: &Path) -> Option<
 /// when present - cargo ignores `RUSTFLAGS` once the encoded form is set - else
 /// to `RUSTFLAGS` (space-joined, matching `make cargo-test-sim`). `None` for an
 /// empty flag list.
-fn composed_rustflags_env(rustflags: &[String]) -> Option<(String, String)> {
-    if rustflags.is_empty() {
+/// `extra` carries the `[lints] allow` flags when - and only when - the
+/// environment is the layer cargo will actually read (see [`crate::rustflags`]).
+/// They go last, because rustc resolves conflicting lint levels last-wins and
+/// the whole point is to beat the project's `-Dwarnings`. When the config layer
+/// is the live one, `extra` is empty here and the flags ride cargo's
+/// `--config` instead.
+fn composed_rustflags_env(rustflags: &[String], extra: &[String]) -> Option<(String, String)> {
+    if rustflags.is_empty() && extra.is_empty() {
         return None;
     }
     if let Ok(existing) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
@@ -63,18 +69,22 @@ fn composed_rustflags_env(rustflags: &[String]) -> Option<(String, String)> {
             existing.split('\u{1f}').map(str::to_owned).collect()
         };
         parts.extend(rustflags.iter().cloned());
+        parts.extend(extra.iter().cloned());
         return Some(("CARGO_ENCODED_RUSTFLAGS".into(), parts.join("\u{1f}")));
     }
     let mut flags = std::env::var("RUSTFLAGS")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_default();
-    if !flags.is_empty() {
-        flags.push(' ');
+    for flag in rustflags.iter().chain(extra) {
+        if !flags.is_empty() {
+            flags.push(' ');
+        }
+        flags.push_str(flag);
     }
-    flags.push_str(&rustflags.join(" "));
     Some(("RUSTFLAGS".into(), flags))
 }
+
 
 /// The `CARGO_TARGET_DIR` + `RUSTFLAGS` pair a sweep's `rustflags` imply, or an
 /// empty vec when it sets none. Used by the clippy phase (which needs no
@@ -88,7 +98,7 @@ pub(crate) fn sweep_cargo_env(
     if let Some(dir) = isolated_target_dir(sweep, meta_target_dir) {
         out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
     }
-    out.extend(composed_rustflags_env(&sweep.rustflags));
+    out.extend(composed_rustflags_env(&sweep.rustflags, &[]));
     out
 }
 
@@ -97,11 +107,16 @@ pub(crate) fn sweep_cargo_env(
 /// `target/rustflags-<hash>` when it carries `rustflags`, else cargo's own
 /// `meta_target_dir`), plus the `CARGO_TARGET_DIR` / `RUSTFLAGS` overlay. The
 /// sweep's own `env` still overlays this via `merged_env`.
+/// `allow_flags` is whatever share of the `[lints] allow` flags belongs in the
+/// environment ([`crate::rustflags::plumbing`]); empty when they ride cargo's
+/// `--config` instead. The caller decides, because the same sink answer also
+/// selects the cargo args it must pass alongside these.
 pub(crate) fn sweep_runtime_env(
     sweep: &ResolvedSweep,
     project: Option<Project>,
     meta_target_dir: &Path,
     profile_dir: &str,
+    allow_flags: &[String],
 ) -> Vec<(String, String)> {
     let isolated = isolated_target_dir(sweep, meta_target_dir);
     let effective: &Path = isolated.as_deref().unwrap_or(meta_target_dir);
@@ -110,7 +125,7 @@ pub(crate) fn sweep_runtime_env(
     if let Some(dir) = &isolated {
         out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
     }
-    out.extend(composed_rustflags_env(&sweep.rustflags));
+    out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags));
     out
 }
 
@@ -300,10 +315,12 @@ fn run_sweep_pre_build(
     sweep: &ResolvedSweep,
     package: &str,
     project_env: &[(String, String)],
+    allow_args: &[String],
     raw: bool,
     commands: bool,
 ) -> Result<(), DevError> {
     let mut args: Vec<String> = vec!["build".into()];
+    args.extend(allow_args.iter().cloned());
     for f in &sweep.cargo_feature_args {
         args.push(f.clone());
     }
@@ -425,6 +442,7 @@ fn run_one_test_sweep(
     packages: &[&str],
     extra_args: &[String],
     project_env: &[(String, String)],
+    allow_args: &[String],
     raw: bool,
     doctests: bool,
     multi: bool,
@@ -434,6 +452,9 @@ fn run_one_test_sweep(
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
 
     let mut args: Vec<String> = vec!["test".into()];
+    // Before the selection and the `--` split: `--config` is a cargo option,
+    // and everything past `--` belongs to libtest.
+    args.extend(allow_args.iter().cloned());
     args.extend(sweep_selection_args(sweep, packages));
     for c in cargo_extra {
         args.push(c.clone());
@@ -1407,6 +1428,7 @@ warning: z [too_many_lines]
             Some(Project::Pbfhogg),
             Path::new("/meta/target"),
             "debug",
+            &[],
         );
         // S3-20: the isolated dir sits beside cargo's resolved target dir, not
         // under an assumed `<project_root>/target`.
@@ -1431,6 +1453,7 @@ warning: z [too_many_lines]
             Some(Project::Pbfhogg),
             Path::new("/media/folk/Banan/cargo"),
             "debug",
+            &[],
         );
         assert_eq!(
             get(&env, "CARGO_TARGET_DIR"),
@@ -1445,6 +1468,7 @@ warning: z [too_many_lines]
             Some(Project::Pbfhogg),
             Path::new("/meta/target"),
             "debug",
+            &[],
         );
         assert_eq!(get(&env, "BROKKR_TEST_BIN_DIR"), Some("/meta/target/debug"));
         assert!(get(&env, "CARGO_TARGET_DIR").is_none());

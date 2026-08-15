@@ -178,6 +178,17 @@ takes the lock so the pin is disabled while it works - including `deps` and
 toolchain-pinned), none of which are builds in the timing sense. A command that
 touches neither cargo nor rustup takes no lock and leaves the file alone.
 
+**When the host toolchain is newer than the pin,** brokkr builds with lints the
+pinned toolchain does not have. That is often the point - it lints ahead of the
+pin - but it has a failure mode worth recognising, because it presents three
+layers away from its cause. A lint the host knows and the pin does not (a
+freshly deprecated API, say) meets a `-Dwarnings` in the project's
+`.cargo/config.toml` and becomes a *hard compile error*, in code no local
+change touched, that CI - building on the pin - never sees. It reads as "your
+code doesn't compile". Suppress the unactionable ones with
+[`[lints] allow`](#lints-section), which reaches the clippy phase and the test
+build alike, or install the pinned toolchain.
+
 The file is restored when the lock is released - on normal exit, on error, or
 on a cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
 non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disabled`;
@@ -531,24 +542,33 @@ debug = true                 # dev profile for run + `--debug` for install
   matching `brokkr test`. CLI `--debug` / `--release` (mutually exclusive)
   override in either direction.
 
-## `[clippy]` section
+## `[lints]` section
 
-Tuning for the clippy phase, shared by `brokkr check` and `brokkr clippy`
-(optional).
+Lint suppressions, applied to **every phase that compiles** - `brokkr check`'s
+clippy phase and its test phase, plus `brokkr clippy` (optional).
+
+Spelled `[clippy]` before the test phase started reading it, and that spelling
+still parses. The two are a true alias: if both are present their lists are
+unioned, so a project part-way through the rename never has one section
+silently shadow the other.
 
 ```toml
-[clippy]
+[lints]
 allow = ["clippy::unused_async_trait_impl", "clippy::default_constructed_unit_structs"]
 allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
 ```
 
-- `allow` - lint names suppressed on every clippy sweep, appended as
-  `-A <lint>` after `--cap-lints=warn`. The escape hatch for driving a foreign
-  checkout under `disable_toolchain`, where the host's newer clippy surfaces
-  lints the project's pinned-toolchain CI cannot see. Bare lint names only
-  (`clippy::`-qualified or plain rustc names) - a leading `-` or embedded
-  whitespace is rejected at parse time. The phase announces the allowed lints
-  at the start of every run. Known limit: a site carrying its own lint-level
+- `allow` - lint names suppressed on every sweep. The clippy phase appends
+  `-A <lint>` after `--cap-lints=warn`; the test phase has no rustc
+  passthrough of its own and routes them through cargo's rustflags (see
+  *How the test phase injects them* below). The escape hatch for driving a
+  foreign checkout under `disable_toolchain`, where the host's newer compiler
+  surfaces lints the project's pinned-toolchain CI cannot see - and where a
+  `-Dwarnings` in the project's `.cargo/config.toml` turns each of them into a
+  hard compile error. Bare lint names only (`clippy::`-qualified or plain
+  rustc names) - a leading `-` or embedded whitespace is rejected at parse
+  time. Each phase announces the allowed lints at the start of every run.
+  Known limit in the clippy phase: a site carrying its own lint-level
   attribute can defeat the injected `-A` - observed on clippy 1.98, where an
   `#[expect]` for a sibling lint let the allowed lint through at error
   severity despite `-A` and `--cap-lints=warn`. See `docs/commands/check.md`
@@ -563,6 +583,57 @@ allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
   entry is announced up front; one that suppressed nothing draws a stale
   notice. Parse-time rejection mirrors `allow`, plus the `@` split: exactly
   one `@`, non-empty halves, no whitespace. See `docs/commands/check.md`.
+
+  **The file scoping is clippy-phase only.** A lint that fails a *build* fails
+  it during compilation, before any diagnostic reaches brokkr to be filtered,
+  and `-A` has no path-scoped form - so in the test phase each entry
+  contributes its lint name build-wide, and the run says so on its notice
+  line. The narrow guarantee still holds everywhere it can be enforced. The
+  alternative was an `allow_exact` that silently does nothing about the build
+  failure it was written for.
+
+### How the test phase injects them
+
+`cargo test` has no `-- <rustc flags>` passthrough, so the test phase puts the
+`-A` flags into cargo's rustflags. Which layer it uses is decided per sweep,
+because cargo does **not** merge rustflags across kinds of source - it picks
+exactly one, first match wins:
+
+1. `CARGO_ENCODED_RUSTFLAGS`
+2. `RUSTFLAGS`
+3. every *matching* `target.<triple>.rustflags` / `target.<cfg>.rustflags`,
+   joined together
+4. `build.rustflags`
+
+This is why brokkr does not simply export `RUSTFLAGS`: that promotes its own
+flags to source 2 and discards the project's `-Dwarnings`, its
+`-fuse-ld=lld`, its `relocation-model=pic`, all at once. (It is also why
+`[[check]] rustflags` isolates a sweep into `target/rustflags-<hash>` and
+should not be used to carry a lint allow.)
+
+Instead brokkr finds the layer already live and adds to *that* one, where
+cargo's own array merging applies and its entry lands last - which is what a
+lint allow needs, since rustc resolves conflicting lint levels last-wins. A
+config layer is reached with `--config`, the highest-precedence config source,
+so the project's `.cargo/config.toml` is left untouched.
+
+The chain inspected is the whole chain cargo reads: every `.cargo/config.toml`
+from the build root upwards, plus `$CARGO_HOME/config.toml`. A user-level
+`[target.<host-triple>] rustflags` is common - a linker choice, a
+`-Ctarget-cpu` - and it silently decides the winning layer for **every**
+project on that machine, including ones whose own flags live in
+`build.rustflags` and are therefore already being ignored.
+
+An unrecognised `cfg(...)` selector resolves to the inert direction, never the
+destructive one: injecting at `build.rustflags` when a target table actually
+wins merely does nothing, while injecting at `target."cfg(all())"` when
+`build.rustflags` was the live layer would demote it and drop the project's
+flags. The run always prints which layer it used, so an inert injection is
+diagnosable rather than mysterious:
+
+```
+test: allowing deprecated via --config target."cfg(all())".rustflags ([lints] allow)
+```
 
 ## `[[check]]` array
 

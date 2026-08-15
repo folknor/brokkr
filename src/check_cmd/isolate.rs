@@ -32,6 +32,7 @@ fn run_isolated_sweep(
     packages: &[&str],
     extra_args: &[String],
     project_env: &[(String, String)],
+    allow_args: &[String],
     raw: bool,
     all: bool,
     doctests: bool,
@@ -58,7 +59,11 @@ fn run_isolated_sweep(
         ));
     }
 
-    let selection = sweep_selection_args(sweep, packages);
+    // Prepended to the selection rather than to each argv: the selection is
+    // what both the enumeration pass and every per-test invocation are built
+    // from, so a lint allow that lives here cannot be dropped by one of them.
+    let mut selection = allow_args.to_vec();
+    selection.extend(sweep_selection_args(sweep, packages));
     let env_full = merged_env(&sweep.env, project_env);
     let env_refs: Vec<(&str, &str)> = env_full
         .iter()

@@ -37,11 +37,12 @@ use std::time::Duration;
 use crate::build;
 use crate::cargo_filter;
 use crate::check_cmd;
-use crate::config::DevConfig;
+use crate::config::{self, DevConfig};
 use crate::error::DevError;
 use crate::output;
 use crate::profile::ResolvedSweep;
 use crate::project::Project;
+use crate::rustflags;
 use crate::test_runner::{self, LibtestOutcome};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,7 @@ pub fn run(
     // `cfg!(debug_assertions)` profile guess (which silently lies when
     // a workspace pins `[profile.test]` overrides).
     let debug = resolve_debug(profile_override, dev_config.test.as_ref());
+    let allow_flags = lint_allow_flags(dev_config);
     let profile_dir = if debug { "debug" } else { "release" };
     let target_dir = build::project_info(Some(project_root))?.target_dir;
 
@@ -154,17 +156,14 @@ pub fn run(
             continue;
         }
 
-        // Per-sweep base env: a sweep carrying `rustflags` gets its own
-        // isolated target dir + matching BROKKR_TEST_BIN_DIR + composed
-        // RUSTFLAGS, so running a sim sweep through `brokkr test` builds under
-        // its cfg without thrashing the plain sweeps.
-        let project_env =
-            check_cmd::sweep_runtime_env(sweep, Some(project), &target_dir, profile_dir);
-        // Merge profile-declared env onto the project's always-set vars.
-        // Profile env wins on collision so a profile can shadow defaults
-        // when it really needs to (request 3 / B3: brokkr test was
-        // dropping this and a `default_profile` env didn't apply).
-        let env_owned = check_cmd::merged_env(&sweep.env, project_env.as_slice());
+        let (env_owned, allow_args) = sweep_env(
+            sweep,
+            project,
+            project_root,
+            &target_dir,
+            profile_dir,
+            &allow_flags,
+        );
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -194,7 +193,8 @@ pub fn run(
         // tests under one raised ceiling. Sweeps that match zero (the
         // test is feature-gated out) are fine - they'll just SKIP.
         if timeout.is_some() {
-            let matched = count_matching_tests(&pkg, name, sweep, &env_refs, project_root, debug)?;
+            let matched =
+                count_matching_tests(&pkg, name, sweep, &env_refs, &allow_args, project_root, debug)?;
             if matched > 1 {
                 return Err(DevError::Config(format!(
                     "--timeout only applies to a single test, but `{name}` matches {matched} tests \
@@ -206,22 +206,7 @@ pub fn run(
         }
 
         for n in 1..=repeat {
-            let mut args: Vec<String> = vec!["test".into()];
-            if !debug {
-                args.push("--release".into());
-            }
-            args.extend(sweep.cargo_feature_args.iter().cloned());
-            if let Some(j) = jobs {
-                args.push("-j".into());
-                args.push(j.to_string());
-            }
-            args.push("-p".into());
-            args.push(pkg.clone());
-            args.push(name.into());
-            args.push("--".into());
-            args.push("--include-ignored".into());
-            args.push("--nocapture".into());
-            args.push("--test-threads=1".into());
+            let args = test_argv(sweep, &allow_args, &pkg, name, jobs, debug);
 
             let label = sweep.label.as_str();
             let tag = match (multi, repeat > 1) {
@@ -378,15 +363,94 @@ fn run_pre_build(
 /// runnable test prints a `path::to::test: test` line, so we count those.
 /// A build/list failure returns `Ok(0)` so the subsequent real run is the
 /// one that surfaces the compile error through the normal BUILD FAILED path.
+/// The `cargo test` argv for one run of one named test in one sweep.
+///
+/// `allow_args` goes first: `--config` is a cargo option, and everything past
+/// the `--` split belongs to libtest.
+fn test_argv(
+    sweep: &ResolvedSweep,
+    allow_args: &[String],
+    pkg: &str,
+    name: &str,
+    jobs: Option<u32>,
+    debug: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["test".into()];
+    args.extend(allow_args.iter().cloned());
+    if !debug {
+        args.push("--release".into());
+    }
+    args.extend(sweep.cargo_feature_args.iter().cloned());
+    if let Some(j) = jobs {
+        args.push("-j".into());
+        args.push(j.to_string());
+    }
+    args.push("-p".into());
+    args.push(pkg.into());
+    args.push(name.into());
+    args.push("--".into());
+    args.push("--include-ignored".into());
+    args.push("--nocapture".into());
+    args.push("--test-threads=1".into());
+    args
+}
+
+/// One sweep's cargo environment, plus the `--config` args that must ride its
+/// argv.
+///
+/// The two are returned together because one decision produces both: the
+/// `[lints] allow` flags reach the compiler through the environment or through
+/// cargo's command line depending on which rustflags layer this build actually
+/// reads (see [`crate::rustflags`]), never both.
+///
+/// A sweep carrying `rustflags` gets its own isolated target dir + matching
+/// BROKKR_TEST_BIN_DIR + composed RUSTFLAGS, so running a sim sweep through
+/// `brokkr test` builds under its cfg without thrashing the plain sweeps. The
+/// profile-declared env is merged on top of the project's always-set vars, and
+/// wins on collision so a profile can shadow defaults when it really needs to
+/// (request 3 / B3: brokkr test was dropping this and a `default_profile` env
+/// didn't apply).
+fn sweep_env(
+    sweep: &ResolvedSweep,
+    project: Project,
+    project_root: &Path,
+    target_dir: &Path,
+    profile_dir: &str,
+    allow_flags: &[String],
+) -> (Vec<(String, String)>, Vec<String>) {
+    let (env_allows, allow_args) =
+        rustflags::plumbing(project_root, !sweep.rustflags.is_empty(), allow_flags);
+    let project_env =
+        check_cmd::sweep_runtime_env(sweep, Some(project), target_dir, profile_dir, env_allows);
+    (
+        check_cmd::merged_env(&sweep.env, project_env.as_slice()),
+        allow_args,
+    )
+}
+
+/// The `[lints] allow` flags for this command's builds.
+///
+/// `brokkr test` reads the section for the same reason `check`'s test phase
+/// does: a lint that the project's `-Dwarnings` turns into a compile error
+/// stops this command too, and a suppression that worked in one and not the
+/// other is the asymmetry the section exists to close.
+fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
+    dev_config.lints.as_ref().map_or_else(Vec::new, |l| {
+        config::test_phase_allow_flags(&l.allow, &l.allow_exact)
+    })
+}
+
 fn count_matching_tests(
     pkg: &str,
     name: &str,
     sweep: &ResolvedSweep,
     env: &[(&str, &str)],
+    allow_args: &[String],
     project_root: &Path,
     debug: bool,
 ) -> Result<usize, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
+    args.extend(allow_args.iter().cloned());
     if !debug {
         args.push("--release".into());
     }

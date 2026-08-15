@@ -51,7 +51,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let script_checks = parse_script_checks(table)?;
     let manifest = parse_manifest(table)?;
     let deps = parse_deps(table)?;
-    let clippy = parse_clippy(table)?;
+    let lints = parse_lints(table)?;
     let bin = parse_bin(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let hosts = parse_hosts(table)?;
@@ -79,7 +79,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             script_checks,
             manifest,
             deps,
-            clippy,
+            lints,
             bin,
             disable_toolchain,
         },
@@ -112,35 +112,50 @@ fn parse_bin(
     Ok(Some(cfg))
 }
 
-/// Parse the optional `[clippy]` section. Absent -> `None`. Entries must be
-/// bare lint names: a leading `-` or embedded whitespace means the user is
-/// trying to smuggle arbitrary flags through what is a lint list.
-fn parse_clippy(
+/// Parse the optional `[lints]` section and its `[clippy]` alias, unioned.
+/// Neither present -> `None`.
+///
+/// The alias is a true alias, not a fallback: a project part-way through the
+/// rename must not have one section silently shadow the other, so both are
+/// parsed and their lists concatenated.
+///
+/// Entries must be bare lint names: a leading `-` or embedded whitespace means
+/// the user is trying to smuggle arbitrary flags through what is a lint list.
+/// That guard matters more now than it did when this fed clippy's argv alone -
+/// the same names are assembled into a cargo `--config` rustflags expression
+/// for the test phase.
+fn parse_lints(
     table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<ClippyConfig>, DevError> {
-    let Some(value) = table.get("clippy") else {
-        return Ok(None);
-    };
-    let cfg: ClippyConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("[clippy]: {e}")))?;
-    for lint in &cfg.allow {
-        if lint.trim().is_empty() {
-            return Err(DevError::Config(
-                "[clippy] allow has a blank entry - name a lint (e.g. \
-                 \"clippy::unused_async\")."
-                    .into(),
-            ));
+) -> Result<Option<LintsConfig>, DevError> {
+    let mut merged: Option<LintsConfig> = None;
+    for key in ["lints", "clippy"] {
+        let Some(value) = table.get(key) else {
+            continue;
+        };
+        let cfg: LintsConfig = value
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| DevError::Config(format!("[{key}]: {e}")))?;
+        for lint in &cfg.allow {
+            if lint.trim().is_empty() {
+                return Err(DevError::Config(format!(
+                    "[{key}] allow has a blank entry - name a lint (e.g. \
+                     \"clippy::unused_async\")."
+                )));
+            }
+            if lint.starts_with('-') || lint.chars().any(char::is_whitespace) {
+                return Err(DevError::Config(format!(
+                    "[{key}] allow entry '{lint}' is not a bare lint name - list \
+                     lint names only (e.g. \"clippy::unused_async\"), not flags."
+                )));
+            }
         }
-        if lint.starts_with('-') || lint.chars().any(char::is_whitespace) {
-            return Err(DevError::Config(format!(
-                "[clippy] allow entry '{lint}' is not a bare lint name - list \
-                 lint names only (e.g. \"clippy::unused_async\"), not flags."
-            )));
+        match &mut merged {
+            Some(acc) => acc.merge(cfg),
+            None => merged = Some(cfg),
         }
     }
-    Ok(Some(cfg))
+    Ok(merged)
 }
 
 /// Parse the optional `[manifest]` section. Absent -> `None`.
@@ -615,6 +630,7 @@ fn parse_hosts(
             || key == "manifest"
             || key == "deps"
             || key == "clippy"
+            || key == "lints"
             || key == "bin"
             || key == "disable_toolchain"
         {

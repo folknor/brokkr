@@ -45,6 +45,7 @@ mod request;
 mod resolve;
 mod results_cmd;
 mod runnables;
+mod rustflags;
 mod scope;
 mod script_check;
 mod shutdown;

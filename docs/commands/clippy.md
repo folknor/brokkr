@@ -80,9 +80,9 @@ is checked in one pass; because a capped lint no longer makes cargo exit
 non-zero, **pass/fail is brokkr's decision: any diagnostic is a failure**, and a
 capped `warning` is promoted back to `error` in the output.
 
-A `[clippy] allow` list in `brokkr.toml` applies here exactly as in `check`'s
+A `[lints] allow` list in `brokkr.toml` applies here exactly as in `check`'s
 clippy phase: each entry is appended as `-A <lint>` after `--cap-lints=warn`,
-and the run announces the allowed lints up front. `[clippy] allow_exact`
+and the run announces the allowed lints up front. `[lints] allow_exact`
 (`"lint@path"` sited suppressions, filtered on brokkr's side at JSON
 ingestion rather than via `-A`) applies here too. See
 `docs/commands/check.md`.
