@@ -857,8 +857,11 @@ A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
 labels lane-qualified (`tier1/default`, `serial/default`). The test phase
 runs each lane's entry separately - contradictory filter sets are the point -
 while the clippy phase dedupes sweeps whose build shape (packages, features,
-rustflags, env, build_packages) is identical, logging
-`clippy <label>: deduped`.
+rustflags, env, build_packages, profile) is identical, logging
+`clippy <label>: deduped`. `profile` is in the shape because
+`cfg(debug_assertions)` decides which code exists: a dev and a release sweep of
+the same features present different lint surfaces, so they are linted
+separately rather than deduped into one.
 
 `brokkr test <name>` follows the same ladder except: filters are dropped (the
 user's `<name>` argument is the filter), there's no CLI ad-hoc path (the
@@ -880,10 +883,13 @@ Both `brokkr check` (test phase) and `brokkr test` set the following on every
 `cargo test` invocation, including sweeps with empty `build_packages`:
 
 - `BROKKR_TEST_BIN_DIR` - directory containing the just-rebuilt
-  `build_packages` artefacts. `brokkr check` always sets it to
-  `<target>/debug` (the test phase runs without `--release`); `brokkr test`
-  sets it to `<target>/release` by default and `<target>/debug` when
-  `--debug` is passed. The profile tracks the cargo invocation 1:1 - it does
+  `build_packages` artefacts. `brokkr check` sets it to `<target>/debug` (the
+  test phase runs without `--release`) unless the sweep carries
+  `profile = "release"`, in which case it sets `<target>/release` and the
+  whole sweep - clippy, pre-build, test run, coverage enumeration - compiles
+  release; `brokkr test` sets `<target>/release` by default, `<target>/debug`
+  when `--debug` or `[test] debug` applies, and follows the sweep's own
+  `profile` when it declares one. The profile tracks the cargo invocation 1:1 - it does
   *not* track whatever profile cargo happens to compile the test harness with.
   `<target>` comes from `cargo metadata --no-deps`. Tests that spawn the
   rebuilt binary should read this var as the primary source of truth and fall
@@ -901,8 +907,15 @@ pointer to `brokkr visual`.)
 Run one specific cargo test. Defaults to release; pass `--debug` to run the
 dev profile instead (faster compile, useful when the failing test isn't
 profile-sensitive). Setting `[test] debug = true` in `brokkr.toml` flips the
-default to dev; `--release` forces release back. Precedence: `--debug` /
-`--release` (mutually exclusive) > `[test] debug` > release.
+default to dev; `--release` forces release back. A `[[check]]` entry may pin
+its own `profile = "dev" | "release"`, which applies to the sweeps that
+reference it. Precedence: `--debug` / `--release` (mutually exclusive) >
+the sweep's `[[check]] profile` > `[test] debug` > release.
+
+The sweep's profile sits above the project-wide default deliberately: a repo
+can take `[test] debug = true` for the fast inner loop without the documented
+`brokkr test <a release-only timing test>` quietly switching to dev and failing
+on the build profile rather than on the code.
 
 Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and
 integration tests are matched by the name substring within the selected
@@ -948,9 +961,10 @@ Flags:
   PASS/FAIL counts plus one `Nx <msg> @ <loc>` line per distinct failure
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--raw` - disable all filtering
-- `--debug` - dev profile instead of release (overrides `[test] debug`)
-- `--release` - force release, overriding `[test] debug = true` (mutually
-  exclusive with `--debug`)
+- `--debug` - dev profile instead of release (overrides both `[test] debug` and
+  a sweep's `[[check]] profile`)
+- `--release` - force release, overriding `[test] debug = true` and a sweep's
+  `profile = "dev"` (mutually exclusive with `--debug`)
 - `--timeout <SECS>` - raise the per-test watchdog ceiling (1-280s)
 
 Because `cargo test <name>` is a substring filter, identically-named tests in

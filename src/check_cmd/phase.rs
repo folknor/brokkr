@@ -1324,6 +1324,11 @@ fn clippy_args(sweep: &ResolvedSweep, scope: &[&str], allow: &[String]) -> Vec<S
         "--all-targets".into(),
         "--message-format=json".into(),
     ];
+    // A sweep pinned to a profile is linted in it: `cfg(debug_assertions)`
+    // decides which code exists, so linting a release sweep in dev checks
+    // source the release build never compiles - and misses the source it
+    // does.
+    args.extend(sweep_profile_args(sweep));
     if !scope.is_empty() {
         for pkg in scope {
             args.push("--package".into());
@@ -2218,12 +2223,14 @@ fn run_test_phase(
     let multi = sweeps.len() > 1;
     let allow_flags = crate::config::test_phase_allow_flags(allow, allow_exact);
     announce_test_allows(project_root, sweeps, &allow_flags, allow_exact);
-    // `brokkr check`'s test phase always runs `cargo test` without
-    // `--release`, so each sweep's `build_packages` artefacts land in
-    // `<target>/debug`. Tests that spawn the just-rebuilt binary read
-    // BROKKR_TEST_BIN_DIR to skip the `cfg!(debug_assertions)` profile
-    // guess (which silently lies when a workspace pins
-    // `[profile.test]` overrides).
+    // `brokkr check`'s test phase runs `cargo test` in the dev profile
+    // unless the sweep's `[[check]] profile` says otherwise, so each
+    // sweep's `build_packages` artefacts land in that profile's
+    // `<target>/` subdirectory. Tests that spawn the just-rebuilt binary
+    // read BROKKR_TEST_BIN_DIR to skip the `cfg!(debug_assertions)`
+    // profile guess (which silently lies when a workspace pins
+    // `[profile.test]` overrides, and now also when a sweep opts into
+    // release).
     let target_dir = build::project_info(Some(project_root))?.target_dir;
 
     let mut ran_any = false;
@@ -2258,7 +2265,12 @@ fn run_test_phase(
         // `cargo test` is ever reached.
         let (env_allows, allow_args) =
             rustflags::plumbing(project_root, !sweep.rustflags.is_empty(), &allow_flags);
-        let project_env = sweep_runtime_env(sweep, project, &target_dir, "debug", env_allows);
+        // Dev unless the sweep pinned a profile: BROKKR_TEST_BIN_DIR must
+        // name the directory this sweep's own pre-build wrote into.
+        let profile_dir = sweep
+            .profile
+            .map_or("debug", crate::config::SweepProfile::target_subdir);
+        let project_env = sweep_runtime_env(sweep, project, &target_dir, profile_dir, env_allows);
         for pkg in &sweep.build_packages {
             run_sweep_pre_build(
                 project_root,

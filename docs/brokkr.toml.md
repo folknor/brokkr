@@ -726,6 +726,53 @@ env = { HIGH_PRECISION = "1" }
   substring filters. This lets a curated subset (e.g. one named test per
   package) be expressed as several sibling `[[check]]` entries under one
   profile, rather than one sweep running a whole package set's tests.
+- `profile` (optional, unset) - the cargo profile this sweep compiles and runs
+  under: `"dev"` (alias `"debug"`) or `"release"`. Unset means the command's own
+  default, which is what every sweep did before this key existed: dev under
+  `brokkr check`, and the CLI / `[test] debug` answer under `brokkr test`.
+  Custom `[profile.*]` names are not accepted - brokkr derives
+  `BROKKR_TEST_BIN_DIR` from the profile's `target/` subdirectory, and cargo's
+  mapping from a custom profile to its directory isn't reliably readable.
+
+  This is the only way to express a **per-sweep profile split**. `[test] debug`
+  is one project-wide default and applies to `brokkr test` alone; a profile lane
+  can't carry a profile either, because a lane selects *which tests run*, never
+  *how they are built*. A repo with a wall-clock contract that only holds
+  optimized declares one entry with `profile = "release"` and puts the timing
+  tests in it, while the rest of the suite keeps the fast dev build:
+
+  ```toml
+  [[check]]
+  name = "timing"
+  profile = "release"
+  only = ["tape_lateness_under_acceleration", "read_market_latency"]
+  curated = true
+
+  [test.profiles.timing]
+  sweeps = ["timing"]
+  ```
+
+  The profile reaches **every** cargo run that compiles the sweep - clippy, the
+  test-phase pre-build, the test run, the process-isolated per-test
+  invocations, and the coverage enumeration - and `BROKKR_TEST_BIN_DIR` points
+  at the matching `target/` subdirectory, so a test that spawns its
+  just-rebuilt binary finds the one this sweep actually built.
+
+  It is part of the **build shape**, unlike `curated` and
+  `test_exclude_packages`: `cfg(debug_assertions)` decides which code exists, so
+  a dev and a release sweep of the same features are two different compiles and
+  two different lint surfaces, and neither dedupes into the other. Two
+  consequences worth planning for - clippy runs once per profile rather than
+  once for both, and under a `certifies = "complete"` profile the release sweep
+  enumerates its own coverage universe, so a narrow one wants `curated = true`
+  the same way a narrow `rustflags` sweep does.
+
+  `brokkr test` honours it too, one sweep at a time: an explicit
+  `--debug`/`--release` still wins, then the sweep's `profile`, then
+  `[test] debug`. That is what keeps the split honest - a project can set
+  `[test] debug = true` for the fast inner loop without the documented
+  `brokkr test tape_lateness_under_acceleration` silently switching to dev and
+  failing on the build profile rather than on the code.
 - `curated` (optional, default `false`) - declares the entry a hand-picked
   subset for coverage purposes, and requires the entry to carry its own
   `tests`/`skip`/`only` filters (an unfiltered "curated" entry is just an
@@ -873,8 +920,11 @@ include_ignored = true
   to dev. Use it when the project's tests aren't profile-sensitive and the
   faster compile is worth more than the faster run. CLI overrides win:
   `--debug` forces dev, `--release` forces release; the field only decides
-  when neither is passed. (Affects `brokkr test` only - `brokkr check`'s
-  test phase always builds dev.)
+  when neither is passed. It is the project-wide **default**, not a rule: a
+  `[[check]]` entry's own `profile` sits between it and the CLI flags, so a
+  sweep that must run optimized still does under `brokkr test`. Affects
+  `brokkr check` not at all - check's test phase builds dev unless the sweep's
+  `profile` says otherwise, and this field is never consulted there.
 - `doctests` (default `false`) decides whether `brokkr check`'s test phase runs
   doctests. Off by default because CI runs under cargo-nextest, which never
   executes doctests - running them here would gate on a signal CI can't see. In

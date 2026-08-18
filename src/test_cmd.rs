@@ -129,9 +129,10 @@ pub fn run(
     // just-rebuilt binary read this var to skip the
     // `cfg!(debug_assertions)` profile guess (which silently lies when
     // a workspace pins `[profile.test]` overrides).
-    let debug = resolve_debug(profile_override, dev_config.test.as_ref());
+    // Per sweep, because a `[[check]]` entry may pin its own profile: the
+    // project-wide default is what a sweep that doesn't care inherits, not
+    // a decision imposed on one that does.
     let allow_flags = lint_allow_flags(dev_config);
-    let profile_dir = if debug { "debug" } else { "release" };
     let target_dir = build::project_info(Some(project_root))?.target_dir;
 
     let mut reports: Vec<RunReport> = Vec::new();
@@ -149,6 +150,9 @@ pub fn run(
         // feature (e.g. `-p nautilus-hyperliquid` under an ffi sweep it isn't
         // a member of). Skip the sweep like the zero-tests-matched case; other
         // sweeps still get their chance to run the test.
+        let debug = resolve_debug(profile_override, dev_config.test.as_ref(), sweep.profile);
+        let profile_dir = if debug { "debug" } else { "release" };
+
         if let Some(reason) = sweep_skip_reason(sweep, &pkg) {
             let label = if multi { format!(" [{}]", sweep.label) } else { String::new() };
             println!("[test]    SKIP {pkg}::{name}{label} - {reason}");
@@ -479,13 +483,30 @@ fn count_listed_tests(stdout: &str) -> usize {
         .count()
 }
 
-/// Resolve `brokkr test`'s cargo profile to a `debug` bool. An explicit
-/// `--debug`/`--release` on the CLI (`profile_override`: `Some(true)` /
-/// `Some(false)`) always wins; with neither flag (`None`) the `[test] debug`
-/// toml field decides, defaulting to `false` (release) when there's no
-/// `[test]` section at all.
-fn resolve_debug(profile_override: Option<bool>, test_cfg: Option<&crate::config::TestConfig>) -> bool {
-    profile_override.unwrap_or_else(|| test_cfg.is_some_and(|t| t.debug))
+/// Resolve one sweep's cargo profile for `brokkr test` to a `debug` bool,
+/// in precedence order:
+///   1. An explicit `--debug`/`--release` on the CLI (`profile_override`:
+///      `Some(true)` / `Some(false)`) - the per-invocation answer always wins.
+///   2. The sweep's own `[[check]] profile`, when it names one. A sweep that
+///      declares its profile has a reason (a wall-clock contract that only
+///      holds optimized, a lane pinned to dev for speed), and a project-wide
+///      default must not silently overrule it - that is the whole point of
+///      the key: `brokkr test <that test>` runs it the way it is meant to run
+///      without the caller having to remember a flag.
+///   3. `[test] debug`, the project-wide default, `false` (release) when
+///      there is no `[test]` section at all.
+fn resolve_debug(
+    profile_override: Option<bool>,
+    test_cfg: Option<&crate::config::TestConfig>,
+    sweep_profile: Option<crate::config::SweepProfile>,
+) -> bool {
+    if let Some(explicit) = profile_override {
+        return explicit;
+    }
+    if let Some(p) = sweep_profile {
+        return p == crate::config::SweepProfile::Dev;
+    }
+    test_cfg.is_some_and(|t| t.debug)
 }
 
 /// Resolve the cargo package name in precedence order:
@@ -1032,7 +1053,7 @@ mod tests {
         clippy::panic
     )]
     use super::*;
-    use crate::config::{CheckEntry, TestConfig};
+    use crate::config::{CheckEntry, SweepProfile, TestConfig};
 
     #[test]
     fn stdout_filter_strips_test_framing() {
@@ -1583,9 +1604,41 @@ benches::throughput: benchmark
             ..Default::default()
         };
         // --release (Some(false)) beats `[test] debug = true`.
-        assert!(!resolve_debug(Some(false), Some(&debug_cfg)));
+        assert!(!resolve_debug(Some(false), Some(&debug_cfg), None));
         // --debug (Some(true)) holds even when config says release.
-        assert!(resolve_debug(Some(true), Some(&TestConfig::default())));
+        assert!(resolve_debug(Some(true), Some(&TestConfig::default()), None));
+        // The CLI also beats a sweep's own pinned profile - the
+        // per-invocation answer is the most specific one there is.
+        assert!(resolve_debug(
+            Some(true),
+            None,
+            Some(SweepProfile::Release)
+        ));
+        assert!(!resolve_debug(Some(false), None, Some(SweepProfile::Dev)));
+    }
+
+    #[test]
+    fn a_sweeps_profile_beats_the_project_wide_default() {
+        // The case the key exists for: a repo pins the fast dev build
+        // project-wide, and one sweep holds a wall-clock contract that only
+        // means anything optimized. `brokkr test <that test>` must run it
+        // release without the caller remembering `--release`.
+        let debug_cfg = TestConfig {
+            debug: true,
+            ..Default::default()
+        };
+        assert!(!resolve_debug(
+            None,
+            Some(&debug_cfg),
+            Some(SweepProfile::Release)
+        ));
+        // And the mirror: brokkr's own default is release, so a sweep that
+        // pins dev (for compile speed) gets dev with no flag either.
+        assert!(resolve_debug(
+            None,
+            Some(&TestConfig::default()),
+            Some(SweepProfile::Dev)
+        ));
     }
 
     #[test]
@@ -1594,12 +1647,12 @@ benches::throughput: benchmark
             debug: true,
             ..Default::default()
         };
-        // No CLI flag: `[test] debug = true` decides.
-        assert!(resolve_debug(None, Some(&debug_cfg)));
+        // No CLI flag, no sweep profile: `[test] debug = true` decides.
+        assert!(resolve_debug(None, Some(&debug_cfg), None));
         // No CLI flag, config defaults to release.
-        assert!(!resolve_debug(None, Some(&TestConfig::default())));
+        assert!(!resolve_debug(None, Some(&TestConfig::default()), None));
         // No CLI flag, no `[test]` section at all -> release.
-        assert!(!resolve_debug(None, None));
+        assert!(!resolve_debug(None, None, None));
     }
 
     #[test]

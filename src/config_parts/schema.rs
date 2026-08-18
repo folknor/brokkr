@@ -843,6 +843,67 @@ pub struct CheckEntry {
     /// Coverage policy only, never part of the build shape.
     #[serde(default)]
     pub curated: bool,
+    /// The cargo profile this sweep compiles and runs under. Unset means
+    /// the command's own default - dev for `brokkr check`, and `brokkr
+    /// test`'s CLI/`[test] debug` resolution - which is what every sweep
+    /// did before this key existed.
+    ///
+    /// This is the only way to express a per-sweep profile split: `[test]
+    /// debug` is one project-wide default for `brokkr test` alone, and a
+    /// profile lane cannot carry a profile (a lane selects *which tests*
+    /// run, never *how they are built*). A repo with a wall-clock contract
+    /// that only holds under optimization declares one `[[check]]` entry
+    /// with `profile = "release"` and puts the timing tests in it; the rest
+    /// of the suite keeps the fast dev build.
+    ///
+    /// Part of the build shape ([`crate::profile::ResolvedSweep::build_shape_key`]):
+    /// `cfg(debug_assertions)` decides which code exists, so a dev and a
+    /// release sweep of the same features are two different compiles and
+    /// two different lint surfaces, and neither may dedupe into the other.
+    #[serde(default)]
+    pub profile: Option<SweepProfile>,
+}
+
+/// The cargo build profile a `[[check]]` entry may name. `dev` and
+/// `release` are cargo's own names for the two built-in profiles;
+/// `debug` is accepted as an alias for `dev` because that is what the
+/// directory under `target/` is called and what brokkr's `--debug` flag
+/// says.
+///
+/// Deliberately not open to custom `[profile.*]` names: brokkr derives
+/// `BROKKR_TEST_BIN_DIR` from the profile's target subdirectory, and
+/// cargo's mapping from a custom profile to its directory is not
+/// something brokkr can read back reliably.
+///
+/// Not to be confused with [`crate::build::CargoProfile`], which is the
+/// provenance tag stored on a result row (release / java / cmake) and
+/// says which *build system* produced a benchmarked binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SweepProfile {
+    #[serde(alias = "debug")]
+    Dev,
+    Release,
+}
+
+impl SweepProfile {
+    /// The subdirectory of `target/` this profile's artifacts land in -
+    /// what `BROKKR_TEST_BIN_DIR` must point at.
+    pub fn target_subdir(self) -> &'static str {
+        match self {
+            Self::Dev => "debug",
+            Self::Release => "release",
+        }
+    }
+
+    /// The cargo argv fragment that selects this profile. Dev is cargo's
+    /// default and needs no flag.
+    pub fn cargo_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Dev => &[],
+            Self::Release => &["--release"],
+        }
+    }
 }
 
 impl CheckEntry {

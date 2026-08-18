@@ -14,7 +14,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{CheckEntry, Isolation, ProfileDef, QualifiedSkip, SkipSpec, TestConfig};
+use crate::config::{
+    CheckEntry, Isolation, ProfileDef, QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
+};
 use crate::error::DevError;
 
 /// One sweep to execute, after profile resolution + check-entry lookup.
@@ -72,6 +74,11 @@ pub struct ResolvedSweep {
     /// universe. Audit policy only - never part of the build shape, and the
     /// audit exempts a shape only when *every* sweep producing it is curated.
     pub curated: bool,
+    /// The `[[check]]` entry's `profile`: the cargo profile this sweep
+    /// compiles and runs under, or `None` for the command's default (dev
+    /// under `brokkr check`; the CLI/`[test] debug` answer under `brokkr
+    /// test`). Part of the build shape - see [`ResolvedSweep::build_shape_key`].
+    pub profile: Option<SweepProfile>,
 }
 
 impl ResolvedSweep {
@@ -94,6 +101,11 @@ impl ResolvedSweep {
     /// `HIGH_PRECISION=1` on one sweep and not another makes two
     /// otherwise-identical sweeps cache-incompatible. `test_exclude_packages`
     /// is deliberately out - it narrows the test invocation only.
+    ///
+    /// `profile` is in, because `cfg(debug_assertions)` decides which code
+    /// exists: a dev and a release sweep of the same features compile
+    /// different source and present different lint surfaces, so deduping
+    /// either into the other would lint one build and run the other.
     pub fn build_shape_key(&self) -> BuildShapeKey {
         (
             self.packages.clone(),
@@ -104,6 +116,7 @@ impl ResolvedSweep {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             self.build_packages.clone(),
+            self.profile,
         )
     }
 }
@@ -115,6 +128,7 @@ pub type BuildShapeKey = (
     Vec<String>,
     Vec<(String, String)>,
     Vec<String>,
+    Option<SweepProfile>,
 );
 
 /// Synthesize a `ResolvedSweep` from a `CheckEntry` alone, with no
@@ -148,6 +162,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         process_isolation: false,
         qualified_skips: Vec::new(),
         curated: entry.curated,
+        profile: entry.profile,
     }
 }
 
@@ -372,6 +387,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         process_isolation: profile.isolation == Some(Isolation::Process),
         qualified_skips,
         curated: entry.curated,
+        profile: entry.profile,
     }
 }
 
@@ -479,6 +495,65 @@ isolation = "process"
             .env
             .insert("HIGH_PRECISION".into(), "1".into());
         assert_ne!(plain.build_shape_key(), env_sweep.build_shape_key());
+    }
+
+    #[test]
+    fn profile_rides_the_sweep_and_is_part_of_the_shape() {
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "timing"
+profile = "release"
+only = ["tape_lateness"]
+curated = true
+
+[test.profiles.timing]
+sweeps = ["timing"]
+"#,
+        );
+        let resolved = resolve(&cfg, &checks, "timing").unwrap();
+        assert_eq!(resolved[0].profile, Some(SweepProfile::Release));
+        assert_eq!(
+            sweep_from_check_entry(&checks[0]).profile,
+            Some(SweepProfile::Release)
+        );
+
+        // Unlike `curated` and `isolation`, the profile IS the build shape:
+        // `cfg(debug_assertions)` decides which code exists, so a dev sweep
+        // must not dedupe into a release one - it would lint one build and
+        // run the other.
+        let mut dev_entry = checks[0].clone();
+        dev_entry.profile = Some(SweepProfile::Dev);
+        let dev = sweep_from_check_entry(&dev_entry);
+        assert_ne!(dev.build_shape_key(), resolved[0].build_shape_key());
+
+        // And an unset profile is its own shape too: it means "the command's
+        // default", which is not the same declaration as either.
+        let mut unset_entry = checks[0].clone();
+        unset_entry.profile = None;
+        assert_ne!(
+            sweep_from_check_entry(&unset_entry).build_shape_key(),
+            dev.build_shape_key()
+        );
+    }
+
+    #[test]
+    fn profile_accepts_debug_as_an_alias_for_dev() {
+        // `debug` is what the target subdirectory and brokkr's own --debug
+        // flag call it, so a config that says `debug` must not be a parse
+        // error the user has to discover at run time.
+        let (checks, _) = parse_fragment(
+            r#"
+[[check]]
+name = "fast"
+profile = "debug"
+"#,
+        );
+        assert_eq!(checks[0].profile, Some(SweepProfile::Dev));
+        assert_eq!(SweepProfile::Dev.target_subdir(), "debug");
+        assert!(SweepProfile::Dev.cargo_args().is_empty());
+        assert_eq!(SweepProfile::Release.target_subdir(), "release");
+        assert_eq!(SweepProfile::Release.cargo_args(), ["--release"]);
     }
 
     #[test]

@@ -251,6 +251,15 @@ pub(crate) fn describe_sweep(
         ));
     }
 
+    // Surfaced for the same reason as `rustflags`: a non-default profile
+    // sends the sweep to a different `target/` subdirectory and compiles it
+    // from scratch there, and an unexplained full rebuild is exactly what a
+    // collapsed log must not hide. Only when set - an unset profile is the
+    // command's default and says nothing.
+    if let Some(p) = sweep.profile {
+        parts.push(format!("profile {}", p.target_subdir()));
+    }
+
     if for_test {
         let skips = sweep.libtest_args.iter().filter(|a| *a == "--skip").count();
         if skips > 0 {
@@ -328,6 +337,10 @@ fn run_sweep_pre_build(
 ) -> Result<(), DevError> {
     let mut args: Vec<String> = vec!["build".into()];
     args.extend(allow_args.iter().cloned());
+    // The pre-build must land where the tests will look for it: a sweep
+    // pinned to a profile builds its binaries into that profile's
+    // directory, which is the one BROKKR_TEST_BIN_DIR names.
+    args.extend(sweep_profile_args(sweep));
     for f in &sweep.cargo_feature_args {
         args.push(f.clone());
     }
@@ -392,6 +405,23 @@ fn has_target_selector(args: &[String]) -> bool {
     })
 }
 
+/// The cargo profile-selection fragment for one sweep (`--release`, or
+/// nothing). Empty for a sweep that names no `profile`, which is every
+/// sweep in a repo that never sets the key: `brokkr check` compiles dev,
+/// exactly as it always has.
+///
+/// Emitted by every cargo run that COMPILES this sweep - clippy, the
+/// pre-build, the test run, the process-isolated per-test invocations, and
+/// the coverage enumeration - because a profile mismatch between any two of
+/// them is a silent full rebuild at best and lint results for a build that
+/// never ran at worst.
+fn sweep_profile_args(sweep: &ResolvedSweep) -> Vec<String> {
+    sweep
+        .profile
+        .map(|p| p.cargo_args().iter().map(|a| (*a).to_owned()).collect())
+        .unwrap_or_default()
+}
+
 /// The cargo-level selection + feature args shared by the standard and
 /// process-isolated test paths, so the two can never diverge on what a
 /// sweep selects. A CLI `-p` set *replaces* the sweep's package selection -
@@ -400,7 +430,7 @@ fn has_target_selector(args: &[String]) -> bool {
 /// cli_package_scope; callers already intersected the CLI set with the
 /// sweep's scope and skipped sweeps where nothing survived).
 fn sweep_selection_args(sweep: &ResolvedSweep, packages: &[&str]) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
+    let mut args: Vec<String> = sweep_profile_args(sweep);
 
     if !packages.is_empty() {
         for pkg in packages {
@@ -1505,6 +1535,59 @@ warning: z [too_many_lines]
         assert!(rustflags_value(&env)
             .expect("allow flags reach the env")
             .contains("-Aclippy::assert_is_empty"));
+    }
+
+    fn release_sweep() -> ResolvedSweep {
+        ResolvedSweep {
+            label: "timing".into(),
+            profile: Some(crate::config::SweepProfile::Release),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_pinned_profile_reaches_every_compiling_path() {
+        // The invariant the key stands on: clippy, the test invocation, the
+        // process-isolated selection and the coverage enumeration all compile
+        // the same sweep, and a profile that reached only some of them would
+        // mean linting one build, running another, and auditing a third.
+        let sweep = release_sweep();
+        assert_eq!(sweep_profile_args(&sweep), ["--release"]);
+
+        let test_args = sweep_selection_args(&sweep, &[]);
+        assert_eq!(test_args.first().map(String::as_str), Some("--release"));
+
+        let clippy = clippy_args(&sweep, &[], &[]);
+        assert!(clippy.iter().any(|a| a == "--release"), "got: {clippy:?}");
+
+        let enumeration = shape_selection_args(&sweep);
+        assert_eq!(enumeration.first().map(String::as_str), Some("--release"));
+
+        // `--release` must not read as a target selector - that would suppress
+        // the `--tests` scoping and let doctests back into the sweep.
+        assert!(!has_target_selector(&test_args));
+    }
+
+    #[test]
+    fn an_unpinned_sweep_is_untouched() {
+        // Every repo that never sets the key must produce byte-identical argv
+        // to what it produced before the key existed.
+        let plain = ResolvedSweep::default();
+        assert!(sweep_profile_args(&plain).is_empty());
+        assert!(!sweep_selection_args(&plain, &[]).iter().any(|a| a == "--release"));
+        assert!(!clippy_args(&plain, &[], &[]).iter().any(|a| a == "--release"));
+        assert!(!shape_selection_args(&plain).iter().any(|a| a == "--release"));
+    }
+
+    #[test]
+    fn the_shape_line_names_a_pinned_profile() {
+        // Same reason `rustflags` is surfaced: it redirects the sweep to
+        // another target subdirectory and buys a full recompile there, and an
+        // unexplained rebuild is what the collapsed log must not hide.
+        let line = describe_sweep(&release_sweep(), true, &[]);
+        assert!(line.contains("profile release"), "got: {line}");
+        // An unpinned sweep says nothing - it is the command's default.
+        assert!(!describe_sweep(&ResolvedSweep::default(), true, &[]).contains("profile"));
     }
 
     fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> cargo_filter::ParsedTestResults {

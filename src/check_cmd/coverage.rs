@@ -381,7 +381,11 @@ fn enumerate_shapes(
 /// The shape's bare cargo selection: packages/excludes + features, no
 /// target filters (those are lane narrowing, audited via the ran-sets).
 fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
+    // The shape's profile comes first: enumeration compiles
+    // (`cargo test --no-run`), and enumerating a release shape in dev would
+    // both rebuild the world and list the dev build's tests - a universe for
+    // a build the phase never ran.
+    let mut args: Vec<String> = sweep_profile_args(sweep);
     for pkg in &sweep.packages {
         args.push("-p".into());
         args.push(pkg.clone());
