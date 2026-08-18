@@ -21,8 +21,10 @@ publish cycle + clippy + tests. Trailing args after
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
 to libtest after the default `--test-threads=1` (e.g.
-`brokkr check -- -- --ignored`). With no separator, every token is
-cargo-level. The test phase also fails on a successful `cargo test` that ran
+`brokkr check -- -- --ignored`). With no second separator, every token is
+cargo-level. The leading `--` is **required**: `check` takes no
+`trailing_var_arg`, so an unrecognised brokkr flag is a parse error rather
+than a token silently forwarded to `cargo test`. The test phase also fails on a successful `cargo test` that ran
 zero tests (suites=0, or filters excluded everything) so a too-narrow
 profile/filter combo can't silently green-light a check. Each test sweep
 closes with a `[test]    N passed` count line (`, M ignored` / `, K filtered

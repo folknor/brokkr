@@ -170,7 +170,12 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         /// under a `certifies = "complete"` profile: they narrow the test
         /// run but not the coverage audit, which would then count tests
         /// that never ran.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ///
+        /// The leading `--` is required: tokens after it are raw values
+        /// for this positional either way, so neither `trailing_var_arg`
+        /// nor `allow_hyphen_values` is needed - and without them an
+        /// unrecognised brokkr flag is a clap error instead of being
+        /// silently forwarded to cargo.
         args: Vec<String>,
     },
     /// Run ONLY the clippy phase against an ad-hoc target (investigative).
