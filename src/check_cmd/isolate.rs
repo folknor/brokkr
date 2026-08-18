@@ -34,7 +34,7 @@ fn run_isolated_sweep(
     project_env: &[(String, String)],
     allow_args: &[String],
     raw: bool,
-    all: bool,
+    triage: bool,
     doctests: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
@@ -76,7 +76,7 @@ fn run_isolated_sweep(
         return Ok(false);
     };
 
-    let Some((runnable, pkg_skipped)) = plan_runnable(&plan, &sweep.label, all) else {
+    let Some((runnable, pkg_skipped)) = plan_runnable(&plan, &sweep.label, triage) else {
         return Ok(false);
     };
 
@@ -86,7 +86,7 @@ fn run_isolated_sweep(
     for name in &runnable {
         if !plan.include_ignored && plan.ignored.contains(name) {
             ignored += 1;
-            if all {
+            if triage {
                 println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
             }
             continue;
@@ -99,7 +99,7 @@ fn run_isolated_sweep(
             plan.include_ignored,
             &env_refs,
             raw,
-            all,
+            triage,
             commands,
         )?;
         match outcome {
@@ -166,10 +166,10 @@ enum IsolatedOutcome {
 
 /// The plan's runnable name list plus the package-qualified-skipped
 /// count; `None` after reporting a qualified-skip collision or a
-/// zero-runnable enumeration. Under `--all` the plan is announced before
+/// zero-runnable enumeration. Under `--triage` the plan is announced before
 /// the run (the roll-call); otherwise the sweep's one summary line
 /// reports it after.
-fn plan_runnable(plan: &IsolatedPlan, label: &str, all: bool) -> Option<(Vec<String>, usize)> {
+fn plan_runnable(plan: &IsolatedPlan, label: &str, triage: bool) -> Option<(Vec<String>, usize)> {
     // A name present in both a qualified-skipped and an unskipped package
     // cannot be split by one `cargo test -- --exact` invocation: error
     // rather than half-obey the skip.
@@ -206,7 +206,7 @@ fn plan_runnable(plan: &IsolatedPlan, label: &str, all: bool) -> Option<(Vec<Str
         ));
         return None;
     }
-    if all {
+    if triage {
         println!(
             "[test]    {label}: {}, one process each{}",
             count_tests(runnable.len()),
@@ -316,7 +316,7 @@ fn run_one_isolated_test(
     include_ignored: bool,
     env_refs: &[(&str, &str)],
     raw: bool,
-    all: bool,
+    triage: bool,
     commands: bool,
 ) -> Result<IsolatedOutcome, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
@@ -392,9 +392,9 @@ fn run_one_isolated_test(
 
     // A passing test is not news: the sweep's summary line carries the
     // count, and a failure reports itself in full. One line per test turns
-    // a gate run into a scroll. `--all` is the way back to the roll-call.
+    // a gate run into a scroll. `--triage` is the way back to the roll-call.
     let elapsed = run.completed.first().map(|(_, e)| *e);
-    if all {
+    if triage {
         match elapsed {
             Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
             None => println!("[test]    PASS {name}"),

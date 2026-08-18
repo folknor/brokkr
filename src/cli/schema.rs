@@ -46,14 +46,14 @@ Output (default text mode, no flags):
     not just the first occurrence per rule.
   - Tests: one line per failure on failure, compact summary on pass.
     Never capped or scoped - every failing test in every suite is
-    listed, and `--all` does not change that.
+    listed, and `--triage` does not change that.
 
 Capping and scoping (clippy + gremlins, and the `--timings` list):
   Output is capped at `--limit N` (default 20). When the cap kicks in,
   diagnostics in files changed on the current branch (vs upstream /
   origin/master / origin/main) are surfaced first, and a trailer
   summarises what's hidden.
-  - `--all` shows everything, sorted by (level, lint code, file, line)
+  - `--triage` shows everything, sorted by (level, lint code, file, line)
     so every hit of a single rule clumps together for bulk triage.
     The test phase is not affected - it was never capped.
 
@@ -64,7 +64,7 @@ Output mode:
 
 Examples:
   brokkr check                                     # gremlins + clippy + all tests
-  brokkr check --all                               # bulk-triage view, sorted by lint
+  brokkr check --triage                            # bulk-triage view, sorted by lint
   brokkr check --fix-gremlins                      # rewrite banned chars before checking
   brokkr check --raw                               # full terminal-style cargo output
   brokkr check -- --test read_paths                # run one test file
@@ -126,7 +126,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         json: bool,
 
         /// Maximum diagnostics printed per phase (gremlins, clippy). Ignored
-        /// with `--raw` or `--all`.
+        /// with `--raw` or `--triage`.
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
@@ -137,7 +137,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         /// phase: the failure list is never capped or scoped, so a red
         /// run reports the same failures with or without this flag.
         #[arg(long)]
-        all: bool,
+        triage: bool,
 
         /// Before checking, rewrite banned Unicode in tracked source files
         /// with their ASCII equivalents (em/en dash -> `-`, smart quotes ->
@@ -148,7 +148,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
 
         /// After the check is otherwise done, print every test that ran in
         /// descending order by wall-clock time. Capped at `--limit` (or
-        /// uncapped with `--all`). Build time is excluded - timing
+        /// uncapped with `--triage`). Build time is excluded - timing
         /// starts when libtest emits the per-test start marker.
         #[arg(long)]
         timings: bool,
@@ -193,7 +193,7 @@ Two modes:
 
 `--env KEY=VALUE` (repeatable) overrides either env source and wins last.
 Output modes match `brokkr check`'s clippy phase: default capped text,
-`--all` bulk-triage, `--limit N`, `--raw` (cargo's terminal-style rendering).
+`--triage` bulk-triage, `--limit N`, `--raw` (cargo's terminal-style rendering).
 Exit 0 iff zero diagnostics; 1 on any lint or build error.
 
 Examples:
@@ -202,7 +202,7 @@ Examples:
   brokkr clippy --features a,b -p mycrate    # a virtual workspace needs -p
   brokkr clippy --sweep ffi                  # replay the 'ffi' [[check]] entry
   brokkr clippy --sweep ffi --env HIGH_PRECISION=0
-  brokkr clippy --all                        # bulk-triage, sorted by lint
+  brokkr clippy --triage                     # bulk-triage, sorted by lint
 
 In depth: `brokkr man clippy`."
     )]
@@ -240,13 +240,13 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         raw: bool,
 
-        /// Maximum diagnostics printed. Ignored with `--raw` or `--all`.
+        /// Maximum diagnostics printed. Ignored with `--raw` or `--triage`.
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
         /// Show every diagnostic, sorted by (level, lint, file, line).
         #[arg(long)]
-        all: bool,
+        triage: bool,
     },
     /// Run `cargo fmt`. All arguments are forwarded raw.
     #[command(display_order = 0)]

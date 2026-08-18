@@ -136,7 +136,7 @@ pub fn format_trailer(hidden_unscoped: usize) -> Option<String> {
     if hidden_unscoped == 0 {
         return None;
     }
-    Some(format!("+{hidden_unscoped} in unchanged files (--all to see)"))
+    Some(format!("+{hidden_unscoped} in unchanged files (--triage to see)"))
 }
 
 #[cfg(test)]
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn trailer_unscoped_only() {
         let s = format_trailer(7).unwrap();
-        assert_eq!(s, "+7 in unchanged files (--all to see)");
+        assert_eq!(s, "+7 in unchanged files (--triage to see)");
     }
 
     #[test]

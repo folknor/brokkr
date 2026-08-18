@@ -65,7 +65,7 @@ Flags:
   last line of stdout; human output is unchanged
 - `--limit N` - max diagnostics shown per phase (gremlins, clippy, and the
   `--timings` list), default 20
-- `--all` - show every gremlins/clippy diagnostic and every `--timings` row, no
+- `--triage` - show every gremlins/clippy diagnostic and every `--timings` row, no
   cap, no changed-files scoping. Does *not* widen the test phase - the failure
   list is never capped or scoped in the first place
 - `--fix-gremlins` - rewrite banned chars in place before scan
@@ -287,7 +287,7 @@ so re-run after each one rather than trusting a single report as the
 complete inventory. The phase points at `brokkr deps` for that, since
 scoping is investigation.
 
-Honours `--limit`/`--all` like the other finding phases, and is skippable
+Honours `--limit`/`--triage` like the other finding phases, and is skippable
 as `publish_cycle` in a partial profile's `skip_phases`.
 
 ## `clippy` phase
@@ -443,7 +443,7 @@ failure behind it. The exit code stayed correct, so the run was honestly red -
 only the *which-tests* list was short, which is the worse shape of the two,
 because a fixer who clears every listed failure concludes the run is
 understood. Forwarding `--no-fail-fast` did not help: cargo ran every binary,
-but the renderer still showed one. Note that `--all` does not widen test
+but the renderer still showed one. Note that `--triage` does not widen test
 reporting either - it governs clippy and gremlins capping and scoping.
 
 Unrelated but worth knowing beside it: a failing sweep ends the run before the
@@ -588,7 +588,7 @@ if zero tests were enumerated. Shape lines carry `process-isolated`.
 Passing tests are **not** listed one per line: a lane of a hundred serial
 tests would bury the rest of the run, and the sweep's one summary line
 (`serial/live: 52 tests process-isolated passed, 1 pkg-skipped`) carries the
-counts. Failures always report in full. `--all` restores the roll-call: the
+counts. Failures always report in full. `--triage` restores the roll-call: the
 pre-run plan line, one `PASS <name> (<secs>)` per test, and a `SKIP` line
 per `#[ignore]`d name in a lane without `include_ignored`.
 
@@ -759,7 +759,7 @@ The ledger reports as **one rolled-up line** - entry count, total pairs,
 and the per-issue pair breakdown in descending order (`quarantine: 21
 entries, 106 pairs - B51 80, B41 14, B50 10, …`). That keeps both signals
 the per-entry listing carried: the countdown, and the growth warning when a
-substring starts matching more than it used to. `--all` prints the old line
+substring starts matching more than it used to. `--triage` prints the old line
 per entry, with each entry's pattern and package scope. The `--json` summary carries a
 `coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `curated`,
 `orphaned`.

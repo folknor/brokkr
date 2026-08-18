@@ -89,7 +89,7 @@ ingestion rather than via `-A`) applies here too. See
 
 - default: one line per diagnostic, capped at `--limit N` (default 20), with
   branch-changed files surfaced first and a trailer summarising what is hidden.
-- `--all`: show everything, sorted by (level, lint, file, line) so every hit of a
+- `--triage`: show everything, sorted by (level, lint, file, line) so every hit of a
   rule clumps together for bulk triage.
 - `--raw`: cargo's terminal-style rendering (full source annotations and help
   suggestions). This is human-rendered text, not machine JSON - there is no

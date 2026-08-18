@@ -380,7 +380,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         raw,
         json,
         limit,
-        all,
+        triage,
         fix_gremlins,
         timings,
         commands,
@@ -467,7 +467,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             raw,
             json,
             limit,
-            all,
+            triage,
             fix_gremlins,
             timings,
             commands,
@@ -483,7 +483,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         env,
         raw,
         limit,
-        all,
+        triage,
     } = cli.command
     {
         // Like `check`, `clippy` builds the code tree (cwd), reading `[[check]]`
@@ -511,7 +511,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
             raw,
             limit,
-            all,
+            triage,
         );
     }
 

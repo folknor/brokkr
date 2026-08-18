@@ -99,7 +99,7 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
         .collect();
 
     format!(
-        "quarantine: {} entries, {pairs} pairs - {} (--all to list)",
+        "quarantine: {} entries, {pairs} pairs - {} (--triage to list)",
         quarantine.len(),
         breakdown.join(", ")
     )
@@ -147,7 +147,7 @@ fn run_coverage_phase(
     quarantine: &[QuarantineEntry],
     allow_flags: &[String],
     limit: usize,
-    all: bool,
+    triage: bool,
     commands: bool,
 ) -> CoverageOutcome {
     let shapes = match enumerate_shapes(project_root, sweeps, executed, allow_flags, commands) {
@@ -160,9 +160,9 @@ fn run_coverage_phase(
     // The per-entry pair counts are the countdown the ledger exists for,
     // and the growth signal when a substring starts matching more than it
     // used to - but one line per entry is a page of them on a real ledger.
-    // Rolled up per issue by default, which keeps both signals; `--all`
+    // Rolled up per issue by default, which keeps both signals; `--triage`
     // restores the entry-by-entry listing.
-    if all {
+    if triage {
         for (entry, count) in quarantine.iter().zip(&report.per_entry) {
             match (&entry.pattern, &entry.category) {
                 (Some(p), _) => {
@@ -199,14 +199,14 @@ fn run_coverage_phase(
     // reason this phase runs on failing test phases) just as much as the
     // stale report, and returning on the first hid the other.
     if !report.orphans.is_empty() {
-        let cap = if all { usize::MAX } else { limit };
+        let cap = if triage { usize::MAX } else { limit };
         for orphan in report.orphans.iter().take(cap) {
             output::error(&format!("orphaned: {orphan} (run nowhere, quarantined nowhere)"));
         }
 
         if report.orphans.len() > cap {
             output::error(&format!(
-                "... and {} more (rerun with --all)",
+                "... and {} more (rerun with --triage)",
                 report.orphans.len() - cap
             ));
         }

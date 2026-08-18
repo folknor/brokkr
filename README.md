@@ -86,7 +86,7 @@ forbid = ["db", "service-state"]
 
 This rejects direct `app -> db` or `app -> service-state` dependencies before clippy/tests run. `from` and `forbid` each accept either one string or an array of package names; `forbid` can name workspace crates or external crates.
 
-When many diagnostics are found at once (e.g. picking the checker up on an existing codebase), text mode caps each phase at `--limit N` entries (default 20) and prefers files changed on the current branch so the most actionable hits surface first. The cap applies to both the gremlin phase and the clippy phase (independently), with a trailer summarising what's hidden (`+N more in this branch, +M in unchanged files (--all to see)`). Use `--all` to see everything, or `--limit N` to override the cap. `--raw` and `--json` bypass the cap.
+When many diagnostics are found at once (e.g. picking the checker up on an existing codebase), text mode caps each phase at `--limit N` entries (default 20) and prefers files changed on the current branch so the most actionable hits surface first. The cap applies to both the gremlin phase and the clippy phase (independently), with a trailer summarising what's hidden (`+N more in this branch, +M in unchanged files (--triage to see)`). Use `--triage` to see everything, or `--limit N` to override the cap. `--raw` and `--json` bypass the cap.
 
 `check` runs clippy and tests against the same list of "active sweeps" - one cargo invocation per sweep, both phases. The sweep list is built from `brokkr.toml`, in priority order:
 
