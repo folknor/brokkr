@@ -829,6 +829,15 @@ fn emit_timings(timings: &[TestTiming], limit: usize, triage: bool, multi_sweep:
 /// Returns `Err` only when the user asked for a `--profile` that
 /// doesn't resolve. Every other branch always succeeds with at least
 /// one sweep.
+/// Escape sentences for a cross-entry `env` disagreement. `clippy` can pick a
+/// value (`--env`) or replay one entry (`--sweep`); `check` has neither flag,
+/// so its way out is to stop being ad-hoc.
+const CLIPPY_ENV_CONFLICT_REMEDY: &str = "`brokkr clippy` can't pick one; pass \
+     `--env KEY=...` to choose, or `--sweep NAME` to run one entry.";
+const CHECK_ENV_CONFLICT_REMEDY: &str = "an ad-hoc `--features` run takes no \
+     `[[check]]` entry and can't pick one; run a profile (or `-p` with no \
+     `--features`) instead, or reconcile the entries' `env`.";
+
 pub(crate) fn decide_active_sweeps(
     check_entries: &[CheckEntry],
     test_cfg: Option<&TestConfig>,
@@ -874,6 +883,28 @@ pub(crate) fn decide_active_sweeps(
             && let Some(name) = effective_profile_name(test_cfg, profile_name)?
         {
             profile::run_shaping(cfg, &name)?.apply(&mut sweep);
+        }
+        // Entry-level env, unioned across every `[[check]]` entry - the same
+        // `merge_check_envs` `brokkr clippy`'s ad-hoc path uses, so the two
+        // commands compile the same shape from the same config. Without it a
+        // build-affecting invariant carried by the entries rather than the
+        // profile (the class `HIGH_PRECISION` belongs to) was silently dropped,
+        // and a scoped run went green having never compiled the width the gate
+        // compiles - a quiet wrong, where the dropped-skips bug was a loud one.
+        // A key two entries disagree on is a hard error, never a coin flip.
+        //
+        // Entry env overlays profile env, matching `build_resolved_sweep`.
+        //
+        // `test_exclude_packages` is deliberately NOT unioned: it is a
+        // per-entry selection workaround, not an invariant, so unioning it
+        // would narrow what a scoped run tests while everything else about the
+        // run claims to be wider. That residual stays with the caller.
+        for (k, v) in merge_check_envs(
+            check_entries,
+            &std::collections::BTreeSet::new(),
+            CHECK_ENV_CONFLICT_REMEDY,
+        )? {
+            sweep.env.insert(k, v);
         }
         return Ok(vec![sweep]);
     }
@@ -1847,7 +1878,7 @@ fn build_clippy_sweep(
             label: "clippy".into(),
             cargo_feature_args,
             packages: packages.to_vec(),
-            env: merge_check_envs(check_entries, &overridden)?,
+            env: merge_check_envs(check_entries, &overridden, CLIPPY_ENV_CONFLICT_REMEDY)?,
             ..Default::default()
         }
     };
@@ -1869,9 +1900,16 @@ fn build_clippy_sweep(
 /// silently dropped - that is the exact failure BUG_SWEEP set out to prevent.
 /// The cost is that entries setting *disjoint* keys contribute all of them; the
 /// escape is `--env KEY=...` (or `--sweep NAME` to replay one entry exactly).
+///
+/// Shared by `brokkr clippy`'s ad-hoc path and `brokkr check`'s, so the two
+/// commands resolve the same width from the same config - they used to
+/// disagree, `clippy --features x` unioning `HIGH_PRECISION=1` while `check
+/// --features x` silently compiled without it. `remedy` carries the escape
+/// sentence, since the two commands offer different flags for it.
 fn merge_check_envs(
     entries: &[CheckEntry],
     overridden: &std::collections::BTreeSet<&str>,
+    remedy: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, DevError> {
     let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for e in entries {
@@ -1883,8 +1921,7 @@ fn merge_check_envs(
                 Some(existing) if existing != v => {
                     return Err(DevError::Config(format!(
                         "[[check]] env conflict on `{k}`: '{existing}' vs '{v}' across \
-                         sweeps - `brokkr clippy` can't pick one; pass `--env {k}=...` \
-                         to choose, or `--sweep NAME` to run one entry."
+                         sweeps - {remedy}"
                     )));
                 }
                 _ => {
@@ -2523,7 +2560,7 @@ mod clippy_sweep_tests {
     #[test]
     fn merge_unions_disjoint_keys() {
         let entries = [entry("a", &[("FOO", "1")]), entry("b", &[("BAR", "2")])];
-        let merged = merge_check_envs(&entries, &BTreeSet::new()).unwrap();
+        let merged = merge_check_envs(&entries, &BTreeSet::new(), CLIPPY_ENV_CONFLICT_REMEDY).unwrap();
         assert_eq!(merged.get("FOO").map(String::as_str), Some("1"));
         assert_eq!(merged.get("BAR").map(String::as_str), Some("2"));
     }
@@ -2531,14 +2568,14 @@ mod clippy_sweep_tests {
     #[test]
     fn merge_agreeing_duplicate_is_fine() {
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "1")])];
-        let merged = merge_check_envs(&entries, &BTreeSet::new()).unwrap();
+        let merged = merge_check_envs(&entries, &BTreeSet::new(), CLIPPY_ENV_CONFLICT_REMEDY).unwrap();
         assert_eq!(merged.get("HP").map(String::as_str), Some("1"));
     }
 
     #[test]
     fn merge_conflicting_duplicate_errors_naming_key() {
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
-        let err = merge_check_envs(&entries, &BTreeSet::new()).unwrap_err();
+        let err = merge_check_envs(&entries, &BTreeSet::new(), CLIPPY_ENV_CONFLICT_REMEDY).unwrap_err();
         assert!(err.to_string().contains("HP"), "got: {err}");
     }
 
@@ -2548,7 +2585,7 @@ mod clippy_sweep_tests {
         // --env override will set it. (The P1-1 fix: --env resolves a conflict.)
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
         let overridden: BTreeSet<&str> = ["HP"].into_iter().collect();
-        let merged = merge_check_envs(&entries, &overridden).unwrap();
+        let merged = merge_check_envs(&entries, &overridden, CLIPPY_ENV_CONFLICT_REMEDY).unwrap();
         // The overridden key is skipped entirely here; build_clippy_sweep layers
         // the override on afterwards.
         assert!(!merged.contains_key("HP"));

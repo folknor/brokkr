@@ -59,7 +59,10 @@ The base env depends on the mode:
   values, that is a config error - resolve it with `--env KEY=...`, or replay one
   entry with `--sweep NAME`. Union (rather than intersection) is deliberate: an
   invariant present in most-but-not-all entries must survive, which intersection
-  would drop.
+  would drop. `brokkr check`'s ad-hoc `--features` path takes the same union
+  from the same function, so the two commands cannot resolve different shapes
+  from one config - they used to, and a scoped `check` silently compiled
+  without the invariant `clippy` was applying.
 - **`--sweep NAME`:** just that entry's `env`.
 
 `--env` overrides both, and a key set via `--env` is exempt from the cross-sweep

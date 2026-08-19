@@ -987,6 +987,119 @@ test_threads = 0
         assert_eq!(sweeps[0].test_threads, Some(0));
     }
 
+    /// The quiet half of the same defect: entry-level `env` is a
+    /// build-affecting invariant (the `HIGH_PRECISION` class), and an ad-hoc
+    /// run dropping it went green having compiled a different width than the
+    /// gate. `brokkr clippy`'s ad-hoc path already unioned it; `check` now
+    /// takes the same union from the same function, so the two commands can't
+    /// resolve different widths from one config.
+    #[test]
+    fn ad_hoc_inherits_unioned_check_entry_env() {
+        let entries = vec![
+            CheckEntry {
+                name: "default".into(),
+                env: [("HIGH_PRECISION".to_owned(), "1".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            CheckEntry {
+                name: "cli".into(),
+                env: [("HIGH_PRECISION".to_owned(), "1".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        ];
+        let sweeps =
+            decide_active_sweeps(&entries, None, None, &["defi".to_owned()], false).unwrap();
+        assert_eq!(
+            sweeps[0].env.get("HIGH_PRECISION").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    /// Disagreement is a hard error naming the key, never a coin flip - the
+    /// property that makes the union safe to take implicitly.
+    #[test]
+    fn ad_hoc_env_conflict_across_entries_errors() {
+        let entries = vec![
+            CheckEntry {
+                name: "high".into(),
+                env: [("HIGH_PRECISION".to_owned(), "1".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            CheckEntry {
+                name: "std".into(),
+                env: [("HIGH_PRECISION".to_owned(), "0".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        ];
+        let err = decide_active_sweeps(&entries, None, None, &["defi".to_owned()], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HIGH_PRECISION"), "got: {err}");
+        // The remedy must name flags `check` actually has - not clippy's
+        // `--env` / `--sweep`.
+        assert!(err.contains("run a profile"), "got: {err}");
+    }
+
+    /// Entry env overlays profile env on a key collision, matching
+    /// `build_resolved_sweep`'s precedence for non-ad-hoc sweeps.
+    #[test]
+    fn ad_hoc_entry_env_overlays_profile_env() {
+        let toml_text = r#"
+default_profile = "tier1"
+
+[profiles.tier1]
+sweeps = ["all"]
+env = { HIGH_PRECISION = "0", ONLY_PROFILE = "p" }
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            env: [("HIGH_PRECISION".to_owned(), "1".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }];
+        let sweeps = decide_active_sweeps(
+            &entries,
+            Some(&test_cfg),
+            None,
+            &["defi".to_owned()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            sweeps[0].env.get("HIGH_PRECISION").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            sweeps[0].env.get("ONLY_PROFILE").map(String::as_str),
+            Some("p")
+        );
+    }
+
+    /// `test_exclude_packages` stays out of the union: a selection
+    /// workaround, not an invariant, so inheriting it would narrow what a
+    /// scoped run tests while the rest of the run claims to be wider.
+    #[test]
+    fn ad_hoc_does_not_inherit_test_exclude_packages() {
+        let entries = vec![CheckEntry {
+            name: "default".into(),
+            test_exclude_packages: vec!["nautilus-pyo3".into()],
+            ..Default::default()
+        }];
+        let sweeps =
+            decide_active_sweeps(&entries, None, None, &["defi".to_owned()], false).unwrap();
+        assert!(sweeps[0].test_exclude_packages.is_empty());
+    }
+
     /// A `lanes` profile shapes nothing of its own, so an ad-hoc run under
     /// one inherits no filters rather than silently borrowing one lane's.
     #[test]

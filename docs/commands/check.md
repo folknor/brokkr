@@ -861,9 +861,21 @@ independent: sweep selection decides what cargo compiles, while a profile's
 `env` decide which tests run and how. A test that cannot pass in-process
 cannot pass in-process at any feature shape, so an ad-hoc run inherits the
 shaping of the profile it would otherwise have used (`--profile NAME`, else
-`[test] default_profile`). It still takes no `[[check]]` entry, so it inherits
-no entry-level `features`, `env`, `test_exclude_packages` or `build_packages` -
-see the warning below.
+`[test] default_profile`).
+
+It also inherits **entry-level `env`, unioned across every `[[check]]`
+entry** - the same `merge_check_envs` `brokkr clippy`'s ad-hoc path uses, so
+the two commands resolve one shape from one config. A build-affecting
+invariant carried by the entries rather than the profile (the class
+`HIGH_PRECISION = "1"` belongs to) must not be silently dropped: a scoped run
+that drops it goes green having never compiled the width the gate compiles.
+A key two entries set to *different* values is a hard config error naming the
+key, never a coin flip. Entry env overlays profile env on a collision,
+matching non-ad-hoc sweeps.
+
+It still takes no `[[check]]` entry, so it inherits no entry-level
+`features`, `test_exclude_packages` or `build_packages` - see the warning
+below.
 
 A `lanes` profile shapes nothing of its own (lanes carry no run-shaping
 fields), so an ad-hoc run under one inherits no filters rather than silently
@@ -881,12 +893,16 @@ it claims no `certifies` - this line is the only statement of its filters, and
 without it a red is indistinguishable from a code failure.
 
 > [!WARNING]
-> An ad-hoc run takes no `[[check]]` entry, so **entry-level `env` and
-> `test_exclude_packages` are not applied**. A project pinning something like
-> `HIGH_PRECISION=1` per entry compiles a *different shape* under `--features`
-> than under any profile sweep, and one excluding a package from the test
-> selection will try to link it. Prefer `--sweep NAME` (`brokkr clippy`) or a
-> profile when the entry's configuration matters.
+> An ad-hoc run takes no `[[check]]` entry, so **`test_exclude_packages` is
+> not applied** - an entry excluding a package from its test selection (say,
+> one that would link libpython) will try to link it here. `env` *is*
+> inherited, via the union above; exclusions are deliberately not, because
+> they are a per-entry selection workaround rather than an invariant, and
+> unioning them would narrow what a scoped run tests while the rest of the run
+> reads wider. Prefer a profile when the entry's selection matters.
+>
+> A shape needing an entry's exclusions *and* different features
+> simultaneously is not expressible as any union, and has no spelling today.
 
 A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
 labels lane-qualified (`tier1/default`, `serial/default`). The test phase
