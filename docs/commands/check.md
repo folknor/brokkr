@@ -55,7 +55,9 @@ Flags:
   fails rather than reading as green. The shape line shows `-p <pkg> …` and
   the `--json` summary carries a `package` field (comma-joined for a
   multi-package run). Rejected under a `certifies = "complete"` profile
-- `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`
+- `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`.
+  Overrides sweep *selection* only; the resolved profile's run shaping (skips,
+  filters, thread policy) still applies - see "Sweep selection"
 - `--profile <NAME>` - selects a `[test.profiles]` entry; conflicts with
   `--features` / `--no-default-features`
 - `--gate` - run the profile named by `[test] gate_profile` (load-validated
@@ -851,7 +853,40 @@ shape does.
 | `[[check]]` configured, no `default_profile`, no flags | every `[[check]]` entry in declaration order | none |
 | `[[check]]` + `default_profile = "tier1"`, no flags | the entries `tier1.sweeps` references | tier1's filters |
 | `--profile tier1` | the entries `tier1.sweeps` references | tier1's filters |
-| `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | none |
+| `--features X` (or `--no-default-features`) | one ad-hoc sweep, no `build_packages` | the resolved profile's filters (see below) |
+
+**CLI features override sweep *selection*, not run shaping.** The two are
+independent: sweep selection decides what cargo compiles, while a profile's
+`skip` / `only` / `tests` / `include_ignored` / `test_threads` / `isolation` /
+`env` decide which tests run and how. A test that cannot pass in-process
+cannot pass in-process at any feature shape, so an ad-hoc run inherits the
+shaping of the profile it would otherwise have used (`--profile NAME`, else
+`[test] default_profile`). It still takes no `[[check]]` entry, so it inherits
+no entry-level `features`, `env`, `test_exclude_packages` or `build_packages` -
+see the warning below.
+
+A `lanes` profile shapes nothing of its own (lanes carry no run-shaping
+fields), so an ad-hoc run under one inherits no filters rather than silently
+borrowing one lane's.
+
+Every ad-hoc run names what it inherited:
+
+```
+[run]     ad-hoc features: sweep selection overridden, run shaping from profile tier1
+[run]     ad-hoc features: sweep selection overridden, no profile - no test filters applied
+```
+
+An ad-hoc run reports no profile in the header or the `--json` trailer, because
+it claims no `certifies` - this line is the only statement of its filters, and
+without it a red is indistinguishable from a code failure.
+
+> [!WARNING]
+> An ad-hoc run takes no `[[check]]` entry, so **entry-level `env` and
+> `test_exclude_packages` are not applied**. A project pinning something like
+> `HIGH_PRECISION=1` per entry compiles a *different shape* under `--features`
+> than under any profile sweep, and one excluding a package from the test
+> selection will try to link it. Prefer `--sweep NAME` (`brokkr clippy`) or a
+> profile when the entry's configuration matters.
 
 A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
 labels lane-qualified (`tier1/default`, `serial/default`). The test phase

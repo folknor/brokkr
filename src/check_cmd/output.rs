@@ -822,8 +822,9 @@ mod tests {
 
     #[test]
     fn decide_active_sweeps_cli_features_create_ad_hoc() {
-        // --features commands → single ad-hoc sweep, ignores `[[check]]`
-        // and any profile entirely.
+        // --features commands → single ad-hoc sweep, taking no `[[check]]`
+        // entry. (It still inherits profile run shaping when a `[test]`
+        // section exists - see the ad_hoc_inherits_* tests below.)
         let entries = vec![CheckEntry {
             name: "all".into(),
             features: vec!["a".into()],
@@ -937,6 +938,124 @@ include_ignored = true
             decide_active_sweeps(&entries, Some(&test_cfg), Some("full"), &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert!(sweeps[0].libtest_args.contains(&"--include-ignored".into()));
+    }
+
+    /// The regression this whole split exists for: `check -p <pkg>
+    /// --features x` used to issue a bare `cargo test` with no `--skip` at
+    /// all, because the ad-hoc branch dropped the profile's run shaping
+    /// along with its sweep selection. It then failed on tests the default
+    /// profile had always excluded (nautilus: 8 `serial_tests::` + 2
+    /// `logging::macros::`, deterministic), reporting a red that reads as a
+    /// code failure.
+    #[test]
+    fn ad_hoc_inherits_default_profile_run_shaping() {
+        let toml_text = r#"
+default_profile = "tier1"
+
+[profiles.tier1]
+sweeps = ["all"]
+skip = ["serial_tests::", "logging::macros::"]
+test_threads = 0
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            features: vec!["a".into()],
+            no_default_features: false,
+            build_packages: vec!["ignored".into()],
+            ..Default::default()
+        }];
+        let sweeps = decide_active_sweeps(
+            &entries,
+            Some(&test_cfg),
+            None,
+            &["defi".to_owned()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(sweeps.len(), 1);
+        // Sweep selection IS overridden: the ad-hoc feature set, and no
+        // `[[check]]` entry (hence no build_packages).
+        assert_eq!(sweeps[0].label, "default");
+        assert_eq!(sweeps[0].cargo_feature_args, vec!["--features", "defi"]);
+        assert!(sweeps[0].build_packages.is_empty());
+        // Run shaping is NOT: the profile's filters and thread policy ride along.
+        assert_eq!(
+            sweeps[0].libtest_args,
+            vec!["--skip", "serial_tests::", "--skip", "logging::macros::"]
+        );
+        assert_eq!(sweeps[0].test_threads, Some(0));
+    }
+
+    /// A `lanes` profile shapes nothing of its own, so an ad-hoc run under
+    /// one inherits no filters rather than silently borrowing one lane's.
+    #[test]
+    fn ad_hoc_under_lanes_profile_inherits_nothing() {
+        let toml_text = r#"
+default_profile = "gate"
+
+[profiles.gate]
+lanes = ["tier1"]
+
+[profiles.tier1]
+sweeps = ["all"]
+skip = ["serial_tests::"]
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            ..Default::default()
+        }];
+        let sweeps = decide_active_sweeps(
+            &entries,
+            Some(&test_cfg),
+            None,
+            &["defi".to_owned()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(sweeps.len(), 1);
+        assert!(sweeps[0].libtest_args.is_empty());
+    }
+
+    /// `--profile` still selects which shaping an ad-hoc run inherits.
+    #[test]
+    fn ad_hoc_honours_explicit_profile_for_shaping() {
+        let toml_text = r#"
+default_profile = "tier1"
+
+[profiles.tier1]
+sweeps = ["all"]
+skip = ["tier1_only::"]
+
+[profiles.edit]
+sweeps = ["all"]
+skip = ["edit_only::"]
+"#;
+        let test_cfg: TestConfig = toml::from_str(toml_text).unwrap();
+        let entries = vec![CheckEntry {
+            name: "all".into(),
+            ..Default::default()
+        }];
+        let sweeps = decide_active_sweeps(
+            &entries,
+            Some(&test_cfg),
+            Some("edit"),
+            &["defi".to_owned()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(sweeps[0].libtest_args, vec!["--skip", "edit_only::"]);
+    }
+
+    /// No `[test]` section at all: nothing to inherit, and the ad-hoc sweep
+    /// stays exactly as it was.
+    #[test]
+    fn ad_hoc_without_test_config_is_unshaped() {
+        let sweeps =
+            decide_active_sweeps(&[], None, None, &["defi".to_owned()], false).unwrap();
+        assert!(sweeps[0].libtest_args.is_empty());
+        assert_eq!(sweeps[0].test_threads, None);
     }
 
     #[test]

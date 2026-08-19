@@ -85,6 +85,13 @@ pub(crate) fn cmd_check(
     reject_extra_args_complete(certifies, extra_args)?;
 
     announce_profile_header(&active_sweeps, &profile_label, commands);
+    announce_adhoc_shaping(
+        features,
+        no_default_features,
+        test_cfg,
+        profile_name,
+        commands,
+    )?;
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
     let mut coverage_stats: Option<CoverageStats> = None;
@@ -209,6 +216,39 @@ fn announce_profile_header(
         Some(name) => output::run_msg(&format!("profile {name}: {n} sweeps ({joined})")),
         None => output::run_msg(&format!("{n} sweeps ({joined})")),
     }
+}
+
+/// Name what an ad-hoc CLI-features run inherited, and from where.
+///
+/// An ad-hoc run reports no profile in the header (it certifies nothing and
+/// claims no `certifies`), which left the run's filters unstated: the only
+/// way to tell "these tests failed" from "these tests were never meant to
+/// run here" was to stash the diff and run again. One line closes that.
+///
+/// Silent on the non-ad-hoc path - the profile header already says it.
+fn announce_adhoc_shaping(
+    features: &[String],
+    no_default_features: bool,
+    test_cfg: Option<&TestConfig>,
+    profile_name: Option<&str>,
+    commands: bool,
+) -> Result<(), DevError> {
+    if commands || (features.is_empty() && !no_default_features) {
+        return Ok(());
+    }
+    let shaping = match (test_cfg, effective_profile_name(test_cfg, profile_name)?) {
+        (Some(cfg), Some(name)) => Some((name.clone(), profile::run_shaping(cfg, &name)?)),
+        _ => None,
+    };
+    let detail = match &shaping {
+        Some((name, s)) if !s.is_empty() => format!("run shaping from profile {name}"),
+        Some((name, _)) => format!("profile {name} shapes nothing - no test filters applied"),
+        None => "no profile - no test filters applied".to_owned(),
+    };
+    output::run_msg(&format!(
+        "ad-hoc features: sweep selection overridden, {detail}"
+    ));
+    Ok(())
 }
 
 /// A narrowed run must never look like a full one in the log: name the
@@ -796,9 +836,20 @@ pub(crate) fn decide_active_sweeps(
     features: &[String],
     no_default_features: bool,
 ) -> Result<Vec<ResolvedSweep>, DevError> {
-    // 1. CLI override: ad-hoc one-off sweep. Skips `[[check]]` and any
-    //    profile entirely, and ships no `build_packages` (the user is
-    //    spot-checking; if they need a CLI rebuild they pass --package).
+    // 1. CLI override: ad-hoc one-off sweep. Overrides *sweep selection* -
+    //    it takes no `[[check]]` entry, and ships no `build_packages` (the
+    //    user is spot-checking; if they need a CLI rebuild they pass
+    //    --package).
+    //
+    //    It does NOT discard the profile's run shaping. Sweep selection
+    //    decides what cargo compiles; the profile's `skip`/`only`/
+    //    `test_threads`/`isolation` decide which tests run and how, and the
+    //    two are independent - a test that cannot pass in-process cannot
+    //    pass in-process at any feature shape. This branch used to drop both
+    //    together, so `check -p <pkg> --features x` issued a bare `cargo
+    //    test` with no `--skip` at all and failed on tests the profile had
+    //    always excluded, reporting a red indistinguishable from a code
+    //    failure. `announce_adhoc_shaping` says which profile was applied.
     if !features.is_empty() || no_default_features {
         let mut feature_args = Vec::new();
         if no_default_features {
@@ -808,7 +859,7 @@ pub(crate) fn decide_active_sweeps(
             feature_args.push("--features".into());
             feature_args.push(features.join(","));
         }
-        return Ok(vec![ResolvedSweep {
+        let mut sweep = ResolvedSweep {
             label: "default".into(),
             cargo_feature_args: feature_args,
             build_packages: Vec::new(),
@@ -818,7 +869,13 @@ pub(crate) fn decide_active_sweeps(
             name_filters: Vec::new(),
             env: std::collections::BTreeMap::new(),
             ..Default::default()
-        }]);
+        };
+        if let Some(cfg) = test_cfg
+            && let Some(name) = effective_profile_name(test_cfg, profile_name)?
+        {
+            profile::run_shaping(cfg, &name)?.apply(&mut sweep);
+        }
+        return Ok(vec![sweep]);
     }
 
     // 2. Explicit --profile or default_profile from [test].

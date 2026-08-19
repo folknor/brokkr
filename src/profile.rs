@@ -327,7 +327,71 @@ fn collect_extends_chain<'a>(
     }
 }
 
-fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> ResolvedSweep {
+/// The *run-shaping* half of a profile: which tests run and how they are
+/// executed, with nothing that decides what cargo compiles.
+///
+/// Split out of [`build_resolved_sweep`] so the ad-hoc CLI-features path can
+/// inherit it. A `--features` run overrides *sweep selection* - which
+/// `[[check]]` entry's feature shape to compile - and that is orthogonal to
+/// the profile's filters: a test that cannot pass in-process cannot pass
+/// in-process at any feature shape. Dropping these along with the sweep set
+/// was the defect (a bare `cargo test` with no `--skip` at all, reporting a
+/// red that reads as a code failure).
+///
+/// `env` is here rather than in the build shape because a profile's env is
+/// profile-wide policy; a `[[check]]` entry's env is not, and an ad-hoc run
+/// deliberately inherits no entry.
+#[derive(Debug, Clone, Default)]
+pub struct RunShaping {
+    libtest_args: Vec<String>,
+    cargo_test_filters: Vec<String>,
+    name_filters: Vec<String>,
+    env: BTreeMap<String, String>,
+    test_threads: Option<u32>,
+    process_isolation: bool,
+    qualified_skips: Vec<QualifiedSkip>,
+}
+
+impl RunShaping {
+    /// True when the profile shapes nothing - a `lanes` profile, or one
+    /// declaring no filters. Lets the caller say "no filters applied"
+    /// rather than name a profile that changed nothing.
+    pub fn is_empty(&self) -> bool {
+        self.libtest_args.is_empty()
+            && self.cargo_test_filters.is_empty()
+            && self.name_filters.is_empty()
+            && self.env.is_empty()
+            && self.test_threads.is_none()
+            && !self.process_isolation
+            && self.qualified_skips.is_empty()
+    }
+
+    /// Overlay onto an ad-hoc sweep. Assignment, not merge: an ad-hoc sweep
+    /// carries no `[[check]]` entry, so there is nothing to AND with.
+    pub fn apply(self, sweep: &mut ResolvedSweep) {
+        sweep.libtest_args = self.libtest_args;
+        sweep.cargo_test_filters = self.cargo_test_filters;
+        sweep.name_filters = self.name_filters;
+        sweep.env = self.env;
+        sweep.test_threads = self.test_threads;
+        sweep.process_isolation = self.process_isolation;
+        sweep.qualified_skips = self.qualified_skips;
+    }
+}
+
+/// The run shaping `name` contributes, for the ad-hoc CLI-features path.
+///
+/// A `lanes` profile returns an empty shaping: load-time validation
+/// guarantees lanes carry no run-shaping fields of their own, and there is
+/// no defensible way to pick one lane's filters for a single ad-hoc run.
+pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError> {
+    if cfg.profiles.get(name).is_some_and(|d| d.lanes.is_some()) {
+        return Ok(RunShaping::default());
+    }
+    Ok(shaping_from(&resolve_profile_chain(&cfg.profiles, name)?))
+}
+
+fn shaping_from(profile: &ResolvedProfile) -> RunShaping {
     // `test_threads` is NOT pushed into `libtest_args` here. It is carried raw
     // on the sweep so each consumer applies its own policy: the check test
     // phase turns it into `--test-threads=N` (or a parallel run), while
@@ -336,8 +400,6 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
     if profile.include_ignored {
         libtest_args.push("--include-ignored".into());
     }
-    // Profile `skip` then the entry's own `skip` - they AND (both apply), never
-    // replace, so a sweep can pin its own exclusions on top of the profile's.
     // Name entries become libtest `--skip` flags; qualified entries are
     // carried separately and filtered out of the enumerated set instead.
     let mut qualified_skips: Vec<QualifiedSkip> = Vec::new();
@@ -350,24 +412,48 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
             SkipSpec::Qualified(q) => qualified_skips.push(q.clone()),
         }
     }
+
+    let mut cargo_test_filters: Vec<String> = Vec::new();
+    for t in &profile.tests {
+        cargo_test_filters.push("--test".into());
+        cargo_test_filters.push(t.clone());
+    }
+
+    RunShaping {
+        libtest_args,
+        cargo_test_filters,
+        name_filters: profile.only.clone(),
+        env: profile.env.clone(),
+        test_threads: profile.test_threads,
+        process_isolation: profile.isolation == Some(Isolation::Process),
+        qualified_skips,
+    }
+}
+
+fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> ResolvedSweep {
+    let shaping = shaping_from(profile);
+    // Profile `skip` then the entry's own `skip` - they AND (both apply), never
+    // replace, so a sweep can pin its own exclusions on top of the profile's.
+    let mut libtest_args = shaping.libtest_args;
+    let qualified_skips = shaping.qualified_skips;
     for s in &entry.skip {
         libtest_args.push("--skip".into());
         libtest_args.push(s.clone());
     }
 
-    let mut cargo_test_filters: Vec<String> = Vec::new();
-    for t in profile.tests.iter().chain(&entry.tests) {
+    let mut cargo_test_filters = shaping.cargo_test_filters;
+    for t in &entry.tests {
         cargo_test_filters.push("--test".into());
         cargo_test_filters.push(t.clone());
     }
 
     // Profile `only` (positional substring filters) then the entry's own.
-    let mut name_filters = profile.only.clone();
+    let mut name_filters = shaping.name_filters;
     name_filters.extend(entry.only.iter().cloned());
 
     // Profile env is the base; the entry's own env overlays it so a
     // sweep-specific var wins on a key collision.
-    let mut env = profile.env.clone();
+    let mut env = shaping.env;
     for (k, v) in &entry.env {
         env.insert(k.clone(), v.clone());
     }
