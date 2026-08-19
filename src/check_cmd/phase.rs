@@ -888,10 +888,15 @@ pub(crate) fn decide_active_sweeps(
         // `merge_check_envs` `brokkr clippy`'s ad-hoc path uses, so the two
         // commands compile the same shape from the same config. Without it a
         // build-affecting invariant carried by the entries rather than the
-        // profile (the class `HIGH_PRECISION` belongs to) was silently dropped,
-        // and a scoped run went green having never compiled the width the gate
-        // compiles - a quiet wrong, where the dropped-skips bug was a loud one.
-        // A key two entries disagree on is a hard error, never a coin flip.
+        // profile (a var a build script reads, a codegen toggle) was silently
+        // dropped, and a probe could go green having compiled something other
+        // than what the gate compiles - a quiet wrong, where the dropped-skips
+        // bug was a loud one. A key two entries disagree on is a hard error,
+        // never a coin flip.
+        //
+        // This does NOT reach an invariant expressed as a cargo *feature*:
+        // that follows feature resolution, which follows the CLI scope, and no
+        // env union restores it.
         //
         // Entry env overlays profile env, matching `build_resolved_sweep`.
         //
@@ -1896,16 +1901,22 @@ fn build_clippy_sweep(
 /// explicit `--env` will set it anyway and the cross-sweep disagreement is moot.
 ///
 /// Union (not intersection) is deliberate: a build-affecting invariant present
-/// in most-but-not-all entries (the class HIGH_PRECISION belongs to) must not be
-/// silently dropped - that is the exact failure BUG_SWEEP set out to prevent.
-/// The cost is that entries setting *disjoint* keys contribute all of them; the
-/// escape is `--env KEY=...` (or `--sweep NAME` to replay one entry exactly).
+/// in most-but-not-all entries must not be silently dropped - that is the exact
+/// failure BUG_SWEEP set out to prevent. The cost is that entries setting
+/// *disjoint* keys contribute all of them; the escape is `--env KEY=...` (or
+/// `--sweep NAME` to replay one entry exactly).
+///
+/// Every entry `env` is carried, load-bearing or not: telling the two apart
+/// would mean knowing what each `build.rs` reads. So this guarantees the same
+/// *env* on both paths, and nothing about what that env achieves - an
+/// invariant a project expresses as a cargo feature follows feature
+/// resolution, and no env union reaches it.
 ///
 /// Shared by `brokkr clippy`'s ad-hoc path and `brokkr check`'s, so the two
-/// commands resolve the same width from the same config - they used to
-/// disagree, `clippy --features x` unioning `HIGH_PRECISION=1` while `check
-/// --features x` silently compiled without it. `remedy` carries the escape
-/// sentence, since the two commands offer different flags for it.
+/// commands resolve the same env from the same config - they used to disagree,
+/// `clippy --features x` unioning the entries' env while `check --features x`
+/// silently ran without it. `remedy` carries the escape sentence, since the
+/// two commands offer different flags for it.
 fn merge_check_envs(
     entries: &[CheckEntry],
     overridden: &std::collections::BTreeSet<&str>,

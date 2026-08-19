@@ -865,13 +865,20 @@ shaping of the profile it would otherwise have used (`--profile NAME`, else
 
 It also inherits **entry-level `env`, unioned across every `[[check]]`
 entry** - the same `merge_check_envs` `brokkr clippy`'s ad-hoc path uses, so
-the two commands resolve one shape from one config. A build-affecting
-invariant carried by the entries rather than the profile (the class
-`HIGH_PRECISION = "1"` belongs to) must not be silently dropped: a scoped run
-that drops it goes green having never compiled the width the gate compiles.
-A key two entries set to *different* values is a hard config error naming the
-key, never a coin flip. Entry env overlays profile env on a collision,
-matching non-ad-hoc sweeps.
+the two commands resolve one shape from one config. An entry `env` is treated
+as a build-affecting invariant - a var a build script reads, a codegen toggle
+- and a probe that drops one can go green having compiled something other
+than what the gate compiles. A key two entries set to *different* values is a
+hard config error naming the key, never a coin flip. Entry env overlays
+profile env on a collision, matching non-ad-hoc sweeps.
+
+brokkr cannot tell a load-bearing entry `env` from an inert one - that would
+mean knowing what every `build.rs` reads - so it carries all of them. Note
+what this does **not** cover: where a project's real invariant is a *cargo
+feature* rather than an env var, the shape follows feature resolution and
+therefore follows the CLI scope, which no env union can restore. An entry
+`env` that nothing reads is harmless but proves nothing; do not read its
+presence as evidence that a scoped run matched the gate's shape.
 
 It still takes no `[[check]]` entry, so it inherits no entry-level
 `features`, `test_exclude_packages` or `build_packages` - see the warning

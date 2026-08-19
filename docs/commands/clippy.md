@@ -5,8 +5,7 @@ clippy phase - no gremlins/style/header/textlint/manifest/dependency/test - so
 it is a probe, not a gate. It exists to recover the exact firing lints of an
 arbitrary crate/feature configuration under brokkr's env and toolchain
 discipline, instead of dropping to a raw `cargo +nightly clippy` that silently
-loses `disable_toolchain` and the project's `[[check]]` env (e.g. the
-`HIGH_PRECISION=1` header-regeneration guard).
+loses `disable_toolchain` and the project's `[[check]]` env.
 
 Because it is not a gate, it allows things a `[[check]]` entry deliberately
 cannot: a real `--all-features`, and free feature sweeps no entry models. The
@@ -53,9 +52,12 @@ over every other source. KEY must be non-empty; `KEY=` (empty value) is legal.
 
 The base env depends on the mode:
 
-- **Ad-hoc:** the **union** of every `[[check]]` entry's `env`. These are
-  build-affecting project invariants (codegen toggles like `HIGH_PRECISION`) a
-  probe must not silently drop. If two entries set the same key to *different*
+- **Ad-hoc:** the **union** of every `[[check]]` entry's `env`. Treated as
+  build-affecting project invariants - a var a build script reads, a codegen
+  toggle - that a probe must not silently drop. brokkr cannot tell a
+  load-bearing entry `env` from an inert one (that would mean knowing what
+  every `build.rs` reads), so it carries all of them and lets the project
+  decide what belongs there. If two entries set the same key to *different*
   values, that is a config error - resolve it with `--env KEY=...`, or replay one
   entry with `--sweep NAME`. Union (rather than intersection) is deliberate: an
   invariant present in most-but-not-all entries must survive, which intersection
