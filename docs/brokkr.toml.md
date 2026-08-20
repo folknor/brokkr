@@ -967,7 +967,11 @@ include_ignored = true
   `certifies = "complete"` profile the `coverage` phase asserts every
   `skip` and every `only` - profile-level and entry-level alike, each
   individually - against the enumeration, and reports a dead one with the
-  block it was written in. Same rule as a stale `[[quarantine]]` entry, and
+  block it was written in. A filter is judged against the sweeps *it*
+  applies to: an entry's filter against the lanes running that entry, a
+  profile's filter against every sweep the profile runs. So a profile-level
+  skip naming a test outside a package-scoped sweep is live as long as some
+  sweep of that profile runs it. Same rule as a stale `[[quarantine]]` entry, and
   for the same reason: a filter selecting nothing is a name that drifted,
   and a dead `only` leaves its lane evaluating nothing while still reading
   as a gate. Complementary to the test phase's `zero tests ran` refusal,

@@ -87,6 +87,17 @@ mod shared {
         assert_eq!(super::double(2), 4);
     }
 }
+
+// Outside `shared::` on purpose: the package-scoped sweep needs a test the
+// gate-scoped profile's `shared::` skip does not reach, or that sweep would
+// evaluate nothing and the run-time guard would fire instead.
+#[cfg(test)]
+mod own {
+    #[test]
+    fn member_scoped_probe() {
+        assert_eq!(super::double(3), 6);
+    }
+}
 EOF
 
 cat > "$smoke/src/lib.rs" <<'EOF'
@@ -171,6 +182,28 @@ skip = ["adds", "skipme", "shared::"]
 [test.profiles.gate-stale]
 certifies = "complete"
 sweeps = ["default"]
+
+# The false-death regression: one profile-level skip list across an
+# unscoped sweep and a package-scoped one. `skipme` and root's `shared::`
+# name tests that exist only in certifies-smoke, so both are necessarily
+# dead in the member-scoped sweep while doing their job in the unscoped
+# one. Judged per sweep this reported two dead filters and there was no
+# way to silence it but to stop scoping sweeps or stop skipping tests.
+# `curated` because a complete profile's universe is every [[check]] entry:
+# an entry the other gate profiles do not reference has to declare itself
+# outside the universe. Its own `only` is entry-scoped, so it is judged
+# against this entry's sweeps alone - and it must survive the profile's
+# `shared::` skip, which is why `own::` exists in member.
+[[check]]
+name = "scoped"
+packages = ["member"]
+curated = true
+only = ["member_scoped_probe"]
+
+[test.profiles.gate-scoped]
+certifies = "complete"
+sweeps = ["default", "scoped"]
+skip = ["skipme", "shared::"]
 
 # A skip naming a test that no longer exists, and an `only` whose every
 # match the skip above removes. Neither subtracts anything from the lane's
@@ -287,6 +320,15 @@ expect "stale quarantine = exit 1" 1 $rc
 # orphan, and both from any non-coverage failure.
 expect_json "gate-stale failed on coverage with no orphans" \
   '.failed_phase == "coverage" and .coverage != null and .coverage.orphaned == 0'
+
+echo "=== --profile gate-scoped: a profile filter spans its sweeps ==="
+check_json check --profile gate-scoped --json
+# Orphans are beside the point here (the scoped sweep audits member's own
+# pairs); what must hold is that NO filter is reported dead. Both skips are
+# live in the unscoped sweep and dead in the scoped one, which is the shape
+# that per-sweep judging turned into a false gate failure.
+expect_json "gate-scoped reports no dead filters" \
+  '.coverage != null and .coverage.dead_filters == 0'
 
 echo "=== --profile gate-dead-skip: a skip matching nothing fails ==="
 check_json check --profile gate-dead-skip --json

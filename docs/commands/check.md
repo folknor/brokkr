@@ -787,7 +787,7 @@ asserted against the enumeration, and one that matched nothing fails the
 check, named with the block it was written in:
 
 ```
-[error]   dead filter: only "read_market_latency" in [test.profiles.timing] (sweep: timing) - matches no test
+[error]   dead filter: only "read_market_latency" in [test.profiles.timing] - matches no test in any sweep it applies to (timing)
 ```
 
 A dead `skip` is a name that drifted: whatever it excluded runs again under
@@ -807,6 +807,19 @@ Four rules decide what "matched nothing" means:
   matched against the names *that lane* can see. Against the wider universe
   a skip would read as alive on the strength of a match inside a binary the
   lane narrowed away.
+- **The reference set is the filter's own scope**, which is the union of
+  the candidate sets of the sweeps it applies to: a `[[check]]` filter
+  against the lanes running *that entry*, a `[test.profiles.*]` filter
+  against *every sweep the profile runs*. The two claims differ - "this
+  test should not run in this sweep" versus "…in this profile" - and the
+  latter is satisfied by matching anywhere the profile runs. Judging a
+  profile filter per sweep is wrong in a way that shows up immediately:
+  any profile combining an unscoped sweep with a package-scoped one
+  reports a false death for essentially every entry, since each skip names
+  a test outside the scoped sweep's packages and is necessarily dead there
+  while doing its job in the unscoped one. Nothing is lost in the
+  direction the check exists for - a filter dead in *every* sweep it
+  applies to has no live sighting anywhere, and still reports.
 - **`skip` and `only` run against different sets.** A `skip` is dead when
   nothing it could remove *exists*. An `only` is dead when the lane
   *evaluates* nothing under it, so the skips and (on a lane without

@@ -69,7 +69,15 @@ here because their reasoning constrains future work:
   Filters are judged against the LANE's binaries, never the shape's
   universe - a lane narrowed by `--test` would otherwise report a skip
   alive on a match inside a binary it never runs, the same defect one
-  level up. And each filter is asserted INDIVIDUALLY rather than folded
+  level up - but the verdict is taken over the union of the sweeps the
+  filter's SCOPE covers, which is where the first cut got it wrong. A
+  profile-level filter is declared once against the profile's whole sweep
+  list, so judging it per sweep made every profile that combines an
+  unscoped sweep with a package-scoped one report false deaths. The
+  provenance carried for the report turned out to be the scope key too:
+  unioning over sweeps sharing an `(origin, kind, pattern, package)` gives
+  entry filters and profile filters their two different reference sets
+  without a branch. And each filter is asserted INDIVIDUALLY rather than folded
   the way libtest ORs them, or a live `only` covers for a dead sibling:
   both halves green, half of what was declared evaluating nothing. The
   degenerate half of the hazard - a substring so short it always matches -

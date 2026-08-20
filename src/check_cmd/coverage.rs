@@ -77,7 +77,10 @@ struct ShapeCoverage {
 /// checked. Neither subtracts anything from the lane's claim, so the orphan
 /// audit cannot see either: no pair goes non-run, so nothing is orphaned.
 struct DeadFilter {
-    sweep: String,
+    /// Every sweep it was judged against, rendered - a profile-level filter is
+    /// judged against the union of them (see [`FilterLedger`]), so naming one
+    /// would misreport where the check actually looked.
+    sweeps: String,
     origin: String,
     label: String,
 }
@@ -255,8 +258,9 @@ fn run_coverage_phase(
     // is a different edit in a different file.
     for d in &dead {
         output::error(&format!(
-            "dead filter: {} in {} (sweep: {}) - matches no test",
-            d.label, d.origin, d.sweep
+            "dead filter: {} in {} - matches no test in any sweep it applies \
+             to ({})",
+            d.label, d.origin, d.sweeps
         ));
     }
 
@@ -323,7 +327,7 @@ fn enumerate_shapes(
     // built into or it would rebuild the whole shape from scratch.
     let meta_target_dir = build::project_info(Some(project_root))?.target_dir;
 
-    let mut dead: Vec<DeadFilter> = Vec::new();
+    let mut ledger = FilterLedger::default();
     let mut out = Vec::with_capacity(order.len());
     for key in &order {
         let members = &groups[key];
@@ -407,7 +411,13 @@ fn enumerate_shapes(
                 .filter_map(|b| per_binary.get(&b.executable))
                 .flat_map(|pairs| pairs.iter().cloned())
                 .collect();
-            dead.extend(dead_filters(sweep, &candidates, &ignored));
+            // Recorded, not decided: a profile-level filter spans the
+            // profile's sweeps, and those sit in DIFFERENT build shapes (an
+            // unscoped sweep and a package-scoped one are two shapes by
+            // construction), so the verdict cannot be taken inside this loop.
+            for (filter, live) in filter_liveness(sweep, &candidates, &ignored) {
+                ledger.record(filter, live, &sweep.label);
+            }
             let mut libtest: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
             libtest.extend(sweep.libtest_args.iter().map(String::as_str));
             let inc = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
@@ -442,7 +452,7 @@ fn enumerate_shapes(
             ran,
         });
     }
-    Ok((out, dead))
+    Ok((out, ledger.dead()))
 }
 
 /// Every filter on `sweep` that matched nothing it could have matched.
@@ -469,11 +479,11 @@ fn enumerate_shapes(
 /// `--exact` is ever in a lane's argv - `libtest_args` is built from
 /// include-ignored, skips and thread count alone), so the local computation is
 /// exact, and a listing per binary per filter is not.
-fn dead_filters(
-    sweep: &ResolvedSweep,
+fn filter_liveness<'a>(
+    sweep: &'a ResolvedSweep,
     candidates: &[(String, String)],
     ignored: &BTreeSet<(String, String)>,
-) -> Vec<DeadFilter> {
+) -> Vec<(&'a DeclaredFilter, bool)> {
     let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
     let name_skips: Vec<&DeclaredFilter> = sweep
         .declared_filters
@@ -497,16 +507,91 @@ fn dead_filters(
     sweep
         .declared_filters
         .iter()
-        .filter(|f| match f.kind {
-            FilterKind::Skip => !candidates.iter().any(|(pkg, test)| f.matches(pkg, test)),
-            FilterKind::Only => !evaluated.iter().any(|(pkg, test)| f.matches(pkg, test)),
-        })
-        .map(|f| DeadFilter {
-            sweep: sweep.label.clone(),
-            origin: f.origin.clone(),
-            label: f.label(),
+        .map(|f| {
+            let live = match f.kind {
+                FilterKind::Skip => candidates.iter().any(|(pkg, test)| f.matches(pkg, test)),
+                FilterKind::Only => evaluated.iter().any(|(pkg, test)| f.matches(pkg, test)),
+            };
+            (f, live)
         })
         .collect()
+}
+
+/// Liveness accumulated across every sweep a filter applies to.
+///
+/// THE REFERENCE SET IS THE FILTER'S SCOPE, NOT THE LANE'S. A `[[check]]`
+/// filter belongs to one entry and a profile-level filter is declared once
+/// against the profile's whole sweep list, so the author's claim differs:
+/// "this test should not run in this sweep" versus "…in this profile". The
+/// latter is satisfied by matching anywhere the profile runs.
+///
+/// Judging a profile filter per sweep was a real defect, not a strictness
+/// setting. Any profile combining an unscoped sweep with a package-scoped one
+/// reports a false death for essentially every entry - each skip names a test
+/// outside the scoped sweep's packages, so it is necessarily dead there while
+/// doing its job in the unscoped sweep. The only ways to silence it would be
+/// to stop scoping sweeps or to stop skipping tests.
+///
+/// The scope key is the PROVENANCE, which makes the two cases one rule rather
+/// than a branch: `origin` already names either the profile block or the
+/// specific `[[check]]` entry, so unioning over every sweep that carries the
+/// same `(origin, kind, pattern, package)` gives a profile filter the union
+/// across the profile's sweeps and an entry filter the union across the lanes
+/// running that entry - exactly the two intended reference sets.
+///
+/// Nothing is lost in the direction the feature is for: a filter dead in every
+/// sweep it applies to still has no live sighting, and still reports.
+#[derive(Default)]
+struct FilterLedger {
+    /// First-seen order, so the report follows declaration order rather than
+    /// hash order. Linear lookup: a config carries filters in the tens.
+    tallies: Vec<FilterTally>,
+}
+
+struct FilterTally {
+    origin: String,
+    label: String,
+    /// Matched something in at least one sweep it applies to.
+    live: bool,
+    /// Every sweep it was judged against, for the report - a dead filter's
+    /// remedy depends on which lanes were even looking.
+    sweeps: Vec<String>,
+}
+
+impl FilterLedger {
+    fn record(&mut self, filter: &DeclaredFilter, live: bool, sweep: &str) {
+        let label = filter.label();
+        match self
+            .tallies
+            .iter_mut()
+            .find(|t| t.origin == filter.origin && t.label == label)
+        {
+            Some(t) => {
+                t.live |= live;
+                if !t.sweeps.iter().any(|s| s == sweep) {
+                    t.sweeps.push(sweep.to_owned());
+                }
+            }
+            None => self.tallies.push(FilterTally {
+                origin: filter.origin.clone(),
+                label,
+                live,
+                sweeps: vec![sweep.to_owned()],
+            }),
+        }
+    }
+
+    fn dead(self) -> Vec<DeadFilter> {
+        self.tallies
+            .into_iter()
+            .filter(|t| !t.live)
+            .map(|t| DeadFilter {
+                sweeps: t.sweeps.join(", "),
+                origin: t.origin,
+                label: t.label,
+            })
+            .collect()
+    }
 }
 
 /// The shape's bare cargo selection: packages/excludes + features, no
@@ -636,8 +721,8 @@ mod coverage_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        classify, dead_filters, shape_enumeration_args, CoverageStats, DeclaredFilter,
-        FilterKind, QuarantineEntry, ResolvedSweep, ShapeCoverage,
+        classify, filter_liveness, shape_enumeration_args, CoverageStats, DeclaredFilter,
+        FilterKind, FilterLedger, QuarantineEntry, ResolvedSweep, ShapeCoverage,
     };
     use crate::config::QualifiedSkip;
     use std::collections::BTreeSet;
@@ -684,15 +769,103 @@ mod coverage_tests {
             .collect()
     }
 
+    /// The verdict over a whole profile: every sweep's liveness recorded, then
+    /// the ledger asked. Mirrors `enumerate_shapes`, which cannot decide
+    /// inside its per-shape loop.
+    fn dead_over(lanes: &[(&ResolvedSweep, &[(String, String)])]) -> Vec<String> {
+        let ignored = BTreeSet::new();
+        let mut ledger = FilterLedger::default();
+        for (sweep, cands) in lanes {
+            for (f, live) in filter_liveness(sweep, cands, &ignored) {
+                ledger.record(f, live, &sweep.label);
+            }
+        }
+        ledger.dead().into_iter().map(|d| d.label).collect()
+    }
+
     fn dead_labels(
         sweep: &ResolvedSweep,
         cands: &[(String, String)],
         ignored: &BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        dead_filters(sweep, cands, ignored)
-            .into_iter()
-            .map(|d| d.label)
-            .collect()
+        let mut ledger = FilterLedger::default();
+        for (f, live) in filter_liveness(sweep, cands, ignored) {
+            ledger.record(f, live, &sweep.label);
+        }
+        ledger.dead().into_iter().map(|d| d.label).collect()
+    }
+
+    #[test]
+    fn a_profile_filter_lives_if_it_matches_in_any_sweep_it_applies_to() {
+        // The false-death shape: a profile declares one skip list and runs an
+        // unscoped sweep plus a package-scoped one. `server_only` names a test
+        // outside the scoped sweep's packages, so it is NECESSARILY dead there
+        // while doing its job in the unscoped sweep. Judged per sweep, every
+        // such entry reports dead and the only remedies are to stop scoping
+        // sweeps or to stop skipping tests.
+        let profile_skip = DeclaredFilter {
+            kind: FilterKind::Skip,
+            pattern: "server_only".into(),
+            package: None,
+            origin: "[test.profiles.gate]".into(),
+        };
+        let workspace = ResolvedSweep {
+            label: "workspace".into(),
+            declared_filters: vec![profile_skip.clone()],
+            ..ResolvedSweep::default()
+        };
+        let instrumented = ResolvedSweep {
+            label: "instrumented".into(),
+            declared_filters: vec![profile_skip],
+            ..ResolvedSweep::default()
+        };
+        let wide = candidates(&[("mogwai-server", "server_only_probe")]);
+        let scoped = candidates(&[("mogwai-data", "unrelated")]);
+
+        assert!(dead_over(&[(&workspace, &wide), (&instrumented, &scoped)]).is_empty());
+        // Order of sweeps cannot matter: a live sighting anywhere settles it.
+        assert!(dead_over(&[(&instrumented, &scoped), (&workspace, &wide)]).is_empty());
+
+        // Nothing is lost in the direction the check exists for: dead in every
+        // sweep is still dead.
+        let elsewhere = candidates(&[("mogwai-server", "renamed")]);
+        assert_eq!(
+            dead_over(&[(&workspace, &elsewhere), (&instrumented, &scoped)]),
+            vec!["skip \"server_only\""]
+        );
+    }
+
+    #[test]
+    fn an_entry_filter_unions_only_over_its_own_entrys_lanes() {
+        // Provenance is the scope key, so the same union rule gives an entry
+        // filter a narrower reference set: two `[[check]]` entries carrying the
+        // same pattern are two filters, and one living cannot cover the other.
+        let live_entry = ResolvedSweep {
+            label: "workspace".into(),
+            declared_filters: vec![DeclaredFilter {
+                kind: FilterKind::Skip,
+                pattern: "shared_name".into(),
+                package: None,
+                origin: "[[check]] 'workspace'".into(),
+            }],
+            ..ResolvedSweep::default()
+        };
+        let dead_entry = ResolvedSweep {
+            label: "instrumented".into(),
+            declared_filters: vec![DeclaredFilter {
+                kind: FilterKind::Skip,
+                pattern: "shared_name".into(),
+                package: None,
+                origin: "[[check]] 'instrumented'".into(),
+            }],
+            ..ResolvedSweep::default()
+        };
+        let wide = candidates(&[("core", "shared_name_test")]);
+        let scoped = candidates(&[("data", "unrelated")]);
+        assert_eq!(
+            dead_over(&[(&live_entry, &wide), (&dead_entry, &scoped)]),
+            vec!["skip \"shared_name\""]
+        );
     }
 
     #[test]
