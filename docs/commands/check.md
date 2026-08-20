@@ -755,7 +755,8 @@ broad one it nests under) or ignored at the source
 (counted, reported, not fatal); anything else is **orphaned** and fails
 the check, listed as `shape/package/test` up to `--limit`. A pattern
 entry justifying zero pairs is stale and fails the check. A run with
-both stale entries and orphans prints **both** worksheets before failing. Package-level
+stale entries, orphans and dead filters (below) prints **all** the
+worksheets before failing. Package-level
 `test_exclude_packages` is outside the pair audit (those binaries cannot
 build) and is called out in the trailer.
 
@@ -766,12 +767,121 @@ the per-entry listing carried: the countdown, and the growth warning when a
 substring starts matching more than it used to. `--triage` prints the old line
 per entry, with each entry's pattern and package scope. The `--json` summary carries a
 `coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `curated`,
-`orphaned`.
+`orphaned`, `dead_filters`. `dead_filters` counts the dead `skip`/`only`
+filters below; it exists as its own field because a dead filter moves no
+pair between the other buckets - a run that fails on one is otherwise
+indistinguishable from a green one in the counts.
 It is present whenever the audit got as far as classifying pairs - a run
 that fails *on* the audit (stale entries, orphans) still reports its
 counts, so a consumer of a failed gate sees the worksheet's numbers and
 not `null`. Only an enumeration failure, which predates any counts,
 leaves it null.
+
+## Dead `skip` / `only` filters
+
+The same staleness rule the ledger applies to `[[quarantine]]` entries
+applies to the filters themselves: **a filter that matches no test is a
+defect, not a no-op.** During the `coverage` phase every `skip` and every
+`only` declared on a `[test.profiles.*]` block or a `[[check]]` entry is
+asserted against the enumeration, and one that matched nothing fails the
+check, named with the block it was written in:
+
+```
+[error]   dead filter: only "read_market_latency" in [test.profiles.timing] (sweep: timing) - matches no test
+```
+
+A dead `skip` is a name that drifted: whatever it excluded runs again under
+a name nobody wrote down, or it will silently start catching an unrelated
+test that grows into the substring later. A dead `only` is worse, because
+the lane then evaluates nothing at all - a sweep declared to carry a
+wall-clock contract, whose filter no longer matches, is a gate that has
+quietly stopped existing while still sitting in the config as evidence that
+the contract is checked. Neither is visible to the orphan audit: a dead
+skip subtracts nothing from the lane's claim, so no pair goes non-run and
+nothing is orphaned.
+
+Four rules decide what "matched nothing" means:
+
+- **Judged against the lane's binaries, not the shape's universe.** A lane
+  narrows binaries with `tests = [...]` (`--test <target>`), so a filter is
+  matched against the names *that lane* can see. Against the wider universe
+  a skip would read as alive on the strength of a match inside a binary the
+  lane narrowed away.
+- **`skip` and `only` run against different sets.** A `skip` is dead when
+  nothing it could remove *exists*. An `only` is dead when the lane
+  *evaluates* nothing under it, so the skips and (on a lane without
+  `include_ignored`) the `#[ignore]`d names come out first - an `only`
+  whose every match is skipped or ignored satisfies "matched something"
+  while selecting no work.
+- **Each filter is asserted individually.** libtest ORs positional filters,
+  so a lane with one live `only` and one dead one still runs tests and
+  looks healthy. Folding the assertion the way libtest folds the filters
+  would let the live sibling cover for the dead one.
+- **Package-qualified skips match within their package only**, exactly as
+  `package = "<pkg>"` scopes a `[[quarantine]]` entry.
+
+Lanes the test phase never reached are exempt, on the same reasoning that
+stops them crediting the ran-set: they ran nothing, so nothing they declare
+can be shown dead.
+
+Resolving filters against libtest's own enumeration is a correctness
+choice, not only a cheap one. The alternative - deriving test names by
+parsing Rust source - has to be taught every declaration form
+(`#[tokio::test]`, `macro_rules!`-generated tests, and so on), and a parser
+that has gone blind agrees with every filter list there is.
+
+### The two guards are complementary
+
+The alive-check runs only under `certifies = "complete"`, because that is
+the only place the `coverage` phase runs. **That is not the same as "dead
+filters go unchecked elsewhere"** - a second guard covers the other
+direction. When a sweep actually runs and its filters collect no work, the
+test phase already refuses:
+
+```
+cargo test: zero tests ran (sweep: timing) (1 suite(s), 99 filtered out)
+  - a profile/filter combo collected no work; treat as a wrong-run.
+```
+
+So a dead `only` is caught at **run time** in any sweep that runs, and the
+alive-check covers the **enumerate-but-don't-run** case: a curated entry
+referenced by a complete profile, whose lane is enumerated by the audit.
+The residual between them is a sweep that is neither enumerated under a
+complete profile nor ever run - which is a lane nobody evaluates, a larger
+and different defect, and not one a filter check can fix.
+
+The degenerate-filter floor below applies everywhere, under every profile,
+because it is enforced at config load rather than in either phase.
+
+### The minimum filter length
+
+A `skip` or `only` substring shorter than **four characters** is a
+**load-time error**, in any `[[check]]` entry or `[test.profiles.*]` block
+(for a package-qualified skip, the floor is on the `pattern` half; the
+`package` half is an exact name):
+
+```
+[[check]] entry 'unit' has `skip` filter "ser", shorter than 4 characters. …
+```
+
+It closes the hazard the alive-check structurally cannot see. A very short
+substring is a substring of nearly every test name, so it suppresses (or
+selects) tests nobody chose *while always matching something* - it
+satisfies "matched at least one test" vacuously. The alive-check catches a
+filter that matches too little; the floor catches one that matches too
+much.
+
+It is enforced at load rather than in the `coverage` phase for the reason
+in the section above: the phase runs only under a complete profile, and a
+degenerate filter is degenerate wherever it is declared. Loading is also
+where the config location is known exactly. The escape hatch for a
+genuinely broad filter is a longer substring - there is no opt-in flag.
+
+> [!WARNING]
+> This is a breaking change for existing configs. The floor is a parse
+> error, so a `brokkr.toml` carrying a three-character filter stops loading
+> rather than warning - every command fails, not just `check`. Fix is to
+> write the substring that was meant.
 
 ## `certifies` and exit codes
 

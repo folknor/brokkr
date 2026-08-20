@@ -32,7 +32,7 @@ use crate::rustflags;
 use crate::error::DevError;
 use crate::gremlins;
 use crate::output;
-use crate::profile::{self, ResolvedSweep};
+use crate::profile::{self, DeclaredFilter, FilterKind, ResolvedSweep};
 use crate::project::Project;
 use crate::scope;
 use crate::test_runner::{self, LibtestOutcome};
@@ -2786,6 +2786,7 @@ mod json_summary_tests {
                 ignored: 2,
                 curated: 0,
                 orphaned: 0,
+                dead_filters: 0,
             }),
             elapsed_ms: 10,
         };

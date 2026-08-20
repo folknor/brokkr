@@ -61,6 +61,25 @@ here because their reasoning constrains future work:
   died before any pair was classified. The general rule this closes out
   - a phase that fails still reports what it learned - is worth applying
   to the next phase that grows a summary object.
+- **The filters are audited too, not only the pairs.** The staleness rule
+  now covers `skip` and `only` themselves: a filter matching nothing in
+  its lane's enumeration fails the check, named with the block it was
+  written in (`dead_filters` in `coverage.rs`, counted in the summary).
+  Two constraints came out of building it and both are load-bearing.
+  Filters are judged against the LANE's binaries, never the shape's
+  universe - a lane narrowed by `--test` would otherwise report a skip
+  alive on a match inside a binary it never runs, the same defect one
+  level up. And each filter is asserted INDIVIDUALLY rather than folded
+  the way libtest ORs them, or a live `only` covers for a dead sibling:
+  both halves green, half of what was declared evaluating nothing. The
+  degenerate half of the hazard - a substring so short it always matches -
+  is a load-time floor of four characters instead, because the coverage
+  phase runs only under `certifies = "complete"` and a degenerate filter
+  is degenerate wherever it is declared. Complementary to the test phase's
+  `zero tests ran` refusal, which catches a lane whose filters collect no
+  work at run time; the residual between the two is a sweep that is
+  neither enumerated nor ever run, which is a larger defect than a filter
+  check can address.
 
 **The first full audit ran to completion** (nautilus, 2026-07-22,
 `--profile pre-commit`, 5m33s): the test phase was entirely green across

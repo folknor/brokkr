@@ -172,6 +172,25 @@ skip = ["adds", "skipme", "shared::"]
 certifies = "complete"
 sweeps = ["default"]
 
+# A skip naming a test that no longer exists, and an `only` whose every
+# match the skip above removes. Neither subtracts anything from the lane's
+# claim, so the orphan audit cannot see either - the alive-check must.
+[test.profiles.gate-dead-skip]
+certifies = "complete"
+sweeps = ["default"]
+skip = ["renamed_away_long_ago", "skipme", "shared::"]
+
+# The live sibling is the point: `tests::adds` selects real work, so the
+# lane runs tests and looks healthy, while `skipme` - matched by the only,
+# removed by the skip - selects none. A lane where NO filter matches is
+# caught earlier and elsewhere, by the test phase's `zero tests ran`
+# refusal; this is the case only the alive-check sees.
+[test.profiles.gate-dead-only]
+certifies = "complete"
+sweeps = ["default"]
+skip = ["skipme"]
+only = ["skipme", "tests::adds"]
+
 [[quarantine]]
 pattern = "skipme"
 issue = "B1"
@@ -268,6 +287,33 @@ expect "stale quarantine = exit 1" 1 $rc
 # orphan, and both from any non-coverage failure.
 expect_json "gate-stale failed on coverage with no orphans" \
   '.failed_phase == "coverage" and .coverage != null and .coverage.orphaned == 0'
+
+echo "=== --profile gate-dead-skip: a skip matching nothing fails ==="
+check_json check --profile gate-dead-skip --json
+expect "dead skip = exit 1" 1 $rc
+# Exactly one filter is dead - the other two match. A dead filter moves no
+# pair between buckets (the lane's counts are lane-par's), which is exactly
+# why the orphan audit cannot see it and this count has to exist.
+expect_json "gate-dead-skip failed on coverage with one dead filter" \
+  '.failed_phase == "coverage" and .coverage.dead_filters == 1'
+
+echo "=== --profile gate-dead-only: an only selecting nothing fails ==="
+check_json check --profile gate-dead-only --json
+expect "dead only = exit 1" 1 $rc
+# `skipme` exists and is matched by the `only`, but the lane's `skip` removes
+# it - so "matched something" holds while the filter selects no work. The
+# live sibling keeps the lane running tests and the test phase green, which
+# is the whole reason a folded assertion would miss this: the failure has to
+# land in `coverage`, with exactly one of the two filters named.
+expect_json "gate-dead-only failed on coverage with one dead filter" \
+  '.failed_phase == "coverage" and .coverage.dead_filters == 1'
+
+echo "=== a filter under the length floor is a load-time error ==="
+cp brokkr.toml brokkr.toml.bak
+printf '\n[test.profiles.degenerate]\nsweeps = ["default"]\nskip = ["ser"]\n' >> brokkr.toml
+brokkr check --profile edit
+expect "three-character filter = config error" 1 $?
+mv brokkr.toml.bak brokkr.toml
 
 echo "=== --gate -p: rejected by clap ==="
 brokkr check --gate -p certifies-smoke

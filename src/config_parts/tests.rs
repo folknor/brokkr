@@ -531,6 +531,25 @@ preset = ["a", "b"]
     }
 
     #[test]
+    fn parse_check_rejects_a_degenerate_filter_substring() {
+        // A three-character substring is a substring of nearly every test
+        // name: it suppresses tests nobody chose while still matching
+        // something, so the coverage phase's alive-check can never see it.
+        for field in ["skip", "only"] {
+            let table: toml::map::Map<String, toml::Value> =
+                toml::from_str(&format!("[[check]]\nname = \"x\"\n{field} = [\"ser\"]\n"))
+                    .unwrap();
+            let err = parse_check(&table).unwrap_err().to_string();
+            assert!(err.contains("shorter than 4"), "{field}: {err}");
+            assert!(err.contains(field), "{field}: {err}");
+        }
+        // Four characters is the floor, not past it.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[[check]]\nname = \"x\"\nskip = [\"seri\"]\n").unwrap();
+        assert!(parse_check(&table).is_ok());
+    }
+
+    #[test]
     fn parse_check_rejects_rustflags_with_env_rustflags() {
         let table: toml::map::Map<String, toml::Value> = toml::from_str(
             "[[check]]\nname = \"sim\"\nrustflags = [\"--cfg\", \"madsim\"]\n\
@@ -1479,6 +1498,30 @@ sweeps = ["all"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn profile_filters_are_held_to_the_same_floor_as_entry_filters() {
+        // The floor lives at load precisely so it reaches profiles the
+        // coverage phase never enumerates - this one certifies nothing, so
+        // the alive-check would never see it.
+        let table = root_table(
+            r#"
+project = "pbfhogg"
+[[check]]
+name = "all"
+[test.profiles.tier1]
+sweeps = ["all"]
+skip = [{ package = "core", pattern = "io" }]
+"#,
+        );
+        let check = parse_check(&table).unwrap();
+        let test = parse_test(&table).unwrap();
+        let err = validate_check_against_test(&check, test.as_ref(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("shorter than 4"), "got: {err}");
+        assert!(err.contains("[test.profiles.tier1]"), "got: {err}");
     }
 
     #[test]

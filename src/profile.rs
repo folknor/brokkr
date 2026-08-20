@@ -74,11 +74,71 @@ pub struct ResolvedSweep {
     /// universe. Audit policy only - never part of the build shape, and the
     /// audit exempts a shape only when *every* sweep producing it is curated.
     pub curated: bool,
+    /// Every `skip` / `only` filter this sweep carries, each still knowing
+    /// where it was written. The executable forms above are flattened past
+    /// recovery - profile `skip` and entry `skip` both become `--skip X` pairs
+    /// in `libtest_args`, and both `only` lists concatenate into
+    /// `name_filters` - so a dead-filter report built from those could only
+    /// name the sweep, not the line to delete. Audit provenance only: never
+    /// part of the build shape, never read by an execution path.
+    pub declared_filters: Vec<DeclaredFilter>,
     /// The `[[check]]` entry's `profile`: the cargo profile this sweep
     /// compiles and runs under, or `None` for the command's default (dev
     /// under `brokkr check`; the CLI/`[test] debug` answer under `brokkr
     /// test`). Part of the build shape - see [`ResolvedSweep::build_shape_key`].
     pub profile: Option<SweepProfile>,
+}
+
+/// Which half of the filter surface a [`DeclaredFilter`] is, because the two
+/// are dead for different reasons and are checked against different sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterKind {
+    /// A `skip` entry: dead when nothing it could remove exists.
+    Skip,
+    /// An `only` entry: dead when the lane evaluates nothing under it.
+    Only,
+}
+
+impl FilterKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FilterKind::Skip => "skip",
+            FilterKind::Only => "only",
+        }
+    }
+}
+
+/// One `skip` / `only` filter with the config location it came from - the
+/// input to the coverage phase's alive-check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredFilter {
+    pub kind: FilterKind,
+    /// The test-name substring, as written.
+    pub pattern: String,
+    /// Set on a package-qualified skip; the pattern then applies within this
+    /// package only, exactly as a `[[quarantine]]` entry's `package` scopes it.
+    pub package: Option<String>,
+    /// Where it was written: `[test.profiles.tier2]` or `[[check]] 'serial'`.
+    /// Carried as rendered text because the report's whole job is to name a
+    /// line, and the two sources have no common address type.
+    pub origin: String,
+}
+
+impl DeclaredFilter {
+    /// Does this filter match `test` in `package`? Substring semantics, the
+    /// same libtest applies to both `--skip` and a positional filter, with the
+    /// package scoping that only a qualified skip carries.
+    pub fn matches(&self, package: &str, test: &str) -> bool {
+        self.package.as_deref().is_none_or(|p| p == package) && test.contains(&self.pattern)
+    }
+
+    /// How the dead-filter report names it.
+    pub fn label(&self) -> String {
+        match &self.package {
+            Some(pkg) => format!("{} \"{}\" (package {pkg})", self.kind.as_str(), self.pattern),
+            None => format!("{} \"{}\"", self.kind.as_str(), self.pattern),
+        }
+    }
 }
 
 impl ResolvedSweep {
@@ -141,6 +201,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         libtest_args.push("--skip".into());
         libtest_args.push(s.clone());
     }
+    let declared_filters = entry_filters(entry);
     let mut cargo_test_filters: Vec<String> = Vec::new();
     for t in &entry.tests {
         cargo_test_filters.push("--test".into());
@@ -161,9 +222,28 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         rustflags: entry.rustflags.clone(),
         process_isolation: false,
         qualified_skips: Vec::new(),
+        declared_filters,
         curated: entry.curated,
         profile: entry.profile,
     }
+}
+
+/// The `[[check]]` entry's own filters, provenance attached.
+fn entry_filters(entry: &CheckEntry) -> Vec<DeclaredFilter> {
+    let origin = format!("[[check]] '{}'", entry.name);
+    let skips = entry.skip.iter().map(|s| DeclaredFilter {
+        kind: FilterKind::Skip,
+        pattern: s.clone(),
+        package: None,
+        origin: origin.clone(),
+    });
+    let onlys = entry.only.iter().map(|o| DeclaredFilter {
+        kind: FilterKind::Only,
+        pattern: o.clone(),
+        package: None,
+        origin: origin.clone(),
+    });
+    skips.chain(onlys).collect()
 }
 
 /// Merged, resolved view of a `ProfileDef` after walking its `extends`
@@ -175,6 +255,13 @@ struct ResolvedProfile {
     tests: Vec<String>,
     only: Vec<String>,
     skip: Vec<SkipSpec>,
+    /// Which profile in the `extends` chain actually declared `only` / `skip`.
+    /// The merge is whole-list replacement, so each list came from exactly one
+    /// def - and a dead-filter report that named the resolved profile when the
+    /// filter is written in a parent sends the reader to a block that does not
+    /// contain it.
+    only_from: Option<String>,
+    skip_from: Option<String>,
     include_ignored: bool,
     test_threads: Option<u32>,
     isolation: Option<Isolation>,
@@ -241,7 +328,7 @@ fn resolve_single(
                      but no `[[check]]` entry with that name exists."
                 ))
             })?;
-        out.push(build_resolved_sweep(entry, &merged));
+        out.push(build_resolved_sweep(entry, &merged, name));
     }
 
     // Package-qualified skips are filtered out of the enumerated set, and
@@ -269,7 +356,7 @@ fn resolve_profile_chain(
 ) -> Result<ResolvedProfile, DevError> {
     let chain = collect_extends_chain(profiles, name)?;
     let mut out = ResolvedProfile::default();
-    for def in chain.iter().rev() {
+    for (def_name, def) in chain.iter().rev() {
         if let Some(v) = &def.sweeps {
             out.sweeps = v.clone();
         }
@@ -278,9 +365,11 @@ fn resolve_profile_chain(
         }
         if let Some(v) = &def.only {
             out.only = v.clone();
+            out.only_from = Some((*def_name).to_owned());
         }
         if let Some(v) = &def.skip {
             out.skip = v.clone();
+            out.skip_from = Some((*def_name).to_owned());
         }
         if let Some(v) = def.include_ignored {
             out.include_ignored = v;
@@ -304,8 +393,8 @@ fn resolve_profile_chain(
 fn collect_extends_chain<'a>(
     profiles: &'a BTreeMap<String, ProfileDef>,
     name: &str,
-) -> Result<Vec<&'a ProfileDef>, DevError> {
-    let mut chain: Vec<&ProfileDef> = Vec::new();
+) -> Result<Vec<(&'a str, &'a ProfileDef)>, DevError> {
+    let mut chain: Vec<(&str, &ProfileDef)> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut cur = name.to_owned();
     loop {
@@ -316,10 +405,10 @@ fn collect_extends_chain<'a>(
                 seen.iter().cloned().collect::<Vec<_>>().join(" -> ")
             )));
         }
-        let def = profiles.get(&cur).ok_or_else(|| {
+        let (key, def) = profiles.get_key_value(&cur).ok_or_else(|| {
             DevError::Config(format!("[test.profiles.{cur}] is not defined"))
         })?;
-        chain.push(def);
+        chain.push((key.as_str(), def));
         match &def.extends {
             Some(parent) => cur = parent.clone(),
             None => return Ok(chain),
@@ -350,6 +439,7 @@ pub struct RunShaping {
     test_threads: Option<u32>,
     process_isolation: bool,
     qualified_skips: Vec<QualifiedSkip>,
+    declared_filters: Vec<DeclaredFilter>,
 }
 
 impl RunShaping {
@@ -376,6 +466,7 @@ impl RunShaping {
         sweep.test_threads = self.test_threads;
         sweep.process_isolation = self.process_isolation;
         sweep.qualified_skips = self.qualified_skips;
+        sweep.declared_filters = self.declared_filters;
     }
 }
 
@@ -388,10 +479,16 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
     if cfg.profiles.get(name).is_some_and(|d| d.lanes.is_some()) {
         return Ok(RunShaping::default());
     }
-    Ok(shaping_from(&resolve_profile_chain(&cfg.profiles, name)?))
+    Ok(shaping_from(
+        &resolve_profile_chain(&cfg.profiles, name)?,
+        name,
+    ))
 }
 
-fn shaping_from(profile: &ResolvedProfile) -> RunShaping {
+/// `profile_name` is carried for provenance alone: the merged profile is the
+/// product of an `extends` chain and has no name of its own, but a dead-filter
+/// report has to name a block the reader can open.
+fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
     // `test_threads` is NOT pushed into `libtest_args` here. It is carried raw
     // on the sweep so each consumer applies its own policy: the check test
     // phase turns it into `--test-threads=N` (or a parallel run), while
@@ -419,9 +516,34 @@ fn shaping_from(profile: &ResolvedProfile) -> RunShaping {
         cargo_test_filters.push(t.clone());
     }
 
+    // Provenance is per list, not per profile: `extends` replaces `only` and
+    // `skip` wholesale, so each names the def that actually declared it.
+    let skip_at = at_profile(profile.skip_from.as_deref(), profile_name);
+    let only_at = at_profile(profile.only_from.as_deref(), profile_name);
+    let mut declared_filters: Vec<DeclaredFilter> = Vec::new();
+    for spec in &profile.skip {
+        let (pattern, package) = match spec {
+            SkipSpec::Name(s) => (s.clone(), None),
+            SkipSpec::Qualified(q) => (q.pattern.clone(), Some(q.package.clone())),
+        };
+        declared_filters.push(DeclaredFilter {
+            kind: FilterKind::Skip,
+            pattern,
+            package,
+            origin: skip_at.clone(),
+        });
+    }
+    declared_filters.extend(profile.only.iter().map(|o| DeclaredFilter {
+        kind: FilterKind::Only,
+        pattern: o.clone(),
+        package: None,
+        origin: only_at.clone(),
+    }));
+
     RunShaping {
         libtest_args,
         cargo_test_filters,
+        declared_filters,
         name_filters: profile.only.clone(),
         env: profile.env.clone(),
         test_threads: profile.test_threads,
@@ -430,8 +552,19 @@ fn shaping_from(profile: &ResolvedProfile) -> RunShaping {
     }
 }
 
-fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> ResolvedSweep {
-    let shaping = shaping_from(profile);
+/// Render a filter's origin block, falling back to the resolved profile when
+/// the chain recorded no declaring def (the list is empty in that case, so the
+/// fallback never actually labels a filter).
+fn at_profile(declared_in: Option<&str>, resolved: &str) -> String {
+    format!("[test.profiles.{}]", declared_in.unwrap_or(resolved))
+}
+
+fn build_resolved_sweep(
+    entry: &CheckEntry,
+    profile: &ResolvedProfile,
+    profile_name: &str,
+) -> ResolvedSweep {
+    let shaping = shaping_from(profile, profile_name);
     // Profile `skip` then the entry's own `skip` - they AND (both apply), never
     // replace, so a sweep can pin its own exclusions on top of the profile's.
     let mut libtest_args = shaping.libtest_args;
@@ -450,6 +583,11 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
     // Profile `only` (positional substring filters) then the entry's own.
     let mut name_filters = shaping.name_filters;
     name_filters.extend(entry.only.iter().cloned());
+
+    // The profile's filters and the entry's own AND together, so the audit
+    // sees both lists - each still pointing at its own block.
+    let mut declared_filters = shaping.declared_filters;
+    declared_filters.extend(entry_filters(entry));
 
     // Profile env is the base; the entry's own env overlays it so a
     // sweep-specific var wins on a key collision.
@@ -472,6 +610,7 @@ fn build_resolved_sweep(entry: &CheckEntry, profile: &ResolvedProfile) -> Resolv
         rustflags: entry.rustflags.clone(),
         process_isolation: profile.isolation == Some(Isolation::Process),
         qualified_skips,
+        declared_filters,
         curated: entry.curated,
         profile: entry.profile,
     }
@@ -620,6 +759,47 @@ sweeps = ["timing"]
         assert_ne!(
             sweep_from_check_entry(&unset_entry).build_shape_key(),
             dev.build_shape_key()
+        );
+    }
+
+    #[test]
+    fn declared_filters_name_the_block_that_actually_declared_them() {
+        // The report's whole job is to name a line to delete. `extends`
+        // replaces `skip` / `only` wholesale, so a filter inherited from a
+        // parent is written in the PARENT - naming the resolved profile would
+        // send the reader to a block that does not contain it.
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "unit"
+skip = ["entry_skip"]
+
+[test.profiles.base]
+sweeps = ["unit"]
+skip = ["inherited_skip"]
+
+[test.profiles.tier2]
+extends = "base"
+sweeps = ["unit"]
+only = ["own_only"]
+"#,
+        );
+        let s = &resolve(&cfg, &checks, "tier2").unwrap()[0];
+        let seen: Vec<(&str, &str, &str)> = s
+            .declared_filters
+            .iter()
+            .map(|f| (f.kind.as_str(), f.pattern.as_str(), f.origin.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                // Inherited: declared in base, not in tier2.
+                ("skip", "inherited_skip", "[test.profiles.base]"),
+                ("only", "own_only", "[test.profiles.tier2]"),
+                // The entry's own filters AND with the profile's and keep
+                // their own address.
+                ("skip", "entry_skip", "[[check]] 'unit'"),
+            ]
         );
     }
 

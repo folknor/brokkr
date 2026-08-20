@@ -955,6 +955,24 @@ include_ignored = true
   no crate prefix). Qualified entries require `isolation = "process"`
   (enforced at resolve time), and a test name existing in both a skipped and
   an unskipped package is a reported collision, never half-obeyed.
+- **`skip` and `only` substrings must be at least four characters**, in a
+  profile block or a `[[check]]` entry alike (for a qualified skip, the
+  floor is on the `pattern` half). Shorter is a load-time error: a
+  substring that short matches nearly every test name, so it suppresses or
+  selects tests nobody chose while still matching *something* - which is
+  the one dead-filter shape the `coverage` phase cannot detect. Breaking
+  change for configs that carried one; the fix is the substring that was
+  meant, and there is no opt-in for a broad filter.
+- **A filter that matches no test fails `brokkr check`.** Under a
+  `certifies = "complete"` profile the `coverage` phase asserts every
+  `skip` and every `only` - profile-level and entry-level alike, each
+  individually - against the enumeration, and reports a dead one with the
+  block it was written in. Same rule as a stale `[[quarantine]]` entry, and
+  for the same reason: a filter selecting nothing is a name that drifted,
+  and a dead `only` leaves its lane evaluating nothing while still reading
+  as a gate. Complementary to the test phase's `zero tests ran` refusal,
+  which catches the same defect at run time in any sweep that runs. See
+  `docs/commands/check.md`.
 - `isolation = "process"` runs each of the profile's tests in its own
   `cargo test … -- --exact <name>` process (TIERED-CHECK.md feature 10).
   `--test-threads=1` serializes tests inside one process per test binary; it

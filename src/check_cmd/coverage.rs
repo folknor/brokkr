@@ -42,6 +42,11 @@ struct CoverageStats {
     curated: usize,
     /// Non-run, unjustified pairs. Any value above zero failed the check.
     orphaned: usize,
+    /// Declared `skip` / `only` filters that matched nothing. Any value above
+    /// zero failed the check. Carried in the summary because a dead filter is
+    /// otherwise invisible in the counts - it moves no pair between buckets,
+    /// which is exactly why the orphan audit cannot see it.
+    dead_filters: usize,
 }
 
 /// One build shape's enumeration, package-qualified: the full universe,
@@ -58,6 +63,23 @@ struct ShapeCoverage {
     universe: BTreeSet<(String, String)>,
     ignored: BTreeSet<(String, String)>,
     ran: BTreeSet<(String, String)>,
+}
+
+/// A declared `skip` / `only` filter that matched nothing in the lane it was
+/// declared on - the filter-side twin of a stale `[[quarantine]]` entry.
+///
+/// A dead `skip` is a name that drifted: whatever it excluded runs again under
+/// a name nobody wrote down, or it will silently start catching an unrelated
+/// test that grows into the substring later. A dead `only` is worse, because
+/// the lane then evaluates nothing at all - a sweep declared to carry a
+/// contract, whose filter no longer matches, is a gate that has stopped
+/// existing while still appearing in the config as evidence the contract is
+/// checked. Neither subtracts anything from the lane's claim, so the orphan
+/// audit cannot see either: no pair goes non-run, so nothing is orphaned.
+struct DeadFilter {
+    sweep: String,
+    origin: String,
+    label: String,
 }
 
 /// What the audit produced. `stats` is present whenever enumeration and
@@ -150,11 +172,13 @@ fn run_coverage_phase(
     triage: bool,
     commands: bool,
 ) -> CoverageOutcome {
-    let shapes = match enumerate_shapes(project_root, sweeps, executed, allow_flags, commands) {
-        Ok(s) => s,
-        Err(e) => return CoverageOutcome::aborted(e),
-    };
-    let report = classify(&shapes, quarantine);
+    let (shapes, dead) =
+        match enumerate_shapes(project_root, sweeps, executed, allow_flags, commands) {
+            Ok(s) => s,
+            Err(e) => return CoverageOutcome::aborted(e),
+        };
+    let mut report = classify(&shapes, quarantine);
+    report.stats.dead_filters = dead.len();
     let stats = Some(report.stats);
 
     // The per-entry pair counts are the countdown the ledger exists for,
@@ -226,7 +250,28 @@ fn run_coverage_phase(
         ));
     }
 
-    if !report.orphans.is_empty() || !stale.is_empty() {
+    // Reported alongside the other two findings rather than instead of them:
+    // a run can have orphans, stale entries and dead filters at once, and each
+    // is a different edit in a different file.
+    for d in &dead {
+        output::error(&format!(
+            "dead filter: {} in {} (sweep: {}) - matches no test",
+            d.label, d.origin, d.sweep
+        ));
+    }
+
+    if !dead.is_empty() {
+        output::error(&format!(
+            "{} dead `skip`/`only` filter(s): a filter that selects nothing is a \
+             name that drifted, not a no-op - a dead `skip` no longer excludes \
+             what it names, and a dead `only` leaves its lane evaluating \
+             nothing while still reading as a gate. Fix the substring or delete \
+             the filter.",
+            dead.len()
+        ));
+    }
+
+    if !report.orphans.is_empty() || !stale.is_empty() || !dead.is_empty() {
         return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
     }
 
@@ -262,7 +307,7 @@ fn enumerate_shapes(
     executed: &[bool],
     allow_flags: &[String],
     commands: bool,
-) -> Result<Vec<ShapeCoverage>, DevError> {
+) -> Result<(Vec<ShapeCoverage>, Vec<DeadFilter>), DevError> {
     let mut order: Vec<profile::BuildShapeKey> = Vec::new();
     let mut groups: HashMap<profile::BuildShapeKey, Vec<usize>> = HashMap::new();
     for (idx, sweep) in sweeps.iter().enumerate() {
@@ -278,6 +323,7 @@ fn enumerate_shapes(
     // built into or it would rebuild the whole shape from scratch.
     let meta_target_dir = build::project_info(Some(project_root))?.target_dir;
 
+    let mut dead: Vec<DeadFilter> = Vec::new();
     let mut out = Vec::with_capacity(order.len());
     for key in &order {
         let members = &groups[key];
@@ -317,13 +363,26 @@ fn enumerate_shapes(
         let libdir = toolchain_libdir(project_root, &env_refs)?;
         let mut universe: BTreeSet<(String, String)> = BTreeSet::new();
         let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
+        // Kept per binary, not just folded into the universe: a lane narrows
+        // the binary set with `--test <target>`, and a filter must be judged
+        // against the names the LANE can see. Judging against the shape's
+        // universe would report a skip alive on the strength of a match inside
+        // a binary the lane narrowed away - the same defect this phase exists
+        // to catch, one level up. The listings are already being fetched here,
+        // so retaining them costs nothing.
+        let mut per_binary: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for b in &binaries {
             let Some(all) =
                 binary_list(b, project_root, &["--include-ignored"], &env_refs, &libdir)?
             else {
                 return Err(DevError::Build("coverage enumeration failed".into()));
             };
-            universe.extend(all.into_iter().map(|t| (b.package.clone(), t)));
+            let pairs: Vec<(String, String)> = all
+                .into_iter()
+                .map(|t| (b.package.clone(), t))
+                .collect();
+            universe.extend(pairs.iter().cloned());
+            per_binary.insert(b.executable.clone(), pairs);
             let Some(ig) = binary_list(b, project_root, &["--ignored"], &env_refs, &libdir)? else {
                 return Err(DevError::Build("coverage enumeration failed".into()));
             };
@@ -341,6 +400,14 @@ fn enumerate_shapes(
             }
             let sweep = &sweeps[idx];
             let lane_binaries = filter_binaries(&binaries, &sweep.cargo_test_filters);
+            // Everything the lane's own binaries contain, before any of its
+            // filters apply: the reference set the alive-check runs against.
+            let candidates: Vec<(String, String)> = lane_binaries
+                .iter()
+                .filter_map(|b| per_binary.get(&b.executable))
+                .flat_map(|pairs| pairs.iter().cloned())
+                .collect();
+            dead.extend(dead_filters(sweep, &candidates, &ignored));
             let mut libtest: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
             libtest.extend(sweep.libtest_args.iter().map(String::as_str));
             let inc = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
@@ -375,7 +442,71 @@ fn enumerate_shapes(
             ran,
         });
     }
-    Ok(out)
+    Ok((out, dead))
+}
+
+/// Every filter on `sweep` that matched nothing it could have matched.
+///
+/// The two kinds are checked against different sets, because they are dead for
+/// different reasons:
+///
+/// - a `skip` is dead when nothing it could remove EXISTS, so it is judged
+///   against the lane's candidates before any filtering;
+/// - an `only` is dead when the lane EVALUATES nothing under it, so the
+///   qualified skips and (on a lane without `--include-ignored`) the ignored
+///   names come out first. An `only` whose every match is skipped or ignored
+///   satisfies "matched something" while selecting no work, which is precisely
+///   the silently-vanished gate.
+///
+/// Each filter is asserted INDIVIDUALLY. libtest ORs positional filters, so a
+/// lane with a live `only` and a dead one still runs tests - and folding the
+/// assertion the way libtest folds the filters would let the live sibling
+/// cover for the dead one. Both halves green, nothing evaluated: the failure
+/// family this check exists for.
+///
+/// The post-skip set is computed here rather than read from a second listing.
+/// libtest's `--skip` and positional filters are plain substring matches (no
+/// `--exact` is ever in a lane's argv - `libtest_args` is built from
+/// include-ignored, skips and thread count alone), so the local computation is
+/// exact, and a listing per binary per filter is not.
+fn dead_filters(
+    sweep: &ResolvedSweep,
+    candidates: &[(String, String)],
+    ignored: &BTreeSet<(String, String)>,
+) -> Vec<DeadFilter> {
+    let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
+    let name_skips: Vec<&DeclaredFilter> = sweep
+        .declared_filters
+        .iter()
+        .filter(|f| f.kind == FilterKind::Skip)
+        .collect();
+
+    let evaluated: Vec<&(String, String)> = candidates
+        .iter()
+        .filter(|(pkg, test)| {
+            if !include_ignored && ignored.contains(&((*pkg).clone(), (*test).clone())) {
+                return false;
+            }
+            if sweep.qualified_skips.iter().any(|q| q.matches(pkg, test)) {
+                return false;
+            }
+            !name_skips.iter().any(|f| f.matches(pkg, test))
+        })
+        .collect();
+
+    sweep
+        .declared_filters
+        .iter()
+        .filter(|f| match f.kind {
+            FilterKind::Skip => !candidates.iter().any(|(pkg, test)| f.matches(pkg, test)),
+            FilterKind::Only => !evaluated.iter().any(|(pkg, test)| f.matches(pkg, test)),
+        })
+        .map(|f| DeadFilter {
+            sweep: sweep.label.clone(),
+            origin: f.origin.clone(),
+            label: f.label(),
+        })
+        .collect()
 }
 
 /// The shape's bare cargo selection: packages/excludes + features, no
@@ -435,6 +566,8 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
         ignored: 0,
         curated: 0,
         orphaned: 0,
+        // Filled in by the phase: `classify` sees pairs, not filters.
+        dead_filters: 0,
     };
     let mut per_entry = vec![0usize; quarantine.len()];
     let mut orphans: Vec<String> = Vec::new();
@@ -503,9 +636,10 @@ mod coverage_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        classify, shape_enumeration_args, CoverageStats, QuarantineEntry, ResolvedSweep,
-        ShapeCoverage,
+        classify, dead_filters, shape_enumeration_args, CoverageStats, DeclaredFilter,
+        FilterKind, QuarantineEntry, ResolvedSweep, ShapeCoverage,
     };
+    use crate::config::QualifiedSkip;
     use std::collections::BTreeSet;
 
     #[test]
@@ -532,6 +666,155 @@ mod coverage_tests {
             shape_enumeration_args(&sweep, Vec::new()),
             vec!["-p".to_owned(), "pkg".to_owned()]
         );
+    }
+
+    fn filter(kind: FilterKind, pattern: &str) -> DeclaredFilter {
+        DeclaredFilter {
+            kind,
+            pattern: pattern.into(),
+            package: None,
+            origin: "[test.profiles.tier1]".into(),
+        }
+    }
+
+    fn candidates(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
+            .collect()
+    }
+
+    fn dead_labels(
+        sweep: &ResolvedSweep,
+        cands: &[(String, String)],
+        ignored: &BTreeSet<(String, String)>,
+    ) -> Vec<String> {
+        dead_filters(sweep, cands, ignored)
+            .into_iter()
+            .map(|d| d.label)
+            .collect()
+    }
+
+    #[test]
+    fn a_skip_matching_nothing_is_dead_and_a_matching_one_is_not() {
+        let sweep = ResolvedSweep {
+            declared_filters: vec![
+                filter(FilterKind::Skip, "serial_tests::"),
+                filter(FilterKind::Skip, "renamed_away"),
+            ],
+            ..ResolvedSweep::default()
+        };
+        let cands = candidates(&[("core", "serial_tests::a"), ("core", "plain")]);
+        assert_eq!(
+            dead_labels(&sweep, &cands, &BTreeSet::new()),
+            vec!["skip \"renamed_away\""]
+        );
+    }
+
+    #[test]
+    fn a_filter_is_judged_against_the_lanes_binaries_not_the_shapes_universe() {
+        // The unsoundness the caller's candidate set exists to close: the
+        // shape's universe carries `tape::budget`, but this lane narrows to
+        // one target with `--test`, so the skip removes nothing HERE. Judged
+        // against the wider universe it would read as alive - the same defect
+        // this phase exists to catch, one level up.
+        let sweep = ResolvedSweep {
+            declared_filters: vec![filter(FilterKind::Skip, "tape::budget")],
+            ..ResolvedSweep::default()
+        };
+        let lane_only = candidates(&[("core", "unit::a")]);
+        assert_eq!(
+            dead_labels(&sweep, &lane_only, &BTreeSet::new()),
+            vec!["skip \"tape::budget\""]
+        );
+
+        let whole_shape = candidates(&[("core", "unit::a"), ("core", "tape::budget")]);
+        assert!(dead_labels(&sweep, &whole_shape, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn each_only_is_asserted_individually() {
+        // libtest ORs positional filters, so this lane runs tests and looks
+        // healthy. Folding the assertion the way libtest folds the filters
+        // would let the live sibling cover for the dead one: both halves
+        // green, half of what was declared evaluating nothing.
+        let sweep = ResolvedSweep {
+            declared_filters: vec![
+                filter(FilterKind::Only, "read_market_latency"),
+                filter(FilterKind::Only, "write_market_latency"),
+            ],
+            ..ResolvedSweep::default()
+        };
+        let cands = candidates(&[("core", "read_market_latency_p99")]);
+        assert_eq!(
+            dead_labels(&sweep, &cands, &BTreeSet::new()),
+            vec!["only \"write_market_latency\""]
+        );
+    }
+
+    #[test]
+    fn an_only_whose_every_match_is_skipped_or_ignored_is_dead() {
+        // "Matched something" is satisfied here and the lane still evaluates
+        // nothing - the vanished gate. `skip` and `only` therefore run against
+        // different sets: the skip below is alive (it removes a real test)
+        // while the only it empties is dead.
+        let sweep = ResolvedSweep {
+            declared_filters: vec![
+                filter(FilterKind::Skip, "_slow"),
+                filter(FilterKind::Only, "latency"),
+            ],
+            ..ResolvedSweep::default()
+        };
+        let cands = candidates(&[("core", "latency_slow"), ("core", "other")]);
+        assert_eq!(
+            dead_labels(&sweep, &cands, &BTreeSet::new()),
+            vec!["only \"latency\""]
+        );
+
+        // Same shape via `#[ignore]` rather than a skip: a lane without
+        // --include-ignored lists names it will never execute.
+        let sweep = ResolvedSweep {
+            declared_filters: vec![filter(FilterKind::Only, "latency")],
+            ..ResolvedSweep::default()
+        };
+        let ignored: BTreeSet<(String, String)> =
+            candidates(&[("core", "latency_manual")]).into_iter().collect();
+        let cands = candidates(&[("core", "latency_manual")]);
+        assert_eq!(
+            dead_labels(&sweep, &cands, &ignored),
+            vec!["only \"latency\""]
+        );
+
+        // ...and alive again once the lane lifts the ignore.
+        let lifted = ResolvedSweep {
+            libtest_args: vec!["--include-ignored".into()],
+            ..sweep
+        };
+        assert!(dead_labels(&lifted, &cands, &ignored).is_empty());
+    }
+
+    #[test]
+    fn a_qualified_skip_is_dead_when_its_package_has_no_match() {
+        // Package scoping is the point: the pattern matches a test in another
+        // package, and the entry is still dead where it was written.
+        let mut scoped = filter(FilterKind::Skip, "serial_tests::");
+        scoped.package = Some("nautilus-infrastructure".into());
+        let sweep = ResolvedSweep {
+            declared_filters: vec![scoped],
+            qualified_skips: vec![QualifiedSkip {
+                package: "nautilus-infrastructure".into(),
+                pattern: "serial_tests::".into(),
+            }],
+            ..ResolvedSweep::default()
+        };
+        let cands = candidates(&[("nautilus-backtest", "serial_tests::t")]);
+        assert_eq!(
+            dead_labels(&sweep, &cands, &BTreeSet::new()),
+            vec!["skip \"serial_tests::\" (package nautilus-infrastructure)"]
+        );
+
+        let cands = candidates(&[("nautilus-infrastructure", "serial_tests::t")]);
+        assert!(dead_labels(&sweep, &cands, &BTreeSet::new()).is_empty());
     }
 
     fn set(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {

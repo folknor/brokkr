@@ -1035,6 +1035,40 @@ fn validate_non_empty_string_list(
     Ok(())
 }
 
+/// Shortest test-name substring a `skip` / `only` filter may carry.
+///
+/// A very short substring is a substring of nearly every test name, so it
+/// excludes (or selects) tests nobody chose while satisfying the coverage
+/// phase's alive-check vacuously - it always matches something. The floor is
+/// the cheap half of the same principle: the alive-check catches a filter that
+/// matches too little, this catches one that matches too much.
+///
+/// Enforced at LOAD rather than in the coverage phase, deliberately. The
+/// coverage phase runs only under `certifies = "complete"`, so a floor living
+/// there would never see a filter on any other profile - and a degenerate
+/// filter is degenerate wherever it is declared. Loading is also where the
+/// config location is known exactly, without carrying provenance forward.
+///
+/// The escape hatch for a genuinely broad filter is a longer substring, not an
+/// opt-in flag: no case has needed one, and a `broad = true` marker is config
+/// surface that would be copied more often than it is earned.
+const MIN_FILTER_LEN: usize = 4;
+
+/// Reject a degenerate `skip` / `only` substring. `at` names the config block.
+fn validate_filter_floor(kind: &str, pattern: &str, at: &str) -> Result<(), DevError> {
+    let trimmed = pattern.trim();
+    if trimmed.chars().count() >= MIN_FILTER_LEN {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "{at} has `{kind}` filter \"{pattern}\", shorter than {MIN_FILTER_LEN} \
+         characters. A substring that short matches nearly every test name, so \
+         it suppresses (or selects) tests nobody chose while still matching \
+         something - which is exactly what the coverage phase's alive-check \
+         cannot detect. Write the longer substring you meant."
+    )))
+}
+
 /// Parse the optional `[[check]]` array of tables.
 ///
 /// Rejects:
@@ -1146,6 +1180,13 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
                 )));
             }
         }
+    }
+    let at = format!("[[check]] entry '{}'", entry.name);
+    for s in &entry.skip {
+        validate_filter_floor("skip", s, &at)?;
+    }
+    for o in &entry.only {
+        validate_filter_floor("only", o, &at)?;
     }
     if !entry.packages.is_empty() && !entry.test_exclude_packages.is_empty() {
         return Err(DevError::Config(format!(
@@ -1390,6 +1431,18 @@ fn validate_check_against_test(
             )));
         }
         validate_skip_phases(profile_name, def)?;
+        let at = format!("[test.profiles.{profile_name}]");
+        for o in def.only.iter().flatten() {
+            validate_filter_floor("only", o, &at)?;
+        }
+        for spec in def.skip.iter().flatten() {
+            match spec {
+                SkipSpec::Name(s) => validate_filter_floor("skip", s, &at)?,
+                // The package half is an exact name, not a substring; only
+                // the pattern half can be degenerate.
+                SkipSpec::Qualified(q) => validate_filter_floor("skip", &q.pattern, &at)?,
+            }
+        }
         // Per-process execution is serial by construction: a parallel
         // thread count under `isolation = "process"` has no meaning.
         if def.isolation == Some(Isolation::Process)

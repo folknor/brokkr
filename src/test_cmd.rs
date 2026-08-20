@@ -613,6 +613,9 @@ fn decide_sweeps(
         s.cargo_test_filters.clear();
         s.name_filters.clear();
         s.qualified_skips.clear();
+        // Nothing declared applies any more, so nothing can be audited as
+        // dead here either - and `brokkr test` runs no coverage phase anyway.
+        s.declared_filters.clear();
     }
     Ok(sweeps)
 }
