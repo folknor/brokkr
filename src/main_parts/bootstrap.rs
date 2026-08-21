@@ -426,6 +426,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
             ),
             None => {
                 let cwd = std::env::current_dir()?;
+                // No project config, but the user-wide layer is not about this
+                // project - it applies to any tree brokkr checks, and a repo
+                // that never adopted a brokkr.toml is exactly where a personal
+                // convention is most likely the only rule there is. Detection
+                // normally folds it in; here there is nothing to fold it into,
+                // so it stands alone.
+                let user = config::load_user()?;
+                let (textlint, script_checks) = user
+                    .map_or_else(|| (Vec::new(), Vec::new()), |u| (u.textlint, u.script_checks));
                 (
                     None,
                     Vec::new(),
@@ -434,8 +443,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     None,
                     None,
                     None,
-                    Vec::new(),
-                    Vec::new(),
+                    textlint,
+                    script_checks,
                     None,
                     None,
                     cwd.clone(),

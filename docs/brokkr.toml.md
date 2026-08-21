@@ -90,6 +90,13 @@ The layer is applied at project detection, not when a `brokkr.toml` is parsed,
 so parsing a config file yields that file and nothing from the machine it runs
 on.
 
+**Trees with no `brokkr.toml` at all.** `check` runs in any Rust+git repo, and
+the user-wide layer reaches those too - it is not about this project, and a repo
+that never adopted a `brokkr.toml` is exactly where a personal convention is
+likely to be the only rule there is. With nothing to merge into, the user
+entries stand alone: `check` runs its gremlins, textlint and `script_check`
+phases from them and skips the config-driven rest.
+
 **Overriding the path.** `BROKKR_USER_CONFIG=/path/to/file` reads the layer from
 somewhere else; `BROKKR_USER_CONFIG=` (set, empty) switches it off entirely, for
 a CI job that must see only the project's own rules. An absent file is not an
