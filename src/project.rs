@@ -136,7 +136,8 @@ pub fn detect() -> Result<Detection, DevError> {
             cwd.display()
         ))
     })?;
-    let (project, config) = config::load(&config_dir)?;
+    let (project, mut config) = config::load(&config_dir)?;
+    config.apply_user_layer()?;
     Ok(Detection {
         project,
         config,
@@ -157,7 +158,8 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     let Some(config_dir) = find_config_dir(&cwd) else {
         return Ok(None);
     };
-    let (project, config) = config::load(&config_dir)?;
+    let (project, mut config) = config::load(&config_dir)?;
+    config.apply_user_layer()?;
     Ok(Some(Detection {
         project,
         config,

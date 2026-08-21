@@ -21,6 +21,19 @@ pub struct EnvInfo {
     pub storage: Vec<StorageInfo>,
     pub tools: Vec<(String, String)>,
     pub datasets: Vec<(String, DatasetStatus)>,
+    /// The user-wide `brokkr.toml` layer: where it is looked for, and what it
+    /// contributed. `None` when the layer is switched off (`BROKKR_USER_CONFIG=`)
+    /// or no config directory can be determined. Reported because a rule that
+    /// comes from outside the tree is otherwise invisible from inside it.
+    pub user_config: Option<UserConfigStatus>,
+}
+
+/// Where the user-wide config lives and what it added to this project.
+pub struct UserConfigStatus {
+    pub path: PathBuf,
+    pub present: bool,
+    pub textlint: usize,
+    pub script_checks: usize,
 }
 
 /// Probed details for a configured storage path.
@@ -71,7 +84,31 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         storage: collect_storage(paths),
         tools: collect_tools(project),
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
+        user_config: collect_user_config(),
     }
+}
+
+/// Probe the user-wide config layer. A parse failure is not reported here -
+/// `detect` already failed the whole run on it, so reaching this point means
+/// the file either parsed or is absent.
+fn collect_user_config() -> Option<UserConfigStatus> {
+    let loaded = crate::config::load_user().ok().flatten();
+    Some(match loaded {
+        // Report the path the file was actually read from, not the one we would
+        // have looked in - they differ under `BROKKR_USER_CONFIG`.
+        Some(u) => UserConfigStatus {
+            path: u.path,
+            present: true,
+            textlint: u.textlint.len(),
+            script_checks: u.script_checks.len(),
+        },
+        None => UserConfigStatus {
+            path: crate::config::user_config_path()?,
+            present: false,
+            textlint: 0,
+            script_checks: 0,
+        },
+    })
 }
 
 /// Print environment info in formatted output.
@@ -101,6 +138,19 @@ fn print_header(info: &EnvInfo) {
         format_gib(info.swap_free_mb),
     );
     println!("{:<12} {}", "io_uring:", info.io_uring_status);
+    if let Some(uc) = &info.user_config {
+        let summary = if uc.present {
+            format!(
+                "{} ({} textlint, {} script_check)",
+                uc.path.display(),
+                uc.textlint,
+                uc.script_checks
+            )
+        } else {
+            format!("{} (absent)", uc.path.display())
+        };
+        println!("{:<12} {}", "user cfg:", summary);
+    }
 }
 
 /// Format a MiB count as GiB with one decimal, e.g. 30968 -> "30.2 GiB".
