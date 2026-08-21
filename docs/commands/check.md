@@ -102,6 +102,37 @@ Output:
   conflicting flags, a certifies violation) emits no summary - resolve-time
   errors are not run verdicts.
 
+## The markdown-only shortcut
+
+In a git repo where **everything uncommitted is markdown**, `check` runs the
+`gremlins`, `textlint` and `script_check` phases and nothing else. Documentation
+cannot change how the code builds, so clippy and the tests would be re-proving
+what the last full run already established on the same code.
+
+The classifier is `scope::dirt` (`git status --porcelain=v1 -z
+--untracked-files=all`): staged, unstaged and untracked-not-ignored paths all
+count, `.md` and `.markdown` are prose, and a rename record's *origin* path
+counts too - `git mv notes.md src/lib.rs` is not a documentation edit. Four
+outcomes, only one of which shortens the run:
+
+| | |
+|---|---|
+| `Unknown` | not a git repo, or git could not be asked - full run |
+| `Clean` | nothing uncommitted - **full run**, since a clean tree is the state a complete check is *for* |
+| `ProseOnly` | markdown and nothing else - shortened |
+| `Code` | anything else - full run |
+
+**Waived by** `--force-rust`, `--gate`, any `--profile` (and so by any
+`certifies` claim), `--features`, `--no-default-features`, `-p`, or trailing
+`-- ARGS`. A shortcut that could quietly skip the certifying run would be worse
+than no shortcut at all: `--gate` has to mean the same thing on every tree it is
+ever run on.
+
+A shortened run says so twice - `markdown-only tree: running gremlins,
+textlint, script_check (--force-rust to check the build too)` up front, and
+`check passed (markdown only - build phases skipped)` at the end, because the
+announcement has scrolled away by the time the verdict is read.
+
 ## `gremlins` phase
 
 Runs first and fails the check if any banned Unicode character

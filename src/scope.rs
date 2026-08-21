@@ -89,6 +89,98 @@ fn run_git(project_root: &Path, args: &[&str]) -> Option<String> {
     if s.is_empty() { None } else { Some(s.to_string()) }
 }
 
+/// What kind of work is uncommitted in the working tree.
+///
+/// Drives `check`'s prose-only shortcut: editing documentation cannot break a
+/// build, so a tree whose only uncommitted change is markdown does not need the
+/// clippy and test phases to prove it still compiles - the last full run
+/// already did, on the same code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dirt {
+    /// Not a git repo, or git could not be asked. Never shortens a run: the
+    /// shortcut is an inference from evidence, and there is none here.
+    Unknown,
+    /// Nothing uncommitted. A full run - a clean tree is exactly the state a
+    /// complete check is *for*, and shortening it would make the common
+    /// pre-commit invocation prove nothing.
+    Clean,
+    /// Every uncommitted path is markdown.
+    ProseOnly,
+    /// At least one uncommitted path is not markdown.
+    Code,
+}
+
+/// Extensions the prose-only shortcut treats as documentation.
+const PROSE_EXTENSIONS: [&str; 2] = ["md", "markdown"];
+
+/// Classify the working tree. Staged, unstaged and untracked-not-ignored paths
+/// all count: what matters is whether anything not yet committed could change
+/// how the code builds, and an untracked `.rs` file certainly can.
+pub fn dirt(project_root: &Path) -> Dirt {
+    let Some(output) = Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+    else {
+        return Dirt::Unknown;
+    };
+    classify_status(&output.stdout)
+}
+
+/// Classify the bytes of `git status --porcelain=v1 -z`. Split out so the
+/// record format - including the second path a rename record carries - is
+/// testable without a repository.
+fn classify_status(stdout: &[u8]) -> Dirt {
+    let mut seen = false;
+    let mut prose_only = true;
+    // A rename/copy record is followed by its origin path as a bare field.
+    // That path is part of the change too: `git mv notes.md src/lib.rs` is not
+    // a documentation edit.
+    let mut expect_origin = false;
+    for field in stdout.split(|b| *b == 0) {
+        if field.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(field) else {
+            // A path we cannot read is a path we cannot vouch for.
+            return Dirt::Code;
+        };
+        let path = if expect_origin {
+            expect_origin = false;
+            text
+        } else {
+            // `XY <path>`: two status columns, a space, then the path.
+            let Some(rest) = text.get(3..) else {
+                return Dirt::Code;
+            };
+            expect_origin = text.starts_with('R') || text.starts_with('C');
+            rest
+        };
+        seen = true;
+        let is_prose = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| PROSE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+        if !is_prose {
+            prose_only = false;
+        }
+    }
+    if !seen {
+        Dirt::Clean
+    } else if prose_only {
+        Dirt::ProseOnly
+    } else {
+        Dirt::Code
+    }
+}
+
 /// Result of partitioning a diagnostic list into displayed vs hidden.
 pub struct Partition<T> {
     pub displayed: Vec<T>,
@@ -211,5 +303,51 @@ mod tests {
     #[test]
     fn trailer_none_when_nothing_hidden() {
         assert!(format_trailer(0).is_none());
+    }
+
+    #[test]
+    fn empty_status_is_a_clean_tree() {
+        assert_eq!(classify_status(b""), Dirt::Clean);
+    }
+
+    #[test]
+    fn markdown_only_changes_are_prose() {
+        let status = b" M docs/guide.md\0?? notes/todo.markdown\0A  README.MD\0";
+        assert_eq!(classify_status(status), Dirt::ProseOnly);
+    }
+
+    #[test]
+    fn one_code_file_is_enough_to_make_it_code() {
+        let status = b" M docs/guide.md\0 M src/lib.rs\0";
+        assert_eq!(classify_status(status), Dirt::Code);
+    }
+
+    /// A path with no extension (`Makefile`, `justfile`) is not prose.
+    #[test]
+    fn extensionless_paths_are_code() {
+        assert_eq!(classify_status(b" M Makefile\0"), Dirt::Code);
+    }
+
+    /// A rename record carries a second path, and it counts: moving a note on
+    /// top of a source file is not a documentation edit.
+    #[test]
+    fn a_rename_weighs_both_of_its_paths() {
+        let renamed = b"R  docs/b.md\0docs/a.md\0";
+        assert_eq!(classify_status(renamed), Dirt::ProseOnly);
+
+        let out_of_prose = b"R  src/lib.rs\0notes.md\0";
+        assert_eq!(classify_status(out_of_prose), Dirt::Code);
+
+        let into_prose = b"R  docs/a.md\0src/lib.rs\0";
+        assert_eq!(classify_status(into_prose), Dirt::Code);
+    }
+
+    /// An origin path that happens to look like a status record must be read
+    /// as a path, not re-parsed - otherwise its first three bytes vanish.
+    #[test]
+    fn an_origin_path_is_not_reparsed_as_a_record() {
+        // Re-parsing would strip "xy." and leave an extensionless "md".
+        let status = b"R  docs/b.md\0xy.md\0";
+        assert_eq!(classify_status(status), Dirt::ProseOnly);
     }
 }

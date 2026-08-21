@@ -25,7 +25,8 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
     Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
-    QuarantineEntry, ScriptCheck, SitedAllow, Stage, TestConfig, TextlintRule,
+    NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow, Stage, TestConfig,
+    TextlintRule,
 };
 use crate::dependency_rules;
 use crate::rustflags;
@@ -58,6 +59,7 @@ pub(crate) fn cmd_check(
     packages: &[String],
     profile_name: Option<&str>,
     gate: bool,
+    force_rust: bool,
     raw: bool,
     json: bool,
     limit: usize,
@@ -115,8 +117,19 @@ pub(crate) fn cmd_check(
     // A partial profile may skip phases (validated against PHASE_NAMES at
     // load time). Announce the omission up front - a narrowed run must
     // never look like a full one in the log.
-    let skip = |phase: &str| skip_phases.iter().any(|s| s == phase);
     announce_skipped_phases(skip_phases);
+
+    // On top of that, a tree whose only uncommitted change is markdown gets
+    // the prose-only shortcut: the conventions still apply to prose, but
+    // nothing that was just edited can have changed how the code builds.
+    // Anything that shapes or demands the build waives the shortcut. A profile
+    // covers `--gate` and `certifies` too: both imply one is in effect.
+    let shaped =
+        no_default_features || !features.is_empty() || !packages.is_empty() || !extra_args.is_empty();
+    let waived = force_rust || shaped || profile_label.is_some();
+    let prose_skips = prose_only_skips(project_root, waived);
+    let skip =
+        |phase: &str| skip_phases.iter().any(|s| s == phase) || prose_skips.contains(&phase);
 
     // Run every phase behind one closure so a failure from *any* of them
     // (not just the test phase) still funnels through the summary line below,
@@ -190,6 +203,7 @@ pub(crate) fn cmd_check(
         &profile_label,
         &ran_labels,
         skip_phases,
+        !prose_skips.is_empty(),
         package_label.as_deref(),
         failing_phase,
         coverage_stats,
@@ -260,6 +274,38 @@ fn announce_skipped_phases(skip_phases: &[String]) {
             skip_phases.join(", ")
         ));
     }
+}
+
+/// The phases the prose-only shortcut keeps. Everything else in
+/// [`PHASE_NAMES`] is skipped when nothing but markdown is uncommitted.
+///
+/// These three are the ones that read prose. `header` and `manifest` are not
+/// here: they police source files and manifests, which the run has just
+/// established nobody touched.
+const PROSE_PHASES: [&str; 3] = ["gremlins", "textlint", "script_check"];
+
+/// Decide the phases to skip because the working tree holds documentation
+/// edits and nothing else. Empty means "run everything", which is the answer
+/// whenever the shortcut cannot be justified.
+///
+/// `build_requested` is the caller's waiver: `--force-rust`, `--gate`, a profile, or
+/// any flag that shapes the build. A shortcut that could quietly skip the
+/// certifying run would be worse than no shortcut at all - `--gate` has to mean
+/// the same thing on every tree it is ever run on.
+fn prose_only_skips(project_root: &Path, build_requested: bool) -> Vec<&'static str> {
+    if build_requested || scope::dirt(project_root) != scope::Dirt::ProseOnly {
+        return Vec::new();
+    }
+    let skipped: Vec<&'static str> = PHASE_NAMES
+        .iter()
+        .copied()
+        .filter(|p| !PROSE_PHASES.contains(p) && !NON_SKIPPABLE_PHASES.contains(p))
+        .collect();
+    output::run_msg(&format!(
+        "markdown-only tree: running {} (--force-rust to check the build too)",
+        PROSE_PHASES.join(", ")
+    ));
+    skipped
 }
 
 /// Everything the seven convention phases (gremlins through dependency
@@ -618,6 +664,7 @@ fn finish_check(
     profile_label: &Option<String>,
     sweep_labels: &[&str],
     skip_phases: &[String],
+    prose_only: bool,
     package: Option<&str>,
     failing_phase: Option<&'static str>,
     coverage: Option<CoverageStats>,
@@ -627,7 +674,18 @@ fn finish_check(
     match outcome {
         Ok(()) => match certifies {
             None => {
-                output::result_msg(&format!("check passed in {}", fmt_wall(started.elapsed())));
+                // A shortened run must not sign off in the same words a full
+                // one does - the announcement at the top has scrolled away by
+                // the time this line is read.
+                let scope = if prose_only {
+                    " (markdown only - build phases skipped)"
+                } else {
+                    ""
+                };
+                output::result_msg(&format!(
+                    "check passed{scope} in {}",
+                    fmt_wall(started.elapsed())
+                ));
                 if json {
                     emit_json_summary(
                         "passed",

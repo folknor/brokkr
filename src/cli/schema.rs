@@ -110,6 +110,16 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         #[arg(long, conflicts_with_all = ["profile", "features", "no_default_features", "package"])]
         gate: bool,
 
+        /// Run the Rust phases (clippy, tests) even when the working tree
+        /// holds nothing but markdown edits. Without it, such a tree runs
+        /// the gremlins, textlint and script_check phases only -
+        /// documentation cannot change how the code builds, so clippy and
+        /// the tests would be re-proving what the last full run already
+        /// established on the same code. Implied by `--gate`, by a
+        /// profile, and by any flag that shapes the build.
+        #[arg(long)]
+        force_rust: bool,
+
         /// Reconstruct cargo's terminal-style output (full source
         /// annotations, help suggestions) by concatenating each
         /// diagnostic's `rendered` field.
