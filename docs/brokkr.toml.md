@@ -978,7 +978,7 @@ include_ignored = true
   which catches the same defect at run time in any sweep that runs. See
   `docs/commands/check.md`.
 - `isolation = "process"` runs each of the profile's tests in its own
-  `cargo test … -- --exact <name>` process (TIERED-CHECK.md feature 10).
+  `cargo test … -- --exact <name>` process.
   `--test-threads=1` serializes tests inside one process per test binary; it
   does not isolate them, and tests touching process-global state (a global
   logger) need the fresh-process guarantee CI's nextest provides. The sweep's
@@ -987,8 +987,8 @@ include_ignored = true
   for a serial family of a dozen tests, not thousands. Requires
   `test_threads` unset or 1; never runs doctests; `brokkr check -- …` extra
   args are rejected on an isolated sweep. Merges through `extends`.
-- `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*
-  (TIERED-CHECK.md feature 2): each lane resolves independently and the test
+- `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*:
+  each lane resolves independently and the test
   phase runs every lane's sweeps in order (labels lane-qualified,
   `tier1/default`), while the clippy phase dedupes on build shape so two
   lanes sharing a `[[check]]` entry are linted once. The opposite of
@@ -1001,7 +1001,7 @@ include_ignored = true
   no-narrowing rule. `brokkr test` under a lanes profile keeps one sweep per
   build shape, since it drops filters anyway.
 - `certifies = "complete" | "partial"` declares what a green run of the
-  profile claims, and permissions derive from the claim (TIERED-CHECK.md).
+  profile claims, and permissions derive from the claim.
   `partial` may set `skip_phases` (subtractive list of check phases, validated
   against the phase names) and use `-p` scoping; it prints `check partial` and
   exits **10** on success so `brokkr check && git commit` fails closed.
@@ -1021,8 +1021,7 @@ include_ignored = true
 
 ## `[[quarantine]]` entries
 
-The justification ledger for coverage accounting (TIERED-CHECK.md feature
-4), audited on every `certifies = "complete"` run:
+The justification ledger for coverage accounting, audited on every `certifies = "complete"` run:
 
 ```toml
 [[quarantine]]

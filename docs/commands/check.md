@@ -94,7 +94,7 @@ Output:
   saying that one of them was fatal.
 - `--json` appends one summary object as the **last line of stdout**, leaving
   the human output untouched (the old NDJSON per-event mode is gone; this is
-  the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
+  the result contract). Fields: `schema` (currently
   1), `certifies` (the resolved profile's claim, `null` for unclaimed
   profiles), `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`),
   `profile` (the profile that drove sweep selection; `null` for ad-hoc and

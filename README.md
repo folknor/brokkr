@@ -337,7 +337,7 @@ Use `--grep` for anything that's a flag/axis (`--grep zstd:1`, `--grep 'snapshot
 
 `brokkr results <uuid>` additionally shows what a table row can't: the per-iteration walls of a `--bench N` run in execution order, and the `prev.*` pairs naming what ran immediately before. `--compare A B` annotates a pair with a `host:` line when the two runs saw different available memory, governor, or kernel.
 
-The `dataset` column in the output table is the first dash-separated component of the input filename - `europe-20260301-seq4714-with-indexdata.osm.pbf` renders as `europe`. This is a display heuristic: filtering via `--dataset` always substring-matches the full `input_file` column, so filters still work even when the short name collapses distinct datasets (e.g. a hypothetical `europe-west` would display as `europe`). The full filename and size are shown in the single-result detail view (`brokkr results <uuid>`) as the `input` field. See TODO.md for the proper fix.
+The `dataset` column in the output table is the first dash-separated component of the input filename - `europe-20260301-seq4714-with-indexdata.osm.pbf` renders as `europe`. This is a display heuristic: filtering via `--dataset` always substring-matches the full `input_file` column, so filters still work even when the short name collapses distinct datasets (e.g. a hypothetical `europe-west` would display as `europe`). The full filename and size are shown in the single-result detail view (`brokkr results <uuid>`) as the `input` field.
 
 The compare view shows timing, output size, peak RSS, rewrite ratio, and blob distribution columns as applicable. Hotpath comparisons include function-level timing diffs.
 

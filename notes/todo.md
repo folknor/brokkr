@@ -382,3 +382,216 @@ locations-on-ways). No schema changes needed: `bench_self.rs` stores
 flags as `meta.*` kv pairs in `run_kv` and the full command line in
 `cli_args`. New flags just need CLI plumbing + `KvPair::text("meta.<flag>",
 ...)` entries in the metadata vec.
+
+### `dataset` column is derived from the filename, not stored
+
+`brokkr results`' `dataset` column is the first dash-separated component of
+`input_file` - `europe-20260301-seq4714-with-indexdata.osm.pbf` renders as
+`europe`. It is a display heuristic and collapses distinct datasets that share
+a first component (a hypothetical `europe-west` also displays as `europe`).
+Harmless for filtering, because `--dataset` substring-matches the full
+`input_file` column rather than the rendered short name, and the detail view
+(`brokkr results <uuid>`) shows the full filename.
+
+The proper fix is a stored dataset identity written at result time instead of
+one parsed back out of a filename - the same never-parse-a-constructed-name
+rule `brokkr clean` follows. Needs a schema column plus a backfill decision for
+historical rows, which is why it has stayed a display heuristic. README.md used
+to point here for "the proper fix" without this entry existing; the pointer is
+gone (a durable doc must not cite `notes/`), so the context lives here now.
+
+---
+
+## Tiered check: what is left
+
+Carried here 2026-08-25 when `TIERED-CHECK.md` was deleted. That document
+was a plan, and its plan is discharged: the committed core landed and
+nautilus's gate certifies `complete` over 29,128 pairs with zero orphans
+(2026-07-22). The mechanisms it proposed are now documented where they are
+used - config semantics in `docs/brokkr.toml.md` (`[test]` profiles,
+`[[quarantine]]`), runtime behaviour in `docs/commands/check.md`, and the
+per-mechanism reasoning at its own code site. What follows is the part that
+had no other home: the open items, and one design that was never built.
+
+`scripts/smoke-certifies.sh` exercises every landed mechanism end-to-end
+against a generated two-package workspace; run it after any change in this
+area.
+
+### The ledger reports counts, not membership
+
+`[[quarantine]]` entries are audited for staleness and counted, but the
+audit prints how many pairs an entry absorbs, never which. Per-entry counts
+catch an entry that *grows*; they cannot catch one that was always too wide,
+or one whose members belong to a different issue, because both look like a
+stable, explainable number.
+
+Three real defects walked through that gap on nautilus (2026-07-22), all
+found by a human narrowing patterns by hand, none catchable mechanically:
+
+- `test_quote_tick` was suppressing a B50 test under a B41 reason - it
+  absorbed capnp's `test_quote_tick_roundtrip`, whose four siblings are B50
+  entries. Narrowing B41 would have silently un-skipped a test that still
+  needed suppressing. This is the substring-growth hazard, except it grew
+  across *issues*.
+- `test_data_any_` was over-broad by intent, not by accident. Its count was
+  an innocent 12, matching exactly the 12 tests intended - but only 5 carried
+  the `Price`/`Quantity` raws the reason cited. The other 7 now run and pass.
+  The lesson, worth keeping verbatim: **an explainable count is necessary but
+  not sufficient; the reason has to apply to every member too.**
+- The B50 reason text was simply wrong twice (no proptest in either file;
+  four of five patterns are capnp, not SBE).
+
+The cheap instrument is to print the pairs an entry absorbs, not just how
+many - a flag on the audit, or per-entry pair lists in `--json`. Then "does
+the reason apply to every member?" becomes a question a reviewer can answer.
+Not yet designed: price it against the two-mechanisms-one-question smell
+first, and note that the honest version may be a *review* affordance rather
+than a gate mechanism, since neither miscategorisation is mechanically
+detectable.
+
+### Should a bare `check` say a gate exists?
+
+Undesigned, and deliberately so. Reported 2026-07-22: nautilus had been
+gating PRs on plain `brokkr check` the whole time. With
+`default_profile = "tier1"` and `gate_profile = "pre-commit"`, bare `check`
+runs tier1 alone - no serial lane, no coverage audit - while their own
+`AGENTS.md` prescribed exactly that command as the gate. The incomplete gate
+was the *documented* one, and until the audit existed it could not have said
+so.
+
+A single line naming `--gate` on a bare `check` in a repo that sets
+`gate_profile` is cheap, and it is the one moment the tool knows the user may
+be reaching for the wrong command. It stays inside the non-goals because
+`gate_profile` is opt-in - a config without it sees nothing. But price it
+honestly first: an unconditional nag on the high-frequency loop path is how
+people learn to stop reading output, and the failure it prevents is a
+documentation error, which documentation can also fix. Note the verdict
+vocabulary already carries the honest signal for *certified* profiles
+(`partial`, exit 10); this would be for the uncertified default, which is
+deliberately outside that contract.
+
+### Two mechanisms that were priced and not committed
+
+Do not build either speculatively - they were costed as options, not
+commitments.
+
+- **Conditional sweeps** (`when = "manual"` plus `--with`): re-evaluate
+  against how often a heavy sweep is actually invoked deliberately.
+- **Slow-test budget**, reusing the quarantine shape: re-evaluate against the
+  cost of its baseline store.
+
+A third, **`scope = "changed"`**, is shelved on measurement rather than
+pending: the 2026-07-22 numbers showed manual `-p` already reaches loop speed
+(23-32s), so inferring the scope would buy convenience, not capability.
+
+### `requires`: healthy tests with host preconditions (designed, not built)
+
+The one open build item, and the only design in the deleted document that was
+never implemented. Two instances forced it - pbfhogg's over-watchdog tests
+and nautilus's `redis::msgbus::serial_tests::` - and both break the ledger
+the same way: `[[quarantine]]` demands an `issue`, and these have no bug to
+close. An `issue` that can never close turns a countdown into a graveyard,
+which is the one thing that ledger exists not to be.
+
+```toml
+# What the host can offer. Beside `features`, in the existing
+# per-hostname table - no new mechanism, no new file.
+[plantasjen]
+provides = ["redis"]
+
+# What a pair needs. Same matcher as [[quarantine]]: substring
+# `pattern`, optional `package`.
+[[requires]]
+pattern = "redis::msgbus::"
+capability = "redis"
+reason = "needs a live Redis on 127.0.0.1:6379"
+```
+
+**Declared, never probed.** The tempting design is a probe (`command =
+"redis-cli ping"`, or a typed TCP connect). Rejected for three reasons that
+compound: a probe is a second execution surface in a phase whose whole safety
+argument is that enumeration executes no test code; a probe can itself hang,
+which is precisely the failure being fixed; and the other motivating case
+cannot be probed at all - "this host is fast enough not to trip the watchdog"
+has no ping. A declaration covers both with one mechanism.
+
+The lie case is the better failure *direction*: a host that claims `redis`
+without running one gets the tests **executed** rather than silently removed.
+A probe that wrongly reports "absent" is the invisible-coverage-loss the whole
+design exists to prevent, and no amount of hang is worse than a hole you
+cannot see.
+
+**But the self-correction has a precondition, and neither live customer meets
+it.** Declarations self-correct on first use *when the capability fails fast*.
+B51's Redis tests do not: `create_redis_connection` builds a
+`ConnectionManagerConfig` with retries and exponential backoff, so with
+nothing listening each test blocks past the 20s per-test watchdog - 37 hangs
+recorded before the first run was killed, ~28 minutes of watchdog for the full
+set. pbfhogg's case is the same shape one axis over. So the honest statement
+of the property is: **when the capability fails fast, a wrong declaration
+self-corrects on first use; when it fails slow, the per-test watchdog is the
+only backstop and the cost is watchdog x matching pairs.** Both current
+customers are the slow kind. That is a documented limitation, not a footnote -
+and it means `[[requires]]` does **not** retire an upstream fail-fast fix. A
+bounded connect timeout or `#[ignore]` upstream is what makes a *declaring*
+host with a dead Redis fail loudly. Build the two in parallel; neither gates
+the other.
+
+**Unmet requirements are never part of the certified floor.** Otherwise
+`complete` becomes host-dependent and two greens on the same tree from two
+machines stop being comparable. Pairs carrying a `requires` entry are outside
+the floor: present capability means they run and a failure fails the run;
+absent capability means an accounted omission, reported per entry and counted
+as `unmet` in the trailer and the `--json` `coverage` object. Counted in
+**pairs**, on the same axis as `run` / `quarantined` / `ignored` / `orphaned` -
+not entries, not names, because name-level accounting is exactly what
+certifies over holes.
+
+It deliberately does not promote those pairs into the claim on a host that
+*does* provide the capability. Tempting (CI always has Redis), but a floor
+that grows with the host is the same incomparability. The honest CI-grade
+statement is not a fourth verdict word: it is `complete` **plus** `unmet: 0`,
+both of which the JSON already carries. No knob to fail on unmet - `certifies`
+is the claim spine, and a second place to tighten the claim is the
+two-mechanisms smell.
+
+**Hostname keying alone cannot express the CI case.** CI runner hostnames are
+typically ephemeral and per-run, so the one host that genuinely always has the
+capability is the one that cannot declare it in a `[<hostname>]` table. The
+escape hatch is `BROKKR_PROVIDES=redis,postgres`, unioned with the host
+table's list - no new concept, no probe, and CI capability is a property of
+the *run* rather than of a checked-in file.
+
+**Why a separate table rather than a `[[quarantine]]` variant:** the matcher
+is identical but the staleness rule *inverts*, which forces a separate code
+path anyway. A quarantine entry matching zero non-run pairs is stale and fails
+the check. A `requires` entry matching zero non-run pairs is the **healthy**
+case - the host provides the capability and every pair ran. Two rules reading
+the same field with opposite polarity do not belong in one table. The
+confirming tell: a `[[quarantine]]` without `issue` is meaningless, and a
+`[[requires]]` with one is too.
+
+**The typo check survives the inversion - keep it.** Two predicates are easy
+to conflate here. *Zero non-run matches* is polarity-inverted and correctly
+excluded. *Zero matches in the universe at all* is a misspelled pattern - dead
+config on every host, host-independent - and stays a load-time error exactly
+as for `[[quarantine]]`. Without it a typo'd `[[requires]]` is
+indistinguishable from a satisfied one on a providing host: an entry that
+looks healthy because its number is explainable, which is the failure mode
+that cost the three hand-found ledger defects above.
+
+**A pair matching both tables is a load-time error.** Not a precedence rule: a
+pair that is simultaneously "environmentally unavailable" and "broken, tracked
+by issue B-n" is a modelling confusion, and picking a winner papers over it.
+Erroring also forces a migration to be a *move* rather than an addition, which
+is the correct shape.
+
+**Implementation shape**, inherited whole from package-qualified skips: unmet
+pairs are filtered out of the lane's ran-set, not expressed as cargo
+selection. A name-only pattern can go through libtest's `--skip`; a
+package-qualified one needs per-test invocation and therefore
+`isolation = "process"`, with the same collision guard (a name matching in
+both a provided and an unprovided package errors rather than half-obeys). It
+composes with `#[ignore]` rather than competing: a pair may legitimately be
+both, the accounting already counts ignored pairs separately, and it should
+report `unmet` first as the more specific fact.

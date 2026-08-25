@@ -1,4 +1,4 @@
-// `isolation = "process"` execution (TIERED-CHECK.md feature 10).
+// `isolation = "process"` execution.
 //
 // `--test-threads=1` serializes tests inside one process per test binary;
 // it does not isolate them. Tests that touch process-global state (a

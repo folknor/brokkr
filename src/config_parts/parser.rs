@@ -1491,7 +1491,7 @@ fn validate_check_against_test(
     Ok(())
 }
 
-/// Composition rules for a `lanes` profile (TIERED-CHECK.md feature 2),
+/// Composition rules for a `lanes` profile,
 /// fixed at load time so implementation details never decide them: no
 /// run-shaping fields beside `lanes`, every lane exists, lanes don't nest,
 /// and a lane never declares `certifies` (the claim belongs to the
@@ -1559,9 +1559,8 @@ fn validate_lanes_profile(
     Ok(())
 }
 
-/// A `certifies = "complete"` profile's load-time rules (TIERED-CHECK.md
-/// feature 4 relaxed the interim step-3 rule): libtest-level narrowing
-/// (`skip` / `only` / `tests` / `include_ignored`) is now legal and audited
+/// A `certifies = "complete"` profile's load-time rules. Libtest-level
+/// narrowing (`skip` / `only` / `tests` / `include_ignored`) is legal and audited
 /// at run time by the coverage phase - every non-run (sweep, test) pair
 /// must be quarantined or the check fails as orphaned. What remains
 /// structural: no `extends` (an inherited filter set defeats an explicit
@@ -1645,7 +1644,7 @@ fn referenced_check_entries(
 }
 
 /// The universe of a `complete` profile is every `[[check]]` entry, not its
-/// own sweep list (TIERED-CHECK.md feature 4). If the universe were the
+/// own sweep list. If the universe were the
 /// sweeps a lane happens to reference, an entry no lane names would be
 /// enumerated nowhere and the coverage audit would print `0 orphaned` over
 /// tests that never ran - the exact hole the audit exists to close. Every

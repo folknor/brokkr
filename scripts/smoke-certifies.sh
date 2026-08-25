@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test for TIERED-CHECK step 3: certifies + skip_phases + --gate.
+# Smoke test: certifies + skip_phases + --gate.
 #
 # Generates a throwaway crate under scratch/certifies-smoke and drives
 # brokkr check through the partial/complete/gate paths. The three verdict

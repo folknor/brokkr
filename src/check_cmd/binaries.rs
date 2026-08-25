@@ -1,4 +1,4 @@
-// Per-binary test attribution (TIERED-CHECK.md feature 11).
+// Per-binary test attribution: which package owns each test.
 //
 // Package-qualified skips and package-qualified coverage pairs need to
 // know which package owns each test. Cargo-mediated listing cannot
@@ -156,6 +156,19 @@ fn toolchain_libdir(
 /// when it declared one (so a `[[check]] env` shared-object path is
 /// honored during listing, as it is for the cargo-mediated build/test),
 /// otherwise brokkr's inherited value - resolved by the caller.
+///
+/// Why it is needed at all: a `proc-macro = true` crate links libstd
+/// *dynamically* (rustc dlopens it), so direct-exec `--list` on its test
+/// binary dies with `error while loading shared libraries: libstd-….so`.
+/// Cargo supplies the loader path when cargo runs the binary; listing
+/// directly does not, so brokkr supplies it. Two alternatives were
+/// rejected: enumerating through cargo instead, because cargo cannot
+/// address a single lib unit-test harness without `-p` and `-p` changes
+/// feature unification - it can list a *different build* than the lane
+/// actually runs; and skipping proc-macro targets, which is a quiet
+/// shrink of the universe the coverage audit certifies over. The smoke
+/// workspace carries a proc-macro member as the permanent regression
+/// test.
 fn loader_path(libdir: &str, executable: &str, existing: Option<&str>) -> String {
     let mut paths: Vec<String> = vec![libdir.to_owned()];
 

@@ -33,7 +33,7 @@ pub struct DevConfig {
     pub check: Vec<CheckEntry>,
     pub test: Option<TestConfig>,
     /// `[[quarantine]]` entries: the justification ledger for coverage
-    /// accounting (TIERED-CHECK.md feature 4). Under a `certifies =
+    /// accounting. Under a `certifies =
     /// "complete"` profile, every (sweep, test) pair that no lane runs must
     /// match one of these or the check fails as orphaned. Empty when the
     /// project declares none.
@@ -992,7 +992,7 @@ pub struct TestConfig {
     pub profiles: BTreeMap<String, ProfileDef>,
 }
 
-/// What a green result from this profile claims (TIERED-CHECK.md).
+/// What a green result from this profile claims.
 ///
 /// `Complete` may print the success verdict and exit 0, and in exchange
 /// rejects everything that narrows the run: `skip_phases`, package
@@ -1011,7 +1011,7 @@ pub enum Certifies {
 
 /// One entry in a profile's `skip` list: either a bare test-name
 /// substring (libtest `--skip` semantics, applied by libtest itself) or a
-/// package-qualified skip (TIERED-CHECK feature 11), filtered out of the
+/// package-qualified skip, filtered out of the
 /// enumerated set rather than expressed as cargo selection - the only way
 /// to distinguish identical module paths in different packages
 /// (integration-test paths carry no crate prefix). Qualified entries
@@ -1080,8 +1080,8 @@ pub const PHASE_NAMES: [&str; 10] = [
 /// with the data.
 pub const NON_SKIPPABLE_PHASES: [&str; 1] = ["coverage"];
 
-/// One `[[quarantine]]` entry: a justified, counted suppression
-/// (TIERED-CHECK.md feature 4). `issue` is required, not decorative - it
+/// One `[[quarantine]]` entry: a justified, counted suppression.
+/// `issue` is required, not decorative - it
 /// is what turns the list from a graveyard with good manners into a
 /// countdown that cannot silently grow, and staleness is mechanical: an
 /// entry justifying nothing fails the check.
@@ -1139,8 +1139,8 @@ pub struct ProfileDef {
     /// `coverage` is not skippable (it runs only under a complete claim). Not
     /// inherited through `extends`.
     pub skip_phases: Option<Vec<String>>,
-    /// Run each of this profile's tests in its own process
-    /// (TIERED-CHECK feature 10). `--test-threads=1` serializes tests
+    /// Run each of this profile's tests in its own process.
+    /// `--test-threads=1` serializes tests
     /// inside one process per test binary; it does not isolate them, and
     /// tests touching process-global state (a global logger) need the
     /// process-per-test guarantee CI's nextest provides. Requires
@@ -1148,7 +1148,7 @@ pub struct ProfileDef {
     /// construction. Merges through `extends` like other run-shaping
     /// fields.
     pub isolation: Option<Isolation>,
-    /// Compose other profiles as a *list of runs* (TIERED-CHECK feature 2):
+    /// Compose other profiles as a *list of runs*:
     /// each lane resolves independently and the test phase runs every
     /// lane's sweeps in order, while clippy dedupes on build shape so two
     /// lanes sharing a `[[check]]` entry are linted once. The opposite of

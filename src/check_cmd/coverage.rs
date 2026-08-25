@@ -1,4 +1,4 @@
-// Coverage accounting (TIERED-CHECK.md feature 4) - the phase that makes
+// Coverage accounting - the phase that makes
 // `certifies = "complete"` mean something. Runs only under a complete
 // profile, after the test phase (binaries are built and green).
 //
@@ -51,8 +51,8 @@ struct CoverageStats {
 
 /// One build shape's enumeration, package-qualified: the full universe,
 /// the `#[ignore]`d subset, and the union of every lane's ran-set. Each
-/// element is a `(package, test)` pair (TIERED-CHECK feature 11 upgraded
-/// the coverage pair to (build shape, package, test)).
+/// element is a `(package, test)` pair; with the build shape this map is
+/// keyed on, the full coverage pair is (build shape, package, test).
 struct ShapeCoverage {
     label: String,
     /// Every sweep producing this shape is `curated = true`, so its

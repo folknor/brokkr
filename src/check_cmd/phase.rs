@@ -407,7 +407,7 @@ fn run_build_phases(
     }
 
     // Coverage accounting runs only under a complete claim - it is what the
-    // claim buys (TIERED-CHECK.md feature 4). It runs on a failing test phase
+    // claim buys. It runs on a failing test phase
     // too: the audit needs built binaries, not green tests, and the orphan
     // worksheet is most needed exactly on the unhealthy runs.
     if a.certifies == Some(Certifies::Complete) {
@@ -714,8 +714,8 @@ fn finish_check(
     }
 }
 
-/// The `--json` summary object: one line, last on stdout (TIERED-CHECK.md,
-/// feature 8). Versioned and additive: fields are only ever added under
+/// The `--json` summary object: one line, last on stdout. Versioned
+/// and additive: fields are only ever added under
 /// `schema: 1`, consumers must tolerate unknown ones, and a bump is
 /// reserved for renames or semantic changes. `certifies` mirrors the
 /// resolved profile's claim (`null` for unclaimed profiles); `verdict` is
@@ -1473,8 +1473,7 @@ fn run_clippy_phase(
         None
     };
 
-    // Clippy is per-build-shape while tests are per-lane (TIERED-CHECK
-    // feature 2): two lanes sharing a `[[check]]` entry must not lint it
+    // Clippy is per-build-shape while tests are per-lane: two lanes sharing a `[[check]]` entry must not lint it
     // twice, so dedupe on the whole build shape.
     let mut seen_shapes: std::collections::HashSet<profile::BuildShapeKey> =
         std::collections::HashSet::new();
