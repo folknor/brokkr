@@ -2277,4 +2277,107 @@ debug = true
         let msg = format!("{err}");
         assert!(msg.contains("hotpath_xxh128 without hotpath_file"), "{msg}");
     }
+
+    // -----------------------------------------------------------------------
+    // User-wide config layer
+    // -----------------------------------------------------------------------
+
+    fn user_path() -> PathBuf {
+        PathBuf::from("/home/u/.config/brokkr/brokkr.toml")
+    }
+
+    const USER_RULE: &str = "[[textlint]]\n\
+         name = \"no-shouting\"\n\
+         pattern = \"!!\"\n\
+         paths = [\"**/*.md\"]\n\
+         message = \"one exclamation mark is enough\"\n";
+
+    #[test]
+    fn user_config_carries_textlint_and_script_check() {
+        let cfg = parse_user(
+            &format!(
+                "{USER_RULE}\n\
+                 [[script_check]]\n\
+                 name = \"shellcheck\"\n\
+                 command = \"true\"\n\
+                 expect = \"ok\"\n"
+            ),
+            user_path(),
+        )
+        .unwrap();
+        assert_eq!(cfg.textlint.len(), 1);
+        assert_eq!(cfg.script_checks.len(), 1);
+        assert_eq!(cfg.textlint[0].name, "no-shouting");
+    }
+
+    /// The whole point of the thin schema: a project-shaped key in a machine-wide
+    /// file is a mistake, not a setting, and saying so beats silently ignoring it.
+    #[test]
+    fn user_config_rejects_project_shaped_keys() {
+        for body in ["project = \"brokkr\"\n", "[[check]]\nname = \"x\"\n"] {
+            let err = parse_user(body, user_path()).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("not allowed in the user-wide config"), "{msg}");
+            assert!(msg.contains("/home/u/.config/brokkr/brokkr.toml"), "{msg}");
+        }
+    }
+
+    /// Errors name the file they came from - the user is not in this directory.
+    #[test]
+    fn user_config_errors_are_attributed_to_the_file() {
+        let err = parse_user("[[textlint]]\nname = \"x\"\n", user_path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("/home/u/.config/brokkr/brokkr.toml: [[textlint]]"),
+            "{msg}"
+        );
+    }
+
+    /// Presets are resolved within the file that defines them: a user preset
+    /// serves user rules, and is dead if it serves none.
+    #[test]
+    fn user_config_resolves_its_own_presets() {
+        let cfg = parse_user(
+            "[textlint_preset.md]\npaths = [\"**/*.md\"]\n\n\
+             [[textlint]]\nname = \"r\"\npattern = \"!!\"\nmessage = \"m\"\n\
+             preset = \"md\"\n",
+            user_path(),
+        )
+        .unwrap();
+        assert_eq!(cfg.textlint[0].paths, vec!["**/*.md".to_owned()]);
+
+        let err = parse_user("[textlint_preset.md]\npaths = [\"a\"]\n", user_path()).unwrap_err();
+        assert!(format!("{err}").contains("no `[[textlint]]` rule"), "{err}");
+    }
+
+    #[test]
+    fn merging_puts_user_entries_first_and_lets_the_project_shadow_by_name() {
+        let mut project = vec!["b".to_owned(), "shared".to_owned()];
+        merge_named(
+            &mut project,
+            vec!["a".to_owned(), "shared".to_owned()],
+            |s| s.as_str(),
+        );
+        assert_eq!(project, vec!["a", "b", "shared"]);
+    }
+
+    #[test]
+    fn merging_nothing_leaves_the_project_untouched() {
+        let mut project = vec!["b".to_owned()];
+        merge_named(&mut project, Vec::new(), |s| s.as_str());
+        assert_eq!(project, vec!["b"]);
+    }
+
+    /// An explicit empty override is the opt-out, not a path to a file named "".
+    #[test]
+    fn empty_env_override_disables_the_layer() {
+        let old = std::env::var_os("BROKKR_USER_CONFIG");
+        unsafe { std::env::set_var("BROKKR_USER_CONFIG", "") };
+        let path = user_config_path();
+        match old {
+            Some(v) => unsafe { std::env::set_var("BROKKR_USER_CONFIG", v) },
+            None => unsafe { std::env::remove_var("BROKKR_USER_CONFIG") },
+        }
+        assert!(path.is_none());
+    }
 }

@@ -54,6 +54,59 @@ command at a directory that holds no `Cargo.toml`; brokkr refuses by name
 error, which walks to the root and reads as though the project were broken.
 Config-only commands (`man`, `results`, `history`) work from either directory.
 
+## The user-wide brokkr.toml
+
+A second, optional config lives at `$XDG_CONFIG_HOME/brokkr/brokkr.toml`
+(falling back to `$HOME/.config/brokkr/brokkr.toml`). It holds the conventions
+that belong to *you* rather than to any one tree, and it applies in every
+project brokkr detects.
+
+It accepts three top-level keys and nothing else:
+
+| Key | |
+|---|---|
+| `[[textlint]]` | rules, exactly as in a project config |
+| `[textlint_preset.<name>]` | presets for those rules |
+| `[[script_check]]` | gates, exactly as in a project config |
+
+Any other key - `project`, `[[check]]`, a host section - is an error naming the
+file. The rest of the schema describes one project (its datasets, its sweeps,
+its bin targets) and has no meaning machine-wide; a project-shaped key in a
+machine-wide file is a mistake, not a setting, and rejecting it beats
+silently ignoring it.
+
+`[[textlint]]` `paths` globs and `[[script_check]]` commands are interpreted
+against each project's own tree, exactly as if the entry had been written in
+that project's config. Presets are resolved within the file that defines them:
+a user preset serves user rules, and is dead - an error - if it serves none.
+
+**Merging.** User entries run first, project entries after. Shadowing is by
+`name`: a project entry that reuses a user entry's name replaces it outright.
+That is the opt-out - a project that must not run a personal rule redefines it
+under the same name, rather than needing a suppression syntax nobody would
+remember.
+
+The layer is applied at project detection, not when a `brokkr.toml` is parsed,
+so parsing a config file yields that file and nothing from the machine it runs
+on.
+
+**Trees with no `brokkr.toml` at all.** `check` runs in any Rust+git repo, and
+the user-wide layer reaches those too - it is not about this project, and a repo
+that never adopted a `brokkr.toml` is exactly where a personal convention is
+likely to be the only rule there is. With nothing to merge into, the user
+entries stand alone: `check` runs its gremlins, textlint and `script_check`
+phases from them and skips the config-driven rest.
+
+**Overriding the path.** `BROKKR_USER_CONFIG=/path/to/file` reads the layer from
+somewhere else; `BROKKR_USER_CONFIG=` (set, empty) switches it off entirely, for
+a CI job that must see only the project's own rules. An absent file is not an
+error; a file that exists but does not parse is, because silently ignoring it
+would let one typo switch off every rule you wrote.
+
+`brokkr env` prints a `user cfg:` line with the resolved path and how many
+entries of each kind it contributed - a rule that comes from outside the tree is
+otherwise invisible from inside it.
+
 ## Top-level shape
 
 ```toml
