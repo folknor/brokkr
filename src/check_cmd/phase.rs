@@ -2122,9 +2122,12 @@ fn format_clippy_capped_multi(
     } else {
         let changed = scope::changed_files(project_root);
         let refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
-        let part = scope::partition(
+        // Errors are pinned: the cap is a warning-volume control, and an
+        // elided error is a failure the reader never sees.
+        let part = scope::partition_pinned(
             refs,
             |m| m.diag.path().unwrap_or_else(|| Path::new("")),
+            |m| m.diag.is_error,
             limit,
             changed.as_ref(),
         );

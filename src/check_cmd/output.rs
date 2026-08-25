@@ -493,6 +493,16 @@ fn run_one_test_sweep(
     // and everything past `--` belongs to libtest.
     args.extend(allow_args.iter().cloned());
     args.extend(sweep_selection_args(sweep, packages));
+    // Without this, cargo stops after the FIRST test binary that fails, so a
+    // red run reports the failures of one target and stays silent about every
+    // later one. The exit code is honest either way, which is what made the
+    // under-report invisible: an agent doing mutation verification reads the
+    // list, sees one entry, and concludes the wrong test carried the coverage.
+    // `brokkr check` is a whole-tree gate - it must enumerate every failure it
+    // can reach in one run. Skipped when the caller already asked for it.
+    if !cargo_extra.iter().any(|c| c == "--no-fail-fast") {
+        args.push("--no-fail-fast".into());
+    }
     for c in cargo_extra {
         args.push(c.clone());
     }

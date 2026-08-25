@@ -101,6 +101,8 @@ pub struct Partition<T> {
 ///
 /// `scope` = `None` means "no scope available" (all hits are treated as
 /// unscoped and the cap applies); `Some(set)` uses [`HashSet`] membership.
+///
+/// See [`partition_pinned`] for the cap's one exemption.
 pub fn partition<T, F>(
     items: Vec<T>,
     get_path: F,
@@ -110,10 +112,36 @@ pub fn partition<T, F>(
 where
     F: Fn(&T) -> &Path,
 {
-    let (scoped, unscoped): (Vec<T>, Vec<T>) = match scope {
+    partition_pinned(items, get_path, |_| false, limit, scope)
+}
+
+/// [`partition`] with an exemption: an item `is_pinned` says yes to is
+/// displayed whatever the cap, even when it is unscoped and past `limit`.
+///
+/// The cap exists to keep a wall of WARNINGS in untouched files from burying
+/// the run. It must never hide a FAILURE - a hard error elided as overflow
+/// reads as "not in this run" to anyone who trusts the list, and the trailer
+/// only says how many were hidden, not that one of them was fatal. Pinned
+/// items keep their input position and do not consume the cap.
+pub fn partition_pinned<T, F, P>(
+    items: Vec<T>,
+    get_path: F,
+    is_pinned: P,
+    limit: usize,
+    scope: Option<&HashSet<PathBuf>>,
+) -> Partition<T>
+where
+    F: Fn(&T) -> &Path,
+    P: Fn(&T) -> bool,
+{
+    let (scoped, rest): (Vec<T>, Vec<T>) = match scope {
         Some(set) => items.into_iter().partition(|item| set.contains(get_path(item))),
         None => (Vec::new(), items),
     };
+    // Pinned unscoped items bypass the cap entirely; only the remainder
+    // competes for `limit` slots.
+    let (pinned, unscoped): (Vec<T>, Vec<T>) = rest.into_iter().partition(&is_pinned);
+    let scoped: Vec<T> = scoped.into_iter().chain(pinned).collect();
 
     let mut displayed: Vec<T> = Vec::with_capacity(scoped.len() + limit.min(unscoped.len()));
     displayed.extend(scoped);
@@ -211,5 +239,53 @@ mod tests {
     #[test]
     fn trailer_none_when_nothing_hidden() {
         assert!(format_trailer(0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    /// The defect: the cap is a warning-volume control, and it used to drop
+    /// an unscoped ERROR as overflow - a failure the reader never sees while
+    /// the trailer only counts it.
+    #[test]
+    fn a_pinned_item_survives_past_the_limit() {
+        // (path, is_error). The error sorts last, well past limit=2.
+        let items = vec![
+            (p("a"), false),
+            (p("b"), false),
+            (p("c"), false),
+            (p("d"), true),
+        ];
+        let part = partition_pinned(items, |t| t.0.as_path(), |t| t.1, 2, None);
+        let shown: Vec<&str> = part
+            .displayed
+            .iter()
+            .map(|t| t.0.to_str().unwrap())
+            .collect();
+        assert_eq!(shown, vec!["d", "a", "b"]);
+        // Only the two capped warnings are hidden; the error is not one.
+        assert_eq!(part.hidden_unscoped, 1);
+    }
+
+    /// Pinned items must not consume cap slots - otherwise a run with many
+    /// errors would silently shrink the warning window as well.
+    #[test]
+    fn pinned_items_do_not_consume_the_cap() {
+        let items = vec![
+            (p("e1"), true),
+            (p("e2"), true),
+            (p("w1"), false),
+            (p("w2"), false),
+        ];
+        let part = partition_pinned(items, |t| t.0.as_path(), |t| t.1, 2, None);
+        assert_eq!(part.displayed.len(), 4);
+        assert_eq!(part.hidden_unscoped, 0);
     }
 }

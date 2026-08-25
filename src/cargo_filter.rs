@@ -435,6 +435,16 @@ pub fn parse_test_output_with_stderr(
         failures = inline_panics.into_failures(&failed_names);
     }
 
+    // The detail sections are best-effort - a suite can fail a test whose
+    // `---- name stdout ----` block the parser never saw (an aborted suite
+    // truncating the stream, a detail block nested inside another test's
+    // captured output, a libtest format we don't model). The `failures:`
+    // NAME LIST is the authoritative roster, so anything it names that the
+    // detail pass missed is appended bare rather than dropped. Filtering
+    // failing tests out of a failure report is how a red run under-reports
+    // which tests are down while the exit code stays honest.
+    complete_roster(&mut failures, &failed_names);
+
     ParsedTestResults {
         failures,
         passed,
@@ -443,6 +453,32 @@ pub fn parse_test_output_with_stderr(
         filtered_out,
         suites,
         duration: if has_duration { Some(duration) } else { None },
+    }
+}
+
+/// Append every `failures:`-name-list entry the detail pass did not already
+/// account for, as a bare name with no location or message.
+///
+/// Skipped when the `--nocapture` fallback fell back to raw thread names
+/// (nothing it produced is on the roster): there the existing entries describe
+/// the same failures under a different naming, so appending the roster on top
+/// would double-count them.
+fn complete_roster(failures: &mut Vec<ParsedTestFailure>, failed_names: &[String]) {
+    let comparable = failures.is_empty()
+        || failures
+            .iter()
+            .any(|f| failed_names.iter().any(|n| n == &f.name));
+    if !comparable {
+        return;
+    }
+    for name in failed_names {
+        if !failures.iter().any(|f| &f.name == name) {
+            failures.push(ParsedTestFailure {
+                name: name.clone(),
+                location: None,
+                message: None,
+            });
+        }
     }
 }
 
@@ -598,7 +634,12 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
 
     // All passed by libtest's count - compact summary, unless the
     // process aborted around it (in which case surface the abort too).
-    if parsed.failures.is_empty() && parsed.suites > 0 {
+    //
+    // Gated on the COUNT, not on the roster: an empty failure list with a
+    // non-zero `failed` tally means the parser could not attribute the
+    // failures, not that there were none, and routing that to the compact
+    // "all passed" summary is how a red run reads as green-ish.
+    if parsed.failures.is_empty() && parsed.failed == 0 && parsed.suites > 0 {
         if harness_failure {
             return format!(
                 "{} - but the test process exited non-zero:\n{}",
@@ -609,9 +650,11 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         return format_test_summary(&parsed);
     }
 
-    // Parser found no failures (suites == 0). Surface a FAILED line the
-    // parser missed, or a harness-level abort - never silently succeed.
-    if parsed.failures.is_empty() {
+    // Parser found no failures. Surface a FAILED line the parser missed, or
+    // a harness-level abort - never silently succeed. Skipped when libtest
+    // counted failures: those belong in the failure report below, which
+    // states the tally and the unattributed shortfall.
+    if parsed.failures.is_empty() && parsed.failed == 0 {
         let has_failed = stdout.lines().any(|l| l.contains("FAILED"));
         if has_failed {
             let mut raw = String::new();
@@ -776,10 +819,13 @@ fn format_test_summary(parsed: &ParsedTestResults) -> String {
 
 /// Format parsed test failures as one-liner text output.
 fn format_test_failures(parsed: &ParsedTestResults) -> String {
+    // The headline count is the larger of the parsed roster and libtest's own
+    // tally - never the roster alone, which is what let "1 failure" head a run
+    // with two tests down.
+    let count = parsed.failed.max(parsed.failures.len());
     let mut result = format!(
-        "cargo test: {} failure{}\n",
-        parsed.failures.len(),
-        if parsed.failures.len() == 1 { "" } else { "s" }
+        "cargo test: {count} failure{}\n",
+        if count == 1 { "" } else { "s" }
     );
     for f in &parsed.failures {
         result.push_str("  FAILED ");
@@ -793,6 +839,19 @@ fn format_test_failures(parsed: &ParsedTestResults) -> String {
             result.push_str(msg);
         }
         result.push('\n');
+    }
+
+    // libtest's own `test result:` tally is the ground truth for HOW MANY
+    // failed; the list above is only as complete as the output we could
+    // parse. When they disagree the tally wins and the shortfall is stated,
+    // so a reader never mistakes a short list for the whole story.
+    if parsed.failed > parsed.failures.len() {
+        result.push_str(&format!(
+            "  (libtest counted {} failed; {} could not be attributed to a test name \
+             - rerun with --raw for the unfiltered output)\n",
+            parsed.failed,
+            parsed.failed - parsed.failures.len(),
+        ));
     }
 
     result.trim_end().to_string()
@@ -1679,5 +1738,68 @@ warning: unused variable: `x` [unused_variables]
         let parsed = parse_clippy("");
         assert!(!parsed.parse_failed);
         assert!(parsed.diagnostics.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod failure_completeness_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{filter_test, parse_test_output};
+
+    /// Two tests down, but only one produced a `---- name stdout ----`
+    /// detail block the parser could read. The `failures:` name list is the
+    /// authoritative roster and must fill in the rest - the defect was a
+    /// report headed "1 failure" while two tests were red.
+    const ONE_DETAIL_TWO_NAMED: &str = "\
+running 2 tests
+test alpha ... FAILED
+test beta ... FAILED
+
+failures:
+
+---- alpha stdout ----
+thread 'alpha' panicked at src/lib.rs:10:5:
+boom
+
+failures:
+    alpha
+    beta
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+
+    #[test]
+    fn the_name_list_completes_a_short_failure_roster() {
+        let lines: Vec<&str> = ONE_DETAIL_TWO_NAMED.lines().collect();
+        let parsed = parse_test_output(&lines);
+        assert_eq!(parsed.failed, 2);
+        let names: Vec<&str> = parsed.failures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        // The one with a detail block keeps its location; the recovered one
+        // is bare rather than absent.
+        assert!(parsed.failures[0].location.is_some());
+        assert!(parsed.failures[1].location.is_none());
+    }
+
+    #[test]
+    fn the_rendered_report_names_every_failing_test() {
+        let out = filter_test(ONE_DETAIL_TWO_NAMED, "error: test failed");
+        assert!(out.starts_with("cargo test: 2 failures"), "got: {out}");
+        assert!(out.contains("FAILED alpha"), "got: {out}");
+        assert!(out.contains("FAILED beta"), "got: {out}");
+    }
+
+    /// When nothing can be attributed to a name, the headline still reports
+    /// libtest's own tally and says so - never the shorter roster alone.
+    #[test]
+    fn an_unattributable_failure_is_counted_not_dropped() {
+        let stdout = "\
+running 3 tests
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        let out = filter_test(stdout, "error: test failed");
+        assert!(out.starts_with("cargo test: 2 failures"), "got: {out}");
+        assert!(out.contains("libtest counted 2 failed"), "got: {out}");
     }
 }

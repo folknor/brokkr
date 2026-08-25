@@ -86,6 +86,12 @@ Output:
   changed on the current branch (computed via git merge-base against
   `@{upstream}` / `origin/master` / `origin/main`) and append a trailer
   summarising what's hidden; see `src/scope.rs`.
+- **The cap never hides an error.** It is a warning-volume control, so clippy
+  *errors* are pinned through `scope::partition_pinned`: they display in full
+  however far past `--limit` they sort, and they do not consume cap slots that
+  would otherwise show warnings. An elided error reads as "not in this run" to
+  anyone who trusts the list, and the trailer only counts what it hid without
+  saying that one of them was fatal.
 - `--json` appends one summary object as the **last line of stdout**, leaving
   the human output untouched (the old NDJSON per-event mode is gone; this is
   the TIERED-CHECK.md feature-8 result contract). Fields: `schema` (currently
@@ -446,9 +452,35 @@ state latched on the first suite: a failing lib test masked every integration
 failure behind it. The exit code stayed correct, so the run was honestly red -
 only the *which-tests* list was short, which is the worse shape of the two,
 because a fixer who clears every listed failure concludes the run is
-understood. Forwarding `--no-fail-fast` did not help: cargo ran every binary,
-but the renderer still showed one. Note that `--triage` does not widen test
-reporting either - it governs clippy and gremlins capping and scoping.
+understood. Note that `--triage` does not widen test reporting either - it
+governs clippy and gremlins capping and scoping.
+
+The reset alone was not enough, and the remaining three holes were closed
+together after a downstream report (two agents in consecutive rounds read a
+short list and mis-attributed which test carried a mutation's coverage):
+
+- **The sweep passes `--no-fail-fast`.** Without it cargo stops after the
+  first test *binary* that fails, so the later binaries never run and their
+  failures cannot be reported by any renderer. An earlier note here claimed
+  forwarding it "did not help"; that was measured against the latched-state
+  bug, and it was never actually wired. `brokkr check` is a whole-tree gate,
+  so it enumerates every failure it can reach in one run. A caller that
+  passes its own `--no-fail-fast` is not double-flagged.
+- **The `failures:` name list is the authoritative roster.** The captured
+  detail blocks are best-effort - an aborted suite can truncate the stream,
+  and a detail block can hide inside another test's captured output. Any name
+  the roster lists that the detail pass missed is appended bare (name, no
+  location) rather than dropped.
+- **libtest's `test result:` tally outranks the parsed roster for the
+  headline count.** `cargo test: N failures` reports
+  `max(tally, roster.len())`, and when the tally is larger the report says how
+  many failures could not be attributed to a test name and points at `--raw`.
+  Relatedly, an empty roster no longer routes to the compact "all passed"
+  summary when the tally is non-zero.
+
+Pinned by `the_name_list_completes_a_short_failure_roster`,
+`the_rendered_report_names_every_failing_test` and
+`an_unattributable_failure_is_counted_not_dropped`.
 
 Unrelated but worth knowing beside it: a failing sweep ends the run before the
 later `[[check]]` sweeps test at all, so their results are simply absent from
