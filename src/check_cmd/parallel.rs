@@ -68,10 +68,10 @@ struct BinaryRun {
     hung: Option<HungTest>,
     timed_out: bool,
     completed: Vec<(String, Duration)>,
-    /// Wall time for this binary. The sweep's critical path is the maximum of
-    /// these, so the summary can name the binary that IS the floor - the one
-    /// piece of information that tells a reader which binary to split, merge
-    /// or move to the serial lane.
+    /// Wall time for this binary. Used for the summary's critical-path line -
+    /// and NOT for the next run's allocation, because wall time is a function
+    /// of the slots this run granted, so feeding it back oscillates. See
+    /// `binary_timings`' header.
     elapsed: Duration,
 }
 
@@ -471,29 +471,29 @@ fn run_parallel_sweep(
     let history = timings_load(state_root);
     let recorded = history.get(&sweep.label);
     let label_of = |b: &TestBinary| format!("{}/{}", b.package, b.target);
+    let cost_of = |b: &TestBinary| recorded.and_then(|m| m.get(&label_of(b))).copied();
     let known: Vec<(f64, u32)> = counted
         .iter()
-        .filter_map(|(b, c)| {
-            recorded
-                .and_then(|m| m.get(&label_of(b)))
-                .filter(|s| **s > 0.0)
-                .map(|s| (*s, *c))
-        })
+        .filter_map(|(b, c)| cost_of(b).filter(|k| k.serial > 0.0).map(|k| (k.serial, *c)))
         .collect();
     let mean_cost = mean_cost_per_test(&known);
     let weights: Vec<f64> = counted
         .iter()
-        .map(|(b, c)| {
-            let rec = recorded.and_then(|m| m.get(&label_of(b))).copied();
-            timing_weight_for(rec, *c, mean_cost)
-        })
+        .map(|(b, c)| timing_weight_for(cost_of(b).map(|k| k.serial), *c, mean_cost))
         .collect();
     let weights: Vec<u64> = weights.iter().copied().map(weight_ms).collect();
     let total_weight: u64 = weights.iter().sum();
     let mut planned: Vec<(&TestBinary, u32)> = counted
         .into_iter()
         .zip(&weights)
-        .map(|((b, count), w)| (b, claim_slots(*w, total_weight, budget, count)))
+        .map(|((b, count), w)| {
+            // Capped at what the binary can still use: past `serial/slowest`
+            // another thread cannot make it finish sooner, and the slot is
+            // worth more to a binary that is not yet at its own floor.
+            let cap = useful_slot_cap(cost_of(b)).unwrap_or(u32::MAX);
+            let claim = claim_slots(*w, total_weight, budget, count).min(cap.max(1));
+            (b, claim)
+        })
         .collect();
     if planned.is_empty() {
         return Err(DevError::Config(format!(
@@ -569,10 +569,20 @@ fn run_parallel_sweep(
     // failed still took the time it took, and the next run's allocation is
     // better for knowing it. A sweep whose binaries all failed to spawn
     // records nothing, since `measured` is then empty.
-    let measured: Vec<(String, Duration)> = runs
+    let measured: Vec<(String, BinaryCost)> = runs
         .iter()
         .filter_map(|r| r.as_ref().ok())
-        .map(|r| (r.label.clone(), r.elapsed))
+        .map(|r| {
+            // Serial cost, not `r.elapsed`: the sum of a binary's own tests
+            // does not move when its allocation moves, and wall time does.
+            let serial: f64 = r.completed.iter().map(|(_, d)| d.as_secs_f64()).sum();
+            let slowest = r
+                .completed
+                .iter()
+                .map(|(_, d)| d.as_secs_f64())
+                .fold(0.0_f64, f64::max);
+            (r.label.clone(), BinaryCost { serial, slowest })
+        })
         .collect();
     timings_record(state_root, &sweep.label, &measured);
 

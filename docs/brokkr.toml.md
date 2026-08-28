@@ -903,21 +903,45 @@ equal across binaries, which is exactly threads in proportion to cost. Every
 binary then finishes at the same moment, and any other split leaves one binary
 a longer pole than it needed to be.
 
-The cost is the binary's **measured wall time from the previous run**, kept in
-`.brokkr/parallel-timings.toml` and merged after every parallel sweep. Test
-count is only a fallback, because count-as-cost assumes every test costs the
-same and starves whichever binary is slow-but-small - which on a latency-bound
-suite is precisely the critical path. Measured on the tree this was built for:
-a binary of ten integration tests out of 2224 computed to one slot, and its
-tests then ran end to end for 22.3s of a 24.5s sweep where overlapping them
-would have cost 10.1s.
+The cost is the binary's **serial cost** - the sum of its own tests'
+durations - kept in `.brokkr/parallel-timings.toml` and merged after every
+parallel sweep. Test count is only a fallback, because count-as-cost assumes
+every test costs the same and starves whichever binary is slow-but-small -
+which on a latency-bound suite is precisely the critical path. Measured on the
+tree this was built for: a binary of ten integration tests out of 2224 computed
+to one slot, and its tests then ran end to end for 22.3s of a 24.5s sweep where
+overlapping them would have cost 10.1s.
+
+**Serial cost, and specifically not wall time.** An earlier version stored each
+binary's measured wall time, which oscillated: wall time is a function of the
+slots the allocator granted, so a binary given a generous share finishes fast,
+is weighted cheap, is starved next run, and becomes the pole again. It showed
+as a clean two-cycle at a fixed budget on a warm machine - the pole alternating
+between the same two binaries, the sweep swinging between 13.8s and 19.5s, and
+the claim spread collapsing run over run (1-7, 1-6, 1-4, 1-3) rather than
+converging. Serial cost does not move when the allocation moves. Roughly
+`wall = max(serial / k, slowest_test)`, so wall conflates what is being
+measured with what was chosen.
+
+**Claims are capped where extra threads stop helping.** That same identity
+says no binary finishes before its longest single test, so slots past
+`serial / slowest` do nothing for it - and are worth more to a binary not yet
+at its own floor. The cap is what stops the allocator pouring slots into a
+binary that is already as fast as it can be.
+
+> [!NOTE]
+> Budget tuning needs settled weights. A fresh tree has no history, so the
+> first run weights by count and the second is the first to use measurements.
+> Measure a budget change across at least two runs after the store has warmed,
+> or a single sample can read as a regression when it is only warm-up.
 
 So the allocation warms up. The first run of a tree has no history and weights
 by count exactly as before; a binary with no record of its own is estimated
 from its siblings' mean cost per test, and the estimate is replaced by a
 measurement as soon as it has run once. The file is advisory in every
-direction - missing, unreadable or stale costs a worse allocation and never a
-wrong result.
+direction - missing, unreadable or stale (including one written by an older
+brokkr, which no longer parses) costs one warm-up run and never a wrong
+result.
 
 The rule this replaced - take as many slots as you have tests, capped at the
 budget - silently defeated the lane on the workspaces that needed it most. Any
