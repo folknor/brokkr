@@ -862,6 +862,13 @@ pub struct CheckEntry {
     /// two different lint surfaces, and neither may dedupe into the other.
     #[serde(default)]
     pub profile: Option<SweepProfile>,
+    /// Run this sweep's test binaries concurrently under a budget of
+    /// in-flight tests, instead of letting cargo run them one at a time.
+    /// Execution policy only - never part of the build shape, since it
+    /// changes neither what is compiled nor which tests are selected.
+    /// See [`ParallelBinaries`].
+    #[serde(default)]
+    pub parallel: Option<ParallelBinaries>,
 }
 
 /// The cargo build profile a `[[check]]` entry may name. `dev` and
@@ -2073,3 +2080,54 @@ pub struct ResolvedPaths {
 // Loading
 // ---------------------------------------------------------------------------
 
+
+/// The `parallel` key on a `[[check]]` entry: run the sweep's test binaries
+/// concurrently instead of letting cargo run them one after another.
+///
+/// The floor this exists to dissolve: cargo runs each test binary
+/// sequentially, and `--test-threads` parallelizes only *within* a binary, so
+/// a sweep's wall time cannot fall below the sum, over binaries, of each
+/// binary's slowest test. A single-test binary contributes its full duration
+/// because it has nobody to overlap with. Running the binaries concurrently
+/// collapses that sum to a maximum.
+///
+/// # Why the budget counts tests, not binaries
+///
+/// `budget` is the number of tests allowed in flight across the whole sweep,
+/// not the number of concurrent binaries. Binaries times `test_threads` is the
+/// real in-flight count, and a key that named binaries would let a config ask
+/// for seven binaries at eight threads - fifty-six concurrent tests - while
+/// looking like it asked for seven. The number a project has already tuned is
+/// the total, so the total is what the key takes: each binary claims a slice
+/// of the budget and runs with a matching `--test-threads`.
+///
+/// # What it does not do
+///
+/// It does not isolate. Tests within one binary still share a process, which
+/// is deliberate - a shared-process parallel lane is the only place the
+/// process-global-state class (two tests contending over a global logger) is
+/// visible at all. Process-per-test dissolves that contention along with the
+/// bug's visibility; see `isolation = "process"` for the case where isolation
+/// is what is actually wanted.
+///
+/// What it *adds* is exposure to **machine-global** state: several test
+/// binaries at once is several processes at once, so a per-machine singleton
+/// (a daemon holding an instance lock, a fixed socket path, a shared state
+/// dir) becomes contended where a sequential lane never showed it. There is no
+/// per-entry serial-group key for this, because the sweep list already
+/// composes: `[[check]]` entries run strictly one after another, so a second
+/// unfiltered entry with no `parallel` key is the serial lane, and the
+/// enumerated `tests` list on the parallel entry is the opt-in.
+///
+/// Enumerate the parallel side and leave the complement unfiltered, never the
+/// reverse: a binary added later then shows up serial and slow rather than
+/// parallel and flaky, and a *stale* name in the enumerated list is a hard
+/// cargo error (`no test target named X`) rather than a silent shrink.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelBinaries {
+    /// Tests allowed in flight across the sweep. A binary claims
+    /// `min(its test count, remaining budget)` slots, at least one, and runs
+    /// under `--test-threads=<claim>`.
+    pub budget: u32,
+}

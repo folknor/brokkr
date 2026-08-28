@@ -683,6 +683,25 @@ namespace with unit tests, so skipping them by pattern would eat legitimate
 module tests too. `brokkr test <name>` is unaffected - it runs the full
 `cargo test` default so a deliberately named doctest still runs.
 
+### Parallel test binaries
+
+A `[[check]]` entry carrying `parallel = { budget = N }` runs its test binaries
+concurrently rather than letting cargo run them one at a time, under a budget of
+tests in flight across the sweep. It exists for the wall-clock floor: cargo runs
+binaries sequentially and `--test-threads` parallelizes only within one, so a
+sweep cannot finish faster than the sum, over binaries, of each binary's slowest
+test - a floor `test_threads` cannot move.
+
+The sweep builds once, then fans out; each binary claims `min(its test count,
+budget)` slots and runs under a matching `--test-threads`, largest binary first.
+Every binary's output is buffered and reported after the join in plan order, so
+concurrent binaries cannot braid their failures together and two identical red
+runs produce identical output.
+
+Mutually exclusive with `isolation = "process"` (refused before any test runs),
+and it does not run doctests. Full semantics, and the rule for partitioning a
+suite across a parallel and a serial entry, are in `docs/brokkr.toml.md`.
+
 ## nextest (bundled; groundwork, not yet selectable)
 
 brokkr links cargo-nextest's engine (`nextest-runner`) rather than shelling out
@@ -692,12 +711,29 @@ gate. No per-host install step, and the coverage enumeration reads
 nextest version is brokkr's pin rather than whatever a host happens to have, so
 skew against a project's CI nextest is a choice made in `Cargo.toml`.
 
-Motivation is CI parity. Where a project's CI runs `cargo nextest run`, brokkr's
-in-process libtest lanes exercise a shape CI never runs, and the whole
-process-global-state class (a global logger installed by two tests in one
-binary) is a local-only failure. `isolation = "process"` (see the `test` phase's
-process-isolation section) is the small-scale answer to that; nextest's
-process-per-test isolation is the general one.
+Motivation is CI parity, and *only* parity. Where a project's CI runs
+`cargo nextest run`, brokkr's in-process libtest lanes exercise a shape CI never
+runs, and the whole process-global-state class (a global logger installed by two
+tests in one binary) is a local-only failure. `isolation = "process"` (see the
+`test` phase's process-isolation section) is the small-scale answer to that;
+nextest's process-per-test isolation is the general one.
+
+Two things nextest is **not** the answer to, both of which it has been proposed
+for:
+
+- **The wall-clock floor.** Process-per-test does dissolve the
+  sum-of-per-binary-maxima floor, but so does running the binaries
+  concurrently, and that costs no version skew, no change to the coverage key,
+  and no default-filter pin. A project whose CI runs no nextest would be
+  adopting brokkr's pin as its only exposure to one. See `parallel` in
+  `docs/brokkr.toml.md`, which is the answer to the floor.
+- **Seeing more bugs locally.** It sees strictly *fewer* of one class. Two
+  tests can only contend over a global logger inside one process, so
+  process-per-test dissolves the contention along with the bug's visibility. A
+  shared-process parallel lane is what *catches* that class; nextest is what
+  makes a project need CI parity for it in the first place. For a repo that
+  runs no nextest anywhere, moving a sweep onto it retires a detector rather
+  than adding one.
 
 No `[[check]]` entry can select the nextest harness yet. What exists is the
 coverage key and the disposition classifier (`src/check_cmd/nextest.rs`), landed

@@ -874,6 +874,86 @@ lanes reference it.
 The legacy `[check]` table form (with `consumer_features`) is rejected at
 parse time with a migration message - move the flags into a `[[check]]` entry.
 
+## `parallel` - running a sweep's test binaries at once
+
+`parallel = { budget = N }` on a `[[check]]` entry runs that sweep's test
+binaries concurrently instead of letting cargo run them one after another.
+
+The floor it dissolves: cargo runs each test binary sequentially, and
+`--test-threads` parallelizes only *within* a binary. A sweep's wall time
+therefore cannot fall below the sum, over binaries, of each binary's slowest
+test - and no amount of `test_threads` moves it, which is why a project that
+has already tuned threads measures 8 and 16 identically. A single-test binary
+contributes its whole duration because it has nobody to overlap with. Running
+the binaries concurrently collapses that sum to a maximum.
+
+**The budget counts tests in flight, not binaries.** Binaries times threads is
+the real concurrency: seven binaries at `test_threads = 8` is fifty-six
+concurrent tests, which on an ordinary box is *slower* than the figure the lane
+is chasing. A key naming concurrent binaries would let a config ask for that
+while looking like it asked for seven. The number a project has already tuned
+is the total, so the total is what the key takes - each binary claims
+`min(its test count, budget)` slots, at least one, and runs under a matching
+`--test-threads`. Slices are handed out largest-binary-first, so the long pole
+is admitted while the pool is whole.
+
+`budget = 0` is a load error. There is no spelling for "unlimited": an
+unbounded lane is precisely the mistake the key exists to make unspellable.
+
+### What it does not do
+
+It does **not** isolate. Tests within one binary still share a process, and
+that is the point - a shared-process parallel lane is the only place the
+process-global-state class (two tests contending over a global logger and a
+shared capture buffer) is visible at all. `isolation = "process"` dissolves
+that contention along with the bug's visibility, and the two keys are mutually
+exclusive: a sweep setting both is refused before any test runs.
+
+What it *adds* is exposure to **machine-global** state. Several binaries at
+once is several processes at once, so a per-machine singleton - a daemon
+holding an instance lock, a fixed socket path, a shared state dir - becomes
+contended where a sequential lane never showed it. That class arrives as
+**flakes rather than clean failures**, which is the thing most likely to get
+the lane blamed for a defect it merely exposed. Establish how such state
+isolates across concurrent binaries before adopting, and treat the serial side
+as the safety valve rather than the tuning knob.
+
+Doctests are not run on a `parallel` sweep - they live in the `--doc`
+pseudo-target, which is not one of the binaries the lane fans out over. The
+omission is announced rather than swallowed; run them from a sweep without
+`parallel`.
+
+### Enumerate the parallel side, not the serial side
+
+There is deliberately no per-entry serial-group key, because the sweep list
+already composes: `[[check]]` entries run strictly one after another, so a
+second entry with no `parallel` key **is** the serial lane.
+
+Write the partition with the parallel side enumerated and the complement
+unfiltered, never the reverse:
+
+```toml
+[[check]]
+name = "fanout"
+parallel = { budget = 8 }
+tests = ["parser_*", "codec_*"]   # opt in, explicitly
+
+[[check]]
+name = "rest"                      # unfiltered: today's sequential behaviour
+```
+
+Both halves then fail safe. A binary added later lands in the unfiltered
+complement and shows up **serial and slow** rather than parallel and flaky. A
+*stale* name in the enumerated `tests` list is a hard cargo error (`no test
+target named X`, globs included), so the parallel side cannot quietly shrink -
+note that the dead-filter guard covers `skip` and `only` only, and does not
+judge `tests`, so cargo's own target resolution is what is load-bearing here.
+It fires on every run rather than only under `certifies = "complete"`, which
+makes the coverage gate a third line of defence rather than the first.
+
+Both entries carry the same features, so they share a build shape and there is
+no second compile; the coverage ledger already reconciles multi-sweep ran-sets.
+
 ## `[[dependency_rule]]` array
 
 Optional. Each entry forbids direct Cargo dependencies from one or more

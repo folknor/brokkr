@@ -2448,7 +2448,33 @@ fn run_test_phase(
             )?;
         }
 
-        let success = if sweep.process_isolation {
+        // Two execution policies that cannot both hold: one runs every test in
+        // its own process, the other runs many binaries' tests at once. Refused
+        // here rather than at resolve time because that is where both are read;
+        // it fires before any test runs either way.
+        if sweep.process_isolation && sweep.parallel_budget.is_some() {
+            return Err(DevError::Config(format!(
+                "sweep '{}' sets both `isolation = \"process\"` and                  `parallel`; process isolation runs one test at a time, and                  `parallel` runs many at once. Pick one.",
+                sweep.label
+            )));
+        }
+
+        let success = if let Some(budget) = sweep.parallel_budget {
+            run_parallel_sweep(
+                project_root,
+                state_root,
+                sweep,
+                &scope,
+                budget,
+                extra_args,
+                &project_env,
+                &allow_args,
+                raw,
+                doctests,
+                commands,
+                timings.as_deref_mut(),
+            )?
+        } else if sweep.process_isolation {
             run_isolated_sweep(
                 project_root,
                 state_root,

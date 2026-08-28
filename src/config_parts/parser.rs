@@ -1188,6 +1188,19 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
     for o in &entry.only {
         validate_filter_floor("only", o, &at)?;
     }
+    // A budget of zero would run nothing while reading as "parallel on".
+    // There is no "unlimited" spelling on purpose: the whole point of the key
+    // is that the in-flight count is bounded by a number the project chose,
+    // and an unbounded lane is the 56-concurrent-tests mistake the budget
+    // exists to make unspellable.
+    if let Some(p) = &entry.parallel
+        && p.budget == 0
+    {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets `parallel.budget = 0`; the budget is a              count of tests allowed in flight and must be at least 1.",
+            entry.name
+        )));
+    }
     if !entry.packages.is_empty() && !entry.test_exclude_packages.is_empty() {
         return Err(DevError::Config(format!(
             "[[check]] entry '{}' sets both `packages` (-p scoping) and \

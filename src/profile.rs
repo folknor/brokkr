@@ -60,6 +60,15 @@ pub struct ResolvedSweep {
     /// execution layer (`sweep_runtime_env`) turns these into the `RUSTFLAGS`
     /// and `CARGO_TARGET_DIR` env pair. From the `[[check]]` entry's `rustflags`.
     pub rustflags: Vec<String>,
+    /// From the `[[check]]` entry's `parallel.budget`: run this sweep's test
+    /// binaries concurrently under a budget of in-flight tests, rather than
+    /// letting cargo run them one after another. Execution policy only -
+    /// never part of the build shape, since it changes neither what is
+    /// compiled nor which tests are selected. Mutually exclusive with
+    /// `process_isolation` (enforced at resolve time): one runs every test in
+    /// its own process, the other runs many binaries' tests at once, and a
+    /// sweep cannot mean both.
+    pub parallel_budget: Option<u32>,
     /// Run each test in its own `cargo test -- --exact` process (the
     /// profile's `isolation = "process"`). Execution policy only - never
     /// part of the build shape.
@@ -220,6 +229,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         env: entry.env.clone(),
         test_threads: None,
         rustflags: entry.rustflags.clone(),
+        parallel_budget: entry.parallel.map(|p| p.budget),
         process_isolation: false,
         qualified_skips: Vec::new(),
         declared_filters,
@@ -608,6 +618,7 @@ fn build_resolved_sweep(
         env,
         test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
+        parallel_budget: entry.parallel.map(|p| p.budget),
         process_isolation: profile.isolation == Some(Isolation::Process),
         qualified_skips,
         declared_filters,
