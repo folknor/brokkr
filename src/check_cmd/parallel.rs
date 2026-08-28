@@ -19,10 +19,12 @@
 // the total, so the total is what the key takes: each binary claims a slice of
 // the budget and runs under a matching `--test-threads`.
 //
-// Slices are handed out largest-binary-first. A binary claims
-// `min(test count, budget)` - a single-test binary claims one slot and
-// overlaps with everything, which is precisely the waste named above,
-// collected as the default rather than as something to tune.
+// Slices are proportional to test count (see `claim_slots`), handed out
+// largest-binary-first. Proportional rather than `min(test count, budget)`
+// because that obvious rule silently defeats the whole lane: a binary holding
+// at least `budget` tests claims the entire pool and runs alone, so a
+// workspace whose binaries each hold more tests than the budget never fans
+// out at any sane setting. Measured on a 35-binary tree before it was fixed.
 //
 // WHAT THIS DOES NOT DO IS ISOLATE. Tests within one binary still share a
 // process, deliberately: a shared-process parallel lane is the only place the
@@ -112,6 +114,55 @@ impl Budget {
             self.released.notify_all();
         }
     }
+}
+
+/// How many budget slots one binary claims: its share, in proportion to how
+/// many tests it holds.
+///
+/// # Why proportional, and not `min(count, budget)`
+///
+/// The obvious rule - let a binary take as many slots as it has tests, capped
+/// at the budget - has a shape bug that makes the whole lane a no-op on the
+/// workspaces that need it most. **Any binary holding at least `budget` tests
+/// claims the entire pool and therefore runs alone.** A workspace whose
+/// binaries each hold more tests than the budget can never fan out at any sane
+/// setting: getting two of them to overlap would need a budget above their
+/// test counts, which is hundreds in flight - the exact mistake the budget
+/// exists to make unspellable.
+///
+/// It failed silently, too. Every binary passed, the plan looked sensible
+/// per-binary, and the only visible symptom was several binaries each
+/// reporting that they had claimed the whole pool. Measured on a 35-binary
+/// workspace: eight fat binaries serialized at the full budget each, followed
+/// by a genuinely overlapping tail of the small ones.
+///
+/// # What proportional buys
+///
+/// Model a binary of `c` tests running on `k` threads as taking `c/k`. All
+/// binaries run at once under `sum(k) <= budget`, so the sweep's wall time is
+/// `max(c_i / k_i)`. That maximum is minimised by making `c_i / k_i` equal for
+/// every binary - which is exactly `k_i` proportional to `c_i`. Threads in
+/// proportion to tests is not a heuristic here; it is the allocation that
+/// finishes every binary at the same moment, and any other split leaves one
+/// binary as a longer pole than it had to be.
+///
+/// Two floors keep it honest at the edges:
+///
+/// - **At least one slot**, so a binary is never unschedulable. This can push
+///   the sum of claims past the budget when there are more binaries than
+///   slots; that is the semaphore's problem, not the plan's, and it resolves
+///   as admission in waves rather than as oversubscription.
+/// - **Never more than its own test count**, which only binds when the budget
+///   exceeds the whole suite - a small suite on a big machine, where a binary
+///   asking for more threads than it has tests would idle slots that another
+///   binary could use.
+fn claim_slots(count: u32, total_tests: u64, budget: u32) -> u32 {
+    if total_tests == 0 {
+        return 1;
+    }
+    let share = (u64::from(budget) * u64::from(count)) / total_tests;
+    let share = u32::try_from(share).unwrap_or(budget);
+    share.clamp(1, budget).min(count.max(1))
 }
 
 /// The cargo target selector for one test binary.
@@ -318,7 +369,7 @@ fn run_parallel_sweep(
     let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
     filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
 
-    let mut planned: Vec<(&TestBinary, u32)> = Vec::new();
+    let mut counted: Vec<(&TestBinary, u32)> = Vec::new();
     for b in binaries {
         let Some(listed) = binary_list(b, project_root, &filter_args, &env_refs, &libdir)? else {
             return Ok(false);
@@ -327,12 +378,15 @@ fn run_parallel_sweep(
         if count == 0 {
             continue;
         }
-        // Clamped to the whole budget so the claim is always satisfiable -
-        // an unclamped claim larger than the pool would wait forever.
-        // `budget >= 1` is a load-time guarantee, so the clamp bounds are
-        // always ordered.
-        planned.push((b, count.clamp(1, budget)));
+        counted.push((b, count));
     }
+    // Claims need the whole suite's test count, so they are allocated after
+    // every binary has been listed rather than as each one is.
+    let total_tests: u64 = counted.iter().map(|(_, c)| u64::from(*c)).sum();
+    let mut planned: Vec<(&TestBinary, u32)> = counted
+        .into_iter()
+        .map(|(b, count)| (b, claim_slots(count, total_tests, budget)))
+        .collect();
     if planned.is_empty() {
         return Err(DevError::Config(format!(
             "cargo test: zero tests ran (sweep: {}) - a profile/filter combo \
@@ -354,11 +408,13 @@ fn run_parallel_sweep(
     // should tell its reader.
     let build_elapsed = sweep_started.elapsed();
     output::run_msg(&format!(
-        "test {}: {} {}, budget {} in flight",
+        "test {}: {} {}, budget {} in flight (claims {}-{})",
         sweep.label,
         planned.len(),
         if planned.len() == 1 { "binary" } else { "binaries" },
-        budget
+        budget,
+        planned.iter().map(|(_, c)| *c).min().unwrap_or(0),
+        planned.iter().map(|(_, c)| *c).max().unwrap_or(0),
     ));
     let fanout_started = Instant::now();
 
@@ -583,21 +639,64 @@ mod parallel_lane_tests {
     }
 
     // The deadlock this guards: a binary claiming more than the whole budget
-    // could never be admitted. The plan clamps, so the pool never sees one.
+    // could never be admitted, so no claim may exceed it.
     #[test]
-    fn clamped_claims_are_always_satisfiable() {
+    fn claims_are_always_satisfiable() {
         let budget: u32 = 4;
-        for test_count in [1_u32, 3, 4, 9, 100] {
-            let claim = test_count.clamp(1, budget);
-            assert!((1..=budget).contains(&claim), "count {test_count}");
+        for count in [1_u32, 3, 4, 9, 100, u32::MAX] {
+            let claim = claim_slots(count, u64::from(count), budget);
+            assert!((1..=budget).contains(&claim), "count {count}");
         }
     }
 
-    // A single-test binary claims one slot and overlaps with everything -
-    // the specific waste (a binary contributing its full duration because it
-    // has nobody to overlap with) that the lane exists to collect.
+    // THE REGRESSION THIS FILE EXISTS TO PREVENT. Under the old
+    // `min(count, budget)` rule every one of these binaries claimed the whole
+    // pool and ran alone, so a 35-binary sweep serialized and reported success.
+    // Fat binaries must leave room for each other.
     #[test]
-    fn a_single_test_binary_claims_one_slot() {
-        assert_eq!(1_u32.clamp(1, 8), 1);
+    fn a_binary_holding_more_tests_than_the_budget_does_not_eat_the_pool() {
+        // Eight binaries of 300 tests each, budget 24: the shape measured on
+        // the tree where the old rule was caught.
+        let budget = 24;
+        let total = 8 * 300_u64;
+        let claim = claim_slots(300, total, budget);
+        assert_eq!(claim, 3);
+        // The whole point: several of them fit at once.
+        assert!(claim * 8 <= budget, "eight fat binaries must co-exist");
+    }
+
+    // Proportional means the slice tracks the share of tests, so the binary
+    // with most tests gets most threads and they finish together.
+    #[test]
+    fn slices_follow_each_binarys_share_of_the_suite() {
+        let budget = 12;
+        let total = 100_u64;
+        assert_eq!(claim_slots(50, total, budget), 6);
+        assert_eq!(claim_slots(25, total, budget), 3);
+        // A tiny binary still gets a slot rather than being unschedulable.
+        assert_eq!(claim_slots(1, total, budget), 1);
+    }
+
+    // A lone binary is the degenerate case of proportional: its share is all
+    // of it, so it runs at the full budget exactly as before.
+    #[test]
+    fn a_lone_binary_takes_the_whole_budget() {
+        assert_eq!(claim_slots(1429, 1429, 6), 6);
+    }
+
+    // The count cap only binds when the budget outruns the whole suite: a
+    // binary asking for more threads than it has tests would idle slots.
+    #[test]
+    fn a_small_suite_on_a_big_machine_claims_no_more_than_it_has() {
+        assert_eq!(claim_slots(3, 6, 64), 3);
+        assert_eq!(claim_slots(1, 1, 64), 1);
+    }
+
+    // Degenerate inputs must not divide by zero or return an unschedulable
+    // claim - the plan filters empty binaries, but the rule is total anyway.
+    #[test]
+    fn an_empty_suite_still_yields_a_schedulable_claim() {
+        assert_eq!(claim_slots(0, 0, 8), 1);
+        assert!(claim_slots(0, 10, 8) >= 1);
     }
 }

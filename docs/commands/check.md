@@ -692,17 +692,23 @@ binaries sequentially and `--test-threads` parallelizes only within one, so a
 sweep cannot finish faster than the sum, over binaries, of each binary's slowest
 test - a floor `test_threads` cannot move.
 
-The sweep builds once, then fans out; each binary claims `min(its test count,
-budget)` slots and runs under a matching `--test-threads`, largest binary first.
+The sweep builds once, then fans out; each binary claims a slice of the budget
+proportional to how many tests it holds (floored at one, capped at its own test
+count) and runs under a matching `--test-threads`, largest binary first.
 An unset budget (`parallel = {}`) resolves to the physical cores sharing one
 last-level cache - `brokkr env`'s `l3 domain:` line prints the number.
 
 Output is two lines regardless of how many binaries run:
 
 ```
-[run]     test fanout: 35 binaries, budget 24 in flight
+[run]     test fanout: 35 binaries, budget 24 in flight (claims 1-3)
 [run]     test fanout: 4210 passed in 31.2s (35 binaries, built in 48.9s, slowest broadarrow-worker/ba-worker 28.7s)
 ```
+
+The `claims N-M` spread is the diagnostic for whether the sweep actually
+overlapped. Several binaries each claiming the full budget means they ran one
+at a time - the failure mode the proportional claim rule exists to prevent, and
+one that otherwise reports success.
 
 A passing binary prints nothing of its own. Thirty-five green lines say only
 what the summary says, and a reader who has learned to scroll past the normal

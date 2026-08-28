@@ -892,10 +892,28 @@ the real concurrency: seven binaries at `test_threads = 8` is fifty-six
 concurrent tests, which on an ordinary box is *slower* than the figure the lane
 is chasing. A key naming concurrent binaries would let a config ask for that
 while looking like it asked for seven. The number a project has already tuned
-is the total, so the total is what the key takes - each binary claims
-`min(its test count, budget)` slots, at least one, and runs under a matching
-`--test-threads`. Slices are handed out largest-binary-first, so the long pole
-is admitted while the pool is whole.
+is the total, so the total is what the key takes.
+
+**Each binary's slice is proportional to how many tests it holds**, floored at
+one slot and capped at its own test count, handed out largest-binary-first so
+the long pole is admitted while the pool is whole. Proportional is not a
+heuristic: model a binary of `c` tests on `k` threads as taking `c/k`, and the
+sweep's wall time is `max(c_i / k_i)`; that maximum is minimised by holding
+`c_i / k_i` equal across binaries, which is exactly threads in proportion to
+tests. Every binary then finishes at the same moment, and any other split
+leaves one binary a longer pole than it needed to be.
+
+The rule this replaced - take as many slots as you have tests, capped at the
+budget - silently defeated the lane on the workspaces that needed it most. Any
+binary holding at least `budget` tests claimed the whole pool and ran alone, so
+a workspace whose binaries each hold more tests than the budget could never fan
+out at any sane setting: overlapping two of them would have needed a budget
+above their test counts, which is hundreds in flight - the mistake the budget
+exists to make unspellable. It failed green, too: measured on a 35-binary tree,
+eight fat binaries serialized at the full budget each and the sweep reported
+success. The `claims N-M` figure on the sweep's first output line is what makes
+that visible - several binaries claiming the whole budget means they cannot
+have overlapped.
 
 `budget = 0` is a load error. There is no spelling for "unlimited": an
 unbounded lane is precisely the mistake the key exists to make unspellable.
@@ -912,6 +930,14 @@ contend for that core's execution resources, and on a chiplet part two tests on
 separate dies pay fabric latency on every shared cache line. Both look like
 parallelism without delivering it, so a default taken from `nproc` would spend
 wall time in a lane that exists to save it.
+
+This default suits a CPU-bound suite. A suite that is **latency**-bound -
+integration tests that spawn subprocesses, wait on daemons, or sleep - profits
+from oversubscription well past the core count, because its threads are mostly
+idle. One measured tree ran 3x faster at 24 in flight than at 8 on a machine
+with fewer cores than either. If a sweep's tests spend their time waiting
+rather than computing, set `budget` explicitly and measure; the cache-domain
+default is a floor for such a suite, not an estimate of it.
 
 The metric is well defined on every vendor; what it *names* differs. On AMD Zen
 the L3 domain is a CCX, which on current parts is a whole CCD - 6 or 8 cores,
