@@ -693,8 +693,10 @@ sweep cannot finish faster than the sum, over binaries, of each binary's slowest
 test - a floor `test_threads` cannot move.
 
 The sweep builds once, then fans out; each binary claims a slice of the budget
-proportional to how many tests it holds (floored at one, capped at its own test
-count) and runs under a matching `--test-threads`, largest binary first.
+proportional to its measured wall time from the previous run (floored at one,
+capped at its own test count) and runs under a matching `--test-threads`,
+slowest binary first. Times live in `.brokkr/parallel-timings.toml`; a tree
+with no history weights by test count instead.
 An unset budget (`parallel = {}`) resolves to the physical cores sharing one
 last-level cache - `brokkr env`'s `l3 domain:` line prints the number.
 

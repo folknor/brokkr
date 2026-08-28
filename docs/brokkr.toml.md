@@ -894,14 +894,30 @@ is chasing. A key naming concurrent binaries would let a config ask for that
 while looking like it asked for seven. The number a project has already tuned
 is the total, so the total is what the key takes.
 
-**Each binary's slice is proportional to how many tests it holds**, floored at
-one slot and capped at its own test count, handed out largest-binary-first so
-the long pole is admitted while the pool is whole. Proportional is not a
-heuristic: model a binary of `c` tests on `k` threads as taking `c/k`, and the
-sweep's wall time is `max(c_i / k_i)`; that maximum is minimised by holding
-`c_i / k_i` equal across binaries, which is exactly threads in proportion to
-tests. Every binary then finishes at the same moment, and any other split
-leaves one binary a longer pole than it needed to be.
+**Each binary's slice is proportional to how long it takes**, floored at one
+slot and capped at its own test count, handed out largest-first so the long
+pole is admitted while the pool is whole. Proportional is not a heuristic:
+model a binary of cost `c` on `k` threads as taking `c/k`, and the sweep's wall
+time is `max(c_i / k_i)`; that maximum is minimised by holding `c_i / k_i`
+equal across binaries, which is exactly threads in proportion to cost. Every
+binary then finishes at the same moment, and any other split leaves one binary
+a longer pole than it needed to be.
+
+The cost is the binary's **measured wall time from the previous run**, kept in
+`.brokkr/parallel-timings.toml` and merged after every parallel sweep. Test
+count is only a fallback, because count-as-cost assumes every test costs the
+same and starves whichever binary is slow-but-small - which on a latency-bound
+suite is precisely the critical path. Measured on the tree this was built for:
+a binary of ten integration tests out of 2224 computed to one slot, and its
+tests then ran end to end for 22.3s of a 24.5s sweep where overlapping them
+would have cost 10.1s.
+
+So the allocation warms up. The first run of a tree has no history and weights
+by count exactly as before; a binary with no record of its own is estimated
+from its siblings' mean cost per test, and the estimate is replaced by a
+measurement as soon as it has run once. The file is advisory in every
+direction - missing, unreadable or stale costs a worse allocation and never a
+wrong result.
 
 The rule this replaced - take as many slots as you have tests, capped at the
 budget - silently defeated the lane on the workspaces that needed it most. Any

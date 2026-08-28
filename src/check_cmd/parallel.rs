@@ -174,35 +174,36 @@ fn partition_target_selectors(args: &[String]) -> (Vec<String>, Vec<String>) {
     (selectors, rest)
 }
 
-/// How many budget slots one binary claims: its share, in proportion to how
-/// many tests it holds.
+/// How many budget slots one binary claims: its share of the sweep's total
+/// cost.
 ///
-/// # Why proportional, and not `min(count, budget)`
+/// # Why proportional
 ///
-/// The obvious rule - let a binary take as many slots as it has tests, capped
-/// at the budget - has a shape bug that makes the whole lane a no-op on the
-/// workspaces that need it most. **Any binary holding at least `budget` tests
-/// claims the entire pool and therefore runs alone.** A workspace whose
-/// binaries each hold more tests than the budget can never fan out at any sane
-/// setting: getting two of them to overlap would need a budget above their
-/// test counts, which is hundreds in flight - the exact mistake the budget
-/// exists to make unspellable.
-///
-/// It failed silently, too. Every binary passed, the plan looked sensible
-/// per-binary, and the only visible symptom was several binaries each
-/// reporting that they had claimed the whole pool. Measured on a 35-binary
-/// workspace: eight fat binaries serialized at the full budget each, followed
-/// by a genuinely overlapping tail of the small ones.
-///
-/// # What proportional buys
-///
-/// Model a binary of `c` tests running on `k` threads as taking `c/k`. All
+/// Model a binary of cost `c` running on `k` threads as taking `c/k`. All
 /// binaries run at once under `sum(k) <= budget`, so the sweep's wall time is
 /// `max(c_i / k_i)`. That maximum is minimised by making `c_i / k_i` equal for
 /// every binary - which is exactly `k_i` proportional to `c_i`. Threads in
-/// proportion to tests is not a heuristic here; it is the allocation that
-/// finishes every binary at the same moment, and any other split leaves one
-/// binary as a longer pole than it had to be.
+/// proportion to cost is not a heuristic; it is the allocation that finishes
+/// every binary at the same moment, and any other split leaves one binary a
+/// longer pole than it had to be.
+///
+/// # Why not `min(count, budget)`
+///
+/// The obvious rule - take as many slots as you have tests, capped at the
+/// budget - makes the lane a no-op on the workspaces that need it most. **Any
+/// binary holding at least `budget` tests claims the entire pool and runs
+/// alone.** A workspace whose binaries each hold more tests than the budget
+/// can never fan out at any sane setting: overlapping two of them would need a
+/// budget above their test counts, which is hundreds in flight - the exact
+/// mistake the budget exists to make unspellable. It failed green, too:
+/// measured on a 35-binary tree, eight fat binaries serialized at the full
+/// budget each and the sweep reported success.
+///
+/// # Why the weight is duration, not test count
+///
+/// See `timing_weight_for`. Count-as-cost assumes every test costs the same, and
+/// starves whichever binary is slow-but-small - which on a latency-bound suite
+/// is precisely the critical path.
 ///
 /// Two floors keep it honest at the edges:
 ///
@@ -211,16 +212,30 @@ fn partition_target_selectors(args: &[String]) -> (Vec<String>, Vec<String>) {
 ///   slots; that is the semaphore's problem, not the plan's, and it resolves
 ///   as admission in waves rather than as oversubscription.
 /// - **Never more than its own test count**, which only binds when the budget
-///   exceeds the whole suite - a small suite on a big machine, where a binary
-///   asking for more threads than it has tests would idle slots that another
-///   binary could use.
-fn claim_slots(count: u32, total_tests: u64, budget: u32) -> u32 {
-    if total_tests == 0 {
+///   exceeds the whole suite - a binary asking for more threads than it has
+///   tests would idle slots another binary could use.
+fn claim_slots(weight_ms: u64, total_ms: u64, budget: u32, count: u32) -> u32 {
+    if total_ms == 0 {
         return 1;
     }
-    let share = (u64::from(budget) * u64::from(count)) / total_tests;
+    // Integer milliseconds rather than seconds-as-f64: the arithmetic is a
+    // ratio of durations, and doing it in floats would need a float-to-int
+    // cast at the end that is unsound for NaN, negative and out-of-range
+    // values - none of which a weight should ever be, but all of which a
+    // cast would silently accept.
+    let share = u64::from(budget).saturating_mul(weight_ms) / total_ms;
     let share = u32::try_from(share).unwrap_or(budget);
     share.clamp(1, budget).min(count.max(1))
+}
+
+/// A weight in seconds as integer milliseconds, for the ratio above.
+///
+/// Total by construction: NaN, negative and absurd values all collapse to
+/// zero, which reads downstream as "no information" and floors the binary at
+/// one slot rather than corrupting every other binary's share.
+fn weight_ms(seconds: f64) -> u64 {
+    Duration::try_from_secs_f64(seconds)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The cargo target selector for one test binary.
@@ -368,7 +383,7 @@ fn run_one_binary(
 /// Run one sweep with its test binaries executing concurrently under the
 /// entry's in-flight budget. Returns `Ok(false)` when any binary failed,
 /// having already reported it.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_parallel_sweep(
     project_root: &Path,
     state_root: &Path,
@@ -449,12 +464,36 @@ fn run_parallel_sweep(
         }
         counted.push((b, count));
     }
-    // Claims need the whole suite's test count, so they are allocated after
-    // every binary has been listed rather than as each one is.
-    let total_tests: u64 = counted.iter().map(|(_, c)| u64::from(*c)).sum();
+    // Claims need the whole sweep's cost, so they are allocated after every
+    // binary has been listed rather than as each one is. Cost is the previous
+    // run's measured wall time where there is one, and an estimate from the
+    // known binaries' cost per test otherwise - see `timing_weight_for`.
+    let history = timings_load(state_root);
+    let recorded = history.get(&sweep.label);
+    let label_of = |b: &TestBinary| format!("{}/{}", b.package, b.target);
+    let known: Vec<(f64, u32)> = counted
+        .iter()
+        .filter_map(|(b, c)| {
+            recorded
+                .and_then(|m| m.get(&label_of(b)))
+                .filter(|s| **s > 0.0)
+                .map(|s| (*s, *c))
+        })
+        .collect();
+    let mean_cost = mean_cost_per_test(&known);
+    let weights: Vec<f64> = counted
+        .iter()
+        .map(|(b, c)| {
+            let rec = recorded.and_then(|m| m.get(&label_of(b))).copied();
+            timing_weight_for(rec, *c, mean_cost)
+        })
+        .collect();
+    let weights: Vec<u64> = weights.iter().copied().map(weight_ms).collect();
+    let total_weight: u64 = weights.iter().sum();
     let mut planned: Vec<(&TestBinary, u32)> = counted
         .into_iter()
-        .map(|(b, count)| (b, claim_slots(count, total_tests, budget)))
+        .zip(&weights)
+        .map(|((b, count), w)| (b, claim_slots(*w, total_weight, budget, count)))
         .collect();
     if planned.is_empty() {
         return Err(DevError::Config(format!(
@@ -525,6 +564,17 @@ fn run_parallel_sweep(
             }));
         }
     });
+
+    // Recorded before reporting, and for a red sweep too: a binary that
+    // failed still took the time it took, and the next run's allocation is
+    // better for knowing it. A sweep whose binaries all failed to spawn
+    // records nothing, since `measured` is then empty.
+    let measured: Vec<(String, Duration)> = runs
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .map(|r| (r.label.clone(), r.elapsed))
+        .collect();
+    timings_record(state_root, &sweep.label, &measured);
 
     report_runs(project_root, sweep, runs, raw, fanout_started, build_elapsed, timings)
 }
@@ -713,9 +763,40 @@ mod parallel_lane_tests {
     fn claims_are_always_satisfiable() {
         let budget: u32 = 4;
         for count in [1_u32, 3, 4, 9, 100, u32::MAX] {
-            let claim = claim_slots(count, u64::from(count), budget);
+            let w = u64::from(count);
+            let claim = claim_slots(w, w, budget, count);
             assert!((1..=budget).contains(&claim), "count {count}");
         }
+    }
+
+    // Degenerate weights must not produce an unschedulable or oversized claim.
+    #[test]
+    fn non_finite_and_empty_weights_fall_back_to_one_slot() {
+        assert_eq!(claim_slots(1, 0, 8, 5), 1);
+        assert_eq!(weight_ms(f64::NAN), 0);
+        assert_eq!(weight_ms(-1.0), 0);
+        assert_eq!(weight_ms(f64::INFINITY), 0);
+        assert_eq!(weight_ms(22.3), 22_300);
+    }
+
+    // THE SECOND ALLOCATION REGRESSION. Weighting by test count starved the
+    // binary that was the critical path: ten latency-bound tests out of 2224
+    // computed to one slot, so its tests ran end to end for 22.3s of a 24.5s
+    // sweep. Weighted by measured duration it draws the slots it needs.
+    #[test]
+    fn a_slow_small_binary_outranks_a_fast_big_one() {
+        let budget = 24;
+        // The measured shape: one 22.3s binary of 10 tests, and the rest of
+        // the suite costing 38s across 2214 fast tests.
+        let total = weight_ms(22.3) + weight_ms(38.0);
+        let pole = claim_slots(weight_ms(22.3), total, budget, 10);
+        let bulk = claim_slots(weight_ms(38.0), total, budget, 2214);
+        assert!(pole >= 8, "the critical path must get real threads, got {pole}");
+        assert!(bulk >= 1 && bulk <= budget);
+
+        // Under the old count weighting it got exactly one slot - the bug.
+        let by_count = claim_slots(10, 2224, budget, 10);
+        assert_eq!(by_count, 1);
     }
 
     fn v(args: &[&str]) -> Vec<String> {
@@ -783,8 +864,8 @@ mod parallel_lane_tests {
         // Eight binaries of 300 tests each, budget 24: the shape measured on
         // the tree where the old rule was caught.
         let budget = 24;
-        let total = 8 * 300_u64;
-        let claim = claim_slots(300, total, budget);
+        let total = 8 * 300;
+        let claim = claim_slots(300, total, budget, 300);
         assert_eq!(claim, 3);
         // The whole point: several of them fit at once.
         assert!(claim * 8 <= budget, "eight fat binaries must co-exist");
@@ -795,33 +876,33 @@ mod parallel_lane_tests {
     #[test]
     fn slices_follow_each_binarys_share_of_the_suite() {
         let budget = 12;
-        let total = 100_u64;
-        assert_eq!(claim_slots(50, total, budget), 6);
-        assert_eq!(claim_slots(25, total, budget), 3);
+        let total = 100;
+        assert_eq!(claim_slots(50, total, budget, 50), 6);
+        assert_eq!(claim_slots(25, total, budget, 25), 3);
         // A tiny binary still gets a slot rather than being unschedulable.
-        assert_eq!(claim_slots(1, total, budget), 1);
+        assert_eq!(claim_slots(1, total, budget, 1), 1);
     }
 
     // A lone binary is the degenerate case of proportional: its share is all
     // of it, so it runs at the full budget exactly as before.
     #[test]
     fn a_lone_binary_takes_the_whole_budget() {
-        assert_eq!(claim_slots(1429, 1429, 6), 6);
+        assert_eq!(claim_slots(1429, 1429, 6, 1429), 6);
     }
 
     // The count cap only binds when the budget outruns the whole suite: a
     // binary asking for more threads than it has tests would idle slots.
     #[test]
     fn a_small_suite_on_a_big_machine_claims_no_more_than_it_has() {
-        assert_eq!(claim_slots(3, 6, 64), 3);
-        assert_eq!(claim_slots(1, 1, 64), 1);
+        assert_eq!(claim_slots(3, 6, 64, 3), 3);
+        assert_eq!(claim_slots(1, 1, 64, 1), 1);
     }
 
     // Degenerate inputs must not divide by zero or return an unschedulable
     // claim - the plan filters empty binaries, but the rule is total anyway.
     #[test]
     fn an_empty_suite_still_yields_a_schedulable_claim() {
-        assert_eq!(claim_slots(0, 0, 8), 1);
-        assert!(claim_slots(0, 10, 8) >= 1);
+        assert_eq!(claim_slots(0, 0, 8, 0), 1);
+        assert!(claim_slots(0, 10, 8, 0) >= 1);
     }
 }
