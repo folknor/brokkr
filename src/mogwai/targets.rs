@@ -137,30 +137,29 @@ mod tests {
     const BASE: &str = "project = \"mogwai\"\n\n[mogwai]\npackage = \"mogwai-cli\"\n\
                         bin = \"mogwai\"\n\n";
 
-    /// A fresh scratch dir under the crate's gitignored `target/`
-    /// (project rules forbid `/tmp`).
+    /// A fresh scratch dir for one test. `test_name` must be unique within
+    /// this module - see `crate::test_scratch`.
     fn tmpdir(test_name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/mogwai-targets")
-            .join(test_name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("mogwai-targets", test_name)
     }
 
-    fn config_with(toml_src: &str) -> DevConfig {
-        // Named per-test by the caller's line so parallel tests don't share a
-        // scratch dir; the content is all that matters here.
-        let dir = tmpdir(&format!("cfg-{:?}", std::thread::current().id()));
+    /// Build a `DevConfig` from `toml_src`, with `brokkr.toml` written into
+    /// the caller's OWN scratch dir.
+    ///
+    /// Takes the dir rather than allocating one: a helper that allocated its
+    /// own would have to name it, and any fixed name is shared by every
+    /// caller. Writing into the caller's root also matches how the config is
+    /// really found - `project_root` and the directory holding `brokkr.toml`
+    /// are the same place in every non-test path.
+    fn config_with(dir: &Path, toml_src: &str) -> DevConfig {
         fs::write(dir.join("brokkr.toml"), toml_src).unwrap();
-        crate::config::load(&dir).unwrap().1
+        crate::config::load(dir).unwrap().1
     }
 
     #[test]
     fn no_target_resolves_the_registered_bin() {
-        let cfg = config_with(BASE);
+        let dir = tmpdir("no_target_resolves_the_registered_bin");
+        let cfg = config_with(&dir, BASE);
         let resolved = resolve(config(&cfg).unwrap(), None, &[]).unwrap();
         // The CLI surface needs no registration - that is the whole point.
         assert_eq!(resolved.name, "mogwai");
@@ -170,7 +169,8 @@ mod tests {
 
     #[test]
     fn a_target_resolves_to_its_example_and_features() {
-        let cfg = config_with(&format!(
+        let dir = tmpdir("a_target_resolves_to_its_example_and_features");
+        let cfg = config_with(&dir, &format!(
             "{BASE}[mogwai.targets.screen_projection]\n\
              package = \"mogwai-lab\"\n\
              example = \"screen_projection_bench\"\n\
@@ -190,7 +190,8 @@ mod tests {
 
     #[test]
     fn call_site_features_append_to_the_registered_ones() {
-        let cfg = config_with(&format!(
+        let dir = tmpdir("call_site_features_append_to_the_registered_ones");
+        let cfg = config_with(&dir, &format!(
             "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
              features = [\"hotpath\"]\n"
         ));
@@ -203,7 +204,8 @@ mod tests {
     fn a_feature_already_registered_is_not_repeated() {
         // `--hotpath` asks for the feature the target already registers, which
         // is the common case rather than an edge one.
-        let cfg = config_with(&format!(
+        let dir = tmpdir("a_feature_already_registered_is_not_repeated");
+        let cfg = config_with(&dir, &format!(
             "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
              features = [\"hotpath\"]\n"
         ));
@@ -214,7 +216,8 @@ mod tests {
 
     #[test]
     fn a_target_without_a_package_falls_back_to_the_mogwai_one() {
-        let cfg = config_with(&format!(
+        let dir = tmpdir("a_target_without_a_package_falls_back_to_the_mogwai_one");
+        let cfg = config_with(&dir, &format!(
             "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n"
         ));
         let resolved = resolve(config(&cfg).unwrap(), Some("walk"), &[]).unwrap();
@@ -223,7 +226,8 @@ mod tests {
 
     #[test]
     fn an_unknown_target_lists_the_registered_ones_and_the_cli_form() {
-        let cfg = config_with(&format!(
+        let dir = tmpdir("an_unknown_target_lists_the_registered_ones_and_the_cli_form");
+        let cfg = config_with(&dir, &format!(
             "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n"
         ));
         let err = resolve(config(&cfg).unwrap(), Some("nope"), &[]).unwrap_err();
@@ -238,7 +242,8 @@ mod tests {
 
     #[test]
     fn the_index_names_the_cli_form_and_every_target() {
-        let cfg = config_with(&format!(
+        let dir = tmpdir("the_index_names_the_cli_form_and_every_target");
+        let cfg = config_with(&dir, &format!(
             "{BASE}[mogwai.targets.walk]\nexample = \"arrival_walk_bench\"\n\
              features = [\"hotpath\"]\n"
         ));
@@ -252,7 +257,8 @@ mod tests {
 
     #[test]
     fn an_empty_registry_still_offers_the_cli() {
-        let cfg = config_with(BASE);
+        let dir = tmpdir("an_empty_registry_still_offers_the_cli");
+        let cfg = config_with(&dir, BASE);
         let index = format_index(config(&cfg).unwrap());
         assert!(index.contains("none registered"), "{index}");
         assert!(index.contains("brokkr mogwai -- <args>"), "{index}");

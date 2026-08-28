@@ -55,7 +55,10 @@ mod sidecar_fmt;
 mod sluggrs;
 mod test_cmd;
 mod textlint;
+mod cpu_topology;
 mod test_runner;
+#[cfg(test)]
+mod test_scratch;
 mod toolchain;
 mod tools;
 mod wc;

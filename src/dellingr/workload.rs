@@ -119,42 +119,14 @@ pub(crate) fn resolve(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
-    use std::collections::BTreeSet;
     use std::fs;
-    use std::sync::Mutex;
 
-    /// A fresh scratch dir under the crate's gitignored `target/`
-    /// (project rules forbid `/tmp`).
-    ///
-    /// `test_name` MUST be unique across this module, because the first thing
-    /// this does is delete the directory. Two tests sharing a name delete each
-    /// other's scratch mid-run, which under a serial lane is invisible and
-    /// under a parallel one is an intermittent `DirectoryNotEmpty` or a
-    /// vanished `brokkr.toml` - a flake that reads as a bug in the code under
-    /// test. That is not a hypothetical: a shared `"cfg"` dir inside
-    /// `config_with` did exactly this, and stayed hidden until the suite ran
-    /// several tests at once.
-    ///
-    /// So uniqueness is asserted rather than trusted. A repeat name fails
-    /// loudly here, at the moment it is introduced, instead of becoming a race
-    /// somebody has to reproduce later.
+    /// A fresh scratch dir for one test. `test_name` must be unique within
+    /// this module; the allocator deletes the path before returning it and
+    /// asserts uniqueness rather than trusting it (see `crate::test_scratch`,
+    /// which exists because this module's `config_with` broke that rule).
     fn tmpdir(test_name: &str) -> PathBuf {
-        static TAKEN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-        assert!(
-            TAKEN.lock().unwrap().insert(test_name.to_owned()),
-            "two tests share the scratch dir name {test_name:?}; tmpdir deletes \
-             the directory on entry, so a shared name means they delete each \
-             other's files. Give each test its own name."
-        );
-
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/dellingr")
-            .join(test_name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("dellingr", test_name)
     }
 
     /// Build a `DevConfig` carrying just the `[dellingr]` block under test,
@@ -349,15 +321,6 @@ mod tests {
             panic!("expected DevError::Config, got {err:?}");
         };
         assert!(msg.contains("nope/w.lua"), "{msg}");
-    }
-
-    // The guard itself: a reused scratch name must fail here rather than
-    // becoming a race in whichever two tests happened to share it.
-    #[test]
-    #[should_panic(expected = "share the scratch dir name")]
-    fn a_reused_scratch_name_is_refused() {
-        let _first = tmpdir("dupe_probe");
-        let _second = tmpdir("dupe_probe");
     }
 
     #[test]

@@ -694,15 +694,10 @@ mod tests {
 
     use super::*;
 
+    /// A fresh scratch directory for one test. `name` must be unique in
+    /// this module - the allocator asserts it.
     fn tmpdir(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/ratatoskr-cmd")
-            .join(name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("ratatoskr-cmd", name)
     }
 
     fn fake_built(bin_dir: &Path) -> HarnessBuild {

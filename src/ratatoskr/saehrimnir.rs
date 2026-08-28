@@ -874,15 +874,10 @@ mod tests {
         assert!(err.to_string().contains("no port"), "got: {err}");
     }
 
+    /// A fresh scratch dir for one fixture-resolution test. `name` must be
+    /// unique within this module - the allocator asserts it.
     fn fixture_tmpdir(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/mock-serve-fixture")
-            .join(name);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("mock-serve-fixture", name)
     }
 
     #[test]

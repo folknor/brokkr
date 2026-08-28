@@ -11,6 +11,12 @@ pub struct EnvInfo {
     pub hostname: String,
     pub kernel: String,
     pub cpu: String,
+    /// Physical cores sharing one last-level cache, and logical CPUs overall.
+    /// Reported because it is the default in-flight budget for a `parallel`
+    /// [[check]] sweep - a machine-dependent default nobody can audit unless
+    /// the machine's own number is printed somewhere. `None` when sysfs said
+    /// nothing usable.
+    pub cache_domain_cores: Option<usize>,
     pub governor: String,
     pub memory_total_mb: u64,
     pub memory_available_mb: u64,
@@ -74,6 +80,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         hostname: paths.hostname.clone(),
         kernel: read_kernel(),
         cpu: read_cpu(),
+        cache_domain_cores: crate::cpu_topology::cache_domain_cores(),
         governor: read_governor(),
         memory_total_mb: mem_total,
         memory_available_mb: mem_avail,
@@ -124,6 +131,20 @@ fn print_header(info: &EnvInfo) {
     println!("{:<12} {}", "hostname:", info.hostname);
     println!("{:<12} {}", "kernel:", info.kernel);
     println!("{:<12} {}", "cpu:", info.cpu);
+    // The label ("CCX/CCD" on AMD, "die" on Intel) is cosmetic - it names the
+    // number, never derives it - so a vendor miss costs a word and nothing else.
+    // The `cpu:` line above already carries total cores/threads, so this one
+    // adds only what it cannot: the cache-sharing boundary, and the fact that
+    // it is what an unset `parallel` budget resolves to.
+    match info.cache_domain_cores {
+        Some(cores) => println!(
+            "{:<12} {} cores per {} (parallel budget)",
+            "l3 domain:",
+            cores,
+            crate::cpu_topology::domain_label(&info.cpu),
+        ),
+        None => println!("{:<12} not detected", "l3 domain:"),
+    }
     println!("{:<12} {}", "governor:", info.governor);
     println!(
         "{:<12} {} ({} available)",

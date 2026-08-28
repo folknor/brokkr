@@ -1259,15 +1259,10 @@ mod tests {
         }
     }
 
+    /// A fresh scratch directory for one test. `name` must be unique in
+    /// this module - the allocator asserts it.
     fn sum_tmp(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/sync-summary")
-            .join(name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("sync-summary", name)
     }
 
     #[test]

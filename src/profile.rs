@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::{
     CheckEntry, Isolation, ProfileDef, QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
 };
+use crate::config::ParallelBinaries;
 use crate::error::DevError;
 
 /// One sweep to execute, after profile resolution + check-entry lookup.
@@ -229,7 +230,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         env: entry.env.clone(),
         test_threads: None,
         rustflags: entry.rustflags.clone(),
-        parallel_budget: entry.parallel.map(|p| p.budget),
+        parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
         process_isolation: false,
         qualified_skips: Vec::new(),
         declared_filters,
@@ -618,7 +619,7 @@ fn build_resolved_sweep(
         env,
         test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
-        parallel_budget: entry.parallel.map(|p| p.budget),
+        parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
         process_isolation: profile.isolation == Some(Isolation::Process),
         qualified_skips,
         declared_filters,

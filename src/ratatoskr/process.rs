@@ -193,22 +193,17 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     use super::*;
 
+    /// A fresh scratch dir for one test. `test_name` must be unique within
+    /// this module - the allocator asserts it.
     fn tmpdir(test_name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/process")
-            .join(test_name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("process", test_name)
     }
 
     /// Spawn `sleep <seconds>` and return its PID. Caller is

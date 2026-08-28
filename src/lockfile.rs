@@ -725,14 +725,7 @@ mod tests {
     /// test threads never contend (or falsely nest) with each other, and
     /// none of them ever touch the real global lock.
     fn tmp_lock(name: &str) -> PathBuf {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/lockfile");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        // Stale file from a previous run is fine - flock state died with
-        // that process - but remove it so contents assertions start clean.
-        std::fs::remove_file(&path).ok();
-        path
+        crate::test_scratch::scratch_path("lockfile", name)
     }
 
     fn ctx() -> LockContext<'static> {

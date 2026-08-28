@@ -900,6 +900,40 @@ is admitted while the pool is whole.
 `budget = 0` is a load error. There is no spelling for "unlimited": an
 unbounded lane is precisely the mistake the key exists to make unspellable.
 
+### The default budget
+
+`parallel = {}` leaves the budget unset, which resolves to **the physical cores
+sharing one last-level cache** - a full CCX/CCD on AMD, the die on Intel.
+`brokkr env` prints the machine's own number on its `l3 domain:` line, so a
+machine-dependent default is auditable rather than mysterious.
+
+Deliberately not logical CPUs. Two tests on the SMT siblings of one core
+contend for that core's execution resources, and on a chiplet part two tests on
+separate dies pay fabric latency on every shared cache line. Both look like
+parallelism without delivering it, so a default taken from `nproc` would spend
+wall time in a lane that exists to save it.
+
+The metric is well defined on every vendor; what it *names* differs. On AMD Zen
+the L3 domain is a CCX, which on current parts is a whole CCD - 6 or 8 cores,
+and a real boundary, since cross-CCD traffic leaves the die. On Intel there is
+no CCD: L3 is shared across the whole ring or mesh, so the same computation
+returns every physical core in the socket, which is the correct analogue - the
+die *is* the domain, and on a multi-socket box the socket is. On Intel hybrid
+parts (Alder Lake and later) P-cores and E-cores share the L3 and both are
+counted, which is honest for a cache-sharing question and slightly optimistic
+for a throughput one; sysfs exposes no portable core-class field, so the
+alternative would be guessing.
+
+### Doctests
+
+`[test] doctests = true` alongside any `parallel` entry is a **load error**.
+Doctests live in cargo's `--doc` pseudo-target, which has no binary for the
+lane to fan out over, so the sweep cannot run them. Refused at load rather than
+warned about at run time: the conflict is a property of the config, so it needs
+deciding once, and a gate whose every green run carries a warning has taught
+its readers to skip warnings. Give the doctests a `[[check]]` entry without
+`parallel`.
+
 ### What it does not do
 
 It does **not** isolate. Tests within one binary still share a process, and
@@ -917,11 +951,6 @@ contended where a sequential lane never showed it. That class arrives as
 the lane blamed for a defect it merely exposed. Establish how such state
 isolates across concurrent binaries before adopting, and treat the serial side
 as the safety valve rather than the tuning knob.
-
-Doctests are not run on a `parallel` sweep - they live in the `--doc`
-pseudo-target, which is not one of the binaries the lane fans out over. The
-omission is announced rather than swallowed; run them from a sweep without
-`parallel`.
 
 ### Enumerate the parallel side, not the serial side
 

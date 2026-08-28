@@ -694,13 +694,34 @@ test - a floor `test_threads` cannot move.
 
 The sweep builds once, then fans out; each binary claims `min(its test count,
 budget)` slots and runs under a matching `--test-threads`, largest binary first.
-Every binary's output is buffered and reported after the join in plan order, so
-concurrent binaries cannot braid their failures together and two identical red
-runs produce identical output.
+An unset budget (`parallel = {}`) resolves to the physical cores sharing one
+last-level cache - `brokkr env`'s `l3 domain:` line prints the number.
+
+Output is two lines regardless of how many binaries run:
+
+```
+[run]     test fanout: 35 binaries, budget 24 in flight
+[run]     test fanout: 4210 passed in 31.2s (35 binaries, built in 48.9s, slowest broadarrow-worker/ba-worker 28.7s)
+```
+
+A passing binary prints nothing of its own. Thirty-five green lines say only
+what the summary says, and a reader who has learned to scroll past the normal
+case will scroll past the abnormal one too; `--raw` still emits everything.
+Build time and fan-out time are reported separately because a lane sold on wall
+time must not fold the compile into the number it is judged on. **The slowest
+binary is named because it is the sweep's floor** - the sweep finishes when it
+does, so it is the one to split, or to move to the serial lane, and no other
+line can say which it was.
+
+Failures are the exception: a failing binary prints its label, its
+copy-pasteable cargo line, and its output. Every binary's output is buffered
+and reported after the join in plan order, so concurrent binaries cannot braid
+their failures together and two identical red runs produce identical output.
 
 Mutually exclusive with `isolation = "process"` (refused before any test runs),
-and it does not run doctests. Full semantics, and the rule for partitioning a
-suite across a parallel and a serial entry, are in `docs/brokkr.toml.md`.
+and `[test] doctests = true` alongside a `parallel` entry is a load error.
+Full semantics, and the rule for partitioning a suite across a parallel and a
+serial entry, are in `docs/brokkr.toml.md`.
 
 ## nextest (bundled; groundwork, not yet selectable)
 

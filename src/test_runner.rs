@@ -1635,15 +1635,10 @@ mod tests {
         );
     }
 
+    /// A fresh scratch dir for one test. `name` must be unique within this
+    /// module - see `crate::test_scratch`.
     fn test_root(name: &str) -> PathBuf {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/test-runner")
-            .join(name);
-        if root.exists() {
-            fs::remove_dir_all(&root).unwrap();
-        }
-        fs::create_dir_all(&root).unwrap();
-        root
+        crate::test_scratch::scratch("test-runner", name)
     }
 
     fn wait_for_direct_children(parent: u32) -> Vec<u32> {

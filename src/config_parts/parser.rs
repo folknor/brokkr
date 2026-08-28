@@ -1194,7 +1194,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
     // and an unbounded lane is the 56-concurrent-tests mistake the budget
     // exists to make unspellable.
     if let Some(p) = &entry.parallel
-        && p.budget == 0
+        && p.budget == Some(0)
     {
         return Err(DevError::Config(format!(
             "[[check]] entry '{}' sets `parallel.budget = 0`; the budget is a              count of tests allowed in flight and must be at least 1.",
@@ -1371,6 +1371,7 @@ fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevE
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_check_against_test(
     check: &[CheckEntry],
     test: Option<&TestConfig>,
@@ -1379,6 +1380,23 @@ fn validate_check_against_test(
     let Some(t) = test else {
         return Ok(());
     };
+    // A `parallel` sweep fans out over test BINARIES, and doctests have none -
+    // they live in cargo's `--doc` pseudo-target. Refused here rather than
+    // warned about at run time: the conflict is a property of the config, so
+    // it needs deciding once, and a gate whose every green run carries a
+    // warning has taught its readers to skip warnings. The fix is a second
+    // `[[check]]` entry without `parallel` for the doctests to run under.
+    if t.doctests
+        && let Some(e) = check.iter().find(|e| e.parallel.is_some())
+    {
+        return Err(DevError::Config(format!(
+            "[test] doctests = true conflicts with `parallel` on [[check]] \
+             entry '{}': a parallel sweep fans out over test binaries, and \
+             doctests have none. Give them a [[check]] entry without \
+             `parallel`, or set doctests = false.",
+            e.name
+        )));
+    }
     // `default_profile` must name an existing profile - catch a typo at load
     // time instead of at `brokkr check` time. (Checked even when `profiles` is
     // empty: a `default_profile` set with no profiles defined is always wrong.)

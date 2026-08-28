@@ -50,7 +50,7 @@
 // not the first.
 
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::output::CapturedOutput;
 use crate::test_runner::{effective_test_threads, HungTest};
@@ -66,7 +66,11 @@ struct BinaryRun {
     hung: Option<HungTest>,
     timed_out: bool,
     completed: Vec<(String, Duration)>,
-    slots: u32,
+    /// Wall time for this binary. The sweep's critical path is the maximum of
+    /// these, so the summary can name the binary that IS the floor - the one
+    /// piece of information that tells a reader which binary to split, merge
+    /// or move to the serial lane.
+    elapsed: Duration,
 }
 
 /// A counting semaphore over the sweep's in-flight test budget.
@@ -225,6 +229,7 @@ fn run_one_binary(
         libtest_extra,
     )?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let started = Instant::now();
     let run = test_runner::run_libtest_parallel(
         &arg_refs,
         project_root,
@@ -247,7 +252,7 @@ fn run_one_binary(
         hung,
         timed_out: run.timed_out,
         completed: run.completed,
-        slots,
+        elapsed: started.elapsed(),
     })
 }
 
@@ -269,20 +274,17 @@ fn run_parallel_sweep(
     commands: bool,
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
+    let sweep_started = Instant::now();
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
 
-    // Doctests live in the `--doc` pseudo-target, which has no `--list`-able
-    // executable and so is not one of the binaries this lane fans out over.
-    // Announced rather than swallowed, on the same reasoning as the
-    // process-isolated lane: a project that set `[test] doctests = true` is
-    // owed the news that this sweep did not honour it.
-    if doctests {
-        output::warn(&format!(
-            "test {}: doctests are not run on a `parallel` sweep (no test \
-             binary to fan out over); run them from a sweep without `parallel`",
-            sweep.label
-        ));
-    }
+    // Doctests are not reachable from this lane (they live in the `--doc`
+    // pseudo-target, which has no binary to fan out over), but this is NOT
+    // where that is reported: `[test] doctests = true` alongside a `parallel`
+    // entry is refused at config load. A per-run warning would be printed on
+    // every green run forever for a decision that only needs making once, and
+    // a gate whose normal output contains a warning has taught its readers to
+    // skip warnings.
+    let _ = doctests;
 
     let env_full = merged_env(&sweep.env, project_env);
     let env_refs: Vec<(&str, &str)> = env_full
@@ -345,12 +347,20 @@ fn run_parallel_sweep(
     // is whole - the ordering that puts the critical path first.
     planned.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.target.cmp(&b.0.target)));
 
+    // Split here on purpose. Everything above is cargo building and listing;
+    // everything below is tests actually running. Reporting one number for
+    // both would have said "1429 passed in 40.5s" for a fan-out that took
+    // half a second, which is the opposite of what a lane sold on wall time
+    // should tell its reader.
+    let build_elapsed = sweep_started.elapsed();
     output::run_msg(&format!(
-        "test {}: {} test binaries in parallel, budget {} test(s) in flight",
+        "test {}: {} {}, budget {} in flight",
         sweep.label,
         planned.len(),
+        if planned.len() == 1 { "binary" } else { "binaries" },
         budget
     ));
+    let fanout_started = Instant::now();
 
     let pool = Budget::new(budget);
     let mut runs: Vec<Result<BinaryRun, DevError>> = Vec::new();
@@ -391,7 +401,7 @@ fn run_parallel_sweep(
         }
     });
 
-    report_runs(project_root, sweep, runs, raw, timings)
+    report_runs(project_root, sweep, runs, raw, fanout_started, build_elapsed, timings)
 }
 
 /// Render every binary's buffered output and decide the sweep's verdict.
@@ -406,11 +416,17 @@ fn report_runs(
     sweep: &ResolvedSweep,
     runs: Vec<Result<BinaryRun, DevError>>,
     raw: bool,
+    started: Instant,
+    build_elapsed: Duration,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
+    let binaries = runs.len();
+    let mut passed = 0usize;
+    let mut slowest = (String::new(), Duration::ZERO);
     let mut ok = true;
     for run in runs {
         let run = run?;
+        passed += run.completed.len();
         if let Some(out) = timings.as_deref_mut() {
             for (name, elapsed) in run.completed {
                 out.push(TestTiming {
@@ -462,6 +478,10 @@ fn report_runs(
             ok = false;
             continue;
         }
+        // A passing binary prints NOTHING. Thirty-five green lines say only
+        // what one summary line says, and a reader who has learned to scroll
+        // past the normal case will scroll past the abnormal one too. `--raw`
+        // still gets everything, which is what `--raw` is for.
         if raw {
             if !stderr.is_empty() {
                 print!("{stderr}");
@@ -469,12 +489,37 @@ fn report_runs(
             if !stdout.is_empty() {
                 print!("{stdout}");
             }
-        } else {
-            output::run_msg(&format!(
-                "test {}: {} ok ({} slot(s))",
-                sweep.label, run.label, run.slots
-            ));
         }
+        if run.elapsed > slowest.1 {
+            slowest = (run.label.clone(), run.elapsed);
+        }
+    }
+
+    // The summary earns its line by carrying what no other line can: the wall
+    // time, and WHICH binary was the critical path. A parallel sweep finishes
+    // when its slowest binary finishes, so that name is the answer to "what do
+    // I do next" - split it, or move it to the serial lane, or leave it alone
+    // because it is already the floor.
+    if ok {
+        // The slowest binary IS the sweep's floor, so naming it is the whole
+        // actionable content - it is the one to split, or to move to the
+        // serial lane. Omitted for a single binary, where it would only
+        // restate the line's own duration.
+        let critical = if binaries > 1 {
+            format!(", slowest {} {:.1}s", slowest.0, slowest.1.as_secs_f64())
+        } else {
+            String::new()
+        };
+        output::run_msg(&format!(
+            "test {}: {} passed in {:.1}s ({} {}, built in {:.1}s{})",
+            sweep.label,
+            passed,
+            started.elapsed().as_secs_f64(),
+            binaries,
+            if binaries == 1 { "binary" } else { "binaries" },
+            build_elapsed.as_secs_f64(),
+            critical,
+        ));
     }
 
     Ok(ok)

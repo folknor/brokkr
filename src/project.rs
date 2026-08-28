@@ -185,17 +185,10 @@ mod tests {
     use super::find_config_dir;
     use std::fs;
 
-    /// A fresh, empty scratch dir under the crate's gitignored `target/`
-    /// (project rules forbid `/tmp`).
+    /// A fresh, empty scratch dir for one test. `test_name` must be unique
+    /// within this module - the allocator enforces that.
     fn tmpdir(test_name: &str) -> std::path::PathBuf {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/project")
-            .join(test_name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("project", test_name)
     }
 
     #[test]

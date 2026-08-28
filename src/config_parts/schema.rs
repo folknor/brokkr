@@ -2127,7 +2127,30 @@ pub struct ResolvedPaths {
 #[serde(deny_unknown_fields)]
 pub struct ParallelBinaries {
     /// Tests allowed in flight across the sweep. A binary claims
-    /// `min(its test count, remaining budget)` slots, at least one, and runs
-    /// under `--test-threads=<claim>`.
-    pub budget: u32,
+    /// `min(its test count, budget)` slots, at least one, and runs under
+    /// `--test-threads=<claim>`.
+    ///
+    /// Unset means **the physical cores sharing one last-level cache** - a
+    /// full CCX/CCD on AMD, the die on Intel (see `crate::cpu_topology`).
+    /// Not logical CPUs: two tests on the SMT siblings of one core contend
+    /// for that core, and on a chiplet part two tests on separate dies pay
+    /// fabric latency on every shared line. Both look like parallelism
+    /// without delivering it, and a default that overstates the machine
+    /// turns a lane meant to save wall time into one that spends it.
+    #[serde(default)]
+    pub budget: Option<u32>,
+}
+
+impl ParallelBinaries {
+    /// The budget to run under, resolving the unset case against this
+    /// machine's cache domain.
+    ///
+    /// Resolved at config load rather than at run time so the number is
+    /// visible to everything downstream - `brokkr env` reports the same
+    /// figure this returns, which is what makes a machine-dependent default
+    /// auditable rather than mysterious.
+    pub fn resolved_budget(self) -> u32 {
+        self.budget
+            .unwrap_or_else(crate::cpu_topology::cache_domain_cores_or_default)
+    }
 }

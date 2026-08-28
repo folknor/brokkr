@@ -181,18 +181,10 @@ mod tests {
 
     use super::*;
 
+    /// A fresh scratch dir for one test. `test_name` must be unique within
+    /// this module - see `crate::test_scratch`.
     fn tmpdir(test_name: &str) -> PathBuf {
-        // Per project rules: no /tmp. CARGO_TARGET_TMPDIR is only set
-        // for integration tests; unit tests inside `src/` use a fixed
-        // path under the crate's `target/` (which is gitignored).
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp/artefacts")
-            .join(test_name);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("artefacts", test_name)
     }
 
     #[test]
