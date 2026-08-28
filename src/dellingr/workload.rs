@@ -119,11 +119,34 @@ pub(crate) fn resolve(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
+    use std::sync::Mutex;
 
     /// A fresh scratch dir under the crate's gitignored `target/`
     /// (project rules forbid `/tmp`).
+    ///
+    /// `test_name` MUST be unique across this module, because the first thing
+    /// this does is delete the directory. Two tests sharing a name delete each
+    /// other's scratch mid-run, which under a serial lane is invisible and
+    /// under a parallel one is an intermittent `DirectoryNotEmpty` or a
+    /// vanished `brokkr.toml` - a flake that reads as a bug in the code under
+    /// test. That is not a hypothetical: a shared `"cfg"` dir inside
+    /// `config_with` did exactly this, and stayed hidden until the suite ran
+    /// several tests at once.
+    ///
+    /// So uniqueness is asserted rather than trusted. A repeat name fails
+    /// loudly here, at the moment it is introduced, instead of becoming a race
+    /// somebody has to reproduce later.
     fn tmpdir(test_name: &str) -> PathBuf {
+        static TAKEN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+        assert!(
+            TAKEN.lock().unwrap().insert(test_name.to_owned()),
+            "two tests share the scratch dir name {test_name:?}; tmpdir deletes \
+             the directory on entry, so a shared name means they delete each \
+             other's files. Give each test its own name."
+        );
+
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target/test-tmp/dellingr")
             .join(test_name);
@@ -134,11 +157,17 @@ mod tests {
         dir
     }
 
-    /// Build a `DevConfig` carrying just the `[dellingr]` block under test.
-    fn config_with(toml_src: &str) -> DevConfig {
-        let dir = tmpdir("cfg");
+    /// Build a `DevConfig` carrying just the `[dellingr]` block under test,
+    /// with `brokkr.toml` written into the caller's OWN scratch dir.
+    ///
+    /// Takes the dir rather than allocating one: a helper that allocated its
+    /// own would have to name it, and any fixed name is shared by every caller
+    /// (see `tmpdir`). Writing into the caller's root also matches how the
+    /// config is really found - `project_root` and the directory holding
+    /// `brokkr.toml` are the same place in every non-test path.
+    fn config_with(dir: &Path, toml_src: &str) -> DevConfig {
         fs::write(dir.join("brokkr.toml"), toml_src).unwrap();
-        crate::config::load(&dir).unwrap().1
+        crate::config::load(dir).unwrap().1
     }
 
     const SRC: &str = "-- workload\n";
@@ -164,7 +193,7 @@ mod tests {
         let root = tmpdir("ok");
         let digest = src_digest(&root);
         write_workload(&root, "examples/fields/read.lua", SRC);
-        let cfg = config_with(&format!(
+        let cfg = config_with(&root, &format!(
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"examples/fields/read.lua\"\n\
              xxh128 = \"{digest}\"\n"
@@ -181,7 +210,7 @@ mod tests {
         let digest = src_digest(&root);
         write_workload(&root, "bench/read.lua", SRC);
         write_workload(&root, "examples/fields/read.lua", SRC);
-        let cfg = config_with(&format!(
+        let cfg = config_with(&root, &format!(
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
              xxh128 = \"{digest}\"\n\
@@ -200,7 +229,7 @@ mod tests {
         let root = tmpdir("hp_missing");
         let digest = src_digest(&root);
         write_workload(&root, "bench/read.lua", SRC);
-        let cfg = config_with(&format!(
+        let cfg = config_with(&root, &format!(
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
              xxh128 = \"{digest}\"\n"
@@ -244,7 +273,7 @@ mod tests {
         let digest = src_digest(&root);
         write_workload(&root, "bench/read.lua", SRC);
         write_workload(&root, "examples/fields/read.lua", "-- retuned\n");
-        let cfg = config_with(&format!(
+        let cfg = config_with(&root, &format!(
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
              xxh128 = \"{digest}\"\n\
@@ -273,7 +302,7 @@ mod tests {
         // Registered with SRC's digest, but the file on disk says otherwise -
         // exactly the silent-history-poisoning case the pin exists to catch.
         write_workload(&root, "w.lua", "-- retuned\n");
-        let cfg = config_with(&format!(
+        let cfg = config_with(&root, &format!(
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.w]\nfile = \"w.lua\"\nxxh128 = \"{digest}\"\n"
         ));
@@ -293,6 +322,7 @@ mod tests {
     fn unknown_workload_lists_the_registered_names() {
         let root = tmpdir("unknown");
         let cfg = config_with(
+            &root,
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.alpha]\nfile = \"a.lua\"\nxxh128 = \"00\"\n\n\
              [dellingr.workloads.beta]\nfile = \"b.lua\"\nxxh128 = \"11\"\n",
@@ -309,6 +339,7 @@ mod tests {
     fn missing_file_reports_the_registration_not_just_the_path() {
         let root = tmpdir("missing");
         let cfg = config_with(
+            &root,
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.w]\nfile = \"nope/w.lua\"\nxxh128 = \"00\"\n",
         );
@@ -320,9 +351,19 @@ mod tests {
         assert!(msg.contains("nope/w.lua"), "{msg}");
     }
 
+    // The guard itself: a reused scratch name must fail here rather than
+    // becoming a race in whichever two tests happened to share it.
+    #[test]
+    #[should_panic(expected = "share the scratch dir name")]
+    fn a_reused_scratch_name_is_refused() {
+        let _first = tmpdir("dupe_probe");
+        let _second = tmpdir("dupe_probe");
+    }
+
     #[test]
     fn absent_dellingr_block_explains_what_to_write() {
-        let cfg = config_with("project = \"dellingr\"\n");
+        let root = tmpdir("no_block");
+        let cfg = config_with(&root, "project = \"dellingr\"\n");
         let err = config(&cfg).unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
