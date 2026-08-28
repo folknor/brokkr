@@ -952,13 +952,28 @@ alternative would be guessing.
 
 ### Doctests
 
-`[test] doctests = true` alongside any `parallel` entry is a **load error**.
 Doctests live in cargo's `--doc` pseudo-target, which has no binary for the
-lane to fan out over, so the sweep cannot run them. Refused at load rather than
-warned about at run time: the conflict is a property of the config, so it needs
-deciding once, and a gate whose every green run carries a warning has taught
-its readers to skip warnings. Give the doctests a `[[check]]` entry without
-`parallel`.
+lane to fan out over, so a `parallel` sweep cannot run them. They therefore
+need at least one entry **without** `parallel` to run under, and two load
+errors enforce that:
+
+- **Every `[[check]]` entry sets `parallel`** - there is nowhere for doctests
+  to run at all.
+- **A `certifies = "complete"` profile runs only parallel sweeps** - the
+  profile would certify a run in which the project's declared doctests never
+  executed. Checked per complete profile rather than globally, because a
+  partial profile may legitimately be all-parallel: it certifies nothing.
+
+Both are load errors rather than run-time warnings: the conflict is a property
+of the config, so it needs deciding once, and a gate whose every green run
+carries a warning has taught its readers to skip warnings.
+
+A mixed config is the intended shape and loads cleanly - `fanout` with
+`parallel`, `rest` without, both in the complete profile's `sweeps`. Note that
+an earlier version refused *any* `parallel` entry while its message told you to
+add a serial sibling, so the remedy it named did not clear it; the only escape
+was `doctests = false` plus a quarantine, which the complete gate then
+correctly called an unaudited gap.
 
 ### What it does not do
 

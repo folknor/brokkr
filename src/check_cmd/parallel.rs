@@ -116,6 +116,64 @@ impl Budget {
     }
 }
 
+/// Split cargo-level extra args into target selectors and everything else.
+///
+/// `brokkr check -- --test read_paths` is a documented workflow, and on this
+/// lane it needs different handling from every other cargo arg. A selector
+/// must shape WHICH BINARIES the sweep plans; every other arg (`--release`,
+/// `--no-fail-fast`, a feature flag) belongs on each per-binary invocation.
+///
+/// Getting this wrong is not a cosmetic bug. Each per-binary command already
+/// carries its own selector, and **cargo unions selection flags** - so
+/// appending `--test cli` to all of them turns every invocation into
+/// `cargo test -p pkg --lib --test cli`, running `cli` once per planned
+/// binary, pulling in binaries the user meant to exclude, and putting more
+/// tests in flight than the budget allows. Meanwhile the plan itself ignored
+/// the selector, because enumeration never saw it.
+///
+/// Value-taking selectors consume their following token; the `--test=NAME`
+/// form carries it inline. An unknown flag is left in `rest`, which is the
+/// safe direction: a non-selector wrongly treated as a selector would silently
+/// change the planned binary set, while a selector wrongly left in `rest` is
+/// the behaviour this function exists to fix and would be caught by the same
+/// symptom.
+fn partition_target_selectors(args: &[String]) -> (Vec<String>, Vec<String>) {
+    const VALUED: [&str; 4] = ["--test", "--bin", "--example", "--bench"];
+    const BARE: [&str; 8] = [
+        "--lib",
+        "--doc",
+        "--tests",
+        "--bins",
+        "--examples",
+        "--benches",
+        "--all-targets",
+        "--doctests",
+    ];
+
+    let mut selectors = Vec::new();
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let head = a.split_once('=').map_or(a.as_str(), |(h, _)| h);
+        if a.contains('=') && VALUED.contains(&head) {
+            selectors.push(a.clone());
+        } else if VALUED.contains(&a.as_str()) {
+            selectors.push(a.clone());
+            if let Some(v) = args.get(i + 1) {
+                selectors.push(v.clone());
+                i += 1;
+            }
+        } else if BARE.contains(&a.as_str()) {
+            selectors.push(a.clone());
+        } else {
+            rest.push(a.clone());
+        }
+        i += 1;
+    }
+    (selectors, rest)
+}
+
 /// How many budget slots one binary claims: its share, in proportion to how
 /// many tests it holds.
 ///
@@ -327,6 +385,10 @@ fn run_parallel_sweep(
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+    // Selectors narrow the PLAN; the rest rides on each per-binary command.
+    // See `partition_target_selectors` for why mixing the two is a real bug
+    // rather than a tidiness question.
+    let (extra_selectors, cargo_extra) = partition_target_selectors(cargo_extra);
 
     // Doctests are not reachable from this lane (they live in the `--doc`
     // pseudo-target, which has no binary to fan out over), but this is NOT
@@ -347,11 +409,18 @@ fn run_parallel_sweep(
     // below re-enter cargo, but the artifacts are already current, so they
     // resolve to a no-op rebuild rather than N concurrent compiles of the same
     // crate graph fighting over the target dir lock.
-    let selection = sweep_selection_args(sweep, packages);
+    let mut selection = sweep_selection_args(sweep, packages);
+    selection.extend(extra_selectors.iter().cloned());
     let Some(all) = test_binaries(project_root, &selection, &env_refs, commands)? else {
         return Ok(false);
     };
-    let binaries = filter_binaries(&all, &sweep.cargo_test_filters);
+    // The sweep's own `--test` filters UNION with any the caller supplied,
+    // matching cargo's own semantics for repeated selection flags - the
+    // enumeration above already unions them, so narrowing to one side here
+    // would drop binaries the build was told to produce.
+    let mut target_filters = sweep.cargo_test_filters.clone();
+    target_filters.extend(extra_selectors.iter().cloned());
+    let binaries = filter_binaries(&all, &target_filters);
     if binaries.is_empty() {
         return Err(DevError::Config(format!(
             "sweep '{}' has `parallel` but its selection matched no test \
@@ -647,6 +716,62 @@ mod parallel_lane_tests {
             let claim = claim_slots(count, u64::from(count), budget);
             assert!((1..=budget).contains(&claim), "count {count}");
         }
+    }
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    // THE OTHER REGRESSION. Each per-binary command already carries its own
+    // selector and cargo UNIONS selection flags, so a `--test cli` copied
+    // onto all of them ran `cli` once per planned binary and dragged in
+    // binaries the caller meant to exclude. Selectors shape the plan instead.
+    #[test]
+    fn target_selectors_are_split_out_of_the_per_binary_args() {
+        let (sel, rest) = partition_target_selectors(&v(&["--test", "read_paths"]));
+        assert_eq!(sel, v(&["--test", "read_paths"]));
+        assert!(rest.is_empty());
+    }
+
+    // A value-taking selector must carry its value across with it; leaving
+    // the name behind would make the plan select nothing and the per-binary
+    // command inherit a stray positional.
+    #[test]
+    fn a_selectors_value_travels_with_it_in_both_spellings() {
+        let (sel, rest) = partition_target_selectors(&v(&["--bin", "cli", "--release"]));
+        assert_eq!(sel, v(&["--bin", "cli"]));
+        assert_eq!(rest, v(&["--release"]));
+
+        let (sel, rest) = partition_target_selectors(&v(&["--test=cli", "--release"]));
+        assert_eq!(sel, v(&["--test=cli"]));
+        assert_eq!(rest, v(&["--release"]));
+    }
+
+    #[test]
+    fn bare_selectors_need_no_value_and_non_selectors_are_untouched() {
+        let (sel, rest) =
+            partition_target_selectors(&v(&["--lib", "--no-fail-fast", "--tests"]));
+        assert_eq!(sel, v(&["--lib", "--tests"]));
+        assert_eq!(rest, v(&["--no-fail-fast"]));
+    }
+
+    // An unknown flag stays in `rest`: treating it as a selector would
+    // silently change which binaries the sweep plans, which is the worse
+    // direction to be wrong in.
+    #[test]
+    fn an_unknown_flag_is_left_for_the_per_binary_command() {
+        let (sel, rest) = partition_target_selectors(&v(&["--offline", "-j", "4"]));
+        assert!(sel.is_empty());
+        assert_eq!(rest, v(&["--offline", "-j", "4"]));
+    }
+
+    // A trailing value-taking selector with nothing after it must not index
+    // past the end.
+    #[test]
+    fn a_dangling_selector_does_not_panic() {
+        let (sel, rest) = partition_target_selectors(&v(&["--test"]));
+        assert_eq!(sel, v(&["--test"]));
+        assert!(rest.is_empty());
     }
 
     // THE REGRESSION THIS FILE EXISTS TO PREVENT. Under the old

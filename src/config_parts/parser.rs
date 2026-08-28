@@ -1381,21 +1381,24 @@ fn validate_check_against_test(
         return Ok(());
     };
     // A `parallel` sweep fans out over test BINARIES, and doctests have none -
-    // they live in cargo's `--doc` pseudo-target. Refused here rather than
-    // warned about at run time: the conflict is a property of the config, so
-    // it needs deciding once, and a gate whose every green run carries a
-    // warning has taught its readers to skip warnings. The fix is a second
-    // `[[check]]` entry without `parallel` for the doctests to run under.
-    if t.doctests
-        && let Some(e) = check.iter().find(|e| e.parallel.is_some())
-    {
-        return Err(DevError::Config(format!(
-            "[test] doctests = true conflicts with `parallel` on [[check]] \
-             entry '{}': a parallel sweep fans out over test binaries, and \
-             doctests have none. Give them a [[check]] entry without \
-             `parallel`, or set doctests = false.",
-            e.name
-        )));
+    // they live in cargo's `--doc` pseudo-target. So doctests need at least
+    // one entry without `parallel` to run under.
+    //
+    // The condition is "NOWHERE to run them", not "any parallel entry
+    // exists". An earlier version tested the latter while its message told
+    // the reader to add a serial sibling - so the remedy it named did not
+    // clear it, and the only way out was `doctests = false` plus a
+    // quarantine, which the complete-profile gate then correctly calls an
+    // unaudited gap. A config that offers an escape must honour it; the
+    // check and its message have to be the same check.
+    if t.doctests && !check.is_empty() && check.iter().all(|e| e.parallel.is_some()) {
+        return Err(DevError::Config(
+            "[test] doctests = true, but every [[check]] entry sets \
+             `parallel`. A parallel sweep fans out over test binaries and \
+             doctests have none, so there is nowhere for them to run. Add a \
+             [[check]] entry without `parallel`, or set doctests = false."
+                .into(),
+        ));
     }
     // `default_profile` must name an existing profile - catch a typo at load
     // time instead of at `brokkr check` time. (Checked even when `profiles` is
@@ -1694,6 +1697,26 @@ fn validate_complete_universe(
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
     referenced_check_entries(&t.profiles, name, &mut visited, &mut referenced);
+    // Doctests run only in a sweep without `parallel`. A profile whose every
+    // sweep is parallel therefore runs none - and a `complete` profile that
+    // certifies a run in which the project's declared doctests never executed
+    // is claiming coverage it does not have. Checked per complete profile
+    // rather than globally: a partial `fast` profile may legitimately be all
+    // parallel, because it certifies nothing.
+    if t.doctests && !referenced.is_empty() {
+        let serial = check
+            .iter()
+            .filter(|e| referenced.contains(&e.name))
+            .any(|e| e.parallel.is_none());
+        if !serial {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{name}] certifies \"complete\" and \
+                 [test] doctests = true, but every sweep it runs sets \
+                 `parallel`, which cannot execute doctests. Add a [[check]] \
+                 entry without `parallel` to this profile's sweeps."
+            )));
+        }
+    }
     let unreferenced: Vec<&str> = check
         .iter()
         .filter(|e| !e.curated)

@@ -724,8 +724,15 @@ copy-pasteable cargo line, and its output. Every binary's output is buffered
 and reported after the join in plan order, so concurrent binaries cannot braid
 their failures together and two identical red runs produce identical output.
 
-Mutually exclusive with `isolation = "process"` (refused before any test runs),
-and `[test] doctests = true` alongside a `parallel` entry is a load error.
+Mutually exclusive with `isolation = "process"` (refused before any test runs).
+Doctests cannot run on a parallel sweep, so `[test] doctests = true` requires
+at least one entry without `parallel` - and a `certifies = "complete"` profile
+must include one among its own sweeps. Both are load errors.
+
+Cargo target selectors passed after `--` (`brokkr check -- --test read_paths`)
+shape which binaries the sweep plans, rather than being appended to each
+per-binary command - cargo unions selection flags, so copying a selector onto
+every invocation would run that target once per planned binary.
 Full semantics, and the rule for partitioning a suite across a parallel and a
 serial entry, are in `docs/brokkr.toml.md`.
 
