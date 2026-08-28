@@ -919,9 +919,13 @@ is weighted cheap, is starved next run, and becomes the pole again. It showed
 as a clean two-cycle at a fixed budget on a warm machine - the pole alternating
 between the same two binaries, the sweep swinging between 13.8s and 19.5s, and
 the claim spread collapsing run over run (1-7, 1-6, 1-4, 1-3) rather than
-converging. Serial cost does not move when the allocation moves. Roughly
+converging. Left running it reached `1-1` - every binary at the floor - and
+took 55.8s against a ~50s baseline for not fanning out at all, so the loop's
+terminal state lost to the thing the lane exists to beat while still reporting
+success. Serial cost does not move when the allocation moves. Roughly
 `wall = max(serial / k, slowest_test)`, so wall conflates what is being
-measured with what was chosen.
+measured with what was chosen: wall time is what you want to know, and
+precisely therefore not what you may feed back.
 
 **Claims are capped where extra threads stop helping.** That same identity
 says no binary finishes before its longest single test, so slots past

@@ -31,6 +31,14 @@
 // over run (1-7, 1-6, 1-4, 1-3) instead of converging. Feeding back the
 // outcome of your own decision as its input is a control loop, not a measure.
 //
+// AND IT DID NOT MERELY CYCLE - IT COLLAPSED. Left running, the spread reached
+// `1-1`, every binary at the floor, and the sweep took 55.8s against a ~50s
+// baseline for not fanning out at all. So the terminal state of the feedback
+// loop was losing to the thing the lane exists to beat, while still reporting
+// success. That is the reason this stores serial cost and not the obvious
+// quantity: wall time is what you want to know, and precisely therefore not
+// what you may measure.
+//
 // Serial cost - the sum of the binary's own tests' durations - does not move
 // when the allocation moves. Roughly `wall = max(serial / k, slowest_test)`,
 // so wall conflates the thing being measured with the thing being chosen, and
