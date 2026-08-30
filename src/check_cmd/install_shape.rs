@@ -10,8 +10,14 @@
 // every workspace-selected sweep and fails at install time - on the deploy
 // path, which is the worst place to learn about it. First production run of
 // this phase caught exactly that: a web bridge relying on hyper-util
-// features reqwest contributed, with the reliance written down in a manifest
-// comment as a saving.
+// features reqwest contributed - and the reliance had its rationale written
+// directly above the dependency line ("pulled through the network stack...
+// the features are additive"), a comment load-bearing in the wrong
+// direction. Prose that explains why a resolve is fine cannot be trusted in
+// either direction; only the install-shaped resolve could falsify it, which
+// is also why this header records MEASUREMENTS (below) rather than
+// reasoning - so the next reader cannot argue their way back into the batch
+// from first principles, the same move that comment made.
 //
 // ONE INVOCATION PER PACKAGE, deliberately. RFC 3692 describes multi-`-p`
 // package mode as equivalent to N separate builds, and measured against a
