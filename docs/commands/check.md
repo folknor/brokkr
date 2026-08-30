@@ -948,17 +948,34 @@ third-party feature (a tokio, hyper, or upstream-crate feature, not just the
 workspace's own) is green under every workspace-selected sweep and fails at
 install time, on the deploy path.
 
-The phase closes that gap: one `cargo check` over the `[bin] install`
-packages under `-Zfeature-unification` with
-`resolver.feature-unification="package"` - cargo's mode that resolves each
-selected package as though it were selected alone, which is exactly
-`cargo install`'s boundary. `--bins` (install builds only bins, no
-dev-units), `--release` unless `[bin] debug = true` (the profile install
-uses), `--keep-going` (every broken install package in one run), and the
-`[lints]` allows through the same rustflags plumbing as the test phase. The
-CLI `--config` outranks a repo's committed `.cargo/config.toml`, so a
-workspace-mode unification pin (adopted for the parallel lane) and this
-phase coexist.
+The phase closes that gap: **one `cargo check` per `[bin] install` package**
+under `-Zfeature-unification` with `resolver.feature-unification="package"` -
+cargo's mode that resolves a selected package as though it were selected
+alone, which is exactly `cargo install`'s boundary. `--bins` (install builds
+only bins, no dev-units), `--release` unless `[bin] debug = true` (the
+profile install uses), and the `[lints]` allows through the same rustflags
+plumbing as the test phase. The CLI `--config` outranks a repo's committed
+`.cargo/config.toml`, so a workspace-mode unification pin (adopted for the
+parallel lane) and this phase coexist. Every package is checked even after
+an earlier one fails, so one run reports the whole install set.
+
+Per package rather than one batched multi-`-p` invocation, from a measured
+false positive: cargo dedupes units across a batched graph, so with two
+feature variants of a shared dependency in the batch, a path dependency
+whose own features do not vary dedupes onto one variant while a crate
+between them compiles against both - producing "expected `AccountId`, found
+`AccountId`" errors in an innocent intermediate crate, a shape no actual
+`cargo install` can resolve its way into. Per-package invocations are the
+advertised boundary, and they attribute every error to the package whose
+resolve produced it. When a single package's resolve still builds two
+feature variants of one crate version, the failure output names the crate -
+rustc's "mismatched types" between identical type names otherwise reads as
+version skew that is not there.
+
+CLI `-p` intersects with the install list like every other phase: named
+install packages are checked, the rest dropped with a note, and an emptied
+intersection skips the phase visibly. (Moot under `--gate`, which refuses
+`-p` outright.)
 
 What a green run claims, precisely: **each install package's binary source
 compiles without features contributed solely by sibling workspace roots.**
@@ -980,9 +997,9 @@ Two refusals keep it honest:
 On failure, the errors are ordinary rustc errors against code that compiles
 fine in the rest of the run - genuinely confusing without context - so the
 phase names the mechanism: it diffs the workspace resolve against the
-install-shaped resolve and prints which features each dependency loses
-("hyper v1.11.0: server"), with the usual fix being to declare the feature
-in the install package's own manifest.
+failing package's install-shaped resolve and prints which features each
+dependency loses ("hyper v1.11.0: server"), with the usual fix being to
+declare the feature in the install package's own manifest.
 
 When it runs: `[bin] install_feature_check = "off" | "gate" | "always"`,
 default `gate` - only under a `certifies = "complete"` profile, because
@@ -991,6 +1008,11 @@ and is priced for the pre-landing run, not the edit loop. The phase is inert
 without an explicit `[bin] install` list, and the key without the list is a
 load error (a knob that looks armed but can never fire). A partial profile
 may name `install_feature` in `skip_phases`.
+
+The cost is not only the phase's own runtime: its units land in the shared
+target dir, and a first gate run on a workspace-unification-pinned tree has
+been measured to invalidate warm test artifacts, taxing the *next* fast-loop
+run too. That asymmetry is part of why `gate` is the default.
 
 ## Dead `skip` / `only` filters
 

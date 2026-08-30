@@ -504,6 +504,7 @@ fn run_build_phases(
         run_install_feature_phase(
             a.project_root,
             a.bin_cfg,
+            a.packages,
             a.certifies,
             &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
             a.commands,
