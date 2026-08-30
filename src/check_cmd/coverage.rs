@@ -238,9 +238,9 @@ fn run_coverage_phase(
             ));
         }
         output::error(&format!(
-            "{} orphaned pair(s): every skipped test needs a [[quarantine]] \
+            "{}: every skipped test needs a [[quarantine]] \
              entry with an issue, or a lane that runs it under this build shape",
-            report.orphans.len()
+            output::count(report.orphans.len(), "orphaned pair")
         ));
     }
 
@@ -266,12 +266,13 @@ fn run_coverage_phase(
 
     if !dead.is_empty() {
         output::error(&format!(
-            "{} dead `skip`/`only` filter(s): a filter that selects nothing is a \
+            "{} dead `skip`/`only` filter{}: a filter that selects nothing is a \
              name that drifted, not a no-op - a dead `skip` no longer excludes \
              what it names, and a dead `only` leaves its lane evaluating \
              nothing while still reading as a gate. Fix the substring or delete \
              the filter.",
-            dead.len()
+            dead.len(),
+            if dead.len() == 1 { "" } else { "s" }
         ));
     }
 

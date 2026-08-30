@@ -452,7 +452,7 @@ stage   = "pre-clippy"  # pre-clippy | pre-test | post-test (default: pre-clippy
 
 - `name` - label shown when the entry **fails** (`beta: stdout did not match
   "ok"`). A passing stage prints one collapsed line, `script-check: ok (N
-  check(s))`, rather than a line per entry: a passing gate's name carries
+  checks)`, rather than a line per entry: a passing gate's name carries
   nothing to act on, while the count still says which corpus passed. A stage
   with some failures prints `script-check: M of N ok` above the failure block.
 - `command` - run as `sh -c "<command>"`, cwd = the code tree, so

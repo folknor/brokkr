@@ -132,6 +132,14 @@ impl BuildConfig {
 
 pub struct ProjectInfo {
     pub target_dir: PathBuf,
+    /// Whether a bare (no `-p`) cargo selection selects every workspace
+    /// member: `workspace_default_members` equals `workspace_members`. False
+    /// for a `[workspace] default-members` subset and for a non-virtual
+    /// workspace whose root package is the default. The parallel test lane
+    /// reads this to decide whether workspace-mode feature unification is a
+    /// faithful description of its own prebuild - see
+    /// `check_cmd/parallel.rs`.
+    pub bare_selection_is_whole_workspace: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +176,30 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
 
     Ok(ProjectInfo {
         target_dir: PathBuf::from(target_dir),
+        bare_selection_is_whole_workspace: members_all_default(&val),
     })
+}
+
+/// Whether `workspace_default_members` covers every `workspace_members`
+/// entry. Compared as sets: the two lists carry the same package-id strings
+/// but cargo does not promise an order. A missing `workspace_default_members`
+/// (cargo before 1.71) reads as false - the conservative direction, since the
+/// only consumer uses true to widen build semantics.
+fn members_all_default(metadata: &serde_json::Value) -> bool {
+    let ids = |key: &str| -> Option<std::collections::BTreeSet<&str>> {
+        Some(
+            metadata
+                .get(key)?
+                .as_array()?
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect(),
+        )
+    };
+    match (ids("workspace_members"), ids("workspace_default_members")) {
+        (Some(members), Some(default)) => default == members,
+        _ => false,
+    }
 }
 
 /// Refuse, in brokkr's own words, to run cargo somewhere that is not a Rust
@@ -534,5 +565,45 @@ fn dump_build_stderr(stderr: &[u8]) {
     let text = String::from_utf8_lossy(stderr);
     if !text.is_empty() {
         output::error(&text);
+    }
+}
+
+#[cfg(test)]
+mod project_info_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::members_all_default;
+
+    fn meta(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    // Order must not matter: cargo promises the same package-id strings in
+    // both lists, not the same sequence.
+    #[test]
+    fn whole_workspace_is_recognized_regardless_of_order() {
+        let m = meta(
+            r#"{"workspace_members":["id-a","id-b"],
+                "workspace_default_members":["id-b","id-a"]}"#,
+        );
+        assert!(members_all_default(&m));
+    }
+
+    // A `default-members` subset means a bare selection builds less than the
+    // workspace, so workspace-mode unification would widen semantics.
+    #[test]
+    fn a_default_members_subset_reads_as_not_whole() {
+        let m = meta(
+            r#"{"workspace_members":["id-a","id-b"],
+                "workspace_default_members":["id-a"]}"#,
+        );
+        assert!(!members_all_default(&m));
+    }
+
+    // Old cargo omits the field entirely; the conservative reading is the
+    // only safe one, because the consumer uses true to widen build semantics.
+    #[test]
+    fn a_missing_default_members_field_reads_as_not_whole() {
+        let m = meta(r#"{"workspace_members":["id-a"]}"#);
+        assert!(!members_all_default(&m));
     }
 }

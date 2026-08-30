@@ -866,7 +866,7 @@ fn emit_timings(timings: &[TestTiming], limit: usize, triage: bool, multi_sweep:
         &sorted[..limit]
     };
 
-    let mut msg = format!("timings: {total} test(s), slowest first\n");
+    let mut msg = format!("timings: {}, slowest first\n", output::count(total, "test"));
     for t in displayed {
         let secs = t.elapsed.as_secs_f64();
         if multi_sweep {
@@ -1046,8 +1046,9 @@ fn run_gremlins(
             output::run_msg("fix-gremlins: nothing to fix");
         } else {
             output::run_msg(&format!(
-                "fix-gremlins: rewrote {total} char(s) across {} file(s)",
-                fixed.len()
+                "fix-gremlins: rewrote {} across {}",
+                output::count(total, "char"),
+                output::count(fixed.len(), "file")
             ));
             for f in &fixed {
                 output::run_msg(&format!("  {} ({})", f.path.display(), f.count));
@@ -1157,7 +1158,7 @@ fn run_header(
     let total = violations.len();
     let (displayed, trailer) =
         scope_limit(violations, project_root, limit, triage, |v| v.file.as_path());
-    let mut msg = format!("header: {total} violation(s)\n");
+    let mut msg = format!("header: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
         msg.push_str(&crate::header::format_one(v, &expected));
@@ -1193,18 +1194,18 @@ fn run_textlint(
         // cannot distinguish a clean tree from a rule whose `paths` glob has
         // stopped matching anything.
         output::run_msg(&format!(
-            "textlint: ok ({} rule(s), {} file(s))",
-            rules.len(),
-            scan.files
+            "textlint: ok ({}, {})",
+            output::count(rules.len(), "rule"),
+            output::count(scan.files, "file")
         ));
         return Ok(());
     }
 
-    output::run_msg(&format!("textlint: {} rule(s)", rules.len()));
+    output::run_msg(&format!("textlint: {}", output::count(rules.len(), "rule")));
     let total = violations.len();
     let (displayed, trailer) =
         scope_limit(violations, project_root, limit, triage, |v| v.file.as_path());
-    let mut msg = format!("textlint: {total} violation(s)\n");
+    let mut msg = format!("textlint: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
         msg.push_str(&crate::textlint::format_one(v));
@@ -1243,7 +1244,7 @@ fn run_manifest(
     let total = violations.len();
     let (displayed, trailer) =
         scope_limit(violations, project_root, limit, triage, |v| v.file.as_path());
-    let mut msg = format!("manifest: {total} violation(s)\n");
+    let mut msg = format!("manifest: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
         msg.push_str(&crate::manifest::format_one(v));
@@ -1291,7 +1292,7 @@ fn run_script_checks(
     // silently stopped running its checks is visible as a shrinking number.
     // Failures are unaffected; each one still prints its captured output below.
     if failures.is_empty() {
-        output::run_msg(&format!("script-check: ok ({total} check(s))"));
+        output::run_msg(&format!("script-check: ok ({})", output::count(total, "check")));
         return Ok(());
     }
     if failures.len() < total {
@@ -1365,8 +1366,9 @@ fn run_dependency_rules(
 
     if report.violations.is_empty() {
         output::run_msg(&format!(
-            "dependency rules: ok ({} rule(s), {} workspace package(s))",
-            report.rules, report.packages,
+            "dependency rules: ok ({}, {})",
+            output::count(report.rules, "rule"),
+            output::count(report.packages, "workspace package"),
         ));
         return Ok(());
     }
@@ -1377,7 +1379,7 @@ fn run_dependency_rules(
     } else {
         &report.violations[..limit]
     };
-    let mut msg = format!("dependency rules: {total} violation(s)\n");
+    let mut msg = format!("dependency rules: {}\n", output::count(total, "violation"));
     for violation in displayed {
         msg.push_str("  ");
         msg.push_str(&dependency_rules::format_violation(violation));
@@ -1434,7 +1436,10 @@ fn run_publish_cycle(
     } else {
         &cycles[..limit]
     };
-    let mut msg = format!("publish cycle: {total} cargo publication cycle(s)\n");
+    let mut msg = format!(
+        "publish cycle: {}\n",
+        output::count(total, "cargo publication cycle")
+    );
     for cycle in displayed {
         for line in crate::deps::publish_cycle_lines(cycle) {
             msg.push_str("  ");
@@ -1607,7 +1612,7 @@ fn run_clippy_phase(
     // them means nothing was checked, which must not read as clean.
     if results.is_empty() && !sweeps.is_empty() {
         return Err(DevError::Config(format!(
-            "-p {}: every sweep's config rules the package(s) out; nothing was \
+            "-p {}: every sweep's config rules the selection out; nothing was \
              clippy-checked",
             packages.join(" -p ")
         )));
@@ -2396,7 +2401,10 @@ fn run_test_phase(
     // profile guess (which silently lies when a workspace pins
     // `[profile.test]` overrides, and now also when a sweep opts into
     // release).
-    let target_dir = build::project_info(Some(project_root))?.target_dir;
+    // `whole_workspace` feeds the parallel lane's feature-unification gate;
+    // resolved once out here as a property of the tree, not of any sweep.
+    let build::ProjectInfo { target_dir, bare_selection_is_whole_workspace: whole_workspace } =
+        build::project_info(Some(project_root))?;
 
     let mut ran_any = false;
     for (i, sweep) in sweeps.iter().enumerate() {
@@ -2472,6 +2480,7 @@ fn run_test_phase(
                 raw,
                 doctests,
                 commands,
+                whole_workspace,
                 timings.as_deref_mut(),
             )?
         } else if sweep.process_isolation {
@@ -2514,7 +2523,7 @@ fn run_test_phase(
     // them means zero tests ran, which must not read as green.
     if !ran_any && !sweeps.is_empty() {
         return Err(DevError::Config(format!(
-            "-p {}: every sweep's config rules the package(s) out; zero tests ran",
+            "-p {}: every sweep's config rules the selection out; zero tests ran",
             packages.join(" -p ")
         )));
     }

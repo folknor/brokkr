@@ -55,7 +55,23 @@ fn test_binaries(
 
     if !captured.status.success() {
         output::error(&format!("failing command: cargo {}", args.join(" ")));
-        output::error(&String::from_utf8_lossy(&captured.stderr));
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        output::error(&stderr);
+        // A deliberate hard stop, not a fallback: running the fan-out
+        // without the unification pin recreates the mismatched-graph run it
+        // exists to prevent (see parallel.rs's module header). Scoped to
+        // rejections that name the flag so an ordinary compile error is not
+        // decorated with an irrelevant remedy.
+        if selection.iter().any(|a| a == "-Zfeature-unification")
+            && (stderr.contains("feature-unification") || stderr.contains("nightly"))
+        {
+            output::error(
+                "this cargo does not support -Zfeature-unification, which the \
+                 parallel test lane needs to keep its per-binary runs on the \
+                 prebuild's feature graph. Update the nightly toolchain, or \
+                 drop `parallel` from the [[check]] entry.",
+            );
+        }
         return Ok(None);
     }
     Ok(Some(parse_test_binaries(&String::from_utf8_lossy(

@@ -8,6 +8,7 @@ providers = ["codex"]
 [plantasjen.codex.bugs]
 model = "gpt-5.6-sol"
 effort = "low"
+sandbox = "read-only"
 
 [plantasjen.codex.implement]
 model = "gpt-5.6-sol"
@@ -17,6 +18,7 @@ sandbox = "workspace-write"
 [bygg.codex.bugs]
 model = "gpt-5.6-sol"
 effort = "low"
+sandbox = "read-only"
 
 [bygg.codex.implement]
 model = "gpt-5.6-sol"
@@ -26,6 +28,7 @@ sandbox = "workspace-write"
 [dm6.codex.bugs]
 model = "gpt-5.6-sol"
 effort = "low"
+sandbox = "read-only"
 
 [dm6.codex.implement]
 model = "gpt-5.6-sol"

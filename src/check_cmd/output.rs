@@ -227,11 +227,11 @@ pub(crate) fn describe_sweep(
                 .join(" "),
         );
     } else if !sweep.packages.is_empty() {
-        parts.push(format!("{} pkgs", sweep.packages.len()));
+        parts.push(output::count(sweep.packages.len(), "pkg"));
     } else if for_test && !sweep.test_exclude_packages.is_empty() {
         parts.push(format!(
-            "workspace -{} pkgs",
-            sweep.test_exclude_packages.len()
+            "workspace -{}",
+            output::count(sweep.test_exclude_packages.len(), "pkg")
         ));
     } else {
         parts.push("workspace".into());
@@ -720,9 +720,10 @@ fn run_one_test_sweep(
             String::new()
         };
         output::error(&format!(
-            "cargo test: zero tests ran{label} ({} suite(s), {} filtered out) - \
+            "cargo test: zero tests ran{label} ({}, {} filtered out) - \
              a profile/filter combo collected no work; treat as a wrong-run.",
-            parsed.suites, parsed.filtered_out,
+            output::count(parsed.suites, "suite"),
+            parsed.filtered_out,
         ));
         if !commands {
             output::error(&full_command);
@@ -2126,7 +2127,7 @@ warning: z [too_many_lines]
 
         assert_eq!(
             sweep_run_line("clippy", &ffi, &args, false, false, &[]),
-            "clippy ffi: 1 pkgs, +ffi"
+            "clippy ffi: 1 pkg, +ffi"
         );
         assert_eq!(
             sweep_run_line("clippy", &ffi, &args, true, true, &[]),

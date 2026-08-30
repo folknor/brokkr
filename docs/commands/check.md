@@ -199,7 +199,7 @@ context patterns fragment-tolerant (match `madsim`, not a full single-line
 attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
 engine behind most grep-style convention hooks; see `src/textlint.rs`.
 
-A clean run reports what it covered - `textlint: ok (21 rule(s), 812 file(s))`
+A clean run reports what it covered - `textlint: ok (21 rules, 812 files)`
 - rather than a bare `ok`, matching the `dependency rules` line. The file count
 is files at least one rule applied to, not the tracked-file total, so it is a
 statement about the corpus that was actually scanned: a rule whose `paths` glob
@@ -233,7 +233,7 @@ therefore ignored; only a spawn failure is a hard error. Every entry runs (no
 fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
 each failure prints the full captured stdout/stderr (the diagnostic, never
 truncated by `--limit`). A clean stage prints a single collapsed line -
-`script-check: ok (21 check(s))` - rather than one per entry; the count keeps
+`script-check: ok (21 checks)` - rather than one per entry; the count keeps
 the line falsifiable (a stage that quietly stopped running its checks shows a
 shrinking number) while a passing gate's name carries nothing to act on. A
 partly-failing stage prints `script-check: M of N ok` above the failure block. It fills the gap for gates brokkr's native phases can't
@@ -310,7 +310,7 @@ would be indistinguishable from one that didn't run. On a finding it fails
 the check with the loop rendered as a chain:
 
 ```
-[error]   publish cycle: 1 cargo publication cycle(s)
+[error]   publish cycle: 1 cargo publication cycle
             nautilus-execution -[dev]-> nautilus-testkit -> nautilus-trading -> nautilus-execution
               dev-dependency nautilus-execution -> nautilus-testkit names a version, so cargo
               publish keeps it; dropping the version key leaves a path-only dev-dep that publish
@@ -692,7 +692,29 @@ binaries sequentially and `--test-threads` parallelizes only within one, so a
 sweep cannot finish faster than the sum, over binaries, of each binary's slowest
 test - a floor `test_threads` cannot move.
 
-The sweep builds once, then fans out; each binary claims a slice of the budget
+The sweep builds once, then fans out - and the fan-out must land on the
+artifacts that build produced, which is not automatic. Each fanned-out
+invocation is `cargo test -p <pkg> --test <t>`, and cargo's resolver unifies
+dependency features over the *selected* package set, so a `-p`-scoped run can
+resolve shared dependencies with different features than the sweep-wide
+prebuild did (measured: hyper losing its `server` feature under one `-p`).
+Every runner then recompiles a second variant of the shared graph, serialized
+by cargo's build lock - a sweep that should take seconds runs a lone rustc for
+minutes - and the `--list`-based plan describes a different feature shape than
+cargo executes. On a sweep whose selection is exactly the whole workspace (no
+`packages`, no `test_exclude_packages`, no CLI `-p`, and `default-members` is
+not a subset), the prebuild and every per-binary run therefore carry
+`-Zfeature-unification --config resolver.feature-unification="workspace"`,
+pinning them all to one graph. Narrower selections keep cargo's default
+selected-mode unification - widening those to "workspace" would let members
+outside the selection poison the graph - and accept that their fan-out cannot
+guarantee no-op rebuilds. A cargo too old for the flag fails the prebuild with
+a named remedy; there is deliberately no silent fallback. Consumer workspaces
+can get the same one-graph property for every cargo invocation (rust-analyzer
+and ad-hoc `-p` builds included) by committing the equivalent `[unstable]` +
+`[resolver]` pin in `.cargo/config.toml`.
+
+Each binary claims a slice of the budget
 proportional to its serial cost from the previous run - the sum of its own
 tests' durations - floored at one slot, capped at its own test count, and
 capped again where extra threads stop helping (`serial / slowest_test`). Costs
@@ -990,7 +1012,7 @@ direction. When a sweep actually runs and its filters collect no work, the
 test phase already refuses:
 
 ```
-cargo test: zero tests ran (sweep: timing) (1 suite(s), 99 filtered out)
+cargo test: zero tests ran (sweep: timing) (1 suite, 99 filtered out)
   - a profile/filter combo collected no work; treat as a wrong-run.
 ```
 

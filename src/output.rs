@@ -182,6 +182,30 @@ pub fn warn(msg: &str) {
     }
 }
 
+/// `"1 rule"` / `"5 rules"` - a count with its noun, pluralized by the
+/// count instead of the `(s)` hedge. For the regular `+s` nouns brokkr's
+/// messages use; a noun with an irregular plural wants its own format
+/// string, not a smarter helper.
+pub fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    // The whole point is the `1` case: `1 rules` (and the old `1 rule(s)`
+    // hedge) is what the helper exists to remove.
+    #[test]
+    fn one_is_singular_everything_else_plural() {
+        assert_eq!(super::count(1, "rule"), "1 rule");
+        assert_eq!(super::count(0, "rule"), "0 rules");
+        assert_eq!(super::count(5, "workspace package"), "5 workspace packages");
+    }
+}
+
 // --- Subprocess types ---
 
 /// Captured output from a subprocess.

@@ -248,7 +248,7 @@ fn join_incompatible_predicate(rule: &TextlintRule) -> Option<&'static str> {
 ///
 /// A green phase reports the second half so "ok" is a statement about a known
 /// corpus rather than an unfalsifiable one - a rule whose `paths` glob stopped
-/// matching anything still passes, and `0 file(s)` is the only thing that
+/// matching anything still passes, and `0 files` is the only thing that
 /// distinguishes that from a rule doing its job.
 pub struct TextlintScan {
     pub violations: Vec<TextlintViolation>,

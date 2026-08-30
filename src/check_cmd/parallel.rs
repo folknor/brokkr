@@ -51,6 +51,40 @@
 // construction on both sides; the coverage gate is a third line of defence,
 // not the first.
 
+// ONE FEATURE GRAPH FOR PREBUILD AND FAN-OUT. The lane prebuilds once with
+// the sweep's whole selection, then re-enters cargo as `-p <pkg> --test <t>`
+// per binary - and resolver v2/v3 unify dependency features over the
+// *selected* package set, so a `-p`-scoped invocation can resolve shared
+// dependencies with different features than the sweep-wide prebuild did.
+// That breaks the lane's founding assumption in the worst direction: every
+// per-binary cargo has a second variant of the shared graph to compile, and
+// cargo's build-dir lock serializes them - measured on a consumer workspace
+// as one lone rustc for five minutes where the warm sweep takes fourteen
+// seconds (hyper lost its `server` feature under `-p <daemon>`). It is a
+// correctness hole too, not just a slow one: the `--list` enumeration reads
+// the prebuilt executables, so the budget and the recorded ran-set can
+// describe a different feature shape than the one cargo then runs.
+//
+// The fix is cargo's own `-Zfeature-unification` with
+// `resolver.feature-unification="workspace"`, passed to the prebuild and
+// every per-binary invocation alike, so all of them resolve one graph. It is
+// applied ONLY when the sweep's selection is exactly the whole workspace -
+// no `packages`, no `test_exclude_packages`, no CLI `-p`, and cargo metadata
+// confirms `default-members` is not a subset - because that is the one case
+// where "workspace" names the same universe the prebuild already selected.
+// A `packages = [...]` sweep prebuilds with the same `-p` set it fans out
+// under, so its runners were never mismatched w.r.t. its own prebuild beyond
+// multi-package subsets, and widening it to workspace unification would let
+// members outside the sweep poison its graph (mutually exclusive features,
+// an excluded member's `hyper/server`). Those lanes keep cargo's default
+// selected-mode and accept that a no-op rebuild is not guaranteed.
+//
+// Nightly-only, like the lane itself (libtest's JSON format already needs
+// `-Z unstable-options`). A cargo without the flag fails the prebuild loudly
+// and `test_binaries` names the remedy; there is deliberately no silent
+// fallback, which would recreate the mismatched-graph run this exists to
+// prevent.
+
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -238,6 +272,29 @@ fn weight_ms(seconds: f64) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// The three cargo args that pin feature resolution to the workspace
+/// universe. One list so the prebuild and every per-binary invocation
+/// cannot drift apart - the whole point is that they name one graph.
+fn feature_unification_args() -> [String; 3] {
+    [
+        "-Zfeature-unification".into(),
+        "--config".into(),
+        "resolver.feature-unification=\"workspace\"".into(),
+    ]
+}
+
+/// Whether this sweep's fan-out gets workspace feature unification: only
+/// when its selection is exactly every workspace member, because that is the
+/// one selection where cargo's `"workspace"` mode describes the prebuild
+/// rather than widening it. See the module header for why each condition is
+/// load-bearing.
+fn unify_workspace(sweep: &ResolvedSweep, cli_scope: &[&str], whole_workspace: bool) -> bool {
+    cli_scope.is_empty()
+        && sweep.packages.is_empty()
+        && sweep.test_exclude_packages.is_empty()
+        && whole_workspace
+}
+
 /// The cargo target selector for one test binary.
 ///
 /// Mirrors cargo's own target kinds rather than assuming `--test`: a package's
@@ -269,6 +326,7 @@ fn binary_selector(binary: &TestBinary) -> Vec<String> {
 /// own `--test` filters, and here the binary's own selector replaces them.
 /// cargo unions selection flags, so leaving the sweep's filters in would
 /// broaden every per-binary run back to the whole lane.
+#[allow(clippy::too_many_arguments)]
 fn binary_args(
     sweep: &ResolvedSweep,
     binary: &TestBinary,
@@ -276,8 +334,12 @@ fn binary_args(
     threads: u32,
     cargo_extra: &[String],
     libtest_extra: &[String],
+    unify: bool,
 ) -> Result<Vec<String>, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
+    if unify {
+        args.extend(feature_unification_args());
+    }
     args.extend(allow_args.iter().cloned());
     args.extend(sweep.cargo_feature_args.iter().cloned());
     args.extend(binary_selector(binary));
@@ -343,6 +405,7 @@ fn run_one_binary(
     slots: u32,
     cargo_extra: &[String],
     libtest_extra: &[String],
+    unify: bool,
 ) -> Result<BinaryRun, DevError> {
     let args = binary_args(
         sweep,
@@ -351,6 +414,7 @@ fn run_one_binary(
         slots,
         cargo_extra,
         libtest_extra,
+        unify,
     )?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let started = Instant::now();
@@ -396,6 +460,7 @@ fn run_parallel_sweep(
     raw: bool,
     doctests: bool,
     commands: bool,
+    whole_workspace: bool,
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
@@ -421,11 +486,20 @@ fn run_parallel_sweep(
         .collect();
 
     // One build for the whole sweep, before any fan-out. The per-binary runs
-    // below re-enter cargo, but the artifacts are already current, so they
-    // resolve to a no-op rebuild rather than N concurrent compiles of the same
-    // crate graph fighting over the target dir lock.
+    // below re-enter cargo, and for them to resolve to a no-op rebuild rather
+    // than N serialized recompiles the prebuild must carry every
+    // compile-affecting argument they will: the lint allows, the forwarded
+    // cargo args (`--release` and kin), and - on a whole-workspace sweep -
+    // the workspace feature-unification pin, without which each `-p`-scoped
+    // runner resolves its own feature graph (see the module header).
+    let unify = unify_workspace(sweep, packages, whole_workspace);
     let mut selection = sweep_selection_args(sweep, packages);
     selection.extend(extra_selectors.iter().cloned());
+    selection.extend(allow_args.iter().cloned());
+    selection.extend(cargo_extra.iter().cloned());
+    if unify {
+        selection.extend(feature_unification_args());
+    }
     let Some(all) = test_binaries(project_root, &selection, &env_refs, commands)? else {
         return Ok(false);
     };
@@ -548,6 +622,7 @@ fn run_parallel_sweep(
                     *slots,
                     cargo_extra,
                     libtest_extra,
+                    unify,
                 );
                 // Released whether the run succeeded or errored: a binary that
                 // failed to spawn must not strand its slice of the budget and
@@ -914,5 +989,47 @@ mod parallel_lane_tests {
     fn an_empty_suite_still_yields_a_schedulable_claim() {
         assert_eq!(claim_slots(0, 0, 8, 0), 1);
         assert!(claim_slots(0, 10, 8, 0) >= 1);
+    }
+
+    fn bare_sweep() -> ResolvedSweep {
+        crate::profile::sweep_from_check_entry(&crate::config::CheckEntry {
+            name: "default".into(),
+            ..Default::default()
+        })
+    }
+
+    // Workspace unification applies exactly when the selection is the whole
+    // workspace: any narrowing - sweep packages, excludes, CLI `-p`, or a
+    // `default-members` subset - and cargo's `"workspace"` mode would widen
+    // the graph past what the prebuild selected.
+    #[test]
+    fn unification_applies_only_to_a_whole_workspace_selection() {
+        let sweep = bare_sweep();
+        assert!(unify_workspace(&sweep, &[], true));
+        assert!(!unify_workspace(&sweep, &[], false));
+        assert!(!unify_workspace(&sweep, &["one-pkg"], true));
+
+        let mut scoped = bare_sweep();
+        scoped.packages = vec!["a".into()];
+        assert!(!unify_workspace(&scoped, &[], true));
+
+        let mut excluding = bare_sweep();
+        excluding.test_exclude_packages = vec!["bad".into()];
+        assert!(!unify_workspace(&excluding, &[], true));
+    }
+
+    // The per-binary argv must carry the pin whenever the plan was built
+    // with it - a runner without it resolves its own feature graph, which is
+    // the serialized-rebuild (and wrong-universe) failure this lane fixed.
+    #[test]
+    fn the_unification_pin_rides_every_per_binary_command_or_none() {
+        let sweep = bare_sweep();
+        let b = binary("pkg", "test", "t");
+        let with = binary_args(&sweep, &b, &[], 2, &[], &[], true).unwrap();
+        for a in feature_unification_args() {
+            assert!(with.contains(&a), "missing {a}");
+        }
+        let without = binary_args(&sweep, &b, &[], 2, &[], &[], false).unwrap();
+        assert!(!without.iter().any(|a| a == "-Zfeature-unification"));
     }
 }
