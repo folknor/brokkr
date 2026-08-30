@@ -507,6 +507,7 @@ fn run_build_phases(
             a.packages,
             a.certifies,
             &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
+            a.raw,
             a.commands,
         )?;
     }

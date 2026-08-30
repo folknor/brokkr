@@ -999,7 +999,14 @@ fine in the rest of the run - genuinely confusing without context - so the
 phase names the mechanism: it diffs the workspace resolve against the
 failing package's install-shaped resolve and prints which features each
 dependency loses ("hyper v1.11.0: server"), with the usual fix being to
-declare the feature in the install package's own manifest.
+declare the feature in the install package's own manifest. Under `--raw`
+the phase prints rustc's full rendered diagnostics instead of the one-line
+form - the dropped notes ("perhaps two different versions of crate X are
+being used?") are precisely the detail this failure class needs. `--raw`
+stays whole-run, not failing-phase-scoped: phases stream as they run, so
+scoping would mean buffering everything to replay the loser, killing the
+watch-it-run use; the low-noise debug loop is `-p <install pkg> --raw`,
+which narrows the test phases and the install set together.
 
 When it runs: `[bin] install_feature_check = "off" | "gate" | "always"`,
 default `gate` - only under a `certifies = "complete"` profile, because

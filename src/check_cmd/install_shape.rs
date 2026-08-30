@@ -241,6 +241,7 @@ fn check_one_install_package(
     debug: bool,
     allow_args: &[String],
     env_refs: &[(&str, &str)],
+    raw: bool,
     commands: bool,
 ) -> Result<bool, DevError> {
     let mut args: Vec<String> = vec!["check".into()];
@@ -291,6 +292,22 @@ fn check_one_install_package(
             // Nothing structured to show - a spawn-level failure. stderr
             // carries cargo's own words.
             output::error(&stderr);
+        } else if raw {
+            // The full rustc diagnostics, not the one-line rendering. This
+            // failure class is exactly where the dropped parts matter:
+            // rustc's notes ("perhaps two different versions of crate X are
+            // being used?"), spans, and help text name the mechanism the
+            // one-liner cannot.
+            output::error(&format!(
+                "install-feature {package}: {}",
+                output::count(errors.len(), "error")
+            ));
+            for d in &errors {
+                match &d.rendered {
+                    Some(r) => output::error(r.trim_end()),
+                    None => output::error(&event_to_clippy(d, false).format_one()),
+                }
+            }
         } else {
             let mut msg = format!(
                 "install-feature {package}: {}\n",
@@ -347,6 +364,7 @@ fn run_install_feature_phase(
     cli_packages: &[String],
     certifies: Option<Certifies>,
     allow_flags: &[String],
+    raw: bool,
     commands: bool,
 ) -> Result<(), DevError> {
     let Some(cfg) = bin_cfg.filter(|c| !c.install.is_empty()) else {
@@ -402,6 +420,7 @@ fn run_install_feature_phase(
             cfg.debug,
             &allow_args,
             &env_refs,
+            raw,
             commands,
         )?;
     }
