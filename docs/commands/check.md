@@ -702,13 +702,17 @@ Every runner then recompiles a second variant of the shared graph, serialized
 by cargo's build lock - a sweep that should take seconds runs a lone rustc for
 minutes - and the `--list`-based plan describes a different feature shape than
 cargo executes. On a sweep whose selection is exactly the whole workspace (no
-`packages`, no `test_exclude_packages`, no CLI `-p`, and `default-members` is
-not a subset), the prebuild and every per-binary run therefore carry
+`packages`, no `test_exclude_packages`, no CLI `-p`, no package selector among
+the args forwarded after `--`, and `default-members` is not a subset), the
+prebuild and every per-binary run therefore carry
 `-Zfeature-unification --config resolver.feature-unification="workspace"`,
 pinning them all to one graph. Narrower selections keep cargo's default
 selected-mode unification - widening those to "workspace" would let members
 outside the selection poison the graph - and accept that their fan-out cannot
-guarantee no-op rebuilds. A cargo too old for the flag fails the prebuild with
+guarantee no-op rebuilds. The forwarded-args clause covers every spelling
+cargo accepts, the attached `-pfoo` short form included: `brokkr check -- -p
+one-pkg` narrows through a channel brokkr's own `-p` does not pass through,
+and a gate blind to it hands workspace unification to a one-package run. A cargo too old for the flag fails the prebuild with
 a named remedy; there is deliberately no silent fallback. Consumer workspaces
 can get the same one-graph property for every cargo invocation (rust-analyzer
 and ad-hoc `-p` builds included) by committing the equivalent `[unstable]` +
@@ -987,12 +991,27 @@ Two refusals keep it honest:
 
 - **Zero-target refusal.** `--bins` silently skips a bin whose
   `required-features` are unsatisfied, so the artifact stream is compared
-  against each package's expected bin targets and a bin that never compiled
-  fails the phase - a gate that checked nothing must not read as green.
+  against each package's declared bin targets - a gate that checked nothing
+  must not read as green. A bin missing from the stream is then put to cargo
+  by name (`--bin NAME`, every other resolution argument identical): building
+  credits it, a compile error fails the package, and cargo's own
+  `requires the features` refusal *naming that target* waives it, since
+  `cargo install` would skip it too. Anything else fails closed. Brokkr
+  deliberately does not decide eligibility from `required-features` itself -
+  that would mean reproducing namespaced features, `dep:` suppression of
+  implicit features, weak dependency features and `dep/feat` requirements,
+  and a model wrong in the permissive direction drops a bin from the
+  expectations, never compiles it, and reports green: cargo's silent skip
+  moved inside brokkr, where nothing is left to catch it. Waived bins are
+  reported by name, and a package whose bins are *all* waived still fails.
 - **No toolchain fallback.** A cargo without package-mode support fails with
   a named remedy (update nightly, or `install_feature_check = "off"`);
   falling back to selected-mode would silently recreate the workspace-unified
-  graph the phase exists to leave.
+  graph the phase exists to leave. That classification aborts the phase, so it
+  requires a positive match on cargo's own option rejection *and* the absence
+  of rustc diagnostics - a substring test for "nightly" matches ordinary
+  compile output and a dependency named `nightly-helper` alike, and would
+  abort the remaining install set with a false remedy.
 
 On failure, the errors are ordinary rustc errors against code that compiles
 fine in the rest of the run - genuinely confusing without context - so the

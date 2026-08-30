@@ -69,9 +69,14 @@
 // `resolver.feature-unification="workspace"`, passed to the prebuild and
 // every per-binary invocation alike, so all of them resolve one graph. It is
 // applied ONLY when the sweep's selection is exactly the whole workspace -
-// no `packages`, no `test_exclude_packages`, no CLI `-p`, and cargo metadata
-// confirms `default-members` is not a subset - because that is the one case
-// where "workspace" names the same universe the prebuild already selected.
+// no `packages`, no `test_exclude_packages`, no CLI `-p`, no package
+// selector among the forwarded cargo args, and cargo metadata confirms
+// `default-members` is not a subset - because that is the one case where
+// "workspace" names the same universe the prebuild already selected. The
+// forwarded-args clause is not decoration: `brokkr check -- -p one-pkg`
+// narrows through a channel brokkr's own `-p` does not pass through, and
+// the gate that missed it handed workspace unification to a one-package
+// run, letting members the caller excluded contribute features to it.
 // A `packages = [...]` sweep prebuilds with the same `-p` set it fans out
 // under, so its runners were never mismatched w.r.t. its own prebuild beyond
 // multi-package subsets, and widening it to workspace unification would let
@@ -283,16 +288,42 @@ fn feature_unification_args() -> [String; 3] {
     ]
 }
 
+/// Whether forwarded cargo args narrow the package selection.
+///
+/// `brokkr check -- -p one-pkg` reaches cargo through a different channel
+/// than brokkr's own `-p`, and the unification gate has to see BOTH or it
+/// widens a selection the caller narrowed. Every spelling cargo accepts
+/// counts, including the attached short form `-pfoo` - a scan that knows
+/// only `-p foo` and `-p=foo` still hands workspace unification to a
+/// one-package run.
+///
+/// Selection-shaped is enough; the value is never inspected. A bare
+/// trailing `-p` that cargo will reject still reads as narrowing, because
+/// the alternative is deciding what an incomplete flag meant.
+fn narrows_selection(cargo_extra: &[String]) -> bool {
+    const SELECTORS: [&str; 3] = ["-p", "--package", "--exclude"];
+    cargo_extra.iter().any(|a| {
+        let head = a.split_once('=').map_or(a.as_str(), |(h, _)| h);
+        SELECTORS.contains(&head) || (a.starts_with("-p") && a.len() > 2)
+    })
+}
+
 /// Whether this sweep's fan-out gets workspace feature unification: only
 /// when its selection is exactly every workspace member, because that is the
 /// one selection where cargo's `"workspace"` mode describes the prebuild
 /// rather than widening it. See the module header for why each condition is
 /// load-bearing.
-fn unify_workspace(sweep: &ResolvedSweep, cli_scope: &[&str], whole_workspace: bool) -> bool {
+fn unify_workspace(
+    sweep: &ResolvedSweep,
+    cli_scope: &[&str],
+    whole_workspace: bool,
+    cargo_extra: &[String],
+) -> bool {
     cli_scope.is_empty()
         && sweep.packages.is_empty()
         && sweep.test_exclude_packages.is_empty()
         && whole_workspace
+        && !narrows_selection(cargo_extra)
 }
 
 /// The cargo target selector for one test binary.
@@ -492,7 +523,7 @@ fn run_parallel_sweep(
     // cargo args (`--release` and kin), and - on a whole-workspace sweep -
     // the workspace feature-unification pin, without which each `-p`-scoped
     // runner resolves its own feature graph (see the module header).
-    let unify = unify_workspace(sweep, packages, whole_workspace);
+    let unify = unify_workspace(sweep, packages, whole_workspace, &cargo_extra);
     let mut selection = sweep_selection_args(sweep, packages);
     selection.extend(extra_selectors.iter().cloned());
     selection.extend(allow_args.iter().cloned());
@@ -1005,17 +1036,56 @@ mod parallel_lane_tests {
     #[test]
     fn unification_applies_only_to_a_whole_workspace_selection() {
         let sweep = bare_sweep();
-        assert!(unify_workspace(&sweep, &[], true));
-        assert!(!unify_workspace(&sweep, &[], false));
-        assert!(!unify_workspace(&sweep, &["one-pkg"], true));
+        assert!(unify_workspace(&sweep, &[], true, &[]));
+        assert!(!unify_workspace(&sweep, &[], false, &[]));
+        assert!(!unify_workspace(&sweep, &["one-pkg"], true, &[]));
 
         let mut scoped = bare_sweep();
         scoped.packages = vec!["a".into()];
-        assert!(!unify_workspace(&scoped, &[], true));
+        assert!(!unify_workspace(&scoped, &[], true, &[]));
 
         let mut excluding = bare_sweep();
         excluding.test_exclude_packages = vec!["bad".into()];
-        assert!(!unify_workspace(&excluding, &[], true));
+        assert!(!unify_workspace(&excluding, &[], true, &[]));
+    }
+
+    // A selector forwarded after `--` narrows the same way brokkr's own
+    // `-p` does. Every spelling cargo accepts has to count: the attached
+    // short form is the one a hand-written scan misses, and missing it
+    // means a one-package run resolving against the whole workspace's
+    // features.
+    #[test]
+    fn a_forwarded_package_selector_also_rules_unification_out() {
+        let sweep = bare_sweep();
+        for extra in [
+            vec!["-p".to_owned(), "one".to_owned()],
+            vec!["-p=one".to_owned()],
+            vec!["-pone".to_owned()],
+            vec!["--package".to_owned(), "one".to_owned()],
+            vec!["--package=one".to_owned()],
+            vec!["--exclude".to_owned(), "bad".to_owned()],
+            vec!["--exclude=bad".to_owned()],
+            // Incomplete, and cargo will reject it - but brokkr does not
+            // get to guess what it meant, so it reads as narrowing.
+            vec!["-p".to_owned()],
+        ] {
+            assert!(
+                !unify_workspace(&sweep, &[], true, &extra),
+                "{extra:?} must rule unification out"
+            );
+        }
+
+        // Non-selection args leave the whole-workspace reading intact.
+        for extra in [
+            vec!["--no-fail-fast".to_owned()],
+            vec!["--release".to_owned()],
+            vec!["--profile=release".to_owned()],
+        ] {
+            assert!(
+                unify_workspace(&sweep, &[], true, &extra),
+                "{extra:?} must not rule unification out"
+            );
+        }
     }
 
     // The per-binary argv must carry the pin whenever the plan was built

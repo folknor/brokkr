@@ -45,7 +45,17 @@
 // with none of its binaries compiled - a gate-shaped no-op, the
 // declared-but-never-evaluated failure this repo's consumers have shipped
 // twice under other names. The artifact stream is therefore compared against
-// the package's expected bin targets, and a missing bin fails the phase.
+// the package's expected bin targets.
+//
+// A missing bin used to fail the phase outright, which was wrong in the
+// other direction: `cargo install` installs the eligible bins and skips a
+// feature-gated one without complaint, so a package with an optional admin
+// binary alongside its ordinary one could never pass. The fix is NOT to
+// decide eligibility here from `required-features` - see `probe_missing_bin`
+// for why reproducing cargo's feature semantics would hide the very failure
+// this refusal exists to catch - but to ask cargo about each missing bin by
+// name and waive it only on cargo's own refusal. Waiving every bin in a
+// package is still the no-op, and still fails.
 //
 // Gate-only by default (`[bin] install_feature_check`): package mode
 // deliberately compiles duplicate variants of shared dependencies, which is
@@ -61,6 +71,37 @@ fn package_unification_args() -> [String; 3] {
         "--config".into(),
         "resolver.feature-unification=\"package\"".into(),
     ]
+}
+
+/// Did cargo reject the unification flags themselves, rather than fail to
+/// compile something?
+///
+/// This one classification aborts the whole phase, so it has to be a
+/// POSITIVE identification of cargo's own option rejection. The first
+/// version tested `stderr.contains("nightly")`, which any rustc diagnostic
+/// about an unstable API satisfies, as does `error: failed to select a
+/// version for \`nightly-helper\`` - and the phase would then abort every
+/// remaining install package with a false remedy. Absence of rustc
+/// diagnostics is necessary (a real compile failure always has them) and
+/// nowhere near sufficient: cargo fails before rustc for manifest,
+/// resolution and config reasons that have nothing to do with these flags.
+///
+/// Wrong in the safe direction by construction: an unrecognised rejection
+/// reads as an ordinary failure, which reports the package and continues.
+fn is_toolchain_refusal(stderr: &str, has_rustc_errors: bool) -> bool {
+    if has_rustc_errors {
+        return false;
+    }
+    const REJECTIONS: [&str; 6] = [
+        "flag is only accepted on the nightly channel",
+        "unknown `-Z` flag",
+        "unexpected argument '-Zfeature-unification'",
+        "unexpected argument `-Zfeature-unification`",
+        "feature-unification is unstable",
+        "`feature-unification` is unstable",
+    ];
+    REJECTIONS.iter().any(|r| stderr.contains(r))
+        || (stderr.contains("feature-unification") && stderr.contains("requires -Z"))
 }
 
 /// Should the phase run under this mode and profile claim?
@@ -235,6 +276,142 @@ fn explain_lost_features(project_root: &Path, package: &str, env: &[(&str, &str)
     );
 }
 
+/// The invocation shape both the per-package check and the per-bin probe
+/// use. Every resolution-affecting argument lives here so the probe cannot
+/// answer a question about a different build than the one that asked it:
+/// same unification config, same profile, same allows, same package.
+fn install_check_args(
+    package: &str,
+    target_selector: &[String],
+    debug: bool,
+    allow_args: &[String],
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["check".into()];
+    args.extend(allow_args.iter().cloned());
+    args.extend(package_unification_args());
+    args.push("--keep-going".into());
+    // The profile install actually builds: release unless `[bin] debug`.
+    if !debug {
+        args.push("--release".into());
+    }
+    args.push("-p".into());
+    args.push(package.to_owned());
+    args.extend(target_selector.iter().cloned());
+    args.push("--message-format=json".into());
+    args
+}
+
+/// What cargo says about one bin that the `--bins` stream never produced.
+enum BinVerdict {
+    /// Cargo built it when asked by name: eligible, and now checked.
+    Checked,
+    /// Cargo's own target-selection refusal: `required-features` this
+    /// package's resolve does not satisfy, so `cargo install` would skip
+    /// it too. The only verdict that waives a bin.
+    Ineligible,
+    /// Anything else - a compile error, or a failure nobody recognised.
+    Failed,
+}
+
+/// Ask cargo whether a missing bin was ineligible or simply not built.
+///
+/// WHY AN ORACLE RATHER THAN A MODEL. The obvious fix for "the phase
+/// demands a bin `cargo install` would skip" is to read `required-features`
+/// from metadata and decide eligibility here. That reproduces cargo's
+/// feature semantics inside brokkr - namespaced features, `dep:` suppressing
+/// an implicit feature, weak dependency features, `dep/feat` in
+/// `required-features` (which cargo does support), resolver differences -
+/// and every one of those is a chance to decide a bin is ineligible when
+/// cargo would have built it. That mistake is invisible: the bin leaves the
+/// expected set, never compiles, and the phase reports green. It would move
+/// cargo's silent skip - the exact defect the zero-target refusal exists to
+/// catch - inside brokkr, where nothing is left to catch it.
+///
+/// So brokkr never decides. Broad selection (`--bins`) skips an ineligible
+/// bin silently, but naming one (`--bin NAME`) makes cargo REFUSE it out
+/// loud, and that refusal is the only thing that waives a bin here.
+/// Everything else fails closed: a false red is visible and arguable, a
+/// false green falsifies the phase's whole claim.
+#[allow(clippy::too_many_arguments)]
+fn probe_missing_bin(
+    project_root: &Path,
+    package: &str,
+    bin: &str,
+    debug: bool,
+    allow_args: &[String],
+    env_refs: &[(&str, &str)],
+    raw: bool,
+    commands: bool,
+) -> Result<BinVerdict, DevError> {
+    let selector = vec!["--bin".to_owned(), bin.to_owned()];
+    let args = install_check_args(package, &selector, debug, allow_args);
+    if commands {
+        output::run_msg(&format!("cargo {}", args.join(" ")));
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
+    if captured.status.success() {
+        return Ok(BinVerdict::Checked);
+    }
+
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    let events = cargo_json::parse_cargo_diagnostics(&stdout);
+    let errors: Vec<_> = events.iter().filter(|d| d.level == "error").collect();
+
+    // Cargo's target-selection refusal, and it must name THIS target -
+    // a `requires the features` line about some other target is not an
+    // answer to the question asked. If cargo ever rephrases this, the
+    // match fails and the bin fails closed rather than being waived.
+    if errors.is_empty()
+        && stderr.contains("requires the features")
+        && stderr.contains(&format!("`{bin}`"))
+    {
+        return Ok(BinVerdict::Ineligible);
+    }
+
+    output::error(&format!("failing command: cargo {}", args.join(" ")));
+    if errors.is_empty() {
+        output::error(&stderr);
+    } else {
+        report_errors(package, &errors, raw);
+    }
+    Ok(BinVerdict::Failed)
+}
+
+/// Render one invocation's rustc errors, whole under `--raw` and one line
+/// each otherwise.
+fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent], raw: bool) {
+    if raw {
+        // The full rustc diagnostics, not the one-line rendering. This
+        // failure class is exactly where the dropped parts matter:
+        // rustc's notes ("perhaps two different versions of crate X are
+        // being used?"), spans, and help text name the mechanism the
+        // one-liner cannot.
+        output::error(&format!(
+            "install-feature {package}: {}",
+            output::count(errors.len(), "error")
+        ));
+        for d in errors {
+            match &d.rendered {
+                Some(r) => output::error(r.trim_end()),
+                None => output::error(&event_to_clippy(d, false).format_one()),
+            }
+        }
+        return;
+    }
+    let mut msg = format!(
+        "install-feature {package}: {}\n",
+        output::count(errors.len(), "error")
+    );
+    for d in errors {
+        msg.push_str("  ");
+        msg.push_str(&event_to_clippy(d, false).format_one());
+        msg.push('\n');
+    }
+    output::error(msg.trim_end());
+}
+
 /// Check one install package under its own package-mode resolve. Returns
 /// whether it passed; failures are already reported, attributed to this
 /// package. `Err` is reserved for the unsupported-toolchain refusal, which
@@ -250,21 +427,10 @@ fn check_one_install_package(
     raw: bool,
     commands: bool,
 ) -> Result<bool, DevError> {
-    let mut args: Vec<String> = vec!["check".into()];
-    args.extend(allow_args.iter().cloned());
-    args.extend(package_unification_args());
-    args.push("--keep-going".into());
-    // The profile install actually builds: release unless `[bin] debug`.
-    if !debug {
-        args.push("--release".into());
-    }
-    args.push("-p".into());
-    args.push(package.to_owned());
     // `cargo install` installs every eligible bin in the package, so the
-    // broad selector is right - the zero-target comparison below is what
-    // keeps it honest about `required-features` skips.
-    args.push("--bins".into());
-    args.push("--message-format=json".into());
+    // broad selector is right - the per-bin probe below is what keeps it
+    // honest about `required-features` skips.
+    let args = install_check_args(package, &["--bins".to_owned()], debug, allow_args);
 
     if commands {
         output::run_msg(&format!("cargo {}", args.join(" ")));
@@ -275,7 +441,9 @@ fn check_one_install_package(
     let stderr = String::from_utf8_lossy(&captured.stderr);
 
     if !captured.status.success() {
-        if stderr.contains("feature-unification") || stderr.contains("nightly") {
+        let events = cargo_json::parse_cargo_diagnostics(&stdout);
+        let errors: Vec<_> = events.iter().filter(|d| d.level == "error").collect();
+        if is_toolchain_refusal(&stderr, !errors.is_empty()) {
             // No silent fallback: running un-pinned would recreate the
             // workspace-unified graph this phase exists to leave. A hard
             // stop rather than a per-package failure - it would repeat
@@ -292,39 +460,12 @@ fn check_one_install_package(
             ));
         }
         output::error(&format!("failing command: cargo {}", args.join(" ")));
-        let events = cargo_json::parse_cargo_diagnostics(&stdout);
-        let errors: Vec<_> = events.iter().filter(|d| d.level == "error").collect();
         if errors.is_empty() {
             // Nothing structured to show - a spawn-level failure. stderr
             // carries cargo's own words.
             output::error(&stderr);
-        } else if raw {
-            // The full rustc diagnostics, not the one-line rendering. This
-            // failure class is exactly where the dropped parts matter:
-            // rustc's notes ("perhaps two different versions of crate X are
-            // being used?"), spans, and help text name the mechanism the
-            // one-liner cannot.
-            output::error(&format!(
-                "install-feature {package}: {}",
-                output::count(errors.len(), "error")
-            ));
-            for d in &errors {
-                match &d.rendered {
-                    Some(r) => output::error(r.trim_end()),
-                    None => output::error(&event_to_clippy(d, false).format_one()),
-                }
-            }
         } else {
-            let mut msg = format!(
-                "install-feature {package}: {}\n",
-                output::count(errors.len(), "error")
-            );
-            for d in errors {
-                msg.push_str("  ");
-                msg.push_str(&event_to_clippy(d, false).format_one());
-                msg.push('\n');
-            }
-            output::error(msg.trim_end());
+            report_errors(package, &errors, raw);
         }
         let scan = scan_artifacts(&stdout, package);
         if !scan.duplicate_units.is_empty() {
@@ -342,18 +483,48 @@ fn check_one_install_package(
         return Ok(false);
     }
 
+    // A bin absent from the stream is not yet a failure and not yet a
+    // waiver - cargo has not been asked about it. It is asked, one bin at
+    // a time, and only its own refusal waives one.
     let missing = missing_bins(expected_bins, &scan_artifacts(&stdout, package).checked_bins);
-    if !missing.is_empty() {
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
+    let mut ok = true;
+    let mut waived: Vec<String> = Vec::new();
+    for bin in &missing {
+        match probe_missing_bin(
+            project_root, package, bin, debug, allow_args, env_refs, raw, commands,
+        )? {
+            BinVerdict::Checked => {}
+            BinVerdict::Ineligible => waived.push(bin.clone()),
+            BinVerdict::Failed => ok = false,
+        }
+    }
+    if !ok {
+        return Ok(false);
+    }
+    if waived.len() == expected_bins.len() {
+        // THE ZERO-TARGET REFUSAL, in its surviving form. Waiving bins one
+        // by one on cargo's word is safe; waiving all of them leaves a
+        // package that compiled no binary at all, which is the gate-shaped
+        // no-op this refusal has always been about.
         output::error(&format!(
-            "install-feature {package}: {} never compiled: {} - likely \
-             `required-features` the package's own resolve does not satisfy, \
-             which `cargo install` will hit the same way. A bin the phase \
-             cannot check cannot be credited green.",
-            output::count(missing.len(), "expected bin"),
-            missing.join(", "),
+            "install-feature {package}: every declared bin is ineligible under \
+             this package's own resolve ({}) - nothing was checked, so nothing \
+             can be credited. `cargo install` would install no binary from this \
+             package either.",
+            waived.join(", "),
         ));
         return Ok(false);
+    }
+    if !waived.is_empty() {
+        // Reported, not silent: a bin cargo declined to build is a bin this
+        // phase did not check, and the next reader needs to know which
+        // claim they are actually getting.
+        output::run_msg(&format!(
+            "install-feature {package}: {} skipped by cargo for unsatisfied \
+             `required-features` ({}) - `cargo install` skips them the same way",
+            output::count(waived.len(), "bin"),
+            waived.join(", "),
+        ));
     }
     Ok(true)
 }
@@ -467,9 +638,10 @@ mod install_shape_tests {
         assert!(!install_feature_applies(Some(M::Gate), None));
     }
 
-    // THE ZERO-TARGET REFUSAL. `--bins` silently skips a bin whose
-    // `required-features` are unsatisfied, so "the invocation succeeded" is
-    // not "the binaries were checked" - the artifact stream is the proof.
+    // `--bins` silently skips a bin whose `required-features` are
+    // unsatisfied, so "the invocation succeeded" is not "the binaries were
+    // checked" - the artifact stream is the proof, and what it does not
+    // account for is what gets put to cargo by name.
     #[test]
     fn a_bin_the_stream_never_produced_is_reported_missing() {
         let expected = vec!["ba-daemon".to_owned(), "ba-mock-worker".to_owned()];
@@ -500,6 +672,37 @@ mod install_shape_tests {
             missing_bins(&["ba-daemon".to_owned()], &scan.checked_bins),
             vec!["ba-daemon".to_owned()]
         );
+    }
+
+    // THE TOOLCHAIN REFUSAL ABORTS THE WHOLE PHASE, so it must be a
+    // positive identification. The first version tested for the substring
+    // "nightly", which ordinary compile output satisfies constantly.
+    #[test]
+    fn only_cargos_own_option_rejection_reads_as_an_unsupported_toolchain() {
+        assert!(is_toolchain_refusal(
+            "error: the `-Z` flag is only accepted on the nightly channel of Cargo",
+            false
+        ));
+        assert!(is_toolchain_refusal("error: unknown `-Z` flag specified", false));
+
+        // A dependency whose NAME contains the word, and no rustc errors:
+        // the old classifier aborted every remaining package here.
+        assert!(!is_toolchain_refusal(
+            "error: failed to select a version for `nightly-helper`",
+            false
+        ));
+        // An unstable-API diagnostic mentioning nightly, with rustc errors
+        // present - an ordinary compile failure, reported per package.
+        assert!(!is_toolchain_refusal(
+            "error[E0658]: use of unstable library feature; add `#![feature(x)]` \
+             to the crate attributes to enable (nightly only)",
+            true
+        ));
+        // Even the right words do not qualify once rustc has spoken.
+        assert!(!is_toolchain_refusal(
+            "error: unknown `-Z` flag specified",
+            true
+        ));
     }
 
     // THE DUPLICATE-UNIT NOTE. One crate version compiled under two feature
