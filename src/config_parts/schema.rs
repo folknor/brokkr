@@ -107,6 +107,23 @@ pub struct BinConfig {
     pub install: Vec<String>,
     /// Default both commands to the dev profile.
     pub debug: bool,
+    /// When `brokkr check` runs the install-feature phase (compile the
+    /// `install` packages under package-mode feature unification, the way
+    /// `cargo install` resolves them). Unset means `gate`. Only meaningful
+    /// alongside `install` - the parser refuses the key without it.
+    pub install_feature_check: Option<InstallFeatureCheck>,
+}
+
+/// When the install-feature phase runs. `gate` (the default) means only
+/// under a `certifies = "complete"` profile - the pre-landing run - because
+/// package-mode resolution deliberately compiles duplicate variants of
+/// shared dependencies, which is not edit-loop priced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstallFeatureCheck {
+    Off,
+    Gate,
+    Always,
 }
 
 /// `[lints]` section: lint suppressions, applied to every phase that compiles.
@@ -1068,7 +1085,7 @@ pub enum Isolation {
 /// anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion, and the `skip_phases`
 /// validator subtracts it from this list - so the two roles no longer let
 /// `skip_phases = ["coverage"]` load clean and announce a no-op.
-pub const PHASE_NAMES: [&str; 10] = [
+pub const PHASE_NAMES: [&str; 11] = [
     "gremlins",
     "header",
     "textlint",
@@ -1079,6 +1096,7 @@ pub const PHASE_NAMES: [&str; 10] = [
     "clippy",
     "test",
     "coverage",
+    "install_feature",
 ];
 
 /// Phases that are real (valid `failed_phase` values) but that a `skip_phases`

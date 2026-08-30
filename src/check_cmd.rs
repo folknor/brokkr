@@ -4,5 +4,6 @@ include!("check_cmd/isolate.rs");
 include!("check_cmd/binary_timings.rs");
 include!("check_cmd/parallel.rs");
 include!("check_cmd/coverage.rs");
+include!("check_cmd/install_shape.rs");
 include!("check_cmd/binaries.rs");
 include!("check_cmd/nextest.rs");

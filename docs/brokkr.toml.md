@@ -598,6 +598,13 @@ debug = true                 # dev profile for run + `--debug` for install
   `--release`, `cargo install --debug`). Unset means release for both,
   matching `brokkr test`. CLI `--debug` / `--release` (mutually exclusive)
   override in either direction.
+- `install_feature_check` - `"off"` / `"gate"` (the default) / `"always"`:
+  when `brokkr check` runs the install-feature phase, which compiles the
+  `install` packages under package-mode feature unification - the way
+  `cargo install` resolves them, without features sibling workspace members
+  contribute. `"gate"` means only under a `certifies = "complete"` profile.
+  Requires an explicit `install` list; the key without one is a load error.
+  See `brokkr man check install_feature`.
 
 ## `[lints]` section
 

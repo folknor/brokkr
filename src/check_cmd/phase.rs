@@ -47,6 +47,7 @@ pub(crate) fn cmd_check(
     dependency_rules: &[DependencyRule],
     quarantine: &[QuarantineEntry],
     test_cfg: Option<&TestConfig>,
+    bin_cfg: Option<&crate::config::BinConfig>,
     gremlins_cfg: Option<&GremlinsConfig>,
     header_cfg: Option<&HeaderConfig>,
     textlint_rules: &[TextlintRule],
@@ -169,6 +170,7 @@ pub(crate) fn cmd_check(
                 clippy_allow,
                 clippy_allow_exact,
                 quarantine,
+                bin_cfg,
                 certifies,
                 doctests,
                 raw,
@@ -386,6 +388,8 @@ struct BuildPhaseArgs<'a> {
     /// The `[clippy] allow_exact` sited list, filtered at JSON ingestion.
     clippy_allow_exact: &'a [SitedAllow],
     quarantine: &'a [QuarantineEntry],
+    /// `[bin]`, for the install-feature phase's package set and mode.
+    bin_cfg: Option<&'a crate::config::BinConfig>,
     certifies: Option<Certifies>,
     doctests: bool,
     raw: bool,
@@ -490,6 +494,20 @@ fn run_build_phases(
     if !skip("script_check") {
         *failing_phase = Some("script_check");
         run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
+    }
+
+    // Last on purpose: package-mode resolution can compile duplicate variants
+    // of shared dependencies, making this the most expensive phase on a cold
+    // store, and the repo's ordering rule is cheap-fails-first.
+    if !skip("install_feature") {
+        *failing_phase = Some("install_feature");
+        run_install_feature_phase(
+            a.project_root,
+            a.bin_cfg,
+            a.certifies,
+            &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
+            a.commands,
+        )?;
     }
 
     *failing_phase = None;

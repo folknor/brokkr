@@ -252,6 +252,34 @@ pub fn cmd_run(
     forward_cargo(&cargo_args, lock)
 }
 
+/// The `[bin] install` packages with their bin target names, through the
+/// same discovery `cmd_install` resolves against - package names, never bin
+/// names or directory basenames, and an unknown package refused in the same
+/// words. `check`'s install-feature phase reads this so the checked set and
+/// the installed set cannot drift.
+pub fn install_bin_targets(
+    project_root: &Path,
+    install: &[String],
+) -> Result<Vec<(String, Vec<String>)>, DevError> {
+    let runnables = discover(project_root)?;
+    let mut out = Vec::new();
+    for pkg in install {
+        let bins: Vec<String> = runnables
+            .iter()
+            .filter(|r| !r.example && &r.package == pkg)
+            .map(|r| r.name.clone())
+            .collect();
+        if bins.is_empty() {
+            return Err(DevError::Build(format!(
+                "[bin] install names '{pkg}', which has no bin target \
+                 in this workspace"
+            )));
+        }
+        out.push((pkg.clone(), bins));
+    }
+    Ok(out)
+}
+
 /// `brokkr install`: install `[bin] install`'s packages, or the sole
 /// bin-carrying package, via `cargo install [--debug] --path <pkg dir>`.
 pub fn cmd_install(

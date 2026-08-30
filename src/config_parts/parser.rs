@@ -109,6 +109,15 @@ fn parse_bin(
             ));
         }
     }
+    // The phase checks the install set, so a knob with no set is a config
+    // that looks armed and can never fire - refused rather than ignored.
+    if cfg.install_feature_check.is_some() && cfg.install.is_empty() {
+        return Err(DevError::Config(
+            "[bin] install_feature_check without [bin] install - the phase \
+             compiles the install packages, so list them."
+                .into(),
+        ));
+    }
     Ok(Some(cfg))
 }
 

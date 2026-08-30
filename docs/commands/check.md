@@ -937,6 +937,61 @@ counts, so a consumer of a failed gate sees the worksheet's numbers and
 not `null`. Only an enumeration failure, which predates any counts,
 leaves it null.
 
+## `install_feature` phase (install-shaped resolve)
+
+Every other compiling phase resolves features over a selection that includes
+sibling workspace members, so a shared dependency's features are the union of
+what all members ask for. `cargo install --path <pkg>` - which is what
+`brokkr install` runs per `[bin] install` package - resolves each package
+**alone**. A call site that only compiles because a sibling enables a
+third-party feature (a tokio, hyper, or upstream-crate feature, not just the
+workspace's own) is green under every workspace-selected sweep and fails at
+install time, on the deploy path.
+
+The phase closes that gap: one `cargo check` over the `[bin] install`
+packages under `-Zfeature-unification` with
+`resolver.feature-unification="package"` - cargo's mode that resolves each
+selected package as though it were selected alone, which is exactly
+`cargo install`'s boundary. `--bins` (install builds only bins, no
+dev-units), `--release` unless `[bin] debug = true` (the profile install
+uses), `--keep-going` (every broken install package in one run), and the
+`[lints]` allows through the same rustflags plumbing as the test phase. The
+CLI `--config` outranks a repo's committed `.cargo/config.toml`, so a
+workspace-mode unification pin (adopted for the parallel lane) and this
+phase coexist.
+
+What a green run claims, precisely: **each install package's binary source
+compiles without features contributed solely by sibling workspace roots.**
+It does not claim the package will `cargo install` - the check shares the
+workspace lockfile (install re-resolves unless locked) and performs no
+codegen or linking, and the ok line says so.
+
+Two refusals keep it honest:
+
+- **Zero-target refusal.** `--bins` silently skips a bin whose
+  `required-features` are unsatisfied, so the artifact stream is compared
+  against each package's expected bin targets and a bin that never compiled
+  fails the phase - a gate that checked nothing must not read as green.
+- **No toolchain fallback.** A cargo without package-mode support fails with
+  a named remedy (update nightly, or `install_feature_check = "off"`);
+  falling back to selected-mode would silently recreate the workspace-unified
+  graph the phase exists to leave.
+
+On failure, the errors are ordinary rustc errors against code that compiles
+fine in the rest of the run - genuinely confusing without context - so the
+phase names the mechanism: it diffs the workspace resolve against the
+install-shaped resolve and prints which features each dependency loses
+("hyper v1.11.0: server"), with the usual fix being to declare the feature
+in the install package's own manifest.
+
+When it runs: `[bin] install_feature_check = "off" | "gate" | "always"`,
+default `gate` - only under a `certifies = "complete"` profile, because
+package mode deliberately compiles duplicate variants of shared dependencies
+and is priced for the pre-landing run, not the edit loop. The phase is inert
+without an explicit `[bin] install` list, and the key without the list is a
+load error (a knob that looks armed but can never fire). A partial profile
+may name `install_feature` in `skip_phases`.
+
 ## Dead `skip` / `only` filters
 
 The same staleness rule the ledger applies to `[[quarantine]]` entries
