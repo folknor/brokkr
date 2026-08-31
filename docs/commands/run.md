@@ -113,13 +113,38 @@ reintroduce the swallowed-first-argument bug.
 ## `brokkr install`
 
 ```
-brokkr install [--debug|--release]
+brokkr install [--debug|--release] [--unlocked]
 ```
 
-Runs `cargo install [--debug] --path <pkg dir>` once per selected package, in
-the order `[bin] install` lists them, announcing each invocation. `cargo
-install --path` installs every bin the package carries, so the selection is by
-*package*, not by target.
+Runs `cargo install [--debug] --locked --path <pkg dir>` once per selected
+package, in the order `[bin] install` lists them, announcing each invocation.
+`cargo install --path` installs every bin the package carries, so the
+selection is by *package*, not by target.
+
+### `--locked` is the default
+
+`cargo install --path` does not read the workspace `Cargo.lock`. Left to
+itself it re-resolves every dependency to the newest semver-compatible
+version available at install time, which you can see in its output as
+`Locking N packages to highest Rust <version> compatible versions`.
+
+That makes `install` the one command in the workflow that does not agree with
+the others about what the dependency graph is. `check`, `test`, `run` and
+`check`'s own install-feature phase all resolve against the committed
+lockfile, so a green gate says nothing about a re-resolving install: an
+upstream crate publishing a breaking minor can break the deploy of a tree
+whose last commit was days ago, and the failure lands in a dependency, on a
+version no test ever compiled. A lockfile exists so that what ships is what
+was tested; re-resolving at install time spends exactly that.
+
+So brokkr passes `--locked`, and what `check` was green on is what gets
+installed. `--unlocked` restores cargo's default for the rare case where you
+*want* the newer graph - and the honest way to adopt it is `cargo update`,
+a `check`, and a commit, so the lockfile carries the decision.
+
+A tree with **no** `Cargo.lock` is re-resolved either way: cargo refuses
+`--locked` without one, so brokkr omits the flag and prints a line saying the
+install is not the resolution `check` validated, rather than aborting.
 
 `install` takes **no feature flags**. It is the session-workflow closer -
 it ships the project as configured, and what it ships should not depend on
@@ -136,7 +161,7 @@ install = ["broadarrow-ba", "broadarrow-worker", "broadarrow-daemon", "broadarro
 debug = true
 ```
 
-Four `cargo install --debug --path <dir>` runs, in that order. Note the two
+Four `cargo install --debug --locked --path <dir>` runs, in that order. Note the two
 namespaces at work: `default` is a **target** name (`ba`, what `cargo run
 --bin` takes), while every `install` entry is a **package** name
 (`broadarrow-ba`). They are not interchangeable, and a workspace that names

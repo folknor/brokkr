@@ -590,8 +590,8 @@ debug = true                 # dev profile for run + `--debug` for install
 
 - `default` - the target name bare `brokkr run` launches. Without it, a sole
   runnable runs; several runnables print an index and exit 0.
-- `install` - package names installed via `cargo install --path <pkg dir>`,
-  in order. Without it, the workspace's sole bin-carrying package installs;
+- `install` - package names installed via `cargo install --locked --path
+  <pkg dir>`, in order. Without it, the workspace's sole bin-carrying package installs;
   several is an error naming this key. A package with no bin target is a
   config error.
 - `debug` - default both commands to the dev profile (`cargo run` without

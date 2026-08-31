@@ -316,6 +316,9 @@ In depth: `brokkr man clippy`."
     /// sole bin-carrying package when the list is absent. `[bin] debug =
     /// true` installs with `--debug`; `--debug`/`--release` override it.
     ///
+    /// Installs with `--locked`, so what ships is what `check` validated.
+    /// `--unlocked` restores cargo's default re-resolution.
+    ///
     /// In depth: `brokkr man run`.
     #[command(display_order = 0)]
     Install {
@@ -326,6 +329,10 @@ In depth: `brokkr man clippy`."
         /// Install release (overrides `[bin] debug = true`)
         #[arg(long)]
         release: bool,
+
+        /// Re-resolve dependencies instead of honouring Cargo.lock
+        #[arg(long)]
+        unlocked: bool,
     },
     /// List rust source files above a line-count threshold (default 800).
     ///

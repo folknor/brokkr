@@ -281,12 +281,27 @@ pub fn install_bin_targets(
 }
 
 /// `brokkr install`: install `[bin] install`'s packages, or the sole
-/// bin-carrying package, via `cargo install [--debug] --path <pkg dir>`.
+/// bin-carrying package, via `cargo install [--debug] --locked --path
+/// <pkg dir>`.
+///
+/// `--locked` is the default because `cargo install --path` otherwise
+/// ignores the workspace `Cargo.lock` entirely and re-resolves every
+/// dependency to the newest semver-compatible version. Every other brokkr
+/// path - `check`, `test`, `run`, the install-feature phase - reads the
+/// lockfile, so without it `install` is the one command that ships a
+/// dependency set no gate ever validated, and an upstream crate publishing
+/// a breaking minor breaks the deploy of a tree nobody touched. Whatever
+/// `check` was green on is what gets installed.
+///
+/// `unlocked` restores cargo's default. A tree with no `Cargo.lock` is
+/// re-resolved either way - cargo refuses `--locked` without one - and says
+/// so rather than failing.
 pub fn cmd_install(
     project_root: &Path,
     cfg: Option<&BinConfig>,
     debug: bool,
     release: bool,
+    unlocked: bool,
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
     let runnables = discover(project_root)?;
@@ -338,9 +353,25 @@ pub fn cmd_install(
 
     let dev = resolve_debug(cfg, debug, release);
     for r in selected {
+        // A lock cargo cannot find is a lock `--locked` would only make it
+        // abort over. Look where cargo does: the package's own directory
+        // first, then the workspace root that owns it.
+        let locked = !unlocked
+            && (r.package_dir.join("Cargo.lock").is_file()
+                || project_root.join("Cargo.lock").is_file());
+        if !unlocked && !locked {
+            output::run_msg(&format!(
+                "no Cargo.lock for {} - installing with cargo's own \
+                 dependency resolution, not the one check validated",
+                r.package
+            ));
+        }
         let mut cargo_args: Vec<String> = vec!["install".into()];
         if dev {
             cargo_args.push("--debug".into());
+        }
+        if locked {
+            cargo_args.push("--locked".into());
         }
         cargo_args.push("--path".into());
         cargo_args.push(r.package_dir.display().to_string());

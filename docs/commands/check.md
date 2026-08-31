@@ -988,9 +988,12 @@ intersection skips the phase visibly. (Moot under `--gate`, which refuses
 
 What a green run claims, precisely: **each install package's binary source
 compiles without features contributed solely by sibling workspace roots.**
-It does not claim the package will `cargo install` - the check shares the
-workspace lockfile (install re-resolves unless locked) and performs no
-codegen or linking, and the ok line says so.
+It does not claim the package will `cargo install` - the check performs no
+codegen or linking, and the ok line says so. It does share a dependency
+graph with the install: both resolve against the workspace lockfile, since
+`brokkr install` passes `--locked` (`brokkr man run`). Raw `cargo install
+--path`, and `brokkr install --unlocked`, re-resolve instead - and then this
+phase's green says nothing about the versions they pick.
 
 Two refusals keep it honest:
 

@@ -283,7 +283,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             Some(&_lock),
         );
     }
-    if let Command::Install { debug, release } = &cli.command {
+    if let Command::Install {
+        debug,
+        release,
+        unlocked,
+    } = &cli.command
+    {
         // Like `run`, `install` builds the code tree (cwd), riding the same
         // lock + toolchain-disable window. The session-workflow closer:
         // install the workspace's bins without reaching for raw cargo.
@@ -297,6 +302,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             bin_cfg.as_ref(),
             *debug,
             *release,
+            *unlocked,
             Some(&_lock),
         );
     }
