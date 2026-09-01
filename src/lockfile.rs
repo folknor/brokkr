@@ -23,7 +23,7 @@ struct LockState {
     /// fail closed, by design.
     starttime: String,
     /// `/proc/sys/kernel/random/boot_id` at acquire time. Discriminates
-    /// boots: the `~/.cache` fallback lock path survives reboot, and a
+    /// boots: the lock file lives under `$HOME` and so survives reboot, and a
     /// starttime from a previous boot could coincidentally match an
     /// unrelated process in this one.
     boot_id: String,
@@ -204,19 +204,29 @@ pub struct LockInfo {
     pub progress: Option<(u32, u32)>,
 }
 
-/// Resolve the global lock file path.
+/// Resolve the global lock file path: always `$HOME/.brokkr/brokkr.lock`.
 ///
-/// Uses `$XDG_RUNTIME_DIR/brokkr.lock` (typically `/run/user/$UID/brokkr.lock`).
-/// Falls back to `$HOME/.cache/brokkr/brokkr.lock` if `XDG_RUNTIME_DIR` is unset.
+/// One path, no alternatives. The lock is brokkr's *global* mutual exclusion -
+/// two invocations that resolve different paths are not excluding each other,
+/// they are two unsynchronised builds sharing one target dir. That is exactly
+/// what the previous `$XDG_RUNTIME_DIR`-first rule allowed: the variable is set
+/// per *session* by logind and is freely repointed by sandboxes, containers and
+/// `systemd-run`, so a brokkr under one and a brokkr in a login shell held two
+/// different files and both believed they had the lock.
+///
+/// Not `~/.cache/brokkr/`: a cache directory is by specification disposable, and
+/// unlinking the lock file while a hold is live breaks the mutex outright - the
+/// holder keeps its flock on a now-nameless inode while the next invocation
+/// creates a fresh file and locks that instead. `~/.brokkr/` is not swept.
+///
+/// `$HOME` is the one input, and it is per-user by construction, which is what
+/// keeps the file writable and the lock scoped to the user whose builds it
+/// serialises. If `$HOME` is unset there is no defensible default, so this
+/// errors rather than inventing one.
 fn lock_path() -> Result<PathBuf, DevError> {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(dir).join("brokkr.lock"));
-    }
-
-    // Fallback: ~/.cache/brokkr/
     let home = std::env::var("HOME")
-        .map_err(|_| DevError::Lock("neither XDG_RUNTIME_DIR nor HOME is set".into()))?;
-    let dir = PathBuf::from(home).join(".cache").join("brokkr");
+        .map_err(|_| DevError::Lock("$HOME is not set - cannot locate the brokkr lock".into()))?;
+    let dir = PathBuf::from(home).join(".brokkr");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("brokkr.lock"))
 }
