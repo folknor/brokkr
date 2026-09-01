@@ -711,7 +711,11 @@ cargo executes. On a sweep whose selection is exactly the whole workspace (no
 the args forwarded after `--`, and `default-members` is not a subset), the
 prebuild and every per-binary run therefore carry
 `-Zfeature-unification --config resolver.feature-unification="workspace"`,
-pinning them all to one graph. Narrower selections keep cargo's default
+pinning them all to one graph. That promotion is what the default
+`feature_unification = "auto"` means; an entry may name a mode explicitly
+instead (see [Feature unification](#feature-unification) below), and an explicit
+`selected` on a sweep that would have been promoted is refused rather than
+silently overridden. Narrower selections keep cargo's default
 selected-mode unification - widening those to "workspace" would let members
 outside the selection poison the graph - and accept that their fan-out cannot
 guarantee no-op rebuilds. The forwarded-args clause covers every spelling
@@ -945,6 +949,80 @@ that fails *on* the audit (stale entries, orphans) still reports its
 counts, so a consumer of a failed gate sees the worksheet's numbers and
 not `null`. Only an enumeration failure, which predates any counts,
 leaves it null.
+
+## Feature unification
+
+A `[[check]]` entry chooses which feature graph its cargo invocations resolve
+against:
+
+| Value | Meaning |
+|---|---|
+| `auto` (default) | Brokkr policy: pin nothing, except the parallel lane's whole-workspace promotion described above. Exactly what every sweep did before this key existed. |
+| `selected` | Pin cargo's default - each selected package resolved with only the features that selection requires. |
+| `workspace` | Pin workspace-wide unification: every member contributes features, whatever the selection. |
+| `package` | Pin per-package resolution, the shape `cargo install` produces. Requires a non-empty `packages`. |
+
+The three explicit values mirror cargo's own `resolver.feature-unification`
+vocabulary, and each **pins** its value on the argv (`-Zfeature-unification`
+plus a `--config`), so a lane's resolution does not depend on whether the
+consuming repository happens to carry a matching `[resolver]` block in
+`.cargo/config.toml`. A CLI `--config` outranks a config file, so the pin wins.
+`auto` is the one value that defers to ambient config, which is why the default
+is spelled `auto` rather than `selected`: absence and `auto` mean the same
+thing, so materializing the default cannot change behaviour.
+
+### What `package` catches
+
+The `install_feature` phase below compiles the install shape but runs no tests,
+and the defect class it cannot see is a **runtime** one: a crate whose behaviour
+depends on a feature a sibling workspace member enables. A daemon taking a
+dependency with `default-features = false` and calling a `#[cfg(feature)]`-gated
+path compiles identically either way; under workspace resolution a sibling
+donates the feature and every dev build passes, while every installed binary
+takes the other arm. Only running that package's tests in package resolution
+distinguishes them.
+
+```toml
+[[check]]
+name = "daemon-install-shape"
+packages = ["broadarrow-daemon"]
+feature_unification = "package"
+
+[[check]]
+name = "run-prep-adapter-free"
+packages = ["broadarrow-run-prep"]
+feature_unification = "package"
+no_default_features = true
+```
+
+The second lane is why this is an explicit key rather than a flag derived from
+`[bin] install`: a crate's install shape and its adapter-free consumer shape are
+different questions, and only the first could be derived.
+
+### Consequences of package mode
+
+- **One cargo invocation per package**, never a batched multi-`-p` - the same
+  rule, and the same measured reason, as the `install_feature` phase below.
+  This applies to clippy, the prebuild, the test run, the parallel fan-out and
+  the coverage enumeration alike.
+- **Its own target dir** (`<target>/unify-package[-<rustflags hash>]`), because
+  a different resolution re-fingerprints units and would otherwise rebuild
+  against every ordinary sweep on every run, in both directions. The dir is
+  shared across the lane's per-package resolutions: cargo fingerprints
+  independent invocations correctly within one directory, and a lane exports a
+  single `BROKKR_TEST_BIN_DIR`, so a directory per package would leave a
+  multi-package lane with no one place holding the binaries its tests spawn.
+- **Its own coverage shape per resolution.** Under `certifies = "complete"` a
+  two-package package-mode lane audits as two `ShapeCoverage` units, labelled
+  `<entry>/<package>`. It does *not* need `curated = true`: package scoping
+  narrows the universe and the ran-set together, so an unfiltered lane has
+  `ran == universe` and no orphans.
+- **Forwarded package selectors are refused.** `brokkr check -- -p other` under
+  package mode is an error, because cargo unions selection flags and would
+  widen a resolution promised to hold exactly one package.
+- The mode is part of the **build shape**, so a package-mode and a
+  workspace-mode lane never dedupe into each other in clippy, in `brokkr test`,
+  or in the coverage audit.
 
 ## `install_feature` phase (install-shaped resolve)
 

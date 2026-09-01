@@ -531,6 +531,49 @@ preset = ["a", "b"]
     }
 
     #[test]
+    fn parse_check_rejects_package_unification_without_packages() {
+        // Package mode resolves one cargo invocation per selected package, so
+        // an empty package list gives it nothing to resolve. The refusal is
+        // also what keeps this pin and the parallel lane's workspace promotion
+        // from ever being live at once: promotion requires an empty
+        // `packages`, so a non-empty one makes them exclusive by construction.
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"daemon\"\nfeature_unification = \"package\"\n",
+        )
+        .unwrap();
+        let err = parse_check(&table).unwrap_err().to_string();
+        assert!(err.contains("no `packages`"), "got: {err}");
+
+        // With a package list it parses, and the other three values are
+        // accepted unconditionally - only `package` carries this requirement.
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[[check]]\nname = \"daemon\"\npackages = [\"d\"]\nfeature_unification = \"package\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_check(&table).unwrap()[0].feature_unification,
+            FeatureUnification::Package
+        );
+        for value in ["auto", "selected", "workspace"] {
+            let src = format!("[[check]]\nname = \"x\"\nfeature_unification = \"{value}\"\n");
+            let table: toml::map::Map<String, toml::Value> = toml::from_str(&src).unwrap();
+            assert!(parse_check(&table).is_ok(), "{value} must parse bare");
+        }
+    }
+
+    #[test]
+    fn check_entry_defaults_to_auto_unification() {
+        // Absence and `auto` mean the same thing, so a config rewrite that
+        // materializes the default cannot change behaviour.
+        let table: toml::map::Map<String, toml::Value> =
+            toml::from_str("[[check]]\nname = \"plain\"\n").unwrap();
+        assert_eq!(
+            parse_check(&table).unwrap()[0].feature_unification,
+            FeatureUnification::Auto
+        );
+    }
+
+    #[test]
     fn parse_check_rejects_a_degenerate_filter_substring() {
         // A three-character substring is a substring of nearly every test
         // name: it suppresses tests nobody chose while still matching

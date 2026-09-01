@@ -886,6 +886,128 @@ pub struct CheckEntry {
     /// See [`ParallelBinaries`].
     #[serde(default)]
     pub parallel: Option<ParallelBinaries>,
+    /// Which feature graph this sweep resolves against. See
+    /// [`FeatureUnification`] - the default (`auto`) is what every sweep
+    /// did before this key existed.
+    ///
+    /// Part of the build shape: package and workspace resolution compile
+    /// different code for the same source, so two sweeps differing only
+    /// here are two compiles and two lint surfaces, and neither may dedupe
+    /// into the other.
+    #[serde(default)]
+    pub feature_unification: FeatureUnification,
+}
+
+/// Which feature graph a sweep's cargo invocations resolve against.
+///
+/// The three explicit values mirror cargo's own `resolver.feature-unification`
+/// vocabulary exactly (`selected`, `workspace`, `package` - verified against
+/// cargo's own error text, which lists those three and nothing else), and each
+/// **pins** its value on the argv, so the resolution a sweep declares does not
+/// depend on whether the consuming repository happens to carry a matching
+/// `[resolver]` block in `.cargo/config.toml`. A CLI `--config` outranks a
+/// config file, so the pin is authoritative.
+///
+/// `auto` is brokkr's own policy rather than a cargo mode, which is why it is
+/// spelled rather than left as an absent key: it emits no flags in the ordinary
+/// case and lets [`crate::check_cmd::parallel`] promote an eligible
+/// whole-workspace fan-out to `workspace`, which is exactly what every sweep did
+/// before this key existed. Absence and `auto` mean the same thing, so a config
+/// rewrite that materializes the default cannot change behaviour.
+///
+/// The distinction that matters: `auto` DEFERS to ambient config, `selected`
+/// PINS cargo's selected mode. Spelling the policy as `selected` would promise
+/// a pin that the unpromoted case does not perform.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureUnification {
+    /// Brokkr policy: no flags, except the parallel lane's workspace
+    /// promotion. The pre-existing behaviour.
+    #[default]
+    Auto,
+    /// Pin cargo's default: each selected package resolved with only the
+    /// features that selection requires.
+    Selected,
+    /// Pin workspace-wide unification: every member contributes features,
+    /// whatever the selection.
+    Workspace,
+    /// Pin per-package resolution - the shape `cargo install` produces, and
+    /// the only one that catches a crate depending on features a sibling
+    /// member donates. Requires a non-empty `packages` list, and resolves
+    /// one cargo invocation per package (see [`CargoUnification::Package`]).
+    Package,
+}
+
+/// A cargo feature-unification mode, with brokkr's `auto` policy resolved
+/// away. This is what actually reaches an argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CargoUnification {
+    Selected,
+    Workspace,
+    Package,
+}
+
+impl CargoUnification {
+    /// The value as cargo spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::Workspace => "workspace",
+            Self::Package => "package",
+        }
+    }
+
+    /// The argv fragment that pins this mode. Both halves are required:
+    /// the config key is unstable, so the `-Z` must accompany it unless the
+    /// consuming repo carries `[unstable] feature-unification = true` - and
+    /// relying on that is the same class of ambient accident this mode
+    /// exists to catch.
+    pub fn cargo_args(self) -> [String; 3] {
+        [
+            "-Zfeature-unification".into(),
+            "--config".into(),
+            format!("resolver.feature-unification=\"{}\"", self.as_str()),
+        ]
+    }
+}
+
+/// The resolved unification policy for one sweep in one invocation.
+///
+/// `Ambient` is not a cargo mode - it is the absence of a pin, which leaves
+/// whatever the config chain says in force. Keeping it distinct from
+/// `Pinned(Selected)` is what lets `auto` preserve existing behaviour byte
+/// for byte while explicit `selected` makes a real promise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EffectiveUnification {
+    /// No pin. The default, and what `auto` resolves to outside the parallel
+    /// lane's promotion - i.e. what every sweep did before this key existed.
+    #[default]
+    Ambient,
+    Pinned(CargoUnification),
+}
+
+impl EffectiveUnification {
+    /// The argv fragment, empty when nothing is pinned.
+    pub fn cargo_args(self) -> Vec<String> {
+        match self {
+            Self::Ambient => Vec::new(),
+            Self::Pinned(mode) => mode.cargo_args().to_vec(),
+        }
+    }
+
+    /// Whether this mode requires one cargo resolution per package.
+    pub fn is_per_package(self) -> bool {
+        self == Self::Pinned(CargoUnification::Package)
+    }
+
+    /// How the mode reads in a run line. `Ambient` prints nothing - it is
+    /// the status quo and naming it on every line would be noise.
+    pub fn describe(self) -> Option<&'static str> {
+        match self {
+            Self::Ambient => None,
+            Self::Pinned(mode) => Some(mode.as_str()),
+        }
+    }
 }
 
 /// The cargo build profile a `[[check]]` entry may name. `dev` and
@@ -953,6 +1075,15 @@ impl CheckEntry {
 /// so the isolated `target/rustflags-<key>` cache persists between invocations
 /// and is shared by every sweep carrying identical flags. Returns `None` for an
 /// empty flag list (no isolation).
+///
+/// KNOWN GAP, deliberately left: `join(" ")` is ambiguous at the token level -
+/// `["--cfg", "a b"]` and `["--cfg a", "b"]` hash alike. Fixing it means a
+/// length-tagged encoding, which renames every existing isolated dir and costs
+/// one cold rebuild per rustflags sweep in every consuming repo. The collision
+/// needs a flag list carrying an embedded space to bite, so the rename is not
+/// worth forcing on a config nobody has written; it is recorded here rather
+/// than fixed silently. Any change here must keep the digest stable for a given
+/// flag list or the dirs churn.
 pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
     if rustflags.is_empty() {
         return None;
@@ -964,6 +1095,41 @@ pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     Some(format!("{hash:016x}"))
+}
+
+/// The isolated target subdirectory a sweep needs, or `None` to use cargo's
+/// ordinary one.
+///
+/// Isolation exists to stop two builds that cannot share a cache from
+/// alternating in one directory and rebuilding each other. Two inputs force it:
+///
+/// - `rustflags`, which re-fingerprints every unit (the pre-existing case,
+///   whose directory name is preserved exactly so no existing tree rebuilds);
+/// - package-mode unification, which resolves a different feature graph for the
+///   same source and would otherwise thrash against every ordinary sweep on
+///   every run.
+///
+/// Pinned `selected` and `workspace` deliberately do NOT isolate. Ambient
+/// resolution is already one of those in any given repo, so isolating them
+/// would split the common cache in two for no gain - and `workspace` is what
+/// the parallel lane has always pinned into the shared dir.
+///
+/// Package mode shares ONE directory across its per-package resolutions rather
+/// than taking a directory each. The resolution boundary and the artifact
+/// boundary are not the same thing: cargo fingerprints independent invocations
+/// correctly within a shared dir, and a lane exports a single
+/// `BROKKR_TEST_BIN_DIR`, so per-package dirs would leave a multi-package lane
+/// with no one directory containing the binaries its tests spawn.
+pub fn shape_target_key(rustflags: &[String], unification: EffectiveUnification) -> Option<String> {
+    match rustflags_target_key(rustflags) {
+        // Both inputs present: the rustflags dir, qualified by the mode, so a
+        // package-mode sweep and an ordinary sweep carrying identical flags do
+        // not land in one directory.
+        Some(key) if unification.is_per_package() => Some(format!("unify-package-{key}")),
+        Some(key) => Some(key),
+        None if unification.is_per_package() => Some("unify-package".into()),
+        None => None,
+    }
 }
 
 /// `[test]` section.

@@ -42,9 +42,26 @@ pub(crate) fn build_test_env(
 /// `[build] target-dir` can place it on another drive entirely, and the
 /// isolated dir must sit beside the real one so `brokkr clean` and the plain
 /// sweeps find it (S3-20).
-fn isolated_target_dir(sweep: &ResolvedSweep, meta_target_dir: &Path) -> Option<std::path::PathBuf> {
-    crate::config::rustflags_target_key(&sweep.rustflags)
-        .map(|key| meta_target_dir.join(format!("rustflags-{key}")))
+/// A package-mode sweep isolates too, even with no `rustflags`: it resolves a
+/// different feature graph for the same source, so sharing the common dir would
+/// have it rebuild against every ordinary sweep on every run, in both
+/// directions. Its dir is shared across the sweep's per-package resolutions -
+/// the resolution boundary is not the artifact boundary, and a lane exports one
+/// `BROKKR_TEST_BIN_DIR`, so a directory per package would leave a multi-package
+/// lane with no single directory holding the binaries its tests spawn.
+///
+/// The name for the rustflags-only case is unchanged (`rustflags-<hash>`), so no
+/// existing tree re-derives a directory or pays a cold rebuild for this feature.
+pub(crate) fn isolated_target_dir(
+    sweep: &ResolvedSweep,
+    meta_target_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    crate::config::shape_target_key(&sweep.rustflags, sweep.effective_unification)
+        .map(|key| meta_target_dir.join(if key.starts_with("unify-") {
+            key
+        } else {
+            format!("rustflags-{key}")
+        }))
 }
 
 /// Compose a sweep's `rustflags` with any inherited flags into the env pair to
@@ -249,6 +266,22 @@ pub(crate) fn describe_sweep(
             "rustflags {} (isolated target)",
             sweep.rustflags.join(" ")
         ));
+    }
+
+    // Surfaced for the same reason as `rustflags` below it: a pinned
+    // resolution changes which features are on, so it compiles different code
+    // - and package mode also sends the sweep to its own target dir. An
+    // unexplained full rebuild is exactly what a collapsed log must not hide,
+    // and the mode is the single most load-bearing fact about such a lane.
+    // `auto` prints nothing: it is the status quo, and naming it on every
+    // line of every ordinary run would be noise.
+    if let Some(mode) = sweep.effective_unification.describe() {
+        let isolated = if sweep.effective_unification.is_per_package() {
+            " (isolated target)"
+        } else {
+            ""
+        };
+        parts.push(format!("unification {mode}{isolated}"));
     }
 
     // Surfaced for the same reason as `rustflags`: a non-default profile

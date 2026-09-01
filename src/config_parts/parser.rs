@@ -1218,6 +1218,35 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
             entry.name
         )));
     }
+    // Package mode resolves ONE cargo invocation per selected package, so it
+    // needs an explicit positive package set to enumerate. It is also what
+    // keeps this pin and the parallel lane's workspace promotion from ever
+    // being live at once: promotion requires an empty `packages`, so a
+    // non-empty one makes the two mutually exclusive by construction rather
+    // than by a runtime check that could be forgotten.
+    if entry.feature_unification == FeatureUnification::Package && entry.packages.is_empty() {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets `feature_unification = \"package\"` with no `packages`. \
+             Package mode resolves each selected package on its own, so it needs an explicit \
+             package list to resolve - name the package(s) whose install-shape you are testing.",
+            entry.name
+        )));
+    }
+    // Contradictory selection models: package mode names packages positively
+    // and resolves each alone, while `test_exclude_packages` is a
+    // `--workspace --exclude` subtraction. The `packages` refusal above
+    // already makes this unreachable, but the diagnostic is worth having
+    // explicitly - the two keys read as compatible and are not.
+    if entry.feature_unification == FeatureUnification::Package
+        && !entry.test_exclude_packages.is_empty()
+    {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets `feature_unification = \"package\"` with \
+             `test_exclude_packages`. Package mode selects packages positively and resolves each \
+             one separately; `--workspace --exclude` is the opposite model. Use `packages`.",
+            entry.name
+        )));
+    }
     for key in entry.env.keys() {
         if key.trim().is_empty() {
             return Err(DevError::Config(format!(

@@ -73,8 +73,8 @@ pub(crate) fn cmd_check(
     let started = std::time::Instant::now();
     let gate_name = resolve_gate_profile(gate, test_cfg)?;
     let profile_name = gate_name.as_deref().or(profile_name);
-    let active_sweeps =
-        decide_active_sweeps(check_entries, test_cfg, profile_name, features, no_default_features)?;
+    let active_sweeps = active_sweeps_resolved(check_entries, test_cfg, profile_name,
+        (features, no_default_features), (project_root, packages, extra_args))?;
     // The profile that drove sweep selection, if any. Ad-hoc CLI features
     // bypass profiles entirely (priority 1 in decide_active_sweeps), so an
     // ad-hoc run reports no profile even when [test].default_profile is set.
@@ -606,6 +606,70 @@ fn resolve_gate_profile(
 /// build, and a scoped green is not comparable to the full green (feature
 /// unification changes with the package set - the B41 hazard), so a
 /// complete profile rejects it before anything compiles.
+/// Sweep selection followed immediately by unification resolution - one step,
+/// because a `ResolvedSweep` whose `effective_unification` has not been filled
+/// in yet is not safe to hand to a phase: it would build cargo commands, and
+/// hash a build shape, from the unresolved default.
+fn active_sweeps_resolved(
+    check_entries: &[CheckEntry],
+    test_cfg: Option<&TestConfig>,
+    profile_name: Option<&str>,
+    // (ad-hoc `--features`, `--no-default-features`)
+    shaping: (&[String], bool),
+    // (project root, CLI `-p` scope, forwarded args)
+    invocation: (&Path, &[String], &[String]),
+) -> Result<Vec<ResolvedSweep>, DevError> {
+    let mut sweeps =
+        decide_active_sweeps(check_entries, test_cfg, profile_name, shaping.0, shaping.1)?;
+    resolve_sweep_unification(&mut sweeps, invocation.0, invocation.1, invocation.2)?;
+    Ok(sweeps)
+}
+
+/// Turn every sweep's configured `feature_unification` policy into the answer
+/// this invocation uses, once, before any phase builds a cargo command.
+///
+/// One resolution point is the whole design. Clippy, the pre-build, the test
+/// run, the parallel prebuild, each per-binary re-entry and the coverage
+/// enumeration must all agree on the graph they are talking about; deciding it
+/// separately in each is how an audit ends up describing a build that never
+/// ran. Storing the answer on the sweep also puts it in `build_shape_key`,
+/// which is what stops a promoted and an unpromoted lane deduping into one.
+///
+/// The `cargo metadata` call that answers "is the bare selection the whole
+/// workspace" is paid only when some sweep could actually be promoted - the
+/// ordinary run does not gain a subprocess for a question it never asks.
+fn resolve_sweep_unification(
+    sweeps: &mut [ResolvedSweep],
+    project_root: &Path,
+    packages: &[String],
+    extra_args: &[String],
+) -> Result<(), DevError> {
+    let cli_scope: Vec<&str> = packages.iter().map(String::as_str).collect();
+    let (cargo_extra, _) = split_extra_args(extra_args);
+    // Only a parallel lane is ever promoted, and only one whose selection is
+    // unscoped in every channel. Everything else resolves without asking.
+    let any_candidate = sweeps.iter().any(|s| {
+        s.parallel_budget.is_some() && unify_workspace(s, &cli_scope, true, cargo_extra)
+    });
+    let whole_workspace = if any_candidate {
+        build::project_info(Some(project_root))?.bare_selection_is_whole_workspace
+    } else {
+        false
+    };
+
+    for sweep in sweeps.iter_mut() {
+        let eligible = sweep.parallel_budget.is_some()
+            && unify_workspace(sweep, &cli_scope, whole_workspace, cargo_extra);
+        sweep.effective_unification = profile::resolve_unification(sweep, eligible)?;
+        // Refused here rather than at each phase: the forwarded args are one
+        // invocation-wide input, so one refusal covers clippy, the pre-build,
+        // the test run and the audit, and none of them can be reached with a
+        // selection brokkr did not plan.
+        reject_forwarded_selectors(sweep, cargo_extra)?;
+    }
+    Ok(())
+}
+
 fn reject_scoped_complete(
     certifies: Option<Certifies>,
     packages: &[String],
@@ -1505,6 +1569,13 @@ fn clippy_args(sweep: &ResolvedSweep, scope: &[&str], allow: &[String]) -> Vec<S
     // source the release build never compiles - and misses the source it
     // does.
     args.extend(sweep_profile_args(sweep));
+    // Same reason as the profile above, one level out: package and workspace
+    // resolution enable different features, so they compile different source
+    // and present different lint surfaces. Linting a package-mode sweep under
+    // ambient resolution checks code its own build never compiles - and misses
+    // the `#[cfg(feature)]` arms that only its resolution turns on, which is
+    // exactly the defect class the mode exists to catch.
+    args.extend(sweep.unification_args());
     if !scope.is_empty() {
         for pkg in scope {
             args.push("--package".into());
@@ -1526,6 +1597,58 @@ fn clippy_args(sweep: &ResolvedSweep, scope: &[&str], allow: &[String]) -> Vec<S
         args.push(lint.clone());
     }
     args
+}
+
+/// One `cargo clippy` run: one sweep, one cargo resolution.
+///
+/// Split out because package mode makes this a loop body rather than a
+/// straight line - a package-mode sweep lints once per package, for the same
+/// reason it tests once per package. A batched multi-`-p` clippy resolves a
+/// graph that is none of the graphs the lane builds, so its lint surface would
+/// belong to no real compile.
+fn run_one_clippy(
+    project_root: &Path,
+    sweep: &ResolvedSweep,
+    run_scope: &[&str],
+    allow: &[String],
+    meta_target_dir: Option<&Path>,
+    commands: bool,
+) -> Result<SweepResult, DevError> {
+    let args = clippy_args(sweep, run_scope, allow);
+    output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, run_scope));
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Apply the sweep's env to the clippy build too, so a build-affecting
+    // var (codegen toggle, etc.) is set consistently across every phase -
+    // clippy, the test pre-build, and the test run - not just the tests.
+    let mut env_owned: Vec<(String, String)> = sweep
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    // A sweep with `rustflags` (or package-mode unification) clippy-checks
+    // under the same cfg + isolated target dir as its tests, so the gate's
+    // lints match its build. Plain sweeps contribute nothing here, and for
+    // those `meta_target_dir` is `None` (computed by the caller).
+    if let Some(dir) = meta_target_dir {
+        // No lint allows in the env here: clippy passes the same `-A` set
+        // on its own argv (`clippy_args`), and a second copy in RUSTFLAGS
+        // would only change the build fingerprint away from the test
+        // phase's, costing a rebuild for no change in what is suppressed.
+        env_owned.extend(sweep_cargo_env(sweep, dir, &[]));
+    }
+    let env_refs: Vec<(&str, &str)> = env_owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
+    Ok(SweepResult {
+        label: sweep.label.clone(),
+        command: format!("cargo {}", args.join(" ")),
+        stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
+        success: captured.status.success(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1550,7 +1673,11 @@ fn run_clippy_phase(
     // they must agree on the location, and a workspace can place it off the
     // project root (S3-20). Only rustflags sweeps need it, so the extra `cargo
     // metadata` call is paid lazily - the common (no-isolation) run skips it.
-    let meta_target_dir = if sweeps.iter().any(|s| !s.rustflags.is_empty()) {
+    // "Any sweep needs an isolated dir", not "any sweep has rustflags": a
+    // package-mode sweep isolates on its own, and the old predicate would have
+    // left it clippy-checking in the shared dir while its tests built in the
+    // isolated one - the two disagreeing about where the artifacts are.
+    let meta_target_dir = if sweeps.iter().any(ResolvedSweep::needs_isolated_target_dir) {
         Some(build::project_info(Some(project_root))?.target_dir)
     } else {
         None
@@ -1589,43 +1716,25 @@ fn run_clippy_phase(
         // the `--json` trailer may honestly list it as clippy-checked (S3-33).
         // `i` indexes `sweeps`, and `clippy_ran` is sized to match, so direct.
         clippy_ran[i] = true;
-        let args = clippy_args(sweep, &scope, allow);
-
-        output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, &scope));
-
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        // Apply the sweep's env to the clippy build too, so a build-affecting
-        // var (codegen toggle, etc.) is set consistently across every phase -
-        // clippy, the test pre-build, and the test run - not just the tests.
-        let mut env_owned: Vec<(String, String)> = sweep
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        // A sweep with `rustflags` clippy-checks under the same cfg + isolated
-        // target dir as its tests, so the sim gate's lints match its build.
-        // Plain sweeps contribute nothing here; only rustflags sweeps do, and
-        // for those `meta_target_dir` is `Some` (computed above).
-        if let Some(dir) = &meta_target_dir {
-            // No lint allows in the env here: clippy passes the same `-A` set
-            // on its own argv (`clippy_args`), and a second copy in RUSTFLAGS
-            // would only change the build fingerprint away from the test
-            // phase's, costing a rebuild for no change in what is suppressed.
-            env_owned.extend(sweep_cargo_env(sweep, dir, &[]));
+        // Package mode lints one package per cargo run, for the same reason it
+        // tests one per run: a batched multi-`-p` clippy resolves a graph that
+        // is not any of the graphs the lane actually builds, so its lint
+        // surface belongs to no real compile.
+        let owned_scope: Vec<String> = scope.iter().map(|s| (*s).to_owned()).collect();
+        for resolution in sweep.resolutions(&owned_scope) {
+            let run_scope: Vec<&str> = match &resolution {
+                Some(pkg) => vec![pkg.as_str()],
+                None => scope.clone(),
+            };
+            results.push(run_one_clippy(
+                project_root,
+                sweep,
+                &run_scope,
+                allow,
+                meta_target_dir.as_deref(),
+                commands,
+            )?);
         }
-        let env_refs: Vec<(&str, &str)> = env_owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let captured =
-            output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
-        results.push(SweepResult {
-            label: sweep.label.clone(),
-            command: format!("cargo {}", args.join(" ")),
-            stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
-            success: captured.status.success(),
-        });
     }
 
     // Skipping some sweeps for an out-of-scope `-p` is fine; skipping all of
@@ -2421,9 +2530,9 @@ fn run_test_phase(
     // profile guess (which silently lies when a workspace pins
     // `[profile.test]` overrides, and now also when a sweep opts into
     // release).
-    // `whole_workspace` feeds the parallel lane's feature-unification gate;
-    // resolved once out here as a property of the tree, not of any sweep.
-    let build::ProjectInfo { target_dir, bare_selection_is_whole_workspace: whole_workspace } =
+    // `whole_workspace` is a property of the tree, not of any sweep. It now
+    // feeds `resolve_unification` rather than the parallel lane directly.
+    let build::ProjectInfo { target_dir, bare_selection_is_whole_workspace: _whole_workspace } =
         build::project_info(Some(project_root))?;
 
     let mut ran_any = false;
@@ -2500,7 +2609,6 @@ fn run_test_phase(
                 raw,
                 doctests,
                 commands,
-                whole_workspace,
                 timings.as_deref_mut(),
             )?
         } else if sweep.process_isolation {

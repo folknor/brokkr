@@ -779,6 +779,23 @@ env = { HIGH_PRECISION = "1" }
   simulator once). There is no key to set - isolation is automatic and derived
   from the flags. Setting `RUSTFLAGS` or `CARGO_TARGET_DIR` in `env` alongside
   `rustflags` is a parse error (one unambiguous source each).
+- `feature_unification` (optional, default `"auto"`) - which feature graph this
+  sweep's cargo invocations resolve against: `"auto"`, `"selected"`,
+  `"workspace"` or `"package"`. The three explicit values mirror cargo's own
+  `resolver.feature-unification` vocabulary and **pin** their value on the argv
+  (`-Zfeature-unification` plus a `--config`, which outranks a repo's committed
+  `.cargo/config.toml`), so a lane's resolution never depends on an ambient
+  config line. `"auto"` is brokkr policy rather than a cargo mode: it pins
+  nothing, except that the parallel lane still promotes an eligible
+  whole-workspace fan-out to `workspace` - exactly what every sweep did before
+  this key existed, which is why absence and `"auto"` mean the same thing.
+  `"package"` is the `cargo install` boundary and the only mode that catches a
+  crate depending on features a sibling member donates; it requires a non-empty
+  `packages`, resolves one cargo invocation per package, and **auto-isolates**
+  the sweep into `target/unify-package[-<rustflags hash>]` for the same
+  fingerprint-thrash reason `rustflags` does. An explicit `"selected"` on a
+  sweep the parallel lane would have promoted is a hard error, not a silent
+  override. See `brokkr man check feature-unification`.
 - `tests` / `skip` / `only` (optional, default `[]`) - per-`[[check]]` libtest
   filters, **ANDed** with any referencing profile's filters of the same name
   (they append, never replace): `tests` -> cargo `--test <name>` target

@@ -15,7 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{
-    CheckEntry, Isolation, ProfileDef, QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
+    CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Isolation, ProfileDef,
+    QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
 };
 use crate::config::ParallelBinaries;
 use crate::error::DevError;
@@ -97,6 +98,17 @@ pub struct ResolvedSweep {
     /// under `brokkr check`; the CLI/`[test] debug` answer under `brokkr
     /// test`). Part of the build shape - see [`ResolvedSweep::build_shape_key`].
     pub profile: Option<SweepProfile>,
+    /// The `[[check]]` entry's `feature_unification`, as configured. Policy,
+    /// not yet an answer: `auto` resolves differently depending on CLI scope
+    /// and parallel eligibility, which are runtime facts.
+    pub feature_unification: FeatureUnification,
+    /// The resolved answer for THIS invocation, filled in by
+    /// [`resolve_unification`] once the CLI scope is known. Part of the build
+    /// shape, and it must be the effective value rather than the configured
+    /// one: an `auto` sweep promoted to `workspace` compiles a different graph
+    /// from an `auto` sweep that was not, and keying on the configured `auto`
+    /// would let those two dedupe into one.
+    pub effective_unification: EffectiveUnification,
 }
 
 /// Which half of the filter surface a [`DeclaredFilter`] is, because the two
@@ -176,6 +188,19 @@ impl ResolvedSweep {
     /// exists: a dev and a release sweep of the same features compile
     /// different source and present different lint surfaces, so deduping
     /// either into the other would lint one build and run the other.
+    /// `effective_unification` is in, and it is the EFFECTIVE value rather
+    /// than the configured one: package and workspace resolution compile
+    /// different code for the same source, so two sweeps differing only there
+    /// are two lint surfaces and two test universes. Keying on the configured
+    /// value instead would fold a promoted `auto` sweep into an unpromoted one.
+    ///
+    /// KNOWN GAP, pre-existing and left alone: `build_packages` is in the key
+    /// although clippy never reads it, so two sweeps differing only in their
+    /// pre-built binaries get linted twice for provably identical output. That
+    /// is a phase-contract conflation (one key serving clippy dedupe, coverage
+    /// grouping and `brokkr test` dedupe, which want different things), and
+    /// splitting it is orthogonal to feature unification - it would change
+    /// dedupe behaviour for configs that have nothing to do with this feature.
     pub fn build_shape_key(&self) -> BuildShapeKey {
         (
             self.packages.clone(),
@@ -187,7 +212,40 @@ impl ResolvedSweep {
                 .collect(),
             self.build_packages.clone(),
             self.profile,
+            self.effective_unification,
         )
+    }
+
+    /// Whether this sweep compiles into its own target dir rather than
+    /// cargo's. The gate for the lazy `cargo metadata` call that resolves
+    /// where that dir hangs off: it used to read "any sweep has rustflags",
+    /// which silently stopped being the whole question once package mode
+    /// could isolate on its own.
+    pub fn needs_isolated_target_dir(&self) -> bool {
+        !self.rustflags.is_empty() || self.effective_unification.is_per_package()
+    }
+
+    /// The cargo argv fragment pinning this sweep's resolution, empty under
+    /// `auto` where nothing is pinned. Every cargo invocation derived from the
+    /// sweep must carry it - clippy, the pre-build, the test run, the parallel
+    /// prebuild and its per-binary re-entries, the isolation lane, and the
+    /// coverage enumeration - or the audit describes a build that never ran.
+    pub fn unification_args(&self) -> Vec<String> {
+        self.effective_unification.cargo_args()
+    }
+
+    /// One cargo resolution per package under package mode; one resolution
+    /// over the whole selection otherwise.
+    ///
+    /// `None` in the returned vec means "no `-p` narrowing" - the unscoped
+    /// selection - which is emphatically not the same as an empty vec, which
+    /// would mean no cargo command runs at all. An empty effective scope is a
+    /// skip decided by the caller (`cli_package_scope`), never a plan.
+    pub fn resolutions(&self, scope: &[String]) -> Vec<Option<String>> {
+        if self.effective_unification.is_per_package() {
+            return scope.iter().map(|p| Some(p.clone())).collect();
+        }
+        vec![None]
     }
 }
 
@@ -199,7 +257,57 @@ pub type BuildShapeKey = (
     Vec<(String, String)>,
     Vec<String>,
     Option<SweepProfile>,
+    EffectiveUnification,
 );
+
+/// Resolve one sweep's configured unification policy into the answer this
+/// invocation will use.
+///
+/// This is a RUNTIME decision, not a parse-time one, and it cannot be moved
+/// earlier: whether the parallel lane needs its workspace pin depends on the
+/// CLI `-p` scope and on forwarded cargo selectors, so the same config is
+/// promotion-eligible in one invocation and not in another.
+///
+/// `promotion_eligible` is the parallel lane's own gate (see
+/// `check_cmd::parallel::unify_workspace`): a whole-workspace fan-out whose
+/// per-binary re-entries would otherwise resolve a different feature graph
+/// from the prebuild that produced them.
+///
+/// Explicit `selected` on a promotion-eligible sweep FAILS rather than being
+/// silently promoted. Promotion exists because the parallel lane cannot keep
+/// the prebuild's graph equal to the runners' without it, so honouring the
+/// request would knowingly reintroduce the mismatch the lane was built to
+/// eliminate - and overriding it silently would make the value's name false.
+/// A sweep that CLI narrowing has already made ineligible is not refused: the
+/// prebuild and every runner then share one package root, so selected mode is
+/// truthful and sound there.
+pub fn resolve_unification(
+    sweep: &ResolvedSweep,
+    promotion_eligible: bool,
+) -> Result<EffectiveUnification, DevError> {
+    Ok(match sweep.feature_unification {
+        FeatureUnification::Package => EffectiveUnification::Pinned(CargoUnification::Package),
+        FeatureUnification::Workspace => EffectiveUnification::Pinned(CargoUnification::Workspace),
+        FeatureUnification::Selected if promotion_eligible => {
+            return Err(DevError::Config(format!(
+                "[[check]] '{}': `feature_unification = \"selected\"` cannot be honoured on a \
+                 parallel whole-workspace sweep. The parallel lane pins workspace unification so \
+                 each test binary's cargo re-entry resolves the same feature graph as the prebuild \
+                 that produced it; selected mode would let them differ, which is the mismatch the \
+                 lane exists to prevent. Drop `parallel`, scope the sweep with `packages`, or use \
+                 `auto`.",
+                sweep.label
+            )))
+        }
+        FeatureUnification::Selected => EffectiveUnification::Pinned(CargoUnification::Selected),
+        // The pre-existing behaviour, and the only value that defers to
+        // ambient config rather than pinning.
+        FeatureUnification::Auto if promotion_eligible => {
+            EffectiveUnification::Pinned(CargoUnification::Workspace)
+        }
+        FeatureUnification::Auto => EffectiveUnification::Ambient,
+    })
+}
 
 /// Synthesize a `ResolvedSweep` from a `CheckEntry` alone, with no
 /// profile filters. Used by the bare `brokkr check` path when
@@ -230,6 +338,10 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         env: entry.env.clone(),
         test_threads: None,
         rustflags: entry.rustflags.clone(),
+        feature_unification: entry.feature_unification,
+        // Unresolved until the CLI scope is known; `resolve_unification`
+        // fills it in before any cargo command is built.
+        effective_unification: EffectiveUnification::Ambient,
         parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
         process_isolation: false,
         qualified_skips: Vec::new(),
@@ -619,6 +731,8 @@ fn build_resolved_sweep(
         env,
         test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
+        feature_unification: entry.feature_unification,
+        effective_unification: EffectiveUnification::Ambient,
         parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
         process_isolation: profile.isolation == Some(Isolation::Process),
         qualified_skips,
@@ -711,6 +825,122 @@ isolation = "process"
         // of the same entry still dedupe to one clippy run.
         let plain = sweep_from_check_entry(&checks[0]);
         assert_eq!(plain.build_shape_key(), sweeps[0].build_shape_key());
+    }
+
+    #[test]
+    fn unification_mode_is_part_of_the_build_shape() {
+        // Two lanes identical in every other field. Package and workspace
+        // resolution enable different features, so they compile different
+        // source and present different lint surfaces - deduping either into
+        // the other would lint one build and run the other, which is the
+        // whole argument the coverage phase is built on.
+        let base = ResolvedSweep::default();
+        let pkg = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..base.clone()
+        };
+        let ws = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Workspace),
+            ..base.clone()
+        };
+        assert_ne!(pkg.build_shape_key(), ws.build_shape_key());
+        assert_ne!(pkg.build_shape_key(), base.build_shape_key());
+        // And an unpinned lane is not the same shape as one pinned to
+        // cargo's default: `Ambient` defers to the config chain, which is a
+        // different promise even where it lands on the same answer.
+        let sel = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Selected),
+            ..base.clone()
+        };
+        assert_ne!(sel.build_shape_key(), base.build_shape_key());
+    }
+
+    #[test]
+    fn auto_preserves_the_pre_existing_behaviour_in_both_directions() {
+        // The compatibility contract: `auto` un-promoted pins nothing at all,
+        // which is what every sweep did before this key existed...
+        let auto = ResolvedSweep::default();
+        assert_eq!(
+            resolve_unification(&auto, false).unwrap(),
+            EffectiveUnification::Ambient
+        );
+        assert!(auto.unification_args().is_empty());
+        // ...and `auto` on a promotion-eligible parallel sweep still pins
+        // workspace, which is what the parallel lane did before it.
+        assert_eq!(
+            resolve_unification(&auto, true).unwrap(),
+            EffectiveUnification::Pinned(CargoUnification::Workspace)
+        );
+    }
+
+    #[test]
+    fn explicit_selected_fails_rather_than_being_silently_promoted() {
+        let sweep = ResolvedSweep {
+            label: "lane".into(),
+            feature_unification: FeatureUnification::Selected,
+            ..ResolvedSweep::default()
+        };
+        // Promotion exists because the parallel lane cannot otherwise keep the
+        // prebuild's graph equal to its runners'. Honouring `selected` would
+        // reintroduce that mismatch; overriding it silently would make the
+        // value's name false. So it refuses.
+        assert!(resolve_unification(&sweep, true).is_err());
+        // Where CLI narrowing already made promotion unnecessary, the prebuild
+        // and every runner share one package root, so the request is truthful
+        // and is honoured.
+        assert_eq!(
+            resolve_unification(&sweep, false).unwrap(),
+            EffectiveUnification::Pinned(CargoUnification::Selected)
+        );
+    }
+
+    #[test]
+    fn package_mode_plans_one_resolution_per_package() {
+        let pkg = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..ResolvedSweep::default()
+        };
+        let scope = vec!["daemon".to_owned(), "client".to_owned()];
+        assert_eq!(
+            pkg.resolutions(&scope),
+            vec![Some("daemon".to_owned()), Some("client".to_owned())]
+        );
+        // Every other mode is ONE resolution over the whole selection. `None`
+        // means "no -p narrowing", which is emphatically not an empty plan:
+        // an empty vec would mean no cargo command runs at all.
+        let plain = ResolvedSweep::default();
+        assert_eq!(plain.resolutions(&scope), vec![None]);
+        assert_eq!(plain.resolutions(&[]), vec![None]);
+    }
+
+    #[test]
+    fn only_package_mode_and_rustflags_isolate_the_target_dir() {
+        use crate::config::shape_target_key;
+        // The default must keep cargo's own dir, or every existing tree pays
+        // a cold rebuild for a feature it does not use.
+        assert_eq!(shape_target_key(&[], EffectiveUnification::Ambient), None);
+        // A pinned selected/workspace sweep resolves what ambient already
+        // resolves in any given repo, so splitting the cache buys nothing.
+        for mode in [CargoUnification::Selected, CargoUnification::Workspace] {
+            assert_eq!(shape_target_key(&[], EffectiveUnification::Pinned(mode)), None);
+        }
+        // Package mode isolates even with no rustflags: it resolves a
+        // different graph and would otherwise thrash against every ordinary
+        // sweep, in both directions, on every run.
+        let pkg = EffectiveUnification::Pinned(CargoUnification::Package);
+        assert_eq!(shape_target_key(&[], pkg), Some("unify-package".to_owned()));
+
+        // The rustflags-only name is unchanged, so no existing isolated dir
+        // is re-derived by this feature.
+        let flags = vec!["--cfg".to_owned(), "madsim".to_owned()];
+        let plain = shape_target_key(&flags, EffectiveUnification::Ambient).unwrap();
+        assert_eq!(
+            plain,
+            crate::config::rustflags_target_key(&flags).unwrap()
+        );
+        // ...and the two inputs compose rather than colliding: a package-mode
+        // sweep carrying the same flags gets its own dir, not the plain one.
+        assert_ne!(shape_target_key(&flags, pkg).unwrap(), plain);
     }
 
     #[test]

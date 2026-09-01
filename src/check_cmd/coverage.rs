@@ -164,6 +164,35 @@ fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
     }
 }
 
+/// One audited unit per cargo RESOLUTION, not per configured sweep.
+///
+/// Under package mode a two-package lane is one lane but two independent cargo
+/// graphs. A single `ShapeCoverage` spanning both would claim a graph boundary
+/// that does not exist - one enumeration, one ignored set and one curated
+/// verdict standing in for two compiles - and would pull enumeration back
+/// toward the batched multi-`-p` command the mode exists to avoid.
+///
+/// Returns first-seen order alongside the map so the report follows
+/// declaration order rather than hash order.
+type ResolutionKey = (profile::BuildShapeKey, Option<String>);
+
+fn group_by_resolution(
+    sweeps: &[ResolvedSweep],
+) -> (Vec<ResolutionKey>, HashMap<ResolutionKey, Vec<usize>>) {
+    let mut order: Vec<ResolutionKey> = Vec::new();
+    let mut groups: HashMap<ResolutionKey, Vec<usize>> = HashMap::new();
+    for (idx, sweep) in sweeps.iter().enumerate() {
+        for resolution in sweep.resolutions(&sweep.packages) {
+            let key = (sweep.build_shape_key(), resolution);
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(idx);
+        }
+    }
+    (order, groups)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_coverage_phase(
     project_root: &Path,
@@ -313,15 +342,7 @@ fn enumerate_shapes(
     allow_flags: &[String],
     commands: bool,
 ) -> Result<(Vec<ShapeCoverage>, Vec<DeadFilter>), DevError> {
-    let mut order: Vec<profile::BuildShapeKey> = Vec::new();
-    let mut groups: HashMap<profile::BuildShapeKey, Vec<usize>> = HashMap::new();
-    for (idx, sweep) in sweeps.iter().enumerate() {
-        let key = sweep.build_shape_key();
-        if !groups.contains_key(&key) {
-            order.push(key.clone());
-        }
-        groups.entry(key).or_default().push(idx);
-    }
+    let (order, groups) = group_by_resolution(sweeps);
 
     // cargo's resolved target dir: a rustflags shape's isolated dir hangs off
     // it (S3-20), and enumeration must reuse the *same* dir the test phase
@@ -331,6 +352,7 @@ fn enumerate_shapes(
     let mut ledger = FilterLedger::default();
     let mut out = Vec::with_capacity(order.len());
     for key in &order {
+        let (_, resolution) = key;
         let members = &groups[key];
         let first = &sweeps[members[0]];
         // Same shape => same env by construction (env is in the key), and
@@ -356,7 +378,11 @@ fn enumerate_shapes(
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let bare = shape_enumeration_args(first, allow_args);
+        // Under package mode the enumeration is scoped to this resolution's
+        // one package, matching the one cargo command the lane actually ran
+        // for it. Enumerating the lane's whole package list here would
+        // catalogue binaries from a batched graph nothing built.
+        let bare = resolution_enumeration_args(first, resolution.as_deref(), allow_args);
         // Per-binary enumeration (feature 11): the artifact stream gives
         // package attribution, direct-binary `--list` gives the names.
         // libtest's `--list` includes `#[ignore]`d tests regardless of
@@ -446,7 +472,13 @@ fn enumerate_shapes(
         }
 
         out.push(ShapeCoverage {
-            label: first.label.clone(),
+            // The resolution is part of the name under package mode: an
+            // orphan report that said only "daemon-package" would not say
+            // which of the lane's resolutions is missing the pair.
+            label: match resolution {
+                Some(pkg) => format!("{}/{pkg}", first.label),
+                None => first.label.clone(),
+            },
             curated: members.iter().all(|&idx| sweeps[idx].curated),
             universe,
             ignored,
@@ -603,6 +635,11 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
     // both rebuild the world and list the dev build's tests - a universe for
     // a build the phase never ran.
     let mut args: Vec<String> = sweep_profile_args(sweep);
+    // Exactly the same argument as the profile, and the reason this line is
+    // not optional: enumerating a package-mode lane under ambient resolution
+    // would list the tests of a build nothing ran, and rebuild the shape in
+    // both directions on every audit.
+    args.extend(sweep.unification_args());
     for pkg in &sweep.packages {
         args.push("-p".into());
         args.push(pkg.clone());
@@ -628,6 +665,31 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
 fn shape_enumeration_args(sweep: &ResolvedSweep, allow_args: Vec<String>) -> Vec<String> {
     let mut args = allow_args;
     args.extend(shape_selection_args(sweep));
+    args
+}
+
+/// The enumeration selection for ONE cargo resolution of a shape.
+///
+/// `resolution` is `Some(pkg)` only under package mode, where the lane ran one
+/// cargo command per package and the audit must enumerate the same way: a
+/// batched `-p a -p b` listing would catalogue binaries from a graph no run
+/// produced, which is the batched-versus-independent difference the mode is
+/// built on. The package REPLACES the shape's own `-p` list rather than adding
+/// to it, since cargo unions selection flags.
+fn resolution_enumeration_args(
+    sweep: &ResolvedSweep,
+    resolution: Option<&str>,
+    allow_args: Vec<String>,
+) -> Vec<String> {
+    let Some(pkg) = resolution else {
+        return shape_enumeration_args(sweep, allow_args);
+    };
+    let mut args = allow_args;
+    args.extend(sweep_profile_args(sweep));
+    args.extend(sweep.unification_args());
+    args.push("-p".to_owned());
+    args.push(pkg.to_owned());
+    args.extend(sweep.cargo_feature_args.iter().cloned());
     args
 }
 

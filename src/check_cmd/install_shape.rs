@@ -65,12 +65,11 @@
 /// boundary `cargo install` uses. CLI `--config` outranks a repo's committed
 /// `.cargo/config.toml` pin (e.g. a workspace-mode pin adopted for the
 /// parallel test lane), which is what lets both coexist.
+/// One definition, shared with the `[[check]]` `feature_unification` key: this
+/// phase and a package-mode test lane must mean the same thing by "the install
+/// shape", or the lane's green would be evidence about a different build.
 fn package_unification_args() -> [String; 3] {
-    [
-        "-Zfeature-unification".into(),
-        "--config".into(),
-        "resolver.feature-unification=\"package\"".into(),
-    ]
+    crate::config::CargoUnification::Package.cargo_args()
 }
 
 /// Did cargo reject the unification flags themselves, rather than fail to

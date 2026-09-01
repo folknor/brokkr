@@ -277,16 +277,11 @@ fn weight_ms(seconds: f64) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// The three cargo args that pin feature resolution to the workspace
-/// universe. One list so the prebuild and every per-binary invocation
-/// cannot drift apart - the whole point is that they name one graph.
-fn feature_unification_args() -> [String; 3] {
-    [
-        "-Zfeature-unification".into(),
-        "--config".into(),
-        "resolver.feature-unification=\"workspace\"".into(),
-    ]
-}
+// The pin itself now lives on the sweep as `effective_unification`, resolved
+// once per invocation by `profile::resolve_unification` and read here through
+// `sweep.unification_args()`. The prebuild and every per-binary invocation take
+// it from that one field, which is what keeps them naming one graph - the
+// property this lane's local helper used to enforce by being the only caller.
 
 /// Whether forwarded cargo args narrow the package selection.
 ///
@@ -313,7 +308,13 @@ fn narrows_selection(cargo_extra: &[String]) -> bool {
 /// one selection where cargo's `"workspace"` mode describes the prebuild
 /// rather than widening it. See the module header for why each condition is
 /// load-bearing.
-fn unify_workspace(
+/// This is now the *eligibility* half only: it says the fan-out would need the
+/// workspace pin, and [`crate::profile::resolve_unification`] decides what the
+/// sweep's configured policy does with that - promote under `auto`, honour an
+/// explicit `workspace`, or refuse an explicit `selected` that cannot be
+/// delivered. Package mode can never reach here: it requires a non-empty
+/// `packages`, which fails the second condition.
+pub(crate) fn unify_workspace(
     sweep: &ResolvedSweep,
     cli_scope: &[&str],
     whole_workspace: bool,
@@ -324,6 +325,48 @@ fn unify_workspace(
         && sweep.test_exclude_packages.is_empty()
         && whole_workspace
         && !narrows_selection(cargo_extra)
+}
+
+/// Reject forwarded cargo package selectors under package mode.
+///
+/// Package mode promises one cargo resolution per selected package. A
+/// trailing `-- -p other` reaches cargo through a channel brokkr does not
+/// plan, and cargo UNIONS selection flags, so it would smuggle a second
+/// package into a resolution that is supposed to hold exactly one - silently
+/// turning the lane back into the batched shape it exists to avoid.
+/// `--workspace` and `--exclude` have no package-mode meaning at all, since
+/// the mode requires an explicit positive set.
+pub(crate) fn reject_forwarded_selectors(
+    sweep: &ResolvedSweep,
+    cargo_extra: &[String],
+) -> Result<(), DevError> {
+    if !sweep.effective_unification.is_per_package() {
+        return Ok(());
+    }
+    let offending: Vec<&String> = cargo_extra
+        .iter()
+        .filter(|a| {
+            let head = a.split_once('=').map_or(a.as_str(), |(h, _)| h);
+            ["-p", "--package", "--exclude", "--workspace"].contains(&head)
+                || (a.starts_with("-p") && a.len() > 2)
+        })
+        .collect();
+
+    if offending.is_empty() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "[[check]] '{}' runs under `feature_unification = \"package\"`, which resolves one cargo \
+         invocation per package, but the forwarded args carry package selectors ({}). cargo unions \
+         selection flags, so these would widen a resolution that must hold exactly one package. \
+         Use brokkr's own `-p`, or the entry's `packages`.",
+        sweep.label,
+        offending
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )))
 }
 
 /// The cargo target selector for one test binary.
@@ -365,12 +408,11 @@ fn binary_args(
     threads: u32,
     cargo_extra: &[String],
     libtest_extra: &[String],
-    unify: bool,
 ) -> Result<Vec<String>, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
-    if unify {
-        args.extend(feature_unification_args());
-    }
+    // Taken from the sweep, not decided here: the prebuild that produced this
+    // binary read the same field, so they cannot name different graphs.
+    args.extend(sweep.unification_args());
     args.extend(allow_args.iter().cloned());
     args.extend(sweep.cargo_feature_args.iter().cloned());
     args.extend(binary_selector(binary));
@@ -436,17 +478,8 @@ fn run_one_binary(
     slots: u32,
     cargo_extra: &[String],
     libtest_extra: &[String],
-    unify: bool,
 ) -> Result<BinaryRun, DevError> {
-    let args = binary_args(
-        sweep,
-        binary,
-        allow_args,
-        slots,
-        cargo_extra,
-        libtest_extra,
-        unify,
-    )?;
+    let args = binary_args(sweep, binary, allow_args, slots, cargo_extra, libtest_extra)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let started = Instant::now();
     let run = test_runner::run_libtest_parallel(
@@ -491,7 +524,11 @@ fn run_parallel_sweep(
     raw: bool,
     doctests: bool,
     commands: bool,
-    whole_workspace: bool,
+    // `whole_workspace` used to be decided here, as the local `unify` flag.
+    // It now feeds `profile::resolve_unification` at the top of the check run,
+    // because the answer has to be one value the clippy phase, the pre-build,
+    // this prebuild, every runner and the coverage audit all read - deciding it
+    // per lane is how those drift.
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
@@ -523,17 +560,36 @@ fn run_parallel_sweep(
     // cargo args (`--release` and kin), and - on a whole-workspace sweep -
     // the workspace feature-unification pin, without which each `-p`-scoped
     // runner resolves its own feature graph (see the module header).
-    let unify = unify_workspace(sweep, packages, whole_workspace, &cargo_extra);
-    let mut selection = sweep_selection_args(sweep, packages);
-    selection.extend(extra_selectors.iter().cloned());
-    selection.extend(allow_args.iter().cloned());
-    selection.extend(cargo_extra.iter().cloned());
-    if unify {
-        selection.extend(feature_unification_args());
-    }
-    let Some(all) = test_binaries(project_root, &selection, &env_refs, commands)? else {
-        return Ok(false);
+    //
+    // Under package mode the prebuild is one cargo invocation PER PACKAGE, not
+    // one batched multi-`-p` command. The batched graph is observably not the
+    // same as N independent resolutions - that is the whole premise of package
+    // mode - so a batched prebuild would enumerate binaries from a shape no
+    // runner ever uses, and every per-binary re-entry would then rebuild
+    // instead of hitting the cache.
+    reject_forwarded_selectors(sweep, &cargo_extra)?;
+    let effective_scope: Vec<String> = if sweep.packages.is_empty() {
+        packages.iter().map(|p| (*p).to_owned()).collect()
+    } else {
+        sweep.packages.clone()
     };
+    let mut all: Vec<TestBinary> = Vec::new();
+    for resolution in sweep.resolutions(&effective_scope) {
+        let mut selection = match &resolution {
+            // Package mode: this package alone, replacing the sweep's own
+            // `-p` list rather than adding to it.
+            Some(pkg) => vec!["-p".to_owned(), pkg.clone()],
+            None => sweep_selection_args(sweep, packages),
+        };
+        selection.extend(extra_selectors.iter().cloned());
+        selection.extend(allow_args.iter().cloned());
+        selection.extend(cargo_extra.iter().cloned());
+        selection.extend(sweep.unification_args());
+        let Some(found) = test_binaries(project_root, &selection, &env_refs, commands)? else {
+            return Ok(false);
+        };
+        all.extend(found);
+    }
     // The sweep's own `--test` filters UNION with any the caller supplied,
     // matching cargo's own semantics for repeated selection flags - the
     // enumeration above already unions them, so narrowing to one side here
@@ -653,7 +709,6 @@ fn run_parallel_sweep(
                     *slots,
                     cargo_extra,
                     libtest_extra,
-                    unify,
                 );
                 // Released whether the run succeeded or errored: a binary that
                 // failed to spawn must not strand its slice of the budget and
@@ -1093,13 +1148,58 @@ mod parallel_lane_tests {
     // the serialized-rebuild (and wrong-universe) failure this lane fixed.
     #[test]
     fn the_unification_pin_rides_every_per_binary_command_or_none() {
-        let sweep = bare_sweep();
+        use crate::config::{CargoUnification, EffectiveUnification};
         let b = binary("pkg", "test", "t");
-        let with = binary_args(&sweep, &b, &[], 2, &[], &[], true).unwrap();
-        for a in feature_unification_args() {
+        let promoted = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Workspace),
+            ..bare_sweep()
+        };
+        let with = binary_args(&promoted, &b, &[], 2, &[], &[]).unwrap();
+        for a in CargoUnification::Workspace.cargo_args() {
             assert!(with.contains(&a), "missing {a}");
         }
-        let without = binary_args(&sweep, &b, &[], 2, &[], &[], false).unwrap();
+        // `auto` that was never promoted pins nothing - the pre-existing
+        // behaviour, and the reason `Ambient` is not `Pinned(Selected)`.
+        let without = binary_args(&bare_sweep(), &b, &[], 2, &[], &[]).unwrap();
         assert!(!without.iter().any(|a| a == "-Zfeature-unification"));
+
+        // Package mode rides the same field, so a runner can never resolve a
+        // different graph from the prebuild that produced its binary.
+        let pkg = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..bare_sweep()
+        };
+        let args = binary_args(&pkg, &b, &[], 2, &[], &[]).unwrap();
+        assert!(args.contains(&"resolver.feature-unification=\"package\"".to_owned()));
+    }
+
+    #[test]
+    fn package_mode_refuses_forwarded_package_selectors() {
+        use crate::config::{CargoUnification, EffectiveUnification};
+        let pkg = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..bare_sweep()
+        };
+        // Every spelling cargo accepts, including the attached short form:
+        // one that slipped through would union a second package into a
+        // resolution promised to hold exactly one.
+        for extra in [
+            vec!["-p".to_owned(), "other".to_owned()],
+            vec!["-pother".to_owned()],
+            vec!["--package=other".to_owned()],
+            vec!["--workspace".to_owned()],
+            vec!["--exclude=x".to_owned()],
+        ] {
+            assert!(
+                reject_forwarded_selectors(&pkg, &extra).is_err(),
+                "{extra:?} must be refused"
+            );
+        }
+        // Non-selection args are none of this rule's business.
+        assert!(reject_forwarded_selectors(&pkg, &["--release".to_owned()]).is_ok());
+        // And the rule applies to package mode alone.
+        assert!(
+            reject_forwarded_selectors(&bare_sweep(), &["-p".to_owned(), "o".to_owned()]).is_ok()
+        );
     }
 }

@@ -380,6 +380,11 @@ fn test_argv(
     debug: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["test".into()];
+    // The lane's pinned resolution, same as every cargo command `check`
+    // builds. This path is already one package per invocation (`-p pkg`
+    // below), so package mode's one-resolution-per-package rule is satisfied
+    // by construction and needs no loop here.
+    args.extend(sweep.unification_args());
     args.extend(allow_args.iter().cloned());
     if !debug {
         args.push("--release".into());
@@ -407,9 +412,12 @@ fn test_argv(
 /// cargo's command line depending on which rustflags layer this build actually
 /// reads (see [`crate::rustflags`]), never both.
 ///
-/// A sweep carrying `rustflags` gets its own isolated target dir + matching
+/// A sweep carrying `rustflags` - or package-mode `feature_unification`, on the
+/// same fingerprint-thrash grounds - gets its own isolated target dir + matching
 /// BROKKR_TEST_BIN_DIR + composed RUSTFLAGS, so running a sim sweep through
-/// `brokkr test` builds under its cfg without thrashing the plain sweeps. The
+/// `brokkr test` builds under its cfg without thrashing the plain sweeps. Both
+/// come from `sweep_runtime_env`, so this command and `check` place a lane's
+/// artifacts in the same directory rather than each deriving its own. The
 /// profile-declared env is merged on top of the project's always-set vars, and
 /// wins on collision so a profile can shadow defaults when it really needs to
 /// (request 3 / B3: brokkr test was dropping this and a `default_profile` env
@@ -454,6 +462,11 @@ fn count_matching_tests(
     debug: bool,
 ) -> Result<usize, DevError> {
     let mut args: Vec<String> = vec!["test".into()];
+    // The lane's pinned resolution, same as every cargo command `check`
+    // builds. This path is already one package per invocation (`-p pkg`
+    // below), so package mode's one-resolution-per-package rule is satisfied
+    // by construction and needs no loop here.
+    args.extend(sweep.unification_args());
     args.extend(allow_args.iter().cloned());
     if !debug {
         args.push("--release".into());
@@ -616,6 +629,13 @@ fn decide_sweeps(
         // Nothing declared applies any more, so nothing can be audited as
         // dead here either - and `brokkr test` runs no coverage phase anyway.
         s.declared_filters.clear();
+        // `brokkr test` has no parallel fan-out to promote for, so the only
+        // question is what the entry pinned. Resolving it here rather than
+        // leaving the field at its default is what stops the key being
+        // silently ignored by this command while `check` honours it - the two
+        // must agree on what a lane means, or a green `brokkr test` would be
+        // evidence about a build `check` never runs.
+        s.effective_unification = crate::profile::resolve_unification(s, false)?;
     }
     Ok(sweeps)
 }
