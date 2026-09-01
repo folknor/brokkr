@@ -464,6 +464,13 @@ fn sweep_profile_args(sweep: &ResolvedSweep) -> Vec<String> {
 /// sweep's scope and skipped sweeps where nothing survived).
 fn sweep_selection_args(sweep: &ResolvedSweep, packages: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = sweep_profile_args(sweep);
+    // The sweep's pinned resolution. This is the ordinary (non-parallel) test
+    // path, and it was the one place the pin was never emitted: the lane was
+    // labelled `unification package`, isolated into its own target dir, and
+    // then compiled under whatever the config chain said - a shape asserted in
+    // config that was not the shape that ran, which is precisely the failure
+    // this feature exists to catch, reproduced inside the feature itself.
+    args.extend(sweep.unification_args());
 
     if !packages.is_empty() {
         for pkg in packages {
@@ -1845,6 +1852,40 @@ warning: z [too_many_lines]
     }
 
     #[test]
+    fn a_pinned_unification_reaches_every_compiling_path() {
+        // The twin of the profile invariant above, and the one that shipped
+        // broken: the ordinary test path never emitted the pin, so a lane was
+        // labelled `unification package`, isolated into its own target dir,
+        // and then compiled under workspace resolution. It ran 839 green tests
+        // against a defect it was created to catch. Assert the flags on every
+        // compiling path, not the label.
+        use crate::config::{CargoUnification, EffectiveUnification};
+        let pkg = ResolvedSweep {
+            packages: vec!["daemon".to_owned()],
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..ResolvedSweep::default()
+        };
+        let pin = "resolver.feature-unification=\"package\"";
+
+        let test_args = sweep_selection_args(&pkg, &[]);
+        assert!(test_args.iter().any(|a| a == "-Zfeature-unification"), "test: {test_args:?}");
+        assert!(test_args.iter().any(|a| a == pin), "test: {test_args:?}");
+
+        let clippy = clippy_args(&pkg, &[], &[]);
+        assert!(clippy.iter().any(|a| a == pin), "clippy: {clippy:?}");
+
+        let enumeration = shape_selection_args(&pkg);
+        assert!(enumeration.iter().any(|a| a == pin), "audit: {enumeration:?}");
+
+        // The pin is a cargo option, so it must land before the `--` split or
+        // libtest receives it.
+        if let Some(split) = test_args.iter().position(|a| a == "--") {
+            let z = test_args.iter().position(|a| a == "-Zfeature-unification");
+            assert!(z.is_some_and(|i| i < split), "pin after `--`: {test_args:?}");
+        }
+    }
+
+    #[test]
     fn an_unpinned_sweep_is_untouched() {
         // Every repo that never sets the key must produce byte-identical argv
         // to what it produced before the key existed.
@@ -1853,6 +1894,14 @@ warning: z [too_many_lines]
         assert!(!sweep_selection_args(&plain, &[]).iter().any(|a| a == "--release"));
         assert!(!clippy_args(&plain, &[], &[]).iter().any(|a| a == "--release"));
         assert!(!shape_selection_args(&plain).iter().any(|a| a == "--release"));
+        // Same for unification: `auto` un-promoted pins nothing anywhere.
+        for args in [
+            sweep_selection_args(&plain, &[]),
+            clippy_args(&plain, &[], &[]),
+            shape_selection_args(&plain),
+        ] {
+            assert!(!args.iter().any(|a| a == "-Zfeature-unification"), "got: {args:?}");
+        }
     }
 
     #[test]

@@ -234,16 +234,40 @@ impl ResolvedSweep {
         self.effective_unification.cargo_args()
     }
 
+    /// The packages this sweep actually builds, given the CLI `-p` narrowing.
+    ///
+    /// An EMPTY `cli_scope` means "the caller did not narrow", not "no
+    /// packages" - `cli_package_scope` returns an empty vec for an unnarrowed
+    /// run and reports a sweep whose intersection is genuinely empty as a skip
+    /// instead. Reading the empty vec as the answer is what silently gave a
+    /// package-mode sweep zero resolutions, so it emitted no cargo command at
+    /// all while still being labelled and counted as a lane.
+    pub fn effective_packages(&self, cli_scope: &[String]) -> Vec<String> {
+        if cli_scope.is_empty() {
+            return self.packages.clone();
+        }
+        cli_scope.to_vec()
+    }
+
     /// One cargo resolution per package under package mode; one resolution
     /// over the whole selection otherwise.
     ///
     /// `None` in the returned vec means "no `-p` narrowing" - the unscoped
     /// selection - which is emphatically not the same as an empty vec, which
-    /// would mean no cargo command runs at all. An empty effective scope is a
-    /// skip decided by the caller (`cli_package_scope`), never a plan.
-    pub fn resolutions(&self, scope: &[String]) -> Vec<Option<String>> {
+    /// would mean no cargo command runs at all.
+    ///
+    /// Package mode therefore never returns an empty plan: the parser refuses
+    /// `package` with an empty `packages`, so the fallback in
+    /// [`Self::effective_packages`] always has something to give. If that
+    /// invariant is ever broken the sweep falls back to one unscoped
+    /// resolution rather than silently running nothing - a wrong command is
+    /// visible, a missing one is not.
+    pub fn resolutions(&self, cli_scope: &[String]) -> Vec<Option<String>> {
         if self.effective_unification.is_per_package() {
-            return scope.iter().map(|p| Some(p.clone())).collect();
+            let packages = self.effective_packages(cli_scope);
+            if !packages.is_empty() {
+                return packages.into_iter().map(Some).collect();
+            }
         }
         vec![None]
     }
@@ -911,6 +935,35 @@ isolation = "process"
         let plain = ResolvedSweep::default();
         assert_eq!(plain.resolutions(&scope), vec![None]);
         assert_eq!(plain.resolutions(&[]), vec![None]);
+    }
+
+    #[test]
+    fn a_package_mode_sweep_never_plans_zero_resolutions() {
+        // The shipped bug: callers pass the CLI `-p` set, which is EMPTY on an
+        // unnarrowed run. Reading that as the package list gave a package-mode
+        // sweep zero resolutions, so its loop body never ran - no clippy
+        // command, no pin on the test command, and the lane still labelled and
+        // counted as if it had run. A shape asserted in config that is not the
+        // shape that ran is the exact failure this feature exists to catch.
+        let pkg = ResolvedSweep {
+            packages: vec!["daemon".to_owned()],
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..ResolvedSweep::default()
+        };
+        assert_eq!(pkg.resolutions(&[]), vec![Some("daemon".to_owned())]);
+        assert_eq!(pkg.effective_packages(&[]), vec!["daemon".to_owned()]);
+
+        // A CLI `-p` narrows it, and replaces rather than adds - cargo unions
+        // selection flags, so emitting both would widen the resolution.
+        let cli = vec!["client".to_owned()];
+        assert_eq!(pkg.resolutions(&cli), vec![Some("client".to_owned())]);
+
+        // No mode ever plans nothing: an empty plan means no cargo command
+        // runs, which is silence where a lane was promised.
+        for sweep in [&pkg, &ResolvedSweep::default()] {
+            assert!(!sweep.resolutions(&[]).is_empty());
+            assert!(!sweep.resolutions(&cli).is_empty());
+        }
     }
 
     #[test]

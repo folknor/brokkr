@@ -606,6 +606,56 @@ fn resolve_gate_profile(
 /// build, and a scoped green is not comparable to the full green (feature
 /// unification changes with the package set - the B41 hazard), so a
 /// complete profile rejects it before anything compiles.
+/// The ordinary (non-parallel, non-isolated) test lane: one `cargo test` per
+/// cargo RESOLUTION.
+///
+/// A package-mode sweep tests each of its packages alone, because a batched
+/// multi-`-p` run resolves a graph none of them install under. Every other mode
+/// yields a single unscoped resolution, so this is one iteration and the argv
+/// is what it always was.
+#[allow(clippy::too_many_arguments)]
+fn run_sequential_resolutions(
+    project_root: &Path,
+    state_root: &Path,
+    sweep: &ResolvedSweep,
+    scope: &[&str],
+    extra_args: &[String],
+    project_env: &[(String, String)],
+    allow_args: &[String],
+    // (raw, doctests, multi, commands)
+    flags: (bool, bool, bool, bool),
+    mut timings: Option<&mut Vec<TestTiming>>,
+) -> Result<bool, DevError> {
+    let owned: Vec<String> = scope.iter().map(|s| (*s).to_owned()).collect();
+    let mut all_passed = true;
+    for resolution in sweep.resolutions(&owned) {
+        let run_scope: Vec<&str> = match &resolution {
+            Some(pkg) => vec![pkg.as_str()],
+            None => scope.to_vec(),
+        };
+        let passed = run_one_test_sweep(
+            project_root,
+            state_root,
+            sweep,
+            &run_scope,
+            extra_args,
+            project_env,
+            allow_args,
+            flags.0,
+            flags.1,
+            flags.2,
+            flags.3,
+            timings.as_deref_mut(),
+        )?;
+        // Keep going rather than returning on the first red package: the phase
+        // reports every failure it can reach in one run, and stopping here
+        // would hide a second package's failures behind the first, exactly as
+        // `--no-fail-fast` exists to prevent one binary hiding another.
+        all_passed &= passed;
+    }
+    Ok(all_passed)
+}
+
 /// Sweep selection followed immediately by unification resolution - one step,
 /// because a `ResolvedSweep` whose `effective_unification` has not been filled
 /// in yet is not safe to hand to a phase: it would build cargo commands, and
@@ -1740,11 +1790,28 @@ fn run_clippy_phase(
     // Skipping some sweeps for an out-of-scope `-p` is fine; skipping all of
     // them means nothing was checked, which must not read as clean.
     if results.is_empty() && !sweeps.is_empty() {
-        return Err(DevError::Config(format!(
-            "-p {}: every sweep's config rules the selection out; nothing was \
-             clippy-checked",
-            packages.join(" -p ")
-        )));
+        let labels: Vec<&str> = sweeps.iter().map(|s| s.label.as_str()).collect();
+        // Two different causes, and the message used to assume the first: with
+        // no CLI `-p` at all it interpolated an empty list and read as
+        // `-p : every sweep's config rules the selection out`, which named
+        // neither what was rejected nor why. A phase that fails must say what
+        // it rejected - a bare "check failed" sends the reader to the source.
+        return Err(DevError::Config(if packages.is_empty() {
+            format!(
+                "nothing was clippy-checked: every active sweep ({}) produced no \
+                 cargo invocation. A sweep reaches this only with an empty \
+                 resolution plan, which is a brokkr bug - please report the \
+                 `[[check]]` entries involved.",
+                labels.join(", ")
+            )
+        } else {
+            format!(
+                "-p {}: every sweep's config rules the selection out ({}); \
+                 nothing was clippy-checked",
+                packages.join(" -p "),
+                labels.join(", ")
+            )
+        }));
     }
 
     report_stale_sited_allows(&results, allow_exact, packages);
@@ -2627,7 +2694,7 @@ fn run_test_phase(
                 timings.as_deref_mut(),
             )?
         } else {
-            run_one_test_sweep(
+            run_sequential_resolutions(
                 project_root,
                 state_root,
                 sweep,
@@ -2635,10 +2702,7 @@ fn run_test_phase(
                 extra_args,
                 &project_env,
                 &allow_args,
-                raw,
-                doctests,
-                multi,
-                commands,
+                (raw, doctests, multi, commands),
                 timings.as_deref_mut(),
             )?
         };

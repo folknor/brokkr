@@ -568,13 +568,9 @@ fn run_parallel_sweep(
     // runner ever uses, and every per-binary re-entry would then rebuild
     // instead of hitting the cache.
     reject_forwarded_selectors(sweep, &cargo_extra)?;
-    let effective_scope: Vec<String> = if sweep.packages.is_empty() {
-        packages.iter().map(|p| (*p).to_owned()).collect()
-    } else {
-        sweep.packages.clone()
-    };
+    let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
     let mut all: Vec<TestBinary> = Vec::new();
-    for resolution in sweep.resolutions(&effective_scope) {
+    for resolution in sweep.resolutions(&cli_scope) {
         let mut selection = match &resolution {
             // Package mode: this package alone, replacing the sweep's own
             // `-p` list rather than adding to it.
