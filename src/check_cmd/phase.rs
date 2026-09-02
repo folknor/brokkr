@@ -2785,7 +2785,8 @@ fn run_test_phase(
 
         let success = if sweep.harness == crate::config::Harness::Nextest {
             run_nextest_sweep(
-                project_root, sweep, &scope, extra_args, &project_env, &allow_args, commands,
+                project_root, state_root, sweep, &scope, extra_args, &project_env, &allow_args,
+                commands,
             )?
         } else if let Some(budget) = sweep.parallel_budget {
             run_parallel_sweep(

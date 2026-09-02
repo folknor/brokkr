@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Smoke test: the `harness = "nextest"` check lane.
+"""Smoke test: the `harness = "nextest"` check lane (brokkr-owned config).
 
-Generates a throwaway workspace under scratch/nextest-lane-smoke with a
-`.config/nextest.toml` and drives `brokkr check` through three scenarios:
+Generates a throwaway workspace under scratch/nextest-lane-smoke and drives
+`brokkr check` through three scenarios:
 
-1. green: a bounded nextest profile (terminating slow-timeout), a passing
-   suite, the sweep's `skip` filter honoured -> exit 0;
+1. green: a passing suite, the sweep's `skip` filter honoured -> exit 0;
 2. red: a failing test -> exit 1;
-3. unbounded: the terminating timeout removed -> refusal naming
-   slow-timeout, before any test runs.
+3. foreign config gets no vote: a `.config/nextest.toml` whose
+   default-filter would exclude the failing test (and whose retries would
+   mask it) is written into the checkout - brokkr must ignore the file
+   entirely, so the run stays red. This is the load-bearing scenario: the
+   engine runs under brokkr's synthesized config, and everything the lane
+   runs comes from brokkr.toml.
 
 Usage, from the brokkr repo root:
 
@@ -27,16 +30,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SMOKE = ROOT / "scratch" / "nextest-lane-smoke"
 BROKKR = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "debug" / "brokkr"
 
-BOUNDED = """\
-[profile.default]
-slow-timeout = { period = "30s", terminate-after = 2 }
-"""
-
-UNBOUNDED = """\
-[profile.default]
-slow-timeout = "30s"
-"""
-
 FILES = {
     "Cargo.toml": """\
 [package]
@@ -44,7 +37,6 @@ name = "nsmoke"
 version = "0.1.0"
 edition = "2021"
 """,
-    ".config/nextest.toml": BOUNDED,
     "src/lib.rs": """\
 pub fn add(a: u64, b: u64) -> u64 {
     a + b
@@ -85,6 +77,15 @@ mod red {
 }
 """
 
+# A foreign config that, if consulted, would hide the failure twice over:
+# the default-filter deselects the failing test and retries would need it to
+# fail three times. Brokkr must never open this file.
+FOREIGN_CONFIG = """\
+[profile.default]
+default-filter = "not test(~goes_red)"
+retries = 2
+"""
+
 
 def run_check() -> int:
     return subprocess.run([str(BROKKR), "check"], cwd=SMOKE).returncode
@@ -104,7 +105,7 @@ def main() -> int:
 
     fail = 0
 
-    print("=== green: bounded profile, passing suite, skip honoured ===")
+    print("=== green: passing suite, skip honoured ===")
     rc = run_check()
     if rc != 0:
         print(f"FAIL green scenario: want exit 0, got {rc}")
@@ -118,15 +119,20 @@ def main() -> int:
     if rc != 1:
         print(f"FAIL red scenario: want exit 1, got {rc}")
         fail = 1
-    lib.write_text(green_lib)
 
-    print("=== unbounded: no terminating timeout is a refusal ===")
-    (SMOKE / ".config/nextest.toml").write_text(UNBOUNDED)
+    print("=== foreign .config/nextest.toml gets no vote: still red ===")
+    foreign = SMOKE / ".config/nextest.toml"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text(FOREIGN_CONFIG)
     rc = run_check()
     if rc != 1:
-        print(f"FAIL unbounded scenario: want exit 1, got {rc}")
+        print(
+            f"FAIL foreign-config scenario: want exit 1, got {rc} - the checkout's "
+            "nextest config influenced a brokkr run"
+        )
         fail = 1
-    (SMOKE / ".config/nextest.toml").write_text(BOUNDED)
+    shutil.rmtree(foreign.parent)
+    lib.write_text(green_lib)
 
     if fail == 0:
         print("smoke-nextest-lane: all scenarios passed")

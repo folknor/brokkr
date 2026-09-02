@@ -90,30 +90,60 @@ Expected win, from the measured distribution: the default sweep's floor drops
 toward max(serial/budget, slowest binary), roughly 50-70s against today's 217s.
 Check lands around 2 minutes.
 
-## RFE 2: make the nextest harness lane selectable [LANE DONE; AUDIT PENDING]
+## RFE 2: a nextest-engine execution lane [REFRAMED 2026-09-02; LANE REBUILT]
 
-**Implemented 2026-09-02**: `[[check]] harness = "nextest"` runs a sweep
-through the linked engine, process-per-test, under the project's own
-`.config/nextest.toml` - brokkr keeps the compile shape and translates
-`skip`/`only` (package-qualified skips become filtersets), nextest keeps
-profile/default-filter/retries/timeouts and renders the run. The lane
-refuses unbounded profiles (no terminating slow-timeout) after listing.
-Smoke: `scripts/smoke-nextest-lane.py`. Deliberately NOT yet done, and
-refused fail-closed at config load: `certifies = "complete"` over a nextest
-sweep - the (binary-id, test) coverage audit, the default-filter pin
-(design settled in review: a committed pins file beside the resolved
-brokkr.toml, blessed piners-style, keyed by profile/platform/address/raw
-string/engine version plus an excluded-pair-set hash) and the
-run-extra-args rejection for audited lanes are the remaining work.
+**Rebuild landed same day.** The lane now runs exactly as reframed below:
+synthesized config under the state dir (retries 0, no default-filter, the
+20s watchdog as slow-timeout + terminate-after, max-fail all to match the
+other lanes' enumerate-everything ethos), `.config/nextest.toml` never
+opened, NEXTEST_PROFILE never read, profile `test_threads` mapped onto the
+engine's in-flight count, `isolation = "process"` refused as redundant
+rather than conflicting. The smoke's load-bearing scenario writes a foreign
+nextest.toml whose default-filter and retries would hide a failing test and
+asserts the run stays red - the file gets no vote. The pin/bless/drift
+machinery, the boundedness refusal and the DefaultFiltered bucket are
+deleted. Still pending: the (binary-id, test) coverage audit, now small
+(exclusions only ever come from brokkr.toml), which is what lets a complete
+gate run a nextest sweep - the serial lane's ~170s collapse waits on it.
 
-**Sequencing correction (from the nautilus review)**: nautilus cannot adopt
-the lane ANYWHERE yet, not just not in the gate. The complete-universe rule
-makes the gate reference every non-curated entry, and a complete profile
-referencing a nextest sweep is the fail-closed load error - so on any
-complete-gated config, nextest adoption waits on the audit wholesale. RFE 1
-carries the throughput win in the meantime.
+**The correction, which invalidates this RFE as originally written.** The
+original text below argued the lane on CI parity: upstream supports only
+nextest, so run their runner their way. That framing was wrong about the
+goal, it echoed a pre-existing wrong sentence in check.md's nextest section
+("Motivation is CI parity, and only parity"), and the first implementation
+faithfully built it - reading `.config/nextest.toml`, honoring the
+default-filter, and then inventing a pin/bless/drift apparatus to police a
+foreign config that should never have had a vote. The user killed it at the
+root: brokkr.toml is the ONLY authority over what a gate runs and claims -
+that is the entire point of brokkr standing over a foreign checkout - and
+upstream's CI machinery is of no interest at all.
 
-### The original proposal
+What nextest actually is here: a fast process-per-test **executor**. An
+engine, not a policy source. The rebuilt lane runs the linked engine on a
+brokkr-synthesized config: selection from the sweep and profile
+(packages/excludes/features/skips/only, the translation already built),
+retries zero, no default-filter, no test groups, no setup scripts, and
+slow-timeout + terminate-after set to brokkr's own per-test watchdog value -
+the hang kill the other lanes have, per process, for free. Never opens
+`.config/nextest.toml`, never reads NEXTEST_PROFILE. Everything the first
+cut built to police the foreign config dies with it: the boundedness
+refusal, the default-filter pin, the bless flow, the DefaultFiltered
+bucket, the run-extra-args rejection. The coverage audit shrinks to the
+existing model - universe from a full listing, ran-set from the lane,
+narrowing only ever from brokkr.toml skips and quarantines, keyed
+(binary-id, test).
+
+What the lane is FOR, measured on nautilus: the gate's `isolation =
+"process"` serial lane is ~170 sequential `cargo test -- --exact` spawns,
+~170s of gate-only overhead. Process-per-test under the engine is that
+lane's isolation guarantee executed concurrently - it collapses to seconds,
+configured from brokkr.toml alone. The in-process parallel lanes stay the
+default everywhere else: the shared-process lane is the detector for the
+process-global-state class (it produced four real upstream findings in the
+nautilus workspace), and the original text's claim that it "is not a
+detector there" is retracted along with the parity frame.
+
+### The original proposal (kept as the record of the misread)
 
 The groundwork is in (`src/check_cmd/nextest.rs`, the coverage key, the
 disposition classifier); the lane is not. nautilus is the consumer where the
@@ -200,8 +230,11 @@ red-doctest scenarios in `scripts/smoke-parallel-direct.py`.
 ## Adoption notes for nautilus (2026-09-02)
 
 - `parallel = {}` on `default` + the doc twin is the one-edit adoption; the
-  nextest lane waits on the audit wholesale (see RFE 2's sequencing
-  correction).
+  nextest-engine lane arrives later as the serial-lane replacement, once the
+  rebuilt synthesized-config lane and its (binary-id, test) audit exist (see
+  RFE 2's reframing - the original "waits on the audit wholesale" sequencing
+  was written against the parity-shaped lane and its foreign-config
+  machinery, now dead).
 - First parallel runs: the fan-out overlaps binaries, so wall-clock tests
   (the B100 class; `test_failed_connect_tears_down_websockets_before_retry`
   already at 15.7s) see cross-binary load for the first time and may trip

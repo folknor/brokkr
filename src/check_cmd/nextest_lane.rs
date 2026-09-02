@@ -1,39 +1,46 @@
-// The `harness = "nextest"` lane: the sweep is handed to the linked nextest
-// engine, which owns build, list and run - process-per-test under the
-// project's own `.config/nextest.toml`.
+// The `harness = "nextest"` lane: the linked nextest engine as a fast
+// process-per-test EXECUTOR for a brokkr-configured sweep.
 //
-// Motivation is CI parity, and only parity (see docs/commands/check.md's
-// nextest section): where a project's CI runs `cargo nextest run` and the
-// suite relies on its per-test process isolation, brokkr's in-process libtest
-// lanes exercise a shape CI never runs. This lane runs the real engine
-// in-process - no `cargo-nextest` on PATH, the version pinned by brokkr's
-// Cargo.lock.
+// An engine, not a policy source. Everything the lane runs and claims comes
+// from brokkr.toml - that is the entire point of brokkr standing over a
+// checkout it does not own - so the engine executes under a config brokkr
+// SYNTHESIZES per run: retries zero, no default-filter, no test groups, no
+// setup scripts, and `slow-timeout` + `terminate-after` set to brokkr's own
+// per-test watchdog ceiling, which gives every test the hang kill the other
+// lanes have, per process, for free. The project's `.config/nextest.toml` is
+// NEVER opened and `NEXTEST_PROFILE` is never read: a foreign config must
+// not get a vote in what a brokkr gate runs, and an earlier version of this
+// lane that honoured it had to grow a pin/bless/drift apparatus just to
+// police the vote it had granted.
 //
-// What brokkr keeps for itself:
-// - the COMPILE SHAPE. The build is brokkr's cargo invocation (selection,
-//   features, unification pin, cargo profile, [lints] allows, sweep env,
-//   rustflags plumbing), streamed into nextest's BinaryListBuilder - so a
-//   nextest lane and a libtest lane with equal compile inputs share the
-//   target dir and the clippy dedupe.
-// - the FILTERS. The sweep's `only`/`skip` map onto nextest's own
-//   TestFilterPatterns (identical libtest substring semantics, no filterset
-//   string to escape); a package-qualified skip becomes the filterset
-//   `not (package(P) & test(~X))`, folding the one predicate brokkr used to
-//   evaluate itself back into the tool.
-// - the VERDICT and the bookends. Nextest's reporter renders the run; brokkr
-//   wraps it in the usual sweep lines and decides pass/fail from RunStats.
+// What the engine is FOR: dissolving per-test serialization. A sweep that
+// needs process isolation (the `isolation = "process"` semantics) is N
+// sequential `cargo test -- --exact` spawns on the libtest path; here it is
+// the same guarantee executed concurrently. The in-process libtest lanes
+// remain the default everywhere else - a shared-process lane is the only
+// detector for the process-global-state class, and this lane deliberately
+// does not replace it.
 //
-// What nextest keeps: everything else. Its config's default profile (or
-// NEXTEST_PROFILE), default-filter, retries, per-test timeouts, test groups,
-// setup scripts. Brokkr deliberately imposes NO 20s watchdog here - the lane
-// exists to run tests the way CI runs them - but a gate must be bounded, so
-// after listing it verifies every selected test has a terminating timeout
-// under the resolved profile and refuses otherwise, naming the config to fix
-// (`slow-timeout = { period = "..", terminate-after = N }`).
+// The division of labour:
+// - Brokkr owns the COMPILE SHAPE. The build is brokkr's cargo invocation
+//   (selection, features, unification pin, cargo profile, [lints] allows,
+//   sweep env, rustflags plumbing), streamed into nextest's
+//   BinaryListBuilder - so a nextest lane and a libtest lane with equal
+//   compile inputs share the target dir and the clippy dedupe.
+// - Brokkr owns the FILTERS. The sweep's `only`/`skip` map onto nextest's
+//   own TestFilterPatterns (identical libtest substring semantics, no
+//   filterset string to escape); a package-qualified skip becomes the
+//   filterset `not (package(P) & test(~X))`, folding the one predicate
+//   brokkr used to evaluate itself back into the tool.
+// - Brokkr owns CONCURRENCY: the profile's `test_threads` maps onto the
+//   engine's in-flight count (unset = the engine's num-cpus default).
+// - The engine owns execution and rendering: process-per-test scheduling
+//   and its reporter. Brokkr wraps it in the usual sweep lines and decides
+//   pass/fail from RunStats.
 //
 // The linked engine's version is brokkr's pin, not the host's. It is
-// recorded below and printed on the lane's header line, so a gate result
-// says which engine produced it.
+// recorded below and printed on the lane's header line, so a result says
+// which engine produced it.
 
 use camino::Utf8PathBuf;
 use guppy::graph::PackageGraph;
@@ -63,6 +70,28 @@ use nextest_runner::{
 /// only mislabel output, never change behaviour.
 const NEXTEST_ENGINE_VERSION: &str = "0.122.1";
 
+/// The engine config brokkr synthesizes for one run. Written under the
+/// brokkr-owned state dir (never into the code tree) and handed to the
+/// engine as its ONLY config file, which is what replaces - not merely
+/// shadows - any `.config/nextest.toml` the checkout carries.
+fn write_synthesized_config(state_root: &Path) -> Result<Utf8PathBuf, DevError> {
+    let dir = state_root.join(".brokkr");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("nextest-synth.toml");
+    let ceiling = test_runner::TEST_TIMEOUT.as_secs();
+    // `terminate-after = 1`: the first time a test crosses the ceiling it is
+    // terminated, the exact semantics of the libtest lanes' watchdog.
+    let body = format!(
+        "# Generated by brokkr on every nextest-lane run; do not edit.\n\
+         [profile.default]\n\
+         retries = 0\n\
+         slow-timeout = {{ period = \"{ceiling}s\", terminate-after = 1, grace-period = \"1s\" }}\n"
+    );
+    std::fs::write(&path, body)?;
+    Utf8PathBuf::from_path_buf(path)
+        .map_err(|p| DevError::Config(format!("state dir is not UTF-8: {}", p.display())))
+}
+
 /// Run one `harness = "nextest"` sweep. Returns `Ok(false)` when the run
 /// failed, having already reported it. An `Err` leaving this lane carries
 /// its whole diagnostic in the message; `run_test_phase`'s caller voices it
@@ -70,6 +99,7 @@ const NEXTEST_ENGINE_VERSION: &str = "0.122.1";
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_nextest_sweep(
     project_root: &Path,
+    state_root: &Path,
     sweep: &ResolvedSweep,
     packages: &[&str],
     extra_args: &[String],
@@ -80,8 +110,8 @@ fn run_nextest_sweep(
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
     if !libtest_extra.is_empty() {
         return Err(DevError::Config(format!(
-            "sweep '{}' runs under nextest, which does not take raw libtest args; drop the \
-             trailing `-- {}` (use the sweep's `skip`/`only`, or nextest's own config).",
+            "sweep '{}' runs under the nextest engine, which takes no raw libtest args; drop \
+             the trailing `-- {}` (use the sweep's `skip`/`only`).",
             sweep.label,
             libtest_extra.join(" ")
         )));
@@ -95,7 +125,7 @@ fn run_nextest_sweep(
         .collect();
 
     output::run_msg(&format!(
-        "test {}: nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test",
+        "test {}: nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
         sweep.label
     ));
 
@@ -166,23 +196,23 @@ fn run_nextest_sweep(
     }
     let binary_list = std::sync::Arc::new(builder.finish());
 
-    // Nextest's own config, resolved exactly as `cargo nextest` would:
-    // `.config/nextest.toml` under the workspace root, the default profile
-    // unless NEXTEST_PROFILE says otherwise.
+    // The engine's config is brokkr's own synthesized file, passed as the
+    // explicit config source so the checkout's `.config/nextest.toml` (if
+    // any) is never consulted, and `NEXTEST_PROFILE` is never read: a
+    // foreign config gets no vote in what a brokkr sweep runs.
+    let synth = write_synthesized_config(state_root)?;
     let pcx = ParseContext::new(&graph);
     let config = NextestConfig::from_sources(
         workspace_root.clone(),
         &pcx,
-        None,
+        Some(synth.as_path()),
         std::iter::empty::<&nextest_runner::config::core::ToolConfigFile>(),
         &std::collections::BTreeSet::new(),
     )
-    .map_err(|e| DevError::Config(format!("nextest config: {e}")))?;
-    let profile_name =
-        std::env::var("NEXTEST_PROFILE").unwrap_or_else(|_| NextestConfig::DEFAULT_PROFILE.into());
+    .map_err(|e| DevError::Config(format!("nextest engine config: {e}")))?;
     let early_profile = config
-        .profile(&profile_name)
-        .map_err(|e| DevError::Config(format!("nextest profile: {e}")))?;
+        .profile(NextestConfig::DEFAULT_PROFILE)
+        .map_err(|e| DevError::Config(format!("nextest engine profile: {e}")))?;
     let known_groups = early_profile.known_groups();
     let profile = early_profile.apply_build_platforms(&build_platforms);
 
@@ -267,7 +297,9 @@ fn run_nextest_sweep(
         workspace_root.clone(),
         env_map,
         &profile,
-        FilterBound::DefaultSet,
+        // `All`, explicitly: the synthesized config has no default-filter,
+        // and the concept must never re-enter through a bound.
+        FilterBound::All,
         nextest_runner::config::core::get_num_cpus(),
         ListProgressOptions::new(
             ShowProgress::None,
@@ -280,15 +312,32 @@ fn run_nextest_sweep(
 
     if test_list.run_count() == 0 {
         return Err(DevError::Config(format!(
-            "cargo test: zero tests ran (sweep: {}) - the filters and the nextest profile's \
-             default-filter selected no work; treat as a wrong-run.",
+            "cargo test: zero tests ran (sweep: {}) - the sweep's filters selected no work; \
+             treat as a wrong-run.",
             sweep.label
         )));
     }
 
-    verify_bounded(&profile, &test_list, &sweep.label)?;
-
-    let runner = TestRunnerBuilder::default()
+    // Concurrency is brokkr policy: the profile's `test_threads` maps onto
+    // the engine's in-flight count. Unset (or 0) leaves the engine's
+    // num-cpus default; there is no serial-by-default here, because
+    // process-per-test needs no watchdog attribution trick - the synthesized
+    // slow-timeout kills a hung test by name at any concurrency.
+    let mut runner_builder = TestRunnerBuilder::default();
+    // Every brokkr lane enumerates all failures in one run (the libtest
+    // lanes' --no-fail-fast); the engine's default cancels on the first,
+    // which under-reports a red tree.
+    runner_builder.set_max_fail(nextest_runner::config::elements::MaxFail::All);
+    if let Some(n) = sweep.test_threads
+        && n >= 1
+    {
+        let count = i64::from(n).try_into().map_err(|_| {
+            DevError::Config(format!("test_threads = {n} does not fit the engine's count"))
+        })?;
+        runner_builder
+            .set_test_threads(nextest_runner::config::elements::TestThreads::Count(count));
+    }
+    let runner = runner_builder
         .build(
             run_id,
             version_env_vars.clone(),
@@ -349,38 +398,3 @@ fn qualified_skip_filterset(qs: &crate::config::QualifiedSkip) -> Result<String,
     Ok(format!("not (package({}) & test(~{}))", qs.package, qs.pattern))
 }
 
-/// A gate must be bounded, and this lane deliberately carries no watchdog of
-/// its own - so every selected test must have a terminating timeout under
-/// the resolved nextest profile. Checked per test AFTER listing, because a
-/// profile-level `terminate-after` can be overridden away for a subset
-/// (`[[profile.*.overrides]]` replacing the slow-timeout), and only the
-/// per-test resolution sees that.
-fn verify_bounded(
-    profile: &nextest_runner::config::core::EvaluatableProfile<'_>,
-    test_list: &TestList<'_>,
-    label: &str,
-) -> Result<(), DevError> {
-    for test in test_list.iter_tests() {
-        if !test.test_info.filter_match.is_match() {
-            continue;
-        }
-        let query = test.to_test_query();
-        let settings = profile.settings_for(NextestRunMode::Test, &query);
-        // SlowTimeout's fields are crate-private with no accessor, so the
-        // Debug rendering is the only readable surface. Failure direction is
-        // safe: if an upgrade reshapes the Debug output this starts refusing
-        // (loudly), never silently passing an unbounded lane.
-        let rendered = format!("{:?}", settings.slow_timeout());
-        if !rendered.contains("terminate_after: Some") {
-            return Err(DevError::Config(format!(
-                "sweep '{label}': test {} has no terminating timeout under nextest profile \
-                 '{}' - a hang would run forever, and this lane deliberately adds no watchdog \
-                 of its own. Set `slow-timeout = {{ period = \"60s\", terminate-after = N }}` \
-                 in .config/nextest.toml (profile-wide or via an override).",
-                test.id(),
-                profile.name(),
-            )));
-        }
-    }
-    Ok(())
-}

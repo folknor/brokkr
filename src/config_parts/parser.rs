@@ -1525,17 +1525,18 @@ fn validate_check_against_test(
     // lanes/extends walk the complete-universe check uses so a reference
     // through a lane cannot slip past them:
     //
-    // - `test_threads` / `isolation` on a profile referencing a nextest sweep
-    //   would silently mean nothing (nextest owns concurrency and already
-    //   isolates per test) - or worse, read as honoured.
+    // - `isolation = "process"` on a profile referencing a nextest sweep is
+    //   redundant by construction (the engine already runs process-per-test)
+    //   and refused so the config carries one spelling of the intent.
+    //   `test_threads` is honoured: it maps onto the engine's in-flight
+    //   count, brokkr policy like everywhere else.
     // - a `complete` claim over a nextest sweep is refused: the coverage
-    //   audit cannot enumerate a nextest lane yet ((binary-id, test) pairs,
-    //   default-filter accounting, the pin), so the run would certify tests
-    //   it never accounted for.
+    //   audit cannot enumerate a nextest lane yet ((binary-id, test) pairs),
+    //   so the run would certify tests it never accounted for.
     for (profile_name, def) in &t.profiles {
-        let shapes_run = def.test_threads.is_some() || def.isolation.is_some();
+        let isolates = def.isolation.is_some();
         let complete = def.certifies == Some(Certifies::Complete);
-        if !shapes_run && !complete {
+        if !isolates && !complete {
             continue;
         }
         let mut referenced: BTreeSet<String> = BTreeSet::new();
@@ -1547,12 +1548,12 @@ fn validate_check_against_test(
         let Some(sweep) = nextest_sweep else {
             continue;
         };
-        if shapes_run {
+        if isolates {
             return Err(DevError::Config(format!(
-                "[test.profiles.{profile_name}] sets `test_threads` or `isolation` and runs the \
-                 nextest sweep '{}'. Nextest owns its own concurrency and isolation \
-                 (.config/nextest.toml), so these keys cannot apply - drop them, or move the \
-                 sweep to a libtest entry.",
+                "[test.profiles.{profile_name}] sets `isolation = \"process\"` and runs the \
+                 nextest sweep '{}'. The nextest engine already runs every test in its own \
+                 process, so the key is redundant here - drop it, or move the sweep to a \
+                 libtest entry.",
                 sweep.name
             )));
         }

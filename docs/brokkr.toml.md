@@ -799,23 +799,25 @@ env = { HIGH_PRECISION = "1" }
   run's resolution. See `brokkr man check feature-unification`.
 - `harness` (optional, default `"libtest"`) - which engine executes the
   sweep's test phase. `"libtest"` is brokkr's own lanes (serial,
-  `test_threads`, `parallel`, `isolation = "process"`). `"nextest"` hands the
-  sweep to the linked nextest engine: process-per-test under the project's
-  own `.config/nextest.toml` (default profile or `NEXTEST_PROFILE`,
-  default-filter, retries, timeouts), for consumers whose CI runs nextest
-  and whose suite relies on its isolation contract. Brokkr still owns the
-  compile shape (selection, features, unification pin, profile, `[lints]`
-  allows) and translates the sweep's `skip`/`only` into nextest's own
-  filters, so `harness` is execution policy and never part of the build
+  `test_threads`, `parallel`, `isolation = "process"`). `"nextest"` runs the
+  sweep through the linked nextest engine as a fast process-per-test
+  *executor* - under a config brokkr synthesizes per run (retries zero, no
+  default-filter, no test groups, and brokkr's own 20s per-test watchdog as
+  `slow-timeout` + `terminate-after`). The checkout's `.config/nextest.toml`
+  is never opened and `NEXTEST_PROFILE` is never read: everything the sweep
+  runs and claims comes from `brokkr.toml`. Brokkr owns the compile shape
+  (selection, features, unification pin, profile, `[lints]` allows),
+  translates the sweep's `skip`/`only` into the engine's own filters, and
+  maps the profile's `test_threads` onto the engine's in-flight count (unset
+  = num-cpus), so `harness` is execution policy and never part of the build
   shape - a nextest and a libtest sweep of equal compile inputs share the
-  target dir and dedupe in clippy. Load errors: combined with `parallel`,
-  with `feature_unification = "package"`, on a profile setting
-  `test_threads`/`isolation`, or referenced by a `certifies = "complete"`
-  profile (the coverage audit cannot enumerate a nextest lane yet). The
-  resolved nextest profile must give every selected test a *terminating*
-  timeout (`slow-timeout = { period = "..", terminate-after = N }`) - the
-  lane adds no watchdog of its own, and an unbounded gate is refused. See
-  `brokkr man check nextest`.
+  target dir and dedupe in clippy. The natural use is a sweep needing the
+  process-isolation guarantee, executed concurrently instead of one cargo
+  spawn per test. Load errors: combined with `parallel`, with
+  `feature_unification = "package"`, on a profile setting
+  `isolation = "process"` (redundant - the engine already isolates), or
+  referenced by a `certifies = "complete"` profile (the coverage audit
+  cannot enumerate a nextest lane yet). See `brokkr man check nextest`.
 - `doc_only` (optional, default `false`) - the entry runs `cargo test --doc`
   (doctests, nothing else) with its selection, features, unification pin and
   cargo profile, serially. The doctest twin for a `parallel` workspace

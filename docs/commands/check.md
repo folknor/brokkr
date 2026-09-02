@@ -802,16 +802,30 @@ serial entry, are in `docs/brokkr.toml.md`.
 
 ## nextest (bundled; the `harness = "nextest"` lane)
 
-brokkr links cargo-nextest's engine (`nextest-runner`) rather than shelling out
-to a `cargo-nextest` on PATH - the same in-process seam as the elivagar corpus
-gate. No per-host install step, and the coverage enumeration reads
-`list::TestList` as typed values with no JSON round-trip. The trade is that the
-nextest version is brokkr's pin rather than whatever a host happens to have, so
-skew against a project's CI nextest is a choice made in `Cargo.toml` - the
-lane's header line names the linked engine version for exactly that reason.
+**An engine, not a policy source.** brokkr links cargo-nextest's engine
+(`nextest-runner`) as a fast process-per-test *executor* for a
+brokkr-configured sweep - the reason is speed, the same reason `parallel`
+exists: process-per-test dissolves per-test serialization, most dramatically
+for a sweep that needs the `isolation = "process"` guarantee, which on the
+libtest path is N sequential `cargo test -- --exact` spawns and here is the
+same guarantee executed concurrently. Linking rather than shelling out means
+no per-host install step and typed `list::TestList` values with no JSON
+round-trip; the engine version is brokkr's `Cargo.toml` pin, printed on the
+lane's header line.
+
+**Everything the lane runs and claims comes from `brokkr.toml`.** The engine
+executes under a config brokkr *synthesizes* each run
+(`.brokkr/nextest-synth.toml` under the state dir): retries zero, no
+default-filter, no test groups, no setup scripts, and `slow-timeout` +
+`terminate-after` set to brokkr's own 20s per-test watchdog ceiling - the
+hang kill the other lanes have, per process, for free. The checkout's
+`.config/nextest.toml` is **never opened** and `NEXTEST_PROFILE` is never
+read: a foreign config must not get a vote in what a brokkr gate runs, and
+an earlier version of this lane that honoured it had to grow a
+pin/bless/drift apparatus just to police the vote it had granted.
 
 A `[[check]]` entry selects the lane with `harness = "nextest"`
-(`src/check_cmd/nextest_lane.rs`). The division of ownership:
+(`src/check_cmd/nextest_lane.rs`). The division of labour:
 
 - **Brokkr owns the compile shape.** The build is brokkr's own
   `cargo test --no-run` with the sweep's selection, features, unification pin,
@@ -826,86 +840,60 @@ A `[[check]]` entry selects the lane with `harness = "nextest"`
   `not (package(P) & test(~X))` - folding the one predicate brokkr used to
   evaluate itself back into the tool. Filterset interpolation is restricted
   to identifier-ish characters and refuses anything else, because a
-  wrongly-escaped filter silently changes which tests run.
-- **Nextest owns everything else.** Its config's default profile (or
-  `NEXTEST_PROFILE`), default-filter, retries, per-test timeouts, max-fail
-  policy, test groups, setup scripts - and the run's rendering, which is
-  nextest's own reporter. Brokkr adds the sweep bookends and decides
-  pass/fail from the run stats.
+  wrongly-escaped filter silently changes which tests run. (`test(=X)`
+  matches the **full** test path, which is why the translation uses `~`
+  substring matchers - an exact-match translation of a bare name silently
+  matches nothing.)
+- **Brokkr owns concurrency.** The profile's `test_threads` maps onto the
+  engine's in-flight count; unset (or 0) is the engine's num-cpus default.
+  No serial-by-default here: process-per-test needs no watchdog-attribution
+  trick, the synthesized `terminate-after` kills a hung test by name at any
+  concurrency.
+- **The engine owns execution and rendering** - process-per-test scheduling
+  and its reporter. Brokkr adds the sweep bookends and decides pass/fail
+  from the run stats.
 
-Two refusals keep the lane honest:
+Refusals: trailing `-- -- <libtest args>` (the engine takes no raw libtest
+argv; use the sweep's filters), the same forwarded cargo args the parallel
+lane rejects, a `--format`-style libtest arg smuggled via a profile, and
+filterset values outside the interpolation charset. Config composition rules
+(load-time errors): `harness = "nextest"` with `parallel` (two execution
+owners), with `feature_unification = "package"` (no per-package plan), on a
+profile that sets `isolation = "process"` (redundant - the engine already
+runs every test in its own process; one spelling of the intent), or
+referenced by a `certifies = "complete"` profile - the coverage audit cannot
+enumerate a nextest lane yet, so a complete claim over one would certify
+tests it never accounted for. `[test] doctests = true` needs at least one
+plain libtest entry, since nextest never executes doctests. Double-spawn is
+disabled (`NEXTEST_DOUBLE_SPAWN=0` semantics): nextest's double-spawn
+protocol re-invokes the current executable, which is brokkr, not
+cargo-nextest.
 
-- **Boundedness.** The lane deliberately imposes no 20s watchdog - it exists
-  to run tests the way CI runs them - but a gate must be bounded, so after
-  listing, every selected test must carry a *terminating* timeout under the
-  resolved profile (`slow-timeout = { period = "..", terminate-after = N }`),
-  checked per test because an override can replace a terminating profile-wide
-  timeout with a non-terminating one for a subset. A lane that fails the
-  check names the test and the config to fix.
-- **Untranslatable shapes.** Trailing `-- -- <libtest args>` is refused
-  (nextest takes no raw libtest argv from brokkr; use the sweep's filters or
-  nextest's config), as are the same forwarded cargo args the parallel lane
-  rejects, a `--format`-style libtest arg smuggled via a profile, and
-  filterset values outside the interpolation charset.
-
-Config composition rules (all load-time errors): `harness = "nextest"` with
-`parallel` (two execution owners), with `feature_unification = "package"` (no
-per-package plan), on a profile that sets `test_threads` or `isolation`
-(nextest owns both), or referenced by a `certifies = "complete"` profile -
-the coverage audit cannot enumerate a nextest lane yet, so a complete claim
-over one would certify tests it never accounted for. `[test] doctests = true`
-needs at least one plain libtest entry, since nextest never executes
-doctests. Double-spawn is disabled (`NEXTEST_DOUBLE_SPAWN=0` semantics):
-nextest's double-spawn protocol re-invokes the current executable, which is
-brokkr, not cargo-nextest.
-
-Motivation is CI parity, and *only* parity. Where a project's CI runs
-`cargo nextest run`, brokkr's in-process libtest lanes exercise a shape CI never
-runs, and the whole process-global-state class (a global logger installed by two
-tests in one binary) is a local-only failure. `isolation = "process"` (see the
-`test` phase's process-isolation section) is the small-scale answer to that;
-nextest's process-per-test isolation is the general one.
-
-Two things nextest is **not** the answer to, both of which it has been proposed
-for:
-
-- **The wall-clock floor.** Process-per-test does dissolve the
-  sum-of-per-binary-maxima floor, but so does running the binaries
-  concurrently, and that costs no version skew, no change to the coverage key,
-  and no default-filter pin. A project whose CI runs no nextest would be
-  adopting brokkr's pin as its only exposure to one. See `parallel` in
-  `docs/brokkr.toml.md`, which is the answer to the floor.
-- **Seeing more bugs locally.** It sees strictly *fewer* of one class. Two
-  tests can only contend over a global logger inside one process, so
-  process-per-test dissolves the contention along with the bug's visibility. A
-  shared-process parallel lane is what *catches* that class; nextest is what
-  makes a project need CI parity for it in the first place. For a repo that
-  runs no nextest anywhere, moving a sweep onto it retires a detector rather
-  than adding one.
+**What this lane does not replace:** the in-process libtest lanes stay the
+default everywhere else. A shared-process lane is the only detector for the
+process-global-state class (two tests contending over a global logger), and
+process-per-test dissolves that contention along with the bug's visibility -
+so moving a detector sweep onto the engine retires the detector. Use the
+engine where isolation or per-test fan-out is the point, not as a blanket
+replacement.
 
 The coverage half is still groundwork: the coverage key and the disposition
 classifier (`src/check_cmd/nextest.rs`) landed ahead of the audit because the
 coverage pair is the audit's key type, and a complete profile refuses nextest
-sweeps until the audit itself is wired (see above). Three behaviours were
-measured against cargo-nextest 0.9.143 and are recorded at the code sites that
-depend on them:
+sweeps until the audit itself is wired (see above). What the audit needs is
+now small - the synthesized config has no default-filter, so exclusions only
+ever come from `brokkr.toml` skips and quarantines and the existing ledger
+model applies unchanged. The measured behaviours it builds on (cargo-nextest
+0.9.143, recorded at the code sites):
 
 - **The coverage pair becomes `(binary-id, test)`**, finer than the libtest
   path's `(package, test)`. A package with several test targets has one binary
   id per target, so two integration binaries defining the same test path are two
   pairs rather than one. Package-qualified `[[quarantine]]` and skip entries keep
-  their meaning (`package(X)` spans every binary id in X).
-
-  Whether any per-entry **count** moves is empirical and unresolved. It requires
-  two binaries in one package to define the same full test path - a stricter
-  condition than an entry merely spanning several binaries. nautilus' B51 entry
-  does span five binary ids in `nautilus-infrastructure` (four
-  `crates/infrastructure/tests/` binaries plus `src/redis/msgbus.rs`, since
-  `serial_tests::` is the top-level module name in seven files), so it is the
-  candidate; whether those binaries collide on a test path is not knowable from
-  the config alone. Settle it before adoption by listing a shape and looking for
-  a test path appearing under more than one binary id of the same package - the
-  answer is then a number to hand forward rather than a caveat.
+  their meaning (`package(X)` spans every binary id in X). Whether any
+  per-entry count moves on adoption requires two binaries in one package to
+  define the same full test path - settle it with one listing when wiring the
+  audit.
 - **`MismatchReason` is priority-ordered, not a partition.** A test that is both
   `#[ignore]`d and unmatched by a lane's filterset reports `ignored`, so on a
   single listing it cannot be detected as an orphan. brokkr takes one listing and
@@ -914,50 +902,13 @@ depend on them:
   covering nor quarantining. The scheme self-heals when it matters - remove the
   `#[ignore]` and the verdict flips to `expression`, the pair orphans, and the
   gate fails.
-- **The universe must come from its own listing, with `--ignore-default-filter`.**
-  A lane listing normally carries every testcase, marking unselected ones
-  `mismatch/expression` - but a package-scoped filterset reports the excluded
-  package's suite as `skipped` with an empty testcase map, silently shrinking the
-  universe. `-E 'all()'` is not a fix: the profile's `default-filter` composes
-  with the expression rather than being overridden by it, and a default-filter
-  can drop a whole binary (`skipped-default-filter`, empty testcase map) as well
-  as individual tests. Lane listings are read only for their selections.
-
-A `default-filter` exclusion is **not** an orphan. It is a third non-fatal
-counted bucket alongside `ignored` and `quarantined`: CI does not run those tests
-either, so failing on them would make the gate stricter than the CI it exists to
-predict, and the only way to clear such a failure would be a quarantine entry for
-a test nobody meant to run. It stays distinct from an ordinary filterset mismatch
-because the remedy lives in the project's `.config/nextest.toml` rather than in
-`brokkr.toml`.
-
-The counted bucket alone does not stop upstream shrinking the audited set
-quietly, because a drifting number is not something anyone tracks between runs.
-That needs the resolved default-filter **pinned**, so a change reports once, for
-a decision. The pin is `(profile, section, raw string)`: the compiled expression
-cannot be stored (`CompiledExpr` has no `Display`/`Serialize`, and nextest's raw
-accessor is private), but `CompiledDefaultFilter` publicly exposes `profile` and
-`section`, and `CompiledDefaultFilterSection` is `Profile` or `Override(usize)` -
-the *index* of the override that won. That is a config address, so the string is
-read from `profile.<name>.default-filter` or from override #N of
-`profile.<name>.overrides` rather than assumed to be the top-level one. No
-override-resolution hole survives: editing an override that did not win cannot
-move the pin, because the pin records which one did.
-
-Built today: `FilterAddress` and `read_default_filter` resolve an address to its
-raw source text, distinguishing "present but sets no filter" (`Ok(None)`, a
-legitimate state) from "the address is gone" (an error - it came from nextest's
-own resolution, so its absence means the config moved and the pin is meaningless
-rather than empty). Still waiting on the lane: producing the address, which needs
-a resolved profile, and storing plus comparing the pin, which needs somewhere in
-`brokkr.toml` to keep it and a phase to report from.
-
-Filterset translation is mechanical for the existing constructs: substring
-`skip`/`only` entries become `test(~X)`, and a `{ package, pattern }` qualified
-skip becomes `package(X) & test(~Y)` - which folds the one predicate brokkr
-still evaluates itself (libtest has no package scoping) back into the tool.
-Note `test(=X)` matches the **full** test path, so an exact-match translation of
-a bare test name silently matches nothing.
+- **The universe must come from its own listing** (`FilterBound::All`, no
+  filtersets), never from a lane's: a package-scoped filterset reports the
+  excluded package's suite as `skipped` with an empty testcase map, silently
+  shrinking the universe. Lane listings are read only for their selections. A
+  `default-filter` verdict reaching the classifier is refused outright - under
+  the synthesized config it cannot occur, so its appearance means a foreign
+  config got a vote.
 
 ## `coverage` phase (complete profiles)
 
