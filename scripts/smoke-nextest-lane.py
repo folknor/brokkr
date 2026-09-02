@@ -31,11 +31,19 @@ SMOKE = ROOT / "scratch" / "nextest-lane-smoke"
 BROKKR = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "debug" / "brokkr"
 
 FILES = {
+    # `crate-type = ["rlib", ...]` on purpose: cargo then reports the lib
+    # target's kind as `rlib`, the shape that made the audit's binary-id
+    # construction drift from the engine's (pkg::rlib/target vs plain pkg)
+    # and orphan every lib pair only the engine lane covered. With this in
+    # the fixture, that exact regression turns the gate scenario red.
     "Cargo.toml": """\
 [package]
 name = "nsmoke"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
 """,
     "src/lib.rs": """\
 pub fn add(a: u64, b: u64) -> u64 {

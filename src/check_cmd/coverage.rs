@@ -85,13 +85,30 @@ fn package_of(unit: &str) -> &str {
 /// used deliberately so the libtest lanes' claims and the engine listing's
 /// ids can never drift apart - both sides derive the id through the same
 /// nextest code.
+///
+/// The kind must be NORMALIZED the way nextest's `BinaryList` normalizes it
+/// before the id is built: every lib-like crate-type (`lib`, `rlib`,
+/// `dylib`, `cdylib`, `staticlib`) collapses to the lib kind, whose id is
+/// the bare package name. A crate declaring
+/// `crate-type = ["rlib", "staticlib", "cdylib"]` reports its lib target's
+/// kind as `rlib` in the artifact stream, and passing that raw yielded
+/// `pkg::rlib/target` against the engine's plain `pkg` - which orphaned
+/// every lib-binary pair whose only runner was the engine lane (39 of them
+/// on the consuming workspace's first migrated gate run). Matching on
+/// brokkr's single stored kind is equivalent to nextest's any-in-list rule,
+/// because only lib targets carry multiple kinds and all of theirs are
+/// lib-like.
 fn binary_unit(b: &TestBinary, nextest_keyed: bool) -> String {
     if !nextest_keyed {
         return b.package.clone();
     }
+    let kind = match b.kind.as_str() {
+        "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" => "lib",
+        other => other,
+    };
     nextest_metadata::RustBinaryId::from_parts(
         &b.package,
-        &nextest_metadata::RustTestBinaryKind::new(b.kind.clone()),
+        &nextest_metadata::RustTestBinaryKind::new(kind.to_owned()),
         &b.target,
     )
     .to_string()
@@ -1384,6 +1401,15 @@ mod coverage_tests {
         assert_eq!(super::binary_unit(&bin("lib", "pkg"), true), "pkg");
         assert_eq!(super::binary_unit(&bin("test", "cache_redis"), true), "pkg::cache_redis");
         assert_eq!(super::binary_unit(&bin("bin", "cli"), true), "pkg::bin/cli");
+        // Every lib-like crate-type collapses to the bare package name,
+        // matching nextest's normalization: a `crate-type = ["rlib", ...]`
+        // lib reports kind `rlib`, and passing it raw produced
+        // `pkg::rlib/target` against the engine's plain `pkg` - orphaning
+        // every lib pair the engine lane alone covered (the 39-orphan
+        // migration failure).
+        for kind in ["rlib", "dylib", "cdylib", "staticlib"] {
+            assert_eq!(super::binary_unit(&bin(kind, "pkg"), true), "pkg", "{kind}");
+        }
         // Libtest-only shapes keep the coarse key untouched.
         assert_eq!(super::binary_unit(&bin("test", "cache_redis"), false), "pkg");
     }

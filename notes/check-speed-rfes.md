@@ -117,6 +117,18 @@ orphan path. The serial lane's ~170s collapse is now unblocked: migrate the
 gate's isolated serial lane to a harness = "nextest" entry, and check the
 B51 acceptance delta (+7, 91 -> 98) on the first migrated run.
 
+**Migration finding, fixed 2026-09-02**: the first nautilus gate run hit
+B51 = 98 exactly and collapsed the serial lanes ~170s -> 2.2s, but orphaned
+39 lib-binary pairs on a binary-id normalization drift: nautilus' lib
+crates declare crate-type = ["rlib", "staticlib", "cdylib"], cargo reports
+the lib target's kind as `rlib`, and brokkr's from_parts call passed it raw
+(pkg::rlib/target) where the engine normalizes every lib-like kind to the
+bare package name. Fixed by mirroring nextest's own normalization before
+building the unit, and the smoke's fixture lib now declares the multi
+crate-type so this exact drift turns the gate scenario red forever after.
+Nothing changes in nautilus' config; the same gate run should now read
+check complete.
+
 **The correction, which invalidates this RFE as originally written.** The
 original text below argued the lane on CI parity: upstream supports only
 nextest, so run their runner their way. That framing was wrong about the
