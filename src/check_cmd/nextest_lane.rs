@@ -64,30 +64,11 @@ use nextest_runner::{
 const NEXTEST_ENGINE_VERSION: &str = "0.122.1";
 
 /// Run one `harness = "nextest"` sweep. Returns `Ok(false)` when the run
-/// failed, having already reported it.
-///
-/// The wrapper exists to honour the test phase's reporting contract: a
-/// failing phase prints its own detail (`cmd_check`'s error branch adds only
-/// the timing line), so an `Err` leaving this lane must be voiced here or it
-/// is silent.
-#[allow(clippy::too_many_arguments)]
-fn run_nextest_sweep(
-    project_root: &Path,
-    sweep: &ResolvedSweep,
-    packages: &[&str],
-    extra_args: &[String],
-    project_env: &[(String, String)],
-    allow_args: &[String],
-    commands: bool,
-) -> Result<bool, DevError> {
-    run_nextest_sweep_inner(
-        project_root, sweep, packages, extra_args, project_env, allow_args, commands,
-    )
-    .inspect_err(|e| output::error(&e.to_string()))
-}
-
+/// failed, having already reported it. An `Err` leaving this lane carries
+/// its whole diagnostic in the message; `run_test_phase`'s caller voices it
+/// (the summary path prints only the timing line).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn run_nextest_sweep_inner(
+fn run_nextest_sweep(
     project_root: &Path,
     sweep: &ResolvedSweep,
     packages: &[&str],

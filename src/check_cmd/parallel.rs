@@ -680,8 +680,13 @@ fn run_parallel_sweep(
     // binary has been listed rather than as each one is. Cost is the previous
     // run's measured wall time where there is one, and an estimate from the
     // known binaries' cost per test otherwise - see `timing_weight_for`.
+    // Keyed by the ENTRY name, not the lane-qualified label: `default` and
+    // `tier1/default` are the same binaries, and keying on the label made
+    // every profile that runs an entry re-pay its warm-up separately
+    // (measured: the gate's first parallel run serialized its pole binary
+    // minutes after plain check had converged on the identical entry).
     let history = timings_load(state_root);
-    let recorded = history.get(&sweep.label);
+    let recorded = history.get(&sweep.entry_name);
     let label_of = |b: &TestBinary| format!("{}/{}", b.package, b.target);
     let cost_of = |b: &TestBinary| recorded.and_then(|m| m.get(&label_of(b))).copied();
     let known: Vec<(f64, u32)> = counted
@@ -798,7 +803,7 @@ fn run_parallel_sweep(
             (r.label.clone(), BinaryCost { serial, slowest })
         })
         .collect();
-    timings_record(state_root, &sweep.label, &measured);
+    timings_record(state_root, &sweep.entry_name, &measured);
 
     report_runs(project_root, sweep, runs, raw, fanout_started, build_elapsed, timings)
 }

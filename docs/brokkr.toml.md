@@ -983,7 +983,9 @@ a longer pole than it needed to be.
 
 The cost is the binary's **serial cost** - the sum of its own tests'
 durations - kept in `.brokkr/parallel-timings.toml` and merged after every
-parallel sweep. Test count is only a fallback, because count-as-cost assumes
+parallel sweep, keyed by the `[[check]]` entry name (never the
+lane-qualified label, so `default` under plain check and `tier1/default`
+under a lanes gate share one warmth). Test count is only a fallback, because count-as-cost assumes
 every test costs the same and starves whichever binary is slow-but-small -
 which on a latency-bound suite is precisely the critical path. Measured on the
 tree this was built for: a binary of ten integration tests out of 2224 computed
@@ -1060,6 +1062,18 @@ idle. One measured tree ran 3x faster at 24 in flight than at 8 on a machine
 with fewer cores than either. If a sweep's tests spend their time waiting
 rather than computing, set `budget` explicitly and measure; the cache-domain
 default is a floor for such a suite, not an estimate of it.
+
+There is also an arithmetic floor the default can sit under, and its failure
+reports itself as a clean green run. The pole binary's proportional claim is
+`budget x pole_serial / total_serial`, floored at one slot - so until the
+budget clears `total_serial / pole_serial`, the pole can never claim a second
+slot, its tests run end to end, and the sweep converges to `claims 1-1` at
+roughly the pole's full serial cost. Measured on a ~150-binary suite: budget 6
+put the 193s pole at a 0.94-slot share, both warm runs landed `claims 1-1`,
+and the sweep took longer than not fanning out at all. On a many-binary suite,
+check `claims N-M` on the first warm runs and raise the budget past
+`total_serial / pole_serial` (both figures are in `--timings`) before judging
+the lane.
 
 The metric is well defined on every vendor; what it *names* differs. On AMD Zen
 the L3 domain is a CCX, which on current parts is a whole CCD - 6 or 8 cores,

@@ -208,3 +208,49 @@ red-doctest scenarios in `scripts/smoke-parallel-direct.py`.
   the 20s watchdog. Read `--timings` after the first warm run, expect a
   possible round of serial-lane relocations, and tune no budget until the
   weight store has two runs behind it.
+
+## Adoption results (2026-09-02, same tree as the baseline)
+
+Landed in the consuming config: `parallel = { budget = 24 }` on `default`, the
+`doc_only` twin as its own filterless gate lane, and a parallel-free
+`default-serial` twin for the process-isolated serial profile (see the findings
+below for why that third entry exists). All measured warm:
+
+    brokkr check          4m29s -> 2m21s
+    brokkr check --gate   7m18s -> 5m23s
+    default sweep tests    217s -> 82s   (claims 1-4, pole
+                                          nautilus-polymarket/exec_client 61.5s)
+
+The ledger is unchanged across the adoption: 4 shapes, 32976 pairs, 32815 run,
+0 orphaned; the doc lane runs 69 doctests the parallel sweep can no longer
+carry. No watchdog trips and no new flakes across four parallel runs.
+
+The cache-domain default budget was arithmetically wrong for this suite, not
+merely conservative: at budget 6 the pole binary's proportional share is
+6 x 193/1229 = 0.94, floored to 1, so both warm runs converged to `claims 1-1`
+with betfair/exec_client serializing its whole 193s and the sweep at ~330s -
+slower than not fanning out. A suite spread over ~150 binaries needs the
+budget to clear `total_serial / pole_serial` before the pole can claim a
+second slot; worth a line in the `parallel` docs, since the failure reports
+itself as a clean green run.
+
+Two findings against the new code, both reproduced - **both fixed
+2026-09-02** (test-phase refusals are now voiced before the summary line, and
+the timing store is keyed by entry name so profiles share warmth; the budget
+floor got its line in the `parallel` docs):
+
+- **The parallel x isolation refusal is silent.** A profile with
+  `isolation = "process"` referencing a sweep that declares `parallel` is
+  refused as documented, but the run prints nothing - `[error] check failed
+  in 41.2s` with no line naming the sweep, the conflict, or that a refusal
+  fired. In a gate composed of lanes it presents as tier1 passing and the run
+  dying between lanes with no diagnostic. The remedy on the consumer side is
+  a parallel-free twin entry of the same build shape (clippy dedupes it);
+  the remedy in brokkr is to print the refusal.
+- **The parallel timing store is keyed by the lane-qualified label, not the
+  entry.** `default` (bare check) and `tier1/default` (under the gate's lanes
+  profile) warm separately: the gate's first parallel run re-paid the whole
+  count-weighted warm-up (`claims 1-3`, betfair serialized, 195.6s) minutes
+  after plain check had converged to 82s on the identical entry. Keying on
+  the entry name (or build shape) would let every profile that runs an entry
+  share its warmth.

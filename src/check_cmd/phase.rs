@@ -413,7 +413,10 @@ fn run_build_phases(
     collected_timings: Option<&mut Vec<TestTiming>>,
     coverage_stats: &mut Option<CoverageStats>,
 ) -> Result<(), DevError> {
-    verify_doc_only_rules(a)?;
+    // Voiced here because the summary path deliberately does not echo error
+    // messages (phases print their own detail) - an unvoiced refusal reads
+    // as `check failed` with no line naming why.
+    verify_doc_only_rules(a).inspect_err(|e| output::error(&e.to_string()))?;
     if !skip("clippy") {
         *failing_phase = Some("clippy");
         run_clippy_phase(
@@ -455,6 +458,19 @@ fn run_build_phases(
             executed,
         )
         .err();
+        // The reporting contract: a failing path prints its own detail, and
+        // the summary branch adds only the timing line. `tests failed` is the
+        // one error whose detail was already reported (the failure list
+        // above); everything else leaving the test phase - a lane refusal, a
+        // wrong-run, a config conflict discovered at run time - carries its
+        // whole diagnostic in the message and was previously swallowed:
+        // a refused `isolation` x `parallel` gate died between lanes printing
+        // nothing but `check failed` (measured on the consuming config).
+        if let Some(e) = &test_failure
+            && !matches!(e, DevError::Build(m) if m == "tests failed")
+        {
+            output::error(&e.to_string());
+        }
     }
 
     // Coverage accounting runs only under a complete claim - it is what the

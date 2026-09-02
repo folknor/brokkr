@@ -119,6 +119,14 @@ pub struct ResolvedSweep {
     /// and nothing else. Execution policy, never part of the build shape,
     /// and outside the coverage pair audit (doctests cannot be enumerated).
     pub doc_only: bool,
+    /// The bare `[[check]]` entry name, NEVER lane-qualified - `label` becomes
+    /// `tier1/default` under a lanes profile, this stays `default`. The key
+    /// for state that belongs to the entry rather than the run, today the
+    /// parallel timing store: keyed by label, `default` and `tier1/default`
+    /// warmed separately and the gate re-paid the whole count-weighted
+    /// warm-up minutes after plain check had converged on the identical
+    /// entry (measured on the consuming config).
+    pub entry_name: String,
 }
 
 /// Which half of the filter surface a [`DeclaredFilter`] is, because the two
@@ -375,6 +383,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         profile: entry.profile,
         harness: entry.harness,
         doc_only: entry.doc_only,
+        entry_name: entry.name.clone(),
     }
 }
 
@@ -772,6 +781,7 @@ fn build_resolved_sweep(
         profile: entry.profile,
         harness: entry.harness,
         doc_only: entry.doc_only,
+        entry_name: entry.name.clone(),
     }
 }
 
