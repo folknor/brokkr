@@ -161,7 +161,7 @@ fn toml_string(s: &str) -> String {
 /// Every `.cargo/config{.toml}` cargo would read for a build at `build_root`:
 /// the ancestor walk, then `$CARGO_HOME`. Order does not matter here - the
 /// question is only whether *any* of them contributes a matching target entry.
-fn config_paths(build_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn config_paths(build_root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in build_root.ancestors() {
         push_config(&mut out, &dir.join(".cargo"));
@@ -218,7 +218,7 @@ fn has_matching_target_rustflags(doc: &toml::Table, triple: Option<&str>) -> boo
 
 /// `rustc -vV`'s host triple. Read once per process; a failure here degrades
 /// the bare-triple check to "no match", never to a wrong match.
-fn host_triple() -> Option<String> {
+pub(crate) fn host_triple() -> Option<String> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE
@@ -242,7 +242,7 @@ fn host_triple() -> Option<String> {
 /// take the non-destructive branch. brokkr runs on the host it builds for, so
 /// the host's values are brokkr's own `cfg!` values - no triple parsing beyond
 /// the `target_env` / `target_vendor` fields, which the consts do not expose.
-fn eval_cfg(expr: &str) -> Option<bool> {
+pub(crate) fn eval_cfg(expr: &str) -> Option<bool> {
     let (value, rest) = parse_expr(expr.trim())?;
     rest.trim().is_empty().then_some(value)
 }

@@ -6,22 +6,87 @@
 // listing arrives on stdout - separately captured streams with no
 // reliable correlation. Instead, `cargo test --no-run
 // --message-format=json` yields every test executable with its owning
-// package, and each binary then runs `--list` *directly* - safe because
-// listing executes no test code, so the cargo-env argument against
-// direct execution (CARGO_MANIFEST_DIR, OUT_DIR, …) does not apply to
-// enumeration. Execution still goes through cargo.
+// package, and each binary then runs `--list` *directly* (from the
+// owning package's root, since a custom harness can observe cwd while
+// listing). The parallel lane's *execution* is direct too, under the
+// full cargo launch envelope - see direct_runtime.rs; the sequential
+// and process-isolated lanes still execute through cargo.
 
 /// One test executable and its owning package, from the build's artifact
 /// stream.
 #[derive(Debug, Clone)]
 struct TestBinary {
     package: String,
+    /// The full cargo package id - the key the runtime index is filed under,
+    /// because package *names* are ambiguous across sources and versions.
+    package_id: String,
     /// Target name (`--test <target>` filterable for integration tests).
     target: String,
     /// `"test"` for integration targets, `"lib"`/`"bin"` for unit-test
     /// harnesses.
     kind: String,
     executable: String,
+    /// The owning package's root (its `Cargo.toml`'s directory). Cargo runs
+    /// test binaries with this as cwd, so direct execution and listing must
+    /// too - a fixture test doing `Path::new("tests/fixtures/x")` passes
+    /// under cargo and fails from the workspace root.
+    manifest_dir: PathBuf,
+}
+
+/// What one package's build script contributed, from the prebuild's
+/// `build-script-executed` messages. Cargo supplies all three to the test
+/// processes it launches; direct execution reconstructs them from here.
+#[derive(Debug, Clone, Default)]
+struct BuildScriptOut {
+    out_dir: Option<String>,
+    /// `cargo::rustc-env=K=V` pairs, exported to the test process.
+    env: Vec<(String, String)>,
+    /// `cargo::rustc-link-search` directories, folded into the loader path.
+    linked_paths: Vec<String>,
+}
+
+/// Everything the artifact stream carries beyond the test binaries
+/// themselves, keyed by full package id: build-script output and the
+/// non-test bin executables that back runtime `CARGO_BIN_EXE_<name>` reads.
+#[derive(Debug, Clone, Default)]
+struct BuildRuntimeIndex {
+    build_scripts: std::collections::HashMap<String, BuildScriptOut>,
+    /// package id -> (bin target name, executable path). Cargo 1.94+ exposes
+    /// `CARGO_BIN_EXE_<name>` to test processes at *runtime*, not only via
+    /// `env!`, so the fan-out must be able to reproduce it.
+    bin_exes: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+impl BuildRuntimeIndex {
+    /// Fold another prebuild's stream in (package mode runs one prebuild per
+    /// package; their indexes union, and a duplicate key carries the same
+    /// facts, so last-wins is harmless).
+    fn merge(&mut self, other: BuildRuntimeIndex) {
+        self.build_scripts.extend(other.build_scripts);
+        for (k, v) in other.bin_exes {
+            let slot = self.bin_exes.entry(k).or_default();
+            for pair in v {
+                if !slot.contains(&pair) {
+                    slot.push(pair);
+                }
+            }
+        }
+    }
+
+    /// Every `rustc-link-search` directory any build script emitted, in
+    /// stream order - the loader-path head, matching what cargo adds when it
+    /// runs test binaries itself.
+    fn all_linked_paths(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for bs in self.build_scripts.values() {
+            for p in &bs.linked_paths {
+                if !out.contains(p) {
+                    out.push(p.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Build (or no-op re-check) the selection's test binaries and return
@@ -33,6 +98,18 @@ fn test_binaries(
     env_refs: &[(&str, &str)],
     commands: bool,
 ) -> Result<Option<Vec<TestBinary>>, DevError> {
+    Ok(test_binaries_with_runtime(project_root, selection, env_refs, commands)?
+        .map(|(bins, _)| bins))
+}
+
+/// [`test_binaries`] plus the [`BuildRuntimeIndex`] the same stream carries.
+/// The parallel lane needs both; the listing-only callers drop the index.
+fn test_binaries_with_runtime(
+    project_root: &Path,
+    selection: &[String],
+    env_refs: &[(&str, &str)],
+    commands: bool,
+) -> Result<Option<(Vec<TestBinary>, BuildRuntimeIndex)>, DevError> {
     let mut args: Vec<String> = vec![
         "test".into(),
         "--no-run".into(),
@@ -79,16 +156,30 @@ fn test_binaries(
     ))))
 }
 
-/// Parse the artifact stream: keep compiler-artifact messages that carry
-/// an executable built under the test profile.
-fn parse_test_binaries(stdout: &str) -> Vec<TestBinary> {
+/// Parse the artifact stream: test-profile executables become
+/// [`TestBinary`]s, while `build-script-executed` messages and non-test bin
+/// executables land in the [`BuildRuntimeIndex`] the direct-execution lane
+/// reconstructs cargo's runtime env from.
+fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex) {
     #[derive(serde::Deserialize)]
     struct Artifact {
         reason: String,
         package_id: String,
-        target: ArtifactTarget,
-        profile: ArtifactProfile,
+        #[serde(default)]
+        manifest_path: Option<String>,
+        #[serde(default)]
+        target: Option<ArtifactTarget>,
+        #[serde(default)]
+        profile: Option<ArtifactProfile>,
+        #[serde(default)]
         executable: Option<String>,
+        // build-script-executed fields.
+        #[serde(default)]
+        out_dir: Option<String>,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        #[serde(default)]
+        linked_paths: Vec<String>,
     }
     #[derive(serde::Deserialize)]
     struct ArtifactTarget {
@@ -101,23 +192,59 @@ fn parse_test_binaries(stdout: &str) -> Vec<TestBinary> {
     }
 
     let mut out = Vec::new();
+    let mut index = BuildRuntimeIndex::default();
     for line in stdout.lines() {
         let Ok(a) = serde_json::from_str::<Artifact>(line) else {
             continue;
         };
 
-        if a.reason != "compiler-artifact" || !a.profile.test {
+        if a.reason == "build-script-executed" {
+            let slot = index.build_scripts.entry(a.package_id).or_default();
+            slot.out_dir = a.out_dir;
+            slot.env = a.env;
+            // `linked_paths` entries may carry a `KIND=` prefix
+            // (`native=/path`); the loader path wants the bare directory.
+            slot.linked_paths = a
+                .linked_paths
+                .iter()
+                .map(|p| p.split_once('=').map_or(p.as_str(), |(_, path)| path).to_owned())
+                .collect();
             continue;
         }
+        if a.reason != "compiler-artifact" {
+            continue;
+        }
+        let (Some(target), Some(profile)) = (a.target, a.profile) else {
+            continue;
+        };
         let Some(exe) = a.executable else { continue };
+        let kind = target.kind.first().cloned().unwrap_or_default();
+        if !profile.test {
+            // The runnable bin behind runtime `CARGO_BIN_EXE_<name>` reads.
+            if kind == "bin" {
+                index
+                    .bin_exes
+                    .entry(a.package_id)
+                    .or_default()
+                    .push((target.name, exe));
+            }
+            continue;
+        }
         out.push(TestBinary {
             package: package_name_from_id(&a.package_id),
-            target: a.target.name,
-            kind: a.target.kind.first().cloned().unwrap_or_default(),
+            package_id: a.package_id,
+            target: target.name,
+            kind,
             executable: exe,
+            manifest_dir: a
+                .manifest_path
+                .as_deref()
+                .map(Path::new)
+                .and_then(Path::parent)
+                .map_or_else(PathBuf::new, Path::to_path_buf),
         });
     }
-    out
+    (out, index)
 }
 
 /// Extract the package name from a cargo `package_id`, across the
@@ -227,7 +354,14 @@ fn binary_list(
     let ld = loader_path(libdir, &binary.executable, existing.as_deref());
     let mut env: Vec<(&str, &str)> = env_refs.to_vec();
     env.push(("LD_LIBRARY_PATH", &ld));
-    let captured = output::run_captured_with_env(&binary.executable, &args, project_root, &env)?;
+    // cwd is the owning package's root, matching where cargo runs the binary:
+    // a custom harness or ctor can observe cwd before producing its list.
+    let cwd = if binary.manifest_dir.as_os_str().is_empty() {
+        project_root
+    } else {
+        binary.manifest_dir.as_path()
+    };
+    let captured = output::run_captured_with_env(&binary.executable, &args, cwd, &env)?;
 
     if !captured.status.success() {
         output::error(&format!(
@@ -298,40 +432,63 @@ mod binaries_tests {
     #[test]
     fn artifact_stream_keeps_test_profile_executables() {
         let stdout = concat!(
-            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","target":{"name":"pkg-a","kind":["lib"]},"profile":{"test":true},"executable":"/t/deps/pkg_a-1"}"#,
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{"name":"pkg-a","kind":["lib"]},"profile":{"test":true},"executable":"/t/deps/pkg_a-1"}"#,
             "\n",
             // Non-test profile (the normal lib build): dropped.
-            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","target":{"name":"pkg-a","kind":["lib"]},"profile":{"test":false},"executable":null}"#,
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{"name":"pkg-a","kind":["lib"]},"profile":{"test":false},"executable":null}"#,
             "\n",
-            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/b#pkg-b@0.1.0","target":{"name":"serial_tests","kind":["test"]},"profile":{"test":true},"executable":"/t/deps/serial_tests-2"}"#,
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/b#pkg-b@0.1.0","manifest_path":"/x/b/Cargo.toml","target":{"name":"serial_tests","kind":["test"]},"profile":{"test":true},"executable":"/t/deps/serial_tests-2"}"#,
             "\n",
             r#"{"reason":"build-finished","success":true}"#,
             "\n",
         );
-        let bins = parse_test_binaries(stdout);
+        let (bins, _) = parse_test_binaries(stdout);
         assert_eq!(bins.len(), 2);
         assert_eq!(bins[0].package, "pkg-a");
         assert_eq!(bins[0].kind, "lib");
+        assert_eq!(bins[0].manifest_dir, std::path::Path::new("/x/a"));
         assert_eq!(bins[1].package, "pkg-b");
         assert_eq!(bins[1].target, "serial_tests");
     }
 
+    // The runtime index is what direct execution reconstructs cargo's env
+    // from: build-script out_dir/rustc-env/link-search per package id, and
+    // the non-test bin executables behind runtime CARGO_BIN_EXE reads.
+    #[test]
+    fn artifact_stream_fills_the_runtime_index() {
+        let stdout = concat!(
+            r#"{"reason":"build-script-executed","package_id":"path+file:///x/a#pkg-a@0.1.0","out_dir":"/t/build/pkg-a/out","env":[["GENERATED_ENDPOINT","svc"]],"linked_paths":["native=/t/build/pkg-a/out","/plain"]}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{"name":"servebin","kind":["bin"]},"profile":{"test":false},"executable":"/t/debug/servebin"}"#,
+            "\n",
+        );
+        let (bins, index) = parse_test_binaries(stdout);
+        assert!(bins.is_empty());
+        let bs = index.build_scripts.get("path+file:///x/a#pkg-a@0.1.0").unwrap();
+        assert_eq!(bs.out_dir.as_deref(), Some("/t/build/pkg-a/out"));
+        assert_eq!(bs.env, vec![("GENERATED_ENDPOINT".to_owned(), "svc".to_owned())]);
+        // The `native=` prefix is stripped; a bare path passes through.
+        assert_eq!(bs.linked_paths, vec!["/t/build/pkg-a/out", "/plain"]);
+        assert_eq!(
+            index.bin_exes.get("path+file:///x/a#pkg-a@0.1.0").unwrap(),
+            &vec![("servebin".to_owned(), "/t/debug/servebin".to_owned())]
+        );
+    }
+
+    fn bin(package: &str, target: &str, kind: &str, exe: &str) -> TestBinary {
+        TestBinary {
+            package: package.into(),
+            package_id: format!("path+file:///x/{package}#{package}@0.1.0"),
+            target: target.into(),
+            kind: kind.into(),
+            executable: exe.into(),
+            manifest_dir: std::path::PathBuf::from(format!("/x/{package}")),
+        }
+    }
+
     #[test]
     fn target_filters_follow_cargo_semantics() {
-        let bins = vec![
-            TestBinary {
-                package: "a".into(),
-                target: "a".into(),
-                kind: "lib".into(),
-                executable: "/1".into(),
-            },
-            TestBinary {
-                package: "a".into(),
-                target: "cli_sort".into(),
-                kind: "test".into(),
-                executable: "/2".into(),
-            },
-        ];
+        let bins = vec![bin("a", "a", "lib", "/1"), bin("a", "cli_sort", "test", "/2")];
         // No filter: everything.
         assert_eq!(filter_binaries(&bins, &[]).len(), 2);
         // `--test cli_sort`: only the named integration target; the lib

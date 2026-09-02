@@ -237,6 +237,7 @@ pub(crate) struct ParallelRun {
 /// in-flight; it also honours a cooperative `brokkr kill` / Ctrl-C.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
+    program: &str,
     args: &[&str],
     cwd: &Path,
     state_root: &Path,
@@ -253,15 +254,15 @@ where
     Fin: FnOnce(Duration) + Send + 'static,
 {
     let start = Instant::now();
-    let mut child = spawn_cargo_process_group(args, cwd, env)?;
+    let mut child = spawn_process_group(program, args, cwd, env)?;
     // Spawned with `process_group(0)`, so the child's pid is its pgid.
     let cargo_pid = child.id();
 
     let Some(stdout_pipe) = child.stdout.take() else {
-        return Err(DevError::Build("cargo stdout was not piped".into()));
+        return Err(DevError::Build(format!("{program} stdout was not piped")));
     };
     let Some(stderr_pipe) = child.stderr.take() else {
-        return Err(DevError::Build("cargo stderr was not piped".into()));
+        return Err(DevError::Build(format!("{program} stderr was not piped")));
     };
 
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -307,7 +308,7 @@ where
                     timed_out = overtime;
                     kill_process_group(cargo_pid).ok();
                     let status = child.wait().map_err(|e| DevError::Subprocess {
-                        program: "cargo".into(),
+                        program: program.into(),
                         code: None,
                         stderr: e.to_string(),
                     })?;
@@ -317,7 +318,7 @@ where
             }
             Err(e) => {
                 return Err(DevError::Subprocess {
-                    program: "cargo".into(),
+                    program: program.into(),
                     code: None,
                     stderr: e.to_string(),
                 });
@@ -548,9 +549,22 @@ fn spawn_cargo_process_group(
     cwd: &Path,
     env: &[(&str, &str)],
 ) -> Result<std::process::Child, DevError> {
+    spawn_process_group("cargo", args, cwd, env)
+}
+
+/// Spawn `program` in its own process group with piped output. The general
+/// form behind [`spawn_cargo_process_group`]: the parallel test lane executes
+/// prebuilt test binaries directly (no cargo re-entry), so the program is a
+/// parameter rather than a constant.
+fn spawn_process_group(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> Result<std::process::Child, DevError> {
     use std::os::unix::process::CommandExt;
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -563,7 +577,7 @@ fn spawn_cargo_process_group(
     crate::oom::protect_child(&mut cmd);
 
     cmd.spawn().map_err(|e| DevError::Subprocess {
-        program: "cargo".into(),
+        program: program.into(),
         code: None,
         stderr: e.to_string(),
     })

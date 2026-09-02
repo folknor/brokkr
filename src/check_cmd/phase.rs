@@ -18,7 +18,7 @@
 //    haven't migrated.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::build;
 use crate::cargo_filter;

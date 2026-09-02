@@ -793,9 +793,10 @@ env = { HIGH_PRECISION = "1" }
   crate depending on features a sibling member donates; it requires a non-empty
   `packages`, resolves one cargo invocation per package, and **auto-isolates**
   the sweep into `target/unify-package[-<rustflags hash>]` for the same
-  fingerprint-thrash reason `rustflags` does. An explicit `"selected"` on a
-  sweep the parallel lane would have promoted is a hard error, not a silent
-  override. See `brokkr man check feature-unification`.
+  fingerprint-thrash reason `rustflags` does. An explicit `"selected"` is
+  honoured everywhere, parallel whole-workspace sweeps included - the fan-out
+  executes the prebuilt binaries directly, so the prebuild's resolution is the
+  run's resolution. See `brokkr man check feature-unification`.
 - `tests` / `skip` / `only` (optional, default `[]`) - per-`[[check]]` libtest
   filters, **ANDed** with any referencing profile's filters of the same name
   (they append, never replace): `tests` -> cargo `--test <name>` target
@@ -910,6 +911,18 @@ test - and no amount of `test_threads` moves it, which is why a project that
 has already tuned threads measures 8 and 16 identically. A single-test binary
 contributes its whole duration because it has nobody to overlap with. Running
 the binaries concurrently collapses that sum to a maximum.
+
+**The fan-out executes the prebuilt binaries directly** - one prebuild, then
+each test executable runs under brokkr's reconstruction of cargo's launch
+contract (package-root cwd, loader path, `[env]` config, `OUT_DIR`,
+`CARGO_PKG_*`, runtime `CARGO_BIN_EXE_*`; see `brokkr man check` on parallel
+test binaries). No cargo re-entry means the lane is sound on every selection
+shape, `test_exclude_packages` included, and touches cargo's build lock only
+once. Two consequences: a configured target runner
+(`[target.<triple>].runner`) refuses the lane rather than being silently
+bypassed, and forwarded cargo args that only cargo-mediated execution can
+honour (`--no-run`, `--target`, `--config`, `--manifest-path`,
+`--target-dir`) are rejected on a parallel sweep.
 
 **The budget counts tests in flight, not binaries.** Binaries times threads is
 the real concurrency: seven binaries at `test_threads = 8` is fifty-six

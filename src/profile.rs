@@ -297,14 +297,11 @@ pub type BuildShapeKey = (
 /// per-binary re-entries would otherwise resolve a different feature graph
 /// from the prebuild that produced them.
 ///
-/// Explicit `selected` on a promotion-eligible sweep FAILS rather than being
-/// silently promoted. Promotion exists because the parallel lane cannot keep
-/// the prebuild's graph equal to the runners' without it, so honouring the
-/// request would knowingly reintroduce the mismatch the lane was built to
-/// eliminate - and overriding it silently would make the value's name false.
-/// A sweep that CLI narrowing has already made ineligible is not refused: the
-/// prebuild and every runner then share one package root, so selected mode is
-/// truthful and sound there.
+/// Explicit `selected` is honoured everywhere, promotion-eligible sweeps
+/// included: the parallel fan-out executes the prebuilt binaries directly,
+/// so the prebuild's resolution is the run's resolution and there is nothing
+/// left to mismatch. (It was refused while the fan-out re-entered cargo per
+/// binary, where selected mode let a runner resolve a different graph.)
 pub fn resolve_unification(
     sweep: &ResolvedSweep,
     promotion_eligible: bool,
@@ -312,17 +309,11 @@ pub fn resolve_unification(
     Ok(match sweep.feature_unification {
         FeatureUnification::Package => EffectiveUnification::Pinned(CargoUnification::Package),
         FeatureUnification::Workspace => EffectiveUnification::Pinned(CargoUnification::Workspace),
-        FeatureUnification::Selected if promotion_eligible => {
-            return Err(DevError::Config(format!(
-                "[[check]] '{}': `feature_unification = \"selected\"` cannot be honoured on a \
-                 parallel whole-workspace sweep. The parallel lane pins workspace unification so \
-                 each test binary's cargo re-entry resolves the same feature graph as the prebuild \
-                 that produced it; selected mode would let them differ, which is the mismatch the \
-                 lane exists to prevent. Drop `parallel`, scope the sweep with `packages`, or use \
-                 `auto`.",
-                sweep.label
-            )))
-        }
+        // An explicit `selected` is honoured everywhere, the parallel lane
+        // included: the fan-out executes the prebuilt binaries directly, so
+        // the prebuild's resolution IS the run's resolution and there is no
+        // re-entry left to mismatch. (This was a refusal when the fan-out
+        // re-entered cargo per binary.)
         FeatureUnification::Selected => EffectiveUnification::Pinned(CargoUnification::Selected),
         // The pre-existing behaviour, and the only value that defers to
         // ambient config rather than pinning.
@@ -898,20 +889,20 @@ isolation = "process"
     }
 
     #[test]
-    fn explicit_selected_fails_rather_than_being_silently_promoted() {
+    fn explicit_selected_is_honoured_even_on_a_promotion_eligible_sweep() {
         let sweep = ResolvedSweep {
             label: "lane".into(),
             feature_unification: FeatureUnification::Selected,
             ..ResolvedSweep::default()
         };
-        // Promotion exists because the parallel lane cannot otherwise keep the
-        // prebuild's graph equal to its runners'. Honouring `selected` would
-        // reintroduce that mismatch; overriding it silently would make the
-        // value's name false. So it refuses.
-        assert!(resolve_unification(&sweep, true).is_err());
-        // Where CLI narrowing already made promotion unnecessary, the prebuild
-        // and every runner share one package root, so the request is truthful
-        // and is honoured.
+        // This was a refusal when the fan-out re-entered cargo per binary -
+        // selected mode let a runner resolve a different graph from its
+        // prebuild. Direct execution runs the prebuilt binaries themselves,
+        // so the request is deliverable everywhere and is simply pinned.
+        assert_eq!(
+            resolve_unification(&sweep, true).unwrap(),
+            EffectiveUnification::Pinned(CargoUnification::Selected)
+        );
         assert_eq!(
             resolve_unification(&sweep, false).unwrap(),
             EffectiveUnification::Pinned(CargoUnification::Selected)

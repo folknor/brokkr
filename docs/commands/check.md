@@ -697,35 +697,54 @@ binaries sequentially and `--test-threads` parallelizes only within one, so a
 sweep cannot finish faster than the sum, over binaries, of each binary's slowest
 test - a floor `test_threads` cannot move.
 
-The sweep builds once, then fans out - and the fan-out must land on the
-artifacts that build produced, which is not automatic. Each fanned-out
-invocation is `cargo test -p <pkg> --test <t>`, and cargo's resolver unifies
-dependency features over the *selected* package set, so a `-p`-scoped run can
-resolve shared dependencies with different features than the sweep-wide
-prebuild did (measured: hyper losing its `server` feature under one `-p`).
-Every runner then recompiles a second variant of the shared graph, serialized
-by cargo's build lock - a sweep that should take seconds runs a lone rustc for
-minutes - and the `--list`-based plan describes a different feature shape than
-cargo executes. On a sweep whose selection is exactly the whole workspace (no
-`packages`, no `test_exclude_packages`, no CLI `-p`, no package selector among
-the args forwarded after `--`, and `default-members` is not a subset), the
-prebuild and every per-binary run therefore carry
-`-Zfeature-unification --config resolver.feature-unification="workspace"`,
-pinning them all to one graph. That promotion is what the default
-`feature_unification = "auto"` means; an entry may name a mode explicitly
-instead (see [Feature unification](#feature-unification) below), and an explicit
-`selected` on a sweep that would have been promoted is refused rather than
-silently overridden. Narrower selections keep cargo's default
-selected-mode unification - widening those to "workspace" would let members
-outside the selection poison the graph - and accept that their fan-out cannot
-guarantee no-op rebuilds. The forwarded-args clause covers every spelling
-cargo accepts, the attached `-pfoo` short form included: `brokkr check -- -p
-one-pkg` narrows through a channel brokkr's own `-p` does not pass through,
-and a gate blind to it hands workspace unification to a one-package run. A cargo too old for the flag fails the prebuild with
-a named remedy; there is deliberately no silent fallback. Consumer workspaces
-can get the same one-graph property for every cargo invocation (rust-analyzer
-and ad-hoc `-p` builds included) by committing the equivalent `[unstable]` +
-`[resolver]` pin in `.cargo/config.toml`.
+The sweep builds once, then fans out **by executing the prebuilt test
+binaries directly** - the fan-out never re-enters cargo. That is what makes
+the lane sound on *every* selection shape, `test_exclude_packages` sweeps
+included: cargo's feature resolution follows the root unit set, so any cargo
+re-entry narrower than the prebuild (the old `cargo test -p <pkg> --test <t>`
+shape) could resolve shared dependencies with different features than the
+prebuild did (measured: hyper losing its `server` feature under one `-p`),
+recompile a second variant of the graph serialized on cargo's build lock, and
+run a different build than the plan described. Direct execution makes graph
+identity structural: the executables the prebuild emitted are what run.
+
+Cargo does more than exec a test binary, so brokkr reproduces its launch
+contract per binary (`src/check_cmd/direct_runtime.rs`): cwd = the owning
+package's root, the dynamic-loader path in cargo's order (build-script
+link-search dirs, the exe's deps and profile dirs, the toolchain libdir, the
+inherited tail), `[env]` from the cargo config chain with `force`/`relative`
+semantics, `CARGO_PKG_*` / `CARGO_MANIFEST_DIR` / `CARGO_MANIFEST_PATH` from
+cargo metadata (absent manifest fields export as empty, matching cargo),
+`OUT_DIR` and build-script `rustc-env` values from the prebuild's
+`build-script-executed` messages, runtime `CARGO_BIN_EXE_<name>` for the
+package's own bins, and `CARGO`. Cargo-owned values are applied last, so a
+sweep's `env` cannot forge them. Two refusals keep the direct launch honest:
+a configured target runner (`[target.<triple>].runner` or
+`CARGO_TARGET_<TRIPLE>_RUNNER` - a qemu/wine/valgrind wrapper direct
+execution would silently bypass) refuses the lane at resolution time, and
+forwarded cargo args only cargo-mediated execution can honour (`--no-run`,
+`--target`, `--config`, `--manifest-path`, `--target-dir`) are rejected.
+`CARGO_TARGET_TMPDIR` is deliberately not reproduced at runtime - cargo's
+contract makes it compile-time (`env!`) only.
+
+Feature unification is unchanged on the prebuild side: on a sweep whose
+selection is exactly the whole workspace (no `packages`, no
+`test_exclude_packages`, no CLI `-p`, no package selector among the args
+forwarded after `--` - every spelling cargo accepts, the attached `-pfoo`
+short form included - and `default-members` is not a subset), the prebuild
+and enumeration carry
+`-Zfeature-unification --config resolver.feature-unification="workspace"`.
+That promotion is what the default `feature_unification = "auto"` means, and
+it keeps deciding which graph the binaries are *built* from - existing
+configs compile what they compiled before. What direct execution retires is
+any runner-side need for the pin, so an explicit `selected` on a
+promotion-eligible sweep - formerly refused as undeliverable - is now simply
+honoured (see [Feature unification](#feature-unification) below). A cargo too
+old for the flag fails the prebuild with a named remedy; there is
+deliberately no silent fallback. Consumer workspaces can get the one-graph
+property for every cargo invocation (rust-analyzer and ad-hoc `-p` builds
+included) by committing the equivalent `[unstable]` + `[resolver]` pin in
+`.cargo/config.toml`.
 
 Each binary claims a slice of the budget
 proportional to its serial cost from the previous run - the sum of its own

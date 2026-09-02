@@ -637,6 +637,7 @@ fn run_one_test_sweep(
     // timings) so the reporting below is shared.
     let (captured, hung, timed_out, completed) = if parallel {
         let run = test_runner::run_libtest_parallel(
+            "cargo",
             &arg_refs,
             project_root,
             state_root,

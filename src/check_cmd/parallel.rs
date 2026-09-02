@@ -51,44 +51,40 @@
 // construction on both sides; the coverage gate is a third line of defence,
 // not the first.
 
-// ONE FEATURE GRAPH FOR PREBUILD AND FAN-OUT. The lane prebuilds once with
-// the sweep's whole selection, then re-enters cargo as `-p <pkg> --test <t>`
-// per binary - and resolver v2/v3 unify dependency features over the
-// *selected* package set, so a `-p`-scoped invocation can resolve shared
-// dependencies with different features than the sweep-wide prebuild did.
-// That breaks the lane's founding assumption in the worst direction: every
-// per-binary cargo has a second variant of the shared graph to compile, and
-// cargo's build-dir lock serializes them - measured on a consumer workspace
-// as one lone rustc for five minutes where the warm sweep takes fourteen
-// seconds (hyper lost its `server` feature under `-p <daemon>`). It is a
-// correctness hole too, not just a slow one: the `--list` enumeration reads
-// the prebuilt executables, so the budget and the recorded ran-set can
-// describe a different feature shape than the one cargo then runs.
+// THE FAN-OUT EXECUTES THE PREBUILT BINARIES DIRECTLY. The lane prebuilds
+// once with the sweep's whole selection, then runs each enumerated test
+// executable itself, with the libtest argv - it never re-enters cargo. The
+// previous shape (`cargo test -p <pkg> --test <t>` per binary) was
+// structurally unsound: cargo's feature resolution follows the ROOT UNIT SET,
+// not just the package selection, so a `-p`-scoped re-entry could resolve
+// shared dependencies with different features than the sweep-wide prebuild
+// (measured: hyper losing its `server` feature under `-p <daemon>`, one lone
+// rustc serialized on the build lock for five minutes where the warm sweep
+// takes fourteen seconds). Direct execution makes graph identity a
+// non-question: the executable the prebuild emitted IS what runs, for every
+// selection shape - which is what makes `parallel` legal on sweeps carrying
+// `test_exclude_packages`, the selection the old re-entry could not fan out.
 //
-// The fix is cargo's own `-Zfeature-unification` with
-// `resolver.feature-unification="workspace"`, passed to the prebuild and
-// every per-binary invocation alike, so all of them resolve one graph. It is
-// applied ONLY when the sweep's selection is exactly the whole workspace -
-// no `packages`, no `test_exclude_packages`, no CLI `-p`, no package
-// selector among the forwarded cargo args, and cargo metadata confirms
-// `default-members` is not a subset - because that is the one case where
-// "workspace" names the same universe the prebuild already selected. The
-// forwarded-args clause is not decoration: `brokkr check -- -p one-pkg`
-// narrows through a channel brokkr's own `-p` does not pass through, and
-// the gate that missed it handed workspace unification to a one-package
-// run, letting members the caller excluded contribute features to it.
-// A `packages = [...]` sweep prebuilds with the same `-p` set it fans out
-// under, so its runners were never mismatched w.r.t. its own prebuild beyond
-// multi-package subsets, and widening it to workspace unification would let
-// members outside the sweep poison its graph (mutually exclusive features,
-// an excluded member's `hyper/server`). Those lanes keep cargo's default
-// selected-mode and accept that a no-op rebuild is not guaranteed.
+// Cargo does more than exec a test binary, though: it launches it with a cwd
+// and environment contract (package-root cwd, loader path, `[env]` config,
+// OUT_DIR, CARGO_PKG_*, runtime CARGO_BIN_EXE_*). `DirectRuntime`
+// (direct_runtime.rs) reconstructs that contract from cargo metadata and the
+// prebuild's own artifact stream; a configured target runner - a wrapper
+// direct execution would silently bypass - refuses the lane at resolution
+// time.
 //
-// Nightly-only, like the lane itself (libtest's JSON format already needs
-// `-Z unstable-options`). A cargo without the flag fails the prebuild loudly
-// and `test_binaries` names the remedy; there is deliberately no silent
-// fallback, which would recreate the mismatched-graph run this exists to
-// prevent.
+// The whole-workspace feature-unification promotion (`auto` ->
+// `-Zfeature-unification workspace` on an eligible sweep) is UNCHANGED, and
+// now shapes only the prebuild and enumeration: it decides which graph the
+// binaries are built from, and existing configs keep compiling the graph
+// they compiled before. What direct execution retires is the *need* for the
+// pin on any runner - so an explicit `feature_unification = "selected"` on a
+// parallel whole-workspace sweep, formerly refused as undeliverable, is now
+// simply honoured.
+//
+// Nightly-only, like the lane itself (libtest's JSON format needs
+// `-Z unstable-options`). A cargo too old for a pinned `-Zfeature-unification`
+// still fails the prebuild loudly with a named remedy.
 
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -394,39 +390,14 @@ fn binary_selector(binary: &TestBinary) -> Vec<String> {
     args
 }
 
-/// Build the full `cargo test` argv for one binary of a parallel sweep.
-///
-/// Deliberately does NOT reuse `sweep_selection_args`: that emits the sweep's
-/// own `--test` filters, and here the binary's own selector replaces them.
-/// cargo unions selection flags, so leaving the sweep's filters in would
-/// broaden every per-binary run back to the whole lane.
-#[allow(clippy::too_many_arguments)]
-fn binary_args(
+/// The libtest argv one binary of a parallel sweep is executed with,
+/// directly - no cargo half, since the fan-out runs the prebuilt executable
+/// itself.
+fn direct_libtest_args(
     sweep: &ResolvedSweep,
-    binary: &TestBinary,
-    allow_args: &[String],
     threads: u32,
-    cargo_extra: &[String],
     libtest_extra: &[String],
 ) -> Result<Vec<String>, DevError> {
-    let mut args: Vec<String> = vec!["test".into()];
-    // Taken from the sweep, not decided here: the prebuild that produced this
-    // binary read the same field, so they cannot name different graphs.
-    args.extend(sweep.unification_args());
-    args.extend(allow_args.iter().cloned());
-    args.extend(sweep.cargo_feature_args.iter().cloned());
-    args.extend(binary_selector(binary));
-    if let Some(p) = sweep.profile {
-        args.extend(p.cargo_args().iter().map(|s| (*s).to_owned()));
-    }
-    // Same reason as the sequential lane: without it cargo stops at the first
-    // failure and a red run under-reports. Per binary here, so each binary
-    // enumerates its own failures.
-    if !cargo_extra.iter().any(|c| c == "--no-fail-fast") {
-        args.push("--no-fail-fast".into());
-    }
-    args.extend(cargo_extra.iter().cloned());
-
     let mut libtest_args: Vec<String> = sweep.libtest_args.clone();
     libtest_args.extend(sweep.name_filters.iter().cloned());
     libtest_args.extend(libtest_extra.iter().cloned());
@@ -460,33 +431,107 @@ fn binary_args(
     libtest_args.push("unstable-options".into());
     libtest_args.push("--format".into());
     libtest_args.push("json".into());
-
-    args.push("--".into());
-    args.extend(libtest_args);
-    Ok(args)
+    Ok(libtest_args)
 }
 
-/// Run one binary to completion, having already claimed `slots` of the budget.
+/// The cargo-shaped reproduction line a failing binary reprints.
+///
+/// The lane executes the binary directly, but the command a debugging reader
+/// wants to paste is the cargo one - it rebuilds if needed and supplies the
+/// env without ceremony. The selection is the binary's own selector plus
+/// everything build-shaping the prebuild carried, so it resolves the same
+/// graph.
+fn repro_cargo_line(
+    sweep: &ResolvedSweep,
+    binary: &TestBinary,
+    allow_args: &[String],
+    cargo_extra: &[String],
+) -> String {
+    let mut args: Vec<String> = vec!["test".into()];
+    args.extend(sweep.unification_args());
+    args.extend(allow_args.iter().cloned());
+    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.extend(binary_selector(binary));
+    if let Some(p) = sweep.profile {
+        args.extend(p.cargo_args().iter().map(|s| (*s).to_owned()));
+    }
+    args.extend(cargo_extra.iter().cloned());
+    let mut libtest: Vec<String> = sweep.libtest_args.clone();
+    libtest.extend(sweep.name_filters.iter().cloned());
+    if !libtest.is_empty() {
+        args.push("--".into());
+        args.extend(libtest);
+    }
+    format!("failing command: cargo {}", args.join(" "))
+}
+
+/// Refuse forwarded cargo args the direct-execution fan-out cannot honour.
+///
+/// After the rewrite, forwarded cargo-level args reach only the PREBUILD -
+/// the runners execute binaries directly. Most args are fine there
+/// (`--release` changes which binaries get built and therefore run; `-j`,
+/// `--offline`, `--locked` are prebuild-only by nature). Four are not:
+///
+/// - `--no-run` requests compilation without execution, and a lane that runs
+///   the tests anyway contradicts the forwarded request.
+/// - `--target` selects another platform's executables and potentially a
+///   target runner the direct exec would bypass.
+/// - `--config` can inject `[env]` or a runner at a precedence level the
+///   envelope reconstruction does not read.
+/// - `--manifest-path` / `--target-dir` move the workspace or artifacts out
+///   from under the enumeration-derived paths.
+fn reject_unsupported_forwarded(sweep: &ResolvedSweep, cargo_extra: &[String]) -> Result<(), DevError> {
+    const UNSUPPORTED: [&str; 5] =
+        ["--no-run", "--target", "--config", "--manifest-path", "--target-dir"];
+    let offending: Vec<&str> = cargo_extra
+        .iter()
+        .map(String::as_str)
+        .filter(|a| {
+            let head = a.split_once('=').map_or(*a, |(h, _)| h);
+            UNSUPPORTED.contains(&head)
+        })
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "sweep '{}' runs its test binaries directly (parallel fan-out), and the forwarded cargo \
+         args carry {} - which only cargo-mediated execution can honour. Drop the flag, or drop \
+         `parallel` from the [[check]] entry.",
+        sweep.label,
+        offending.join(" ")
+    )))
+}
+
+/// Run one binary to completion, having already claimed `slots` of the
+/// budget. Executes the prebuilt binary directly under the cargo launch
+/// envelope; `project_root` is the fallback cwd for a binary whose manifest
+/// dir the artifact stream did not carry.
 #[allow(clippy::too_many_arguments)]
 fn run_one_binary(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
     binary: &TestBinary,
+    runtime: &DirectRuntime,
     allow_args: &[String],
     env_refs: &[(&str, &str)],
     slots: u32,
     cargo_extra: &[String],
     libtest_extra: &[String],
 ) -> Result<BinaryRun, DevError> {
-    let args = binary_args(sweep, binary, allow_args, slots, cargo_extra, libtest_extra)?;
+    let args = direct_libtest_args(sweep, slots, libtest_extra)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (cwd, env) = runtime.envelope(binary, env_refs);
+    let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
+    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let started = Instant::now();
     let run = test_runner::run_libtest_parallel(
+        &binary.executable,
         &arg_refs,
-        project_root,
+        &cwd,
         state_root,
-        env_refs,
+        &env_pairs,
         test_runner::PARALLEL_SWEEP_TIMEOUT,
         test_runner::TEST_TIMEOUT,
         |_| {},
@@ -499,7 +544,7 @@ fn run_one_binary(
     };
     Ok(BinaryRun {
         label: format!("{}/{}", binary.package, binary.target),
-        command: format!("failing command: cargo {}", args.join(" ")),
+        command: repro_cargo_line(sweep, binary, allow_args, cargo_extra),
         captured: run.captured,
         hung,
         timed_out: run.timed_out,
@@ -568,8 +613,14 @@ fn run_parallel_sweep(
     // runner ever uses, and every per-binary re-entry would then rebuild
     // instead of hitting the cache.
     reject_forwarded_selectors(sweep, &cargo_extra)?;
+    reject_unsupported_forwarded(sweep, &cargo_extra)?;
+    // A configured target runner means cargo would wrap the executables;
+    // direct execution would silently bypass the wrapper, so the lane
+    // refuses before anything runs.
+    refuse_configured_runner(project_root)?;
     let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
     let mut all: Vec<TestBinary> = Vec::new();
+    let mut runtime_index = BuildRuntimeIndex::default();
     for resolution in sweep.resolutions(&cli_scope) {
         let mut selection = match &resolution {
             // Package mode: this package alone, replacing the sweep's own
@@ -581,11 +632,15 @@ fn run_parallel_sweep(
         selection.extend(allow_args.iter().cloned());
         selection.extend(cargo_extra.iter().cloned());
         selection.extend(sweep.unification_args());
-        let Some(found) = test_binaries(project_root, &selection, &env_refs, commands)? else {
+        let Some((found, index)) =
+            test_binaries_with_runtime(project_root, &selection, &env_refs, commands)?
+        else {
             return Ok(false);
         };
         all.extend(found);
+        runtime_index.merge(index);
     }
+    let runtime = DirectRuntime::load(project_root, &env_refs, runtime_index)?;
     // The sweep's own `--test` filters UNION with any the caller supplied,
     // matching cargo's own semantics for repeated selection flags - the
     // enumeration above already unions them, so narrowing to one side here
@@ -693,6 +748,7 @@ fn run_parallel_sweep(
             let env_refs = &env_refs;
             let cargo_extra = &cargo_extra;
             let libtest_extra = &libtest_extra;
+            let runtime = &runtime;
             handles.push(scope.spawn(move || {
                 pool.acquire(*slots)?;
                 let out = run_one_binary(
@@ -700,6 +756,7 @@ fn run_parallel_sweep(
                     state_root,
                     sweep,
                     binary,
+                    runtime,
                     allow_args,
                     env_refs,
                     *slots,
@@ -875,9 +932,11 @@ mod parallel_lane_tests {
     fn binary(package: &str, kind: &str, target: &str) -> TestBinary {
         TestBinary {
             package: package.to_owned(),
+            package_id: format!("path+file:///x/{package}#{package}@0.1.0"),
             target: target.to_owned(),
             kind: kind.to_owned(),
-            executable: format!("/tmp/{target}"),
+            executable: format!("/t/deps/{target}"),
+            manifest_dir: std::path::PathBuf::from(format!("/x/{package}")),
         }
     }
 
@@ -1139,34 +1198,79 @@ mod parallel_lane_tests {
         }
     }
 
-    // The per-binary argv must carry the pin whenever the plan was built
-    // with it - a runner without it resolves its own feature graph, which is
-    // the serialized-rebuild (and wrong-universe) failure this lane fixed.
+    // The direct-exec argv is libtest-only: filters, the budget's thread
+    // count, and the JSON format the watchdog reads - never a cargo flag.
     #[test]
-    fn the_unification_pin_rides_every_per_binary_command_or_none() {
+    fn direct_argv_is_libtest_only_with_threads_and_json() {
+        let mut sweep = bare_sweep();
+        sweep.libtest_args = v(&["--skip", "slow_io"]);
+        sweep.name_filters = v(&["fast_"]);
+        let args = direct_libtest_args(&sweep, 3, &[]).unwrap();
+        assert_eq!(
+            args,
+            v(&[
+                "--skip",
+                "slow_io",
+                "fast_",
+                "--test-threads=3",
+                "-Z",
+                "unstable-options",
+                "--format",
+                "json"
+            ])
+        );
+    }
+
+    // A `--test-threads` from anywhere else is a second in-flight count; the
+    // budget owns it, so it is refused, exactly as before the rewrite.
+    #[test]
+    fn a_foreign_test_threads_override_is_still_refused() {
+        let mut sweep = bare_sweep();
+        sweep.libtest_args = v(&["--test-threads=4"]);
+        assert!(direct_libtest_args(&sweep, 3, &[]).is_err());
+        assert!(direct_libtest_args(&bare_sweep(), 3, &v(&["--test-threads", "2"])).is_err());
+    }
+
+    // The failure reprint stays cargo-shaped (rebuilds and supplies env when
+    // pasted), and carries the sweep's pin so it resolves the same graph the
+    // prebuild did.
+    #[test]
+    fn the_repro_line_is_cargo_shaped_and_carries_the_pin() {
         use crate::config::{CargoUnification, EffectiveUnification};
         let b = binary("pkg", "test", "t");
         let promoted = ResolvedSweep {
             effective_unification: EffectiveUnification::Pinned(CargoUnification::Workspace),
             ..bare_sweep()
         };
-        let with = binary_args(&promoted, &b, &[], 2, &[], &[]).unwrap();
-        for a in CargoUnification::Workspace.cargo_args() {
-            assert!(with.contains(&a), "missing {a}");
-        }
-        // `auto` that was never promoted pins nothing - the pre-existing
-        // behaviour, and the reason `Ambient` is not `Pinned(Selected)`.
-        let without = binary_args(&bare_sweep(), &b, &[], 2, &[], &[]).unwrap();
-        assert!(!without.iter().any(|a| a == "-Zfeature-unification"));
+        let line = repro_cargo_line(&promoted, &b, &[], &[]);
+        assert!(line.starts_with("failing command: cargo test"), "{line}");
+        assert!(line.contains("-Zfeature-unification"), "{line}");
+        assert!(line.contains("-p pkg --test t"), "{line}");
+        // Unpinned `auto` reproduces without a pin - the pre-existing shape.
+        let plain = repro_cargo_line(&bare_sweep(), &b, &[], &[]);
+        assert!(!plain.contains("-Zfeature-unification"), "{plain}");
+    }
 
-        // Package mode rides the same field, so a runner can never resolve a
-        // different graph from the prebuild that produced its binary.
-        let pkg = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..bare_sweep()
-        };
-        let args = binary_args(&pkg, &b, &[], 2, &[], &[]).unwrap();
-        assert!(args.contains(&"resolver.feature-unification=\"package\"".to_owned()));
+    // Forwarded cargo args only cargo-mediated execution can honour are
+    // refused: `--no-run` contradicts running, and `--target` / `--config` /
+    // `--manifest-path` / `--target-dir` move the platform, env, or artifact
+    // paths out from under the direct launch envelope.
+    #[test]
+    fn unsupported_forwarded_cargo_args_are_refused() {
+        let sweep = bare_sweep();
+        for extra in [
+            v(&["--no-run"]),
+            v(&["--target", "aarch64-unknown-linux-gnu"]),
+            v(&["--target=wasm32-wasip1"]),
+            v(&["--config", "target.x.runner=\"qemu\""]),
+            v(&["--manifest-path", "../other/Cargo.toml"]),
+            v(&["--target-dir=/elsewhere"]),
+        ] {
+            assert!(reject_unsupported_forwarded(&sweep, &extra).is_err(), "{extra:?}");
+        }
+        for extra in [v(&["--release"]), v(&["--offline"]), v(&["-j", "4"])] {
+            assert!(reject_unsupported_forwarded(&sweep, &extra).is_ok(), "{extra:?}");
+        }
     }
 
     #[test]
