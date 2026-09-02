@@ -681,12 +681,17 @@ after `brokkr check --`), which excludes doctests on its own; `--tests` is not
 appended on top of one.
 
 Opt a project back in with `[test] doctests = true`, which restores the full
-`cargo test` default (doctests included). There is no per-sweep or CLI
-override - doctest inclusion is a project-wide, CI-parity property, so it lives
-once in `[test]`. `--skip` is not a workaround: doctests share libtest's filter
-namespace with unit tests, so skipping them by pattern would eat legitimate
-module tests too. `brokkr test <name>` is unaffected - it runs the full
-`cargo test` default so a deliberately named doctest still runs.
+`cargo test` default (doctests included), or per entry with
+`doc_only = true` - a sweep that runs `cargo test --doc` and nothing else,
+regardless of the `[test]` flag (the doctest twin a `parallel` workspace
+sweep needs; see `[[check]] doc_only` in `docs/brokkr.toml.md`, including
+its refusals and the workspace-shaped-carrier rule complete profiles
+enforce). There is no CLI override - doctest inclusion is a declared,
+CI-parity property of the config. `--skip` is not a workaround: doctests
+share libtest's filter namespace with unit tests, so skipping them by
+pattern would eat legitimate module tests too. `brokkr test <name>` is
+unaffected - it runs the full `cargo test` default so a deliberately named
+doctest still runs (and within a doc-only sweep it runs `--doc <name>`).
 
 ### Parallel test binaries
 

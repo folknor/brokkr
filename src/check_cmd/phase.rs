@@ -413,6 +413,7 @@ fn run_build_phases(
     collected_timings: Option<&mut Vec<TestTiming>>,
     coverage_stats: &mut Option<CoverageStats>,
 ) -> Result<(), DevError> {
+    verify_doc_only_rules(a)?;
     if !skip("clippy") {
         *failing_phase = Some("clippy");
         run_clippy_phase(
@@ -513,6 +514,103 @@ fn run_build_phases(
     }
 
     *failing_phase = None;
+    Ok(())
+}
+
+/// The doc-only rules that need resolved sweeps, the CLI args, or the tree -
+/// checked before anything compiles:
+///
+/// - A run containing a doc-only sweep refuses forwarded cargo target
+///   selectors: `--doc` is exclusive in cargo, and stripping the selector for
+///   one sweep while honouring it for the rest would silently change scope.
+/// - A doc-only sweep never takes the process-isolated or `test_threads`
+///   paths - the first enumerates test binaries it does not have, the second
+///   is untested against doctest JSON events - so profile-level run shaping
+///   reaching one is refused.
+/// - Under `certifies = "complete"`, a doc-only sweep may inherit no filters
+///   from its profile: doctests cannot be enumerated, so an inherited
+///   `skip`/`only` could never be audited for liveness and a dead one would
+///   silently reshape the doctest run under a complete claim. Compose the
+///   doc twin as its own filterless lane.
+/// - Under `certifies = "complete"` with a doctest obligation (`[test]
+///   doctests = true`, or a doc-only sweep standing in for the doctests
+///   quarantine), some referenced sweep must be a WORKSPACE-SHAPED doctest
+///   carrier: `packages` empty, and either `test_exclude_packages` non-empty
+///   (which forces an explicit `--workspace`, the exclusion reported like
+///   every other declared narrowing) or the bare selection confirmed to be
+///   the whole workspace. A package-scoped doc twin would prove "some
+///   doctests ran" while the rest of the workspace's doctests silently
+///   stopped - the audit cannot see doctests, so this structural rule is the
+///   only guard.
+fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
+    let doc_sweeps: Vec<&ResolvedSweep> =
+        a.active_sweeps.iter().filter(|s| s.doc_only).collect();
+    if !doc_sweeps.is_empty() {
+        let (cargo_extra, _) = split_extra_args(a.extra_args);
+        let (selectors, _) = partition_target_selectors(cargo_extra);
+        if !selectors.is_empty() {
+            return Err(DevError::Config(format!(
+                "sweep '{}' is doc-only (`cargo test --doc`, an exclusive selector), and the \
+                 forwarded args carry the target selector(s) {}. Drop them, or run a profile \
+                 without the doc-only sweep.",
+                doc_sweeps[0].label,
+                selectors.join(" ")
+            )));
+        }
+        for s in &doc_sweeps {
+            if s.process_isolation || matches!(s.test_threads, Some(n) if n != 1) {
+                return Err(DevError::Config(format!(
+                    "sweep '{}' is doc-only but its profile sets `isolation = \"process\"` or \
+                     `test_threads`; a doc-only sweep runs serially through cargo's own `--doc` \
+                     invocation. Put the doc twin in its own lane without run shaping.",
+                    s.label
+                )));
+            }
+        }
+    }
+    if a.certifies != Some(Certifies::Complete) {
+        return Ok(());
+    }
+    for s in &doc_sweeps {
+        if !s.libtest_args.is_empty()
+            || !s.name_filters.is_empty()
+            || !s.qualified_skips.is_empty()
+            || !s.cargo_test_filters.is_empty()
+        {
+            return Err(DevError::Config(format!(
+                "sweep '{}' is doc-only and inherits `skip`/`only`/`tests` filters from its \
+                 profile, under a \"complete\" claim. Doctests cannot be enumerated, so those \
+                 filters could never be audited for liveness. Compose the doc twin as its own \
+                 lane without filters.",
+                s.label
+            )));
+        }
+    }
+    if a.doctests || !doc_sweeps.is_empty() {
+        let whole =
+            build::project_info(Some(a.project_root))?.bare_selection_is_whole_workspace;
+        let carrier = a.active_sweeps.iter().any(|s| {
+            let carries = s.doc_only
+                || (s.harness == crate::config::Harness::Libtest
+                    && s.parallel_budget.is_none()
+                    && !s.process_isolation
+                    && s.cargo_test_filters.is_empty()
+                    && a.doctests);
+            let workspace_shaped =
+                s.packages.is_empty() && (!s.test_exclude_packages.is_empty() || whole);
+            carries && workspace_shaped
+        });
+        if !carrier {
+            return Err(DevError::Config(
+                "this \"complete\" profile claims doctest coverage but no referenced sweep \
+                 carries workspace doctests: every doctest-capable lane is package-scoped or \
+                 narrower than the workspace. Add a workspace-shaped `doc_only = true` \
+                 [[check]] entry to the profile (its `packages` empty; `test_exclude_packages` \
+                 is allowed and reported), or a serial libtest sweep of that shape."
+                    .into(),
+            ));
+        }
+    }
     Ok(())
 }
 

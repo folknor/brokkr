@@ -54,6 +54,11 @@ fn main() {
 }
 """,
     "src/lib.rs": """\
+/// Adds.
+///
+/// ```
+/// assert_eq!(psmoke::add(2, 2), 4);
+/// ```
 pub fn add(a: u64, b: u64) -> u64 {
     a + b
 }
@@ -120,7 +125,14 @@ mod tests {
     }
 }
 """,
-    # Sequential first, parallel second: same selection, only the lane differs.
+    # Sequential first, parallel second: same selection, only the lane
+    # differs. The doc-only twin is the adoption shape for a project whose
+    # main sweep goes parallel - doctests cannot ride a fan-out, so the twin
+    # carries them with the same selection. No `[test] doctests = true`
+    # here, deliberately: with it, the sequential reference would run
+    # doctests too, and the red-doctest scenario below could no longer prove
+    # the DOC lane runs them (doc_only runs doctests regardless of the
+    # flag - the key is the entry's own opt-in).
     "brokkr.toml": """\
 project = "brokkr"
 
@@ -132,8 +144,24 @@ test_exclude_packages = ["excl"]
 name = "fanout"
 test_exclude_packages = ["excl"]
 parallel = {}
+
+[[check]]
+name = "docs"
+doc_only = true
+test_exclude_packages = ["excl"]
 """,
 }
+
+FAILING_DOCTEST = '''\
+/// Adds.
+///
+/// ```
+/// assert_eq!(psmoke::add(2, 2), 5); // deliberately wrong: proves doctests run
+/// ```
+pub fn add(a: u64, b: u64) -> u64 {
+    a + b
+}
+'''
 
 
 def main() -> int:
@@ -153,7 +181,21 @@ def main() -> int:
         print("FAIL smoke-parallel-direct: brokkr check failed "
               "(sequential is the reference; fanout is the lane under test)")
         return 1
-    print("smoke-parallel-direct: both lanes passed")
+
+    # The doc twin must actually RUN the doctests, not merely exist: break
+    # the doctest and the check must go red through the doc-only lane.
+    lib = SMOKE / "src/lib.rs"
+    green_lib = lib.read_text()
+    lib.write_text(green_lib.replace(green_lib.split("pub fn add")[0],
+                                     FAILING_DOCTEST.split("pub fn add")[0], 1))
+    proc = subprocess.run([str(BROKKR), "check"], cwd=SMOKE)
+    lib.write_text(green_lib)
+    if proc.returncode != 1:
+        print(f"FAIL smoke-parallel-direct: a broken doctest must fail the check "
+              f"(want exit 1, got {proc.returncode})")
+        return 1
+
+    print("smoke-parallel-direct: all lanes passed (fanout, doc twin, red doctest)")
     return 0
 
 

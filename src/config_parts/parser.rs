@@ -1248,6 +1248,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         )));
     }
     validate_check_entry_harness(entry)?;
+    validate_check_entry_doc_only(entry)?;
     for key in entry.env.keys() {
         if key.trim().is_empty() {
             return Err(DevError::Config(format!(
@@ -1268,6 +1269,50 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
              shape exists to run a hand-picked subset\"; an unfiltered entry \
              is a full sweep and must stay in the coverage universe - drop \
              `curated` or add the filters that define the subset.",
+            entry.name
+        )));
+    }
+    Ok(())
+}
+
+/// The `doc_only = true` composition rules on one `[[check]]` entry.
+fn validate_check_entry_doc_only(entry: &CheckEntry) -> Result<(), DevError> {
+    if !entry.doc_only {
+        return Ok(());
+    }
+    // Doctests live in the `--doc` pseudo-target: no binaries to fan out
+    // over, and nextest never executes them.
+    if entry.parallel.is_some() {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets both `doc_only` and `parallel`; doctests have no test \
+             binaries to fan out over. Drop one.",
+            entry.name
+        )));
+    }
+    if entry.harness == Harness::Nextest {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets both `doc_only` and `harness = \"nextest\"`; nextest \
+             never executes doctests. Drop one.",
+            entry.name
+        )));
+    }
+    // `--doc` is exclusive in cargo: it cannot combine with any other target
+    // selector, so a doc-only entry owns target selection outright.
+    if !entry.tests.is_empty() {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets both `doc_only` and `tests`; cargo's `--doc` cannot \
+             combine with other target selectors. Scope with `packages` or features instead.",
+            entry.name
+        )));
+    }
+    // Doctests cannot be enumerated (rustdoc has no stable listing contract),
+    // so a filter on a doc-only entry could never be audited for liveness -
+    // a dead one would silently widen or narrow the doctest run forever.
+    if !entry.skip.is_empty() || !entry.only.is_empty() {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets `doc_only` with `skip`/`only` filters; doctests cannot \
+             be enumerated, so these filters could never be checked for liveness. Scope with \
+             `packages` or features instead.",
             entry.name
         )));
     }
@@ -1613,14 +1658,14 @@ fn validate_check_against_test(
         // no run-shaping fields of its own, its lanes exist, don't nest,
         // and don't declare claims of their own.
         if let Some(lanes) = &def.lanes {
-            validate_lanes_profile(profile_name, def, lanes, t, quarantine)?;
+            validate_lanes_profile(profile_name, def, lanes, t)?;
         }
         // A "complete" profile's load-time rules; the finer-grained
         // narrowing (`skip`/`only`) is audited at run time by the coverage
         // phase against `[[quarantine]]`. A lanes profile was already
         // checked per-lane above.
         if def.certifies == Some(Certifies::Complete) && def.lanes.is_none() {
-            validate_complete_profile(profile_name, def, t, quarantine)?;
+            validate_complete_profile(profile_name, def)?;
         }
         // The universe of a complete profile is every `[[check]]` entry, not
         // its own sweep list - checked once at the certifying-profile level
@@ -1641,6 +1686,7 @@ fn validate_check_against_test(
             }
         }
     }
+    validate_doctest_ledger(t, check, quarantine)?;
     Ok(())
 }
 
@@ -1655,7 +1701,6 @@ fn validate_lanes_profile(
     def: &ProfileDef,
     lanes: &[String],
     t: &TestConfig,
-    quarantine: &[QuarantineEntry],
 ) -> Result<(), DevError> {
     if lanes.is_empty() {
         return Err(DevError::Config(format!(
@@ -1701,7 +1746,7 @@ fn validate_lanes_profile(
             )));
         }
         if def.certifies == Some(Certifies::Complete) {
-            validate_complete_profile(lane, lane_def, t, quarantine).map_err(|e| match e {
+            validate_complete_profile(lane, lane_def).map_err(|e| match e {
                 DevError::Config(msg) => DevError::Config(format!(
                     "[test.profiles.{name}] certifies \"complete\" via lanes: {msg}"
                 )),
@@ -1717,37 +1762,77 @@ fn validate_lanes_profile(
 /// at run time by the coverage phase - every non-run (sweep, test) pair
 /// must be quarantined or the check fails as orphaned. What remains
 /// structural: no `extends` (an inherited filter set defeats an explicit
-/// claim), and doctests off is itself a suppression that needs a
-/// `[[quarantine]] category = "doctests"` entry, because doctests are
-/// invisible to the `--list` enumeration.
-fn validate_complete_profile(
-    name: &str,
-    def: &ProfileDef,
+/// claim). The doctest ledger (doctests off needs justification) is a
+/// certifying-profile property, checked in [`validate_doctest_ledger`]
+/// rather than per lane, because a referenced `doc_only` entry can satisfy
+/// it and lanes only see their own slice.
+fn validate_complete_profile(name: &str, def: &ProfileDef) -> Result<(), DevError> {
+    if def.extends.is_some() {
+        return Err(DevError::Config(format!(
+            "[test.profiles.{name}] cannot back a \"complete\" claim: uses `extends` (an \
+             inherited filter set defeats an explicit claim)."
+        )));
+    }
+    Ok(())
+}
+
+/// The doctest side of the complete-claim ledger, resolved from EFFECTIVE
+/// referenced lanes rather than `[test] doctests` alone: a complete profile
+/// must run doctests somewhere (ordinary libtest lanes under
+/// `doctests = true`, or a referenced `doc_only` entry) or carry a
+/// `[[quarantine]] category = "doctests"` justification - and must not have
+/// both a doc-only route and the quarantine, because a justification for a
+/// suppression that is not happening is a stale ledger entry.
+fn validate_doctest_ledger(
     t: &TestConfig,
+    check: &[CheckEntry],
     quarantine: &[QuarantineEntry],
 ) -> Result<(), DevError> {
-    // Phrased as "cannot back a complete claim" because `name` is either
-    // the certifying profile itself or a lane composing into one.
-    let reject = |what: String| {
-        Err(DevError::Config(format!(
-            "[test.profiles.{name}] cannot back a \"complete\" claim: {what}."
-        )))
-    };
-    if def.extends.is_some() {
-        return reject("uses `extends` (an inherited filter set defeats an explicit claim)".into());
+    if t.doctests {
+        // Ordinary serial lanes run doctests; the pre-existing global stale
+        // rule already rejects a doctests quarantine here.
+        return Ok(());
     }
-    if !t.doctests
-        && !quarantine
+    let has_quarantine = quarantine
+        .iter()
+        .any(|q| q.category.as_deref() == Some("doctests"));
+    let complete: Vec<&str> = t
+        .profiles
+        .iter()
+        .filter(|(_, d)| d.certifies == Some(Certifies::Complete))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if complete.is_empty() {
+        return Ok(());
+    }
+    let mut all_covered = true;
+    for name in &complete {
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        let mut visited: BTreeSet<String> = BTreeSet::new();
+        referenced_check_entries(&t.profiles, name, &mut visited, &mut referenced);
+        let has_doc_lane = check
             .iter()
-            .any(|q| q.category.as_deref() == Some("doctests"))
-    {
-        return reject(
-            "doctests are disabled with no justification. Doctests are \
-             invisible to the coverage enumeration, so `[test] doctests = \
-             false` needs a `[[quarantine]] category = \"doctests\"` entry \
-             with an issue, or set doctests = true"
+            .any(|e| e.doc_only && referenced.contains(&e.name));
+        if !has_doc_lane {
+            all_covered = false;
+            if !has_quarantine {
+                return Err(DevError::Config(format!(
+                    "[test.profiles.{name}] cannot back a \"complete\" claim: doctests are \
+                     disabled with no justification. Doctests are invisible to the coverage \
+                     enumeration, so `[test] doctests = false` needs a referenced \
+                     `doc_only = true` [[check]] entry, a `[[quarantine]] category = \
+                     \"doctests\"` entry with an issue, or doctests = true."
+                )));
+            }
+        }
+    }
+    if all_covered && has_quarantine {
+        return Err(DevError::Config(
+            "[[quarantine]] category = \"doctests\" is stale: every complete profile runs \
+             doctests through a referenced `doc_only` entry, so nothing is suppressed. Delete \
+             the entry."
                 .into(),
-        );
+        ));
     }
     Ok(())
 }

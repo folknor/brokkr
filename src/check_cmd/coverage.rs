@@ -176,12 +176,33 @@ fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
 /// declaration order rather than hash order.
 type ResolutionKey = (profile::BuildShapeKey, Option<String>);
 
+/// Doc-only sweeps sit outside the pair audit, and the narrowing is
+/// reported like `test_exclude_packages`: visible on every run rather than
+/// silently absent.
+fn report_doc_only_exclusion(sweeps: &[ResolvedSweep]) {
+    let doc_only = sweeps.iter().filter(|s| s.doc_only).count();
+    if doc_only > 0 {
+        output::run_msg(&format!(
+            "coverage: {doc_only} doc-only sweep{} outside the pair audit (doctests are not \
+             enumerable)",
+            if doc_only == 1 { "" } else { "s" }
+        ));
+    }
+}
+
 fn group_by_resolution(
     sweeps: &[ResolvedSweep],
 ) -> (Vec<ResolutionKey>, HashMap<ResolutionKey, Vec<usize>>) {
     let mut order: Vec<ResolutionKey> = Vec::new();
     let mut groups: HashMap<ResolutionKey, Vec<usize>> = HashMap::new();
     for (idx, sweep) in sweeps.iter().enumerate() {
+        // Doc-only sweeps are outside the pair audit: doctests cannot be
+        // enumerated, and enumerating the shape's TEST BINARIES for a lane
+        // that deliberately runs none would orphan every pair. Skipped in
+        // place so `executed[idx]` keeps its original indexing.
+        if sweep.doc_only {
+            continue;
+        }
         for resolution in sweep.resolutions(&sweep.packages) {
             let key = (sweep.build_shape_key(), resolution);
             if !groups.contains_key(&key) {
@@ -212,6 +233,8 @@ fn run_coverage_phase(
     let mut report = classify(&shapes, quarantine);
     report.stats.dead_filters = dead.len();
     let stats = Some(report.stats);
+
+    report_doc_only_exclusion(sweeps);
 
     // The per-entry pair counts are the countdown the ledger exists for,
     // and the growth signal when a substring starts matching more than it

@@ -396,6 +396,12 @@ fn test_argv(
     }
     args.push("-p".into());
     args.push(pkg.into());
+    // A doc-only sweep runs doctests and nothing else, here as everywhere:
+    // <NAME> filters within the `--doc` pseudo-target, and a name matching
+    // no doctest SKIPs like any feature-gated miss.
+    if sweep.doc_only {
+        args.push("--doc".into());
+    }
     args.push(name.into());
     args.push("--".into());
     args.push("--include-ignored".into());
@@ -461,6 +467,17 @@ fn count_matching_tests(
     project_root: &Path,
     debug: bool,
 ) -> Result<usize, DevError> {
+    // Doctests cannot be enumerated (`--list` is a libtest flag; rustdoc has
+    // no listing contract), so the single-test precondition `--timeout`
+    // rides on cannot be established for a doc-only sweep.
+    if sweep.doc_only {
+        return Err(DevError::Config(format!(
+            "--timeout cannot apply within doc-only sweep '{}': doctests cannot be enumerated, \
+             so the single-test precondition cannot be checked. Drop --timeout, or use --sweep \
+             to run a non-doc sweep.",
+            sweep.label
+        )));
+    }
     let mut args: Vec<String> = vec!["test".into()];
     // The lane's pinned resolution, same as every cargo command `check`
     // builds. This path is already one package per invocation (`-p pkg`

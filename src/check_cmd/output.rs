@@ -315,7 +315,12 @@ pub(crate) fn describe_sweep(
             parts.push(format!("filter {name}"));
         }
         parts.push(
-            if matches!(sweep.test_threads, Some(n) if n != 1) {
+            if sweep.doc_only {
+                // Serial by construction, and the lane's whole identity: an
+                // unexplained `--doc` invocation is the one thing a collapsed
+                // log must not hide.
+                "doc-only"
+            } else if matches!(sweep.test_threads, Some(n) if n != 1) {
                 "parallel"
             } else {
                 "serial"
@@ -546,14 +551,19 @@ fn run_one_test_sweep(
     for c in cargo_extra {
         args.push(c.clone());
     }
-    // Exclude doctests unless the project opted in (`[test] doctests = true`).
-    // nextest - and therefore every brokkr-managed project's CI - never runs
-    // doctests, so running them here is a signal CI can't see. `--tests`
-    // selects lib + bins + integration but not doctests. A sweep that already
-    // carries an explicit target selector (e.g. a profile's `--test <name>`)
-    // excludes doctests on its own, and `--tests` would wrongly broaden it, so
-    // only inject when no selector is present.
-    if !doctests && !has_target_selector(&args) {
+    // A doc-only sweep runs doctests and nothing else - `--doc` is cargo's
+    // exclusive doctest pseudo-target, and forwarded/configured selectors
+    // were refused up front, so nothing can widen it here. Otherwise,
+    // exclude doctests unless the project opted in (`[test] doctests =
+    // true`): nextest - and therefore every brokkr-managed project's CI -
+    // never runs doctests, so running them here is a signal CI can't see.
+    // `--tests` selects lib + bins + integration but not doctests. A sweep
+    // that already carries an explicit target selector (e.g. a profile's
+    // `--test <name>`) excludes doctests on its own, and `--tests` would
+    // wrongly broaden it, so only inject when no selector is present.
+    if sweep.doc_only {
+        args.push("--doc".into());
+    } else if !doctests && !has_target_selector(&args) {
         args.push("--tests".into());
     }
 

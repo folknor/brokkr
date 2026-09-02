@@ -115,6 +115,10 @@ pub struct ResolvedSweep {
     /// shape - a nextest and a libtest sweep with equal compile inputs are
     /// one clippy surface and share the target dir.
     pub harness: Harness,
+    /// The `[[check]]` entry's `doc_only`: the sweep runs `cargo test --doc`
+    /// and nothing else. Execution policy, never part of the build shape,
+    /// and outside the coverage pair audit (doctests cannot be enumerated).
+    pub doc_only: bool,
 }
 
 /// Which half of the filter surface a [`DeclaredFilter`] is, because the two
@@ -370,6 +374,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         curated: entry.curated,
         profile: entry.profile,
         harness: entry.harness,
+        doc_only: entry.doc_only,
     }
 }
 
@@ -766,6 +771,7 @@ fn build_resolved_sweep(
         curated: entry.curated,
         profile: entry.profile,
         harness: entry.harness,
+        doc_only: entry.doc_only,
     }
 }
 

@@ -816,6 +816,28 @@ env = { HIGH_PRECISION = "1" }
   timeout (`slow-timeout = { period = "..", terminate-after = N }`) - the
   lane adds no watchdog of its own, and an unbounded gate is refused. See
   `brokkr man check nextest`.
+- `doc_only` (optional, default `false`) - the entry runs `cargo test --doc`
+  (doctests, nothing else) with its selection, features, unification pin and
+  cargo profile, serially. The doctest twin for a `parallel` workspace
+  sweep: doctests live in cargo's `--doc` pseudo-target, which no binary
+  fan-out can carry, so a project parallelizing its main sweep pairs it with
+  a doc-only entry of the same selection. Runs doctests regardless of
+  `[test] doctests` (the key is the entry's own opt-in), and a referenced
+  doc-only entry satisfies a complete profile's doctest obligation even
+  under `doctests = false` - a `category = "doctests"` quarantine coexisting
+  with one is then a stale-entry load error. Owns cargo target selection
+  outright (`--doc` is exclusive): entry `tests` and forwarded target
+  selectors are refused, as are entry-level `skip`/`only` - doctests cannot
+  be enumerated, so a filter on them could never be audited for liveness,
+  and under a complete claim profile-inherited filters are refused too
+  (compose the doc twin as its own filterless lane). Under a complete claim
+  with a doctest obligation, at least one doctest carrier must be
+  **workspace-shaped**: `packages` empty, with `test_exclude_packages`
+  allowed and reported - a package-scoped twin would prove "some doctests
+  ran" while the rest of the workspace's silently stopped, invisible to an
+  audit that cannot enumerate doctests. Doc-only sweeps sit outside the
+  coverage pair audit (reported on the coverage line) and are execution
+  policy, never build shape.
 - `tests` / `skip` / `only` (optional, default `[]`) - per-`[[check]]` libtest
   filters, **ANDed** with any referencing profile's filters of the same name
   (they append, never replace): `tests` -> cargo `--test <name>` target
@@ -1074,6 +1096,13 @@ an earlier version refused *any* `parallel` entry while its message told you to
 add a serial sibling, so the remedy it named did not clear it; the only escape
 was `doctests = false` plus a quarantine, which the complete gate then
 correctly called an unaudited gap.
+
+When the parallel sweep IS the workspace-wide one and the serial remainder is
+package-scoped, the serial siblings only run their own packages' doctests -
+the rest of the workspace's doctests would silently stop. That shape wants a
+`doc_only = true` twin of the parallel entry (same selection, `--doc`, ~a few
+seconds serial); see the `doc_only` key above, including the
+workspace-shaped-carrier rule a complete profile enforces.
 
 ### What it does not do
 

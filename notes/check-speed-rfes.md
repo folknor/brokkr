@@ -104,9 +104,14 @@ sweep - the (binary-id, test) coverage audit, the default-filter pin
 (design settled in review: a committed pins file beside the resolved
 brokkr.toml, blessed piners-style, keyed by profile/platform/address/raw
 string/engine version plus an excluded-pair-set hash) and the
-run-extra-args rejection for audited lanes are the remaining work. So for
-nautilus this replaces the tier1 sweeps' harness, but the --gate serial
-lane replacement waits on the audit.
+run-extra-args rejection for audited lanes are the remaining work.
+
+**Sequencing correction (from the nautilus review)**: nautilus cannot adopt
+the lane ANYWHERE yet, not just not in the gate. The complete-universe rule
+makes the gate reference every non-curated entry, and a complete profile
+referencing a nextest sweep is the fail-closed load error - so on any
+complete-gated config, nextest adoption waits on the audit wholesale. RFE 1
+carries the throughput win in the meantime.
 
 ### The original proposal
 
@@ -172,3 +177,34 @@ timestamper sees a two-minute silence and then everything at once - the stamps
 have to be taken at capture time, where only brokkr stands. Stamping brokkr's
 own `[run]`/`[test]`/`[warn]` lines alone would already cover the phase
 boundaries; stamping captured lines at capture would cover the rest.
+
+## RFE 6: a per-entry doc-only sweep (from the nautilus review) [DONE]
+
+**Implemented 2026-09-02**: `[[check]] doc_only = true` - the entry runs
+`cargo test --doc` with its selection/features/unification/profile, serial,
+regardless of `[test] doctests`. The doctest twin a parallel workspace sweep
+needs: nautilus pairs `parallel = {}` on `default` with a `doc_only` twin of
+the same selection and keeps B42 (doctest parity) closed. Guard rails from
+design review: no entry filters (doctests are not enumerable, so liveness
+could never be audited; profile-inherited filters refused under a complete
+claim - compose the twin as its own filterless lane), forwarded target
+selectors refused (`--doc` is exclusive), and under a complete claim with a
+doctest obligation at least one carrier must be workspace-shaped (`packages`
+empty; `test_exclude_packages` allowed and reported) so a package-scoped
+twin cannot green-light a workspace-wide subtraction. A referenced doc-only
+entry satisfies the complete profile's doctest obligation under
+`doctests = false` (quarantine then stale). Doc-only sweeps sit outside the
+coverage pair audit, reported on the coverage line. Smoke: the doc-twin +
+red-doctest scenarios in `scripts/smoke-parallel-direct.py`.
+
+## Adoption notes for nautilus (2026-09-02)
+
+- `parallel = {}` on `default` + the doc twin is the one-edit adoption; the
+  nextest lane waits on the audit wholesale (see RFE 2's sequencing
+  correction).
+- First parallel runs: the fan-out overlaps binaries, so wall-clock tests
+  (the B100 class; `test_failed_connect_tears_down_websockets_before_retry`
+  already at 15.7s) see cross-binary load for the first time and may trip
+  the 20s watchdog. Read `--timings` after the first warm run, expect a
+  possible round of serial-lane relocations, and tune no budget until the
+  weight store has two runs behind it.

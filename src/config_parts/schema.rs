@@ -909,6 +909,21 @@ pub struct CheckEntry {
     /// harness decides how tests execute, never what cargo compiles.
     #[serde(default)]
     pub harness: Harness,
+    /// This entry runs `cargo test --doc` - doctests and nothing else - with
+    /// its selection, features, unification pin and cargo profile. The
+    /// doctest twin for a `parallel` workspace sweep: doctests live in
+    /// cargo's `--doc` pseudo-target, which no binary fan-out can carry, so
+    /// a project that parallelizes its main sweep pairs it with a serial
+    /// doc-only entry and keeps `[test] doctests = true` honest.
+    ///
+    /// Runs doctests regardless of `[test] doctests` (the key IS this
+    /// entry's opt-in). Owns cargo target selection outright: `tests` on the
+    /// entry and forwarded target selectors are refused, as are entry-level
+    /// `skip`/`only` (doctests cannot be enumerated, so a filter on them can
+    /// never be audited for liveness). Execution policy, never part of the
+    /// build shape.
+    #[serde(default)]
+    pub doc_only: bool,
 }
 
 /// Which test harness runs a `[[check]]` sweep's test phase.
