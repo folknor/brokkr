@@ -102,9 +102,20 @@ rather than conflicting. The smoke's load-bearing scenario writes a foreign
 nextest.toml whose default-filter and retries would hide a failing test and
 asserts the run stays red - the file gets no vote. The pin/bless/drift
 machinery, the boundedness refusal and the DefaultFiltered bucket are
-deleted. Still pending: the (binary-id, test) coverage audit, now small
-(exclusions only ever come from brokkr.toml), which is what lets a complete
-gate run a nextest sweep - the serial lane's ~170s collapse waits on it.
+deleted.
+
+**Audit landed same day - RFE 2 is complete.** A `certifies = "complete"`
+profile may reference nextest sweeps: the lane's ran-set comes from the
+engine's own listing under the sweep's real filters (the same code that
+shapes its run), and the pair unit is (binary-id, test) shape-wide whenever
+any lane of a shape is nextest - the finer-key-wins rule from the B51
+analysis, with the unit built through nextest's own RustBinaryId
+construction so libtest claims and engine claims cannot drift. Smoke: the
+gate scenarios in scripts/smoke-nextest-lane.py, including a pair only the
+engine's claim covers (an id-mapping break turns the gate red) and the
+orphan path. The serial lane's ~170s collapse is now unblocked: migrate the
+gate's isolated serial lane to a harness = "nextest" entry, and check the
+B51 acceptance delta (+7, 91 -> 98) on the first migrated run.
 
 **The correction, which invalidates this RFE as originally written.** The
 original text below argued the lane on CI parity: upstream supports only

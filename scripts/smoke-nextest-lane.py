@@ -49,6 +49,11 @@ mod tests {
         assert_eq!(super::add(2, 2), 4);
     }
 
+    #[test]
+    fn third_probe() {
+        assert_eq!(super::add(3, 3), 6);
+    }
+
     // Selected out by the sweep's `skip = ["skipme"]`; would fail if run.
     #[test]
     fn skipme_broken() {
@@ -56,6 +61,12 @@ mod tests {
     }
 }
 """,
+    # The gate composes a MIXED shape: `nx` (nextest) and `lt` (libtest)
+    # share one compile shape, so the audit keys the whole shape by binary
+    # id. `lt` runs only third_probe, which makes `adds` a pair the gate can
+    # only cover through the ENGINE's claim - if the audit's binary-id
+    # construction ever disagreed with the engine's, `adds` would orphan and
+    # the gate would go red.
     "brokkr.toml": """\
 project = "brokkr"
 
@@ -63,6 +74,27 @@ project = "brokkr"
 name = "nx"
 harness = "nextest"
 skip = ["skipme"]
+
+[[check]]
+name = "lt"
+only = ["third"]
+
+[test]
+gate_profile = "gate"
+
+[test.profiles.gate]
+certifies = "complete"
+sweeps = ["nx", "lt"]
+
+[[quarantine]]
+category = "doctests"
+issue = "B2"
+reason = "smoke workspace gates no doctests"
+
+[[quarantine]]
+pattern = "skipme"
+issue = "B1"
+reason = "deliberately broken smoke test, excluded by the sweep skip"
 """,
 }
 
@@ -133,6 +165,27 @@ def main() -> int:
         fail = 1
     shutil.rmtree(foreign.parent)
     lib.write_text(green_lib)
+
+    print("=== gate: complete claim over a mixed nextest+libtest shape ===")
+    rc = subprocess.run([str(BROKKR), "check", "--gate"], cwd=SMOKE).returncode
+    if rc != 0:
+        print(f"FAIL gate scenario: want exit 0, got {rc}")
+        fail = 1
+
+    print("=== gate without the quarantine: the skipped pair orphans ===")
+    cfg = SMOKE / "brokkr.toml"
+    full_cfg = cfg.read_text()
+    head, _, _ = full_cfg.partition("[[quarantine]]\npattern")
+    cfg.write_text(head)
+    proc = subprocess.run(
+        [str(BROKKR), "check", "--gate"], cwd=SMOKE, capture_output=True, text=True
+    )
+    out = proc.stdout + proc.stderr
+    print(out, end="")
+    if proc.returncode != 1 or "orphaned" not in out:
+        print(f"FAIL orphan scenario: want exit 1 with an orphan report, got {proc.returncode}")
+        fail = 1
+    cfg.write_text(full_cfg)
 
     if fail == 0:
         print("smoke-nextest-lane: all scenarios passed")

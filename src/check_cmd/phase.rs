@@ -485,6 +485,7 @@ fn run_build_phases(
         // same source here rather than passed down, so the two cannot drift.
         let audit = audit_coverage(
             a.project_root,
+            a.state_root,
             a.active_sweeps,
             executed,
             a.quarantine,
@@ -497,6 +498,15 @@ fn run_build_phases(
         // Counts first, verdict second: the summary carries them even when
         // the audit is what failed.
         *coverage_stats = audit.stats;
+        // Same reporting contract as the test phase: `coverage failed` is the
+        // sentinel whose detail (worksheets, orphans) already printed; any
+        // other error - an enumeration abort, an engine failure - carries its
+        // whole diagnostic in the message and would otherwise be silent.
+        if let Err(e) = &audit.result
+            && !matches!(e, DevError::Build(m) if m == "coverage failed")
+        {
+            output::error(&e.to_string());
+        }
         audit.result?;
     }
 
@@ -642,6 +652,7 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
 #[allow(clippy::too_many_arguments)]
 fn audit_coverage(
     project_root: &Path,
+    state_root: &Path,
     sweeps: &[ResolvedSweep],
     executed: &[bool],
     quarantine: &[QuarantineEntry],
@@ -654,6 +665,7 @@ fn audit_coverage(
     match test_failure {
         None => run_coverage_phase(
             project_root,
+            state_root,
             sweeps,
             executed,
             quarantine,
@@ -667,6 +679,7 @@ fn audit_coverage(
             // contributes its worksheet and its counts.
             let outcome = run_coverage_phase(
                 project_root,
+                state_root,
                 sweeps,
                 executed,
                 quarantine,

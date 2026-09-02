@@ -813,11 +813,14 @@ env = { HIGH_PRECISION = "1" }
   shape - a nextest and a libtest sweep of equal compile inputs share the
   target dir and dedupe in clippy. The natural use is a sweep needing the
   process-isolation guarantee, executed concurrently instead of one cargo
-  spawn per test. Load errors: combined with `parallel`, with
-  `feature_unification = "package"`, on a profile setting
-  `isolation = "process"` (redundant - the engine already isolates), or
-  referenced by a `certifies = "complete"` profile (the coverage audit
-  cannot enumerate a nextest lane yet). See `brokkr man check nextest`.
+  spawn per test. Legal under a `certifies = "complete"` profile: the
+  coverage audit enumerates nextest lanes through the engine's own listing,
+  keyed `(binary-id, test)` - the finer key applies shape-wide when any lane
+  of a shape is nextest, and a package-scoped `[[quarantine]]` entry spans
+  every binary id in its package. Load errors: combined with `parallel`,
+  with `feature_unification = "package"`, or on a profile setting
+  `isolation = "process"` (redundant - the engine already isolates). See
+  `brokkr man check nextest`.
 - `doc_only` (optional, default `false`) - the entry runs `cargo test --doc`
   (doctests, nothing else) with its selection, features, unification pin and
   cargo profile, serially. The doctest twin for a `parallel` workspace

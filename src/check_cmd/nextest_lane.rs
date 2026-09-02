@@ -218,39 +218,10 @@ fn run_nextest_sweep(
 
     // Filters: `only` and unqualified `skip` ride nextest's own libtest
     // pattern emulation (same substring semantics, nothing to escape);
-    // package-qualified skips become one filterset each.
-    let mut patterns = TestFilterPatterns::new(sweep.name_filters.clone());
-    let mut run_ignored = RunIgnored::default();
-    let mut it = sweep.libtest_args.iter();
-    while let Some(tok) = it.next() {
-        match tok.as_str() {
-            "--skip" => {
-                let Some(v) = it.next() else {
-                    return Err(DevError::Config("--skip without a value".into()));
-                };
-                patterns.add_skip_pattern(v.clone());
-            }
-            "--include-ignored" => run_ignored = RunIgnored::All,
-            other => {
-                return Err(DevError::Config(format!(
-                    "sweep '{}' carries libtest arg `{other}`, which the nextest lane cannot \
-                     translate; drop it from the profile, or use a libtest entry.",
-                    sweep.label
-                )));
-            }
-        }
-    }
-    let mut filtersets: Vec<Filterset> = Vec::new();
-    for qs in &sweep.qualified_skips {
-        let expr = qualified_skip_filterset(qs)?;
-        let parsed = Filterset::parse(expr.clone(), &pcx, FiltersetKind::Test, &known_groups)
-            .map_err(|e| {
-                DevError::Config(format!("qualified skip `{expr}` did not compile: {e:?}"))
-            })?;
-        filtersets.push(parsed);
-    }
-    let test_filter = TestFilter::new(NextestRunMode::Test, run_ignored, patterns, filtersets)
-        .map_err(|e| DevError::Config(format!("nextest test filter: {e}")))?;
+    // package-qualified skips become one filterset each. Compiled by the
+    // same function the audit's listing uses, so run and audit can never
+    // disagree about what a sweep selects.
+    let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
 
     // Double-spawn re-invokes the CURRENT executable with a `__double-spawn`
     // subcommand - a protocol cargo-nextest's own binary implements and
@@ -371,6 +342,198 @@ fn run_nextest_sweep(
         passed,
         nextest_runner::reporter::events::FinalRunStats::Success
     ))
+}
+
+/// One testcase from an engine listing, as plain data: the audit's view of
+/// what a nextest lane selects. `binary_id` is nextest's own
+/// `RustBinaryId` rendering, the finer half of the (binary-id, test)
+/// coverage pair.
+struct EngineCase {
+    binary_id: String,
+    test: String,
+    disposition: Disposition,
+}
+
+/// List one nextest sweep's testcases through the engine, without running
+/// anything: build (or no-op re-check) the shape, feed the artifact stream
+/// to `BinaryListBuilder`, and read `TestList`'s per-testcase verdicts under
+/// the sweep's real filters. The coverage audit's source for a nextest
+/// lane's ran-set - enumeration is ground truth, so the lane's claim comes
+/// from the same engine that executes it, never from a reimplementation of
+/// its filter semantics.
+#[allow(clippy::too_many_lines)]
+fn nextest_shape_cases(
+    project_root: &Path,
+    state_root: &Path,
+    sweep: &ResolvedSweep,
+    selection: &[String],
+    env_refs: &[(&str, &str)],
+    commands: bool,
+) -> Result<Vec<EngineCase>, DevError> {
+    let host = HostPlatform::detect(PlatformLibdir::from_rustc_stdout(
+        nextest_runner::RustcCli::print_host_libdir().read(),
+    ))
+    .map_err(|e| DevError::Build(format!("nextest host platform detection failed: {e}")))?;
+    let triple = host.platform.triple_str().to_owned();
+    let build_platforms = BuildPlatforms { host, target: None };
+
+    let metadata = output::run_captured_with_env(
+        "cargo",
+        &["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
+        project_root,
+        env_refs,
+    )?;
+    if !metadata.status.success() {
+        output::error(&String::from_utf8_lossy(&metadata.stderr));
+        return Err(DevError::Build("cargo metadata failed".into()));
+    }
+    let metadata_json = String::from_utf8_lossy(&metadata.stdout).into_owned();
+    let graph = PackageGraph::from_json(&metadata_json)
+        .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?;
+    let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
+    let cargo_configs = CargoConfigs::new(Vec::<String>::new())
+        .map_err(|e| DevError::Config(format!("cargo config discovery failed: {e}")))?;
+
+    let mut args: Vec<String> =
+        vec!["test".into(), "--no-run".into(), "--message-format=json".into()];
+    args.extend(selection.iter().cloned());
+    if !has_target_selector(&args) {
+        args.push("--tests".into());
+    }
+    if commands {
+        output::run_msg(&format!("cargo {}", args.join(" ")));
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let build = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
+    if !build.status.success() {
+        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        output::error(&String::from_utf8_lossy(&build.stderr));
+        return Err(DevError::Build("coverage enumeration failed".into()));
+    }
+    let mut builder = BinaryListBuilder::new(&graph, build_platforms.clone());
+    for line in String::from_utf8_lossy(&build.stdout).lines() {
+        builder
+            .process_message_line(line)
+            .map_err(|e| DevError::Build(format!("nextest could not read the build: {e}")))?;
+    }
+    let binary_list = std::sync::Arc::new(builder.finish());
+
+    let synth = write_synthesized_config(state_root)?;
+    let pcx = ParseContext::new(&graph);
+    let config = NextestConfig::from_sources(
+        workspace_root.clone(),
+        &pcx,
+        Some(synth.as_path()),
+        std::iter::empty::<&nextest_runner::config::core::ToolConfigFile>(),
+        &std::collections::BTreeSet::new(),
+    )
+    .map_err(|e| DevError::Config(format!("nextest engine config: {e}")))?;
+    let early_profile = config
+        .profile(NextestConfig::DEFAULT_PROFILE)
+        .map_err(|e| DevError::Config(format!("nextest engine profile: {e}")))?;
+    let known_groups = early_profile.known_groups();
+    let profile = early_profile.apply_build_platforms(&build_platforms);
+
+    let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
+    let double_spawn = DoubleSpawnInfo::disabled();
+    let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
+        .unwrap_or_else(|_| TargetRunner::empty());
+    let run_id = nextest_runner::helpers::force_or_new_run_id();
+    let version_env_vars = VersionEnvVars {
+        current_version: NEXTEST_ENGINE_VERSION
+            .parse()
+            .map_err(|e| DevError::Build(format!("engine version constant: {e}")))?,
+        required_version: None,
+        recommended_version: None,
+    };
+    let ctx = TestExecuteContext {
+        run_id,
+        version_env_vars: &version_env_vars,
+        profile_name: profile.name(),
+        double_spawn: &double_spawn,
+        target_runner: &target_runner,
+    };
+    let path_mapper = PathMapper::noop();
+    let rust_build_meta = binary_list.rust_build_meta.map_paths(&path_mapper);
+    let test_artifacts = RustTestArtifact::from_binary_list(
+        &graph,
+        std::sync::Arc::clone(&binary_list),
+        &rust_build_meta,
+        &path_mapper,
+        None,
+    )
+    .map_err(|e| DevError::Build(format!("nextest artifact resolution: {e}")))?;
+    let env_map = EnvironmentMap::new(&cargo_configs);
+    let test_list = TestList::new(
+        &ctx,
+        test_artifacts,
+        rust_build_meta,
+        &test_filter,
+        None,
+        workspace_root,
+        env_map,
+        &profile,
+        FilterBound::All,
+        nextest_runner::config::core::get_num_cpus(),
+        ListProgressOptions::new(
+            ShowProgress::None,
+            ShowTerminalProgress::from_cargo_configs(&cargo_configs, false),
+            ThemeCharacters::default(),
+            false,
+        ),
+    )
+    .map_err(|e| DevError::Build(format!("nextest listing failed: {e}")))?;
+
+    Ok(test_list
+        .iter_tests()
+        .map(|t| EngineCase {
+            binary_id: t.id().binary_id.to_string(),
+            test: t.id().test_name.to_string(),
+            disposition: nextest_disposition(&t.test_info.filter_match),
+        })
+        .collect())
+}
+
+/// The sweep's filters compiled onto the engine's own surfaces - shared by
+/// the run lane and the audit listing so the two can never disagree about
+/// what a sweep selects.
+fn sweep_engine_filter(
+    sweep: &ResolvedSweep,
+    pcx: &ParseContext<'_>,
+    known_groups: &nextest_filtering::KnownGroups,
+) -> Result<TestFilter, DevError> {
+    let mut patterns = TestFilterPatterns::new(sweep.name_filters.clone());
+    let mut run_ignored = RunIgnored::default();
+    let mut it = sweep.libtest_args.iter();
+    while let Some(tok) = it.next() {
+        match tok.as_str() {
+            "--skip" => {
+                let Some(v) = it.next() else {
+                    return Err(DevError::Config("--skip without a value".into()));
+                };
+                patterns.add_skip_pattern(v.clone());
+            }
+            "--include-ignored" => run_ignored = RunIgnored::All,
+            other => {
+                return Err(DevError::Config(format!(
+                    "sweep '{}' carries libtest arg `{other}`, which the nextest lane cannot \
+                     translate; drop it from the profile, or use a libtest entry.",
+                    sweep.label
+                )));
+            }
+        }
+    }
+    let mut filtersets: Vec<Filterset> = Vec::new();
+    for qs in &sweep.qualified_skips {
+        let expr = qualified_skip_filterset(qs)?;
+        let parsed = Filterset::parse(expr.clone(), pcx, FiltersetKind::Test, known_groups)
+            .map_err(|e| {
+                DevError::Config(format!("qualified skip `{expr}` did not compile: {e:?}"))
+            })?;
+        filtersets.push(parsed);
+    }
+    TestFilter::new(NextestRunMode::Test, run_ignored, patterns, filtersets)
+        .map_err(|e| DevError::Config(format!("nextest test filter: {e}")))
 }
 
 /// The filterset for one package-qualified skip: exclude tests matching the

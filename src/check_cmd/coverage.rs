@@ -49,10 +49,17 @@ struct CoverageStats {
     dead_filters: usize,
 }
 
-/// One build shape's enumeration, package-qualified: the full universe,
-/// the `#[ignore]`d subset, and the union of every lane's ran-set. Each
-/// element is a `(package, test)` pair; with the build shape this map is
-/// keyed on, the full coverage pair is (build shape, package, test).
+/// One build shape's enumeration: the full universe, the `#[ignore]`d
+/// subset, and the union of every lane's ran-set. Each element is a
+/// `(unit, test)` pair, where the unit is the package name for a
+/// libtest-only shape and the nextest binary id (`pkg`, `pkg::target`,
+/// `pkg::bin/name`) for a shape any of whose lanes runs under the nextest
+/// engine. The finer key wins shape-wide because the projection between
+/// the two keyings is non-injective - two binaries in one package can
+/// define the same test path (measured: seven such collisions inside
+/// nautilus-infrastructure alone), and a mixed shape keyed coarse would
+/// merge pairs one lane distinguishes. With the build shape this map is
+/// keyed on, the full coverage pair is (build shape, unit, test).
 struct ShapeCoverage {
     label: String,
     /// Every sweep producing this shape is `curated = true`, so its
@@ -63,6 +70,31 @@ struct ShapeCoverage {
     universe: BTreeSet<(String, String)>,
     ignored: BTreeSet<(String, String)>,
     ran: BTreeSet<(String, String)>,
+}
+
+/// The package half of a pair unit. A bare package name maps to itself; a
+/// nextest binary id (`pkg::target`, `pkg::bin/name`) yields its package
+/// prefix - which is what keeps package-scoped `[[quarantine]]` entries and
+/// qualified skips meaning "every binary id in X" across both keyings.
+fn package_of(unit: &str) -> &str {
+    unit.split_once("::").map_or(unit, |(p, _)| p)
+}
+
+/// The pair unit for one test binary under the shape's keying. For a
+/// nextest-keyed shape this is nextest's own `RustBinaryId` construction,
+/// used deliberately so the libtest lanes' claims and the engine listing's
+/// ids can never drift apart - both sides derive the id through the same
+/// nextest code.
+fn binary_unit(b: &TestBinary, nextest_keyed: bool) -> String {
+    if !nextest_keyed {
+        return b.package.clone();
+    }
+    nextest_metadata::RustBinaryId::from_parts(
+        &b.package,
+        &nextest_metadata::RustTestBinaryKind::new(b.kind.clone()),
+        &b.target,
+    )
+    .to_string()
 }
 
 /// A declared `skip` / `only` filter that matched nothing in the lane it was
@@ -217,6 +249,7 @@ fn group_by_resolution(
 #[allow(clippy::too_many_arguments)]
 fn run_coverage_phase(
     project_root: &Path,
+    state_root: &Path,
     sweeps: &[ResolvedSweep],
     executed: &[bool],
     quarantine: &[QuarantineEntry],
@@ -226,7 +259,7 @@ fn run_coverage_phase(
     commands: bool,
 ) -> CoverageOutcome {
     let (shapes, dead) =
-        match enumerate_shapes(project_root, sweeps, executed, allow_flags, commands) {
+        match enumerate_shapes(project_root, state_root, sweeps, executed, allow_flags, commands) {
             Ok(s) => s,
             Err(e) => return CoverageOutcome::aborted(e),
         };
@@ -360,6 +393,7 @@ fn run_coverage_phase(
 /// on two `deprecated` errors the injection exists to suppress.
 fn enumerate_shapes(
     project_root: &Path,
+    state_root: &Path,
     sweeps: &[ResolvedSweep],
     executed: &[bool],
     allow_flags: &[String],
@@ -405,7 +439,7 @@ fn enumerate_shapes(
         // one package, matching the one cargo command the lane actually ran
         // for it. Enumerating the lane's whole package list here would
         // catalogue binaries from a batched graph nothing built.
-        let bare = resolution_enumeration_args(first, resolution.as_deref(), allow_args);
+        let bare = resolution_enumeration_args(first, resolution.as_deref(), allow_args.clone());
         // Per-binary enumeration (feature 11): the artifact stream gives
         // package attribution, direct-binary `--list` gives the names.
         // libtest's `--list` includes `#[ignore]`d tests regardless of
@@ -414,34 +448,24 @@ fn enumerate_shapes(
         let Some(binaries) = test_binaries(project_root, &bare, &env_refs, commands)? else {
             return Err(DevError::Build("coverage enumeration failed".into()));
         };
+        // The finer key wins shape-wide: any nextest lane on the shape keys
+        // the whole shape's pairs by binary id, and libtest lanes' claims are
+        // attributed to the binaries they were enumerated from - which they
+        // already are, since enumeration is per binary and only aggregated
+        // afterward. No information is missing on either side.
+        let nextest_keyed = members
+            .iter()
+            .any(|&idx| sweeps[idx].harness == crate::config::Harness::Nextest);
         let libdir = toolchain_libdir(project_root, &env_refs)?;
-        let mut universe: BTreeSet<(String, String)> = BTreeSet::new();
-        let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
-        // Kept per binary, not just folded into the universe: a lane narrows
-        // the binary set with `--test <target>`, and a filter must be judged
-        // against the names the LANE can see. Judging against the shape's
-        // universe would report a skip alive on the strength of a match inside
-        // a binary the lane narrowed away - the same defect this phase exists
-        // to catch, one level up. The listings are already being fetched here,
-        // so retaining them costs nothing.
-        let mut per_binary: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for b in &binaries {
-            let Some(all) =
-                binary_list(b, project_root, &["--include-ignored"], &env_refs, &libdir)?
-            else {
-                return Err(DevError::Build("coverage enumeration failed".into()));
-            };
-            let pairs: Vec<(String, String)> = all
-                .into_iter()
-                .map(|t| (b.package.clone(), t))
-                .collect();
-            universe.extend(pairs.iter().cloned());
-            per_binary.insert(b.executable.clone(), pairs);
-            let Some(ig) = binary_list(b, project_root, &["--ignored"], &env_refs, &libdir)? else {
-                return Err(DevError::Build("coverage enumeration failed".into()));
-            };
-            ignored.extend(ig.into_iter().map(|t| (b.package.clone(), t)));
-        }
+        let (universe, ignored, per_binary) =
+            enumerate_shape_universe(project_root, &binaries, nextest_keyed, &env_refs, &libdir)?;
+        // The liveness machinery speaks (package, test) - a package-scoped
+        // filter must not be compared against a binary id - so a nextest-keyed
+        // shape derives package-keyed views of the same sets.
+        let ignored_pkg: BTreeSet<(String, String)> = ignored
+            .iter()
+            .map(|(u, t)| (package_of(u).to_owned(), t.clone()))
+            .collect();
 
         let mut ran: BTreeSet<(String, String)> = BTreeSet::new();
         for &idx in members {
@@ -459,19 +483,33 @@ fn enumerate_shapes(
             let candidates: Vec<(String, String)> = lane_binaries
                 .iter()
                 .filter_map(|b| per_binary.get(&b.executable))
-                .flat_map(|pairs| pairs.iter().cloned())
+                .flat_map(|pairs| pairs.iter())
+                .map(|(u, t)| (package_of(u).to_owned(), t.clone()))
                 .collect();
             // Recorded, not decided: a profile-level filter spans the
             // profile's sweeps, and those sit in DIFFERENT build shapes (an
             // unscoped sweep and a package-scoped one are two shapes by
             // construction), so the verdict cannot be taken inside this loop.
-            for (filter, live) in filter_liveness(sweep, &candidates, &ignored) {
+            for (filter, live) in filter_liveness(sweep, &candidates, &ignored_pkg) {
                 ledger.record(filter, live, &sweep.label);
+            }
+            if sweep.harness == crate::config::Harness::Nextest {
+                nextest_lane_claims(
+                    project_root,
+                    state_root,
+                    sweep,
+                    &allow_args,
+                    &env_refs,
+                    commands,
+                    &mut ran,
+                )?;
+                continue;
             }
             let mut libtest: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
             libtest.extend(sweep.libtest_args.iter().map(String::as_str));
             let inc = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
             for b in lane_binaries {
+                let unit = binary_unit(b, nextest_keyed);
                 let Some(listed) = binary_list(b, project_root, &libtest, &env_refs, &libdir)?
                 else {
                     return Err(DevError::Build("coverage enumeration failed".into()));
@@ -484,7 +522,7 @@ fn enumerate_shapes(
                     if sweep.qualified_skips.iter().any(|q| q.matches(&b.package, &t)) {
                         continue;
                     }
-                    let pair = (b.package.clone(), t);
+                    let pair = (unit.clone(), t);
 
                     if !inc && ignored.contains(&pair) {
                         continue;
@@ -509,6 +547,89 @@ fn enumerate_shapes(
         });
     }
     Ok((out, ledger.dead()))
+}
+
+/// A shape's universe and `#[ignore]`d set from per-binary listings, plus
+/// the per-binary pair lists themselves. Kept per binary, not just folded
+/// into the universe: a lane narrows the binary set with `--test <target>`,
+/// and a filter must be judged against the names the LANE can see - judging
+/// against the shape's universe would report a skip alive on the strength of
+/// a match inside a binary the lane narrowed away. The listings are already
+/// being fetched here, so retaining them costs nothing. libtest's `--list`
+/// includes `#[ignore]`d tests regardless of `--include-ignored`, so the
+/// ignored set comes from `--list --ignored`, which lists only them.
+type ShapeUniverse = (
+    BTreeSet<(String, String)>,
+    BTreeSet<(String, String)>,
+    HashMap<String, Vec<(String, String)>>,
+);
+
+fn enumerate_shape_universe(
+    project_root: &Path,
+    binaries: &[TestBinary],
+    nextest_keyed: bool,
+    env_refs: &[(&str, &str)],
+    libdir: &str,
+) -> Result<ShapeUniverse, DevError> {
+    let mut universe: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut per_binary: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for b in binaries {
+        let unit = binary_unit(b, nextest_keyed);
+        let Some(all) = binary_list(b, project_root, &["--include-ignored"], env_refs, libdir)?
+        else {
+            return Err(DevError::Build("coverage enumeration failed".into()));
+        };
+        let pairs: Vec<(String, String)> = all.into_iter().map(|t| (unit.clone(), t)).collect();
+        universe.extend(pairs.iter().cloned());
+        per_binary.insert(b.executable.clone(), pairs);
+        let Some(ig) = binary_list(b, project_root, &["--ignored"], env_refs, libdir)? else {
+            return Err(DevError::Build("coverage enumeration failed".into()));
+        };
+        ignored.extend(ig.into_iter().map(|t| (unit.clone(), t)));
+    }
+    Ok((universe, ignored, per_binary))
+}
+
+/// One nextest lane's contribution to its shape's ran-set: the engine's own
+/// listing under the sweep's real filters - the same code path that selects
+/// its run, so audit and execution can never disagree. `Selected` is the
+/// only crediting verdict; the engine marking a test `Ignored` already
+/// encodes the include-ignored policy, and qualified skips ride the
+/// filtersets. A verdict the ledger has no policy for refuses the audit -
+/// an unaccounted reason is not an audited pair.
+#[allow(clippy::too_many_arguments)]
+fn nextest_lane_claims(
+    project_root: &Path,
+    state_root: &Path,
+    sweep: &ResolvedSweep,
+    allow_args: &[String],
+    env_refs: &[(&str, &str)],
+    commands: bool,
+    ran: &mut BTreeSet<(String, String)>,
+) -> Result<(), DevError> {
+    let mut selection = allow_args.to_vec();
+    selection.extend(shape_selection_args(sweep));
+    selection.extend(sweep.cargo_test_filters.iter().cloned());
+    let cases =
+        nextest_shape_cases(project_root, state_root, sweep, &selection, env_refs, commands)?;
+    for case in cases {
+        match case.disposition {
+            Disposition::Selected => {
+                let _ = ran.insert((case.binary_id, case.test));
+            }
+            Disposition::Ignored | Disposition::Unmatched => {}
+            Disposition::Unclassified => {
+                return Err(DevError::Build(format!(
+                    "coverage: the engine reported a filter verdict the ledger has no policy \
+                     for on {}::{} - an unaudited reason cannot be accounted, so the audit \
+                     refuses.",
+                    case.binary_id, case.test
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every filter on `sweep` that matched nothing it could have matched.
@@ -744,7 +865,10 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
     let mut orphans: Vec<String> = Vec::new();
     for shape in shapes {
         for pair in &shape.universe {
-            let (package, test) = pair;
+            let (unit, test) = pair;
+            // Quarantine `package` scoping means "every binary id in X", so
+            // a binary-id unit is matched through its package prefix.
+            let package = package_of(unit);
             stats.pairs += 1;
 
             if shape.ran.contains(pair) {
@@ -790,7 +914,10 @@ fn classify(shapes: &[ShapeCoverage], quarantine: &[QuarantineEntry]) -> Coverag
                 }
                 None => {
                     stats.orphaned += 1;
-                    orphans.push(format!("{}/{package}/{test}", shape.label));
+                    // The unit, not the extracted package: for a
+                    // nextest-keyed shape the binary id is the finer,
+                    // actionable address (and it carries the package).
+                    orphans.push(format!("{}/{unit}/{test}", shape.label));
                 }
             }
         }
@@ -1226,6 +1353,89 @@ mod coverage_tests {
         assert_eq!(report.stats.curated, 0);
         assert_eq!(report.stats.orphaned, 1);
         assert_eq!(report.orphans, vec!["sim/sim-common/common/b"]);
+    }
+
+    // The unit->package projection behind quarantine scoping and qualified
+    // skips across both keyings: a bare package maps to itself, a binary id
+    // yields its package prefix, bin-target ids included.
+    #[test]
+    fn package_of_handles_both_keyings() {
+        assert_eq!(super::package_of("nautilus-core"), "nautilus-core");
+        assert_eq!(
+            super::package_of("nautilus-infrastructure::test_cache_redis"),
+            "nautilus-infrastructure"
+        );
+        assert_eq!(super::package_of("nautilus-cli::bin/nautilus"), "nautilus-cli");
+    }
+
+    // The unit is nextest's own id construction so the libtest lanes'
+    // claims and the engine listing can never drift: lib harness -> bare
+    // package, integration target -> pkg::target, bin harness -> pkg::bin/x.
+    #[test]
+    fn binary_units_match_nextests_id_format() {
+        let bin = |kind: &str, target: &str| super::TestBinary {
+            package: "pkg".into(),
+            package_id: "path+file:///x/pkg#pkg@0.1.0".into(),
+            target: target.into(),
+            kind: kind.into(),
+            executable: "/t/x".into(),
+            manifest_dir: std::path::PathBuf::from("/x/pkg"),
+        };
+        assert_eq!(super::binary_unit(&bin("lib", "pkg"), true), "pkg");
+        assert_eq!(super::binary_unit(&bin("test", "cache_redis"), true), "pkg::cache_redis");
+        assert_eq!(super::binary_unit(&bin("bin", "cli"), true), "pkg::bin/cli");
+        // Libtest-only shapes keep the coarse key untouched.
+        assert_eq!(super::binary_unit(&bin("test", "cache_redis"), false), "pkg");
+    }
+
+    // The B51 collision shape, measured on nautilus-infrastructure: two
+    // binaries in one package define the same test path. Under (package,
+    // test) that was ONE pair; under (binary-id, test) it is two, and one
+    // package-scoped quarantine entry spans both - the exact +N delta the
+    // first migrated gate run is checked against.
+    #[test]
+    fn a_test_path_shared_by_two_binaries_is_two_pairs_one_entry() {
+        let shapes = vec![ShapeCoverage {
+            curated: false,
+            label: "serial/default".into(),
+            universe: set(&[
+                ("nautilus-infrastructure::test_cache_redis", "serial_tests::t"),
+                ("nautilus-infrastructure::test_cache_postgres", "serial_tests::t"),
+            ]),
+            ignored: set(&[]),
+            ran: set(&[]),
+        }];
+        let mut scoped = entry("serial_tests::", "B51");
+        scoped.package = Some("nautilus-infrastructure".into());
+        let report = classify(&shapes, &[scoped]);
+        assert_eq!(report.stats.pairs, 2);
+        assert_eq!(report.per_entry, vec![2]);
+        assert_eq!(report.stats.orphaned, 0);
+    }
+
+    // Package scoping still excludes foreign packages when the unit is a
+    // binary id - the scope compares against the id's package prefix, never
+    // the whole id.
+    #[test]
+    fn package_scope_matches_the_id_prefix_not_the_whole_id() {
+        let shapes = vec![ShapeCoverage {
+            curated: false,
+            label: "serial/default".into(),
+            universe: set(&[
+                ("nautilus-infrastructure::test_cache_redis", "serial_tests::t"),
+                ("nautilus-backtest::regress", "serial_tests::t"),
+            ]),
+            ignored: set(&[]),
+            ran: set(&[]),
+        }];
+        let mut scoped = entry("serial_tests::", "B51");
+        scoped.package = Some("nautilus-infrastructure".into());
+        let report = classify(&shapes, &[scoped]);
+        assert_eq!(report.per_entry, vec![1]);
+        assert_eq!(
+            report.orphans,
+            vec!["serial/default/nautilus-backtest::regress/serial_tests::t"]
+        );
     }
 
     #[test]

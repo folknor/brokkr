@@ -149,13 +149,17 @@ pub(crate) fn nextest_disposition(filter_match: &FilterMatch) -> Disposition {
         FilterMatch::Matches => Disposition::Selected,
         FilterMatch::Mismatch { reason } => match reason {
             MismatchReason::Ignored => Disposition::Ignored,
-            MismatchReason::Expression => Disposition::Unmatched,
+            // `Expression` is a filterset mismatch (brokkr's qualified
+            // skips); `String` is a pattern mismatch (brokkr's `skip`/`only`
+            // riding nextest's libtest pattern emulation). Both are brokkr's
+            // own filter surfaces, so both are the ordinary
+            // needs-another-lane-or-a-quarantine verdict.
+            MismatchReason::Expression | MismatchReason::String => Disposition::Unmatched,
             // Cannot occur under the brokkr-synthesized config (which
             // declares no default-filter) - so if it does, a foreign config
             // got a vote, and refusing is the only honest reading.
             MismatchReason::DefaultFilter
             | MismatchReason::NotBenchmark
-            | MismatchReason::String
             | MismatchReason::Partition
             | MismatchReason::RerunAlreadyPassed => Disposition::Unclassified,
             _ => Disposition::Unclassified,
@@ -185,10 +189,12 @@ mod nextest_classify_tests {
         );
         assert!(Disposition::Ignored.is_terminal());
 
-        assert_eq!(
-            nextest_disposition(&mismatch(MismatchReason::Expression)),
-            Disposition::Unmatched
-        );
+        // Both of brokkr's own filter surfaces: filtersets (qualified
+        // skips) report `Expression`, pattern filters (`skip`/`only`)
+        // report `String`.
+        for reason in [MismatchReason::Expression, MismatchReason::String] {
+            assert_eq!(nextest_disposition(&mismatch(reason)), Disposition::Unmatched);
+        }
         assert!(!Disposition::Unmatched.is_terminal());
     }
 
@@ -201,7 +207,6 @@ mod nextest_classify_tests {
         for reason in [
             MismatchReason::DefaultFilter,
             MismatchReason::NotBenchmark,
-            MismatchReason::String,
             MismatchReason::Partition,
             MismatchReason::RerunAlreadyPassed,
         ] {

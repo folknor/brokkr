@@ -858,16 +858,13 @@ argv; use the sweep's filters), the same forwarded cargo args the parallel
 lane rejects, a `--format`-style libtest arg smuggled via a profile, and
 filterset values outside the interpolation charset. Config composition rules
 (load-time errors): `harness = "nextest"` with `parallel` (two execution
-owners), with `feature_unification = "package"` (no per-package plan), on a
-profile that sets `isolation = "process"` (redundant - the engine already
-runs every test in its own process; one spelling of the intent), or
-referenced by a `certifies = "complete"` profile - the coverage audit cannot
-enumerate a nextest lane yet, so a complete claim over one would certify
-tests it never accounted for. `[test] doctests = true` needs at least one
-plain libtest entry, since nextest never executes doctests. Double-spawn is
-disabled (`NEXTEST_DOUBLE_SPAWN=0` semantics): nextest's double-spawn
-protocol re-invokes the current executable, which is brokkr, not
-cargo-nextest.
+owners), with `feature_unification = "package"` (no per-package plan), or on
+a profile that sets `isolation = "process"` (redundant - the engine already
+runs every test in its own process; one spelling of the intent). `[test]
+doctests = true` needs at least one plain libtest entry, since nextest never
+executes doctests. Double-spawn is disabled (`NEXTEST_DOUBLE_SPAWN=0`
+semantics): nextest's double-spawn protocol re-invokes the current
+executable, which is brokkr, not cargo-nextest.
 
 **What this lane does not replace:** the in-process libtest lanes stay the
 default everywhere else. A shared-process lane is the only detector for the
@@ -877,38 +874,49 @@ so moving a detector sweep onto the engine retires the detector. Use the
 engine where isolation or per-test fan-out is the point, not as a blanket
 replacement.
 
-The coverage half is still groundwork: the coverage key and the disposition
-classifier (`src/check_cmd/nextest.rs`) landed ahead of the audit because the
-coverage pair is the audit's key type, and a complete profile refuses nextest
-sweeps until the audit itself is wired (see above). What the audit needs is
-now small - the synthesized config has no default-filter, so exclusions only
-ever come from `brokkr.toml` skips and quarantines and the existing ledger
-model applies unchanged. The measured behaviours it builds on (cargo-nextest
-0.9.143, recorded at the code sites):
+**The coverage audit covers nextest lanes**, so a `certifies = "complete"`
+profile may reference them - the exclusion story is the existing ledger
+model unchanged, because the synthesized config has no default-filter and
+narrowing only ever comes from `brokkr.toml` skips and quarantines. How the
+pieces fit (measured against cargo-nextest 0.9.143, recorded at the code
+sites):
 
-- **The coverage pair becomes `(binary-id, test)`**, finer than the libtest
-  path's `(package, test)`. A package with several test targets has one binary
-  id per target, so two integration binaries defining the same test path are two
-  pairs rather than one. Package-qualified `[[quarantine]]` and skip entries keep
-  their meaning (`package(X)` spans every binary id in X). Whether any
-  per-entry count moves on adoption requires two binaries in one package to
-  define the same full test path - settle it with one listing when wiring the
-  audit.
+- **A nextest lane's ran-set comes from the engine's own listing** under the
+  sweep's real filters (`nextest_shape_cases`), compiled by the same
+  function that shapes its run - audit and execution cannot disagree about
+  what a sweep selects. `Selected` is the only crediting verdict; pattern
+  mismatches (`skip`/`only`) report `string` and filterset mismatches
+  (qualified skips) report `expression`, both the ordinary
+  needs-a-lane-or-a-quarantine verdict. A verdict the ledger has no policy
+  for refuses the audit, `default-filter` included - under the synthesized
+  config it cannot occur, so its appearance means a foreign config got a
+  vote.
+- **The pair unit is `(binary-id, test)` for any shape with a nextest lane**
+  - and the finer key wins *shape-wide*, because the projection between
+  keyings is non-injective: two binaries in one package can define the same
+  test path (measured: seven such collisions inside nautilus-infrastructure,
+  all `serial_tests::` members), so a mixed shape keyed coarse would merge
+  pairs one lane distinguishes. The libtest lanes' claims attribute cleanly
+  because their enumeration was per test binary all along; the unit is
+  constructed through nextest's own `RustBinaryId::from_parts`, so the two
+  sides can never drift. Libtest-only shapes keep `(package, test)`
+  untouched. Package-qualified `[[quarantine]]` and skip entries keep their
+  meaning across both keyings - `package(X)` spans every binary id in X, via
+  the id's package prefix. Consequence, once, on migrating an entry:
+  per-entry quarantine counts can rise by exactly the number of duplicated
+  paths the entry spans (nautilus' B51: +7), which is the acceptance check
+  for the first migrated gate run.
 - **`MismatchReason` is priority-ordered, not a partition.** A test that is both
   `#[ignore]`d and unmatched by a lane's filterset reports `ignored`, so on a
   single listing it cannot be detected as an orphan. brokkr takes one listing and
   inherits that precedence: the only thing a second `--run-ignored all` listing
   would detect is a test that is both ignored and uncovered, which needs neither
   covering nor quarantining. The scheme self-heals when it matters - remove the
-  `#[ignore]` and the verdict flips to `expression`, the pair orphans, and the
-  gate fails.
-- **The universe must come from its own listing** (`FilterBound::All`, no
-  filtersets), never from a lane's: a package-scoped filterset reports the
-  excluded package's suite as `skipped` with an empty testcase map, silently
-  shrinking the universe. Lane listings are read only for their selections. A
-  `default-filter` verdict reaching the classifier is refused outright - under
-  the synthesized config it cannot occur, so its appearance means a foreign
-  config got a vote.
+  `#[ignore]` and the verdict flips, the pair orphans, and the gate fails.
+- **The universe comes from the shape's own per-binary enumeration**, never
+  from a lane's listing: a package-scoped filterset reports the excluded
+  package's suite as `skipped` with an empty testcase map, silently shrinking
+  the universe. Lane listings are read only for their selections.
 
 ## `coverage` phase (complete profiles)
 
@@ -921,7 +929,9 @@ best-effort: its findings print, its counts ride in the JSON, and
 never reached credits **nothing** to the ran-set - the shape still counts
 in the universe, so its pairs surface as non-run rather than being counted
 as run they never were. The unit of coverage is the **(build shape, package, test)
-pair**. `curated = true` entries are the declared narrowing of the
+pair** - or **(build shape, binary-id, test)** for a shape any of whose
+lanes runs under the nextest engine; see the nextest section above for the
+finer-key-wins rule and its one-time count consequence. `curated = true` entries are the declared narrowing of the
 universe (below); package-level `test_exclude_packages` is the other.
 
 The universe is **every `[[check]]` entry**, not the profile's own sweep

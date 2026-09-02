@@ -1521,22 +1521,16 @@ fn validate_check_against_test(
                 .into(),
         ));
     }
-    // Nextest-sweep composition rules, resolved through the same
-    // lanes/extends walk the complete-universe check uses so a reference
-    // through a lane cannot slip past them:
-    //
-    // - `isolation = "process"` on a profile referencing a nextest sweep is
-    //   redundant by construction (the engine already runs process-per-test)
-    //   and refused so the config carries one spelling of the intent.
-    //   `test_threads` is honoured: it maps onto the engine's in-flight
-    //   count, brokkr policy like everywhere else.
-    // - a `complete` claim over a nextest sweep is refused: the coverage
-    //   audit cannot enumerate a nextest lane yet ((binary-id, test) pairs),
-    //   so the run would certify tests it never accounted for.
+    // `isolation = "process"` on a profile referencing a nextest sweep is
+    // redundant by construction (the engine already runs process-per-test)
+    // and refused so the config carries one spelling of the intent - resolved
+    // through the same lanes/extends walk the complete-universe check uses so
+    // a reference through a lane cannot slip past it. `test_threads` is
+    // honoured (it maps onto the engine's in-flight count), and a `complete`
+    // claim over a nextest sweep is legal: the coverage audit enumerates
+    // nextest lanes through the engine, keyed (binary-id, test).
     for (profile_name, def) in &t.profiles {
-        let isolates = def.isolation.is_some();
-        let complete = def.certifies == Some(Certifies::Complete);
-        if !isolates && !complete {
+        if def.isolation.is_none() {
             continue;
         }
         let mut referenced: BTreeSet<String> = BTreeSet::new();
@@ -1545,10 +1539,7 @@ fn validate_check_against_test(
         let nextest_sweep = check
             .iter()
             .find(|e| referenced.contains(&e.name) && e.harness == Harness::Nextest);
-        let Some(sweep) = nextest_sweep else {
-            continue;
-        };
-        if isolates {
+        if let Some(sweep) = nextest_sweep {
             return Err(DevError::Config(format!(
                 "[test.profiles.{profile_name}] sets `isolation = \"process\"` and runs the \
                  nextest sweep '{}'. The nextest engine already runs every test in its own \
@@ -1557,13 +1548,6 @@ fn validate_check_against_test(
                 sweep.name
             )));
         }
-        return Err(DevError::Config(format!(
-            "[test.profiles.{profile_name}] certifies \"complete\" and runs the nextest sweep \
-             '{}', but the coverage audit cannot enumerate a nextest lane yet - the run would \
-             certify tests it never accounted for. Keep nextest sweeps in partial or unclaimed \
-             profiles for now.",
-            sweep.name
-        )));
     }
     // `default_profile` must name an existing profile - catch a typo at load
     // time instead of at `brokkr check` time. (Checked even when `profiles` is
