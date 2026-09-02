@@ -2565,6 +2565,21 @@ fn split_extra_args(extra: &[String]) -> (&[String], &[String]) {
     }
 }
 
+/// Two execution policies that cannot both hold: one runs every test in its
+/// own process, the other runs many binaries' tests at once. Refused here
+/// rather than at resolve time because that is where both are read; it fires
+/// before any test runs either way.
+fn reject_conflicting_lanes(sweep: &ResolvedSweep) -> Result<(), DevError> {
+    if sweep.process_isolation && sweep.parallel_budget.is_some() {
+        return Err(DevError::Config(format!(
+            "sweep '{}' sets both `isolation = \"process\"` and `parallel`; process isolation \
+             runs one test at a time, and `parallel` runs many at once. Pick one.",
+            sweep.label
+        )));
+    }
+    Ok(())
+}
+
 /// Iterate `sweeps`, pre-building each sweep's `build_packages` and
 /// then running `cargo test` for it. Fails fast on the first sweep
 /// that fails (build or test), mirroring how the clippy phase
@@ -2652,18 +2667,13 @@ fn run_test_phase(
             )?;
         }
 
-        // Two execution policies that cannot both hold: one runs every test in
-        // its own process, the other runs many binaries' tests at once. Refused
-        // here rather than at resolve time because that is where both are read;
-        // it fires before any test runs either way.
-        if sweep.process_isolation && sweep.parallel_budget.is_some() {
-            return Err(DevError::Config(format!(
-                "sweep '{}' sets both `isolation = \"process\"` and                  `parallel`; process isolation runs one test at a time, and                  `parallel` runs many at once. Pick one.",
-                sweep.label
-            )));
-        }
+        reject_conflicting_lanes(sweep)?;
 
-        let success = if let Some(budget) = sweep.parallel_budget {
+        let success = if sweep.harness == crate::config::Harness::Nextest {
+            run_nextest_sweep(
+                project_root, sweep, &scope, extra_args, &project_env, &allow_args, commands,
+            )?
+        } else if let Some(budget) = sweep.parallel_budget {
             run_parallel_sweep(
                 project_root,
                 state_root,

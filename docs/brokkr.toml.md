@@ -797,6 +797,25 @@ env = { HIGH_PRECISION = "1" }
   honoured everywhere, parallel whole-workspace sweeps included - the fan-out
   executes the prebuilt binaries directly, so the prebuild's resolution is the
   run's resolution. See `brokkr man check feature-unification`.
+- `harness` (optional, default `"libtest"`) - which engine executes the
+  sweep's test phase. `"libtest"` is brokkr's own lanes (serial,
+  `test_threads`, `parallel`, `isolation = "process"`). `"nextest"` hands the
+  sweep to the linked nextest engine: process-per-test under the project's
+  own `.config/nextest.toml` (default profile or `NEXTEST_PROFILE`,
+  default-filter, retries, timeouts), for consumers whose CI runs nextest
+  and whose suite relies on its isolation contract. Brokkr still owns the
+  compile shape (selection, features, unification pin, profile, `[lints]`
+  allows) and translates the sweep's `skip`/`only` into nextest's own
+  filters, so `harness` is execution policy and never part of the build
+  shape - a nextest and a libtest sweep of equal compile inputs share the
+  target dir and dedupe in clippy. Load errors: combined with `parallel`,
+  with `feature_unification = "package"`, on a profile setting
+  `test_threads`/`isolation`, or referenced by a `certifies = "complete"`
+  profile (the coverage audit cannot enumerate a nextest lane yet). The
+  resolved nextest profile must give every selected test a *terminating*
+  timeout (`slow-timeout = { period = "..", terminate-after = N }`) - the
+  lane adds no watchdog of its own, and an unbounded gate is refused. See
+  `brokkr man check nextest`.
 - `tests` / `skip` / `only` (optional, default `[]`) - per-`[[check]]` libtest
   filters, **ANDed** with any referencing profile's filters of the same name
   (they append, never replace): `tests` -> cargo `--test <name>` target

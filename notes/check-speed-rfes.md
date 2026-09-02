@@ -90,7 +90,25 @@ Expected win, from the measured distribution: the default sweep's floor drops
 toward max(serial/budget, slowest binary), roughly 50-70s against today's 217s.
 Check lands around 2 minutes.
 
-## RFE 2: make the nextest harness lane selectable
+## RFE 2: make the nextest harness lane selectable [LANE DONE; AUDIT PENDING]
+
+**Implemented 2026-09-02**: `[[check]] harness = "nextest"` runs a sweep
+through the linked engine, process-per-test, under the project's own
+`.config/nextest.toml` - brokkr keeps the compile shape and translates
+`skip`/`only` (package-qualified skips become filtersets), nextest keeps
+profile/default-filter/retries/timeouts and renders the run. The lane
+refuses unbounded profiles (no terminating slow-timeout) after listing.
+Smoke: `scripts/smoke-nextest-lane.py`. Deliberately NOT yet done, and
+refused fail-closed at config load: `certifies = "complete"` over a nextest
+sweep - the (binary-id, test) coverage audit, the default-filter pin
+(design settled in review: a committed pins file beside the resolved
+brokkr.toml, blessed piners-style, keyed by profile/platform/address/raw
+string/engine version plus an excluded-pair-set hash) and the
+run-extra-args rejection for audited lanes are the remaining work. So for
+nautilus this replaces the tier1 sweeps' harness, but the --gate serial
+lane replacement waits on the audit.
+
+### The original proposal
 
 The groundwork is in (`src/check_cmd/nextest.rs`, the coverage key, the
 disposition classifier); the lane is not. nautilus is the consumer where the

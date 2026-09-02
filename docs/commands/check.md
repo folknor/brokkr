@@ -795,14 +795,64 @@ every invocation would run that target once per planned binary.
 Full semantics, and the rule for partitioning a suite across a parallel and a
 serial entry, are in `docs/brokkr.toml.md`.
 
-## nextest (bundled; groundwork, not yet selectable)
+## nextest (bundled; the `harness = "nextest"` lane)
 
 brokkr links cargo-nextest's engine (`nextest-runner`) rather than shelling out
 to a `cargo-nextest` on PATH - the same in-process seam as the elivagar corpus
 gate. No per-host install step, and the coverage enumeration reads
 `list::TestList` as typed values with no JSON round-trip. The trade is that the
 nextest version is brokkr's pin rather than whatever a host happens to have, so
-skew against a project's CI nextest is a choice made in `Cargo.toml`.
+skew against a project's CI nextest is a choice made in `Cargo.toml` - the
+lane's header line names the linked engine version for exactly that reason.
+
+A `[[check]]` entry selects the lane with `harness = "nextest"`
+(`src/check_cmd/nextest_lane.rs`). The division of ownership:
+
+- **Brokkr owns the compile shape.** The build is brokkr's own
+  `cargo test --no-run` with the sweep's selection, features, unification pin,
+  cargo profile, `[lints]` allows and env - streamed into nextest's
+  `BinaryListBuilder` - so a nextest lane and a libtest lane with equal
+  compile inputs share the target dir and dedupe in clippy. `harness` is
+  execution policy, never part of the build shape.
+- **Brokkr owns the filters.** The sweep's `only` and unqualified `skip`
+  entries ride nextest's own libtest pattern emulation (identical substring
+  semantics, nothing to escape); `include_ignored` maps to nextest's
+  run-ignored policy; a package-qualified skip compiles to the filterset
+  `not (package(P) & test(~X))` - folding the one predicate brokkr used to
+  evaluate itself back into the tool. Filterset interpolation is restricted
+  to identifier-ish characters and refuses anything else, because a
+  wrongly-escaped filter silently changes which tests run.
+- **Nextest owns everything else.** Its config's default profile (or
+  `NEXTEST_PROFILE`), default-filter, retries, per-test timeouts, max-fail
+  policy, test groups, setup scripts - and the run's rendering, which is
+  nextest's own reporter. Brokkr adds the sweep bookends and decides
+  pass/fail from the run stats.
+
+Two refusals keep the lane honest:
+
+- **Boundedness.** The lane deliberately imposes no 20s watchdog - it exists
+  to run tests the way CI runs them - but a gate must be bounded, so after
+  listing, every selected test must carry a *terminating* timeout under the
+  resolved profile (`slow-timeout = { period = "..", terminate-after = N }`),
+  checked per test because an override can replace a terminating profile-wide
+  timeout with a non-terminating one for a subset. A lane that fails the
+  check names the test and the config to fix.
+- **Untranslatable shapes.** Trailing `-- -- <libtest args>` is refused
+  (nextest takes no raw libtest argv from brokkr; use the sweep's filters or
+  nextest's config), as are the same forwarded cargo args the parallel lane
+  rejects, a `--format`-style libtest arg smuggled via a profile, and
+  filterset values outside the interpolation charset.
+
+Config composition rules (all load-time errors): `harness = "nextest"` with
+`parallel` (two execution owners), with `feature_unification = "package"` (no
+per-package plan), on a profile that sets `test_threads` or `isolation`
+(nextest owns both), or referenced by a `certifies = "complete"` profile -
+the coverage audit cannot enumerate a nextest lane yet, so a complete claim
+over one would certify tests it never accounted for. `[test] doctests = true`
+needs at least one plain libtest entry, since nextest never executes
+doctests. Double-spawn is disabled (`NEXTEST_DOUBLE_SPAWN=0` semantics):
+nextest's double-spawn protocol re-invokes the current executable, which is
+brokkr, not cargo-nextest.
 
 Motivation is CI parity, and *only* parity. Where a project's CI runs
 `cargo nextest run`, brokkr's in-process libtest lanes exercise a shape CI never
@@ -828,9 +878,10 @@ for:
   runs no nextest anywhere, moving a sweep onto it retires a detector rather
   than adding one.
 
-No `[[check]]` entry can select the nextest harness yet. What exists is the
-coverage key and the disposition classifier (`src/check_cmd/nextest.rs`), landed
-first because the coverage pair is the audit's key type. Three behaviours were
+The coverage half is still groundwork: the coverage key and the disposition
+classifier (`src/check_cmd/nextest.rs`) landed ahead of the audit because the
+coverage pair is the audit's key type, and a complete profile refuses nextest
+sweeps until the audit itself is wired (see above). Three behaviours were
 measured against cargo-nextest 0.9.143 and are recorded at the code sites that
 depend on them:
 

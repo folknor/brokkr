@@ -249,11 +249,14 @@ dependencies = [
 name = "brokkr"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "clap",
  "elivagar",
  "flate2",
  "globset",
+ "guppy",
  "libc",
+ "nextest-filtering",
  "nextest-metadata",
  "nextest-runner",
  "owo-colors",

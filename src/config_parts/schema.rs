@@ -896,6 +896,31 @@ pub struct CheckEntry {
     /// into the other.
     #[serde(default)]
     pub feature_unification: FeatureUnification,
+    /// Which test harness runs this sweep. `libtest` (the default) is
+    /// brokkr's own lanes - serial, `test_threads`, `parallel`,
+    /// `isolation = "process"`. `nextest` hands the sweep to the linked
+    /// nextest engine: process-per-test under the project's own
+    /// `.config/nextest.toml` (its default profile, retries, timeouts,
+    /// default-filter), for consumers whose CI runs nextest and whose suite
+    /// relies on its isolation contract. See [`Harness`].
+    ///
+    /// NOT part of the compile shape: a nextest and a libtest sweep with
+    /// equal compile inputs share the target dir and dedupe in clippy - the
+    /// harness decides how tests execute, never what cargo compiles.
+    #[serde(default)]
+    pub harness: Harness,
+}
+
+/// Which test harness runs a `[[check]]` sweep's test phase.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Harness {
+    /// Brokkr's own libtest lanes - the pre-existing behaviour.
+    #[default]
+    Libtest,
+    /// The linked nextest engine: nextest owns build, list and run for the
+    /// sweep, under the project's `.config/nextest.toml`.
+    Nextest,
 }
 
 /// Which feature graph a sweep's cargo invocations resolve against.

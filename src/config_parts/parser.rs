@@ -1247,6 +1247,7 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
             entry.name
         )));
     }
+    validate_check_entry_harness(entry)?;
     for key in entry.env.keys() {
         if key.trim().is_empty() {
             return Err(DevError::Config(format!(
@@ -1267,6 +1268,37 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
              shape exists to run a hand-picked subset\"; an unfiltered entry \
              is a full sweep and must stay in the coverage universe - drop \
              `curated` or add the filters that define the subset.",
+            entry.name
+        )));
+    }
+    Ok(())
+}
+
+/// The `harness = "nextest"` composition rules on one `[[check]]` entry.
+fn validate_check_entry_harness(entry: &CheckEntry) -> Result<(), DevError> {
+    if entry.harness != Harness::Nextest {
+        return Ok(());
+    }
+    // Two execution owners cannot share one sweep: nextest schedules its own
+    // process-per-test concurrency, so brokkr's binary fan-out has nothing to
+    // add and the two would fight over the machine.
+    if entry.parallel.is_some() {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' sets both `harness = \"nextest\"` and `parallel`; nextest \
+             already runs tests concurrently (process-per-test, `.config/nextest.toml` \
+             test-threads). Drop one.",
+            entry.name
+        )));
+    }
+    // Package mode plans one cargo resolution per package; the nextest lane
+    // hands the whole build to one nextest invocation and has no per-package
+    // plan. Refused rather than approximated.
+    if entry.feature_unification == FeatureUnification::Package {
+        return Err(DevError::Config(format!(
+            "[[check]] entry '{}' combines `harness = \"nextest\"` with \
+             `feature_unification = \"package\"`; the nextest lane runs one build per sweep and \
+             cannot deliver per-package resolutions. Use a libtest entry for the package-mode \
+             shape.",
             entry.name
         )));
     }
@@ -1429,14 +1461,63 @@ fn validate_check_against_test(
     // quarantine, which the complete-profile gate then correctly calls an
     // unaudited gap. A config that offers an escape must honour it; the
     // check and its message have to be the same check.
-    if t.doctests && !check.is_empty() && check.iter().all(|e| e.parallel.is_some()) {
+    if t.doctests
+        && !check.is_empty()
+        && check
+            .iter()
+            .all(|e| e.parallel.is_some() || e.harness == Harness::Nextest)
+    {
         return Err(DevError::Config(
             "[test] doctests = true, but every [[check]] entry sets \
-             `parallel`. A parallel sweep fans out over test binaries and \
-             doctests have none, so there is nowhere for them to run. Add a \
-             [[check]] entry without `parallel`, or set doctests = false."
+             `parallel` or `harness = \"nextest\"`. A parallel sweep fans out \
+             over test binaries and doctests have none, and nextest never \
+             executes doctests - so there is nowhere for them to run. Add a \
+             plain libtest [[check]] entry, or set doctests = false."
                 .into(),
         ));
+    }
+    // Nextest-sweep composition rules, resolved through the same
+    // lanes/extends walk the complete-universe check uses so a reference
+    // through a lane cannot slip past them:
+    //
+    // - `test_threads` / `isolation` on a profile referencing a nextest sweep
+    //   would silently mean nothing (nextest owns concurrency and already
+    //   isolates per test) - or worse, read as honoured.
+    // - a `complete` claim over a nextest sweep is refused: the coverage
+    //   audit cannot enumerate a nextest lane yet ((binary-id, test) pairs,
+    //   default-filter accounting, the pin), so the run would certify tests
+    //   it never accounted for.
+    for (profile_name, def) in &t.profiles {
+        let shapes_run = def.test_threads.is_some() || def.isolation.is_some();
+        let complete = def.certifies == Some(Certifies::Complete);
+        if !shapes_run && !complete {
+            continue;
+        }
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        let mut visited: BTreeSet<String> = BTreeSet::new();
+        referenced_check_entries(&t.profiles, profile_name, &mut visited, &mut referenced);
+        let nextest_sweep = check
+            .iter()
+            .find(|e| referenced.contains(&e.name) && e.harness == Harness::Nextest);
+        let Some(sweep) = nextest_sweep else {
+            continue;
+        };
+        if shapes_run {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{profile_name}] sets `test_threads` or `isolation` and runs the \
+                 nextest sweep '{}'. Nextest owns its own concurrency and isolation \
+                 (.config/nextest.toml), so these keys cannot apply - drop them, or move the \
+                 sweep to a libtest entry.",
+                sweep.name
+            )));
+        }
+        return Err(DevError::Config(format!(
+            "[test.profiles.{profile_name}] certifies \"complete\" and runs the nextest sweep \
+             '{}', but the coverage audit cannot enumerate a nextest lane yet - the run would \
+             certify tests it never accounted for. Keep nextest sweeps in partial or unclaimed \
+             profiles for now.",
+            sweep.name
+        )));
     }
     // `default_profile` must name an existing profile - catch a typo at load
     // time instead of at `brokkr check` time. (Checked even when `profiles` is

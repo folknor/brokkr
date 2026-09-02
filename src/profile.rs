@@ -15,7 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{
-    CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Isolation, ProfileDef,
+    CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Harness, Isolation,
+    ProfileDef,
     QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
 };
 use crate::config::ParallelBinaries;
@@ -109,6 +110,11 @@ pub struct ResolvedSweep {
     /// from an `auto` sweep that was not, and keying on the configured `auto`
     /// would let those two dedupe into one.
     pub effective_unification: EffectiveUnification,
+    /// The `[[check]]` entry's `harness`: which engine executes this sweep's
+    /// test phase. Execution policy, deliberately NOT part of the build
+    /// shape - a nextest and a libtest sweep with equal compile inputs are
+    /// one clippy surface and share the target dir.
+    pub harness: Harness,
 }
 
 /// Which half of the filter surface a [`DeclaredFilter`] is, because the two
@@ -363,6 +369,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         declared_filters,
         curated: entry.curated,
         profile: entry.profile,
+        harness: entry.harness,
     }
 }
 
@@ -470,11 +477,15 @@ fn resolve_single(
     }
 
     // Package-qualified skips are filtered out of the enumerated set, and
-    // the enumerated set only exists on the process-isolated path - a
-    // shared-process libtest run has no per-package attribution to filter.
+    // the enumerated set only exists where there is per-package attribution:
+    // the process-isolated path, and the nextest lane (whose filterset
+    // translation carries the package scope natively). A shared-process
+    // libtest run has neither.
     if out
         .iter()
-        .any(|s| !s.qualified_skips.is_empty() && !s.process_isolation)
+        .any(|s| {
+            !s.qualified_skips.is_empty() && !s.process_isolation && s.harness != Harness::Nextest
+        })
     {
         return Err(DevError::Config(format!(
             "[test.profiles.{name}] has package-qualified skip entries; these \
@@ -754,6 +765,7 @@ fn build_resolved_sweep(
         declared_filters,
         curated: entry.curated,
         profile: entry.profile,
+        harness: entry.harness,
     }
 }
 

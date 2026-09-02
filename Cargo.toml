@@ -57,6 +57,14 @@ nextest-runner = "0.122.1"
 # A dependency of nextest-runner too, declared explicitly because brokkr names
 # these types directly rather than reaching through the runner for them.
 nextest-metadata = "0.15"
+# The nextest lane's supporting cast, all dependencies of nextest-runner
+# already, declared because brokkr names their types directly: guppy's
+# PackageGraph feeds config parsing and artifact resolution, nextest-filtering
+# compiles the package-qualified skip translation, camino is the path
+# vocabulary the whole API speaks.
+guppy = "0.17"
+nextest-filtering = "0.22"
+camino = "1"
 
 [lints.clippy]
 uninlined_format_args = "deny"
