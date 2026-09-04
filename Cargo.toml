@@ -62,7 +62,9 @@ nextest-metadata = "0.15"
 # PackageGraph feeds config parsing and artifact resolution, nextest-filtering
 # compiles the package-qualified skip translation, camino is the path
 # vocabulary the whole API speaks.
-guppy = "0.17"
+# Held at 0.17: must be the same version nextest-runner links, or its
+# PackageGraph and ours are distinct types and the lane won't compile.
+guppy = "0.17.26"
 nextest-filtering = "0.22"
 camino = "1"
 
