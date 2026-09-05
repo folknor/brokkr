@@ -334,37 +334,37 @@ fn run_convention_phases(
     failing_phase: &mut Option<&'static str>,
 ) -> Result<(), DevError> {
     if !skip("gremlins") {
-        *failing_phase = Some("gremlins");
+        begin_phase(failing_phase, "gremlins");
         run_gremlins(a.project_root, a.gremlins_cfg, a.limit, a.triage, a.fix_gremlins)?;
     }
 
     if !skip("header") {
-        *failing_phase = Some("header");
+        begin_phase(failing_phase, "header");
         run_header(a.project_root, a.header_cfg, a.limit, a.triage)?;
     }
 
     if !skip("textlint") {
-        *failing_phase = Some("textlint");
+        begin_phase(failing_phase, "textlint");
         run_textlint(a.project_root, a.textlint_rules, a.limit, a.triage)?;
     }
 
     if !skip("manifest") {
-        *failing_phase = Some("manifest");
+        begin_phase(failing_phase, "manifest");
         run_manifest(a.project_root, a.manifest_cfg, a.limit, a.triage)?;
     }
 
     if !skip("script_check") {
-        *failing_phase = Some("script_check");
+        begin_phase(failing_phase, "script_check");
         run_script_checks(a.project_root, a.script_checks, Stage::PreClippy)?;
     }
 
     if !skip("dependency_rules") {
-        *failing_phase = Some("dependency_rules");
+        begin_phase(failing_phase, "dependency_rules");
         run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.triage, a.commands)?;
     }
 
     if !skip("publish_cycle") {
-        *failing_phase = Some("publish_cycle");
+        begin_phase(failing_phase, "publish_cycle");
         run_publish_cycle(a.project_root, a.limit, a.triage, a.commands)?;
     }
     Ok(())
@@ -418,7 +418,7 @@ fn run_build_phases(
     // as `check failed` with no line naming why.
     verify_doc_only_rules(a).inspect_err(|e| output::error(&e.to_string()))?;
     if !skip("clippy") {
-        *failing_phase = Some("clippy");
+        begin_phase(failing_phase, "clippy");
         run_clippy_phase(
             a.project_root,
             a.active_sweeps,
@@ -434,13 +434,13 @@ fn run_build_phases(
     }
 
     if !skip("script_check") {
-        *failing_phase = Some("script_check");
+        begin_phase(failing_phase, "script_check");
         run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
     let mut test_failure: Option<DevError> = None;
     if !skip("test") {
-        *failing_phase = Some("test");
+        begin_phase(failing_phase, "test");
         test_failure = run_test_phase(
             a.project,
             a.project_root,
@@ -479,7 +479,7 @@ fn run_build_phases(
     // worksheet is most needed exactly on the unhealthy runs.
     if a.certifies == Some(Certifies::Complete) {
         // Stays "test" on a failing run - the audit is best-effort there.
-        *failing_phase = Some(if test_failure.is_some() { "test" } else { "coverage" });
+        begin_phase(failing_phase, if test_failure.is_some() { "test" } else { "coverage" });
         // The audit's enumeration compiles, so it needs the test phase's lint
         // allows for the same reason the test phase does - derived from the
         // same source here rather than passed down, so the two cannot drift.
@@ -519,7 +519,7 @@ fn run_build_phases(
     // ran. Unlike the coverage audit above, which is deliberately best-effort
     // there, a script-check has no partial-run reading - it just lies.
     if !skip("script_check") {
-        *failing_phase = Some("script_check");
+        begin_phase(failing_phase, "script_check");
         run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
     }
 
@@ -527,7 +527,7 @@ fn run_build_phases(
     // of shared dependencies, making this the most expensive phase on a cold
     // store, and the repo's ordering rule is cheap-fails-first.
     if !skip("install_feature") {
-        *failing_phase = Some("install_feature");
+        begin_phase(failing_phase, "install_feature");
         run_install_feature_phase(
             a.project_root,
             a.bin_cfg,

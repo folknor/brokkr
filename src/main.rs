@@ -49,6 +49,7 @@ mod rustflags;
 mod scope;
 mod script_check;
 mod shutdown;
+mod stray;
 mod sidecar;
 mod sidecar_cmd;
 mod sidecar_fmt;

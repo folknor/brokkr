@@ -164,6 +164,7 @@ pub(crate) const TABLE: &[(&str, Visibility)] = &[
     ),
     ("visual", Visibility::Only(&[Project::Litehtml, Project::Sluggrs])),
     ("visual-status", Visibility::Only(&[Project::Litehtml, Project::Sluggrs])),
+    ("strays", Visibility::Any),
     ("wc", Visibility::Any),
     ("write", Visibility::Only(&[Project::Pbfhogg])),
 ];

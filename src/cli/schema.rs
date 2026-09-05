@@ -1442,6 +1442,23 @@ In depth: `brokkr man measure`.",
     /// Show lock status (who holds the benchmark lock)
     #[command(display_order = 6)]
     Lock,
+    /// List cargo/rustc/build-script processes running outside brokkr (--kill reaps them)
+    #[command(
+        display_order = 6,
+        long_about = "\
+List every cargo-family process (cargo, rustc, rustdoc, clippy-driver,
+build scripts) with no brokkr ancestor, attributed to whatever started it.
+
+--kill: SIGKILL them, leaves first, plus rust-analyzer when it is the
+starter (it would only re-run the cargo). A shell or editor starter is
+never signalled. Every locked brokkr command does this reap on its own
+once it holds the lock; this is the by-hand form."
+    )]
+    Strays {
+        /// SIGKILL the strays instead of only listing them.
+        #[arg(long)]
+        kill: bool,
+    },
     /// Gracefully stop the active bench (SIGTERM → clean shutdown + scratch cleanup)
     #[command(
         display_order = 6,

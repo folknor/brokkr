@@ -23,6 +23,21 @@ use crate::ratatoskr::process::snapshot_proc;
 pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
+/// How long a libtest run may go with no test in flight before the watchdog
+/// kills it as a wedge. The per-test ceiling ages a test only after libtest
+/// announces it, so it is blind to everything around the tests: the compile
+/// and link inside `cargo test`, and the binary's teardown after the last
+/// result. Observed: a `brokkr test` parked for over an hour on cargo's
+/// "Blocking waiting for file lock on build directory" - a rust-analyzer
+/// `cargo check` held the target lock - with nothing for the per-test clock
+/// to age. Five minutes matches `check`'s clippy ceiling: a cold build of
+/// the largest consuming workspace fits, a wedge does not.
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// The name the watchdog blames when [`IDLE_TIMEOUT`] fires: no test was
+/// in flight, so there is nothing to name.
+pub(crate) const IDLE_WEDGE: &str = "(no test in flight)";
+
 /// Coarse whole-sweep wall-clock backstop for a parallel test sweep. The
 /// parallel path enforces the same per-test [`TEST_TIMEOUT`] as the serial
 /// runner (aging each in-flight test from libtest's JSON `started`/`ok`/`failed`
@@ -69,24 +84,45 @@ pub(crate) struct HungTest {
     pub(crate) snapshot_error: Option<String>,
 }
 
-#[derive(Default)]
 struct TestTracker {
     current: HashMap<String, Instant>,
     completed: Vec<(String, Duration)>,
+    /// When the in-flight set last changed (or the run began): the start of
+    /// the current no-test-in-flight window, which [`IDLE_TIMEOUT`] bounds.
+    idle_since: Instant,
+}
+
+impl Default for TestTracker {
+    fn default() -> Self {
+        Self {
+            current: HashMap::new(),
+            completed: Vec::new(),
+            idle_since: Instant::now(),
+        }
+    }
 }
 
 impl TestTracker {
     fn observe_start(&mut self, name: String) {
         self.current.entry(name).or_insert_with(Instant::now);
+        self.idle_since = Instant::now();
     }
 
     fn observe_result(&mut self, name: &str) {
         if let Some(started) = self.current.remove(name) {
             self.completed.push((name.to_owned(), started.elapsed()));
         }
+        self.idle_since = Instant::now();
     }
 
+    /// The in-flight test past `timeout` (the longest-running one, when
+    /// several are), or the idle wedge past [`IDLE_TIMEOUT`] when nothing is
+    /// in flight at all.
     fn timed_out(&self, timeout: Duration) -> Option<(String, Duration)> {
+        if self.current.is_empty() {
+            let idle = self.idle_since.elapsed();
+            return (idle >= IDLE_TIMEOUT).then(|| (IDLE_WEDGE.to_owned(), idle));
+        }
         self.current
             .iter()
             .filter_map(|(name, started)| {
@@ -904,7 +940,8 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        let hung_test = capture_hung_test(&state_root, cargo_pid, &test, elapsed, timeout);
+        let ceiling = if test == IDLE_WEDGE { IDLE_TIMEOUT } else { timeout };
+        let hung_test = capture_hung_test(&state_root, cargo_pid, &test, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
         }
@@ -1097,11 +1134,22 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
         None => format!("full snapshot: {snapshot_path}"),
     };
 
+    let headline = if hung.test == IDLE_WEDGE {
+        format!(
+            "no test in flight for {}s, exceeding the {}s idle ceiling - cargo wedged before the first test or after the last (a build-directory lock held by another cargo, e.g. rust-analyzer, looks exactly like this)\n  idle ceiling: covers the compile, link and teardown the per-test timeout cannot see",
+            hung.elapsed.as_secs(),
+            hung.ceiling.as_secs(),
+        )
+    } else {
+        format!(
+            "test {} ran {}s, exceeding the {}s per-test timeout, after libtest started it\n  per-test timeout: cargo build time excluded",
+            hung.test,
+            hung.elapsed.as_secs(),
+            hung.ceiling.as_secs(),
+        )
+    };
     format!(
-        "test {} ran {}s, exceeding the {}s per-test timeout, after libtest started it\n  per-test timeout: cargo build time excluded\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
-        hung.test,
-        hung.elapsed.as_secs(),
-        hung.ceiling.as_secs(),
+        "{headline}\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
         hung.cargo_pid,
         child_text,
         proc_pid,
@@ -1510,6 +1558,23 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn idle_wedge_fires_only_with_nothing_in_flight() {
+        let long_ago = Instant::now()
+            .checked_sub(IDLE_TIMEOUT + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let mut tracker = TestTracker { idle_since: long_ago, ..TestTracker::default() };
+        let (name, elapsed) = tracker.timed_out(TEST_TIMEOUT).expect("idle wedge");
+        assert_eq!(name, IDLE_WEDGE);
+        assert!(elapsed >= IDLE_TIMEOUT);
+
+        // A start marker ends the idle window and switches to per-test aging.
+        tracker.observe_start("a::fast".to_owned());
+        assert!(tracker.timed_out(TEST_TIMEOUT).is_none());
+        tracker.observe_result("a::fast");
+        assert!(tracker.timed_out(TEST_TIMEOUT).is_none(), "idle window restarts at the result");
+    }
+
+    #[test]
     fn watchdog_kills_process_group_and_writes_snapshot() {
         use std::os::unix::process::CommandExt;
 
@@ -1534,6 +1599,7 @@ mod tests {
         let tracker = Arc::new(Mutex::new(TestTracker {
             current: HashMap::from([("watchdog::hangs".to_owned(), started)]),
             completed: Vec::new(),
+            idle_since: started,
         }));
         let done = Arc::new(AtomicBool::new(false));
         let hung = Arc::new(Mutex::new(None::<HungTest>));

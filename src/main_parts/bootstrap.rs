@@ -173,6 +173,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if let Command::Kill { hard } = cli.command {
         return cmd_kill(hard);
     }
+    if let Command::Strays { kill } = cli.command {
+        return crate::stray::cmd_strays(kill);
+    }
     if let Command::History {
         id,
         command,
@@ -463,6 +466,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         };
         let _lock = acquire_cmd_lock_opt(project, &state_root, "check")?;
+        // The whole-run ceiling, armed once the lock is ours so a wait behind
+        // another brokkr command is not charged against it. Fires as
+        // `brokkr kill --hard` would: SIGKILL every descendant, then exit.
+        let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING);
         return check_cmd::cmd_check(
             project,
             &project_root,
@@ -570,6 +577,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // Already handled by as_pbfhogg() above the match.
         Command::Lock
         | Command::Kill { .. }
+        | Command::Strays { .. }
         | Command::History { .. }
         | Command::Inspect { .. }
         | Command::CheckRefs { .. }

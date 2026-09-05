@@ -36,11 +36,17 @@ pub(crate) fn acquire_cmd_lock_opt(
     project_root: &Path,
     command: &str,
 ) -> Result<lockfile::LockGuard, DevError> {
-    lockfile::acquire(&lockfile::LockContext {
+    let guard = lockfile::acquire(&lockfile::LockContext {
         project: project.map_or("brokkr", Project::name),
         command,
         project_root: &project_root.display().to_string(),
-    })
+    })?;
+    // Under the lock, so the scan cannot mistake another brokkr's cargo for
+    // a stray: any cargo alive now with no brokkr ancestor is one nothing
+    // brokkr-shaped started, and it holds (or will take) the build-directory
+    // lock this command's cargo needs.
+    crate::stray::reap_after_lock();
+    Ok(guard)
 }
 
 /// Resolve project info (target_dir) using cargo metadata.

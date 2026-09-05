@@ -144,6 +144,87 @@ textlint, script_check (--force-rust to check the build too)` up front, and
 `check passed (markdown only - build phases skipped)` at the end, because the
 announcement has scrolled away by the time the verdict is read.
 
+## Time ceilings
+
+A whole `check` run may hold the lock for at most 25 minutes, measured from
+lock acquisition (a wait behind another brokkr command is not charged), and
+each phase has its own ceiling on top of that:
+
+| Phase | Ceiling |
+|---|---|
+| `clippy` | 5 min |
+| `test` | 15 min |
+| `coverage`, `install_feature`, `script_check` | 5 min |
+| every other phase (`gremlins`, `header`, `textlint`, `manifest`, `dependency_rules`, `publish_cycle`) | 2 min |
+
+The per-child deadlines - the 20s hung-test watchdog, the captured runner's
+deadline - bound one invocation each; nothing bounded a phase or the run as a
+whole, and one clippy invocation was observed holding the lock for 1h15m.
+Clippy's five minutes is set against that hang, not against its normal cost:
+warm, the largest consuming workspace finishes clippy in about 20s. The phase
+clock restarts at every phase entry (`begin_phase`, which also points the
+summary's `failed_phase` at the phase in flight, so the two cannot drift), so a
+`script_check` stage that runs three times gets five minutes each time.
+
+When a ceiling fires, the run is killed the way `brokkr kill --hard` would
+kill it, not the cooperative way: the cooperative path depends on whichever
+runner is currently polling the shutdown flag, and a run that has overrun by
+this much is the one whose runner may not be polling. The watchdog thread
+(`src/check_cmd/watchdog.rs`) SIGKILLs every descendant of the brokkr process
+found in `/proc` - test children are spawned into their own process groups
+and not all of them are published to the lockfile, so neither a group signal
+nor the lockfile's `child_pid` would reach them all - then exits with status
+124 (`timeout(1)`'s convention) after two `[error]` lines naming which ceiling
+fired and the kill count. The kernel releases the flock on exit; lockfile readers
+fail closed on the stale metadata exactly as after a hard kill. Follow up with
+`brokkr clean` if scratch was left behind.
+
+The libtest runner carries a third clock, shared by `check`'s test phase and
+`brokkr test`: the 5-minute **idle ceiling** (`IDLE_TIMEOUT` in
+`src/test_runner.rs`). The 20s per-test watchdog ages a test only after
+libtest announces it, so it is blind to everything around the tests - the
+compile and link inside `cargo test`, the binary's teardown after the last
+result. When no test has been in flight for five minutes the watchdog kills
+the cargo process group and reports it through the hung-test path, blamed as
+`(no test in flight)` with the usual `/proc` snapshot. The case it was built
+for: cargo parked on `Blocking waiting for file lock on build directory`
+because a rust-analyzer `cargo check` held the target lock - over an hour,
+with nothing for the per-test clock to age. A `brokkr test -N` repeat run has
+no whole-run ceiling; each iteration is bounded by this clock and the per-test
+one.
+
+The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
+`phase_ceiling`) and `src/test_runner.rs` (`IDLE_TIMEOUT`); there is no
+config key or flag.
+
+## Strays
+
+The ceilings bound the damage; the reap removes the cause. brokkr's premise
+is that every cargo invocation on a development host goes through it - that
+is what the global lock serializes and what the measurement stores assume. A
+cargo running outside brokkr competes for CPU with whatever is being measured
+and takes cargo's build-directory lock, on which brokkr's cargo then blocks
+with nothing to time out. Both hangs above were this: a rust-analyzer `cargo
+check` (a nightly regression, September 2026) held the target lock for over an
+hour, and the next day four of its build scripts spun at 100% CPU under it.
+
+So every locked brokkr command, once it holds the lock, scans `/proc` for the
+cargo family - `cargo`, `cargo-*`, `rustc`, `rustdoc`, `clippy-driver`, build
+scripts (`build_script_bu` after the kernel's 15-byte truncation) - with no
+`brokkr` ancestor, prints each as `stray cargo process: <comm> (pid N) started
+by <starter>`, and SIGKILLs them leaves first (`src/stray.rs`). The starter is
+the nearest ancestor outside the family. When it is rust-analyzer it is killed
+too, because it would only re-run the cargo within seconds and the editor
+restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is
+never signalled. Under the lock, so another brokkr's cargo can never be
+mistaken for a stray. Failure to read `/proc` reads as nothing found: the reap
+is on the way to the real work, never a gate on it.
+
+`brokkr strays` is the by-hand form: bare lists, `--kill` lists then kills.
+Works with no `brokkr.toml`. A legitimate run that needs
+longer is a run whose sweeps want splitting, not a run that wants a longer
+rope.
+
 ## `gremlins` phase
 
 Runs first and fails the check if any banned Unicode character
