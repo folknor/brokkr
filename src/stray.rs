@@ -183,28 +183,60 @@ fn killed_line(killed: usize, starters: usize) -> String {
     line
 }
 
+/// The reap's whole report, one line however many strays there were - the
+/// reap runs at the top of every locked command, so its output is overhead
+/// paid on every invocation. Comms are counted (`build_script_bu x4`),
+/// starters deduplicated. No pids: everything named is dead by the time the
+/// line prints, so a pid identifies nothing. The live, addressable detail
+/// stays with `brokkr strays`.
+fn reap_line(strays: &[Stray], killed: usize, starters: usize) -> String {
+    let mut comms: Vec<(&str, usize)> = Vec::new();
+    for s in strays {
+        match comms.iter_mut().find(|(c, _)| *c == s.comm) {
+            Some((_, n)) => *n += 1,
+            None => comms.push((&s.comm, 1)),
+        }
+    }
+    let comms: Vec<String> = comms
+        .iter()
+        .map(|(c, n)| if *n > 1 { format!("{c} x{n}") } else { (*c).to_owned() })
+        .collect();
+    let mut by: Vec<&str> = Vec::new();
+    for s in strays {
+        let name = s.starter.as_ref().map_or("unknown", |(_, comm)| comm);
+        if !by.contains(&name) {
+            by.push(name);
+        }
+    }
+    let mut line = format!(
+        "SIGKILL sent to {} ({}) started by {}",
+        output::count(killed, "stray cargo process"),
+        comms.join(", "),
+        by.join(", "),
+    );
+    if starters > 0 {
+        line.push_str(&format!(" and to {}", output::count(starters, "rust-analyzer")));
+    }
+    line.push_str(" (`brokkr man check strays`)");
+    line
+}
+
 /// One report line per stray.
 pub fn describe(s: &Stray) -> String {
     format!("{} (pid {}) started by {}", s.comm, s.pid, s.started_by)
 }
 
-/// The reap every locked command runs once it holds the lock: find, report,
-/// kill. Nothing found prints nothing. Failure to read `/proc` reads as
-/// nothing found - the reap is a convenience on the way to the real work,
-/// never a gate on it.
+/// The reap every locked command runs once it holds the lock: find, kill,
+/// report on one line. Nothing found prints nothing. Failure to read `/proc`
+/// reads as nothing found - the reap is a convenience on the way to the real
+/// work, never a gate on it.
 pub fn reap_after_lock() {
     let strays = find();
     if strays.is_empty() {
         return;
     }
-    for s in &strays {
-        output::lock_msg(&format!("stray cargo process: {}", describe(s)));
-    }
     let (killed, starters) = kill(&strays);
-    output::lock_msg(&format!(
-        "{} - no cargo runs outside brokkr on a brokkr host (`brokkr man check strays`)",
-        killed_line(killed, starters),
-    ));
+    output::lock_msg(&reap_line(&strays, killed, starters));
 }
 
 /// `brokkr strays [--kill]`: bare lists, `--kill` lists then kills.
@@ -279,6 +311,24 @@ mod tests {
         let strays = classify(&t);
         let starters: Vec<u32> = starters_to_kill(&strays).into_iter().map(|(pid, _)| pid).collect();
         assert_eq!(starters, vec![10]);
+    }
+
+    #[test]
+    fn reap_line_is_one_line_with_comm_counts_and_starter() {
+        let t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "rust-analyzer"),
+            (20, 10, "cargo"),
+            (30, 20, "build_script_bu"),
+            (31, 20, "build_script_bu"),
+        ]);
+        let strays = classify(&t);
+        let line = reap_line(&strays, 3, 1);
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            line,
+            "SIGKILL sent to 3 stray cargo processes (build_script_bu x2, cargo) started by rust-analyzer and to 1 rust-analyzer (`brokkr man check strays`)"
+        );
     }
 
     #[test]

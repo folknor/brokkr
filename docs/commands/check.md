@@ -211,8 +211,11 @@ hour, and the next day four of its build scripts spun at 100% CPU under it.
 So every locked brokkr command, once it holds the lock, scans `/proc` for the
 cargo family - `cargo`, `cargo-*`, `rustc`, `rustdoc`, `clippy-driver`, build
 scripts (`build_script_bu` after the kernel's 15-byte truncation) - with no
-`brokkr` ancestor, prints each as `stray cargo process: <comm> (pid N) started
-by <starter>`, and SIGKILLs them leaves first (`src/stray.rs`). The starter is
+`brokkr` ancestor, SIGKILLs them leaves first, and reports the whole reap on
+one line - comm counts plus deduplicated starters, no pids since everything
+named is already dead, e.g. `SIGKILL sent to 3 stray cargo processes
+(build_script_bu x2, cargo) started by rust-analyzer` (`src/stray.rs`;
+live per-process detail is `brokkr strays`' job). The starter is
 the nearest ancestor outside the family. When it is rust-analyzer it is killed
 too, because it would only re-run the cargo within seconds and the editor
 restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is

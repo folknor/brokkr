@@ -189,6 +189,8 @@ pub fn warn(msg: &str) {
 pub fn count(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
+    } else if noun.ends_with('s') {
+        format!("{n} {noun}es")
     } else {
         format!("{n} {noun}s")
     }
