@@ -228,6 +228,42 @@ Works with no `brokkr.toml`. A legitimate run that needs
 longer is a run whose sweeps want splitting, not a run that wants a longer
 rope.
 
+## The rustc guard
+
+The reap removes strays after the fact; the guard prevents them from
+compiling at all. `brokkr-rustc-guard` (`src/bin/rustc_guard.rs`, a second
+bin target installed next to `brokkr`) is enrolled user-wide by `brokkr
+guard --install` as `build.rustc-wrapper` in `$CARGO_HOME/config.toml`.
+From then on every cargo this user runs - PATH-resolved or absolute-path,
+rust-analyzer's, an agent harness's, a hand-typed one - routes each rustc
+invocation through the guard. Cargo probes `rustc -vV` through the wrapper
+before building anything, so a refused build dies at startup, zero crates
+compiled.
+
+The decision is runtime, in order: `BROKKR_CARGO` set (the manual escape
+hatch) passes; a `brokkr` ancestor in `/proc` passes - the stray
+definition inverted, so brokkr-owned cargo needs no env threading; then a
+non-blocking shared flock probe of `~/.brokkr/brokkr.lock` - held refuses
+with exit 1 and a message naming `brokkr lock`, free passes. Fail-open
+everywhere except a demonstrably held flock: unreadable `/proc`, unset
+`$HOME`, missing lock file all pass. The guard is benchmark hygiene, not a
+security boundary; the reap remains the backstop for the
+lock-taken-mid-build race and for non-compiling cargo (`cargo metadata` is
+not fenced, and does not need to be).
+
+The wrapper stays configured for brokkr's own builds too - never bypassed
+by unsetting it - because the wrapper's identity is part of cargo's compile
+fingerprint (cargo #9348): a wrapper that came and went per invocation
+would ping-pong full rebuilds. Enrollment therefore costs one full rebuild
+per target dir, once.
+
+`brokkr guard` bare shows status (including a warning when the configured
+guard binary is missing); `--install` writes the config line, resolving the
+guard as the binary next to the running `brokkr` executable and refusing to
+overwrite a wrapper brokkr did not write (sccache, say - chaining wrappers
+is a human's decision); `--remove` unsets it, with the same
+refuse-if-foreign rule. Works with no `brokkr.toml`.
+
 ## `gremlins` phase
 
 Runs first and fails the check if any banned Unicode character

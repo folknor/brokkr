@@ -18,6 +18,7 @@ mod error;
 mod git;
 mod globs;
 mod gremlins;
+mod guard;
 mod header;
 mod harness;
 mod history;

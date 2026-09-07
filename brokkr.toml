@@ -1,4 +1,8 @@
 project = "brokkr"
 
+# Two bin targets since brokkr-rustc-guard; keep bare `brokkr run` on brokkr.
+[bin]
+default = "brokkr"
+
 [test]
 debug = true

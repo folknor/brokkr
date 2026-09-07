@@ -176,6 +176,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
     if let Command::Strays { kill } = cli.command {
         return crate::stray::cmd_strays(kill);
     }
+    if let Command::Guard { install, remove } = cli.command {
+        return crate::guard::cmd_guard(install, remove);
+    }
     if let Command::History {
         id,
         command,
@@ -578,6 +581,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         Command::Lock
         | Command::Kill { .. }
         | Command::Strays { .. }
+        | Command::Guard { .. }
         | Command::History { .. }
         | Command::Inspect { .. }
         | Command::CheckRefs { .. }

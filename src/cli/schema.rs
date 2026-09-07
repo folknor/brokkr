@@ -1459,6 +1459,31 @@ once it holds the lock; this is the by-hand form."
         #[arg(long)]
         kill: bool,
     },
+    /// Manage the rustc-wrapper fence that blocks cargo outside brokkr while the lock is held
+    #[command(
+        display_order = 6,
+        long_about = "\
+Manage the rustc-wrapper fence (`brokkr-rustc-guard`).
+
+Enrolled as `build.rustc-wrapper` in $CARGO_HOME/config.toml, the guard
+routes every rustc invocation this user's cargos make through a runtime
+check: a brokkr ancestor or BROKKR_CARGO=1 passes; otherwise a held
+brokkr lock refuses the compile with exit 1, before anything builds.
+The stray reap removes offenders after the fact - this prevents them.
+
+Bare shows status. --install writes the config line (refusing to
+overwrite a foreign wrapper such as sccache); --remove unsets it.
+Enrollment invalidates cargo's compile fingerprint once per target dir."
+    )]
+    Guard {
+        /// Write build.rustc-wrapper to $CARGO_HOME/config.toml.
+        #[arg(long)]
+        install: bool,
+
+        /// Remove the guard's build.rustc-wrapper entry.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Gracefully stop the active bench (SIGTERM → clean shutdown + scratch cleanup)
     #[command(
         display_order = 6,
