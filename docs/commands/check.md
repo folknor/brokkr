@@ -264,6 +264,11 @@ overwrite a wrapper brokkr did not write (sccache, say - chaining wrappers
 is a human's decision); `--remove` unsets it, with the same
 refuse-if-foreign rule. Works with no `brokkr.toml`.
 
+`scripts/guard-smoke.py` exercises the guard's decision paths directly
+(pass-through, lock-held refusal against the real flock, the
+`BROKKR_CARGO` hatch) without involving cargo; the brokkr-ancestor path is
+covered by any `brokkr check` run with the guard enrolled.
+
 ## `gremlins` phase
 
 Runs first and fails the check if any banned Unicode character
