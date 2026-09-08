@@ -40,7 +40,10 @@ expected = "pass"
 
 See `docs/brokkr.toml.md` for full schema.
 
-## Test runner gating
+## Test runner
 
-`brokkr test` is rejected for litehtml/sluggrs projects with a pointer to
-`brokkr visual` - the visual pipeline is the test surface.
+`brokkr test` runs a single cargo test here like it does anywhere else. It used
+to be refused in litehtml/sluggrs with a pointer to `brokkr visual`, from when
+`test` *was* the visual runner; `visual` has been its own command for a long
+time, and the two surfaces do not overlap - `visual` drives the fixture
+pipeline, `test` drives cargo.

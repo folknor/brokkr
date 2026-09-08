@@ -1601,8 +1601,7 @@ Both `brokkr check` (test phase) and `brokkr test` set the following on every
 
 ## `brokkr test`
 
-`brokkr test [-p <PKG>] <NAME>`. (All cargo projects except litehtml/sluggrs - those are rejected with a
-pointer to `brokkr visual`.)
+`brokkr test [-p <PKG>] <NAME>`. (Any cargo project.)
 
 Run one specific cargo test. Defaults to release; pass `--debug` to run the
 dev profile instead (faster compile, useful when the failing test isn't

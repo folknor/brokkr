@@ -1485,22 +1485,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         // ----- cargo single-test runner -----
         Command::Test { name, package, repeat, jobs, raw, debug, release, timeout, sweep } => {
-            match project {
-                Project::Litehtml | Project::Sluggrs => Err(DevError::Config(
-                    "'test' runs a single cargo test; litehtml/sluggrs use `brokkr visual` for visual-fixture testing.".into(),
-                )),
-                _ => {
-                    // The lock lives in the config dir (.brokkr); cargo runs
-                    // against the code tree (build_root), which differs under
-                    // the one-level-up layout.
-                    let _lock = acquire_cmd_lock(project, &project_root, "test")?;
-                    // cargo runs in the code tree (build_root); brokkr's own
-                    // `.brokkr` state (hung-test snapshots) belongs under the
-                    // config dir (project_root), which differs under the
-                    // one-level-up foreign-checkout layout.
-                    test_cmd::run(&dev_config, project, &build_root, &project_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
-                }
-            }
+            // The lock lives in the config dir (.brokkr); cargo runs
+            // against the code tree (build_root), which differs under
+            // the one-level-up layout.
+            let _lock = acquire_cmd_lock(project, &project_root, "test")?;
+            // cargo runs in the code tree (build_root); brokkr's own
+            // `.brokkr` state (hung-test snapshots) belongs under the
+            // config dir (project_root), which differs under the
+            // one-level-up foreign-checkout layout.
+            test_cmd::run(&dev_config, project, &build_root, &project_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
         }
         Command::List => {
             match project {

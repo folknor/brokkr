@@ -93,10 +93,10 @@ mod visibility_tests {
     /// built-ins would have dropped.
     #[test]
     fn except_subtracts_without_dropping_other() {
-        assert!(!visible_in("test", Project::Litehtml));
-        assert!(!visible_in("test", Project::Sluggrs));
-        assert!(visible_in("test", Project::Piners));
-        assert!(visible_in("test", Project::Other("some-foreign-repo")));
+        assert!(!visible_in("results", Project::Litehtml));
+        assert!(visible_in("results", Project::Sluggrs));
+        assert!(visible_in("results", Project::Piners));
+        assert!(visible_in("results", Project::Other("some-foreign-repo")));
     }
 
     /// `Other("piners")` is a foreign repo that happens to call itself piners
