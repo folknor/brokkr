@@ -10,6 +10,10 @@
 //! must prove it ran to completion by emitting the sentinel. The exit code is
 //! therefore ignored; only a spawn failure is a hard error.
 //!
+//! The child is given `BROKKR_CARGO=1`: a script-check may run cargo, and it
+//! runs under a lock brokkr already holds - see [`run_one`] for why the
+//! rustc guard's ancestor path cannot carry that here.
+//!
 //! This module is the logic (`evaluate` + `run_one`); orchestration and
 //! failure formatting live in `check_cmd::phase::run_script_checks`, mirroring
 //! how `textlint`/`manifest` split scan-logic from phase-plumbing.
@@ -35,8 +39,26 @@ pub struct Outcome {
 /// The command is run as `sh -c "<command>"` with `cwd` as the working
 /// directory (the code tree), so pipes, redirects, and env expansion work.
 /// Returns `Err` only when the process could not be spawned.
+///
+/// `BROKKR_CARGO=1` is exported into the child. A script-check runs *inside*
+/// a brokkr command that already holds the lock, so a cargo it starts is
+/// brokkr's own work and must not be refused by the rustc guard
+/// (`src/bin/rustc_guard.rs`). The guard's other admission path - a `brokkr`
+/// ancestor in `/proc` - is not dependable here: the command is arbitrary
+/// shell, so the chain from rustc back to brokkr runs through whatever the
+/// script does, and anything that detaches, re-execs, or reparents breaks a
+/// walk that fails closed. Every other cargo brokkr runs is spawned by brokkr
+/// directly and keeps the ancestor path; this is the one phase where brokkr
+/// does not own the process tree, so it states the fact instead of inferring
+/// it. Observed as a `cargo doc` script-check refused at its `rustc -vV`
+/// probe while brokkr held the lock.
 pub fn run_one(check: &ScriptCheck, cwd: &Path) -> Result<Outcome, DevError> {
-    let captured = output::run_captured("sh", &["-c", &check.command], cwd)?;
+    let captured = output::run_captured_with_env(
+        "sh",
+        &["-c", &check.command],
+        cwd,
+        &[("BROKKR_CARGO", "1")],
+    )?;
     let passed = evaluate(
         &check.expect,
         check.match_mode,

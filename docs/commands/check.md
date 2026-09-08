@@ -257,6 +257,15 @@ fingerprint (cargo #9348): a wrapper that came and went per invocation
 would ping-pong full rebuilds. Enrollment therefore costs one full rebuild
 per target dir, once.
 
+One phase threads the env var rather than relying on the ancestor walk:
+`[[script_check]]` children are spawned with `BROKKR_CARGO=1`. A script-check
+is arbitrary shell that may run cargo (`cargo doc --no-deps` is the usual
+one), it runs inside a brokkr command that already holds the lock, and brokkr
+does not own the process tree below `sh -c` - anything the script does that
+detaches, re-execs, or reparents breaks a `/proc` walk that fails closed, so
+the fact is stated instead of inferred. Every other cargo brokkr runs is
+spawned directly and keeps the ancestor path.
+
 `brokkr guard` bare shows status (including a warning when the configured
 guard binary is missing); `--install` writes the config line, resolving the
 guard as the binary next to the running `brokkr` executable and refusing to
