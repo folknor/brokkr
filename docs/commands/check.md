@@ -193,9 +193,46 @@ with nothing for the per-test clock to age. A `brokkr test -N` repeat run has
 no whole-run ceiling; each iteration is bounded by this clock and the per-test
 one.
 
+### Which clocks can be trusted
+
+Both clocks described above - the 20s per-test ceiling and the 5-minute idle
+ceiling - are computed from libtest's *announcements*. That makes them
+attribution, not guarantees, and the distinction is load-bearing.
+
+libtest's lifecycle records share one stdout stream with whatever the tests
+write to it. A test can bypass libtest's capture with entirely ordinary safe
+Rust - `write!(std::io::stdout(), "x")` - because libtest installs Rust's
+capture mechanism rather than redirecting the process's OS descriptor; a
+subprocess started with `Command::status()` inherits the descriptor outright.
+Output with no trailing newline gets libtest's next record concatenated onto its
+line, and a record parsed off a line that does not begin with it is a lost
+event. A lost *result* leaves a finished test looking in-flight, and the per-test
+clock then fires against whatever is running now - killing a healthy sweep and
+blaming the wrong test. Corrupted events deciding when brokkr pulls the trigger
+is a verdict change, not a reporting glitch.
+
+So termination authority sits on a **wall clock** that nothing the child prints
+can reach (`SWEEP_WALL_TIMEOUT`, 30 minutes, enforced from the watchdog's own
+`Instant`), and the event-driven ceilings stay for naming a likely offender.
+`Ceilings` in `src/test_runner.rs` carries both, so every call site has to say
+which it is claiming:
+
+| lane | per-test ceiling | wall ceiling |
+|---|---|---|
+| `check` serial sweep | attribution only | authoritative |
+| `check` parallel sweep | attribution only | authoritative |
+| `brokkr test <NAME>` | attribution only | authoritative |
+| isolated lane (`--isolate`) | **authoritative** | same clock |
+| nextest lane | **authoritative** (engine, process-per-test) | engine-owned |
+
+A per-test ceiling is only honest where the process is the unit of one test.
+That is why the isolated and nextest lanes get a real one and the shared-harness
+lanes do not: with many tests in one process there is no way to bound one of
+them without reading a stream the tests themselves can corrupt.
+
 The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
-`phase_ceiling`) and `src/test_runner.rs` (`IDLE_TIMEOUT`); there is no
-config key or flag.
+`phase_ceiling`) and `src/test_runner.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
+`SWEEP_WALL_TIMEOUT`, `PARALLEL_SWEEP_TIMEOUT`); there is no config key or flag.
 
 ## Strays
 
@@ -920,18 +957,22 @@ parallel execution with `test_threads`:
 - `test_threads = 0` - libtest's default parallelism (num_cpus).
 - `test_threads = N` (>= 2) - `--test-threads=N`.
 
-A parallel sweep keeps the **same per-test 20s hang watchdog** as the serial
-path, with named attribution. Since libtest's human output emits no per-test
-*start* signal once tests run concurrently, the parallel path drives libtest's
-JSON event stream instead (`--format json -Z unstable-options`, injected
-automatically; native on nightly): each `started` event arms the watchdog for
-that test, each `ok`/`failed` disarms it, and a test that crosses 20s is blamed
-by name and its process group killed - exactly like serial. The JSON events are
-reconstructed back into human libtest text so `--raw`/filtered output
-all look identical to a serial run. A coarse whole-sweep ceiling (30 min)
-remains only as a backstop for an un-attributable wedge (a stall with no test
-in-flight - e.g. before the first test starts); it kills the process group and
-fails the sweep. This lane is for large workspaces where serial execution is
+A parallel sweep keeps the same per-test 20s clock as the serial path, with the
+same standing: **attribution, not a guarantee** (see "Which clocks can be
+trusted" above). Since libtest's human output emits no per-test *start* signal
+once tests run concurrently, the parallel path drives libtest's JSON event
+stream instead (`--format json -Z unstable-options`, injected automatically;
+native on nightly): each `started` event arms the clock for that test, each
+`ok`/`failed` disarms it, and a test that crosses 20s is named and its process
+group killed. The JSON events are reconstructed back into human libtest text so
+`--raw`/filtered output all look identical to a serial run.
+
+The whole-sweep ceiling (30 min) is not a backstop for the residual case - it is
+the **authoritative** bound, enforced from the runner's own clock and reachable
+by nothing the tests print. It kills the process group and fails the sweep.
+Because the events that arm and disarm the per-test clock ride the same stdout
+the tests write to, a lost record can leave a finished test looking in-flight and
+send the per-test kill at a healthy one; the wall clock is what holds regardless. This lane is for large workspaces where serial execution is
 dominated by a few wall-clock-heavy tests (live/network/multi-second lifecycle)
 that parallelism hides - now without surrendering per-test hang protection.
 Because the per-test clock is wall-clock, a test that is merely CPU-starved
@@ -1846,11 +1887,16 @@ Because `cargo test <name>` is a substring filter, identically-named tests in
 different modules of the same package all run; use a more qualified name
 (module path) to disambiguate.
 
-A per-test watchdog (shared with `brokkr check`'s test phase) kills any test
-that runs longer than 20s and reports it as a hung test. `--timeout <SECS>`
-raises that ceiling for `brokkr test` only, and only for a genuinely single
-test: each sweep is enumerated with libtest `--list` first, and if `<NAME>`
-matches more than one test in any sweep the command errors before running
-anything. Sweeps where the name matches zero tests (feature-gated out) are
-fine and still `SKIP`. There is no way to disable the ceiling entirely - 280s
-is the cap.
+A per-test watchdog (shared with `brokkr check`'s test phase) names any test that
+runs longer than 20s and reports it as a hung test. `--timeout <SECS>` raises
+that ceiling for `brokkr test` only, and only for a genuinely single test: each
+sweep is enumerated with libtest `--list` first, and if `<NAME>` matches more
+than one test in any sweep the command errors before running anything. Sweeps
+where the name matches zero tests (feature-gated out) are fine and still `SKIP`.
+There is no way to disable the ceiling entirely - 280s is the cap.
+
+That per-test clock is **attribution**, because `<NAME>` is a substring filter
+and the invocation therefore runs many tests in one process: see "Which clocks
+can be trusted". The bound that holds no matter what the tests print is the
+30-minute wall ceiling, enforced from the runner's own clock. A `-N` repeat run
+has no whole-run ceiling; each iteration is bounded by that wall clock.

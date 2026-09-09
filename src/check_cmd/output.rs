@@ -674,7 +674,9 @@ fn run_one_test_sweep(
             project_root,
             state_root,
             &env_refs,
-            test_runner::TEST_TIMEOUT,
+            // Many tests in one process: the per-test clock can only name a
+            // suspect, so the wall clock is what actually bounds the sweep.
+            test_runner::Ceilings::shared_harness(),
             |_| {},
             |_| {},
             move |elapsed| {

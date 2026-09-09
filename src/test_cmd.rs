@@ -733,7 +733,11 @@ fn run_one(
         project_root,
         state_root,
         env,
-        ceiling,
+        // `<NAME>` is a substring filter, so this invocation can run several
+        // tests in one process. The per-test ceiling therefore names a suspect
+        // rather than guaranteeing anything, and the wall clock is the bound
+        // that holds regardless of what the tests print.
+        test_runner::Ceilings { per_test: ceiling, wall: Some(test_runner::SWEEP_WALL_TIMEOUT) },
         make_stdout_forwarder(raw, sink.clone()),
         make_stderr_forwarder(raw, sink.clone()),
         move |elapsed| {

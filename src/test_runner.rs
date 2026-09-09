@@ -20,6 +20,11 @@ use crate::error::DevError;
 use crate::output::CapturedOutput;
 use crate::ratatoskr::process::snapshot_proc;
 
+/// Per-test ceiling. **Attribution, not a guarantee** - it ages a test only from
+/// the moment libtest announces it, on a stream test output shares, so a lost
+/// event can both hide a hang and misdirect the kill. Termination authority is
+/// [`Ceilings::wall`]. Honest as a guarantee only where one process runs one
+/// test ([`Ceilings::one_test`]).
 pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
@@ -38,14 +43,85 @@ pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// in flight, so there is nothing to name.
 pub(crate) const IDLE_WEDGE: &str = "(no test in flight)";
 
-/// Coarse whole-sweep wall-clock backstop for a parallel test sweep. The
-/// parallel path enforces the same per-test [`TEST_TIMEOUT`] as the serial
-/// runner (aging each in-flight test from libtest's JSON `started`/`ok`/`failed`
-/// events - see [`run_libtest_parallel`]), so a hung *test* is caught in 20s
-/// with named attribution just like serial. This ceiling only guards the
-/// residual case the per-test watchdog cannot see: a wedge with no test
-/// in-flight (a stall before the first `started` event, or between tests).
-/// Generous, so it only trips on a genuinely un-attributable wedge.
+/// The name the watchdog blames when the wall deadline fires. There is no
+/// offender to name: "active when the deadline expired" is not "caused the
+/// timeout", and the budget can just as well expire during the hundredth
+/// perfectly normal test.
+pub(crate) const WALL_WEDGE: &str = "(sweep wall deadline)";
+
+/// Wall-clock ceiling for a whole shared-harness sweep, enforced from the
+/// watchdog's own clock and reachable by nothing a test prints.
+///
+/// This exists because the two event-driven ceilings are not the guarantee they
+/// look like. [`TEST_TIMEOUT`] ages a test only once libtest *announces* it, and
+/// [`IDLE_TIMEOUT`] is reset by every announced transition - so both are
+/// functions of a stream that arbitrary test output shares. A test can write
+/// straight to the process's stdout with `write!(std::io::stdout(), ...)`, which
+/// libtest's capture does not intercept because it installs Rust's capture
+/// mechanism rather than redirecting the OS descriptor; a subprocess started with
+/// `Command::status()` inherits the descriptor outright. Neither needs malice.
+/// Output that lands mid-record can therefore cost a lifecycle event, and a lost
+/// event means a test that finished still looks in-flight - at which point the
+/// per-test ceiling fires against whatever is running *now*, killing a healthy
+/// run. Corrupted events deciding when brokkr pulls the trigger is a verdict
+/// change, not a reporting glitch.
+///
+/// So termination authority moves here, to a clock no input can touch, and the
+/// event-driven ceilings stay for *attribution*: they name a likely offender, and
+/// they are honest about being a guess. A genuine per-test ceiling needs the
+/// process to be the unit of one test - see `check_cmd/isolate.rs`.
+pub(crate) const SWEEP_WALL_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// The ceilings one libtest run is subject to.
+///
+/// `per_test` and the idle window drive *attribution* and are computed from
+/// libtest's announcements. `wall` drives *termination* and is computed from the
+/// watchdog's own clock. Keeping them in one struct is how the distinction stays
+/// visible at every call site: a caller that wants a trustworthy ceiling sets
+/// `wall`, and one that only wants a name sets `per_test`.
+#[derive(Clone, Copy)]
+pub(crate) struct Ceilings {
+    /// Per-test ceiling for blame, aged from announced starts. Advisory.
+    pub(crate) per_test: Duration,
+    /// Wall-clock ceiling for the whole run. Authoritative; unreachable by test
+    /// output. `None` leaves the run bounded only by the phase watchdog above
+    /// it.
+    pub(crate) wall: Option<Duration>,
+}
+
+impl Ceilings {
+    /// A shared-harness sweep: many tests in one process, so the per-test clock
+    /// can only ever name a suspect, and the wall clock is the real bound.
+    pub(crate) fn shared_harness() -> Self {
+        Self { per_test: TEST_TIMEOUT, wall: Some(SWEEP_WALL_TIMEOUT) }
+    }
+
+    /// One process running exactly one test, where the wall clock *is* the
+    /// per-test ceiling and attribution comes from the caller's selection rather
+    /// than from anything parsed.
+    pub(crate) fn one_test(ceiling: Duration) -> Self {
+        Self { per_test: ceiling, wall: Some(ceiling) }
+    }
+}
+
+/// Whole-sweep wall-clock ceiling for a parallel test sweep - the authoritative
+/// bound, enforced from the runner's own clock in the `try_wait` loop.
+///
+/// This used to be described as a backstop for the residual case, on the grounds
+/// that the per-test ceiling caught a hung test "in 20s with named attribution
+/// just like serial". That overstated it in both places. The per-test ceiling
+/// ages tests from libtest's JSON `started`/`ok`/`failed` events, and those
+/// events share one stdout stream with whatever the tests write to it - a
+/// `write!(std::io::stdout(), ..)` that libtest's capture does not intercept, or
+/// a subprocess that inherited the descriptor. A record concatenated onto
+/// unterminated output is a lost event, and a lost result leaves a finished test
+/// looking in-flight, at which point the per-test clock fires against whatever is
+/// running now and kills a healthy sweep.
+///
+/// So the per-test ceiling is *attribution*: it names a likely offender and may
+/// be wrong. Termination authority is this wall clock, which nothing the child
+/// prints can reach. A real per-test guarantee needs one process per test - see
+/// `check_cmd/isolate.rs` and [`Ceilings::one_test`].
 pub(crate) const PARALLEL_SWEEP_TIMEOUT: Duration = Duration::from_secs(1800);
 
 pub(crate) struct LibtestRun {
@@ -139,7 +215,7 @@ pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     cwd: &Path,
     state_root: &Path,
     env: &[(&str, &str)],
-    timeout: Duration,
+    ceilings: Ceilings,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -197,7 +273,7 @@ where
     let done_t = Arc::clone(&done);
     let hung_t = Arc::clone(&hung);
     let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, timeout);
+        watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings);
     });
 
     let status = child.wait().map_err(|e| DevError::Subprocess {
@@ -324,14 +400,23 @@ where
     });
 
     // The per-test hang watchdog - identical to the serial path, aging the
-    // JSON-fed tracker. It kills the group and records a `HungTest` the instant
-    // any in-flight test crosses `per_test_timeout`.
+    // JSON-fed tracker. It names an in-flight test that crosses
+    // `per_test_timeout`. Attribution only: this path already has an
+    // independent whole-sweep clock in the `try_wait` loop below, which is the
+    // authoritative bound, so the watchdog carries no `wall` of its own.
     let state_root_t = state_root.to_path_buf();
     let tracker_w = Arc::clone(&tracker);
     let done_w = Arc::clone(&done);
     let hung_w = Arc::clone(&hung);
     let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(state_root_t, cargo_pid, tracker_w, done_w, hung_w, per_test_timeout);
+        watchdog_loop(
+            state_root_t,
+            cargo_pid,
+            tracker_w,
+            done_w,
+            hung_w,
+            Ceilings { per_test: per_test_timeout, wall: None },
+        );
     });
 
     let mut timed_out = false;
@@ -907,9 +992,9 @@ fn watchdog_loop(
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
-    timeout: Duration,
+    ceilings: Ceilings,
 ) {
-    watchdog_loop_with_timing(state_root, cargo_pid, tracker, done, hung, timeout, WATCHDOG_POLL);
+    watchdog_loop_with_timing(state_root, cargo_pid, tracker, done, hung, ceilings, WATCHDOG_POLL);
 }
 
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
@@ -919,9 +1004,15 @@ fn watchdog_loop_with_timing(
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
-    timeout: Duration,
+    ceilings: Ceilings,
     poll: Duration,
 ) {
+    // The watchdog's own clock, started when the run started. Nothing the child
+    // prints can advance, reset or extend it - which is the entire point of
+    // having it, and the difference between this and the two event-driven
+    // ceilings below.
+    let started = Instant::now();
+    let timeout = ceilings.per_test;
     loop {
         if done.load(Ordering::SeqCst) {
             return;
@@ -931,18 +1022,31 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        let timed_out = tracker
-            .lock()
-            .ok()
-            .and_then(|t| t.timed_out(timeout));
-        let Some((test, elapsed)) = timed_out else {
+        // Wall deadline first: it is the authoritative one, so it must not be
+        // preempted by an attribution guess that happens to fire in the same
+        // poll tick.
+        let wall_expired = ceilings
+            .wall
+            .filter(|w| started.elapsed() >= *w)
+            .map(|w| (WALL_WEDGE.to_owned(), started.elapsed(), w));
+
+        let timed_out = wall_expired.or_else(|| {
+            tracker
+                .lock()
+                .ok()
+                .and_then(|t| t.timed_out(timeout))
+                .map(|(test, elapsed)| {
+                    let ceiling = if test == IDLE_WEDGE { IDLE_TIMEOUT } else { timeout };
+                    (test, elapsed, ceiling)
+                })
+        });
+        let Some((test, elapsed, ceiling)) = timed_out else {
             continue;
         };
         if done.load(Ordering::SeqCst) {
             return;
         }
 
-        let ceiling = if test == IDLE_WEDGE { IDLE_TIMEOUT } else { timeout };
         let hung_test = capture_hung_test(&state_root, cargo_pid, &test, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
@@ -1576,6 +1680,55 @@ mod tests {
         assert!(tracker.timed_out(TEST_TIMEOUT).is_none(), "idle window restarts at the result");
     }
 
+    /// The wall deadline must fire with an entirely empty tracker: no announced
+    /// start, no announced result, nothing for either event-driven ceiling to
+    /// age. That is the case the whole struct exists for - a run whose lifecycle
+    /// events were lost or never emitted must still be bounded, and the bound
+    /// must come from a clock no input can reach.
+    #[test]
+    fn the_wall_deadline_fires_with_no_events_at_all() {
+        use std::os::unix::process::CommandExt;
+
+        let root = test_root("watchdog_wall_deadline");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60 & wait")
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn shell");
+        let cargo_pid = child.id();
+
+        // Deliberately pristine: `timed_out` would report the idle wedge only
+        // after IDLE_TIMEOUT (five minutes), and per-test aging needs a start
+        // that never comes. Neither can explain a kill here.
+        let tracker = Arc::new(Mutex::new(TestTracker::default()));
+        let done = Arc::new(AtomicBool::new(false));
+        let hung = Arc::new(Mutex::new(None::<HungTest>));
+
+        watchdog_loop_with_timing(
+            root.clone(),
+            cargo_pid,
+            Arc::clone(&tracker),
+            Arc::clone(&done),
+            Arc::clone(&hung),
+            Ceilings { per_test: Duration::from_secs(3600), wall: Some(Duration::from_millis(40)) },
+            Duration::from_millis(5),
+        );
+        child.wait().ok();
+
+        let hung = hung.lock().unwrap().clone().expect("wall deadline must produce a verdict");
+        assert_eq!(hung.test, WALL_WEDGE, "the wall deadline names no offender");
+        assert_eq!(hung.ceiling, Duration::from_millis(40));
+        assert!(
+            wait_for_process_group_exit(cargo_pid),
+            "the process group must be killed"
+        );
+    }
+
     #[test]
     fn watchdog_kills_process_group_and_writes_snapshot() {
         use std::os::unix::process::CommandExt;
@@ -1612,7 +1765,7 @@ mod tests {
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
-            Duration::from_millis(20),
+            Ceilings { per_test: Duration::from_millis(20), wall: None },
             Duration::from_millis(5),
         );
         child.wait().ok();
