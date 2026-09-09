@@ -18,6 +18,10 @@
 //! Attribution is by ancestry read from `/proc` - the nearest ancestor that
 //! is not itself part of the cargo family (`rust-analyzer`, a shell, an
 //! editor), so the report says who started it.
+//!
+//! Ownership - the question of which cargo is brokkr's own and therefore not a
+//! stray - is decided by the *verified lock holder's pid*, not by an ancestor
+//! being named `brokkr`; see [`Ownership`] for why the name is not enough.
 
 use std::collections::HashMap;
 
@@ -69,6 +73,50 @@ pub fn is_cargo_family(comm: &str) -> bool {
         || comm.starts_with("clippy-driver")
         || comm.starts_with("build_script")
         || comm.starts_with("build-script")
+        // The rustc wrapper. `brokkr-rustc-guard` truncates to
+        // `brokkr-rustc-gu`, which matched nothing here, so the guard was
+        // never a reap candidate - and killing its parent cargo does not kill
+        // it, because the reap signals the PIDs it selected rather than their
+        // descendant trees. A guard that outlived the reap went on to exec
+        // rustc, which is the one thing the reap exists to prevent. Matched on
+        // the `brokkr-rustc` prefix, which cannot collide with `brokkr`
+        // itself.
+        || comm.starts_with("brokkr-rustc")
+}
+
+/// How a reap decides that a cargo-family process is brokkr's own work rather
+/// than a stray.
+///
+/// Ancestry by `comm` was the original rule and it is spoofable in the way that
+/// matters: any executable *named* `brokkr` exempts every cargo and rustc
+/// beneath it, with no reference to whether it holds anything. A shell copied
+/// to that name is enough, which is not a hypothetical - it is how the guard's
+/// own fence was first probed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ownership {
+    /// The verified current lock holder's PID. An ancestor matching it is
+    /// brokkr's own work; a process merely *named* `brokkr` is not. This is
+    /// the rule whenever a hold is active, which is exactly when a stray can
+    /// do damage.
+    Holder(u32),
+    /// No hold is active, or the holder's identity could not be verified
+    /// (a PID namespace, a stale record). Fall back to the ancestor's `comm`.
+    /// Spoofable, and chosen anyway: the alternative - exempting nothing -
+    /// SIGKILLs brokkr's own build the moment verification is unavailable,
+    /// and this reaper runs unattended inside every locked command.
+    UnverifiedComm,
+}
+
+/// The ownership rule in force right now, read from the lock file.
+fn current_ownership() -> Ownership {
+    match crate::lockfile::status() {
+        Ok(Some(info))
+            if crate::lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id) =>
+        {
+            Ownership::Holder(info.pid)
+        }
+        _ => Ownership::UnverifiedComm,
+    }
 }
 
 struct ProcEntry {
@@ -103,9 +151,9 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
     table
 }
 
-/// Every cargo-family process with no brokkr ancestor, leaves first. Pure
-/// over the given table so the classification is unit-testable.
-fn classify(table: &HashMap<u32, ProcEntry>) -> Vec<Stray> {
+/// Every cargo-family process not owned by brokkr, leaves first. Pure over the
+/// given table and ownership rule so the classification is unit-testable.
+fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray> {
     let mut strays = Vec::new();
     for (&pid, entry) in table {
         if !is_cargo_family(&entry.comm) {
@@ -121,7 +169,11 @@ fn classify(table: &HashMap<u32, ProcEntry>) -> Vec<Stray> {
         for _ in 0..256 {
             let Some(parent) = table.get(&cursor) else { break };
             depth += 1;
-            if parent.comm == "brokkr" {
+            let owns = match ownership {
+                Ownership::Holder(holder) => cursor == holder,
+                Ownership::UnverifiedComm => parent.comm == "brokkr",
+            };
+            if owns {
                 under_brokkr = true;
                 break;
             }
@@ -153,7 +205,7 @@ fn classify(table: &HashMap<u32, ProcEntry>) -> Vec<Stray> {
 
 /// The strays on this host right now, leaves first.
 pub fn find() -> Vec<Stray> {
-    classify(&read_proc())
+    classify(&read_proc(), current_ownership())
 }
 
 /// SIGKILL each stray, then each rust-analyzer starter. Returns `(strays,
@@ -271,7 +323,37 @@ mod tests {
     #[test]
     fn cargo_under_brokkr_is_not_a_stray() {
         let t = table(&[(1, 0, "systemd"), (10, 1, "zsh"), (20, 10, "brokkr"), (30, 20, "cargo"), (40, 30, "rustc")]);
-        assert!(classify(&t).is_empty());
+        assert!(classify(&t, Ownership::Holder(20)).is_empty());
+        // And under the fallback rule, where the name is all there is.
+        assert!(classify(&t, Ownership::UnverifiedComm).is_empty());
+    }
+
+    /// The impersonation the `comm` rule cannot see: a shell copied to a file
+    /// named `brokkr` exempted everything under it. Keyed on the verified
+    /// holder PID instead, the same tree is entirely stray.
+    #[test]
+    fn a_process_merely_named_brokkr_does_not_exempt_its_cargo() {
+        let t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "zsh"),
+            (20, 10, "brokkr"), // the impostor; the real holder is elsewhere
+            (30, 20, "cargo"),
+            (40, 30, "rustc"),
+        ]);
+        let pids: Vec<u32> =
+            classify(&t, Ownership::Holder(99)).iter().map(|s| s.pid).collect();
+        assert_eq!(pids, vec![40, 30]);
+        // The old rule is what the fallback preserves, spoof and all.
+        assert!(classify(&t, Ownership::UnverifiedComm).is_empty());
+    }
+
+    /// A guard that outlives the cargo above it is itself reapable now.
+    #[test]
+    fn the_rustc_guard_is_in_the_cargo_family() {
+        assert!(is_cargo_family("brokkr-rustc-gu"));
+        assert!(is_cargo_family("brokkr-rustc-guard"));
+        // brokkr itself must never be reapable.
+        assert!(!is_cargo_family("brokkr"));
     }
 
     #[test]
@@ -283,7 +365,7 @@ mod tests {
             (30, 20, "build_script_bu"),
             (31, 20, "build_script_bu"),
         ]);
-        let strays = classify(&t);
+        let strays = classify(&t, Ownership::UnverifiedComm);
         let pids: Vec<u32> = strays.iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![30, 31, 20]);
         assert!(strays.iter().all(|s| s.started_by == "rust-analyzer (pid 10)"), "{strays:?}");
@@ -308,7 +390,7 @@ mod tests {
             (11, 1, "zsh"),
             (21, 11, "cargo"),
         ]);
-        let strays = classify(&t);
+        let strays = classify(&t, Ownership::UnverifiedComm);
         let starters: Vec<u32> = starters_to_kill(&strays).into_iter().map(|(pid, _)| pid).collect();
         assert_eq!(starters, vec![10]);
     }
@@ -322,7 +404,7 @@ mod tests {
             (30, 20, "build_script_bu"),
             (31, 20, "build_script_bu"),
         ]);
-        let strays = classify(&t);
+        let strays = classify(&t, Ownership::UnverifiedComm);
         let line = reap_line(&strays, 3, 1);
         assert!(!line.contains('\n'));
         assert_eq!(

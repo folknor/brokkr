@@ -210,8 +210,9 @@ hour, and the next day four of its build scripts spun at 100% CPU under it.
 
 So every locked brokkr command, once it holds the lock, scans `/proc` for the
 cargo family - `cargo`, `cargo-*`, `rustc`, `rustdoc`, `clippy-driver`, build
-scripts (`build_script_bu` after the kernel's 15-byte truncation) - with no
-`brokkr` ancestor, SIGKILLs them leaves first, and reports the whole reap on
+scripts (`build_script_bu` after the kernel's 15-byte truncation) and the
+wrapper itself (`brokkr-rustc-gu`, truncated from `brokkr-rustc-guard`) - that
+brokkr does not own, SIGKILLs them leaves first, and reports the whole reap on
 one line - comm counts plus deduplicated starters, no pids since everything
 named is already dead, e.g. `SIGKILL sent to 3 stray cargo processes
 (build_script_bu x2, cargo) started by rust-analyzer` (`src/stray.rs`;
@@ -219,9 +220,24 @@ live per-process detail is `brokkr strays`' job). The starter is
 the nearest ancestor outside the family. When it is rust-analyzer it is killed
 too, because it would only re-run the cargo within seconds and the editor
 restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is
-never signalled. Under the lock, so another brokkr's cargo can never be
-mistaken for a stray. Failure to read `/proc` reads as nothing found: the reap
-is on the way to the real work, never a gate on it.
+never signalled. Failure to read `/proc` reads as nothing found: the reap is on
+the way to the real work, never a gate on it.
+
+**Ownership is the verified lock holder's pid, not an ancestor's name.** The
+original rule exempted any process with a `brokkr` ancestor by `comm`, which
+made the exemption spoofable by naming *any* executable `brokkr` - a shell
+copied to that name exempted every cargo and rustc beneath it, with no
+reference to whether it held anything. The rule now walks for an ancestor whose
+pid equals the current holder's, verified through the lock file's starttime and
+boot-id tokens. When no hold is active, or the holder's identity cannot be
+verified (a PID namespace, a stale record), the old `comm` rule is the
+fallback - spoof and all, because the alternative is a reaper that SIGKILLs
+brokkr's own build the moment verification is unavailable, unattended, inside
+every locked command.
+
+A consequence worth naming: the reap runs *after* `acquire()` returns, so it
+cannot rescue a lock acquisition that is itself blocked. Nothing today blocks
+acquisition on other processes, so the ordering is currently harmless.
 
 `brokkr strays` is the by-hand form: bare lists, `--kill` lists then kills.
 Works with no `brokkr.toml`. A legitimate run that needs
