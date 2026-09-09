@@ -117,5 +117,16 @@ fn lock_is_held() -> bool {
     use std::os::fd::AsRawFd;
     // SAFETY: flock on an fd owned by `file`, which outlives the call.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
-    rc != 0
+    if rc == 0 {
+        // Shared lock granted, so no exclusive holder. The momentary hold
+        // releases when `file` drops, before the caller execs.
+        return false;
+    }
+    // Only EWOULDBLOCK demonstrates a conflicting owner. Every other flock
+    // failure - EINTR, ENOLCK, EBADF - says nothing about whether brokkr is
+    // running, and treating them as "held" inverts this guard's stated
+    // fail-open policy: a kernel out of lock records would refuse every
+    // compile on the machine. Fail open and let the stray reaper catch what
+    // slips.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
 }

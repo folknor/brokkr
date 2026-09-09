@@ -467,14 +467,21 @@ fn count_matching_tests(
     project_root: &Path,
     debug: bool,
 ) -> Result<usize, DevError> {
-    // Doctests cannot be enumerated (`--list` is a libtest flag; rustdoc has
-    // no listing contract), so the single-test precondition `--timeout`
-    // rides on cannot be established for a doc-only sweep.
+    // Doctest enumeration is possible but not wired up here yet. The claim
+    // this refusal used to make - that doctests cannot be enumerated because
+    // `--list` is a libtest flag and rustdoc has no listing contract - is
+    // false on a current nightly: rustdoc forwards its test arguments into
+    // libtest, which supports both `--list` and `--exact`, so a doc-only
+    // sweep can be enumerated once merging is disabled (rustdoc's own
+    // `--merge-doctests=no`, which reaches rustdoc through RUSTDOCFLAGS
+    // rather than through cargo's `--` split). Until that plumbing exists,
+    // refuse - but say which it is, so the next reader does not inherit a
+    // wrong reason for a right refusal.
     if sweep.doc_only {
         return Err(DevError::Config(format!(
-            "--timeout cannot apply within doc-only sweep '{}': doctests cannot be enumerated, \
-             so the single-test precondition cannot be checked. Drop --timeout, or use --sweep \
-             to run a non-doc sweep.",
+            "--timeout cannot apply within doc-only sweep '{}': brokkr does not enumerate \
+             doctests yet, so the single-test precondition cannot be checked. Drop --timeout, \
+             or use --sweep to run a non-doc sweep.",
             sweep.label
         )));
     }
@@ -792,18 +799,6 @@ fn run_one(
         return Ok(RunReport::bare(Outcome::BuildFailed));
     }
 
-    // Zero tests ran: the name didn't match anything in this sweep. Print
-    // an informational SKIP; the caller decides whether this is a real
-    // error (all sweeps missed) or fine (feature-gated out of this one).
-    if parsed.passed == 0 && parsed.failed == 0 {
-        flush_sink(sink, false);
-        println!(
-            "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
-        );
-        std::io::stdout().flush().ok();
-        return Ok(RunReport::bare(Outcome::NoMatch));
-    }
-
     if let Some(fail) = parsed.failures.first() {
         let msg = fail.message.as_deref().unwrap_or("<no panic message>");
         let loc = fail.location.as_deref().unwrap_or("<unknown location>");
@@ -834,6 +829,26 @@ fn run_one(
         );
         std::io::stdout().flush().ok();
         return Ok(RunReport::bare(Outcome::Fail));
+    }
+
+    // Zero tests ran: the name didn't match anything in this sweep. Print
+    // an informational SKIP; the caller decides whether this is a real
+    // error (all sweeps missed) or fine (feature-gated out of this one).
+    //
+    // Ordered AFTER the unsuccessful-exit check, not before it. A run that
+    // crashed hard enough to report no counts at all - a SIGABRT or a
+    // stack overflow before the first `test result:` line, a harness that
+    // died in a static initializer - has `passed == 0 && failed == 0` too,
+    // and reporting that as "no tests matched" turned a red run green: the
+    // name was fine, the binary blew up. Zero counts mean a name miss only
+    // when the process also exited successfully.
+    if parsed.passed == 0 && parsed.failed == 0 {
+        flush_sink(sink, false);
+        println!(
+            "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
+        );
+        std::io::stdout().flush().ok();
+        return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
     flush_sink(sink, false);
@@ -1009,13 +1024,32 @@ fn stderr_indicates_compile_error(line: &str) -> bool {
 }
 
 /// Cargo's per-suite launch line: `Running unittests src/lib.rs
-/// (<target>/debug/deps/foo-abc123)` or `Running tests/bar.rs (...)`.
-/// Matched by shape (trailing parenthesized path under `deps/`) rather
-/// than the bare "Running " prefix, so a test's own eprintln! that
-/// happens to start with "Running " still passes through.
+/// (<binary path>)` or `Running tests/bar.rs (<binary path>)`.
+///
+/// Matched by shape rather than the bare "Running " prefix, so a test's own
+/// eprintln! that happens to start with "Running " still passes through. The
+/// shape is the *source* target - `unittests <path>.rs` or `<path>.rs` -
+/// followed by a parenthesized filesystem path, and deliberately says nothing
+/// about where in the target dir that binary lives. It used to require
+/// `/deps/`, which silently stopped matching when cargo moved compiled units
+/// out of `target/<profile>/deps/` and under `target/<profile>/build/<pkg>/
+/// <hash>/out/`. Because this predicate is what flips the stderr forwarder
+/// into test-phase mode, a miss meant every line of a whole test run was
+/// filtered as if it were still cargo compile chatter: the `Running` lines
+/// leaked, `note: run with RUST_BACKTRACE=1` leaked, and a test's own
+/// `warning:`-prefixed output was eaten as a compile-warning block.
 fn is_cargo_running_line(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("Running ") && t.ends_with(')') && t.contains("/deps/")
+    let Some(rest) = line.trim_start().strip_prefix("Running ") else {
+        return false;
+    };
+    let Some(inner) = rest.strip_suffix(')') else {
+        return false;
+    };
+    let Some((target, path)) = inner.rsplit_once(" (") else {
+        return false;
+    };
+    let target = target.strip_prefix("unittests ").unwrap_or(target);
+    target.ends_with(".rs") && path.contains('/')
 }
 
 /// Strip test-harness framing on stdout. The test's own `println!` output,
@@ -1282,12 +1316,29 @@ mod tests {
     }
 
     #[test]
+    fn cargo_running_line_matches_the_depsless_target_layout() {
+        // Cargo no longer puts compiled units under `target/<profile>/deps/`;
+        // a `/deps/` substring requirement made this predicate - and with it
+        // the whole test-phase stderr filter - dead on such a toolchain.
+        assert!(is_cargo_running_line(
+            "     Running unittests src/lib.rs (target/debug/build/broadarrow-daemon/87f43d5b0d3f3d44/out/broadarrow_daemon-87f43d5b0d3f3d44)"
+        ));
+        assert!(is_cargo_running_line(
+            "     Running tests/boot_event_stream.rs (target/unify-package/debug/build/broadarrow-daemon/77ac71235dfced6c/out/boot_event_stream-77ac71235dfced6c)"
+        ));
+    }
+
+    #[test]
     fn cargo_running_line_spares_test_output() {
         // A test's own eprintln! starting with "Running " lacks the
-        // parenthesized deps path and must pass through.
+        // `<target>.rs (<path>)` shape and must pass through.
         assert!(!is_cargo_running_line("Running 500 monte carlo paths"));
         assert!(!is_cargo_running_line("Running phase 2 (warmup)"));
         assert!(!is_cargo_running_line("   Compiling brokkr v0.1.0"));
+        // Parenthesized, but the pre-paren token is prose, not a source file.
+        assert!(!is_cargo_running_line("Running the sweep (a/b/c)"));
+        // A source-file-shaped target with no path in the parens.
+        assert!(!is_cargo_running_line("Running tests/foo.rs (cached)"));
     }
 
     #[test]

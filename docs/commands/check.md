@@ -1626,6 +1626,13 @@ Package resolution: explicit `-p/--package` > `[test] default_package` in
 
 Always adds `--include-ignored --nocapture --test-threads=1`.
 
+`--nocapture` is a **libtest** flag, and for a `doc_only` sweep it does not
+deliver live output. Rustdoc captures each doctest subprocess itself, through
+its own separate `--no-capture` option; passing `--nocapture` via cargo's `--`
+split disables only the outer libtest capture. So a doc-only sweep's doctest
+output is still buffered until the doctest completes. Fixing that means passing
+rustdoc its own flag through `RUSTDOCFLAGS`, which brokkr does not do yet.
+
 Sweep selection: if `[test].default_profile` is set, the test runs against
 every `[[check]]` entry the profile references (profile filters are dropped -
 the user's `<NAME>` is the filter); else if `[[check]]` is non-empty, every
@@ -1635,7 +1642,7 @@ flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary
 with the same feature set the test crate sees.
 
 Streams the test's own stdout/stderr live (cargo/test-harness framing lines
-are stripped, including the per-suite `Running <target> (.../deps/...)`
+are stripped, including the per-suite `Running <target> (<binary path>)`
 launch lines, standalone `ok`/`FAILED` verdict lines, the duplicate
 empty `failures:` header, the `RUST_BACKTRACE` hint, and cargo's
 `to rerun pass ...` suggestion), then prints a `[test]` footer per run: `PASS`,
