@@ -4,7 +4,7 @@
 //! cargo parsers, while also watching libtest's partial `test name ... `
 //! progress marker before the terminating newline arrives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -236,10 +236,19 @@ struct TestTracker {
     /// From that point the per-test cap applies to the whole run, not only to
     /// tests brokkr happens to be watching.
     executing: bool,
-    /// When brokkr last saw a test *complete* (or a suite announce itself).
-    /// Bounded by the per-test cap: see [`TestTracker::timed_out`] for why a
-    /// no-completion clock is needed on top of the per-test one.
+    /// When brokkr last saw *new* lifecycle progress: a suite announcing itself,
+    /// or the first sighting of a test starting or completing. Bounded by the
+    /// per-test cap - see [`TestTracker::timed_out`] for why a no-progress clock
+    /// is needed on top of the per-test one, and `observe_start` for why only
+    /// first sightings count.
     last_progress: Instant,
+    /// Names whose start has been counted, so a repeated start cannot refresh the
+    /// clock. A test can write lifecycle-shaped records to the same stdout the
+    /// protocol uses; this bounds how many refreshes such a forgery can buy to the
+    /// number of distinct names it invents.
+    seen: HashSet<String>,
+    /// Names whose completion has been counted, for the same reason.
+    finished: HashSet<String>,
     /// When the in-flight set last changed (or the run began): the start of
     /// the current no-test-in-flight window, which [`IDLE_TIMEOUT`] bounds.
     idle_since: Instant,
@@ -253,6 +262,8 @@ impl Default for TestTracker {
             ever_observed: false,
             executing: false,
             last_progress: Instant::now(),
+            seen: HashSet::new(),
+            finished: HashSet::new(),
             idle_since: Instant::now(),
         }
     }
@@ -260,20 +271,41 @@ impl Default for TestTracker {
 
 impl TestTracker {
     fn observe_start(&mut self, name: String) {
+        // Refreshes the no-completion clock, and only the FIRST time this name is
+        // seen. Two reasons, and they pull in opposite directions.
+        //
+        // It must refresh at all, or the clock false-kills honest runs: a suite
+        // that announces itself at t=0, starts its first test at t=2 and finishes
+        // it at t=19 has broken no budget, yet a clock armed only by the suite
+        // event fires at t=20 and kills a healthy test.
+        //
+        // It must refresh only once per name, or it is a forgery channel: a test
+        // writing straight to the process's stdout can emit lifecycle records, and
+        // one that re-emits the same start (or completion) on a timer would reset
+        // the clock forever and run until the sweep backstop. Once-per-name means
+        // a forger can spend only as many refreshes as there are real tests.
+        let first_sighting = self.seen.insert(name.clone());
         self.current.entry(name).or_insert_with(Instant::now);
         self.idle_since = Instant::now();
         self.ever_observed = true;
         self.executing = true;
+        if first_sighting {
+            self.last_progress = Instant::now();
+        }
     }
 
     fn observe_result(&mut self, name: &str) {
+        let first_completion = self.finished.insert(name.to_owned());
         if let Some(started) = self.current.remove(name) {
             self.completed.push((name.to_owned(), started.elapsed()));
         }
         self.idle_since = Instant::now();
         self.ever_observed = true;
         self.executing = true;
-        self.last_progress = Instant::now();
+        // Once per name, for the forgery reason above.
+        if first_completion {
+            self.last_progress = Instant::now();
+        }
     }
 
     /// A suite announced itself: test execution has begun, so the per-test cap
@@ -481,6 +513,13 @@ pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
     env: &[(&str, &str)],
     timeout: Duration,
     per_test_timeout: Duration,
+    // `abort` is lane-wide cancellation, set by whichever concurrent binary blows
+    // its budget first; every other binary still executing sees it within one poll
+    // and kills its own process group. Without it, "brokkr stops" was not true of
+    // the parallel lane: an abort flag could stop QUEUED binaries from starting,
+    // but siblings already running were left to finish, so a timeout was followed
+    // by up to another full budget of test execution before the error surfaced.
+    abort: Option<&AtomicBool>,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -551,7 +590,10 @@ where
             Ok(Some(status)) => break status,
             Ok(None) => {
                 let overtime = start.elapsed() >= timeout;
-                if overtime || crate::shutdown::is_shutdown_requested() {
+                let cancelled = abort
+                    .as_ref()
+                    .is_some_and(|a| a.load(Ordering::SeqCst));
+                if overtime || cancelled || crate::shutdown::is_shutdown_requested() {
                     timed_out = overtime;
                     kill_process_group(cargo_pid).ok();
                     let status = child.wait().map_err(|e| DevError::Subprocess {
@@ -2093,6 +2135,52 @@ mod tests {
         );
     }
 
+    /// A suite that is slow to reach its first test has broken no budget. Arming
+    /// the no-progress clock on the suite event alone killed it: suite at t=0,
+    /// first test starting at t=2 and finishing at t=19 was killed at t=20 for
+    /// consuming 19 seconds of its 20. An observed START has to count as progress.
+    #[test]
+    fn a_slow_suite_startup_is_not_a_blown_budget() {
+        let mut tracker = TestTracker::default();
+        tracker.observe_suite_start();
+        // Pretend the suite announced itself 19 seconds ago and the first test
+        // started 2 seconds later - so 17 seconds into a 20 second budget.
+        tracker.last_progress = Instant::now()
+            .checked_sub(Duration::from_secs(19))
+            .unwrap_or_else(Instant::now);
+        tracker.observe_start("a::first".to_owned());
+        assert!(
+            tracker.timed_out(TEST_TIMEOUT).is_none(),
+            "a test that started 0s ago has spent none of its budget"
+        );
+    }
+
+    /// The forgery bound. A test can write lifecycle-shaped records to the same
+    /// stdout the protocol uses, so a naive clock that any completion refreshes
+    /// lets a test re-emit one on a timer and run until the sweep backstop.
+    /// Refreshes are once per name, so a forger can spend only as many as there
+    /// are distinct names it invents.
+    #[test]
+    fn a_repeated_forged_completion_cannot_refresh_the_clock() {
+        let mut tracker = TestTracker::default();
+        tracker.observe_suite_start();
+        tracker.observe_start("a::one".to_owned());
+        tracker.observe_result("a::one");
+
+        // Wind the clock back past the cap, then replay the same records - which
+        // is exactly what a test looping `println!` of a captured event does.
+        tracker.last_progress = Instant::now()
+            .checked_sub(TEST_TIMEOUT + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        tracker.observe_start("a::one".to_owned());
+        tracker.observe_result("a::one");
+
+        let (name, _) = tracker
+            .timed_out(TEST_TIMEOUT)
+            .expect("a replayed event must not buy more time");
+        assert_eq!(name, NO_COMPLETION);
+    }
+
     #[test]
     fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
         use std::os::unix::process::CommandExt;
@@ -2122,6 +2210,8 @@ mod tests {
             ever_observed: true,
             executing: true,
             last_progress: Instant::now(),
+            seen: HashSet::new(),
+            finished: HashSet::new(),
             idle_since: Instant::now(),
         }));
         let done = Arc::new(AtomicBool::new(false));
@@ -2186,6 +2276,8 @@ mod tests {
             ever_observed: true,
             executing: true,
             last_progress: Instant::now(),
+            seen: HashSet::new(),
+            finished: HashSet::new(),
             idle_since: started,
         }));
         let done = Arc::new(AtomicBool::new(false));

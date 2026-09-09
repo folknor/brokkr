@@ -231,10 +231,11 @@ to the idle ceiling instead.
 
 - **The parallel-binaries lane** creates every binary's thread up front and they
   wait for a budget slot. A killed binary used to release its slots and let the
-  next queued binary start, so the run continued past a timeout. An abort flag now
-  stops anything new from starting; binaries already executing are bounded by
-  their own watchdogs and are reported, and the ones never started are reported as
-  skipped.
+  next queued binary start, so the run continued past a timeout. Cancellation is
+  now lane-wide: the first binary to blow its budget sets a shared flag, queued
+  binaries return without starting, and every binary *already executing* sees the
+  flag within one watchdog poll and kills its own process group. Binaries never
+  started are reported as skipped.
 - **The nextest lane** no longer enumerates every failure in one run. In that
   engine a timeout arrives as a failed test, and `MaxFail::All` means "run
   everything regardless of failures", so a test that blew its cap was terminated
@@ -254,6 +255,19 @@ process's OS descriptor; a subprocess started with `Command::status()` inherits
 the descriptor outright. Output with no trailing newline gets libtest's next
 record concatenated onto its line (brokkr recovers that case, see
 `split_trailing_event`), and a record that still goes unparsed is a lost event.
+
+Because those records also *refresh* the clocks, a test that emits them could
+otherwise buy itself unlimited time - re-emitting one completion on a timer would
+reset the no-progress clock forever. So a refresh is counted **once per test
+name**: a forger can spend only as many refreshes as there are distinct names it
+invents, and a replayed record buys nothing.
+
+The residual limit is worth stating rather than glossing: on a shared harness the
+cap is enforced through a stream the tests can write to, so a determined test that
+invents a fresh plausible name every twenty seconds is bounded by the sweep
+backstop rather than by twenty seconds. An unforgeable per-test cap needs the
+process to be the unit of one test, which is what the isolated lane, the nextest
+lane and `brokkr test --timeout` give you.
 
 That affects the **name**, not the entitlement to kill. If a test's terminal event
 is lost, either that test really has burned its budget, or brokkr has seen no test

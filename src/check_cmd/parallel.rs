@@ -543,6 +543,7 @@ fn run_one_binary(
     slots: u32,
     cargo_extra: &[String],
     libtest_extra: &[String],
+    abort: &std::sync::atomic::AtomicBool,
 ) -> Result<BinaryRun, DevError> {
     let args = direct_libtest_args(sweep, slots, libtest_extra)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -558,6 +559,9 @@ fn run_one_binary(
         &env_pairs,
         test_runner::PARALLEL_SWEEP_TIMEOUT,
         test_runner::TEST_TIMEOUT,
+        // Shared with every concurrent binary: the first to blow its budget
+        // cancels the rest mid-flight rather than letting them finish.
+        Some(abort),
         |_| {},
         |_| {},
         |_| {},
@@ -803,6 +807,7 @@ fn run_parallel_sweep(
                     *slots,
                     cargo_extra,
                     libtest_extra,
+                    aborted,
                 );
                 if out.as_ref().is_ok_and(|r| r.timed_out || r.hung.is_some()) {
                     aborted.store(true, std::sync::atomic::Ordering::SeqCst);

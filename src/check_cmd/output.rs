@@ -654,6 +654,8 @@ fn run_one_test_sweep(
             &env_refs,
             test_runner::PARALLEL_SWEEP_TIMEOUT,
             test_runner::TEST_TIMEOUT,
+            // One cargo invocation, so there are no siblings to cancel.
+            None,
             |_| {},
             |_| {},
             move |elapsed| {
