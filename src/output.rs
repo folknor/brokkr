@@ -374,6 +374,11 @@ pub fn run_captured_with_env_and_deadline(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
+    // Last, after every caller-supplied env var, so a caller cannot displace
+    // the capability that lets this child compile under the hold. See
+    // `crate::hold` for why the mark is inherited rather than inferred, and why
+    // it is stamped on every child rather than only the ones named cargo.
+    crate::hold::stamp(&mut cmd);
     // PG isolation is opt-in: the caller asserts a SigtermGuard (or
     // equivalent) is active so terminal Ctrl-C bridges to the PG via
     // the wait-loop's flag-poll. Without that bridge, isolating the
@@ -543,6 +548,11 @@ pub fn spawn_captured(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
+    // Last, after every caller-supplied env var, so a caller cannot displace
+    // the capability that lets this child compile under the hold. See
+    // `crate::hold` for why the mark is inherited rather than inferred, and why
+    // it is stamped on every child rather than only the ones named cargo.
+    crate::hold::stamp(&mut cmd);
     // PG isolation is opt-in for the same reason as the deadline
     // runner: the caller asserts a SigtermGuard is active so terminal
     // signals bridge to the PG. The sidecar's own SigtermGuard (around
@@ -597,6 +607,11 @@ pub fn run_passthrough_in(
         cmd.env(k, v);
     }
     crate::oom::protect_child(&mut cmd);
+    // Last, after every caller-supplied env var, so a caller cannot displace
+    // the capability that lets this child compile under the hold. See
+    // `crate::hold` for why the mark is inherited rather than inferred, and why
+    // it is stamped on every child rather than only the ones named cargo.
+    crate::hold::stamp(&mut cmd);
 
     // A passthrough child (elivagar `regress`, elivagar run-mode dispatch) is a
     // real, long-running workload with no sidecar window around it. Historically

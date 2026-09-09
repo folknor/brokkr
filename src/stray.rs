@@ -291,6 +291,29 @@ pub fn reap_after_lock() {
     output::lock_msg(&reap_line(&strays, killed, starters));
 }
 
+/// The reap run from inside lock acquisition, when compilation leases have not
+/// drained on their own.
+///
+/// Separate from [`reap_after_lock`] because it runs at a different moment and
+/// carries a different meaning. `reap_after_lock` happens once the hold is
+/// usable and is pure hygiene. This one runs *during* acquisition, while
+/// `brokkr.lock` is held but the compile lease has not been obtained, and its
+/// purpose is to unblock a drain that a foreign compiler is sitting on.
+///
+/// It is a recovery attempt, never a guarantee: a lease can be held by a
+/// detached process with a name no cargo-family scan matches, and killing every
+/// process this finds does not prove the lease was released. The drain's only
+/// evidence remains the exclusive flock itself.
+pub fn reap_for_drain() {
+    let strays = find();
+    if strays.is_empty() {
+        output::lock_msg("no strays found - the lease is held by something this scan cannot see");
+        return;
+    }
+    let (killed, starters) = kill(&strays);
+    output::lock_msg(&reap_line(&strays, killed, starters));
+}
+
 /// `brokkr strays [--kill]`: bare lists, `--kill` lists then kills.
 pub fn cmd_strays(kill_them: bool) -> Result<(), DevError> {
     let strays = find();

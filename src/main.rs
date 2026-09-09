@@ -21,6 +21,7 @@ mod gremlins;
 mod guard;
 mod header;
 mod harness;
+mod hold;
 mod history;
 mod history_cmd;
 mod hotpath_fmt;

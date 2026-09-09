@@ -883,6 +883,9 @@ fn forward_cargo(subcommand: &str, args: &[String]) -> Result<(), DevError> {
     let mut cmd = ProcCommand::new("cargo");
     cmd.arg(subcommand);
     cmd.args(args);
+    // A raw `Command` outside the `output` helpers, so it needs the capability
+    // stamp explicitly: see `crate::hold`.
+    crate::hold::stamp(&mut cmd);
     let status = cmd.status().map_err(|e| DevError::Subprocess {
         program: "cargo".into(),
         code: None,

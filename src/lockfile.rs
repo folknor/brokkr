@@ -1,6 +1,7 @@
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use crate::error::DevError;
 
@@ -27,6 +28,19 @@ struct LockState {
     /// starttime from a previous boot could coincidentally match an
     /// unrelated process in this one.
     boot_id: String,
+    /// Hash of this acquisition's capability nonce (`crate::hold`), or empty
+    /// while the hold is still draining and has not minted one. Empty is what
+    /// makes the drain safe: a guard that reads an empty `auth` refuses, so no
+    /// long-running compile can be admitted into a window brokkr has not
+    /// finished clearing. It is the anti-starvation property, obtained from the
+    /// publication order rather than from a separate flag that a crashed writer
+    /// could leave behind.
+    auth: String,
+    /// True while this hold is waiting for earlier compilation leases to drain.
+    /// Published for diagnostics only - `brokkr lock` and the wait message -
+    /// so a waiter can tell "brokkr is clearing compilers" from "brokkr is
+    /// working".
+    draining: bool,
     /// PID of the most recent child process brokkr spawned under the lock,
     /// paired with its starttime token (captured when recorded; empty if
     /// unreadable, which fails verification closed). Updated by the harness
@@ -279,6 +293,28 @@ fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError>
         }
     }
 
+    // Refuse a *fresh* hold from inside an admitted compilation. Placed after
+    // the re-entry check above, which is the legitimate nested case, and before
+    // any flock, which is the deadlock: an admitted rustc holds a share of the
+    // compile lease, and a brokkr started from inside it - a proc macro that
+    // shells out to cargo - would take `brokkr.lock` and then wait forever for
+    // an exclusive compile lease that its own waiting parent is holding a share
+    // of. Refusing loses that build; blocking loses the machine.
+    //
+    // The marker is a convention, not a kernel fact: scrubbing the environment
+    // drops it while leaving the inherited descriptor open, and a helper can
+    // retain it after closing its own. It is the conservative direction in both
+    // cases - a refusal, never a hang.
+    if std::env::var_os(crate::hold::LEASE_MARKER_ENV).is_some_and(|v| !v.is_empty()) {
+        return Err(DevError::Lock(format!(
+            "refusing to take the brokkr lock from inside a compilation brokkr admitted \
+             ({} is set). Taking it here would deadlock: this compiler holds a share of the \
+             compile lease that a new hold must drain. Run the brokkr command outside the \
+             build - a build script or proc macro cannot drive brokkr.",
+            crate::hold::LEASE_MARKER_ENV
+        )));
+    }
+
     let c_path = path_to_cstring(path)?;
     let fd = open_lock_file(&c_path)?;
 
@@ -359,20 +395,18 @@ fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError>
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    // We now hold the flock. Activate any armed toolchain-disable *inside* the
-    // lock so the moved-aside window is exactly the locked window; the guard is
-    // stored below and restored on drop before the flock is released. On error,
-    // `owned` drops here and releases the flock.
+    // We hold `brokkr.lock`, but the hold is not yet usable: compilers admitted
+    // under an earlier hold may still be running. On failure `owned` drops here,
+    // releasing `brokkr.lock`, and we never reach protected work - measuring
+    // alongside a compiler we failed to clear is the one outcome worse than not
+    // measuring at all.
+    let state = drain_and_authorize(owned.as_raw_fd(), ctx)?;
+
+    // Activate any armed toolchain-disable *inside* the lock so the moved-aside
+    // window is exactly the locked window; the guard is stored below and
+    // restored on drop before the flock is released. After the drain, so the
+    // window does not span a wait on other processes.
     let toolchain = crate::toolchain::activate_for_lock()?;
-    let state = build_state(ctx);
-    // The initial publication must succeed: a hold whose metadata never
-    // existed would be indistinguishable from torn metadata for every
-    // reader, and `kill` could never target it. Later state updates degrade
-    // to invalidate-and-warn instead (see `publish`) - a mid-run bookkeeping
-    // failure should not abort a running bench.
-    rewrite_from_state(owned.as_raw_fd(), &state).map_err(|e| {
-        DevError::Lock(format!("failed to publish lock metadata: {e}"))
-    })?;
     let inner = Arc::new(LockInner {
         fd: owned,
         path: path.to_owned(),
@@ -660,6 +694,147 @@ fn open_lock_file(c_path: &std::ffi::CString) -> Result<RawFd, DevError> {
     Ok(fd)
 }
 
+/// The reader/writer lock that admitted compilation holds a share of.
+///
+/// A second file, distinct from `brokkr.lock`, because the two locks answer
+/// different questions and a process needs one while another holds the other.
+/// **Never unlinked and never replaced**: the proof that a drain succeeded is
+/// that an exclusive flock was obtained on *this inode*, so a fresh inode at
+/// the same path would silently split the exclusion in two.
+pub fn compile_lock_path() -> Result<PathBuf, DevError> {
+    Ok(lock_path()?.with_file_name("compile.lock"))
+}
+
+/// How long a fresh acquisition will wait for earlier compilation leases to
+/// drain before giving up. Split into two windows: after the first, the stray
+/// reaper runs once (a foreign compiler holding a lease is exactly what it
+/// exists to kill), then the wait resumes.
+const DRAIN_BUDGET: Duration = Duration::from_secs(120);
+const DRAIN_REAP_AFTER: Duration = Duration::from_secs(20);
+
+/// Wait for every participating compilation lease to be released, and return
+/// the exclusive descriptor that proves it.
+///
+/// The returned fd is held only long enough to publish the new capability, then
+/// dropped so this hold's own descendants can take shares of it.
+///
+/// # What success proves, and what it does not
+///
+/// Linux does not permit a shared and an exclusive flock on one file to
+/// coexist, so obtaining the exclusive lock proves no independent share
+/// remained at that instant. It proves this only for compilation that
+/// *participates* - that took a lease and retained it through execution.
+/// A compiler whose guard could not open this file at all fails open by design
+/// (see `src/bin/rustc_guard.rs`) and is outside the proof.
+///
+/// # Why it can fail
+///
+/// A lease lives as long as *any* process retains the open file description,
+/// which a detached helper can extend without bound while carrying a name no
+/// cargo-family scan will ever match. So this cannot be written as a wait that
+/// must eventually succeed: the budget expiring is a real outcome, and the
+/// caller must release `brokkr.lock` and refuse to proceed rather than
+/// measuring alongside a compiler it failed to clear.
+fn drain_compile_leases() -> Result<OwnedFd, DevError> {
+    let path = compile_lock_path()?;
+    let c_path = path_to_cstring(&path)?;
+    let fd = open_lock_file(&c_path)?;
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let start = Instant::now();
+    let mut announced = false;
+    let mut reaped = false;
+    loop {
+        let rc = unsafe { libc::flock(owned.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(owned);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => {}
+            Some(libc::EINTR) => continue,
+            // Any other flock failure is infrastructure, not contention. The
+            // holder side fails closed here on purpose: brokkr must never run
+            // protected work believing it has exclusion it never obtained.
+            _ => {
+                return Err(DevError::Lock(format!(
+                    "could not take the compile lease lock at {}: {err}",
+                    path.display()
+                )));
+            }
+        }
+        if !announced {
+            announced = true;
+            crate::output::lock_msg(
+                "waiting for compilers started under the previous hold to finish - brokkr clears them before measuring",
+            );
+        }
+        let waited = start.elapsed();
+        if waited >= DRAIN_BUDGET {
+            return Err(DevError::Lock(format!(
+                "compilation leases did not drain within {}s. A compiler admitted under an \
+                 earlier hold is still holding its lease, or a process that inherited its \
+                 descriptor is. This is not a transient busy signal - an unchanged blocker \
+                 will fail every retry. `brokkr strays` shows what is running; \
+                 `brokkr lock` shows the holder.",
+                DRAIN_BUDGET.as_secs()
+            )));
+        }
+        if !reaped && waited >= DRAIN_REAP_AFTER {
+            reaped = true;
+            crate::output::lock_msg(
+                "compilers have not drained; reaping strays once, then waiting again",
+            );
+            crate::stray::reap_for_drain();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Turn a freshly-taken `brokkr.lock` into a usable hold: publish who we are,
+/// drain earlier compilation leases, then mint and publish this acquisition's
+/// capability. Returns the published state.
+///
+/// The order is the protocol, and every step depends on the one before it:
+///
+/// 1. Publish identity with `auth=` empty and `draining=1`. A guard reading an
+///    empty `auth` refuses, so no new compiler can be admitted while we clear -
+///    which is the anti-starvation property, obtained from the publication order
+///    rather than from a separate intent flag a crashed writer could leave
+///    behind. It also lets `brokkr lock` and `kill` see who is draining. This
+///    publication must succeed: a hold whose metadata never existed is
+///    indistinguishable from torn metadata for every reader, and `kill` could
+///    never target it.
+/// 2. Drain, and hold the exclusive compile lease.
+/// 3. Mint the capability and publish its hash *while still holding that
+///    exclusive lease*. A guard paused before taking its share resumes after we
+///    release, reads the new hash under its share, and so cannot turn an earlier
+///    hold's nonce into an admitted compiler.
+/// 4. Release the exclusive lease, so this hold's own descendants can take
+///    shares of it.
+fn drain_and_authorize(fd: RawFd, ctx: &LockContext<'_>) -> Result<LockState, DevError> {
+    let mut state = build_state(ctx);
+    rewrite_from_state(fd, &state)
+        .map_err(|e| DevError::Lock(format!("failed to publish lock metadata: {e}")))?;
+
+    let compile_lease = drain_compile_leases()?;
+
+    let nonce = crate::hold::mint_nonce().ok_or_else(|| {
+        DevError::Lock(
+            "could not read /dev/urandom to mint a compilation capability; a hold that cannot \
+             mint one would have every one of its own compiles refused"
+                .into(),
+        )
+    })?;
+    state.auth = crate::hold::auth_hash(&nonce);
+    state.draining = false;
+    rewrite_from_state(fd, &state)
+        .map_err(|e| DevError::Lock(format!("failed to publish the compilation capability: {e}")))?;
+    crate::hold::publish_capability(&nonce);
+    drop(compile_lease);
+    Ok(state)
+}
+
 /// Build the initial `LockState` for a freshly-acquired lock. Captures the
 /// current brokkr invocation args (argv minus argv[0]) so `brokkr lock`
 /// can show exactly what the user typed, plus the identity tokens readers
@@ -672,6 +847,8 @@ fn build_state(ctx: &LockContext<'_>) -> LockState {
         project_root: ctx.project_root.to_owned(),
         starttime: proc_starttime(std::process::id()).unwrap_or_default(),
         boot_id: local_boot_id().unwrap_or_default(),
+        auth: String::new(),
+        draining: true,
         child: None,
         mocks: Vec::new(),
         progress: None,
@@ -688,6 +865,40 @@ fn build_state(ctx: &LockContext<'_>) -> LockState {
 fn publish(fd: RawFd, state: &LockState) {
     if let Err(e) = rewrite_from_state(fd, state) {
         eprintln!("[lock] warning: failed to write lock metadata: {e}");
+        invalidate_mutable_metadata(fd, state);
+    }
+}
+
+/// Clear the mutable record while preserving this hold's authorization.
+///
+/// Truncating the whole file here - which is what this used to do - would strip
+/// `auth` from a hold that is still live and still driving compilers, so every
+/// subsequent child of the *current* holder would be refused by the guard: a
+/// bookkeeping failure would silently become an inability to compile. So the
+/// identity and authorization block is rewritten and only the mutable tail
+/// (child, mocks, progress) is cleared, which is the part that could otherwise
+/// advertise a PID we no longer track to `kill --hard`.
+///
+/// If even that write fails there is nothing honest left but full
+/// invalidation: readers fail closed, and this holder's own later compiles are
+/// refused. That is the correct direction - a reader trusting a stale child PID
+/// is worse than a build that stops.
+fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
+    let cleared = LockState {
+        project: state.project.clone(),
+        command: state.command.clone(),
+        args: state.args.clone(),
+        project_root: state.project_root.clone(),
+        starttime: state.starttime.clone(),
+        boot_id: state.boot_id.clone(),
+        auth: state.auth.clone(),
+        draining: state.draining,
+        child: None,
+        mocks: Vec::new(),
+        progress: None,
+    };
+    if let Err(e) = rewrite_from_state(fd, &cleared) {
+        eprintln!("[lock] warning: failed to preserve lock authorization: {e}");
         invalidate_metadata(fd);
     }
 }
@@ -718,11 +929,17 @@ fn invalidate_metadata(fd: RawFd) {
 /// Textual values are escaped ([`escape_value`]) because paths and argv can
 /// contain newlines, which would otherwise inject lines into the format.
 fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
+    // `auth` and `draining` ride with the identity block, ahead of every
+    // mutable field: the authorization record must never be the line a
+    // truncation sacrifices, and it must be byte-identical across a holder's
+    // rewrites so a torn read cannot blend two holders' capabilities.
     let mut contents = format!(
-        "pid={}\nstarttime={}\nboot_id={}\n",
+        "pid={}\nstarttime={}\nboot_id={}\nauth={}\ndraining={}\n",
         std::process::id(),
         state.starttime,
         state.boot_id,
+        state.auth,
+        u8::from(state.draining),
     );
     match &state.child {
         Some((pid, st)) => {

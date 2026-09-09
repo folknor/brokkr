@@ -256,16 +256,123 @@ invocation through the guard. Cargo probes `rustc -vV` through the wrapper
 before building anything, so a refused build dies at startup, zero crates
 compiled.
 
-The decision is runtime, in order: `BROKKR_CARGO` set (the manual escape
-hatch) passes; a `brokkr` ancestor in `/proc` passes - the stray
-definition inverted, so brokkr-owned cargo needs no env threading; then a
-non-blocking shared flock probe of `~/.brokkr/brokkr.lock` - held refuses
-with exit 1 and a message naming `brokkr lock`, free passes. Fail-open
-everywhere except a demonstrably held flock: unreadable `/proc`, unset
-`$HOME`, missing lock file all pass. The guard is benchmark hygiene, not a
-security boundary; the reap remains the backstop for the
-lock-taken-mid-build race and for non-compiling cargo (`cargo metadata` is
-not fenced, and does not need to be).
+### Admission is a capability for one acquisition
+
+Admission is **not** an inference about the process tree. It used to be: a
+`brokkr` ancestor in `/proc` passed. That rule was spoofable - any executable
+*named* `brokkr` admitted every compiler beneath it, and a shell copied to that
+name is enough - and it was an inference about process *shape*, so it failed
+wherever shape is not visible: a PID namespace, a restricted `/proc`, a child
+that reparents. Its failure direction was the worst available, refusing the one
+process that must be allowed, because for brokkr's own builds the lock is always
+held: brokkr *is* the holder. The comm walk is gone, not kept as a fallback.
+
+Instead the holder marks its descendants. When a hold begins, brokkr mints a
+random per-acquisition **nonce** (`src/hold.rs`) and hands it to every child it
+starts, via the environment. Inheritance is the point: it reaches a grandchild
+cargo spawned by a test binary or a script check without brokkr having to
+predict which executables might eventually invoke cargo. The lock file carries
+only the nonce's *hash*, so reading the world-readable lock file does not hand a
+bystander a working capability.
+
+The nonce is per **acquisition**, not per process. An identity built from pid,
+starttime and boot id names the process, so one long-lived brokkr could take
+hold A, spawn a child, release A, later take hold B, and the child's mark would
+still match - admitted into a window it was never authorized for. A nested
+(re-entrant) acquire shares the nonce; a genuinely new hold in the same process
+mints a new one.
+
+### The compile lease
+
+Admission alone is not enough: a guard can be stopped between being admitted and
+`exec`ing, then start a compiler inside a much later hold. So admitted
+compilation holds a **reader lease** and a brokkr acquisition is the **writer**,
+on a second lock file, `~/.brokkr/compile.lock`.
+
+The guard takes a *shared* flock on `compile.lock`, clears `FD_CLOEXEC` so the
+lock rides through `exec`, and only then reads the published hash. Lock first,
+then check: a new hold cannot republish the capability without the exclusive lock
+that the share excludes, so the value read cannot change underneath. Because
+flock records live on the open file description, the lease is held by the
+compiler itself and released by the kernel when the last holder of that
+description exits - crash included, with nothing to clean up.
+
+Acquisition, correspondingly, does this before the hold is usable:
+
+1. Publish identity with `auth=` **empty** and `draining=1`. A guard reading an
+   empty `auth` refuses, so nothing new is admitted while brokkr clears. That is
+   the anti-starvation property, obtained from the publication order rather than
+   from a separate intent flag a crashed writer could leave behind.
+2. Take the **exclusive** `compile.lock`, draining earlier leases. After 20s the
+   stray reap runs once, then the wait resumes; the whole drain is bounded at
+   120s.
+3. Mint the nonce and publish its hash *while still holding the exclusive
+   lease*, so a guard paused before taking its share resumes, reads the new hash
+   under its share, and cannot turn an earlier hold's nonce into an admitted
+   compiler.
+4. Release the exclusive lease so the hold's own descendants can take shares.
+
+`compile.lock` is **never unlinked or replaced**. The proof that a drain
+succeeded is an exclusive flock on that *inode*; a fresh inode at the same path
+would silently split the exclusion in two.
+
+**Acquisition can now fail.** If the budget expires, brokkr releases
+`brokkr.lock` and reports that compilation leases did not drain - it does not
+proceed into measurement. This is not a transient busy signal: a lease lives as
+long as *any* process retains the descriptor, and a detached helper can extend
+it without bound while carrying a name no cargo-family scan will match, so an
+unchanged blocker fails every retry.
+
+### The decision, and what it guarantees
+
+In order: `BROKKR_CARGO` set passes, checked **before any lease** - a hatch that
+needs working lock infrastructure is useless exactly when it is needed. Then the
+lease is taken and the record read. Then the flock probe of `brokkr.lock` has the
+final word on whether a hold exists at all: not held passes, whatever the file
+says. Held plus an empty `auth` refuses (a hold is starting up). Held plus a
+non-empty `auth` admits only a matching capability.
+
+The flock probe is last on purpose. Deciding from the record alone is a bug that
+cost a probe run to find: abnormal termination leaves metadata behind while the
+kernel releases the flock, so a crashed brokkr publishes a perfectly well-formed
+capability that matches nobody - and refusing on it refused every compile on the
+machine until something rewrote the file. A leftover record is inert; only a live
+flock is a hold. Only `EWOULDBLOCK` demonstrates a holder; `EINTR`, `ENOLCK` and
+friends say nothing and fail open.
+
+The two sides fail in **opposite directions**, deliberately, because their
+contracts differ. The *holder* fails acquisition if it cannot take the exclusive
+lease or publish a complete record: brokkr must never run protected work
+believing it has exclusion it never obtained. The *guard* fails **open** when the
+lease infrastructure itself is broken - `compile.lock` unopenable, `ENOLCK`, a
+read-only `$HOME`, `FD_CLOEXEC` unclearable - and says so on stderr. Fail-closed
+there would let brokkr brick every build on the machine.
+
+So the guarantee is **conditional**, and stating it precisely matters:
+
+> Protected work excludes compilation that successfully participates in the
+> lease protocol. Explicit overrides and guard infrastructure failures can
+> overlap protected work.
+
+A sandboxed guard denied access to `compile.lock` fails open and compiles
+straight through a measurement, with no race required, and brokkr cannot even
+reliably report that the guarantee degraded - the failing guard may be
+elsewhere. The reap remains the backstop for non-participating cargo, and for
+non-compiling cargo (`cargo metadata` is not fenced and does not need to be).
+
+### Recursive acquisition is refused
+
+A brokkr command started from *inside* an admitted compilation - a proc macro
+that shells out to cargo, which is ordinary Rust - would take `brokkr.lock` and
+then wait forever for an exclusive `compile.lock` that its own waiting parent
+holds a share of. So the guard marks the compiler it admits
+(`BROKKR_COMPILE_LEASE`), and a brokkr finding that mark refuses a *fresh* hold,
+naming the deadlock. Nested (re-entrant) acquisition in the same process is
+unaffected - that check comes first. Refusing loses that build; blocking loses
+the machine. The mark is a convention, not a kernel fact: scrubbing the
+environment drops it while leaving the descriptor open, and a helper can retain
+it after closing its own - both of which fail toward a refusal rather than a
+hang.
 
 The wrapper stays configured for brokkr's own builds too - never bypassed
 by unsetting it - because the wrapper's identity is part of cargo's compile
@@ -273,14 +380,31 @@ fingerprint (cargo #9348): a wrapper that came and went per invocation
 would ping-pong full rebuilds. Enrollment therefore costs one full rebuild
 per target dir, once.
 
-One phase threads the env var rather than relying on the ancestor walk:
-`[[script_check]]` children are spawned with `BROKKR_CARGO=1`. A script-check
-is arbitrary shell that may run cargo (`cargo doc --no-deps` is the usual
-one), it runs inside a brokkr command that already holds the lock, and brokkr
-does not own the process tree below `sh -c` - anything the script does that
-detaches, re-execs, or reparents breaks a `/proc` walk that fails closed, so
-the fact is stated instead of inferred. Every other cargo brokkr runs is
-spawned directly and keeps the ancestor path.
+`[[script_check]]` children no longer need special treatment. A script-check is
+arbitrary shell that may run cargo (`cargo doc --no-deps` is the usual one), and
+brokkr does not own the process tree below `sh -c` - which is exactly why the
+ancestor walk failed for it, observed as a `cargo doc` script-check refused at
+its `rustc -vV` probe. It used to be handed `BROKKR_CARGO=1` explicitly; the
+inherited capability survives detaching, re-execing and reparenting, so the
+hand-granted override is gone. brokkr never grants `BROKKR_CARGO` to its own
+children: that would let a script descendant keep compiling into later holds it
+was never authorized for, which is the failure the per-acquisition nonce exists
+to prevent.
+
+The capability is stamped at the spawn choke points (`crate::hold::stamp`, called
+from `output.rs`'s three `Command` constructors, `test_runner`'s process-group
+spawn, and the raw `forward_cargo`) rather than at each of brokkr's ~25 cargo call
+sites, so a new call site is covered by construction. It is applied *last*, after
+every caller-supplied env var, so a caller cannot displace it. The boundary is
+every child brokkr starts under a hold, not just the ones named cargo: a prebuilt
+test binary, a script check or a benchmark can all reach cargo later.
+
+**Known gap:** the nextest lane (`src/check_cmd/nextest_lane.rs`) launches test
+processes through the linked engine's `TestList::new` and `runner.try_execute`,
+which construct their own commands with no `Command::new` for the choke point to
+catch. Their cargo *build* is stamped, but a test executed by that lane which
+itself invokes cargo would be refused. Those two call sites need their own
+sanctioned adapters.
 
 `brokkr guard` bare shows status (including a warning when the configured
 guard binary is missing); `--install` writes the config line, resolving the
@@ -289,10 +413,14 @@ overwrite a wrapper brokkr did not write (sccache, say - chaining wrappers
 is a human's decision); `--remove` unsets it, with the same
 refuse-if-foreign rule. Works with no `brokkr.toml`.
 
-`scripts/guard-smoke.py` exercises the guard's decision paths directly
-(pass-through, lock-held refusal against the real flock, the
-`BROKKR_CARGO` hatch) without involving cargo; the brokkr-ancestor path is
-covered by any `brokkr check` run with the guard enrolled.
+`scripts/guard-smoke.py` exercises the guard's decision paths against the real
+flock. `scripts/guard-decision-probe.py <guard-binary>` covers the capability
+paths against a scratch `$HOME` - idle, a stale record left by a crash, a
+draining hold, a mismatched capability, no capability, and the `BROKKR_CARGO`
+hatch - and is worth running after any change to `decide()`: it is what caught
+the stale-record refusal described above. The admitted path is covered end to end
+by `brokkr check` compiling anything at all while brokkr holds its own lock; if
+it were broken, no build on the machine would work.
 
 ## `gremlins` phase
 

@@ -1467,9 +1467,15 @@ Manage the rustc-wrapper fence (`brokkr-rustc-guard`).
 
 Enrolled as `build.rustc-wrapper` in $CARGO_HOME/config.toml, the guard
 routes every rustc invocation this user's cargos make through a runtime
-check: a brokkr ancestor or BROKKR_CARGO=1 passes; otherwise a held
-brokkr lock refuses the compile with exit 1, before anything builds.
+check: BROKKR_CARGO=1 passes, and so does a capability the current hold
+handed out; otherwise a held brokkr lock refuses the compile with exit 1,
+before anything builds. Admitted compilation holds a shared lease on
+~/.brokkr/compile.lock, which a new hold drains before it measures.
 The stray reap removes offenders after the fact - this prevents them.
+
+The guarantee is conditional: it covers compilation that participates in
+the lease protocol. Overrides, and guards that cannot reach compile.lock
+at all, fail open and can overlap measured work.
 
 Bare shows status. --install writes the config line (refusing to
 overwrite a foreign wrapper such as sccache); --remove unsets it.

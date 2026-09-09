@@ -40,25 +40,22 @@ pub struct Outcome {
 /// directory (the code tree), so pipes, redirects, and env expansion work.
 /// Returns `Err` only when the process could not be spawned.
 ///
-/// `BROKKR_CARGO=1` is exported into the child. A script-check runs *inside*
-/// a brokkr command that already holds the lock, so a cargo it starts is
-/// brokkr's own work and must not be refused by the rustc guard
-/// (`src/bin/rustc_guard.rs`). The guard's other admission path - a `brokkr`
-/// ancestor in `/proc` - is not dependable here: the command is arbitrary
-/// shell, so the chain from rustc back to brokkr runs through whatever the
-/// script does, and anything that detaches, re-execs, or reparents breaks a
-/// walk that fails closed. Every other cargo brokkr runs is spawned by brokkr
-/// directly and keeps the ancestor path; this is the one phase where brokkr
-/// does not own the process tree, so it states the fact instead of inferring
-/// it. Observed as a `cargo doc` script-check refused at its `rustc -vV`
-/// probe while brokkr held the lock.
+/// A script-check runs *inside* a brokkr command that already holds the lock,
+/// so a cargo it starts is brokkr's own work and must not be refused by the
+/// rustc guard (`src/bin/rustc_guard.rs`). It gets that admission the same way
+/// every other child of a hold does: the inherited capability, stamped by the
+/// spawn choke point (`crate::hold`). Nothing special is needed here any more.
+///
+/// This used to export `BROKKR_CARGO=1` explicitly, because the guard's other
+/// admission path was a `/proc` ancestor walk that arbitrary shell could break
+/// by detaching, re-execing or reparenting - observed as a `cargo doc`
+/// script-check refused at its `rustc -vV` probe. The capability survives all
+/// three, so the hand-granted override is gone: `BROKKR_CARGO` is a *human*
+/// escape hatch that bypasses the lease protocol entirely, and handing it to
+/// brokkr's own children would let a script descendant keep compiling into
+/// later holds it was never authorized for.
 pub fn run_one(check: &ScriptCheck, cwd: &Path) -> Result<Outcome, DevError> {
-    let captured = output::run_captured_with_env(
-        "sh",
-        &["-c", &check.command],
-        cwd,
-        &[("BROKKR_CARGO", "1")],
-    )?;
+    let captured = output::run_captured_with_env("sh", &["-c", &check.command], cwd, &[])?;
     let passed = evaluate(
         &check.expect,
         check.match_mode,

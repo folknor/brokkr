@@ -611,6 +611,8 @@ fn spawn_process_group(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
+    // Last, after every caller-supplied env var: see `crate::hold`.
+    crate::hold::stamp(&mut cmd);
 
     cmd.spawn().map_err(|e| DevError::Subprocess {
         program: program.into(),
