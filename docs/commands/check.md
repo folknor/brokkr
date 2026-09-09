@@ -231,6 +231,30 @@ Where the process is the unit of exactly one test - `brokkr test --timeout`, the
 isolated lane, the nextest lane - the name is the caller's selection rather than
 anything parsed, and the attribution is exact as well.
 
+### An absence is never a fact
+
+Every verdict path is fail-closed on missing evidence, because a zero and a
+silence look identical in a counter. A `cargo test` that exits 0 having reported
+nothing is not a green run - it is a run brokkr cannot vouch for - and the shapes
+that reach it are ordinary: a test that prints and terminates the harness, an
+abnormal exit after a suite announced itself, a custom harness that ignores the
+flags.
+
+So `ParsedTestResults` carries `Completeness`, set by comparing suites that
+announced themselves against suites that summarised. They must agree exactly, and
+zero-of-each is `Incomplete` rather than `Complete`: silence is not agreement.
+Every consumer checks it before reading a count as a fact -
+`brokkr test`, the `check` sweep report, the isolated lane, and the parallel lane
+(which additionally cannot infer a pass from a clean exit, because it derives its
+count from observed completion events).
+
+The same rule governs enumeration. A listing with no `N tests, M benchmarks`
+tally is not an empty listing, and a cargo artifact stream with no
+`build-finished` record is not an empty selection. Both fail rather than
+contribute an empty set, because the coverage audit certifies over exactly those
+sets - and an audit that attests to nothing while printing `0 pairs, 0 orphaned`
+is worse than one that refuses, since a green audit is taken as evidence.
+
 ### The clocks, per lane
 
 `Ceilings` in `src/test_runner.rs` carries the cap, an optional wall backstop, and

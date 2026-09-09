@@ -387,9 +387,24 @@ fn run_one_isolated_test(
     // between enumeration and execution - an anomaly, not a skip.
     let stdout_lines: Vec<&str> = stdout.lines().collect();
 
-    if zero_test_run(&cargo_filter::parse_test_output(&stdout_lines)) {
+    let parsed = cargo_filter::parse_test_output(&stdout_lines);
+    if zero_test_run(&parsed) {
         output::error(&format!(
             "FAIL {name}: invocation ran zero tests (name no longer matches?)"
+        ));
+        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        return Ok(IsolatedOutcome::Failed);
+    }
+
+    // This lane selects one test by name, so its terminal event is the whole
+    // point of the invocation: a stream that stopped before reporting it has not
+    // shown that the test passed, whatever the exit status says. `zero_test_run`
+    // returns false for an incomplete stream by design, which left this path
+    // reaching `Passed` on evidence that never arrived.
+    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+        output::error(&format!(
+            "FAIL {name}: the test stream did not finish reporting: {reason}. The process exited \
+             successfully, but nothing reported this test's result, so there is no pass to record."
         ));
         output::error(&format!("failing command: cargo {}", args.join(" ")));
         return Ok(IsolatedOutcome::Failed);

@@ -801,6 +801,29 @@ fn run_one_test_sweep(
         return Ok(false);
     }
 
+    // A stream that stopped describing itself cannot green a sweep. `zero_test_run`
+    // deliberately returns false for an incomplete stream - blaming the filter for
+    // a crash would be wrong - which left the incomplete case with no check of its
+    // own, so a run like `running 1 test` / `running 1 test` / one summary, exit 0,
+    // printed "1 passed" and returned green while a whole suite went unreported.
+    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+        let label = if multi {
+            format!(" (sweep: {})", sweep.label)
+        } else {
+            String::new()
+        };
+        output::error(&format!(
+            "cargo test: the test stream did not finish reporting{label}: {reason}. Observed \
+             {} passed, {} failed, {} ignored. The process exited successfully, so this is a \
+             harness that stopped talking rather than a failing test - treat as a wrong-run.",
+            parsed.passed, parsed.failed, parsed.ignored
+        ));
+        if !commands {
+            output::error(&full_command);
+        }
+        return Ok(false);
+    }
+
     // The symmetric close to "running tests" above: always report how many
     // tests actually ran, 0 or thousands. On a green run every counted test
     // passed (a failure returns early), so the headline is the pass count;

@@ -151,16 +151,33 @@ fn test_binaries_with_runtime(
         }
         return Ok(None);
     }
-    Ok(Some(parse_test_binaries(&String::from_utf8_lossy(
-        &captured.stdout,
-    ))))
+    let (binaries, index, recognised) =
+        parse_test_binaries(&String::from_utf8_lossy(&captured.stdout));
+    // Cargo exited 0 but said nothing this parser recognised. Handing back an
+    // empty set would make "no artifact facts were parsed" indistinguishable
+    // from "this selection has no test binaries", and the coverage audit
+    // certifies over that set - so an unparsed stream became an empty universe
+    // and a green audit attesting to nothing.
+    if !recognised {
+        output::error(&format!(
+            "cargo exited successfully but produced no recognisable artifact stream \
+             (no build-finished record) for: cargo {}. brokkr cannot tell an empty \
+             selection from an unparsed one, and the coverage audit certifies over \
+             this set, so this is a hard stop rather than an empty universe.",
+            args.join(" ")
+        ));
+        return Ok(None);
+    }
+    Ok(Some((binaries, index)))
 }
 
 /// Parse the artifact stream: test-profile executables become
 /// [`TestBinary`]s, while `build-script-executed` messages and non-test bin
 /// executables land in the [`BuildRuntimeIndex`] the direct-execution lane
 /// reconstructs cargo's runtime env from.
-fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex) {
+/// Returns the binaries, the runtime index, and whether the stream was
+/// recognisably cargo's (see `saw_build_finished` inside).
+fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex, bool) {
     #[derive(serde::Deserialize)]
     struct Artifact {
         reason: String,
@@ -193,7 +210,27 @@ fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex) {
 
     let mut out = Vec::new();
     let mut index = BuildRuntimeIndex::default();
+    // Whether the stream was recognisably cargo's at all. Cargo closes a
+    // `--message-format=json` run with `{"reason":"build-finished","success":...}`,
+    // so its absence means these were not cargo's artifact facts - and an empty
+    // `out` then means "nothing was parsed" rather than "no test binaries exist".
+    // The distinction matters because the coverage audit certifies over `out`: an
+    // unparsed stream produced an empty universe and a green `0 pairs, 0 orphaned`
+    // audit, which attests to nothing while looking like proof.
+    let mut saw_build_finished = false;
+    #[derive(serde::Deserialize)]
+    struct AnyRecord {
+        reason: String,
+    }
     for line in stdout.lines() {
+        // `build-finished` carries no `package_id`, so the strict `Artifact`
+        // parse below rejects it. Sniff the reason first.
+        if let Ok(r) = serde_json::from_str::<AnyRecord>(line)
+            && r.reason == "build-finished"
+        {
+            saw_build_finished = true;
+            continue;
+        }
         let Ok(a) = serde_json::from_str::<Artifact>(line) else {
             continue;
         };
@@ -244,7 +281,7 @@ fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex) {
                 .map_or_else(PathBuf::new, Path::to_path_buf),
         });
     }
-    (out, index)
+    (out, index, saw_build_finished)
 }
 
 /// Extract the package name from a cargo `package_id`, across the
@@ -454,13 +491,38 @@ mod binaries_tests {
             r#"{"reason":"build-finished","success":true}"#,
             "\n",
         );
-        let (bins, _) = parse_test_binaries(stdout);
+        let (bins, _, recognised) = parse_test_binaries(stdout);
+        assert!(recognised, "the build-finished record makes this cargo's stream");
         assert_eq!(bins.len(), 2);
         assert_eq!(bins[0].package, "pkg-a");
         assert_eq!(bins[0].kind, "lib");
         assert_eq!(bins[0].manifest_dir, std::path::Path::new("/x/a"));
         assert_eq!(bins[1].package, "pkg-b");
         assert_eq!(bins[1].target, "serial_tests");
+    }
+
+    /// An unrecognised stream must be distinguishable from a selection with no
+    /// test binaries. Cargo closes a `--message-format=json` run with a
+    /// `build-finished` record; without one, an empty result means "nothing was
+    /// parsed", and the coverage audit certifies over that set - so an unparsed
+    /// stream used to yield an empty universe and a green audit.
+    #[test]
+    fn a_stream_without_build_finished_is_not_recognised() {
+        let (bins, _, recognised) = parse_test_binaries("");
+        assert!(bins.is_empty());
+        assert!(!recognised, "silence is not cargo's artifact stream");
+
+        let (_, _, recognised) = parse_test_binaries("some other tool's output\n");
+        assert!(!recognised);
+
+        // Artifacts but no terminator: a truncated stream, not a complete one.
+        let truncated = concat!(
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{"name":"pkg-a","kind":["lib"]},"profile":{"test":true},"executable":"/t/deps/pkg_a-1"}"#,
+            "\n",
+        );
+        let (bins, _, recognised) = parse_test_binaries(truncated);
+        assert_eq!(bins.len(), 1, "the artifact is still parsed");
+        assert!(!recognised, "but the stream never said it finished");
     }
 
     // The runtime index is what direct execution reconstructs cargo's env
@@ -474,7 +536,7 @@ mod binaries_tests {
             r#"{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{"name":"servebin","kind":["bin"]},"profile":{"test":false},"executable":"/t/debug/servebin"}"#,
             "\n",
         );
-        let (bins, index) = parse_test_binaries(stdout);
+        let (bins, index, _) = parse_test_binaries(stdout);
         assert!(bins.is_empty());
         let bs = index.build_scripts.get("path+file:///x/a#pkg-a@0.1.0").unwrap();
         assert_eq!(bs.out_dir.as_deref(), Some("/t/build/pkg-a/out"));

@@ -830,7 +830,8 @@ fn report_runs(
     let mut ok = true;
     for run in runs {
         let run = run?;
-        passed += run.completed.len();
+        let completed_count = run.completed.len();
+        passed += completed_count;
         if let Some(out) = timings.as_deref_mut() {
             for (name, elapsed) in run.completed {
                 out.push(TestTiming {
@@ -879,6 +880,23 @@ fn report_runs(
             } else {
                 output::error(&cargo_filter::filter_test(&stdout, &stderr));
             }
+            ok = false;
+            continue;
+        }
+        // A clean exit is not evidence that the tests reported. This lane derives
+        // its pass count from observed JSON completion events, so a binary that
+        // exits 0 while emitting missing or malformed lifecycle records
+        // contributed zero to `passed` and still left the sweep green - an
+        // absence read as a fact. The stream has to say it finished.
+        let parsed = cargo_filter::parse_test_output(&stdout.lines().collect::<Vec<_>>());
+        if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+            output::error(&format!(
+                "sweep '{}' binary {} exited successfully but its test stream did not finish \
+                 reporting: {reason}. Observed {} completed test(s). A binary that stops talking \
+                 has not shown its tests passed - treat as a wrong-run.",
+                sweep.label, run.label, completed_count
+            ));
+            output::error(&run.command);
             ok = false;
             continue;
         }
