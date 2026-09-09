@@ -255,13 +255,9 @@ pub fn run(
                 // test and the ceiling can be authoritative. Without it, the
                 // substring filter can match several tests in one process, so the
                 // per-test clock is attribution and the sweep wall is the bound.
-                if exact.is_some() {
-                    test_runner::Ceilings::one_test(ceiling)
-                } else {
-                    test_runner::Ceilings {
-                        per_test: ceiling,
-                        wall: Some(test_runner::SWEEP_WALL_TIMEOUT),
-                    }
+                match &exact {
+                    Some(resolved) => test_runner::Ceilings::one_test(ceiling, resolved),
+                    None => test_runner::Ceilings::shared_harness_with(ceiling),
                 },
                 announce,
                 &repeat_state,
@@ -578,8 +574,20 @@ fn matching_test_names(
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env)?;
+    // A listing command that failed proves nothing about how many tests match.
+    // Returning an empty vec conflated "the build or the harness failed" with
+    // "enumeration succeeded and found nothing", so a compile error during the
+    // `--timeout` precondition check surfaced later as a puzzling "test not
+    // found" instead of the build failure that actually happened.
     if !captured.status.success() {
-        return Ok(Vec::new());
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Build(format!(
+            "could not enumerate tests in sweep '{}' - the listing command failed, so the \
+             single-test precondition --timeout needs cannot be established. This is a build or \
+             harness failure, not a missing test.\n{}",
+            sweep.label,
+            stderr.trim_end()
+        )));
     }
     // A listing that is not a libtest listing cannot establish the
     // single-test precondition `--timeout` rides on. Refusing beats guessing:
@@ -902,19 +910,12 @@ fn run_one(
     }
 
     if !has_test_result && has_compile_error {
-        // Compile errors are identical across repeats by construction
-        // (same source, same flags) - show them once.
+        // One call: `first_sighting` records the signature, so asking twice
+        // would answer `true` then `false` and suppress the block it just
+        // decided to show.
         let first = repeat_state.first_sighting("build failed");
         flush_sink(sink, !first);
-        if !raw && first {
-            let filtered = cargo_filter::filter_test_build_failure(stderr_text.as_ref());
-            if !filtered.is_empty() {
-                output::error(&filtered);
-            }
-        }
-        println!("[test]    BUILD FAILED {tag} ({wall})");
-        std::io::stdout().flush().ok();
-        return Ok(RunReport::bare(Outcome::BuildFailed));
+        return Ok(report_build_failure(tag, &wall, raw, first, stderr_text.as_ref()));
     }
 
     if let Some(fail) = parsed.failures.first() {
@@ -975,10 +976,74 @@ fn run_one(
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
+    // An incomplete stream cannot reach PASS. Requiring completeness for the
+    // no-match branch and then falling through to an unconditional PASS was a
+    // wrong verdict with a short recipe: emit a start-shaped line, exit 0, and a
+    // run that reported no result for anything was declared green. A test can do
+    // that by printing and terminating the harness; an abnormal or custom harness
+    // gets there without trying.
+    //
+    // Fail closed. The counts are whatever was observed, so they still go in the
+    // message - a partial report is useful, it just is not a pass.
+    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+        flush_sink(sink, false);
+        return Ok(report_incomplete(tag, &wall, reason, &parsed));
+    }
+
     flush_sink(sink, false);
     println!("[test]    PASS {tag} ({wall})");
     std::io::stdout().flush().ok();
     Ok(RunReport::bare(Outcome::Pass))
+}
+
+/// Report a run that failed to build. Compile errors are identical across `-N`
+/// repeats by construction (same source, same flags), so the block prints once
+/// and later repeats collapse to the footer.
+fn report_build_failure(
+    tag: &str,
+    wall: &str,
+    raw: bool,
+    first: bool,
+    stderr_text: &str,
+) -> RunReport {
+    if !raw && first {
+        let filtered = cargo_filter::filter_test_build_failure(stderr_text);
+        if !filtered.is_empty() {
+            output::error(&filtered);
+        }
+    }
+    println!("[test]    BUILD FAILED {tag} ({wall})");
+    std::io::stdout().flush().ok();
+    RunReport::bare(Outcome::BuildFailed)
+}
+
+/// Report a run whose stream never finished describing itself.
+///
+/// Fail, never PASS. Requiring completeness for the no-match branch and then
+/// falling through to an unconditional PASS was a wrong verdict with a short
+/// recipe: emit a start-shaped line, exit 0, and a run that reported no result
+/// for anything was declared green. A test can do that by printing and
+/// terminating the harness; an abnormal or custom harness gets there without
+/// trying. The observed counts still go in the message, because a partial report
+/// is useful - it just is not a pass.
+fn report_incomplete(
+    tag: &str,
+    wall: &str,
+    reason: &str,
+    parsed: &cargo_filter::ParsedTestResults,
+) -> RunReport {
+    println!(
+        "[test]    FAIL {tag} ({wall}) - the test stream did not finish reporting: {reason}. \
+         Observed {} passed, {} failed, {} ignored. The process exited successfully, so this is a \
+         harness that stopped talking rather than a failing test.",
+        parsed.passed, parsed.failed, parsed.ignored
+    );
+    std::io::stdout().flush().ok();
+    RunReport {
+        outcome: Outcome::Fail,
+        fail_loc: None,
+        fail_msg: Some(format!("incomplete test stream: {reason}")),
+    }
 }
 
 /// Flush a repeat-run display buffer to stdout, or drop it when the

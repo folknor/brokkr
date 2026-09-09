@@ -276,16 +276,29 @@ pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
 /// reported them, which is indistinguishable from "the filter matched nothing".
 /// Naming the difference is the whole point of [`Completeness`].
 fn judge_completeness(started: usize, summarised: usize) -> Completeness {
-    if started > summarised {
-        Completeness::Incomplete {
+    // Strict inequality both ways. Only rejecting `started > summarised` left two
+    // holes: a lone forged or malformed `test result:` line counted as a complete
+    // run, and a summary printed by test output could numerically compensate for
+    // a suite summary that never arrived. If the two do not agree exactly, the
+    // stream is not describing a run this parser can vouch for.
+    if started != summarised {
+        return Completeness::Incomplete {
             reason: format!(
-                "{started} suite(s) started but only {summarised} reported a summary - the run \
-                 stopped before finishing"
+                "{started} suite(s) announced themselves but {summarised} reported a summary - \
+                 the stream is inconsistent, so its counts describe no run"
             ),
-        }
-    } else {
-        Completeness::Complete
+        };
     }
+    // Zero of each is not agreement, it is silence: no suite ever announced
+    // itself and none summarised, which is what unrecognised output, an empty
+    // stream, or a harness that never started looks like. Complete would make
+    // every count below a fact about a run that was never observed.
+    if started == 0 {
+        return Completeness::Incomplete {
+            reason: "no test suite was observed at all - the output carries no libtest run".into(),
+        };
+    }
+    Completeness::Complete
 }
 
 /// Like [`parse_test_output`], but also scans stderr for inline panic
@@ -1443,10 +1456,33 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         assert_eq!(parsed.accounted(), 0, "nothing was reported, so nothing is accounted");
         match &parsed.completeness {
             Completeness::Incomplete { reason } => {
-                assert!(reason.contains("started"), "{reason}");
+                assert!(reason.contains("announced"), "{reason}");
             }
             Completeness::Complete => panic!("expected Incomplete"),
         }
+    }
+
+    /// A summary with no suite that announced itself is just as inconsistent as
+    /// the reverse. A lone forged or malformed `test result:` line used to count
+    /// as a complete run, and test output could numerically compensate for a real
+    /// suite summary that never arrived.
+    #[test]
+    fn a_lone_summary_with_no_suite_is_incomplete() {
+        let lines = [
+            "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        ];
+        let parsed = parse_test_output(&lines);
+        assert!(!parsed.is_complete(), "a summary with no suite start describes no run");
+    }
+
+    /// Silence is not agreement. No suite announced and none summarised is what
+    /// unrecognised output, an empty stream, or a harness that never started
+    /// looks like - and calling it complete would make every zero below a fact
+    /// about a run nobody observed.
+    #[test]
+    fn no_suite_at_all_is_incomplete_not_complete() {
+        assert!(!parse_test_output(&[]).is_complete());
+        assert!(!parse_test_output(&["my own harness says hello"]).is_complete());
     }
 
     /// The genuinely empty suite: it announced itself, summarised, and reported

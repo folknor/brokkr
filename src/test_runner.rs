@@ -79,7 +79,28 @@ pub(crate) const SWEEP_WALL_TIMEOUT: Duration = Duration::from_secs(1800);
 /// watchdog's own clock. Keeping them in one struct is how the distinction stays
 /// visible at every call site: a caller that wants a trustworthy ceiling sets
 /// `wall`, and one that only wants a name sets `per_test`.
-#[derive(Clone, Copy)]
+/// What the caller knows about the run's shape, and therefore what a wall expiry
+/// means.
+///
+/// This exists so the *reason* for a kill comes from the caller rather than from
+/// the tracker. Deriving it from the tracker was a real defect: at a shared
+/// sweep's 1800s wall deadline an empty tracker made the verdict read "idle
+/// ceiling", and a one-test invocation with a ceiling above `IDLE_TIMEOUT` whose
+/// start event was never observed reported an idle timeout even though only the
+/// per-test wall clock had killed it. The untrusted stream did not pull the
+/// trigger, but it still wrote the explanation.
+#[derive(Clone)]
+pub(crate) enum WallShape {
+    /// Many tests in one process. A wall expiry names no offender, because none
+    /// is knowable.
+    SharedHarness,
+    /// One process running exactly one test, resolved by the caller. A wall
+    /// expiry *is* that test's ceiling, and the name comes from the caller - not
+    /// from anything the process printed.
+    OneTest { name: String },
+}
+
+#[derive(Clone)]
 pub(crate) struct Ceilings {
     /// Per-test ceiling for blame, aged from announced starts. Advisory.
     pub(crate) per_test: Duration,
@@ -87,20 +108,33 @@ pub(crate) struct Ceilings {
     /// output. `None` leaves the run bounded only by the phase watchdog above
     /// it.
     pub(crate) wall: Option<Duration>,
+    /// What a wall expiry means here.
+    pub(crate) shape: WallShape,
 }
 
 impl Ceilings {
     /// A shared-harness sweep: many tests in one process, so the per-test clock
     /// can only ever name a suspect, and the wall clock is the real bound.
     pub(crate) fn shared_harness() -> Self {
-        Self { per_test: TEST_TIMEOUT, wall: Some(SWEEP_WALL_TIMEOUT) }
+        Self {
+            per_test: TEST_TIMEOUT,
+            wall: Some(SWEEP_WALL_TIMEOUT),
+            shape: WallShape::SharedHarness,
+        }
     }
 
-    /// One process running exactly one test, where the wall clock *is* the
-    /// per-test ceiling and attribution comes from the caller's selection rather
-    /// than from anything parsed.
-    pub(crate) fn one_test(ceiling: Duration) -> Self {
-        Self { per_test: ceiling, wall: Some(ceiling) }
+    /// A shared harness with a caller-chosen per-test ceiling for blame.
+    pub(crate) fn shared_harness_with(per_test: Duration) -> Self {
+        Self { per_test, wall: Some(SWEEP_WALL_TIMEOUT), shape: WallShape::SharedHarness }
+    }
+
+    /// One process running exactly one test, named by the caller.
+    pub(crate) fn one_test(ceiling: Duration, name: impl Into<String>) -> Self {
+        Self {
+            per_test: ceiling,
+            wall: Some(ceiling),
+            shape: WallShape::OneTest { name: name.into() },
+        }
     }
 }
 
@@ -203,6 +237,13 @@ pub(crate) struct HungTest {
 struct TestTracker {
     current: HashMap<String, Instant>,
     completed: Vec<(String, Duration)>,
+    /// Whether any lifecycle event has ever been observed.
+    ///
+    /// While this is false nothing has been parsed, so `idle_since` still holds
+    /// the run's start and the idle measurement is plain wall time - trustworthy
+    /// because no input has touched it. Once an event arrives, output can reset
+    /// the window and the idle clock becomes advisory like the per-test one.
+    ever_observed: bool,
     /// When the in-flight set last changed (or the run began): the start of
     /// the current no-test-in-flight window, which [`IDLE_TIMEOUT`] bounds.
     idle_since: Instant,
@@ -213,6 +254,7 @@ impl Default for TestTracker {
         Self {
             current: HashMap::new(),
             completed: Vec::new(),
+            ever_observed: false,
             idle_since: Instant::now(),
         }
     }
@@ -222,6 +264,7 @@ impl TestTracker {
     fn observe_start(&mut self, name: String) {
         self.current.entry(name).or_insert_with(Instant::now);
         self.idle_since = Instant::now();
+        self.ever_observed = true;
     }
 
     fn observe_result(&mut self, name: &str) {
@@ -229,6 +272,7 @@ impl TestTracker {
             self.completed.push((name.to_owned(), started.elapsed()));
         }
         self.idle_since = Instant::now();
+        self.ever_observed = true;
     }
 
     /// The in-flight test past `timeout` (the longest-running one, when
@@ -455,7 +499,7 @@ where
             tracker_w,
             done_w,
             hung_w,
-            Ceilings { per_test: per_test_timeout, wall: None },
+            Ceilings { per_test: per_test_timeout, wall: None, shape: WallShape::SharedHarness },
             start,
         );
     });
@@ -648,7 +692,10 @@ fn split_trailing_event(line: &str) -> Option<(&str, Value)> {
             // an event line.
             return None;
         }
-        return Some((line[..start].trim_end(), val));
+        // Verbatim, deliberately not trimmed: trailing spaces before the record
+        // are the test's own output, and downstream status-line filtering
+        // classifies a prefix by its exact text.
+        return Some((&line[..start], val));
     }
     None
 }
@@ -1186,28 +1233,56 @@ fn watchdog_loop_with_timing(
             ));
         }
 
-        let Some(wall) = ceilings.wall.filter(|w| started.elapsed() >= *w) else {
+        // The one clock that may terminate on untrusted-adjacent evidence: the
+        // idle ceiling, and ONLY while the tracker has never observed a single
+        // lifecycle event. In that state nothing has been parsed, so `idle_since`
+        // has never been advanced by anything and the measurement is plain wall
+        // time since spawn - authoritative by construction, not by inference.
+        // This is the case the idle ceiling was built for: cargo parked on
+        // "Blocking waiting for file lock on build directory" with no test ever
+        // announced. The moment any event is observed the clock becomes
+        // resettable by output, and it drops back to advisory.
+        let virgin_idle = tracker
+            .lock()
+            .ok()
+            .filter(|t| !t.ever_observed)
+            .map(|t| t.idle_since.elapsed())
+            .filter(|e| *e >= IDLE_TIMEOUT);
+
+        // Wall first: it is the caller's stated bound, so it owns the verdict
+        // when both are due.
+        let expiry = ceilings
+            .wall
+            .filter(|w| started.elapsed() >= *w)
+            .map(|w| (w, false))
+            .or_else(|| virgin_idle.map(|e| (e, true)));
+        let Some((ceiling_hit, was_idle)) = expiry else {
             continue;
         };
         if done.load(Ordering::SeqCst) {
             return;
         }
 
-        // At the deadline, consult the tracker to enrich the report - unverified
-        // context, never the reason.
+        // The reason comes from the caller's shape, never from the tracker. The
+        // tracker only supplies unverified context.
         let blamed = tracker
             .lock()
             .ok()
             .map(|t| t.current.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        let (reason, elapsed, ceiling) = match &advisory {
-            // A wall equal to the per-test ceiling is the one-process-one-test
-            // shape: the wall firing *is* that test's ceiling firing, so name it.
-            Some((name, e)) if Some(timeout) == ceilings.wall && name != IDLE_WEDGE => {
-                (TimeoutReason::PerTest { name: name.clone() }, *e, timeout)
+        let (reason, elapsed, ceiling) = if was_idle {
+            (TimeoutReason::Idle, ceiling_hit, IDLE_TIMEOUT)
+        } else {
+            match &ceilings.shape {
+                WallShape::OneTest { name } => (
+                    TimeoutReason::PerTest { name: name.clone() },
+                    started.elapsed(),
+                    ceiling_hit,
+                ),
+                WallShape::SharedHarness => {
+                    (TimeoutReason::SweepWall { blamed }, started.elapsed(), ceiling_hit)
+                }
             }
-            Some((name, e)) if name == IDLE_WEDGE => (TimeoutReason::Idle, *e, IDLE_TIMEOUT),
-            _ => (TimeoutReason::SweepWall { blamed }, started.elapsed(), wall),
         };
 
         let hung_test = capture_hung_test(&state_root, cargo_pid, reason, elapsed, ceiling);
@@ -1899,7 +1974,11 @@ mod tests {
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
-            Ceilings { per_test: Duration::from_secs(3600), wall: Some(Duration::from_millis(40)) },
+            Ceilings {
+                per_test: Duration::from_secs(3600),
+                wall: Some(Duration::from_millis(40)),
+                shape: WallShape::SharedHarness,
+            },
             Duration::from_millis(5),
             Instant::now(),
         );
@@ -1950,6 +2029,7 @@ mod tests {
         let tracker = Arc::new(Mutex::new(TestTracker {
             current: HashMap::from([("a::apparently_overdue".to_owned(), long_ago)]),
             completed: Vec::new(),
+            ever_observed: true,
             idle_since: Instant::now(),
         }));
         let done = Arc::new(AtomicBool::new(false));
@@ -1971,6 +2051,7 @@ mod tests {
             Ceilings {
                 per_test: Duration::from_millis(10),
                 wall: Some(Duration::from_secs(3600)),
+                shape: WallShape::SharedHarness,
             },
             Duration::from_millis(5),
             Instant::now(),
@@ -2014,6 +2095,7 @@ mod tests {
         let tracker = Arc::new(Mutex::new(TestTracker {
             current: HashMap::from([("watchdog::hangs".to_owned(), started)]),
             completed: Vec::new(),
+            ever_observed: true,
             idle_since: started,
         }));
         let done = Arc::new(AtomicBool::new(false));
@@ -2025,12 +2107,11 @@ mod tests {
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
-            // `wall` is what kills now, so the legacy per-test-only shape must be
-            // given one for this test to still exercise a kill.
-            Ceilings {
-                per_test: Duration::from_millis(20),
-                wall: Some(Duration::from_millis(20)),
-            },
+            // One process, one test, named by the caller: the only shape whose
+            // verdict names a test, since a shared-harness wall expiry cannot
+            // know which test to blame. `wall` is also what kills now, so the
+            // ceiling has to be there for this test to exercise a kill at all.
+            Ceilings::one_test(Duration::from_millis(20), "watchdog::hangs"),
             Duration::from_millis(5),
             Instant::now(),
         );

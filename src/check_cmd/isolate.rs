@@ -352,7 +352,7 @@ fn run_one_isolated_test(
         // enforce it. That is the whole reason a per-test guarantee is honest
         // here and only advisory on a shared-harness sweep: attribution comes
         // from the selection, not from anything the process printed.
-        test_runner::Ceilings::one_test(test_runner::TEST_TIMEOUT),
+        test_runner::Ceilings::one_test(test_runner::TEST_TIMEOUT, name),
         |_| {},
         |_| {},
         |_| {},
