@@ -405,19 +405,18 @@ fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError>
     // releasing `brokkr.lock`, and we never reach protected work - measuring
     // alongside a compiler we failed to clear is the one outcome worse than not
     // measuring at all.
-    let state = drain_and_authorize(owned.as_raw_fd(), ctx)?;
+    let Authorized { state, nonce, toolchain } = drain_and_authorize(owned.as_raw_fd(), ctx)?;
 
-    // Activate any armed toolchain-disable *inside* the lock so the moved-aside
-    // window is exactly the locked window; the guard is stored below and
-    // restored on drop before the flock is released. After the drain, so the
-    // window does not span a wait on other processes.
-    let toolchain = crate::toolchain::activate_for_lock()?;
+    // Construct the owner first, then hand the process registry the nonce.
+    // Nothing fallible may sit between these two statements: an error there
+    // would leave a capability installed that no `Drop` will ever clear.
     let inner = Arc::new(LockInner {
         fd: owned,
         path: path.to_owned(),
         state: Mutex::new(state),
         toolchain,
     });
+    crate::hold::publish_capability(&nonce);
     // Register weakly so a later acquire in this process re-enters this hold
     // instead of self-deadlocking on a second fd.
     held_registry().push(Arc::downgrade(&inner));
@@ -817,7 +816,7 @@ fn drain_compile_leases() -> Result<OwnedFd, DevError> {
 ///    hold's nonce into an admitted compiler.
 /// 4. Release the exclusive lease, so this hold's own descendants can take
 ///    shares of it.
-fn drain_and_authorize(fd: RawFd, ctx: &LockContext<'_>) -> Result<LockState, DevError> {
+fn drain_and_authorize(fd: RawFd, ctx: &LockContext<'_>) -> Result<Authorized, DevError> {
     let mut state = build_state(ctx);
     rewrite_from_state(fd, &state)
         .map_err(|e| DevError::Lock(format!("failed to publish lock metadata: {e}")))?;
@@ -835,9 +834,30 @@ fn drain_and_authorize(fd: RawFd, ctx: &LockContext<'_>) -> Result<LockState, De
     state.draining = false;
     rewrite_from_state(fd, &state)
         .map_err(|e| DevError::Lock(format!("failed to publish the compilation capability: {e}")))?;
-    crate::hold::publish_capability(&nonce);
+
+    // Activate the armed toolchain-disable here: after the drain, so the
+    // moved-aside window never spans a wait on other processes, and *before*
+    // the capability enters the process registry, so a failure cannot leave a
+    // nonce installed with no `LockInner` to own it. That was a real defect -
+    // publishing the capability and then doing fallible work meant an
+    // activation failure released `brokkr.lock` without ever constructing the
+    // guard whose `Drop` clears the registry, and the process went on able to
+    // stamp a nonce belonging to no hold.
+    let toolchain = crate::toolchain::activate_for_lock()?;
+
     drop(compile_lease);
-    Ok(state)
+    Ok(Authorized { state, nonce, toolchain })
+}
+
+/// A drained, authorized hold, ready for its [`LockInner`] to take ownership.
+///
+/// The nonce is carried out rather than published here on purpose: nothing
+/// fallible may run between "the process registry names this nonce" and "a
+/// `LockInner` exists whose `Drop` clears it".
+struct Authorized {
+    state: LockState,
+    nonce: String,
+    toolchain: Option<crate::toolchain::DisabledToolchain>,
 }
 
 /// Build the initial `LockState` for a freshly-acquired lock. Captures the

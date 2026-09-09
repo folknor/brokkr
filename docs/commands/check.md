@@ -223,21 +223,46 @@ restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is
 never signalled. Failure to read `/proc` reads as nothing found: the reap is on
 the way to the real work, never a gate on it.
 
-**Ownership is the verified lock holder's pid, not an ancestor's name.** The
-original rule exempted any process with a `brokkr` ancestor by `comm`, which
-made the exemption spoofable by naming *any* executable `brokkr` - a shell
-copied to that name exempted every cargo and rustc beneath it, with no
-reference to whether it held anything. The rule now walks for an ancestor whose
-pid equals the current holder's, verified through the lock file's starttime and
-boot-id tokens. When no hold is active, or the holder's identity cannot be
-verified (a PID namespace, a stale record), the old `comm` rule is the
-fallback - spoof and all, because the alternative is a reaper that SIGKILLs
-brokkr's own build the moment verification is unavailable, unattended, inside
-every locked command.
+**Ownership is two pids, never a name.** The original rule exempted any process
+with a `brokkr` ancestor by `comm`, which made the exemption spoofable by naming
+*any* executable `brokkr` - a shell copied to that name exempted every cargo and
+rustc beneath it, with no reference to whether it held anything. The rule now
+exempts a tree whose ancestor is either **this process** (`std::process::id()`)
+or **the verified current lock holder** (checked through the lock file's
+starttime and boot-id tokens).
 
-A consequence worth naming: the reap runs *after* `acquire()` returns, so it
-cannot rescue a lock acquisition that is itself blocked. Nothing today blocks
-acquisition on other processes, so the ordering is currently harmless.
+There is no name fallback. The case that argued for keeping one - never SIGKILL
+brokkr's own build - needs no lock file at all, because the reaper runs *inside*
+brokkr and can identify its own work by its own pid. A hold whose identity cannot
+be verified from this namespace therefore protects nothing beyond the reaping
+process itself; previously it fell back to the name, which let an executable
+called `brokkr` shield a foreign compiler from a drain that then expired for want
+of killing it.
+
+**The reap kills descendant trees, deepest first, and stops at anything brokkr
+owns.** Signalling only the classified pids left a hole: killing a cargo does not
+kill the rustc wrapper beneath it, so an already-admitted wrapper survived and
+went on to exec a compiler. Expansion must never cross into brokkr's own subtree,
+though - `cargo(stray) -> brokkr(holder) -> cargo(ours)` is an ordinary topology
+whenever brokkr is launched from a cargo, the classifier walking *up* from the
+outer cargo cannot see the holder below it, and expanding descendants from there
+reached brokkr itself. Owned pids are skipped and not recursed through.
+
+**Every signal is identity-checked.** A `Stray` carries the `/proc` starttime
+recorded at classification, and the SIGKILL is sent only if that pid still has
+that starttime. A bare pid is not an identity: between the scan and the signal
+the process can exit and the number be reused, and the reaper would then kill
+something it never classified. The lock code has paired pids with starttimes
+since it was written; this path did not.
+
+Containment is narrowed, not closed: a process can fork again between the `/proc`
+read and the signal, and a lease holder can be a detached process with a name no
+cargo-family scan matches. Closing that needs a cgroup, which is a larger change
+than this reaper is.
+
+A consequence worth naming: the post-acquisition reap runs *after* `acquire()`
+returns, so it cannot rescue an acquisition that is itself blocked. That is why
+the drain has its own reap on stall (see below).
 
 `brokkr strays` is the by-hand form: bare lists, `--kill` lists then kills.
 Works with no `brokkr.toml`. A legitimate run that needs

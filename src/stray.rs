@@ -20,10 +20,12 @@
 //! editor), so the report says who started it.
 //!
 //! Ownership - the question of which cargo is brokkr's own and therefore not a
-//! stray - is decided by the *verified lock holder's pid*, not by an ancestor
-//! being named `brokkr`; see [`Ownership`] for why the name is not enough.
+//! stray - is decided by two pids, this process and the verified lock holder,
+//! never by an ancestor being named `brokkr`; see [`Ownership`] for why a name
+//! is not enough. Signals are identity-checked against a recorded starttime,
+//! and a stray's descendant tree dies with it, stopping at anything brokkr owns.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::DevError;
 use crate::output;
@@ -32,6 +34,16 @@ use crate::output;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stray {
     pub pid: u32,
+    /// `/proc/<pid>/stat` starttime, the identity token that makes the PID
+    /// safe to signal later.
+    ///
+    /// A PID alone is not an identity: between classification and the SIGKILL
+    /// the process can exit and the number be reused, and then the reaper
+    /// signals something it never classified - potentially brokkr itself or any
+    /// unrelated process of this user. `src/lockfile.rs` has paired every PID
+    /// with a starttime for exactly this reason since it was written; this path
+    /// did not, and that was a real hole rather than a theoretical one.
+    pub starttime: String,
     /// `/proc/<pid>/comm`, kernel-truncated to 15 bytes.
     pub comm: String,
     /// Depth below the process tree's root, used to kill leaves first.
@@ -84,44 +96,59 @@ pub fn is_cargo_family(comm: &str) -> bool {
         || comm.starts_with("brokkr-rustc")
 }
 
-/// How a reap decides that a cargo-family process is brokkr's own work rather
-/// than a stray.
+/// Which process trees are brokkr's own work, and therefore not strays.
 ///
-/// Ancestry by `comm` was the original rule and it is spoofable in the way that
-/// matters: any executable *named* `brokkr` exempts every cargo and rustc
-/// beneath it, with no reference to whether it holds anything. A shell copied
-/// to that name is enough, which is not a hypothetical - it is how the guard's
-/// own fence was first probed.
+/// Two PIDs, never a name. Ancestry by `comm` was the original rule and it is
+/// spoofable in the way that matters: any executable *named* `brokkr` exempted
+/// every cargo and rustc beneath it, with no reference to whether it held
+/// anything. A shell copied to that name is enough - which is how this fence was
+/// first probed. It is gone rather than kept as a fallback, because the case that
+/// justified keeping it (never SIGKILL brokkr's own build) needs no lock file at
+/// all: this reaper runs *inside* brokkr, so it can identify its own work by its
+/// own PID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ownership {
-    /// The verified current lock holder's PID. An ancestor matching it is
-    /// brokkr's own work; a process merely *named* `brokkr` is not. This is
-    /// the rule whenever a hold is active, which is exactly when a stray can
-    /// do damage.
-    Holder(u32),
-    /// No hold is active, or the holder's identity could not be verified
-    /// (a PID namespace, a stale record). Fall back to the ancestor's `comm`.
-    /// Spoofable, and chosen anyway: the alternative - exempting nothing -
-    /// SIGKILLs brokkr's own build the moment verification is unavailable,
-    /// and this reaper runs unattended inside every locked command.
-    UnverifiedComm,
+struct Ownership {
+    /// This process. Its subtree is brokkr's own work by definition, and
+    /// identifying it requires reading nothing.
+    me: u32,
+    /// The verified current lock holder, when there is one and its identity
+    /// checks out. During a reap from inside acquisition this *is* `me`; it
+    /// differs only for a hand-run `brokkr strays` while another brokkr holds.
+    ///
+    /// `None` when no hold is active, or when a hold exists whose identity
+    /// cannot be verified from this namespace. That second case used to fall
+    /// back to the name rule, which let an executable named `brokkr` shield
+    /// foreign cargo from a drain that then expired for want of killing it.
+    /// Unverifiable now means unprotected - except for `me`, which is what the
+    /// fallback was really protecting.
+    holder: Option<u32>,
+}
+
+impl Ownership {
+    /// Whether an ancestor PID marks the tree below it as brokkr's own.
+    fn owns(&self, pid: u32) -> bool {
+        pid == self.me || self.holder == Some(pid)
+    }
 }
 
 /// The ownership rule in force right now, read from the lock file.
 fn current_ownership() -> Ownership {
-    match crate::lockfile::status() {
+    let holder = match crate::lockfile::status() {
         Ok(Some(info))
             if crate::lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id) =>
         {
-            Ownership::Holder(info.pid)
+            Some(info.pid)
         }
-        _ => Ownership::UnverifiedComm,
-    }
+        _ => None,
+    };
+    Ownership { me: std::process::id(), holder }
 }
 
 struct ProcEntry {
     ppid: u32,
     comm: String,
+    /// Field 22 of `/proc/<pid>/stat`, the PID's identity token.
+    starttime: String,
 }
 
 fn read_proc() -> HashMap<u32, ProcEntry> {
@@ -141,12 +168,17 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
         let Some(open) = stat.find('(') else { continue };
         let Some(close) = stat.rfind(')') else { continue };
         let comm = stat[open + 1..close].to_owned();
-        let mut fields = stat[close + 2..].split_whitespace();
-        let _state = fields.next();
-        let Some(ppid) = fields.next().and_then(|p| p.parse().ok()) else {
+        let post: Vec<&str> = stat[close + 2..].split_whitespace().collect();
+        // Post-comm field 0 is state, 1 is ppid; starttime is field 22 of the
+        // whole line, which is index 19 here. Same indexing as
+        // `lockfile::proc_starttime`, and read from the *same* line as ppid so
+        // the pair is coherent.
+        let Some(ppid) = post.first().and_then(|_| post.get(1)).and_then(|p| p.parse().ok())
+        else {
             continue;
         };
-        table.insert(pid, ProcEntry { ppid, comm });
+        let starttime = post.get(19).map(|s| (*s).to_owned()).unwrap_or_default();
+        table.insert(pid, ProcEntry { ppid, comm, starttime });
     }
     table
 }
@@ -169,11 +201,7 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
         for _ in 0..256 {
             let Some(parent) = table.get(&cursor) else { break };
             depth += 1;
-            let owns = match ownership {
-                Ownership::Holder(holder) => cursor == holder,
-                Ownership::UnverifiedComm => parent.comm == "brokkr",
-            };
-            if owns {
+            if ownership.owns(cursor) {
                 under_brokkr = true;
                 break;
             }
@@ -191,6 +219,7 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
         }
         strays.push(Stray {
             pid,
+            starttime: entry.starttime.clone(),
             comm: entry.comm.clone(),
             depth,
             started_by: started_by.unwrap_or_else(|| "unknown".to_owned()),
@@ -203,24 +232,37 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
     strays
 }
 
-/// Every descendant of `pid` in the table, paired with its depth below it.
+/// Every descendant of `pid` that brokkr does not own, with its depth and
+/// identity token.
 ///
-/// Bounded by the table size: a `/proc` snapshot can only contain a parent cycle
-/// if it is internally inconsistent, and `seen` makes that terminate anyway.
+/// `seen` is shared across every root, so overlapping stray trees traverse each
+/// process once - without it, overlapping roots re-walked and re-signalled the
+/// same subtrees, and an inconsistent snapshot could amplify that up to the
+/// depth cap. Termination comes from `seen` plus the depth bound; a parent cycle
+/// exists only in an inconsistent snapshot, and either guard alone would stop it.
+///
+/// Anything [`Ownership::owns`] recognises is skipped *and not recursed through*,
+/// so brokkr and the lock holder keep their whole subtrees.
 fn collect_descendants(
     table: &HashMap<u32, ProcEntry>,
     pid: u32,
     depth: usize,
-    out: &mut Vec<(usize, u32)>,
+    ownership: &Ownership,
+    seen: &mut HashSet<u32>,
+    out: &mut Vec<(usize, u32, String)>,
 ) {
     if depth > 64 {
         return;
     }
     for (&child, entry) in table {
-        if entry.ppid == pid && child != pid {
-            out.push((depth + 1, child));
-            collect_descendants(table, child, depth + 1, out);
+        if entry.ppid != pid || child == pid || ownership.owns(child) {
+            continue;
         }
+        if !seen.insert(child) {
+            continue;
+        }
+        out.push((depth + 1, child, entry.starttime.clone()));
+        collect_descendants(table, child, depth + 1, ownership, seen, out);
     }
 }
 
@@ -233,44 +275,66 @@ pub fn find() -> Vec<Stray> {
 /// starters)` signalled; a process that exited between the scan and the
 /// signal is not counted and not an error.
 pub fn kill(strays: &[Stray]) -> (usize, usize) {
-    let sigkill = |pid: u32| {
-        // SAFETY: SIGKILL to a PID read from `/proc` moments ago; the
-        // recycling window is the one every PID-addressed signal has, and
-        // ESRCH is benign.
-        unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) == 0 }
+    // Re-read `/proc` once: it supplies both the fresh identity tokens the
+    // signals are checked against and the descendant topology. A single read
+    // keeps the two coherent.
+    let table = read_proc();
+    let ownership = current_ownership();
+
+    // Signal `pid` only if it is still the process whose starttime we recorded.
+    // A bare PID is not an identity: between classification and the kill the
+    // process can exit and the number be reused, and then this signals something
+    // it never classified.
+    let sigkill = |pid: u32, expect: &str| {
+        if expect.is_empty() {
+            return false;
+        }
+        match crate::lockfile::proc_starttime(pid) {
+            Some(now) if now == expect => {
+                // SAFETY: identity re-verified immediately above; ESRCH is
+                // benign, and the residual window is the one every
+                // PID-addressed signal has.
+                unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) == 0 }
+            }
+            _ => false,
+        }
     };
+
     // Descendants of each stray, deepest first, before the strays themselves.
     //
     // Signalling only the selected PIDs left a hole: killing a cargo does not
-    // kill the rustc-wrapper beneath it, so a wrapper that had already been
-    // admitted survived the reap and went on to exec a compiler - the single
-    // thing the reap exists to prevent. The wrapper is in the cargo family now,
-    // so it is usually selected on its own, but "usually" is not a property: a
-    // stray can have children of any name, and a build script's children are
-    // arbitrary programs.
+    // kill the rustc-wrapper beneath it, so an already-admitted wrapper survived
+    // the reap and went on to exec a compiler - the single thing the reap exists
+    // to prevent. A stray can also have children of any name, and a build
+    // script's children are arbitrary programs.
     //
-    // Re-read `/proc` rather than reusing the classification snapshot, so a
-    // child created since the scan is still found. This is not atomic
-    // containment - a process can fork again between this read and the signal -
-    // so it narrows the hole rather than closing it. Closing it needs a cgroup,
-    // which is a bigger change than this reaper is.
-    let table = read_proc();
-    let mut descendants: Vec<(usize, u32)> = Vec::new();
+    // Expansion stops at anything brokkr owns and never recurses through it.
+    // Without that, `cargo(stray) -> brokkr(holder) -> ...` was fatal: the
+    // classifier walking up from the cargo cannot see the holder *below* it, so
+    // the cargo is a stray, and expanding its descendants then reached brokkr
+    // itself and SIGKILLed it. That topology occurs whenever brokkr is launched
+    // from a cargo.
+    //
+    // This is not atomic containment - a process can fork again between the read
+    // and the signal - so it narrows the hole rather than closing it. Closing it
+    // needs a cgroup, which is a larger change than this reaper is.
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut descendants: Vec<(usize, u32, String)> = Vec::new();
     for s in strays {
-        collect_descendants(&table, s.pid, 0, &mut descendants);
+        collect_descendants(&table, s.pid, 0, &ownership, &mut seen, &mut descendants);
     }
-    // Deepest first, and never a PID that is itself a listed stray - those are
-    // signalled below, in the caller's leaves-first order.
     descendants.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    for (_, pid) in &descendants {
+    for (_, pid, starttime) in &descendants {
         if !strays.iter().any(|s| s.pid == *pid) {
-            sigkill(*pid);
+            sigkill(*pid, starttime);
         }
     }
-    let killed = strays.iter().filter(|s| sigkill(s.pid)).count();
+    let killed = strays.iter().filter(|s| sigkill(s.pid, &s.starttime)).count();
     let starters = starters_to_kill(strays)
         .into_iter()
-        .filter(|(pid, _)| sigkill(*pid))
+        .filter(|(pid, _)| {
+            table.get(pid).is_some_and(|e| sigkill(*pid, &e.starttime))
+        })
         .count();
     (killed, starters)
 }
@@ -388,21 +452,39 @@ mod tests {
 
     fn table(rows: &[(u32, u32, &str)]) -> HashMap<u32, ProcEntry> {
         rows.iter()
-            .map(|&(pid, ppid, comm)| (pid, ProcEntry { ppid, comm: comm.to_owned() }))
+            .map(|&(pid, ppid, comm)| {
+                (
+                    pid,
+                    ProcEntry {
+                        ppid,
+                        comm: comm.to_owned(),
+                        // Distinct per pid, so a test that checks identity
+                        // verification cannot pass by accident.
+                        starttime: format!("{pid}00"),
+                    },
+                )
+            })
             .collect()
     }
 
-    #[test]
-    fn cargo_under_brokkr_is_not_a_stray() {
-        let t = table(&[(1, 0, "systemd"), (10, 1, "zsh"), (20, 10, "brokkr"), (30, 20, "cargo"), (40, 30, "rustc")]);
-        assert!(classify(&t, Ownership::Holder(20)).is_empty());
-        // And under the fallback rule, where the name is all there is.
-        assert!(classify(&t, Ownership::UnverifiedComm).is_empty());
+    /// No hold, and nothing of ours in the tree.
+    fn foreign() -> Ownership {
+        Ownership { me: 999_999, holder: None }
     }
 
-    /// The impersonation the `comm` rule cannot see: a shell copied to a file
-    /// named `brokkr` exempted everything under it. Keyed on the verified
-    /// holder PID instead, the same tree is entirely stray.
+    #[test]
+    fn cargo_under_the_holder_is_not_a_stray() {
+        let t = table(&[(1, 0, "systemd"), (10, 1, "zsh"), (20, 10, "brokkr"), (30, 20, "cargo"), (40, 30, "rustc")]);
+        assert!(classify(&t, Ownership { me: 999_999, holder: Some(20) }).is_empty());
+        // And when the holder *is* this process.
+        assert!(classify(&t, Ownership { me: 20, holder: Some(20) }).is_empty());
+    }
+
+    /// The impersonation the `comm` rule could not see: a shell copied to a file
+    /// named `brokkr` exempted everything under it. Keyed on PIDs brokkr can
+    /// actually vouch for, the same tree is entirely stray - including when a
+    /// hold exists whose identity cannot be verified, which used to fall back to
+    /// the name and shield foreign cargo from a drain.
     #[test]
     fn a_process_merely_named_brokkr_does_not_exempt_its_cargo() {
         let t = table(&[
@@ -412,11 +494,69 @@ mod tests {
             (30, 20, "cargo"),
             (40, 30, "rustc"),
         ]);
-        let pids: Vec<u32> =
-            classify(&t, Ownership::Holder(99)).iter().map(|s| s.pid).collect();
+        let pids: Vec<u32> = classify(&t, foreign()).iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![40, 30]);
-        // The old rule is what the fallback preserves, spoof and all.
-        assert!(classify(&t, Ownership::UnverifiedComm).is_empty());
+        let unverifiable: Vec<u32> = classify(&t, Ownership { me: 999_999, holder: None })
+            .iter()
+            .map(|s| s.pid)
+            .collect();
+        assert_eq!(unverifiable, vec![40, 30]);
+    }
+
+    /// `cargo(stray) -> brokkr(us) -> cargo(ours)`: the classifier walking up
+    /// from the outer cargo cannot see us below it, so the outer cargo is a
+    /// stray. Expanding its descendants must not reach us or our work.
+    #[test]
+    fn descendant_expansion_never_crosses_into_brokkrs_own_subtree() {
+        let t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "cargo"),   // the stray root
+            (20, 10, "brokkr"), // us, launched from that cargo
+            (30, 20, "cargo"),  // our own work
+            (40, 30, "rustc"),
+        ]);
+        let own = Ownership { me: 20, holder: Some(20) };
+        // The outer cargo is a stray; ours is not.
+        let pids: Vec<u32> = classify(&t, own).iter().map(|s| s.pid).collect();
+        assert_eq!(pids, vec![10]);
+
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        collect_descendants(&t, 10, 0, &own, &mut seen, &mut out);
+        let reached: Vec<u32> = out.iter().map(|(_, pid, _)| *pid).collect();
+        assert!(
+            reached.is_empty(),
+            "expansion from a stray must stop at brokkr, not walk through it: {reached:?}"
+        );
+    }
+
+    /// Overlapping roots must traverse each process once.
+    #[test]
+    fn descendant_expansion_visits_each_process_once() {
+        let t = table(&[
+            (1, 0, "systemd"),
+            (10, 1, "cargo"),
+            (20, 10, "build_script_bu"),
+            (30, 20, "cc"),
+        ]);
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        // Both roots cover 30; it must appear once.
+        collect_descendants(&t, 10, 0, &foreign(), &mut seen, &mut out);
+        collect_descendants(&t, 20, 0, &foreign(), &mut seen, &mut out);
+        let mut pids: Vec<u32> = out.iter().map(|(_, pid, _)| *pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, vec![20, 30]);
+    }
+
+    /// Every stray carries the identity token its later SIGKILL is checked
+    /// against.
+    #[test]
+    fn strays_record_the_identity_token_for_their_pid() {
+        let t = table(&[(1, 0, "systemd"), (10, 1, "rust-analyzer"), (20, 10, "cargo")]);
+        let strays = classify(&t, foreign());
+        assert_eq!(strays.len(), 1);
+        assert_eq!(strays[0].starttime, "2000", "the token must come from the same /proc read");
     }
 
     /// A guard that outlives the cargo above it is itself reapable now.
@@ -437,7 +577,7 @@ mod tests {
             (30, 20, "build_script_bu"),
             (31, 20, "build_script_bu"),
         ]);
-        let strays = classify(&t, Ownership::UnverifiedComm);
+        let strays = classify(&t, foreign());
         let pids: Vec<u32> = strays.iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![30, 31, 20]);
         assert!(strays.iter().all(|s| s.started_by == "rust-analyzer (pid 10)"), "{strays:?}");
@@ -462,7 +602,7 @@ mod tests {
             (11, 1, "zsh"),
             (21, 11, "cargo"),
         ]);
-        let strays = classify(&t, Ownership::UnverifiedComm);
+        let strays = classify(&t, foreign());
         let starters: Vec<u32> = starters_to_kill(&strays).into_iter().map(|(pid, _)| pid).collect();
         assert_eq!(starters, vec![10]);
     }
@@ -476,7 +616,7 @@ mod tests {
             (30, 20, "build_script_bu"),
             (31, 20, "build_script_bu"),
         ]);
-        let strays = classify(&t, Ownership::UnverifiedComm);
+        let strays = classify(&t, foreign());
         let line = reap_line(&strays, 3, 1);
         assert!(!line.contains('\n'));
         assert_eq!(
