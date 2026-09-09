@@ -47,6 +47,12 @@ pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// in flight, so there is nothing to name.
 pub(crate) const IDLE_WEDGE: &str = "(no test in flight)";
 
+/// The name the watchdog blames when execution is under way but nothing has
+/// completed within the per-test cap. Either a test is over budget or its
+/// lifecycle records were lost; brokkr cannot tell which, and the budget is blown
+/// regardless.
+pub(crate) const NO_COMPLETION: &str = "(no test completed within the budget)";
+
 /// The name the watchdog blames when the wall deadline fires. There is no
 /// offender to name: "active when the deadline expired" is not "caused the
 /// timeout", and the budget can just as well expire during the hundredth
@@ -226,6 +232,14 @@ struct TestTracker {
     /// because no input has touched it. Once an event arrives, output can reset
     /// the window and the idle clock becomes advisory like the per-test one.
     ever_observed: bool,
+    /// Whether a suite has announced itself, i.e. test execution has begun.
+    /// From that point the per-test cap applies to the whole run, not only to
+    /// tests brokkr happens to be watching.
+    executing: bool,
+    /// When brokkr last saw a test *complete* (or a suite announce itself).
+    /// Bounded by the per-test cap: see [`TestTracker::timed_out`] for why a
+    /// no-completion clock is needed on top of the per-test one.
+    last_progress: Instant,
     /// When the in-flight set last changed (or the run began): the start of
     /// the current no-test-in-flight window, which [`IDLE_TIMEOUT`] bounds.
     idle_since: Instant,
@@ -237,6 +251,8 @@ impl Default for TestTracker {
             current: HashMap::new(),
             completed: Vec::new(),
             ever_observed: false,
+            executing: false,
+            last_progress: Instant::now(),
             idle_since: Instant::now(),
         }
     }
@@ -247,6 +263,7 @@ impl TestTracker {
         self.current.entry(name).or_insert_with(Instant::now);
         self.idle_since = Instant::now();
         self.ever_observed = true;
+        self.executing = true;
     }
 
     fn observe_result(&mut self, name: &str) {
@@ -255,23 +272,65 @@ impl TestTracker {
         }
         self.idle_since = Instant::now();
         self.ever_observed = true;
+        self.executing = true;
+        self.last_progress = Instant::now();
     }
 
-    /// The in-flight test past `timeout` (the longest-running one, when
-    /// several are), or the idle wedge past [`IDLE_TIMEOUT`] when nothing is
-    /// in flight at all.
+    /// A suite announced itself: test execution has begun, so the per-test cap
+    /// applies from here even before any individual test is seen starting.
+    fn observe_suite_start(&mut self) {
+        self.executing = true;
+        self.last_progress = Instant::now();
+        self.idle_since = Instant::now();
+    }
+
+    /// What has blown its budget, if anything.
+    ///
+    /// Two clocks, because a test can burn wall time in two ways brokkr sees
+    /// differently:
+    ///
+    /// 1. **A test we are watching** runs past `timeout`. The obvious case.
+    /// 2. **Nothing completes** for `timeout` while execution is under way. This
+    ///    is the case a lost *start* record produces, and it used to escape
+    ///    entirely: with no start, `current` stayed empty, so the per-test clock
+    ///    had nothing to age and the only remaining bound was the five-minute
+    ///    idle ceiling - a test could run for nearly five minutes under a
+    ///    twenty-second contract. Once a suite has announced itself, brokkr must
+    ///    see a completion at least every `timeout`; if it does not, either a test
+    ///    is over budget or its records were lost, and the budget is blown either
+    ///    way.
+    ///
+    /// Before any suite announces itself there is no test to bill, so the idle
+    /// ceiling covers that window instead (cargo wedged on a build-directory
+    /// lock, say).
     fn timed_out(&self, timeout: Duration) -> Option<(String, Duration)> {
-        if self.current.is_empty() {
-            let idle = self.idle_since.elapsed();
-            return (idle >= IDLE_TIMEOUT).then(|| (IDLE_WEDGE.to_owned(), idle));
-        }
-        self.current
+        // 1. A test we can see, over budget. Prefer this: it can be named.
+        let watched = self
+            .current
             .iter()
             .filter_map(|(name, started)| {
                 let elapsed = started.elapsed();
                 (elapsed >= timeout).then(|| (name.clone(), elapsed))
             })
-            .max_by_key(|(_, elapsed)| *elapsed)
+            .max_by_key(|(_, elapsed)| *elapsed);
+        if watched.is_some() {
+            return watched;
+        }
+
+        // 2. Execution under way and nothing completing.
+        if self.executing {
+            let stalled = self.last_progress.elapsed();
+            if stalled >= timeout {
+                return Some((NO_COMPLETION.to_owned(), stalled));
+            }
+        }
+
+        // 3. Nothing running yet: the idle window.
+        if self.current.is_empty() {
+            let idle = self.idle_since.elapsed();
+            return (idle >= IDLE_TIMEOUT).then(|| (IDLE_WEDGE.to_owned(), idle));
+        }
+        None
     }
 }
 
@@ -721,6 +780,11 @@ impl JsonReconstructor {
         match (kind, event) {
             ("suite", "started") => {
                 self.failures.clear();
+                // Execution has begun: the per-test cap now bounds the whole run,
+                // so a lost start record cannot buy a test the idle ceiling.
+                if let Ok(mut t) = tracker.lock() {
+                    t.observe_suite_start();
+                }
                 let count = val.get("test_count").and_then(Value::as_u64).unwrap_or(0);
                 vec![String::new(), format!("running {count} tests")]
             }
@@ -1029,6 +1093,16 @@ fn handle_stdout_line<F>(
     F: FnMut(&str),
 {
     let text = String::from_utf8_lossy(line).into_owned();
+
+    // `running N tests` is libtest announcing that execution has begun. From
+    // here the per-test cap bounds the whole run, so a lost `test NAME ... `
+    // start marker cannot buy a test the five-minute idle ceiling instead of its
+    // twenty seconds.
+    if text.starts_with("running ") && text.contains(" test")
+        && let Ok(mut t) = tracker.lock()
+    {
+        t.observe_suite_start();
+    }
 
     // libtest's per-suite summary is the universal pending-clear:
     // `test result: ok. ...` or `test result: FAILED. ...`. Match
@@ -1988,6 +2062,37 @@ mod tests {
     /// budget - in which case the run has exceeded what the contract allows
     /// either way. A lost event can corrupt the name, never the entitlement to
     /// kill.
+    /// The hole a lost START record opened. With no start, `current` stays empty,
+    /// so the per-test clock has nothing to age - and the only remaining bound was
+    /// the five-minute idle ceiling, letting a test run for minutes under a
+    /// twenty-second contract. Once a suite announces itself, brokkr must see a
+    /// completion at least every `per_test`.
+    #[test]
+    fn a_lost_start_record_does_not_escape_the_per_test_cap() {
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(3600))
+            .unwrap_or_else(Instant::now);
+        let mut tracker = TestTracker::default();
+        // A suite announced itself, then nothing: no start, no result. Exactly
+        // what a swallowed start marker leaves behind.
+        tracker.observe_suite_start();
+        tracker.last_progress = long_ago;
+
+        let (name, elapsed) = tracker
+            .timed_out(TEST_TIMEOUT)
+            .expect("execution under way with no completion must blow the budget");
+        assert_eq!(name, NO_COMPLETION, "there is no test to name");
+        assert!(elapsed >= TEST_TIMEOUT);
+
+        // And before any suite announces itself there is no test to bill, so the
+        // per-test cap must NOT fire - that window belongs to the idle ceiling.
+        let fresh = TestTracker { last_progress: long_ago, ..TestTracker::default() };
+        assert!(
+            fresh.timed_out(TEST_TIMEOUT).is_none_or(|(n, _)| n == IDLE_WEDGE),
+            "before execution begins only the idle ceiling applies"
+        );
+    }
+
     #[test]
     fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
         use std::os::unix::process::CommandExt;
@@ -2015,6 +2120,8 @@ mod tests {
             current: HashMap::from([("a::apparently_overdue".to_owned(), long_ago)]),
             completed: Vec::new(),
             ever_observed: true,
+            executing: true,
+            last_progress: Instant::now(),
             idle_since: Instant::now(),
         }));
         let done = Arc::new(AtomicBool::new(false));
@@ -2077,6 +2184,8 @@ mod tests {
             current: HashMap::from([("watchdog::hangs".to_owned(), started)]),
             completed: Vec::new(),
             ever_observed: true,
+            executing: true,
+            last_progress: Instant::now(),
             idle_since: started,
         }));
         let done = Arc::new(AtomicBool::new(false));

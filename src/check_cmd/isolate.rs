@@ -103,6 +103,18 @@ fn run_isolated_sweep(
             commands,
         )?;
         match outcome {
+            // A blown budget stops the lane. Collapsing it into `Failed` made it
+            // indistinguishable from an assertion failure, so the loop counted it
+            // and ran the next selected test - and the next, and the next -
+            // returning an ordinary failed-sweep result at the end. Whatever
+            // wedged the killed test is still there for its successors to
+            // inherit, and the contract says stop.
+            IsolatedOutcome::TimedOut => {
+                return Err(DevError::Verify(format!(
+                    "test '{name}' exceeded its time budget in sweep '{}' - stopping",
+                    sweep.label
+                )));
+            }
             IsolatedOutcome::Failed => failed += 1,
             IsolatedOutcome::Passed(elapsed) => {
                 if let Some(out) = timings.as_deref_mut()
@@ -160,8 +172,12 @@ enum IsolatedOutcome {
     /// Ran and passed; carries the test's own wall time when libtest
     /// reported one.
     Passed(Option<std::time::Duration>),
-    /// Failed, hung, or was killed; already reported with its command.
+    /// Failed; already reported with its command. The lane keeps going, because
+    /// a per-test failure list is the point of running isolated.
     Failed,
+    /// Blew its time budget. Distinct from `Failed` because it ends the lane:
+    /// see the loop in [`run`].
+    TimedOut,
 }
 
 /// The plan's runnable name list plus the package-qualified-skipped
@@ -361,7 +377,7 @@ fn run_one_isolated_test(
     if let LibtestOutcome::HungTest(h) = run.outcome {
         output::error(&test_runner::format_hung_test(&h, project_root));
         output::error(&format!("failing command: cargo {}", args.join(" ")));
-        return Ok(IsolatedOutcome::Failed);
+        return Ok(IsolatedOutcome::TimedOut);
     }
     let stdout = String::from_utf8_lossy(&run.captured.stdout);
 

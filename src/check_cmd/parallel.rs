@@ -108,6 +108,30 @@ struct BinaryRun {
     /// of the slots this run granted, so feeding it back oscillates. See
     /// `binary_timings`' header.
     elapsed: Duration,
+    /// Never started, because an earlier binary blew its budget and the lane is
+    /// stopping. Reported as such rather than counted either way.
+    skipped: bool,
+}
+
+impl BinaryRun {
+    /// A binary that reached the front of the queue after the lane was aborted.
+    fn skipped_after_abort(binary: &TestBinary) -> Self {
+        Self {
+            label: format!("{}/{}", binary.package, binary.target),
+            command: String::new(),
+            captured: CapturedOutput {
+                status: std::process::ExitStatus::default(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                elapsed: Duration::ZERO,
+            },
+            hung: None,
+            timed_out: false,
+            completed: Vec::new(),
+            elapsed: Duration::ZERO,
+            skipped: true,
+        }
+    }
 }
 
 /// A counting semaphore over the sweep's in-flight test budget.
@@ -550,6 +574,7 @@ fn run_one_binary(
         timed_out: run.timed_out,
         completed: run.completed,
         elapsed: started.elapsed(),
+        skipped: false,
     })
 }
 
@@ -745,6 +770,12 @@ fn run_parallel_sweep(
 
     let pool = Budget::new(budget);
     let mut runs: Vec<Result<BinaryRun, DevError>> = Vec::new();
+    // Set the moment any binary blows its budget. Every thread is created up
+    // front and waits for a slot, so without this a killed binary released its
+    // slots and the next queued binary started - the run carried on past a
+    // timeout, which the contract forbids. Threads already executing cannot be
+    // recalled (their own watchdogs bound them), but nothing new starts.
+    let aborted = std::sync::atomic::AtomicBool::new(false);
 
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
@@ -754,8 +785,13 @@ fn run_parallel_sweep(
             let cargo_extra = &cargo_extra;
             let libtest_extra = &libtest_extra;
             let runtime = &runtime;
+            let aborted = &aborted;
             handles.push(scope.spawn(move || {
                 pool.acquire(*slots)?;
+                if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+                    pool.release(*slots);
+                    return Ok(BinaryRun::skipped_after_abort(binary));
+                }
                 let out = run_one_binary(
                     project_root,
                     state_root,
@@ -768,6 +804,9 @@ fn run_parallel_sweep(
                     cargo_extra,
                     libtest_extra,
                 );
+                if out.as_ref().is_ok_and(|r| r.timed_out || r.hung.is_some()) {
+                    aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 // Released whether the run succeeded or errored: a binary that
                 // failed to spawn must not strand its slice of the budget and
                 // wedge every binary still waiting.
@@ -815,6 +854,7 @@ fn run_parallel_sweep(
 /// than in completion order, because a gate's output is diffed between runs
 /// and ordering it by which binary happened to finish first makes two
 /// identical red runs look different.
+#[allow(clippy::too_many_lines)]
 fn report_runs(
     project_root: &Path,
     sweep: &ResolvedSweep,
@@ -828,8 +868,17 @@ fn report_runs(
     let mut passed = 0usize;
     let mut slowest = (String::new(), Duration::ZERO);
     let mut ok = true;
+    // Set when any binary blew its budget: the lane stops rather than reporting
+    // an ordinary failed sweep, and the remaining reports are still rendered
+    // first so the operator sees what did run.
+    let mut budget_blown: Option<String> = None;
+    let mut skipped = 0usize;
     for run in runs {
         let run = run?;
+        if run.skipped {
+            skipped += 1;
+            continue;
+        }
         let completed_count = run.completed.len();
         passed += completed_count;
         if let Some(out) = timings.as_deref_mut() {
@@ -855,6 +904,7 @@ fn report_runs(
             ));
             output::error(&run.command);
             ok = false;
+            budget_blown = Some(run.label.clone());
             continue;
         }
         if let Some(hung) = run.hung {
@@ -862,6 +912,7 @@ fn report_runs(
             output::error(&test_runner::format_hung_test(&hung, project_root));
             output::error(&run.command);
             ok = false;
+            budget_blown = Some(run.label.clone());
             continue;
         }
         if !run.captured.status.success() {
@@ -915,6 +966,22 @@ fn report_runs(
         if run.elapsed > slowest.1 {
             slowest = (run.label.clone(), run.elapsed);
         }
+    }
+
+    // A blown budget ends the run rather than failing a sweep. Reported after the
+    // loop so every binary that did run has already spoken.
+    if let Some(label) = budget_blown {
+        if skipped > 0 {
+            output::error(&format!(
+                "{skipped} binary/binaries in sweep '{}' were not started, because the lane \
+                 stopped when {label} exceeded its budget",
+                sweep.label
+            ));
+        }
+        return Err(DevError::Verify(format!(
+            "binary {label} exceeded its time budget in sweep '{}' - stopping",
+            sweep.label
+        )));
     }
 
     // The summary earns its line by carrying what no other line can: the wall

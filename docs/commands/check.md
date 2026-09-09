@@ -209,6 +209,41 @@ of the sweep loop and ends the run, in `check` and in `brokkr test` alike
 (including between `-N` iterations, where the repeat summary still prints for the
 iterations that did run).
 
+### Two clocks, because a test can hide in two ways
+
+The cap is enforced by two measurements, not one:
+
+1. **A test brokkr is watching** runs past 20s. The obvious case.
+2. **Nothing completes** for 20s while a suite is under way. This is the case a
+   lost *start* record produces, and it escaped entirely at first: with no start
+   there was nothing in flight to age, so the only remaining bound was the
+   five-minute idle ceiling and a test could run for minutes under a
+   twenty-second contract. Once a suite announces itself, brokkr must see a
+   completion at least every 20s; if it does not, either a test is over budget or
+   its records were lost, and the budget is blown either way.
+
+Before any suite announces itself there is no test to bill, so that window belongs
+to the idle ceiling instead.
+
+### What stopping costs, per lane
+
+"Stops" has a price in two lanes and it is worth naming:
+
+- **The parallel-binaries lane** creates every binary's thread up front and they
+  wait for a budget slot. A killed binary used to release its slots and let the
+  next queued binary start, so the run continued past a timeout. An abort flag now
+  stops anything new from starting; binaries already executing are bounded by
+  their own watchdogs and are reported, and the ones never started are reported as
+  skipped.
+- **The nextest lane** no longer enumerates every failure in one run. In that
+  engine a timeout arrives as a failed test, and `MaxFail::All` means "run
+  everything regardless of failures", so a test that blew its cap was terminated
+  while the run carried on to the end. There is no way to cancel on a timeout
+  without cancelling on a failure, so the lane is fail-fast with
+  `TerminateMode::Immediate`. The cap is not negotiable and the failure list is.
+  Its `grace-period` is also `0s`: a grace period SIGTERMs at the ceiling and only
+  SIGKILLs afterwards, which lets a test that blocks SIGTERM outlive its budget.
+
 ### What the cap can and cannot prove
 
 The cap is enforced from a clock fed by libtest's *announcements*, and those
