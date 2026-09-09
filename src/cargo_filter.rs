@@ -213,8 +213,46 @@ pub struct ParsedTestResults {
     pub failed: usize,
     pub ignored: usize,
     pub filtered_out: usize,
+    /// Number of suites whose *terminal* summary was observed.
+    ///
+    /// Terminal, not started: a process can report suite one in full and then
+    /// die inside suite two, and a count of started suites would make that look
+    /// finished. See [`Completeness`] for the part this number cannot carry.
     pub suites: usize,
     pub duration: Option<f64>,
+    /// Whether the numbers above describe a run that actually finished
+    /// reporting.
+    ///
+    /// Every count here defaults to zero, and zero is indistinguishable from
+    /// "the run never said". That ambiguity is how a crashed harness reads as a
+    /// clean empty run: `passed == 0 && failed == 0` looks exactly like "the
+    /// filter matched nothing". Callers must consult this before drawing a
+    /// conclusion from a zero.
+    pub completeness: Completeness,
+}
+
+/// Whether a parsed run finished reporting, and if not, why not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Completeness {
+    /// Every suite that started also reported a terminal summary.
+    #[default]
+    Complete,
+    /// The stream stopped, or contradicted itself, before every started suite
+    /// reported. The counts are whatever was observed up to that point - useful
+    /// for a report, never sufficient for a verdict.
+    Incomplete { reason: String },
+}
+
+impl ParsedTestResults {
+    /// Whether these counts may be read as a finished run.
+    pub fn is_complete(&self) -> bool {
+        matches!(self.completeness, Completeness::Complete)
+    }
+
+    /// Tests actually accounted for. Meaningless unless [`Self::is_complete`].
+    pub fn accounted(&self) -> usize {
+        self.passed + self.failed + self.ignored
+    }
 }
 
 /// Parse cargo test stdout into structured results.
@@ -228,6 +266,26 @@ pub struct ParsedTestResults {
 /// before passing non-JSON lines here.
 pub fn parse_test_output(lines: &[&str]) -> ParsedTestResults {
     parse_test_output_with_stderr(lines, &[])
+}
+
+/// Whether every suite that announced itself also reported a summary.
+///
+/// A suite that started and never summarised is the shape a crashed or killed
+/// harness leaves behind, and it is exactly the shape that reads as a clean empty
+/// run when only the counts are consulted: every total stays zero because nothing
+/// reported them, which is indistinguishable from "the filter matched nothing".
+/// Naming the difference is the whole point of [`Completeness`].
+fn judge_completeness(started: usize, summarised: usize) -> Completeness {
+    if started > summarised {
+        Completeness::Incomplete {
+            reason: format!(
+                "{started} suite(s) started but only {summarised} reported a summary - the run \
+                 stopped before finishing"
+            ),
+        }
+    } else {
+        Completeness::Complete
+    }
 }
 
 /// Like [`parse_test_output`], but also scans stderr for inline panic
@@ -259,6 +317,9 @@ pub fn parse_test_output_with_stderr(
     // (`catch_unwind`), and only listed names actually failed.
     let mut failed_names: Vec<String> = Vec::new();
     let mut in_name_list = false;
+    // Suites that announced themselves. Compared against the number that
+    // summarised, to tell a finished run from a truncated one.
+    let mut started_suites: usize = 0;
 
     for line in lines {
         // Start of a new test binary. Cargo concatenates every suite's
@@ -275,6 +336,7 @@ pub fn parse_test_output_with_stderr(
         // and that is not a suite boundary.
         let suite_start = line.starts_with("running ") && !in_failure_detail;
         if suite_start {
+            started_suites += 1;
             flush_parsed_failure(
                 &current_name,
                 &current_panic_loc,
@@ -445,6 +507,8 @@ pub fn parse_test_output_with_stderr(
     // which tests are down while the exit code stays honest.
     complete_roster(&mut failures, &failed_names);
 
+    let completeness = judge_completeness(started_suites, suites);
+
     ParsedTestResults {
         failures,
         passed,
@@ -453,6 +517,7 @@ pub fn parse_test_output_with_stderr(
         filtered_out,
         suites,
         duration: if has_duration { Some(duration) } else { None },
+        completeness,
     }
 }
 
@@ -1365,6 +1430,56 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         // Should be one line per failure, not multi-line.
         let failure_lines: Vec<&str> = result.lines().filter(|l| l.starts_with("  FAILED")).collect();
         assert_eq!(failure_lines.len(), 1, "got: {result}");
+    }
+
+    /// A suite that started and never summarised must not read as a finished
+    /// run. Its zeros mean "never reported", and a caller that cannot tell the
+    /// difference calls a crashed harness an empty test selection.
+    #[test]
+    fn a_truncated_stream_is_incomplete_not_an_empty_run() {
+        let lines = ["", "running 3 tests", "test a::one ... ok"];
+        let parsed = parse_test_output(&lines);
+        assert!(!parsed.is_complete(), "a suite with no summary is not complete");
+        assert_eq!(parsed.accounted(), 0, "nothing was reported, so nothing is accounted");
+        match &parsed.completeness {
+            Completeness::Incomplete { reason } => {
+                assert!(reason.contains("started"), "{reason}");
+            }
+            Completeness::Complete => panic!("expected Incomplete"),
+        }
+    }
+
+    /// The genuinely empty suite: it announced itself, summarised, and reported
+    /// nothing. Complete, and a real - if empty - run.
+    #[test]
+    fn a_legitimately_empty_suite_is_complete() {
+        let lines = [
+            "",
+            "running 0 tests",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        ];
+        let parsed = parse_test_output(&lines);
+        assert!(parsed.is_complete());
+        assert_eq!(parsed.accounted(), 0);
+        assert_eq!(parsed.filtered_out, 0);
+    }
+
+    /// Several suites, all of which reported: complete, and the counts add up.
+    #[test]
+    fn every_suite_reporting_is_complete() {
+        let lines = [
+            "",
+            "running 1 test",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s",
+            "",
+            "running 1 test",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        ];
+        let parsed = parse_test_output(&lines);
+        assert!(parsed.is_complete());
+        assert_eq!(parsed.suites, 2, "suites counts terminal summaries");
+        assert_eq!(parsed.passed, 2);
+        assert_eq!(parsed.filtered_out, 2);
     }
 
     #[test]

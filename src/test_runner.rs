@@ -593,31 +593,109 @@ struct JsonReconstructor {
     failures: Vec<(String, Option<String>)>,
 }
 
+/// Split a stdout line into any leading test output and a trailing libtest
+/// event, or `None` when the line carries no event.
+///
+/// # Why a line can carry both
+///
+/// libtest writes each JSON record, newline included, as one write, and reserves
+/// no boundary against whatever preceded it. A test that prints without a
+/// trailing newline - `print!("breadcrumb")` - therefore produces
+/// `breadcrumb{"type":"test","event":"ok",...}` on a single line. Requiring the
+/// line to *start* with `{` dropped that event on the floor: the test stayed in
+/// the tracker as in-flight, its duration inflated to the next transition, and
+/// the per-test clock aged the wrong thing. This is reachable without
+/// `--nocapture` and without malice, because libtest's capture installs Rust's
+/// capture mechanism rather than redirecting the process's stdout descriptor, so
+/// a `write!(std::io::stdout(), ..)` or a subprocess that inherited the
+/// descriptor writes straight past it.
+///
+/// # Why right to left
+///
+/// Candidate boundaries are tried from the last `{` backwards. If test output
+/// itself ends in JSON immediately before the real record, only the real
+/// record's `{` parses cleanly through end-of-line, so the later boundary is the
+/// correct one. Scanning left to right would hand the earlier, wrong object back.
+///
+/// # What is deliberately not attempted
+///
+/// A candidate is accepted only if the suffix parses whole as one JSON value and
+/// carries a *recognised* libtest `type`/`event` pair. Arbitrary JSON is not an
+/// event merely because it has a `type` field, and cargo's own
+/// `--message-format=json` records (`reason`, no `type`) pass through untouched.
+///
+/// This cannot be made exact. A test can print a byte-for-byte valid libtest
+/// record on its own line, and no amount of scanning distinguishes that from the
+/// real thing - the limitation is in sharing one stream between a protocol and
+/// arbitrary output, not in this function. It is tolerable precisely because
+/// these events no longer decide when anything is killed: being wrong costs a
+/// wrong name in a report, not a terminated run.
+fn split_trailing_event(line: &str) -> Option<(&str, Value)> {
+    if !line.contains('{') {
+        return None;
+    }
+    let mut candidates: Vec<usize> = line.match_indices('{').map(|(i, _)| i).collect();
+    candidates.reverse();
+    for start in candidates {
+        let Ok(val) = serde_json::from_str::<Value>(line[start..].trim_end()) else {
+            continue;
+        };
+        let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
+        let event = val.get("event").and_then(Value::as_str).unwrap_or("");
+        if !is_known_libtest_event(kind, event) {
+            // Parsed, but not one of ours. Do not keep scanning left for a
+            // "better" object: a valid non-event JSON tail means the line is not
+            // an event line.
+            return None;
+        }
+        return Some((line[..start].trim_end(), val));
+    }
+    None
+}
+
+/// The `type`/`event` pairs libtest actually emits. Anything else is not an
+/// event, however JSON-shaped.
+fn is_known_libtest_event(kind: &str, event: &str) -> bool {
+    matches!(
+        (kind, event),
+        ("suite", "started" | "ok" | "failed")
+            | ("test", "started" | "ok" | "failed" | "ignored" | "timeout")
+    )
+}
+
 impl JsonReconstructor {
     /// Consume one raw stdout line, updating `tracker` and returning the human
     /// libtest lines to emit for it (possibly none, or several).
     fn observe(&mut self, line: &str, tracker: &Mutex<TestTracker>) -> Vec<String> {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with('{') {
-            // Non-JSON: `--nocapture` test output, or a stray print. Pass through.
-            return vec![line.to_owned()];
-        }
-        let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+        let Some((prefix, val)) = split_trailing_event(line) else {
+            // No libtest event on this line: test output, a stray print, or
+            // cargo's own `--message-format=json` record (which has `reason`
+            // and no `type`). Pass through untouched.
             return vec![line.to_owned()];
         };
-        // cargo's own `--message-format=json` line (has `reason`, no `type`):
-        // let the caller's JSON path handle it untouched.
-        let Some(kind) = val.get("type").and_then(Value::as_str) else {
-            return vec![line.to_owned()];
-        };
+        let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
         let event = val.get("event").and_then(Value::as_str).unwrap_or("");
+        // Output that ran into the event keeps its own line, verbatim and first.
+        let mut out = if prefix.is_empty() { Vec::new() } else { vec![prefix.to_owned()] };
+        out.extend(self.observe_event(kind, event, &val, tracker));
+        out
+    }
+
+    /// Handle one recognised libtest event.
+    fn observe_event(
+        &mut self,
+        kind: &str,
+        event: &str,
+        val: &Value,
+        tracker: &Mutex<TestTracker>,
+    ) -> Vec<String> {
         match (kind, event) {
             ("suite", "started") => {
                 self.failures.clear();
                 let count = val.get("test_count").and_then(Value::as_u64).unwrap_or(0);
                 vec![String::new(), format!("running {count} tests")]
             }
-            ("suite", _) => self.render_suite_summary(&val, event),
+            ("suite", _) => self.render_suite_summary(val, event),
             ("test", "started") => {
                 if let Some(name) = val.get("name").and_then(Value::as_str)
                     && let Ok(mut t) = tracker.lock()
@@ -627,16 +705,16 @@ impl JsonReconstructor {
                 Vec::new()
             }
             ("test", "ok") => {
-                let name = self.finish(&val, tracker);
+                let name = self.finish(val, tracker);
                 name.map(|n| vec![format!("test {n} ... ok")]).unwrap_or_default()
             }
             ("test", "ignored") => {
-                let name = self.finish(&val, tracker);
+                let name = self.finish(val, tracker);
                 name.map(|n| vec![format!("test {n} ... ignored")])
                     .unwrap_or_default()
             }
             ("test", "failed") => {
-                let Some(name) = self.finish(&val, tracker) else {
+                let Some(name) = self.finish(val, tracker) else {
                     return Vec::new();
                 };
                 let captured = val
@@ -1983,6 +2061,69 @@ mod tests {
             tracker.lock().unwrap().current.keys().cloned().collect();
         in_flight.sort();
         (lines, in_flight)
+    }
+
+    /// The concatenation case. libtest writes a record and its newline as one
+    /// write with no boundary against preceding output, so a test that prints
+    /// without a trailing newline lands its text on the same line as the next
+    /// event. Requiring the line to START with `{` silently dropped that event:
+    /// the test stayed in-flight, its duration ran to the next transition, and
+    /// the per-test clock aged the wrong thing.
+    #[test]
+    fn an_event_glued_after_unterminated_output_is_still_consumed() {
+        let (lines, in_flight) = drive_recon(&[
+            r#"{"type":"suite","event":"started","test_count":1}"#,
+            r#"{"type":"test","event":"started","name":"a::one"}"#,
+            // `print!("breadcrumb")` with no newline, then libtest's record.
+            r#"breadcrumb{"type":"test","name":"a::one","event":"ok"}"#,
+            r#"{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.01}"#,
+        ]);
+        assert!(in_flight.is_empty(), "the glued terminal event must clear the tracker");
+        assert!(
+            lines.iter().any(|l| l == "breadcrumb"),
+            "the test's own output must survive verbatim: {lines:?}"
+        );
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let parsed = crate::cargo_filter::parse_test_output(&refs);
+        assert_eq!(parsed.passed, 1, "the event must be counted: {lines:?}");
+    }
+
+    /// Test output that itself ends in JSON, immediately before a real record.
+    /// Only the later boundary parses cleanly to end-of-line, which is why the
+    /// scan runs right to left.
+    #[test]
+    fn json_shaped_test_output_before_a_real_event_is_preserved() {
+        let (lines, in_flight) = drive_recon(&[
+            r#"{"type":"suite","event":"started","test_count":1}"#,
+            r#"{"type":"test","event":"started","name":"a::one"}"#,
+            r#"{"cfg":"mine"}{"type":"test","name":"a::one","event":"ok"}"#,
+        ]);
+        assert!(in_flight.is_empty(), "the real event must still be consumed");
+        assert!(
+            lines.iter().any(|l| l == r#"{"cfg":"mine"}"#),
+            "the test's JSON-shaped output must survive verbatim: {lines:?}"
+        );
+    }
+
+    /// Neither arbitrary JSON nor cargo's own artifact records are libtest
+    /// events, however JSON-shaped they are.
+    #[test]
+    fn non_libtest_json_is_passed_through_not_interpreted() {
+        let (lines, in_flight) = drive_recon(&[
+            r#"{"type":"suite","event":"started","test_count":1}"#,
+            r#"{"type":"test","event":"started","name":"a::one"}"#,
+            // cargo's message-format record: `reason`, no `type`.
+            r#"{"reason":"compiler-artifact","package_id":"p"}"#,
+            // An object with a `type` that is not one of libtest's.
+            r#"{"type":"telemetry","event":"ok","name":"a::one"}"#,
+        ]);
+        assert_eq!(
+            in_flight,
+            vec!["a::one"],
+            "no impostor may clear a test from the tracker"
+        );
+        assert!(lines.iter().any(|l| l.contains("compiler-artifact")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("telemetry")), "{lines:?}");
     }
 
     #[test]

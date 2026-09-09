@@ -913,14 +913,20 @@ fn run_one(
     // an informational SKIP; the caller decides whether this is a real
     // error (all sweeps missed) or fine (feature-gated out of this one).
     //
-    // Ordered AFTER the unsuccessful-exit check, not before it. A run that
-    // crashed hard enough to report no counts at all - a SIGABRT or a
-    // stack overflow before the first `test result:` line, a harness that
-    // died in a static initializer - has `passed == 0 && failed == 0` too,
-    // and reporting that as "no tests matched" turned a red run green: the
-    // name was fine, the binary blew up. Zero counts mean a name miss only
-    // when the process also exited successfully.
-    if parsed.passed == 0 && parsed.failed == 0 {
+    // Three guards, each for a way a zero can lie:
+    //
+    // - Ordered AFTER the unsuccessful-exit check. A run that crashed hard
+    //   enough to report no counts - a SIGABRT or stack overflow before the
+    //   first `test result:` line, a harness dying in a static initializer -
+    //   has zero counts too, and calling that "no tests matched" turned a red
+    //   run green: the name was fine, the binary blew up.
+    // - `is_complete()`: a stream that stopped mid-run has zeros because
+    //   nothing reported them, not because nothing matched.
+    // - `accounted()` rather than passed+failed: an invocation that matched
+    //   only `#[ignore]`d tests really did match. Currently unreachable, since
+    //   this command always passes `--include-ignored`, but the check should
+    //   say what it means rather than rely on a flag elsewhere staying put.
+    if parsed.is_complete() && parsed.accounted() == 0 {
         flush_sink(sink, false);
         println!(
             "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"

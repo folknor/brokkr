@@ -836,8 +836,14 @@ fn zero_test_run(p: &cargo_filter::ParsedTestResults) -> bool {
     if p.suites == 0 {
         return true;
     }
-    let total = p.passed + p.failed + p.ignored;
-    total == 0 && p.filtered_out > 0
+    // A truncated stream is not a zero-test run - it is a run that stopped
+    // reporting, and its zeros mean "never said" rather than "nothing matched".
+    // Calling it a wrong-run would blame the filter for a crash; the caller's
+    // exit-status and timeout paths own that case.
+    if !p.is_complete() {
+        return false;
+    }
+    p.accounted() == 0 && p.filtered_out > 0
 }
 
 /// Combine the sweep's profile-defined env with the project's
@@ -1937,6 +1943,7 @@ warning: z [too_many_lines]
             filtered_out,
             suites,
             duration: None,
+            completeness: cargo_filter::Completeness::Complete,
         }
     }
 
