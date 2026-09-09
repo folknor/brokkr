@@ -141,13 +141,53 @@ pub(crate) struct LibtestRun {
     pub(crate) completed: Vec<(String, Duration)>,
 }
 
+// The size difference is real - `HungTest` carries snapshot paths and pid
+// lists - and irrelevant: exactly one of these exists per test run, built once
+// when a run ends. Boxing it would buy nothing and cost every match site an
+// indirection.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum LibtestOutcome {
     Completed,
     HungTest(HungTest),
 }
 
+/// Why a run was killed.
+///
+/// An enum rather than a magic value in `test`, because the two are not the same
+/// kind of claim and conflating them let a wall expiry render as
+/// "test (sweep wall deadline) ran 1800s, exceeding the 1800s per-test timeout,
+/// after libtest started it" - a sentence that contradicts itself. Keeping the
+/// distinction in the type also makes it hard to reintroduce the worse bug of
+/// letting attribution terminate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TimeoutReason {
+    /// The authoritative wall clock expired. There is no offender to name:
+    /// "active when the deadline expired" is not "caused the timeout", and the
+    /// budget can just as well expire during the hundredth healthy test.
+    /// `blamed` carries whatever was in flight, as unverified context only.
+    SweepWall { blamed: Vec<String> },
+    /// One process ran one test and that test crossed its ceiling. The only
+    /// case where a per-test ceiling is a guarantee rather than a guess.
+    PerTest { name: String },
+    /// Nothing was in flight for the idle window - cargo wedged before the
+    /// first test or after the last.
+    Idle,
+}
+
+impl TimeoutReason {
+    /// The name to file this under in reports and snapshot paths.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::SweepWall { .. } => WALL_WEDGE.to_owned(),
+            Self::PerTest { name } => name.clone(),
+            Self::Idle => IDLE_WEDGE.to_owned(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct HungTest {
+    pub(crate) reason: TimeoutReason,
     pub(crate) test: String,
     pub(crate) elapsed: Duration,
     pub(crate) ceiling: Duration,
@@ -273,7 +313,7 @@ where
     let done_t = Arc::clone(&done);
     let hung_t = Arc::clone(&hung);
     let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings);
+        watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings, start);
     });
 
     let status = child.wait().map_err(|e| DevError::Subprocess {
@@ -416,6 +456,7 @@ where
             done_w,
             hung_w,
             Ceilings { per_test: per_test_timeout, wall: None },
+            start,
         );
     });
 
@@ -993,11 +1034,22 @@ fn watchdog_loop(
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
     ceilings: Ceilings,
+    started: Instant,
 ) {
-    watchdog_loop_with_timing(state_root, cargo_pid, tracker, done, hung, ceilings, WATCHDOG_POLL);
+    watchdog_loop_with_timing(
+        state_root,
+        cargo_pid,
+        tracker,
+        done,
+        hung,
+        ceilings,
+        WATCHDOG_POLL,
+        started,
+    );
 }
 
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
+#[allow(clippy::too_many_arguments)]
 fn watchdog_loop_with_timing(
     state_root: PathBuf,
     cargo_pid: u32,
@@ -1006,13 +1058,17 @@ fn watchdog_loop_with_timing(
     hung: Arc<Mutex<Option<HungTest>>>,
     ceilings: Ceilings,
     poll: Duration,
+    // `started` is the run's start, captured by the CALLER before it spawned the
+    // child. Passed in rather than taken here: a fresh `Instant::now()` inside
+    // this thread begins after the child and the reader threads are already
+    // running, so the bound would silently exclude spawn and thread-start
+    // latency while the comments claimed it ran "from spawn".
+    started: Instant,
 ) {
-    // The watchdog's own clock, started when the run started. Nothing the child
-    // prints can advance, reset or extend it - which is the entire point of
-    // having it, and the difference between this and the two event-driven
-    // ceilings below.
-    let started = Instant::now();
     let timeout = ceilings.per_test;
+    // Emitted at most once, so a long sweep does not repeat the same guess every
+    // poll tick.
+    let mut warned = false;
     loop {
         if done.load(Ordering::SeqCst) {
             return;
@@ -1022,32 +1078,61 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        // Wall deadline first: it is the authoritative one, so it must not be
-        // preempted by an attribution guess that happens to fire in the same
-        // poll tick.
-        let wall_expired = ceilings
-            .wall
-            .filter(|w| started.elapsed() >= *w)
-            .map(|w| (WALL_WEDGE.to_owned(), started.elapsed(), w));
+        // ONLY the wall clock terminates. This is the whole invariant, and
+        // getting it wrong once already cost a redesign: an earlier version
+        // checked the wall first and fell back to the attribution clock with
+        // `or_else`, which merely resolved ties inside one poll tick - in
+        // practice the 20s guess fired 29m40s before the 30m wall, so the
+        // untrusted clock still had termination authority and the false verdict
+        // the redesign existed to remove was still reachable.
+        //
+        // A per-test or idle expiry therefore produces a *diagnostic* here, not
+        // a kill. Where a per-test ceiling really is a guarantee - one process
+        // running one test - the caller sets `wall` to that same ceiling
+        // (`Ceilings::one_test`), so the guarantee is enforced by the clock that
+        // has authority rather than by the one that reads test output.
+        let advisory = tracker.lock().ok().and_then(|t| t.timed_out(timeout));
+        if let Some((name, elapsed)) = &advisory
+            && !warned
+            && ceilings.wall.is_some()
+        {
+            warned = true;
+            crate::output::warn(&format!(
+                "test '{}' has been running {}s (over the {}s per-test ceiling). Not killing it: \
+                 that ceiling is read from libtest's output, which test output shares, so it \
+                 names a suspect rather than proving one. The run is bounded by its wall \
+                 deadline.",
+                name,
+                elapsed.as_secs(),
+                if name == IDLE_WEDGE { IDLE_TIMEOUT.as_secs() } else { timeout.as_secs() },
+            ));
+        }
 
-        let timed_out = wall_expired.or_else(|| {
-            tracker
-                .lock()
-                .ok()
-                .and_then(|t| t.timed_out(timeout))
-                .map(|(test, elapsed)| {
-                    let ceiling = if test == IDLE_WEDGE { IDLE_TIMEOUT } else { timeout };
-                    (test, elapsed, ceiling)
-                })
-        });
-        let Some((test, elapsed, ceiling)) = timed_out else {
+        let Some(wall) = ceilings.wall.filter(|w| started.elapsed() >= *w) else {
             continue;
         };
         if done.load(Ordering::SeqCst) {
             return;
         }
 
-        let hung_test = capture_hung_test(&state_root, cargo_pid, &test, elapsed, ceiling);
+        // At the deadline, consult the tracker to enrich the report - unverified
+        // context, never the reason.
+        let blamed = tracker
+            .lock()
+            .ok()
+            .map(|t| t.current.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let (reason, elapsed, ceiling) = match &advisory {
+            // A wall equal to the per-test ceiling is the one-process-one-test
+            // shape: the wall firing *is* that test's ceiling firing, so name it.
+            Some((name, e)) if Some(timeout) == ceilings.wall && name != IDLE_WEDGE => {
+                (TimeoutReason::PerTest { name: name.clone() }, *e, timeout)
+            }
+            Some((name, e)) if name == IDLE_WEDGE => (TimeoutReason::Idle, *e, IDLE_TIMEOUT),
+            _ => (TimeoutReason::SweepWall { blamed }, started.elapsed(), wall),
+        };
+
+        let hung_test = capture_hung_test(&state_root, cargo_pid, reason, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
         }
@@ -1059,10 +1144,12 @@ fn watchdog_loop_with_timing(
 fn capture_hung_test(
     state_root: &Path,
     cargo_pid: u32,
-    test: &str,
+    reason: TimeoutReason,
     elapsed: Duration,
     ceiling: Duration,
 ) -> HungTest {
+    let test = reason.label();
+    let test = test.as_str();
     let test_pids = direct_child_pids(cargo_pid);
     let snapshot_pid = test_pids.first().copied().or(Some(cargo_pid));
     // Diagnostic snapshots are brokkr-owned state, so they live under the
@@ -1098,6 +1185,7 @@ fn capture_hung_test(
         .flatten();
 
     HungTest {
+        reason,
         test: test.to_owned(),
         elapsed,
         ceiling,
@@ -1240,7 +1328,25 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
         None => format!("full snapshot: {snapshot_path}"),
     };
 
-    let headline = if hung.test == IDLE_WEDGE {
+    let headline = if let TimeoutReason::SweepWall { blamed } = &hung.reason {
+        // No offender is named, because none is known: the deadline expiring
+        // says nothing about which test caused it, and it can just as easily
+        // expire during the hundredth healthy test. Whatever was in flight is
+        // reported as context, explicitly unverified.
+        let context = match blamed.as_slice() {
+            [] => "no test was in flight".to_owned(),
+            names => format!("in flight when it expired (unverified): {}", names.join(", ")),
+        };
+        format!(
+            "the run exceeded its {}s wall deadline after {}s and was killed\n  \
+             wall deadline: the authoritative bound - it is measured from a clock nothing the \
+             tests print can reach, so unlike the per-test ceiling it cannot be misled by output \
+             that swallows a libtest record\n  {context}\n  \
+             note: \"in flight when the deadline expired\" is not \"caused the timeout\"",
+            hung.ceiling.as_secs(),
+            hung.elapsed.as_secs(),
+        )
+    } else if matches!(hung.reason, TimeoutReason::Idle) {
         format!(
             "no test in flight for {}s, exceeding the {}s idle ceiling - cargo wedged before the first test or after the last (a build-directory lock held by another cargo, e.g. rust-analyzer, looks exactly like this)\n  idle ceiling: covers the compile, link and teardown the per-test timeout cannot see",
             hung.elapsed.as_secs(),
@@ -1717,6 +1823,7 @@ mod tests {
             Arc::clone(&hung),
             Ceilings { per_test: Duration::from_secs(3600), wall: Some(Duration::from_millis(40)) },
             Duration::from_millis(5),
+            Instant::now(),
         );
         child.wait().ok();
 
@@ -1727,6 +1834,81 @@ mod tests {
             wait_for_process_group_exit(cargo_pid),
             "the process group must be killed"
         );
+    }
+
+    /// The central safety property, and the one whose absence let the first
+    /// attempt at this ship broken: an *expired* per-test ceiling must not kill
+    /// anything while the authoritative wall is still running.
+    ///
+    /// That first attempt checked the wall before the tracker and then fell back
+    /// to it with `or_else`, which only resolved ties inside a single poll tick.
+    /// In practice the 20s attribution guess fired 29m40s ahead of the 30m wall,
+    /// so the untrusted clock still decided when to pull the trigger and the
+    /// false verdict the redesign existed to remove was still reachable. The
+    /// empty-tracker test passed the whole time.
+    #[test]
+    fn an_expired_per_test_ceiling_does_not_kill_while_the_wall_runs() {
+        use std::os::unix::process::CommandExt;
+
+        let root = test_root("watchdog_attribution_never_kills");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60 & wait")
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn shell");
+        let cargo_pid = child.id();
+
+        // A test that has apparently been running an hour: the per-test ceiling
+        // is long expired, so an implementation that lets attribution terminate
+        // kills the group here.
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(3600))
+            .unwrap_or_else(Instant::now);
+        let tracker = Arc::new(Mutex::new(TestTracker {
+            current: HashMap::from([("a::apparently_overdue".to_owned(), long_ago)]),
+            completed: Vec::new(),
+            idle_since: Instant::now(),
+        }));
+        let done = Arc::new(AtomicBool::new(false));
+        let hung = Arc::new(Mutex::new(None::<HungTest>));
+
+        // Run the loop briefly, then stop it - the wall is far away, so it must
+        // return without a verdict and without touching the child.
+        let done_t = Arc::clone(&done);
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            done_t.store(true, Ordering::SeqCst);
+        });
+        watchdog_loop_with_timing(
+            root.clone(),
+            cargo_pid,
+            Arc::clone(&tracker),
+            Arc::clone(&done),
+            Arc::clone(&hung),
+            Ceilings {
+                per_test: Duration::from_millis(10),
+                wall: Some(Duration::from_secs(3600)),
+            },
+            Duration::from_millis(5),
+            Instant::now(),
+        );
+        stopper.join().ok();
+
+        assert!(
+            hung.lock().unwrap().is_none(),
+            "an expired attribution clock must not produce a kill verdict"
+        );
+        assert!(
+            process_group_exists(cargo_pid),
+            "the process group must still be alive: only the wall clock may terminate"
+        );
+        kill_process_group(cargo_pid).ok();
+        child.wait().ok();
     }
 
     #[test]
@@ -1765,8 +1947,14 @@ mod tests {
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
-            Ceilings { per_test: Duration::from_millis(20), wall: None },
+            // `wall` is what kills now, so the legacy per-test-only shape must be
+            // given one for this test to still exercise a kill.
+            Ceilings {
+                per_test: Duration::from_millis(20),
+                wall: Some(Duration::from_millis(20)),
+            },
             Duration::from_millis(5),
+            Instant::now(),
         );
         child.wait().ok();
 

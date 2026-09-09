@@ -2042,6 +2042,14 @@ In depth: `brokkr man nidhogg`."
         /// Only honored when `<name>` matches exactly one test per sweep;
         /// if it matches more than one, `brokkr test` errors before
         /// running. Without this flag the ceiling is the standard 20s.
+        ///
+        /// This also makes the ceiling authoritative: `<name>` is resolved
+        /// to its one full test name and run with libtest `--exact`, so the
+        /// process is the unit of one test. Without the flag the per-test
+        /// clock is only attribution and the run is bounded by its wall
+        /// deadline. Note it bounds the whole cargo invocation - lock wait,
+        /// residual compilation, startup, the test, teardown - not the test
+        /// body alone.
         #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..=280))]
         timeout: Option<u64>,
         /// Run only the named sweep from the resolved `default_profile`

@@ -1895,8 +1895,24 @@ than one test in any sweep the command errors before running anything. Sweeps
 where the name matches zero tests (feature-gated out) are fine and still `SKIP`.
 There is no way to disable the ceiling entirely - 280s is the cap.
 
-That per-test clock is **attribution**, because `<NAME>` is a substring filter
-and the invocation therefore runs many tests in one process: see "Which clocks
-can be trusted". The bound that holds no matter what the tests print is the
-30-minute wall ceiling, enforced from the runner's own clock. A `-N` repeat run
-has no whole-run ceiling; each iteration is bounded by that wall clock.
+Without `--timeout`, that per-test clock is **attribution**: `<NAME>` is a
+substring filter, so the invocation runs many tests in one process and no
+per-test bound can be enforced without reading a stream the tests can corrupt
+(see "Which clocks can be trusted"). The bound that holds regardless is the
+30-minute wall ceiling. A `-N` repeat run has no whole-run ceiling; each
+iteration is bounded by that wall clock.
+
+**`--timeout` switches to a genuine per-test guarantee**, because it can. It
+already refuses to run when `<NAME>` matches more than one test, so under it the
+process really is the unit of one test. Enumeration therefore resolves `<NAME>`
+to the one **full test name** and the run is invoked with libtest `--exact`, and
+the ceiling becomes authoritative (`Ceilings::one_test`) rather than advisory.
+Resolving the full name is load-bearing: `--exact` applied to the substring you
+typed would match nothing, so the run would silently execute zero tests.
+
+One honest caveat about what `--timeout <SECS>` bounds: it is a **process
+ceiling**, not a test-body ceiling. It covers the whole cargo invocation - lock
+wait, any residual compilation, harness startup, the test itself, and teardown.
+Enumeration has already prebuilt the target by the time the timed run starts, so
+in practice compilation is warm, but the number you pass is not a stopwatch on
+the test body alone.

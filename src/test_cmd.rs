@@ -18,8 +18,18 @@
 //! profile that gates platform tests behind `BROKKR_TEST_PLATFORM=1`
 //! still works under `brokkr test`.
 //!
-//! The per-test watchdog ceiling (shared with `brokkr check`, normally
-//! 20s) can be raised with `--timeout <SECS>` (1-280). Because a higher
+//! Without `--timeout` the per-test ceiling is *attribution*: `<NAME>` is a
+//! substring filter, so one process runs many tests and the run is bounded by
+//! its wall clock instead (see [`crate::test_runner::Ceilings`]).
+//!
+//! `--timeout <SECS>` (1-280) raises the ceiling AND makes it authoritative,
+//! because it can: the flag already refuses more than one match, so the process
+//! becomes the unit of one test. Enumeration resolves `<NAME>` to the one full
+//! test name and the run is invoked with libtest `--exact` - resolving the full
+//! name matters, since `--exact` on the user's substring would match nothing and
+//! silently run zero tests. What it bounds is the whole cargo invocation, not the
+//! test body: lock wait, residual compilation, startup, the test, teardown.
+//! Because a higher
 //! ceiling only makes sense for one isolated test, it is gated: each
 //! sweep is enumerated with libtest `--list` first, and `<NAME>` matching
 //! more than one test in any sweep is a hard error before anything runs.
@@ -191,26 +201,31 @@ pub fn run(
             continue;
         }
 
-        // A `--timeout` override is only honored for a single isolated
-        // test. Enumerate the matches with libtest `--list` up front and
-        // refuse to run if `<name>` is a prefix that pulls in several
-        // tests under one raised ceiling. Sweeps that match zero (the
-        // test is feature-gated out) are fine - they'll just SKIP.
-        if timeout.is_some() {
-            let matched =
-                count_matching_tests(&pkg, name, sweep, &env_refs, &allow_args, project_root, debug)?;
-            if matched > 1 {
-                return Err(DevError::Config(format!(
-                    "--timeout only applies to a single test, but `{name}` matches {matched} tests \
-                     in sweep `{}`. Narrow it to one fully-qualified test name \
-                     (e.g. `my_module::my_test`), or drop --timeout to run them all at the 20s ceiling.",
-                    sweep.label
-                )));
-            }
-        }
+        // `--timeout` promises a per-test ceiling, so under it the process must
+        // be the unit of exactly one test - otherwise the promise is false, since
+        // a per-test clock read from libtest's output can only name a suspect
+        // (see `test_runner::Ceilings`). Enumerate up front and resolve the
+        // *full* name: adding `--exact` to the user's substring would run zero
+        // tests, so the resolved identity is what gets invoked.
+        //
+        // Sweeps matching zero (feature-gated out) are fine and still SKIP.
+        let exact = resolve_exact_for_timeout(
+            timeout,
+            &pkg,
+            name,
+            sweep,
+            &env_refs,
+            &allow_args,
+            project_root,
+            debug,
+        )?;
 
         for n in 1..=repeat {
-            let args = test_argv(sweep, &allow_args, &pkg, name, jobs, debug);
+            // Under `--timeout`, run the resolved name exactly; otherwise the
+            // user's substring, unchanged.
+            let filter = exact.as_deref().unwrap_or(name);
+            let args =
+                test_argv(sweep, &allow_args, &pkg, filter, jobs, debug, exact.is_some());
 
             let label = sweep.label.as_str();
             let tag = match (multi, repeat > 1) {
@@ -236,7 +251,18 @@ pub fn run(
                 &env_refs,
                 &tag,
                 raw,
-                ceiling,
+                // With `--exact` on a resolved single test, the process runs one
+                // test and the ceiling can be authoritative. Without it, the
+                // substring filter can match several tests in one process, so the
+                // per-test clock is attribution and the sweep wall is the bound.
+                if exact.is_some() {
+                    test_runner::Ceilings::one_test(ceiling)
+                } else {
+                    test_runner::Ceilings {
+                        per_test: ceiling,
+                        wall: Some(test_runner::SWEEP_WALL_TIMEOUT),
+                    }
+                },
                 announce,
                 &repeat_state,
                 n > 1,
@@ -378,6 +404,7 @@ fn test_argv(
     name: &str,
     jobs: Option<u32>,
     debug: bool,
+    exact: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["test".into()];
     // The lane's pinned resolution, same as every cargo command `check`
@@ -407,6 +434,14 @@ fn test_argv(
     args.push("--include-ignored".into());
     args.push("--nocapture".into());
     args.push("--test-threads=1".into());
+    // `--exact` turns the filter from a substring into an identity, which is what
+    // makes the invocation one process running one test - the only shape in which
+    // a per-test ceiling is a guarantee rather than a guess. The caller must have
+    // resolved `name` to a full test name first; `--exact` on a user's substring
+    // would match nothing.
+    if exact {
+        args.push("--exact".into());
+    }
     args
 }
 
@@ -458,7 +493,20 @@ fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
     })
 }
 
-fn count_matching_tests(
+/// Resolve `<NAME>` to the one full test name `--timeout` will run exactly, or
+/// `None` when no `--timeout` was given (or this sweep matches nothing).
+///
+/// `--timeout` promises a per-test ceiling, so under it the process must be the
+/// unit of exactly one test - otherwise the promise is false, because a per-test
+/// clock read from libtest's output can only ever name a suspect (see
+/// `test_runner::Ceilings`). Resolving the *full* name is the load-bearing part:
+/// `--exact` applied to the substring the user typed would match nothing.
+///
+/// A sweep matching zero tests (feature-gated out) resolves to `None` and goes on
+/// to SKIP through the normal path.
+#[allow(clippy::too_many_arguments)]
+fn resolve_exact_for_timeout(
+    timeout: Option<u64>,
     pkg: &str,
     name: &str,
     sweep: &ResolvedSweep,
@@ -466,7 +514,32 @@ fn count_matching_tests(
     allow_args: &[String],
     project_root: &Path,
     debug: bool,
-) -> Result<usize, DevError> {
+) -> Result<Option<String>, DevError> {
+    if timeout.is_none() {
+        return Ok(None);
+    }
+    let matched = matching_test_names(pkg, name, sweep, env, allow_args, project_root, debug)?;
+    if matched.len() > 1 {
+        return Err(DevError::Config(format!(
+            "--timeout only applies to a single test, but `{name}` matches {} tests in sweep \
+             `{}`. Narrow it to one fully-qualified test name (e.g. `my_module::my_test`), or \
+             drop --timeout to run them all at the 20s ceiling.",
+            matched.len(),
+            sweep.label
+        )));
+    }
+    Ok(matched.into_iter().next())
+}
+
+fn matching_test_names(
+    pkg: &str,
+    name: &str,
+    sweep: &ResolvedSweep,
+    env: &[(&str, &str)],
+    allow_args: &[String],
+    project_root: &Path,
+    debug: bool,
+) -> Result<Vec<String>, DevError> {
     // Doctest enumeration is possible but not wired up here yet. The claim
     // this refusal used to make - that doctests cannot be enumerated because
     // `--list` is a libtest flag and rustdoc has no listing contract - is
@@ -506,18 +579,23 @@ fn count_matching_tests(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env)?;
     if !captured.status.success() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
-    Ok(count_listed_tests(&String::from_utf8_lossy(&captured.stdout)))
+    Ok(listed_test_names(&String::from_utf8_lossy(&captured.stdout)))
 }
 
-/// Count libtest `--list` entries that are runnable tests. The list format
-/// is one `name: kind` line per entry; `kind` is `test` or `benchmark`.
-fn count_listed_tests(stdout: &str) -> usize {
+/// The libtest `--list` entries that are runnable tests, by full name.
+///
+/// The list format is one `name: kind` line per entry, `kind` being `test` or
+/// `benchmark`. Names rather than a count, because the caller needs the resolved
+/// identity: a user's `--timeout` run is invoked with `--exact`, and `--exact`
+/// applied to the substring they typed would match nothing.
+fn listed_test_names(stdout: &str) -> Vec<String> {
     stdout
         .lines()
-        .filter(|l| l.trim_end().ends_with(": test"))
-        .count()
+        .filter_map(|l| l.trim_end().strip_suffix(": test"))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Resolve one sweep's cargo profile for `brokkr test` to a `debug` bool,
@@ -722,7 +800,7 @@ fn run_one(
     env: &[(&str, &str)],
     tag: &str,
     raw: bool,
-    ceiling: Duration,
+    ceilings: test_runner::Ceilings,
     announce: bool,
     repeat_state: &RepeatState,
     buffered: bool,
@@ -733,11 +811,7 @@ fn run_one(
         project_root,
         state_root,
         env,
-        // `<NAME>` is a substring filter, so this invocation can run several
-        // tests in one process. The per-test ceiling therefore names a suspect
-        // rather than guaranteeing anything, and the wall clock is the bound
-        // that holds regardless of what the tests print.
-        test_runner::Ceilings { per_test: ceiling, wall: Some(test_runner::SWEEP_WALL_TIMEOUT) },
+        ceilings,
         make_stdout_forwarder(raw, sink.clone()),
         make_stderr_forwarder(raw, sink.clone()),
         move |elapsed| {
@@ -1683,13 +1757,30 @@ foo::baz: test
 benches::throughput: benchmark
 3 tests, 1 benchmark
 ";
-        assert_eq!(count_listed_tests(listing), 2);
+        // Names, not a count: `--timeout` invokes the resolved identity with
+        // `--exact`, and `--exact` on the substring the user typed matches
+        // nothing.
+        assert_eq!(listed_test_names(listing), vec!["foo::bar", "foo::baz"]);
     }
 
     #[test]
-    fn count_listed_tests_zero_when_no_matches() {
-        assert_eq!(count_listed_tests("0 tests, 0 benchmarks\n"), 0);
-        assert_eq!(count_listed_tests(""), 0);
+    fn listed_test_names_empty_when_no_matches() {
+        assert!(listed_test_names("0 tests, 0 benchmarks\n").is_empty());
+        assert!(listed_test_names("").is_empty());
+    }
+
+    /// `--exact` only rides along when the caller resolved a full name.
+    #[test]
+    fn exact_is_only_added_when_requested() {
+        let sweep = ResolvedSweep::default();
+        let plain = test_argv(&sweep, &[], "pkg", "some::test", None, true, false);
+        assert!(!plain.iter().any(|a| a == "--exact"), "{plain:?}");
+        let exact = test_argv(&sweep, &[], "pkg", "some::test", None, true, true);
+        assert!(exact.iter().any(|a| a == "--exact"), "{exact:?}");
+        // And it lands after the libtest separator, not among cargo's own args.
+        let sep = exact.iter().position(|a| a == "--").expect("separator");
+        let at = exact.iter().position(|a| a == "--exact").expect("exact");
+        assert!(at > sep, "--exact must be a libtest arg: {exact:?}");
     }
 
     #[test]
