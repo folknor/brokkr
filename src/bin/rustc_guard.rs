@@ -58,9 +58,8 @@ fn main() {
         Decision::Refused { lease, why } => {
             drop(lease);
             eprintln!(
-                "brokkr-rustc-guard: refusing to compile - {why}. A brokkr hold is active and \
-                 admits only compilers it started. `brokkr lock` shows the holder; \
-                 BROKKR_CARGO=1 overrides."
+                "brokkr-rustc-guard: refusing to compile - {why}. `brokkr lock` shows the \
+                 holder; BROKKR_CARGO=1 overrides."
             );
             std::process::exit(1);
         }

@@ -7,9 +7,12 @@ Exercises the guard's three decision paths directly, without cargo:
 2. lock held (flock EX) -> guard refuses with exit 1 and names brokkr
 3. lock held + BROKKR_CARGO=1 -> the escape hatch execs anyway
 
-The brokkr-ancestor path can't be exercised from here (the parent would be
-python); it is covered end-to-end by every `brokkr check` run with the
-guard enrolled.
+These are the paths that depend on the REAL flock. Admission itself is a
+capability now, not an ancestry inference - there is no brokkr-ancestor path
+any more. The capability paths (a matching nonce, a nonce for another hold, a
+stale record left by a crash, a draining hold) are covered against a scratch
+HOME by `scripts/guard-decision-probe.py`, and the admitted path end-to-end by
+any `brokkr check` that compiles anything while brokkr holds its own lock.
 
 Usage: python3 scripts/guard-smoke.py [path-to-guard]
 Default guard path: target/debug/brokkr-rustc-guard (falls back to release,

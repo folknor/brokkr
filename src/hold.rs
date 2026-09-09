@@ -38,7 +38,7 @@
 //! `/proc/<pid>/environ` of any descendant, and this fence never claimed
 //! otherwise.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 /// The capability handed to descendants: the current hold's nonce.
 pub const CAPABILITY_ENV: &str = "BROKKR_HOLD_NONCE";
@@ -58,29 +58,45 @@ pub const LEASE_MARKER_ENV: &str = "BROKKR_COMPILE_LEASE";
 // authorized for, which is the whole failure the per-acquisition nonce exists
 // to prevent.
 
-/// This process's capability, set once when a hold begins.
+/// This process's capability for the hold it currently owns.
 ///
-/// A `OnceLock` rather than `std::env::set_var`: setting a process-wide
-/// environment variable is unsound once any other thread is running, and
-/// brokkr has drain and watchdog threads. This is read at every spawn choke
-/// point instead, which costs nothing and cannot race.
-static CAPABILITY: OnceLock<String> = OnceLock::new();
+/// A `Mutex`, not `std::env::set_var`: setting a process-wide environment
+/// variable is unsound once any other thread is running, and brokkr has drain
+/// and watchdog threads. This is read at every spawn choke point instead, which
+/// costs nothing and cannot race.
+///
+/// Mutable rather than write-once, which was a real bug on the way here. A
+/// `OnceLock` keeps the *first* hold's nonce forever, so a process that takes
+/// two holds in sequence - acquire, release, acquire - would publish nonce two
+/// to the lock file while still stamping nonce one on its children, and the
+/// guard would refuse every single one of them. Nested acquires share a nonce by
+/// construction and never reach this, so only the sequential case was exposed;
+/// it fails totally when it happens, and no live descendant of the released hold
+/// has any claim on the new one.
+static CAPABILITY: Mutex<Option<String>> = Mutex::new(None);
 
-/// Publish this process's capability. Idempotent; the first hold wins.
-///
-/// The first hold winning is correct rather than merely convenient: a nested
-/// acquire shares the outer hold's nonce by construction, and a *sequential*
-/// second hold in one process would mint a new nonce that this process's
-/// already-running descendants must not be re-authorized with. Descendants of
-/// the second hold are covered because there are none yet - a hold that has
-/// released has no live children brokkr is still driving.
+/// Take the capability lock, treating poison as recoverable. The critical
+/// section is a single clone; failing closed here would mean refusing to stamp,
+/// which turns into the guard refusing brokkr's own compiles.
+fn slot() -> std::sync::MutexGuard<'static, Option<String>> {
+    CAPABILITY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publish the capability for a newly acquired hold, replacing any previous
+/// one.
 pub fn publish_capability(nonce: &str) {
-    let _first = CAPABILITY.set(nonce.to_owned());
+    *slot() = Some(nonce.to_owned());
+}
+
+/// Forget the capability when a hold is released, so a child spawned outside any
+/// hold does not carry a mark for a hold that is over.
+pub fn clear_capability() {
+    *slot() = None;
 }
 
 /// The capability to stamp onto a child, if this process holds one.
-pub fn capability() -> Option<&'static str> {
-    CAPABILITY.get().map(String::as_str)
+pub fn capability() -> Option<String> {
+    slot().clone()
 }
 
 /// Stamp the current capability onto a child command.
@@ -95,6 +111,35 @@ pub fn stamp(cmd: &mut std::process::Command) {
     if let Some(nonce) = capability() {
         cmd.env(CAPABILITY_ENV, nonce);
     }
+}
+
+/// The capability as cargo `--config` overrides, for the nextest lane.
+///
+/// The lane launches test processes through the linked engine
+/// (`TestList::new`, `runner.try_execute`), which construct their own commands
+/// with no `Command` for [`stamp`] to reach. The engine does honour cargo's
+/// `[env]` table, which it reads through `CargoConfigs`, so the capability
+/// travels the documented route instead: an override the engine applies to every
+/// process it spawns. `force` is set so an inherited value cannot shadow it.
+///
+/// Empty when no hold is active, which leaves the engine's configuration exactly
+/// as it was.
+pub fn cargo_config_overrides() -> Vec<String> {
+    match capability() {
+        Some(nonce) => {
+            vec![format!("env.{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true }}")]
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Whether this process is running inside a compilation the guard admitted.
+///
+/// A brokkr command started from there cannot take a *fresh* hold: it would take
+/// `brokkr.lock` and then wait forever for an exclusive compile lease that its
+/// own waiting ancestor holds a share of. See `lockfile::acquire`.
+pub fn inside_admitted_compilation() -> bool {
+    std::env::var_os(LEASE_MARKER_ENV).is_some_and(|v| !v.is_empty())
 }
 
 /// A fresh per-acquisition nonce: 16 bytes of kernel entropy, hex.
@@ -163,5 +208,34 @@ mod tests {
         if let Some(c) = capability() {
             assert!(!c.is_empty());
         }
+    }
+
+    /// The bug this replaced a `OnceLock` to fix: a second sequential hold must
+    /// stamp its own nonce, or every child of it is refused by the guard.
+    ///
+    /// Serialized with the other capability-mutating test through one lock, and
+    /// restoring the previous value, because the slot is process-global and
+    /// `cargo test` shares a process across tests.
+    #[test]
+    fn a_second_hold_replaces_the_first_holds_capability() {
+        let _seq = capability_test_lock();
+        let before = capability();
+        publish_capability("first");
+        assert_eq!(capability().as_deref(), Some("first"));
+        publish_capability("second");
+        assert_eq!(
+            capability().as_deref(),
+            Some("second"),
+            "a sequential second hold must replace the first hold's nonce"
+        );
+        clear_capability();
+        assert_eq!(capability(), None, "release must forget the capability");
+        *slot() = before;
+    }
+
+    /// Tests that mutate the process-global capability must not interleave.
+    fn capability_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static SEQ: Mutex<()> = Mutex::new(());
+        SEQ.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

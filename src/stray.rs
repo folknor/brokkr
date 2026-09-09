@@ -203,6 +203,27 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
     strays
 }
 
+/// Every descendant of `pid` in the table, paired with its depth below it.
+///
+/// Bounded by the table size: a `/proc` snapshot can only contain a parent cycle
+/// if it is internally inconsistent, and `seen` makes that terminate anyway.
+fn collect_descendants(
+    table: &HashMap<u32, ProcEntry>,
+    pid: u32,
+    depth: usize,
+    out: &mut Vec<(usize, u32)>,
+) {
+    if depth > 64 {
+        return;
+    }
+    for (&child, entry) in table {
+        if entry.ppid == pid && child != pid {
+            out.push((depth + 1, child));
+            collect_descendants(table, child, depth + 1, out);
+        }
+    }
+}
+
 /// The strays on this host right now, leaves first.
 pub fn find() -> Vec<Stray> {
     classify(&read_proc(), current_ownership())
@@ -218,6 +239,34 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
         // ESRCH is benign.
         unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) == 0 }
     };
+    // Descendants of each stray, deepest first, before the strays themselves.
+    //
+    // Signalling only the selected PIDs left a hole: killing a cargo does not
+    // kill the rustc-wrapper beneath it, so a wrapper that had already been
+    // admitted survived the reap and went on to exec a compiler - the single
+    // thing the reap exists to prevent. The wrapper is in the cargo family now,
+    // so it is usually selected on its own, but "usually" is not a property: a
+    // stray can have children of any name, and a build script's children are
+    // arbitrary programs.
+    //
+    // Re-read `/proc` rather than reusing the classification snapshot, so a
+    // child created since the scan is still found. This is not atomic
+    // containment - a process can fork again between this read and the signal -
+    // so it narrows the hole rather than closing it. Closing it needs a cgroup,
+    // which is a bigger change than this reaper is.
+    let table = read_proc();
+    let mut descendants: Vec<(usize, u32)> = Vec::new();
+    for s in strays {
+        collect_descendants(&table, s.pid, 0, &mut descendants);
+    }
+    // Deepest first, and never a PID that is itself a listed stray - those are
+    // signalled below, in the caller's leaves-first order.
+    descendants.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    for (_, pid) in &descendants {
+        if !strays.iter().any(|s| s.pid == *pid) {
+            sigkill(*pid);
+        }
+    }
     let killed = strays.iter().filter(|s| sigkill(s.pid)).count();
     let starters = starters_to_kill(strays)
         .into_iter()

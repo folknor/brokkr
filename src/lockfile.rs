@@ -86,6 +86,11 @@ impl Drop for LockInner {
         // but the kernel has released the flock so `status()`'s probe
         // reports no holder and the next acquirer rewrites it.
         invalidate_metadata(self.fd.as_raw_fd());
+        // Forget this hold's compilation capability. A child spawned after
+        // release must not carry a mark for a hold that is over: the next
+        // holder publishes its own nonce, and a stale mark would be refused
+        // anyway - forgetting it makes that explicit rather than incidental.
+        crate::hold::clear_capability();
         // Restore the disabled toolchain (if any) while we still hold the flock,
         // then release. Doing it before LOCK_UN keeps the moved-aside window
         // inside the locked window, so a concurrent brokkr can never observe it.
@@ -305,7 +310,7 @@ fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError>
     // drops it while leaving the inherited descriptor open, and a helper can
     // retain it after closing its own. It is the conservative direction in both
     // cases - a refusal, never a hang.
-    if std::env::var_os(crate::hold::LEASE_MARKER_ENV).is_some_and(|v| !v.is_empty()) {
+    if crate::hold::inside_admitted_compilation() {
         return Err(DevError::Lock(format!(
             "refusing to take the brokkr lock from inside a compilation brokkr admitted \
              ({} is set). Taking it here would deadlock: this compiler holds a share of the \
