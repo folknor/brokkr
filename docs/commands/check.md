@@ -225,6 +225,21 @@ The cap is enforced by two measurements, not one:
 Before any suite announces itself there is no test to bill, so that window belongs
 to the idle ceiling instead.
 
+### How terminal the cap is
+
+Two details decide whether "20 seconds" means 20 seconds:
+
+- **The watchdog wakes on the deadline**, not on a fixed interval. It sleeps to
+  the soonest thing it bounds - the oldest in-flight test's ceiling, the
+  no-progress clock, the idle window, the caller's wall - capped by its poll so it
+  still notices cancellation promptly. A flat 250ms poll meant every cap was really
+  "the ceiling plus up to 250ms".
+- **The run is frozen before it is diagnosed.** The offending group is SIGSTOPped
+  first, then snapshotted, then SIGKILLed. Snapshotting first let the test keep
+  running for as long as `/proc` collection took; killing first would fix the cap
+  and destroy the diagnostic, since a dead process has no `wchan` and no stack.
+  SIGSTOP stops execution immediately and leaves `/proc` readable.
+
 ### What stopping costs, per lane
 
 "Stops" has a price in two lanes and it is worth naming:

@@ -316,6 +316,27 @@ impl TestTracker {
         self.idle_since = Instant::now();
     }
 
+    /// How long until the soonest thing this tracker bounds comes due, so the
+    /// watchdog can wake exactly then rather than one poll interval late.
+    ///
+    /// `None` when nothing is pending: no test in flight and execution not begun,
+    /// where only the caller's ceilings apply.
+    fn next_deadline(&self, timeout: Duration) -> Option<Duration> {
+        let oldest_in_flight = self
+            .current
+            .values()
+            .map(|started| timeout.saturating_sub(started.elapsed()))
+            .min();
+        let no_progress = self
+            .executing
+            .then(|| timeout.saturating_sub(self.last_progress.elapsed()));
+        let idle = self
+            .current
+            .is_empty()
+            .then(|| IDLE_TIMEOUT.saturating_sub(self.idle_since.elapsed()));
+        [oldest_in_flight, no_progress, idle].into_iter().flatten().min()
+    }
+
     /// What has blown its budget, if anything.
     ///
     /// Two clocks, because a test can burn wall time in two ways brokkr sees
@@ -1296,7 +1317,23 @@ fn watchdog_loop_with_timing(
         if done.load(Ordering::SeqCst) {
             return;
         }
-        thread::sleep(poll);
+        // Sleep to the nearest known deadline rather than a flat interval, so the
+        // wake-up lands ON the ceiling instead of up to one poll past it. A flat
+        // 250ms poll meant every cap was really "the ceiling plus up to 250ms",
+        // which is not what a hard cap means. Capped by `poll` so the loop still
+        // notices `done` and the abort flag promptly.
+        let until_deadline = tracker
+            .lock()
+            .ok()
+            .and_then(|t| t.next_deadline(timeout))
+            .into_iter()
+            .chain(
+                ceilings
+                    .wall
+                    .map(|w| w.saturating_sub(started.elapsed())),
+            )
+            .min();
+        thread::sleep(until_deadline.map_or(poll, |d| d.min(poll)));
         if done.load(Ordering::SeqCst) {
             return;
         }
@@ -1387,6 +1424,19 @@ fn watchdog_loop_with_timing(
             return;
         }
 
+        // FREEZE first, diagnose second, kill third.
+        //
+        // Snapshotting before stopping anything let the offending test keep
+        // running for as long as `/proc` collection took, so the cap was not
+        // literal: a test was permitted past its ceiling by the snapshot's
+        // duration on top of the poll interval. Killing first would fix the cap
+        // and destroy the diagnostic - a dead process has no `wchan` and no
+        // stack, which is exactly what a hang investigation needs.
+        //
+        // SIGSTOP resolves it. The group stops executing immediately, so no
+        // further test time is consumed, while `/proc` stays readable for the
+        // snapshot. SIGKILL then lands on already-stopped processes.
+        stop_process_group(cargo_pid).ok();
         let hung_test = capture_hung_test(&state_root, cargo_pid, reason, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
@@ -1454,11 +1504,24 @@ fn capture_hung_test(
     }
 }
 
+/// SIGSTOP a process group: stop it executing without destroying it.
+///
+/// Used to freeze a run the instant its budget expires, so the diagnostic
+/// snapshot that follows costs the offending test no further wall time and still
+/// has a live `/proc` to read. SIGKILL follows.
+fn stop_process_group(pgid: u32) -> Result<(), DevError> {
+    signal_process_group(pgid, libc::SIGSTOP)
+}
+
 fn kill_process_group(pgid: u32) -> Result<(), DevError> {
+    signal_process_group(pgid, libc::SIGKILL)
+}
+
+fn signal_process_group(pgid: u32, signal: libc::c_int) -> Result<(), DevError> {
     let pgid = i32::try_from(pgid)
         .map_err(|_| DevError::Build(format!("process group id {pgid} does not fit pid_t")))?;
     let target: libc::pid_t = -pgid;
-    let ret = unsafe { libc::kill(target, libc::SIGKILL) };
+    let ret = unsafe { libc::kill(target, signal) };
     if ret == 0 {
         return Ok(());
     }
