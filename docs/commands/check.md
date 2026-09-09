@@ -1071,14 +1071,23 @@ parallel execution with `test_threads`:
 - `test_threads = 0` - libtest's default parallelism (num_cpus).
 - `test_threads = N` (>= 2) - `--test-threads=N`.
 
-A parallel sweep enforces the same 20s per-test cap as the serial path. Since
-libtest's human output emits no per-test *start* signal once tests run
-concurrently, the parallel path drives libtest's JSON event stream instead
-(`--format json -Z unstable-options`, injected automatically; native on
-nightly): each `started` event arms the cap for that test, each `ok`/`failed`
-disarms it, and a test that crosses 20s is named and its process group killed.
-The JSON events are reconstructed back into human libtest text so
-`--raw`/filtered output all look identical to a serial run.
+A parallel sweep enforces the same 20s per-test cap as the serial path, by the
+same means: **every lane drives libtest's JSON event stream**
+(`--format json -Z unstable-options`, injected automatically; native on nightly).
+Each `started` event arms the cap for that test, each `ok`/`failed` disarms it,
+and a test that crosses 20s is named and its process group killed. The events are
+reconstructed back into human libtest text, so `--raw` and filtered output look
+exactly as they always did.
+
+The parallel lane always needed this - human output emits no per-test *start*
+signal once tests run concurrently - and the serial lane now uses it too. What it
+replaced was a partial-marker state machine: libtest writes `test NAME ... `
+without a newline, flushes, lets the test print, then writes a bare
+`ok`/`FAILED`/`ignored`, so brokkr had to reconstruct which test was running from
+a marker the test's own output glued itself onto. `print!("hi")` arrived as
+`hiok`, the pending test was never cleared, the next test's marker was ignored,
+and the watchdog blamed the wrong test; `println!("ok")` did the mirror image,
+clearing pending early and hiding a hang. Events state what that had to guess.
 
 The whole-sweep ceiling (30 min) is a backstop for a wedge the per-test cap cannot
 charge to any test; it kills the process group and stops the run. Both are hard:
@@ -1945,7 +1954,10 @@ Package resolution: explicit `-p/--package` > `[test] default_package` in
 `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces
 (e.g. ratatoskr) must pass `-p` or set `default_package`.
 
-Always adds `--include-ignored --nocapture --test-threads=1`.
+Always adds `--include-ignored --nocapture --test-threads=1`, plus
+`-Z unstable-options --format json` to drive libtest's event stream (see "The
+per-test budget is a hard cap"). Nightly is therefore a prerequisite for
+`brokkr test`, as it already was for parallel sweeps.
 
 `--nocapture` is a **libtest** flag, and for a `doc_only` sweep it does not
 deliver live output. Rustdoc captures each doctest subprocess itself, through

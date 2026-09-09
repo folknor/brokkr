@@ -444,6 +444,15 @@ fn test_argv(
     args.push("--include-ignored".into());
     args.push("--nocapture".into());
     args.push("--test-threads=1".into());
+    // Drive libtest's JSON event stream: the per-test budget is charged from
+    // records libtest states, not from a partial `test NAME ... ` marker
+    // reconstructed out of whatever the test printed alongside it. The
+    // reconstructor renders the events back to human text, so streamed output and
+    // `--raw` look exactly as they did. Native on nightly.
+    args.push("-Z".into());
+    args.push("unstable-options".into());
+    args.push("--format".into());
+    args.push("json".into());
     // `--exact` turns the filter from a substring into an identity, which is what
     // makes the invocation one process running one test - the only shape in which
     // a per-test ceiling is a guarantee rather than a guess. The caller must have

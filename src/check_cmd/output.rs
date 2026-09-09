@@ -587,26 +587,30 @@ fn run_one_test_sweep(
         {
             libtest_args.push(format!("--test-threads={n}"));
         }
-        // Drive libtest's JSON event stream so the per-test hang watchdog can
-        // age each in-flight test even under concurrency (human output emits no
-        // per-test *start* signal in parallel). Native on nightly.
-        if libtest_args.iter().any(|a| a == "--format") {
-            return Err(DevError::Config(
-                "a parallel test sweep drives libtest's JSON output for the per-test \
-                 watchdog; remove the `--format` override from this profile's \
-                 libtest_args".into(),
-            ));
-        }
-        libtest_args.push("-Z".into());
-        libtest_args.push("unstable-options".into());
-        libtest_args.push("--format".into());
-        libtest_args.push("json".into());
     } else if test_runner::effective_test_threads(&libtest_args)?.is_none() {
         libtest_args.push("--test-threads=1".into());
     }
+    // Both lanes drive libtest's JSON event stream. The parallel lane always
+    // needed it - human output emits no per-test *start* signal once tests run
+    // concurrently - and the serial lane now uses it too, so the per-test budget
+    // is charged from records libtest states rather than from a partial
+    // `test NAME ... ` marker reconstructed out of whatever the test printed
+    // alongside it. Native on nightly.
+    libtest_args.push("-Z".into());
+    libtest_args.push("unstable-options".into());
+    libtest_args.push("--format".into());
+    libtest_args.push("json".into());
     for e in libtest_extra {
         libtest_args.push(e.clone());
     }
+    // Checked on the FINAL argv, after the forwarded `-- …` args are appended,
+    // because libtest takes the last occurrence of a repeated flag. Checking only
+    // the profile's own args let `brokkr check -- --format pretty` (or
+    // `--format=pretty`) override the injected JSON: the drain would then read
+    // human output, never observe a lifecycle event, and the promised 20s per-test
+    // cap would silently degrade to the five-minute idle ceiling. Both spellings,
+    // since `--format=pretty` is one argv entry.
+    reject_format_override(&libtest_args)?;
     if !parallel && test_runner::effective_test_threads(&libtest_args)? != Some(1) {
         return Err(DevError::Config(
             "brokkr check watchdog requires --test-threads=1; set `test_threads` in \
@@ -857,6 +861,38 @@ fn run_one_test_sweep(
         ));
     }
     Ok(true)
+}
+
+/// Refuse a libtest argv that could override the injected `--format json`.
+///
+/// Checked on the FINAL argv, after the forwarded `-- …` args are appended,
+/// because libtest honours the LAST occurrence of a repeated flag. Checking only
+/// the profile's own args let `brokkr check -- --format pretty` win: the drain
+/// would read human output, never observe a lifecycle event, and the promised 20s
+/// per-test cap would silently degrade to the five-minute idle ceiling. A silent
+/// downgrade of the cap is the one failure this whole design exists to prevent.
+///
+/// Both spellings, since `--format=pretty` is a single argv entry. brokkr's own
+/// injected pair is the one permitted occurrence.
+fn reject_format_override(libtest_args: &[String]) -> Result<(), DevError> {
+    let occurrences: Vec<&String> = libtest_args
+        .iter()
+        .filter(|a| *a == "--format" || a.starts_with("--format="))
+        .collect();
+    let brokkrs_own = occurrences.iter().filter(|a| **a == "--format").count();
+    if occurrences.len() <= 1 && brokkrs_own == occurrences.len() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "brokkr drives libtest's JSON output to charge the per-test budget, and `{}` would \
+         override it - libtest honours the last `--format` it is given, so the per-test cap would \
+         degrade to the idle ceiling without saying so. Remove the `--format` override from this \
+         profile's libtest_args or from the forwarded `-- ...` args.",
+        occurrences
+            .iter()
+            .find(|a| ***a != "--format")
+            .map_or("--format", |a| a.as_str())
+    )))
 }
 
 /// True when a successful `cargo test` run actually validated nothing.
@@ -1672,6 +1708,26 @@ warning: z [too_many_lines]
 
     fn s(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn format_override_is_refused_on_the_final_argv() {
+        let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<String>>();
+        // brokkr's own injected pair, alone: fine.
+        assert!(
+            reject_format_override(&own(&["-Z", "unstable-options", "--format", "json"])).is_ok()
+        );
+        // A forwarded override after it wins in libtest, so it must be refused -
+        // this is the case that silently degraded the per-test cap to the idle
+        // ceiling.
+        assert!(
+            reject_format_override(&own(&["--format", "json", "--format", "pretty"])).is_err()
+        );
+        // The `=` spelling is one argv entry and was missed by an equality check.
+        assert!(reject_format_override(&own(&["--format", "json", "--format=pretty"])).is_err());
+        assert!(reject_format_override(&own(&["--format=pretty"])).is_err());
+        // Unrelated args are untouched.
+        assert!(reject_format_override(&own(&["--nocapture", "--test-threads=1"])).is_ok());
     }
 
     #[test]

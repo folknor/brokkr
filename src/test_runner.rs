@@ -249,6 +249,10 @@ struct TestTracker {
     seen: HashSet<String>,
     /// Names whose completion has been counted, for the same reason.
     finished: HashSet<String>,
+    /// Whether a suite is open - started and not yet summarised. A suite-started
+    /// record arriving while one is already open is not a boundary, and must not
+    /// reset the once-per-name sets: see [`TestTracker::observe_suite_start`].
+    in_suite: bool,
     /// When the in-flight set last changed (or the run began): the start of
     /// the current no-test-in-flight window, which [`IDLE_TIMEOUT`] bounds.
     idle_since: Instant,
@@ -264,6 +268,7 @@ impl Default for TestTracker {
             last_progress: Instant::now(),
             seen: HashSet::new(),
             finished: HashSet::new(),
+            in_suite: false,
             idle_since: Instant::now(),
         }
     }
@@ -312,8 +317,36 @@ impl TestTracker {
     /// applies from here even before any individual test is seen starting.
     fn observe_suite_start(&mut self) {
         self.executing = true;
-        self.last_progress = Instant::now();
         self.idle_since = Instant::now();
+        // Honoured only when no suite is open.
+        //
+        // Resetting on every suite-started record was an unbounded forgery
+        // channel: a hung test could print `suite/started` then `test/started` on
+        // a loop, and each cycle cleared the once-per-name guard and refreshed the
+        // clock, so the per-test ceiling never fired. A real stream opens a suite,
+        // runs it, closes it with `suite/ok` or `suite/failed`, and only then
+        // opens the next; a second start with the previous suite still open is
+        // not a suite boundary.
+        if self.in_suite {
+            return;
+        }
+        self.in_suite = true;
+        self.last_progress = Instant::now();
+        // Names are unique within a suite, not within an invocation: cargo runs
+        // every test binary of a selection in ONE invocation, and the same path
+        // legitimately exists in two of them (`tests::works` in a lib's unit
+        // tests and in an integration target). Keeping the once-per-name sets
+        // across the whole stream meant the second binary's occurrence refreshed
+        // nothing, so a healthy test could be killed for a name an earlier binary
+        // had already spent.
+        self.seen.clear();
+        self.finished.clear();
+    }
+
+    /// A suite reported its summary, so the next suite-started record is a real
+    /// boundary. See [`Self::observe_suite_start`].
+    fn observe_suite_end(&mut self) {
+        self.in_suite = false;
     }
 
     /// How long until the soonest thing this tracker bounds comes due, so the
@@ -425,7 +458,10 @@ where
     let stdout_buf_t = Arc::clone(&stdout_buf);
     let tracker_t = Arc::clone(&tracker);
     let stdout_thread = thread::spawn(move || {
-        drain_stdout(stdout_pipe, &stdout_buf_t, &tracker_t, forward_stdout_line);
+        // The same JSON drain the parallel lane uses. Both lanes read libtest's
+        // event stream now; the reconstructor renders it back to human text, so
+        // downstream consumers and `--raw` see what they always saw.
+        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, forward_stdout_line);
     });
 
     let stderr_buf_t = Arc::clone(&stderr_buf);
@@ -851,7 +887,14 @@ impl JsonReconstructor {
                 let count = val.get("test_count").and_then(Value::as_u64).unwrap_or(0);
                 vec![String::new(), format!("running {count} tests")]
             }
-            ("suite", _) => self.render_suite_summary(val, event),
+            ("suite", _) => {
+                // A summary closes the suite, so the next suite-started record is
+                // a real boundary rather than a replay.
+                if let Ok(mut t) = tracker.lock() {
+                    t.observe_suite_end();
+                }
+                self.render_suite_summary(val, event)
+            }
             ("test", "started") => {
                 if let Some(name) = val.get("name").and_then(Value::as_str)
                     && let Ok(mut t) = tracker.lock()
@@ -993,108 +1036,21 @@ fn clone_hung(hung: &Arc<Mutex<Option<HungTest>>>) -> Result<Option<HungTest>, D
         .map_err(|_| DevError::Build("hung-test state poisoned".into()))
 }
 
-/// State of partial-marker tracking under `--nocapture --test-threads=1`.
-///
-/// Libtest writes `test NAME ... ` (no newline, flushed) before running
-/// each test, then the test's own stdout glues onto that partial line,
-/// then libtest writes the bare status (`ok\n`/`FAILED\n`/`ignored\n`,
-/// optionally with a `<X.Xs>` suffix when `--report-time` is set).
-/// We strip the partial marker and track which name is still running
-/// so the watchdog can age it; the trailing bare-status line, when
-/// it arrives unambiguously (no preceding test output), is consumed
-/// as the terminator.
-///
-/// The earlier implementation gated partial-marker detection on
-/// "no pending test" and cleared pending unconditionally on the first
-/// bare-status-shaped line. Two failure modes:
-/// - `print!("hi")` glues with libtest's `ok\n` -> arrives as `hiok`,
-///   not bare status; pending never cleared; the *next* test's partial
-///   marker is then ignored (gated out), and the watchdog blames the
-///   wrong test.
-/// - `println!("ok")` arrives as a real bare-status line *before*
-///   libtest's terminator; pending cleared early, real hang in same
-///   test goes unnoticed.
-///
-/// The state machine here fixes Trigger A (the next-start-marker case)
-/// and narrows Trigger B (`intermediate_output_seen` suppresses the
-/// bare-status shortcut once any non-status output has flowed).
-#[derive(Default)]
-enum PartialState {
-    #[default]
-    Idle,
-    AwaitingTerminator {
-        name: String,
-        /// True once a non-blank, non-status-shaped line has been
-        /// forwarded for this pending test. Suppresses the
-        /// bare-status terminator shortcut: at that point the next
-        /// `ok`/`FAILED`/`ignored` line is more likely test output
-        /// than libtest framing, so we wait for the *next* partial
-        /// start marker (or `test result:` summary) to clear instead.
-        intermediate_output_seen: bool,
-    },
-}
-
-fn drain_stdout<F>(
-    mut pipe: ChildStdout,
-    buf: &Mutex<Vec<u8>>,
-    tracker: &Mutex<TestTracker>,
-    mut forward_line: F,
-) where
-    F: FnMut(&str),
-{
-    let mut read_buf = [0_u8; 4096];
-    let mut line = Vec::<u8>::new();
-    let mut state = PartialState::Idle;
-
-    while let Ok(n) = pipe.read(&mut read_buf) {
-        if n == 0 {
-            break;
-        }
-        if let Ok(mut out) = buf.lock() {
-            out.extend_from_slice(&read_buf[..n]);
-        }
-        for &byte in &read_buf[..n] {
-            if byte == b'\n' {
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                handle_stdout_line(&line, tracker, &mut forward_line, true, &mut state);
-                line.clear();
-            } else {
-                line.push(byte);
-                // Detect the partial `test NAME ... ` start marker before
-                // the newline arrives, so the watchdog can age the test
-                // even if it never produces output. Note: no `Idle`-only
-                // gate - a new start marker while a previous test is
-                // pending is the strongest signal that the previous test
-                // ended without an explicit terminator (Trigger A).
-                if byte == b' '
-                    && line.len() >= "test x ... ".len()
-                    && let Ok(text) = std::str::from_utf8(&line)
-                    && let Some(name) = parse_start_marker(text)
-                {
-                    if let PartialState::AwaitingTerminator { name: prev, .. } = &state
-                        && let Ok(mut t) = tracker.lock()
-                    {
-                        t.observe_result(prev);
-                    }
-                    if let Ok(mut t) = tracker.lock() {
-                        t.observe_start(name.clone());
-                    }
-                    state = PartialState::AwaitingTerminator {
-                        name,
-                        intermediate_output_seen: false,
-                    };
-                    line.clear();
-                }
-            }
-        }
-    }
-
-    if !line.is_empty() {
-        handle_stdout_line(&line, tracker, &mut forward_line, false, &mut state);
-    }
-}
+// The partial-marker state machine lived here, together with `drain_stdout`,
+// `handle_stdout_line`, `is_libtest_result_summary`, `parse_start_marker` and
+// `parse_result_marker`. All deleted: both lanes read libtest's JSON event stream
+// now, so nothing infers which test is running from a `test NAME ... ` marker
+// that the test's own output glues itself onto.
+//
+// Worth recording what it cost, because the replacement is not a matter of taste.
+// libtest writes that marker without a newline, flushes, lets the test print,
+// then writes a bare `ok`/`FAILED`/`ignored`. So `print!("hi")` arrived as
+// `hiok` - not a bare status - the pending test was never cleared, the NEXT
+// test's marker was then ignored, and the watchdog blamed the wrong test.
+// `println!("ok")` produced the mirror image: a real bare-status line before
+// libtest's own, clearing pending early and hiding a hang in the same test. The
+// machine's own documentation admitted it fixed the first and merely NARROWED
+// the second. Events state plainly what all of that had to guess.
 
 fn drain_stderr<F, G>(
     mut pipe: ChildStderr,
@@ -1146,90 +1102,6 @@ fn is_cargo_finished_line(line: &str) -> bool {
     line.trim_start().starts_with("Finished ")
 }
 
-fn handle_stdout_line<F>(
-    line: &[u8],
-    tracker: &Mutex<TestTracker>,
-    forward_line: &mut F,
-    terminated: bool,
-    state: &mut PartialState,
-) where
-    F: FnMut(&str),
-{
-    let text = String::from_utf8_lossy(line).into_owned();
-
-    // `running N tests` is libtest announcing that execution has begun. From
-    // here the per-test cap bounds the whole run, so a lost `test NAME ... `
-    // start marker cannot buy a test the five-minute idle ceiling instead of its
-    // twenty seconds.
-    if text.starts_with("running ") && text.contains(" test")
-        && let Ok(mut t) = tracker.lock()
-    {
-        t.observe_suite_start();
-    }
-
-    // libtest's per-suite summary is the universal pending-clear:
-    // `test result: ok. ...` or `test result: FAILED. ...`. Match
-    // both verb forms specifically so a test that does
-    // `println!("test result:")` doesn't accidentally clear pending
-    // and leave the watchdog blind to a subsequent hang.
-    if is_libtest_result_summary(&text) {
-        if let PartialState::AwaitingTerminator { name, .. } = state
-            && let Ok(mut t) = tracker.lock()
-        {
-            t.observe_result(name);
-        }
-        *state = PartialState::Idle;
-    }
-
-    if let PartialState::AwaitingTerminator { name: _, intermediate_output_seen } = state {
-        if !*intermediate_output_seen && is_bare_status_line(&text) {
-            // No test output has been seen yet, and the line looks like
-            // libtest's terminator (`ok` / `FAILED` / `ignored`,
-            // optionally `<X.Xs>`). Two real shapes match here:
-            //
-            // 1. The legitimate libtest terminator for a silent test.
-            // 2. A test whose *first* println! was literally one of
-            //    those words - the watchdog can't tell which.
-            //
-            // Drop the line from display either way (so we don't print
-            // a stray `ok` next to libtest's real one), but DO NOT
-            // call observe_result. If the test then hangs after
-            // `println!("ok")`, the watchdog must still fire. Pending
-            // is cleared by either the next `test NAME ... ` start
-            // marker or by the `test result:` summary - both happen
-            // well inside the watchdog timeout for a normal completion.
-            return;
-        }
-        if !text.trim().is_empty() {
-            *intermediate_output_seen = true;
-        }
-    }
-
-    if let Some(name) = parse_result_marker(&text)
-        && let Ok(mut t) = tracker.lock()
-    {
-        t.observe_result(&name);
-    }
-
-    if terminated || parse_start_marker(&text).is_none() {
-        forward_line(&text);
-    }
-}
-
-/// True for libtest's per-suite summary line.
-///
-/// Libtest emits exactly one of:
-/// - `test result: ok. N passed; M failed; ...`
-/// - `test result: FAILED. N passed; M failed; ...`
-///
-/// Match both verbs explicitly so a user `println!("test result:")`
-/// in test output cannot accidentally clear the watchdog's pending
-/// state - which would silently let a subsequent hang go undetected.
-fn is_libtest_result_summary(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("test result: ok.") || t.starts_with("test result: FAILED.")
-}
-
 /// True for libtest's standalone status lines (`ok`, `FAILED`, `ignored`,
 /// optionally followed by ` <X.Xs>` when `--report-time` is enabled).
 /// Also used by `test_cmd`'s display condenser: under `--nocapture` the
@@ -1253,21 +1125,6 @@ pub(crate) fn is_bare_status_line(line: &str) -> bool {
                 && tail.ends_with("s>")
         }
     }
-}
-
-fn parse_start_marker(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("test ")?;
-    let name = rest.strip_suffix(" ... ")?;
-    (!name.is_empty()).then(|| name.to_owned())
-}
-
-fn parse_result_marker(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("test ")?;
-    let (name, status) = rest.rsplit_once(" ... ")?;
-    let is_result = ["ok", "FAILED", "ignored"]
-        .iter()
-        .any(|s| status == *s || status.strip_prefix(s).is_some_and(|tail| tail.starts_with(' ')));
-    (is_result && !name.is_empty()).then(|| name.to_owned())
 }
 
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
@@ -1748,324 +1605,58 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
-    /// Drive `drain_stdout` against a synthetic libtest stream and
-    /// return (forwarded_lines, names_observed_finished).
-    /// The stream is the concatenation of the byte slices the libtest
-    /// stdout pipe would have produced, in chunk order. The tracker
-    /// records `observe_start` / `observe_result` calls so we can
-    /// inspect which tests the watchdog still believes are running.
-    fn drive_drain(chunks: &[&[u8]]) -> (Vec<String>, Vec<String>) {
-        use std::io::Write;
-        // Build a real pipe: one end gets the chunks, the other is fed
-        // to drain_stdout. This exercises the same byte-by-byte path as
-        // production and avoids forking the loop under test.
-        let mut child = Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn cat");
-        let mut stdin = child.stdin.take().expect("cat stdin");
-        let stdout = child.stdout.take().expect("cat stdout");
-
-        let chunks_owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
-        let writer = std::thread::spawn(move || {
-            for c in &chunks_owned {
-                stdin.write_all(c).ok();
-            }
-            drop(stdin);
-        });
-
-        let buf = Mutex::new(Vec::<u8>::new());
-        let tracker = Mutex::new(TestTracker::default());
-        let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let forwarded_t = Arc::clone(&forwarded);
-
-        drain_stdout(stdout, &buf, &tracker, move |line: &str| {
-            forwarded_t.lock().unwrap().push(line.to_owned());
-        });
-
-        writer.join().ok();
-        child.wait().ok();
-
-        // Names still in the tracker are tests the watchdog believes
-        // are running. Names absent from the tracker had observe_result
-        // called - they're "finished" from the watchdog's view.
-        let still_running: Vec<String> =
-            tracker.lock().unwrap().current.keys().cloned().collect();
-        let forwarded = forwarded.lock().unwrap().clone();
-        (forwarded, still_running)
-    }
-
-    /// Like [`drive_drain`] but returns the names the tracker recorded as
-    /// *completed* (in order) - the exact set that feeds `check --timings`.
-    /// `drive_drain` only exposes `current` (the hang watchdog's view), so
-    /// nothing else pins down the timing capture.
-    fn drive_drain_completed(chunks: &[&[u8]]) -> Vec<String> {
-        use std::io::Write;
-        let mut child = Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn cat");
-        let mut stdin = child.stdin.take().expect("cat stdin");
-        let stdout = child.stdout.take().expect("cat stdout");
-
-        let chunks_owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
-        let writer = std::thread::spawn(move || {
-            for c in &chunks_owned {
-                stdin.write_all(c).ok();
-            }
-            drop(stdin);
-        });
-
-        let buf = Mutex::new(Vec::<u8>::new());
-        let tracker = Mutex::new(TestTracker::default());
-        drain_stdout(stdout, &buf, &tracker, |_line: &str| {});
-
-        writer.join().ok();
-        child.wait().ok();
-
-        tracker
-            .lock()
-            .unwrap()
-            .completed
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
     #[test]
-    fn completed_captures_all_tests_atomic_lines() {
-        // Capture ON (no --nocapture): libtest writes each result as one
-        // atomic `test NAME ... ok\n` line. Every test - including the last,
-        // cleared by the summary - must land in `completed`, or
-        // `check --timings` reports "no tests ran" for a green suite.
-        let stream: Vec<&[u8]> = vec![
-            b"\nrunning 3 tests\n",
-            b"test alpha ... ok\n",
-            b"test beta ... ok\n",
-            b"test gamma ... ok\n",
-            b"\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let mut completed = drive_drain_completed(&stream);
-        completed.sort();
-        assert_eq!(completed, vec!["alpha", "beta", "gamma"]);
-    }
+    fn a_forged_suite_start_cannot_reset_the_anti_forgery_guard() {
+        let mut tracker = TestTracker::default();
+        tracker.observe_suite_start();
+        tracker.observe_start("a::hung".to_owned());
 
-    #[test]
-    fn completed_captures_all_tests_partial_markers() {
-        // Capture OFF (--nocapture): the `test NAME ... ` marker is flushed
-        // separately from the trailing `ok\n`. Same guarantee.
-        let stream: Vec<&[u8]> = vec![
-            b"\nrunning 2 tests\n",
-            b"test alpha ... ",
-            b"ok\n",
-            b"test beta ... ",
-            b"ok\n",
-            b"\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let mut completed = drive_drain_completed(&stream);
-        completed.sort();
-        assert_eq!(completed, vec!["alpha", "beta"]);
-    }
+        // The loop a hung test could otherwise run: re-announce a suite, then
+        // re-announce itself, forever. With the previous suite still open, the
+        // suite record is not a boundary, so neither the once-per-name guard nor
+        // the clock is reset.
+        for _ in 0..5 {
+            tracker.last_progress = Instant::now()
+                .checked_sub(TEST_TIMEOUT + Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+            tracker.observe_suite_start();
+            tracker.observe_start("a::hung".to_owned());
+            assert!(
+                tracker.timed_out(TEST_TIMEOUT).is_some(),
+                "a replayed suite start must not buy the test more time"
+            );
+        }
 
-    #[test]
-    fn watchdog_clears_when_test_prints_without_newline() {
-        // Trigger A from the review: `print!("hello")` glues with the
-        // libtest `ok\n` -> arrives as `hellook\n`. The next test's
-        // partial marker must clear the previous pending; otherwise
-        // the watchdog times the wrong test.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"hellook\n",
-            b"test bar ... ",
-            b"ok\n",
-            b"\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (forwarded, still_running) = drive_drain(&stream);
-        // "hellook" should have been forwarded as test output (intermediate).
-        assert!(forwarded.iter().any(|l| l == "hellook"), "got: {forwarded:?}");
-        // After the result summary, no test should still be pending.
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
-    }
-
-    #[test]
-    fn is_libtest_result_summary_matches_real_shapes_only() {
-        // Exact libtest summary forms (with leading whitespace tolerated).
-        assert!(is_libtest_result_summary(
-            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
-        ));
-        assert!(is_libtest_result_summary(
-            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out"
-        ));
-        // A user `println!("test result:")` with no verb is NOT a
-        // summary - reviewer flagged that the prefix-only check let
-        // tests accidentally clear watchdog pending state.
-        assert!(!is_libtest_result_summary("test result:"));
-        assert!(!is_libtest_result_summary("test result: foo"));
-        assert!(!is_libtest_result_summary("test result: ok bar"));
-    }
-
-    #[test]
-    fn watchdog_keeps_pending_when_test_prints_test_result_prefix_then_hangs() {
-        // Item 4 from the second review: a test that prints
-        // `println!("test result:")` and then hangs must NOT have
-        // pending cleared by the summary detector.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"test result: maybe later\n",
-            // ... and then the test hangs.
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert_eq!(still_running, vec!["foo".to_string()]);
-    }
-
-    #[test]
-    fn watchdog_keeps_pending_when_test_prints_ok_then_hangs() {
-        // Reviewer-flagged regression: a test whose *first* output is
-        // `println!("ok")` and which then hangs forever must NOT be
-        // declared finished by the bare-status shortcut. Previously
-        // the watchdog cleared pending on that line and the timeout
-        // never fired. With the deferred-observe fix the test stays
-        // pending; the real watchdog timer (20s in production, not
-        // simulated here) will eventually trigger.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"ok\n",
-            // ... and then nothing. EOF here stands in for "the test
-            // is still running / hung when the pipe closes".
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert_eq!(still_running, vec!["foo".to_string()]);
-    }
-
-    #[test]
-    fn watchdog_clears_when_test_prints_ok_literal() {
-        // Trigger B fixture: the test calls `println!("ok")` then
-        // completes normally. Both the test's `ok` and libtest's
-        // own `ok\n` look like bare-status terminators with no
-        // intermediate output - the deferred-observe path drops
-        // both from display but does *not* clear pending. The
-        // `test result:` summary line at the end is what actually
-        // clears the watchdog tracker.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"ok\n",
-            b"ok\n",
-            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
-    }
-
-    #[test]
-    fn watchdog_clears_when_test_prints_failed_literal() {
-        // Symmetric to the `ok` case: `println!("FAILED")` followed
-        // by libtest's own `FAILED\n`. Both bare-status lines are
-        // dropped from display without observing a result; the
-        // `test result:` summary at the end is the actual
-        // pending-clear event.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"FAILED\n",
-            b"FAILED\n",
-            b"\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
-    }
-
-    #[test]
-    fn watchdog_clears_silent_test_via_bare_status() {
-        // No test output: stream is `test foo ... ok\n`. The partial
-        // start marker is stripped; the bare `ok` line is dropped from
-        // display (deferred-observe: we can't tell it from a test's
-        // own `println!("ok")`) without clearing pending. The
-        // `test result:` summary is what clears the watchdog tracker.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"ok\n",
-            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
-    }
-
-    #[test]
-    fn watchdog_clears_after_panic_message() {
-        // A failing test usually prints panic info on stdout/stderr
-        // before libtest writes `FAILED\n`. The state machine must
-        // eventually clear pending; the `test result:` summary is the
-        // last-resort terminator after intermediate output suppressed
-        // the bare-status shortcut.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"thread 'foo' panicked at tests/x.rs:1:1:\n",
-            b"assertion failed\n",
-            b"FAILED\n",
-            b"\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (forwarded, still_running) = drive_drain(&stream);
+        // A real boundary - the suite summarised first - still resets.
+        tracker.observe_suite_end();
+        tracker.observe_suite_start();
+        tracker.observe_start("a::hung".to_owned());
         assert!(
-            forwarded.iter().any(|l| l.contains("panicked")),
-            "forwarded: {forwarded:?}"
+            tracker.timed_out(TEST_TIMEOUT).is_none(),
+            "a suite that closed and reopened is a genuine boundary"
         );
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
     }
 
     #[test]
-    fn watchdog_clears_with_report_time_suffix() {
-        // libtest with `--report-time` emits `ok <0.001s>\n`. The
-        // is_bare_status_line check accepts the `<X.Xs>` suffix, so
-        // pending should clear normally even when timing is enabled.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ",
-            b"ok <0.001s>\n",
-            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
-    }
+    fn the_same_name_in_a_second_binary_still_counts_as_progress() {
+        let mut tracker = TestTracker::default();
+        tracker.observe_suite_start();
+        tracker.observe_start("tests::works".to_owned());
+        tracker.observe_result("tests::works");
 
-    #[test]
-    fn watchdog_full_form_marker_clears_pending() {
-        // When `--nocapture` is off, libtest writes the full
-        // `test foo ... ok\n` line atomically. parse_result_marker
-        // catches it; pending stays empty.
-        let stream: Vec<&[u8]> = vec![
-            b"test foo ... ok\n",
-            b"\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        ];
-        let (_forwarded, still_running) = drive_drain(&stream);
-        assert!(still_running.is_empty(), "still running: {still_running:?}");
-    }
-
-    #[test]
-    fn start_marker_allows_spaces_in_doctest_names() {
-        let name = parse_start_marker("test src/lib.rs - module::Foo::bar (line 42) ... ")
-            .expect("start marker");
-        assert_eq!(name, "src/lib.rs - module::Foo::bar (line 42)");
-    }
-
-    #[test]
-    fn result_marker_allows_report_time_suffix() {
-        let name = parse_result_marker("test my_mod::slow ... ok (0.25s)")
-            .expect("result marker");
-        assert_eq!(name, "my_mod::slow");
-    }
-
-    #[test]
-    fn result_marker_parses_failed() {
-        let name = parse_result_marker("test my_mod::slow ... FAILED")
-            .expect("result marker");
-        assert_eq!(name, "my_mod::slow");
-    }
-
-    #[test]
-    fn result_marker_ignores_non_test_lines() {
-        assert!(parse_result_marker("hello test my_mod::slow ... ok").is_none());
+        // Second binary of the same invocation, same test path, clock wound past
+        // the cap in between. The first suite summarises first, as a real stream
+        // does - that summary is what makes the next start a genuine boundary.
+        tracker.observe_suite_end();
+        tracker.observe_suite_start();
+        tracker.last_progress = Instant::now()
+            .checked_sub(TEST_TIMEOUT + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        tracker.observe_start("tests::works".to_owned());
+        assert!(
+            tracker.timed_out(TEST_TIMEOUT).is_none(),
+            "a fresh suite's occurrence of the same name is real progress"
+        );
     }
 
     #[test]
@@ -2275,6 +1866,7 @@ mod tests {
             last_progress: Instant::now(),
             seen: HashSet::new(),
             finished: HashSet::new(),
+            in_suite: false,
             idle_since: Instant::now(),
         }));
         let done = Arc::new(AtomicBool::new(false));
@@ -2341,6 +1933,7 @@ mod tests {
             last_progress: Instant::now(),
             seen: HashSet::new(),
             finished: HashSet::new(),
+            in_suite: false,
             idle_since: started,
         }));
         let done = Arc::new(AtomicBool::new(false));
