@@ -424,7 +424,20 @@ fn run_one_isolated_test(
 /// don't match the suffix). Sorted + deduped: the same name in two test
 /// binaries is still one `--exact` invocation, and each binary runs it in
 /// its own process anyway.
-fn parse_list_output(stdout: &str) -> Vec<String> {
+///
+/// `None` means the output is **not a libtest listing at all**, which is a
+/// different fact from "a libtest listing containing no tests" and must not be
+/// confused with it. Every libtest listing ends with a `N tests, M benchmarks`
+/// tally, even when both are zero; a binary built with `harness = false`, a
+/// custom harness, or anything else that ignores `--list` and exits 0 produces
+/// no such line. Returning an empty vec for those silently shrank the universe
+/// the coverage audit certifies - the audit would pass while attesting to
+/// nothing, which is worse than failing, because a green audit is taken as
+/// evidence.
+fn parse_list_output(stdout: &str) -> Option<Vec<String>> {
+    if !stdout.lines().any(|l| is_list_tally(l.trim())) {
+        return None;
+    }
     let mut out: Vec<String> = stdout
         .lines()
         .filter_map(|line| {
@@ -435,14 +448,30 @@ fn parse_list_output(stdout: &str) -> Vec<String> {
         .collect();
     out.sort();
     out.dedup();
-    out
+    Some(out)
+}
+
+/// The tally line libtest closes a `--list` with: `N tests, M benchmarks`,
+/// singularised at 1. Its presence is what distinguishes a real (possibly empty)
+/// listing from a binary that never understood `--list`.
+fn is_list_tally(line: &str) -> bool {
+    let Some((tests, benches)) = line.split_once(", ") else {
+        return false;
+    };
+    let counted = |part: &str, noun: &str| {
+        let Some((n, word)) = part.split_once(' ') else {
+            return false;
+        };
+        n.parse::<u64>().is_ok() && (word == noun || word == format!("{noun}s"))
+    };
+    counted(tests, "test") && counted(benches, "benchmark")
 }
 
 #[cfg(test)]
 mod isolate_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::parse_list_output;
+    use super::{is_list_tally, parse_list_output};
 
     #[test]
     fn list_output_keeps_test_names_only() {
@@ -459,7 +488,7 @@ serial_tests::test_logging_to_file: test
 some_bench: benchmark
 1 test, 1 benchmark
 ";
-        let names = parse_list_output(stdout);
+        let names = parse_list_output(stdout).expect("a real libtest listing");
         assert_eq!(
             names,
             vec![
@@ -470,8 +499,40 @@ some_bench: benchmark
         );
     }
 
+    /// A real listing that happens to contain nothing: empty, but a listing.
     #[test]
     fn list_output_empty_on_no_matches() {
-        assert!(parse_list_output("0 tests, 0 benchmarks\n").is_empty());
+        assert_eq!(
+            parse_list_output("0 tests, 0 benchmarks\n"),
+            Some(Vec::new()),
+            "an empty libtest listing is still a listing"
+        );
+        assert_eq!(parse_list_output("1 test, 1 benchmark\n"), Some(Vec::new()));
+    }
+
+    /// Output that is not a libtest listing at all must be distinguishable from
+    /// one containing no tests. A `harness = false` target, or any custom harness
+    /// that ignores `--list` and exits 0, used to contribute an empty set - and
+    /// the coverage audit would then certify a universe it never saw.
+    #[test]
+    fn non_libtest_output_is_not_an_empty_listing() {
+        assert_eq!(parse_list_output(""), None, "silence is not a listing");
+        assert_eq!(
+            parse_list_output("running my own harness\nall good\n"),
+            None,
+            "a custom harness that ignores --list is not an empty listing"
+        );
+        // Names but no tally: a truncated listing, not a complete empty one.
+        assert_eq!(parse_list_output("a::b: test\n"), None);
+    }
+
+    #[test]
+    fn the_tally_line_is_recognised_in_both_singular_and_plural() {
+        assert!(is_list_tally("0 tests, 0 benchmarks"));
+        assert!(is_list_tally("1 test, 1 benchmark"));
+        assert!(is_list_tally("12 tests, 3 benchmarks"));
+        assert!(!is_list_tally("2 tests"));
+        assert!(!is_list_tally("some tests, some benchmarks"));
+        assert!(!is_list_tally("a::b: test"));
     }
 }

@@ -581,7 +581,22 @@ fn matching_test_names(
     if !captured.status.success() {
         return Ok(Vec::new());
     }
-    Ok(listed_test_names(&String::from_utf8_lossy(&captured.stdout)))
+    // A listing that is not a libtest listing cannot establish the
+    // single-test precondition `--timeout` rides on. Refusing beats guessing:
+    // treating unrecognised output as "zero matches" would resolve to no exact
+    // name, silently fall back to the substring, and hand the user an
+    // authoritative-looking ceiling over an invocation that may run many tests.
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    listed_test_names(&stdout).ok_or_else(|| {
+        DevError::Config(format!(
+            "could not enumerate tests in sweep '{}': the listing carried no \
+             `N tests, M benchmarks` tally, so this target does not speak libtest's `--list` \
+             (a `harness = false` target, or a custom harness). --timeout needs enumeration to \
+             prove `{name}` names exactly one test. Drop --timeout, or use --sweep to pick a \
+             sweep whose targets are libtest harnesses.",
+            sweep.label
+        ))
+    })
 }
 
 /// The libtest `--list` entries that are runnable tests, by full name.
@@ -590,12 +605,37 @@ fn matching_test_names(
 /// `benchmark`. Names rather than a count, because the caller needs the resolved
 /// identity: a user's `--timeout` run is invoked with `--exact`, and `--exact`
 /// applied to the substring they typed would match nothing.
-fn listed_test_names(stdout: &str) -> Vec<String> {
-    stdout
-        .lines()
-        .filter_map(|l| l.trim_end().strip_suffix(": test"))
-        .map(str::to_owned)
-        .collect()
+///
+/// `None` when the output is not a libtest listing at all - no
+/// `N tests, M benchmarks` tally - which is a different fact from a listing with
+/// no matches. See `check_cmd::isolate::parse_list_output`, which draws the same
+/// distinction for the same reason.
+fn listed_test_names(stdout: &str) -> Option<Vec<String>> {
+    if !stdout.lines().any(|l| is_list_tally(l.trim())) {
+        return None;
+    }
+    Some(
+        stdout
+            .lines()
+            .filter_map(|l| l.trim_end().strip_suffix(": test"))
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// The tally line libtest closes a `--list` with: `N tests, M benchmarks`,
+/// singularised at 1.
+fn is_list_tally(line: &str) -> bool {
+    let Some((tests, benches)) = line.split_once(", ") else {
+        return false;
+    };
+    let counted = |part: &str, noun: &str| {
+        let Some((n, word)) = part.split_once(' ') else {
+            return false;
+        };
+        n.parse::<u64>().is_ok() && (word == noun || word == format!("{noun}s"))
+    };
+    counted(tests, "test") && counted(benches, "benchmark")
 }
 
 /// Resolve one sweep's cargo profile for `brokkr test` to a `debug` bool,
@@ -1766,13 +1806,29 @@ benches::throughput: benchmark
         // Names, not a count: `--timeout` invokes the resolved identity with
         // `--exact`, and `--exact` on the substring the user typed matches
         // nothing.
-        assert_eq!(listed_test_names(listing), vec!["foo::bar", "foo::baz"]);
+        assert_eq!(
+            listed_test_names(listing).expect("a real libtest listing"),
+            vec!["foo::bar", "foo::baz"]
+        );
     }
 
     #[test]
     fn listed_test_names_empty_when_no_matches() {
-        assert!(listed_test_names("0 tests, 0 benchmarks\n").is_empty());
-        assert!(listed_test_names("").is_empty());
+        assert_eq!(
+            listed_test_names("0 tests, 0 benchmarks\n"),
+            Some(Vec::new()),
+            "an empty libtest listing is still a listing"
+        );
+    }
+
+    /// Not a listing at all must not read as a listing with no matches: the
+    /// first cannot establish `--timeout`'s single-test precondition, the second
+    /// legitimately means "feature-gated out of this sweep".
+    #[test]
+    fn listed_test_names_rejects_output_that_is_not_a_listing() {
+        assert_eq!(listed_test_names(""), None);
+        assert_eq!(listed_test_names("my own harness ran fine\n"), None);
+        assert_eq!(listed_test_names("foo::bar: test\n"), None, "no tally: truncated");
     }
 
     /// `--exact` only rides along when the caller resolved a full name.

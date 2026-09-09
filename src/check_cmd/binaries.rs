@@ -372,9 +372,21 @@ fn binary_list(
         output::error(&String::from_utf8_lossy(&captured.stderr));
         return Ok(None);
     }
-    Ok(Some(parse_list_output(&String::from_utf8_lossy(
-        &captured.stdout,
-    ))))
+    // A listing that is not a libtest listing must fail enumeration rather than
+    // contribute an empty set. Silently treating "this binary does not speak
+    // --list" as "this binary has no tests" is how a coverage audit certifies a
+    // universe it never saw - and a green audit is taken as evidence.
+    let Some(names) = parse_list_output(&String::from_utf8_lossy(&captured.stdout)) else {
+        output::error(&format!(
+            "{} did not produce a libtest listing (no `N tests, M benchmarks` tally). A target \
+             built with `harness = false`, or any custom harness that ignores `--list`, cannot be \
+             enumerated - so it cannot be audited or run through the isolated lane. Exclude the \
+             target from this sweep, or give it a libtest harness.",
+            binary.executable
+        ));
+        return Ok(None);
+    };
+    Ok(Some(names))
 }
 
 /// Restrict the binary set to a lane's `--test <target>` filters: cargo
