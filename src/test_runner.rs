@@ -20,11 +20,15 @@ use crate::error::DevError;
 use crate::output::CapturedOutput;
 use crate::ratatoskr::process::snapshot_proc;
 
-/// Per-test ceiling. **Attribution, not a guarantee** - it ages a test only from
-/// the moment libtest announces it, on a stream test output shares, so a lost
-/// event can both hide a hang and misdirect the kill. Termination authority is
-/// [`Ceilings::wall`]. Honest as a guarantee only where one process runs one
-/// test ([`Ceilings::one_test`]).
+/// **The hard cap.** Every test brokkr runs gets this much wall time and no more;
+/// exceeding it fails the run and stops it. The single exception is
+/// `brokkr test --timeout`, which raises the cap for one resolved test and is
+/// itself limited to 280s by the CLI parser.
+///
+/// The clock is fed by libtest's announcements, which share a stream with test
+/// output, so a lost event can blur *which* test is named - see [`Ceilings`].
+/// It cannot excuse the overrun: if no test has been seen completing for longer
+/// than the budget, the budget is blown whoever spent it.
 pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WATCHDOG_POLL: Duration = Duration::from_millis(250);
 
@@ -49,36 +53,24 @@ pub(crate) const IDLE_WEDGE: &str = "(no test in flight)";
 /// perfectly normal test.
 pub(crate) const WALL_WEDGE: &str = "(sweep wall deadline)";
 
-/// Wall-clock ceiling for a whole shared-harness sweep, enforced from the
-/// watchdog's own clock and reachable by nothing a test prints.
+/// Wall-clock backstop for a whole run, enforced from the watchdog's own clock
+/// and reachable by nothing a test prints.
 ///
-/// This exists because the two event-driven ceilings are not the guarantee they
-/// look like. [`TEST_TIMEOUT`] ages a test only once libtest *announces* it, and
-/// [`IDLE_TIMEOUT`] is reset by every announced transition - so both are
-/// functions of a stream that arbitrary test output shares. A test can write
-/// straight to the process's stdout with `write!(std::io::stdout(), ...)`, which
-/// libtest's capture does not intercept because it installs Rust's capture
-/// mechanism rather than redirecting the OS descriptor; a subprocess started with
-/// `Command::status()` inherits the descriptor outright. Neither needs malice.
-/// Output that lands mid-record can therefore cost a lifecycle event, and a lost
-/// event means a test that finished still looks in-flight - at which point the
-/// per-test ceiling fires against whatever is running *now*, killing a healthy
-/// run. Corrupted events deciding when brokkr pulls the trigger is a verdict
-/// change, not a reporting glitch.
-///
-/// So termination authority moves here, to a clock no input can touch, and the
-/// event-driven ceilings stay for *attribution*: they name a likely offender, and
-/// they are honest about being a guess. A genuine per-test ceiling needs the
-/// process to be the unit of one test - see `check_cmd/isolate.rs`.
+/// Not the primary bound - [`TEST_TIMEOUT`] is - but the one that catches a wedge
+/// neither the per-test cap nor [`IDLE_TIMEOUT`] can charge to anything: no test
+/// in flight to bill, and enough parsed activity to keep the idle window
+/// resetting. Inside `brokkr check` the 15-minute test-phase watchdog
+/// (`check_cmd/watchdog.rs`) always fires first, so in practice this governs
+/// `brokkr test`.
 pub(crate) const SWEEP_WALL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The ceilings one libtest run is subject to.
 ///
-/// `per_test` and the idle window drive *attribution* and are computed from
-/// libtest's announcements. `wall` drives *termination* and is computed from the
-/// watchdog's own clock. Keeping them in one struct is how the distinction stays
-/// visible at every call site: a caller that wants a trustworthy ceiling sets
-/// `wall`, and one that only wants a name sets `per_test`.
+/// `per_test` is the hard cap and it terminates. `wall` is a backstop for a wedge
+/// the cap cannot charge to any test. `shape` says only what a kill may be
+/// *called*, which is the one thing a corrupted stream can take away: with a
+/// caller-resolved single test the name is exact, and on a shared harness it is
+/// the tracker's best-known suspect.
 /// What the caller knows about the run's shape, and therefore what a wall expiry
 /// means.
 ///
@@ -138,24 +130,14 @@ impl Ceilings {
     }
 }
 
-/// Whole-sweep wall-clock ceiling for a parallel test sweep - the authoritative
-/// bound, enforced from the runner's own clock in the `try_wait` loop.
+/// Whole-sweep wall-clock backstop for a parallel test sweep, enforced from the
+/// runner's own clock in the `try_wait` loop.
 ///
-/// This used to be described as a backstop for the residual case, on the grounds
-/// that the per-test ceiling caught a hung test "in 20s with named attribution
-/// just like serial". That overstated it in both places. The per-test ceiling
-/// ages tests from libtest's JSON `started`/`ok`/`failed` events, and those
-/// events share one stdout stream with whatever the tests write to it - a
-/// `write!(std::io::stdout(), ..)` that libtest's capture does not intercept, or
-/// a subprocess that inherited the descriptor. A record concatenated onto
-/// unterminated output is a lost event, and a lost result leaves a finished test
-/// looking in-flight, at which point the per-test clock fires against whatever is
-/// running now and kills a healthy sweep.
-///
-/// So the per-test ceiling is *attribution*: it names a likely offender and may
-/// be wrong. Termination authority is this wall clock, which nothing the child
-/// prints can reach. A real per-test guarantee needs one process per test - see
-/// `check_cmd/isolate.rs` and [`Ceilings::one_test`].
+/// A parallel sweep enforces the same [`TEST_TIMEOUT`] cap per test as the serial
+/// path, aging each in-flight test from libtest's JSON `started`/`ok`/`failed`
+/// events. This ceiling covers what that cannot bill to any test: a stall with
+/// nothing in flight, or a wedge outside the test bodies entirely. Generous, so it
+/// only trips on something the per-test cap genuinely cannot see.
 pub(crate) const PARALLEL_SWEEP_TIMEOUT: Duration = Duration::from_secs(1800);
 
 pub(crate) struct LibtestRun {
@@ -1203,87 +1185,91 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        // ONLY the wall clock terminates. This is the whole invariant, and
-        // getting it wrong once already cost a redesign: an earlier version
-        // checked the wall first and fell back to the attribution clock with
-        // `or_else`, which merely resolved ties inside one poll tick - in
-        // practice the 20s guess fired 29m40s before the 30m wall, so the
-        // untrusted clock still had termination authority and the false verdict
-        // the redesign existed to remove was still reachable.
+        // THE PER-TEST CAP TERMINATES. Every test brokkr runs gets `per_test`
+        // of wall time and no more; exceeding it fails the run and stops it. The
+        // only exception is `brokkr test --timeout`, which raises this cap for one
+        // resolved test and is itself hard-capped at 280s by the CLI parser.
         //
-        // A per-test or idle expiry therefore produces a *diagnostic* here, not
-        // a kill. Where a per-test ceiling really is a guarantee - one process
-        // running one test - the caller sets `wall` to that same ceiling
-        // (`Ceilings::one_test`), so the guarantee is enforced by the clock that
-        // has authority rather than by the one that reads test output.
-        let advisory = tracker.lock().ok().and_then(|t| t.timed_out(timeout));
-        if let Some((name, elapsed)) = &advisory
-            && !warned
-            && ceilings.wall.is_some()
-        {
-            warned = true;
-            crate::output::warn(&format!(
-                "test '{}' has been running {}s (over the {}s per-test ceiling). Not killing it: \
-                 that ceiling is read from libtest's output, which test output shares, so it \
-                 names a suspect rather than proving one. The run is bounded by its wall \
-                 deadline.",
-                name,
-                elapsed.as_secs(),
-                if name == IDLE_WEDGE { IDLE_TIMEOUT.as_secs() } else { timeout.as_secs() },
-            ));
-        }
+        // The cap is enforced even though the clock that measures it is fed by a
+        // stream test output shares, and that is not an oversight. Either the
+        // named test really has burned its budget, or its terminal event was lost
+        // and brokkr has seen NO test complete for longer than the budget - in
+        // which case the run has still exceeded what the contract allows, and
+        // failing is right either way. What a lost event can corrupt is the NAME,
+        // not the entitlement to kill, so the report says so rather than
+        // pretending the attribution is proven.
+        let per_test_expiry = tracker.lock().ok().and_then(|t| {
+            t.timed_out(timeout).map(|(name, elapsed)| {
+                let stale = !t.ever_observed;
+                (name, elapsed, stale)
+            })
+        });
 
-        // The one clock that may terminate on untrusted-adjacent evidence: the
-        // idle ceiling, and ONLY while the tracker has never observed a single
-        // lifecycle event. In that state nothing has been parsed, so `idle_since`
-        // has never been advanced by anything and the measurement is plain wall
-        // time since spawn - authoritative by construction, not by inference.
-        // This is the case the idle ceiling was built for: cargo parked on
-        // "Blocking waiting for file lock on build directory" with no test ever
-        // announced. The moment any event is observed the clock becomes
-        // resettable by output, and it drops back to advisory.
-        let virgin_idle = tracker
+        // The idle ceiling covers the gap the per-test cap cannot see: no test in
+        // flight at all, so there is no budget to charge. While
+        // `ever_observed` is false nothing has been parsed, so `idle_since` still
+        // holds the run's start and this is plain wall time since spawn. The case
+        // it was built for is cargo parked on a build-directory lock with no test
+        // ever announced.
+        let idle_expiry = tracker
             .lock()
             .ok()
-            .filter(|t| !t.ever_observed)
+            .filter(|t| t.current.is_empty())
             .map(|t| t.idle_since.elapsed())
             .filter(|e| *e >= IDLE_TIMEOUT);
 
-        // Wall first: it is the caller's stated bound, so it owns the verdict
-        // when both are due.
-        let expiry = ceilings
-            .wall
-            .filter(|w| started.elapsed() >= *w)
-            .map(|w| (w, false))
-            .or_else(|| virgin_idle.map(|e| (e, true)));
-        let Some((ceiling_hit, was_idle)) = expiry else {
+        // The caller's wall ceiling: a backstop for a wedge that neither clock
+        // above can charge to anything.
+        let wall_expiry = ceilings.wall.filter(|w| started.elapsed() >= *w);
+
+        let verdict = if let Some((name, elapsed, stale)) = per_test_expiry {
+            if name == IDLE_WEDGE {
+                Some((TimeoutReason::Idle, elapsed, IDLE_TIMEOUT))
+            } else {
+                // A one-test invocation is named by the caller; a shared harness
+                // can only offer the tracker's best-known suspect.
+                let named = match &ceilings.shape {
+                    WallShape::OneTest { name } => name.clone(),
+                    WallShape::SharedHarness => name,
+                };
+                if stale && !warned {
+                    warned = true;
+                    crate::output::warn(
+                        "no libtest lifecycle event was ever observed, so the test named below is \
+                         brokkr's best guess at which one burned the budget - the budget itself \
+                         was still exceeded.",
+                    );
+                }
+                Some((TimeoutReason::PerTest { name: named }, elapsed, timeout))
+            }
+        } else if let Some(elapsed) = idle_expiry {
+            Some((TimeoutReason::Idle, elapsed, IDLE_TIMEOUT))
+        } else if let Some(wall) = wall_expiry {
+            let blamed = tracker
+                .lock()
+                .ok()
+                .map(|t| t.current.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            match &ceilings.shape {
+                WallShape::OneTest { name } => Some((
+                    TimeoutReason::PerTest { name: name.clone() },
+                    started.elapsed(),
+                    wall,
+                )),
+                WallShape::SharedHarness => {
+                    Some((TimeoutReason::SweepWall { blamed }, started.elapsed(), wall))
+                }
+            }
+        } else {
+            None
+        };
+
+        let Some((reason, elapsed, ceiling)) = verdict else {
             continue;
         };
         if done.load(Ordering::SeqCst) {
             return;
         }
-
-        // The reason comes from the caller's shape, never from the tracker. The
-        // tracker only supplies unverified context.
-        let blamed = tracker
-            .lock()
-            .ok()
-            .map(|t| t.current.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let (reason, elapsed, ceiling) = if was_idle {
-            (TimeoutReason::Idle, ceiling_hit, IDLE_TIMEOUT)
-        } else {
-            match &ceilings.shape {
-                WallShape::OneTest { name } => (
-                    TimeoutReason::PerTest { name: name.clone() },
-                    started.elapsed(),
-                    ceiling_hit,
-                ),
-                WallShape::SharedHarness => {
-                    (TimeoutReason::SweepWall { blamed }, started.elapsed(), ceiling_hit)
-                }
-            }
-        };
 
         let hung_test = capture_hung_test(&state_root, cargo_pid, reason, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
@@ -1993,18 +1979,17 @@ mod tests {
         );
     }
 
-    /// The central safety property, and the one whose absence let the first
-    /// attempt at this ship broken: an *expired* per-test ceiling must not kill
-    /// anything while the authoritative wall is still running.
+    /// THE CONTRACT: every test gets `per_test` of wall time and no more.
+    /// Exceeding it kills the run, whatever the wall ceiling still has left.
     ///
-    /// That first attempt checked the wall before the tracker and then fell back
-    /// to it with `or_else`, which only resolved ties inside a single poll tick.
-    /// In practice the 20s attribution guess fired 29m40s ahead of the 30m wall,
-    /// so the untrusted clock still decided when to pull the trigger and the
-    /// false verdict the redesign existed to remove was still reachable. The
-    /// empty-tracker test passed the whole time.
+    /// The clock is fed by a stream test output shares, and the cap is enforced
+    /// anyway. Either the named test really burned its budget, or its terminal
+    /// event was lost and brokkr has seen no test complete for longer than the
+    /// budget - in which case the run has exceeded what the contract allows
+    /// either way. A lost event can corrupt the name, never the entitlement to
+    /// kill.
     #[test]
-    fn an_expired_per_test_ceiling_does_not_kill_while_the_wall_runs() {
+    fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
         use std::os::unix::process::CommandExt;
 
         let root = test_root("watchdog_attribution_never_kills");
@@ -2035,13 +2020,8 @@ mod tests {
         let done = Arc::new(AtomicBool::new(false));
         let hung = Arc::new(Mutex::new(None::<HungTest>));
 
-        // Run the loop briefly, then stop it - the wall is far away, so it must
-        // return without a verdict and without touching the child.
-        let done_t = Arc::clone(&done);
-        let stopper = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(120));
-            done_t.store(true, Ordering::SeqCst);
-        });
+        // The wall is an hour away and must not be what saves or condemns this
+        // run: the per-test cap alone has to fire.
         watchdog_loop_with_timing(
             root.clone(),
             cargo_pid,
@@ -2056,18 +2036,19 @@ mod tests {
             Duration::from_millis(5),
             Instant::now(),
         );
-        stopper.join().ok();
-
-        assert!(
-            hung.lock().unwrap().is_none(),
-            "an expired attribution clock must not produce a kill verdict"
-        );
-        assert!(
-            process_group_exists(cargo_pid),
-            "the process group must still be alive: only the wall clock may terminate"
-        );
-        kill_process_group(cargo_pid).ok();
         child.wait().ok();
+
+        let hung = hung.lock().unwrap().clone().expect("the per-test cap must fire");
+        assert_eq!(
+            hung.reason,
+            TimeoutReason::PerTest { name: "a::apparently_overdue".to_owned() },
+            "the cap names the test that burned the budget"
+        );
+        assert_eq!(hung.ceiling, Duration::from_millis(10));
+        assert!(
+            wait_for_process_group_exit(cargo_pid),
+            "exceeding the per-test cap must kill the run"
+        );
     }
 
     #[test]

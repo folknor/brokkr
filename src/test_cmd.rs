@@ -18,17 +18,15 @@
 //! profile that gates platform tests behind `BROKKR_TEST_PLATFORM=1`
 //! still works under `brokkr test`.
 //!
-//! Without `--timeout` the per-test ceiling is *attribution*: `<NAME>` is a
-//! substring filter, so one process runs many tests and the run is bounded by
-//! its wall clock instead (see [`crate::test_runner::Ceilings`]).
-//!
-//! `--timeout <SECS>` (1-280) raises the ceiling AND makes it authoritative,
-//! because it can: the flag already refuses more than one match, so the process
-//! becomes the unit of one test. Enumeration resolves `<NAME>` to the one full
-//! test name and the run is invoked with libtest `--exact` - resolving the full
-//! name matters, since `--exact` on the user's substring would match nothing and
-//! silently run zero tests. What it bounds is the whole cargo invocation, not the
-//! test body: lock wait, residual compilation, startup, the test, teardown.
+//! Every test gets a 20s hard cap; exceeding it fails the run and stops it,
+//! between `-N` iterations included. `--timeout <SECS>` (1-280) is the only
+//! exception anywhere in brokkr, and it also makes the *attribution* exact: the
+//! flag already refuses more than one match, so enumeration resolves `<NAME>` to
+//! the one full test name and the run is invoked with libtest `--exact`, making
+//! the process the unit of one test. Resolving the full name matters - `--exact`
+//! on the user's substring would match nothing and silently run zero tests. What
+//! it bounds is the whole cargo invocation, not the test body: lock wait,
+//! residual compilation, startup, the test, teardown.
 //! Because a higher
 //! ceiling only makes sense for one isolated test, it is gated: each
 //! sweep is enumerated with libtest `--list` first, and `<NAME>` matching
@@ -71,6 +69,9 @@ enum Outcome {
 /// on. `fail_loc`/`fail_msg` are only set for `Outcome::Fail` and may
 /// be partial (an exit-code failure with no parsed panic has neither).
 struct RunReport {
+    /// The run blew a time budget rather than merely failing. Stops the command:
+    /// see the `-N` loop in [`run`].
+    timed_out: bool,
     outcome: Outcome,
     fail_loc: Option<String>,
     fail_msg: Option<String>,
@@ -80,8 +81,19 @@ impl RunReport {
     fn bare(outcome: Outcome) -> Self {
         Self {
             outcome,
+            timed_out: false,
             fail_loc: None,
             fail_msg: None,
+        }
+    }
+
+    /// A run that blew a time budget. Fails, and stops the command.
+    fn timed_out(msg: String) -> Self {
+        Self {
+            outcome: Outcome::Fail,
+            timed_out: true,
+            fail_loc: None,
+            fail_msg: Some(msg),
         }
     }
 }
@@ -251,19 +263,21 @@ pub fn run(
                 &env_refs,
                 &tag,
                 raw,
-                // With `--exact` on a resolved single test, the process runs one
-                // test and the ceiling can be authoritative. Without it, the
-                // substring filter can match several tests in one process, so the
-                // per-test clock is attribution and the sweep wall is the bound.
-                match &exact {
-                    Some(resolved) => test_runner::Ceilings::one_test(ceiling, resolved),
-                    None => test_runner::Ceilings::shared_harness_with(ceiling),
-                },
+                ceilings_for(&exact, ceiling),
                 announce,
                 &repeat_state,
                 n > 1,
             )?;
+            let timed_out = report.timed_out;
             reports.push(report);
+            // A blown time budget stops brokkr. Unlike a failing test - where a
+            // `-N` run's whole purpose is to keep going and count the flakes -
+            // a timeout means the run is already outside the contract, and
+            // whatever wedged it is still there for the next iteration and the
+            // next sweep to inherit.
+            if timed_out {
+                return Err(stop_for_budget(&reports, repeat, &sweep.label));
+            }
         }
     }
 
@@ -902,11 +916,10 @@ fn run_one(
             hung.ceiling.as_secs()
         );
         std::io::stdout().flush().ok();
-        return Ok(RunReport {
-            outcome: Outcome::Fail,
-            fail_loc: None,
-            fail_msg: Some(format!("hung test exceeded {}s", hung.ceiling.as_secs())),
-        });
+        return Ok(RunReport::timed_out(format!(
+            "hung test exceeded {}s",
+            hung.ceiling.as_secs()
+        )));
     }
 
     if !has_test_result && has_compile_error {
@@ -934,6 +947,7 @@ fn run_one(
         std::io::stdout().flush().ok();
         return Ok(RunReport {
             outcome: Outcome::Fail,
+            timed_out: false,
             fail_loc: fail.location.clone(),
             fail_msg: fail.message.clone(),
         });
@@ -996,6 +1010,39 @@ fn run_one(
     Ok(RunReport::bare(Outcome::Pass))
 }
 
+/// End the command because a test blew its time budget.
+///
+/// Distinct from a failing test, where a `-N` run's whole purpose is to keep
+/// going and count the flakes. A timeout means the run is already outside the
+/// contract every later measurement assumes, and whatever wedged it - a deadlock,
+/// a lock nobody will release, a runaway child - is still there for the next
+/// iteration and the next sweep to inherit. The repeat summary still prints, so
+/// the iterations that did run are not lost.
+fn stop_for_budget(reports: &[RunReport], repeat: u32, label: &str) -> DevError {
+    if repeat > 1 {
+        for line in format_repeat_summary(reports) {
+            println!("{line}");
+        }
+    }
+    DevError::Verify(format!(
+        "a test exceeded its time budget in sweep '{label}' - stopping"
+    ))
+}
+
+/// The ceilings for one invocation.
+///
+/// Both shapes enforce the same cap - every test gets `ceiling` of wall time and
+/// no more. They differ only in what a kill can be *called*: with `--exact` on a
+/// resolved single test the process runs exactly one test, so the caller knows
+/// the name; without it the substring filter can match several tests in one
+/// process and the name is the tracker's best-known suspect.
+fn ceilings_for(exact: &Option<String>, ceiling: Duration) -> test_runner::Ceilings {
+    match exact {
+        Some(resolved) => test_runner::Ceilings::one_test(ceiling, resolved),
+        None => test_runner::Ceilings::shared_harness_with(ceiling),
+    }
+}
+
 /// Report a run that failed to build. Compile errors are identical across `-N`
 /// repeats by construction (same source, same flags), so the block prints once
 /// and later repeats collapse to the footer.
@@ -1041,6 +1088,7 @@ fn report_incomplete(
     std::io::stdout().flush().ok();
     RunReport {
         outcome: Outcome::Fail,
+        timed_out: false,
         fail_loc: None,
         fail_msg: Some(format!("incomplete test stream: {reason}")),
     }
@@ -1375,6 +1423,7 @@ mod tests {
     fn report(outcome: Outcome, msg: Option<&str>, loc: Option<&str>) -> RunReport {
         RunReport {
             outcome,
+            timed_out: false,
             fail_msg: msg.map(str::to_owned),
             fail_loc: loc.map(str::to_owned),
         }

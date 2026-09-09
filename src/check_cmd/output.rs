@@ -706,6 +706,16 @@ fn run_one_test_sweep(
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
 
+    // A blown time budget stops brokkr; it does not merely fail a sweep.
+    //
+    // Returning `Ok(false)` here let the phase carry on to the next package
+    // resolution and the next sweep, which is right for a *failing test* - the
+    // phase exists to report every failure it can reach - and wrong for a
+    // timeout. A test that burned its budget means the run is already outside the
+    // contract every later measurement assumes, and whatever wedged it (a
+    // deadlock, a lock nobody will release, a runaway child) is still there for
+    // the next sweep to inherit. `Err` propagates out of the sweep loop and ends
+    // the run.
     if timed_out {
         output::error(&format!(
             "sweep '{}' exceeded the parallel test timeout ({}s) and was killed",
@@ -715,7 +725,10 @@ fn run_one_test_sweep(
         if !commands {
             output::error(&full_command);
         }
-        return Ok(false);
+        return Err(DevError::Verify(format!(
+            "sweep '{}' exceeded its time budget - stopping",
+            sweep.label
+        )));
     }
 
     if let Some(hung) = hung {
@@ -723,7 +736,11 @@ fn run_one_test_sweep(
         if !commands {
             output::error(&full_command);
         }
-        return Ok(false);
+        return Err(DevError::Verify(format!(
+            "a test exceeded its {}s budget in sweep '{}' - stopping",
+            hung.ceiling.as_secs(),
+            sweep.label
+        )));
     }
 
     if !captured.status.success() {
