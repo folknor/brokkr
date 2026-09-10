@@ -46,6 +46,10 @@ pub(crate) fn acquire_cmd_lock_opt(
     // brokkr-shaped started, and it holds (or will take) the build-directory
     // lock this command's cargo needs.
     crate::stray::reap_after_lock();
+    // A stale enrolled guard fails in shapes that read as anything but
+    // staleness (a refused probe even poisons cargo's rustc-info cache), so
+    // say it plainly, once, while we know a build may be about to run.
+    crate::guard::warn_if_guard_stale();
     Ok(guard)
 }
 

@@ -43,6 +43,24 @@ use std::sync::Mutex;
 /// The capability handed to descendants: the current hold's nonce.
 pub const CAPABILITY_ENV: &str = "BROKKR_HOLD_NONCE";
 
+/// Cargo's switch for its persistent rustc-probe cache
+/// (`target/.rustc_info.json`), stamped `0` on every child brokkr starts.
+///
+/// The cache stores FAILED `rustc -vV`/`--print` probes - stderr included -
+/// keyed by a fingerprint that ignores inherited env vars, and replays them
+/// without re-running the probe. A foreign cargo refused by the guard during
+/// someone's hold therefore poisons the shared cache, and brokkr's own
+/// correctly-stamped cargo then replays that refusal verbatim: the nonce is
+/// present, the guard never runs, the build fails anyway, and `BROKKR_CARGO=1`
+/// cannot cure it (it reaches a guard cargo no longer spawns). Observed live
+/// 2026-09-10 against a piners `cargo doc` script check. Disabling the cache
+/// for brokkr's children makes every brokkr build re-probe - a few tens of
+/// milliseconds per cargo invocation - and immune to historical or concurrent
+/// poison. The guard's query admission (`src/bin/rustc_guard.rs::classify`)
+/// stops NEW poison at the source; this stops old and racing poison from
+/// reaching brokkr.
+pub const RUSTC_INFO_CACHE_ENV: &str = "CARGO_CACHE_RUSTC_INFO";
+
 /// Set by the guard on the compiler it admits, so a brokkr command started
 /// from inside a compilation - a proc macro that shells out - can refuse to
 /// take a fresh hold instead of deadlocking against its own lease. See
@@ -111,6 +129,10 @@ pub fn stamp(cmd: &mut std::process::Command) {
     if let Some(nonce) = capability() {
         cmd.env(CAPABILITY_ENV, nonce);
     }
+    // Unconditional, hold or no hold: replay protection is about what a
+    // cargo READS, not about what this process is authorized to do. See
+    // [`RUSTC_INFO_CACHE_ENV`].
+    cmd.env(RUSTC_INFO_CACHE_ENV, "0");
 }
 
 /// The capability as cargo `--config` overrides, for the nextest lane.
@@ -122,15 +144,16 @@ pub fn stamp(cmd: &mut std::process::Command) {
 /// travels the documented route instead: an override the engine applies to every
 /// process it spawns. `force` is set so an inherited value cannot shadow it.
 ///
-/// Empty when no hold is active, which leaves the engine's configuration exactly
-/// as it was.
+/// Always carries the rustc-info cache disable (see [`RUSTC_INFO_CACHE_ENV`]);
+/// the capability entry joins it when a hold is active.
 pub fn cargo_config_overrides() -> Vec<String> {
-    match capability() {
-        Some(nonce) => {
-            vec![format!("env.{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true }}")]
-        }
-        None => Vec::new(),
+    let mut overrides = vec![format!(
+        "env.{RUSTC_INFO_CACHE_ENV} = {{ value = \"0\", force = true }}"
+    )];
+    if let Some(nonce) = capability() {
+        overrides.push(format!("env.{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true }}"));
     }
+    overrides
 }
 
 /// Whether this process is running inside a compilation the guard admitted.

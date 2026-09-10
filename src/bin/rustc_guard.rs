@@ -16,11 +16,15 @@
 //! every other build in the same target dir.
 //!
 //! Decision, in order:
-//! 1. `BROKKR_CARGO` set and non-empty - exec. The manual escape hatch.
-//! 2. A `brokkr` ancestor in `/proc` - exec. The same rule that defines a
-//!    stray, inverted: brokkr-owned rustc is whatever runs under brokkr.
-//! 3. The brokkr lock (`$HOME/.brokkr/brokkr.lock`) held - refuse, exit 1.
-//! 4. Otherwise - exec.
+//! 1. `--brokkr-guard-info` alone - answer the version handshake and exit.
+//! 2. The invocation classifies as a compiler-information query - exec, no
+//!    lease, no capability asked. Queries compile nothing, and refusing one
+//!    poisons cargo's persistent rustc-info cache (see [`classify`]).
+//! 3. `BROKKR_CARGO` set and non-empty - exec. The manual escape hatch.
+//! 4. Take a shared compile lease, read the published capability hash under
+//!    it, then probe the brokkr lock (`$HOME/.brokkr/brokkr.lock`) last:
+//!    not held - exec; held - exec only with a matching `BROKKR_HOLD_NONCE`,
+//!    refuse (exit 1) otherwise.
 //!
 //! Fail-open everywhere except a demonstrably held flock: an unreadable
 //! `/proc`, a missing `$HOME`, a missing lock file all exec. The guard is a
@@ -42,6 +46,45 @@ fn main() {
         std::process::exit(2);
     };
     let rest: Vec<std::ffi::OsString> = args.collect();
+
+    // The version handshake, recognized before anything else - no lease, no
+    // lock probe, no environment reads - so a probing brokkr gets an answer
+    // even when the lock infrastructure is wedged. An OLD guard reaching this
+    // point instead treats the flag as the executable to wrap and dies at
+    // `exec` with status 127, which the prober reads as "stale".
+    // `brokkr guard` and locked-command startup compare this against
+    // `guard::GUARD_PROTOCOL`; both sides must be edited together.
+    if real == "--brokkr-guard-info" && rest.is_empty() {
+        println!("brokkr-rustc-guard protocol=1 capabilities=capability-lease-v1,query-bypass-v1");
+        return;
+    }
+
+    // Compiler-information queries are admitted unconditionally, before any
+    // lease or lock question is asked. Two reasons, both load-bearing:
+    //
+    // - A query compiles nothing (the classifier only accepts invocation
+    //   shapes rustc answers before expansion and codegen), so refusing it
+    //   buys no exclusion for a measurement.
+    // - Cargo PERSISTS a failed `rustc -vV`/`--print` probe - stderr and all -
+    //   in `target/.rustc_info.json`, keyed by a fingerprint that is blind to
+    //   inherited env vars. A refusal here therefore poisons the shared probe
+    //   cache: every later cargo with the same fingerprint, brokkr's own
+    //   correctly-stamped children included, replays the refusal without ever
+    //   spawning this guard, and neither the capability nor BROKKR_CARGO can
+    //   cure it. Demonstrated live 2026-09-10 against a piners `cargo doc`
+    //   script check.
+    //
+    // No lease is taken and no BROKKR_COMPILE_LEASE marker is set: the
+    // invariant is that every invocation CAPABLE of compilation participates,
+    // and a query holding a lease would only delay drains. An inherited
+    // marker from an admitted ancestor rides along untouched.
+    if classify(&rest) == Invocation::Query {
+        let mut cmd = Command::new(&real);
+        cmd.args(&rest);
+        let err = cmd.exec();
+        eprintln!("brokkr-rustc-guard: exec {} failed: {err}", real.to_string_lossy());
+        std::process::exit(127);
+    }
 
     let lease = match decide() {
         Decision::Admitted(lease) => Some(lease),
@@ -191,6 +234,180 @@ impl Drop for Lease {
     }
 }
 
+/// What the wrapped invocation is, decided from its arguments alone.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum Invocation {
+    /// A compiler-information query that cannot reach codegen. Admitted
+    /// without a capability or a lease - see the comment at the call site.
+    Query,
+    /// Anything else, including anything this parser does not understand.
+    /// Takes the full capability/lease path.
+    Compile,
+}
+
+/// `--print` requests rustc answers and exits on, before expansion, analysis
+/// or codegen. `link-args` and `native-static-libs` are deliberately ABSENT:
+/// rustc services those by continuing into compilation and printing at the
+/// end, so an invocation carrying them is a compile wearing a query's hat.
+/// Unknown print names fail closed into `Compile` for the same reason.
+const EARLY_PRINTS: &[&str] = &[
+    "file-names",
+    "sysroot",
+    "target-libdir",
+    "host-tuple",
+    "crate-name",
+    "crate-root-lint-levels",
+    "cfg",
+    "check-cfg",
+    "calling-conventions",
+    "target-list",
+    "target-cpus",
+    "target-features",
+    "relocation-models",
+    "code-models",
+    "tls-models",
+    "target-spec-json",
+    "all-target-specs-json",
+    "split-debuginfo",
+    "deployment-target",
+    "stack-protector-strategies",
+    "supported-crate-types",
+];
+
+/// Long options (`--opt value` / `--opt=value`) a probe legitimately carries
+/// and that cannot, by themselves, request codegen or output.
+const VALUE_OPTS: &[&str] = &[
+    "--print",
+    "--crate-name",
+    "--crate-type",
+    "--edition",
+    "--target",
+    "--cfg",
+    "--check-cfg",
+    "--cap-lints",
+    "--error-format",
+    "--json",
+    "--color",
+    "--diagnostic-width",
+    "--sysroot",
+    "--allow",
+    "--warn",
+    "--deny",
+    "--forbid",
+    "--force-warn",
+];
+
+/// Classify the wrapped rustc invocation by parsing its option grammar.
+///
+/// The shape recognized as a query is the one cargo actually sends when
+/// probing a compiler: version requests (`rustc -vV`), and `--print` batteries
+/// such as `rustc - --crate-name ___ --print=file-names --crate-type bin ...
+/// --print=cfg -Wwarnings`, possibly with the user's RUSTFLAGS appended
+/// (`-Ctarget-cpu`, `--cfg`, `-Z...`), a `--target`, and stdin (`-`) as the
+/// sole input. Anything with a real source file, an output request (`-o`,
+/// `--out-dir`, `--emit`), an unexpanded `@argfile` (rustc would re-read a
+/// mutable file after this decision - a classification race), a non-early
+/// print, or any option this parser does not know is `Compile`. The failure
+/// direction is deliberate: misreading a query as a compile costs one
+/// refusal-and-repoke, misreading a compile as a query would let real work
+/// run outside the exclusion guarantee.
+fn classify(args: &[std::ffi::OsString]) -> Invocation {
+    let mut strs = Vec::with_capacity(args.len());
+    for a in args {
+        match a.to_str() {
+            Some(s) => strs.push(s),
+            None => return Invocation::Compile,
+        }
+    }
+
+    // Version-only requests: every arg is a version/verbosity flag and at
+    // least one actually requests the version.
+    let version_flag = |s: &str| matches!(s, "-vV" | "-V" | "--version");
+    if strs.iter().any(|s| version_flag(s))
+        && strs.iter().all(|s| version_flag(s) || matches!(*s, "-v" | "--verbose"))
+    {
+        return Invocation::Query;
+    }
+
+    let mut prints: Vec<String> = Vec::new();
+    let mut positionals = 0usize;
+    let mut stdin_input = false;
+    let mut i = 0;
+    while i < strs.len() {
+        let arg = strs[i];
+        i += 1;
+        if arg == "-" {
+            stdin_input = true;
+            positionals += 1;
+            continue;
+        }
+        if arg == "--" {
+            // Everything after is positional input; a query has none beyond
+            // the one stdin marker handled above.
+            positionals += strs.len() - i;
+            i = strs.len();
+            continue;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            let dashed = format!("--{name}");
+            if !VALUE_OPTS.contains(&dashed.as_str()) {
+                return Invocation::Compile;
+            }
+            let value = match attached {
+                Some(v) => v.to_owned(),
+                None => {
+                    let Some(next) = strs.get(i) else {
+                        return Invocation::Compile;
+                    };
+                    i += 1;
+                    (*next).to_owned()
+                }
+            };
+            if name == "print" {
+                prints.push(value);
+            }
+            continue;
+        }
+        if let Some(short) = arg.strip_prefix('-') {
+            // Lint, codegen, unstable and search-path flags: value attached
+            // (`-Wwarnings`, `-Ctarget-cpu=native`) or separate (`-W warnings`).
+            // A probe inherits these from RUSTFLAGS; none of them turns a
+            // print request into a compile, because the early print exits
+            // first. Any other short flag is unknown here and fails closed.
+            let mut chars = short.chars();
+            let letter = chars.next();
+            if matches!(letter, Some('W' | 'A' | 'D' | 'F' | 'C' | 'Z' | 'L' | 'l')) {
+                if chars.next().is_none() {
+                    // Separated form consumes the next arg as its value.
+                    if strs.get(i).is_none() {
+                        return Invocation::Compile;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            return Invocation::Compile;
+        }
+        if arg.starts_with('@') {
+            return Invocation::Compile;
+        }
+        positionals += 1;
+    }
+
+    let inputs_ok = positionals == 0 || (positionals == 1 && stdin_input);
+    if inputs_ok
+        && !prints.is_empty()
+        && prints.iter().all(|p| EARLY_PRINTS.contains(&p.as_str()))
+    {
+        return Invocation::Query;
+    }
+    Invocation::Compile
+}
+
 /// Why this rustc was admitted or refused. Carried so the refusal can name the
 /// rule rather than making the next reader reconstruct it - the absence of that
 /// is what made the last failure of this fence expensive to diagnose.
@@ -302,4 +519,95 @@ fn lock_is_held() -> bool {
     // compile on the machine. Fail open and let the stray reaper catch what
     // slips.
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::{classify, Invocation};
+
+    fn args(list: &[&str]) -> Vec<std::ffi::OsString> {
+        list.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn version_probe_is_a_query() {
+        assert_eq!(classify(&args(&["-vV"])), Invocation::Query);
+        assert_eq!(classify(&args(&["--version", "--verbose"])), Invocation::Query);
+        // Verbosity alone requests nothing.
+        assert_eq!(classify(&args(&["-v"])), Invocation::Compile);
+    }
+
+    #[test]
+    fn cargos_target_probe_is_a_query() {
+        // The observed shape, RUSTFLAGS included, that poisoned the cache
+        // when refused.
+        assert_eq!(
+            classify(&args(&[
+                "-",
+                "--crate-name",
+                "___",
+                "--print=file-names",
+                "--crate-type",
+                "bin",
+                "--crate-type",
+                "rlib",
+                "--crate-type",
+                "proc-macro",
+                "--print=sysroot",
+                "--print=split-debuginfo",
+                "--print=crate-name",
+                "--print=cfg",
+                "-Wwarnings",
+                "-Zthreads=8",
+                "-Ctarget-cpu=native",
+                "-Clink-arg=-fuse-ld=wild",
+                "--cfg=some_flag",
+            ])),
+            Invocation::Query
+        );
+        assert_eq!(
+            classify(&args(&["--print=target-spec-json", "-Zunstable-options", "--target", "x86_64-unknown-linux-gnu"])),
+            Invocation::Query
+        );
+    }
+
+    #[test]
+    fn compilation_continuing_prints_stay_gated() {
+        // rustc services these by compiling first; they are not queries.
+        assert_eq!(classify(&args(&["main.rs", "--print=link-args"])), Invocation::Compile);
+        assert_eq!(
+            classify(&args(&["-", "--crate-type=staticlib", "--print=native-static-libs"])),
+            Invocation::Compile
+        );
+        // Unknown print names fail closed.
+        assert_eq!(classify(&args(&["--print=whatever-new-mode"])), Invocation::Compile);
+    }
+
+    #[test]
+    fn real_compiles_are_never_queries() {
+        assert_eq!(
+            classify(&args(&["--crate-name", "foo", "src/lib.rs", "--emit=dep-info,metadata"])),
+            Invocation::Compile
+        );
+        // A source file alongside an early print is still an input.
+        assert_eq!(classify(&args(&["src/lib.rs", "--print=cfg"])), Invocation::Compile);
+        // Output requests, argfiles and unknown options fail closed.
+        assert_eq!(classify(&args(&["--print=cfg", "--out-dir", "x"])), Invocation::Compile);
+        assert_eq!(classify(&args(&["@args.txt", "--print=cfg"])), Invocation::Compile);
+        assert_eq!(classify(&args(&["--print=cfg", "--mystery-flag"])), Invocation::Compile);
+        // Positionals after `--` are inputs.
+        assert_eq!(classify(&args(&["--print=cfg", "--", "lib.rs"])), Invocation::Compile);
+        // No print request at all: nothing was asked, assume the worst.
+        assert_eq!(classify(&args(&["--crate-name", "foo"])), Invocation::Compile);
+    }
+
+    #[test]
+    fn dangling_value_options_fail_closed() {
+        assert_eq!(classify(&args(&["--print"])), Invocation::Compile);
+        assert_eq!(classify(&args(&["--print=cfg", "-W"])), Invocation::Compile);
+        // Non-UTF-8 anywhere is not parsed, so not admitted.
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![0x2d, 0xff, 0xfe]);
+        assert_eq!(classify(&[bad]), Invocation::Compile);
+    }
 }

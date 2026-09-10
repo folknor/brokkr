@@ -428,9 +428,10 @@ bin target installed next to `brokkr`) is enrolled user-wide by `brokkr
 guard --install` as `build.rustc-wrapper` in `$CARGO_HOME/config.toml`.
 From then on every cargo this user runs - PATH-resolved or absolute-path,
 rust-analyzer's, an agent harness's, a hand-typed one - routes each rustc
-invocation through the guard. Cargo probes `rustc -vV` through the wrapper
-before building anything, so a refused build dies at startup, zero crates
-compiled.
+invocation through the guard. Cargo's startup `rustc -vV` probe goes through
+the wrapper too, but probes are admitted (see below - refusing one poisons
+cargo's probe cache), so a refused build dies at its first real compile
+instead: zero crates completed, one refused.
 
 ### Admission is a capability for one acquisition
 
@@ -536,6 +537,60 @@ reliably report that the guarantee degraded - the failing guard may be
 elsewhere. The reap remains the backstop for non-participating cargo, and for
 non-compiling cargo (`cargo metadata` is not fenced and does not need to be).
 
+### Queries are admitted; refusing them poisons cargo's cache
+
+Compiler-information queries - `rustc -vV`, and the `--print` batteries cargo
+sends when probing a toolchain - are admitted unconditionally, before any lease
+or lock question is asked (`classify` in `src/bin/rustc_guard.rs`). Two reasons,
+and the second is the one that forced the rule:
+
+- A query compiles nothing. The classifier parses the invocation's option
+  grammar and accepts only shapes rustc answers before expansion and codegen:
+  version requests, and `--print` requests from an explicit early-print
+  allowlist, with no input beyond stdin's `-`. `--print=link-args` and
+  `--print=native-static-libs` are compiles wearing a query's hat (rustc
+  services them by compiling first) and stay gated, as does any option or print
+  name the parser does not know. Misreading a query as a compile costs one
+  refusal; the reverse would run real work outside the exclusion guarantee, so
+  unknown shapes fail toward `Compile`.
+- Cargo **persists a failed probe** - stderr and all - in
+  `target/.rustc_info.json`, keyed by a fingerprint that is blind to inherited
+  env vars, and **replays it without re-running the probe**. A foreign
+  nonce-less cargo refused at its probe during anyone's hold therefore poisons
+  the shared cache: every later cargo with the same fingerprint, brokkr's own
+  correctly-stamped children included, fails with the guard's refusal verbatim
+  while the guard never runs - the nonce is present and useless, and
+  `BROKKR_CARGO=1` cannot cure it because it reaches a guard cargo no longer
+  spawns. The poison heals only when a concurrent cargo holding a pre-poison
+  in-memory copy rewrites the file (last-writer-wins), which is why the failure
+  is intermittent. Demonstrated live 2026-09-10: a piners `cargo doc`
+  script-check failed two runs with "carries no brokkr capability" despite a
+  correctly-stamped child, then healed with no external change.
+
+Query admission stops *new* poison at the source. Against *historical* and
+*racing* poison, brokkr stamps `CARGO_CACHE_RUSTC_INFO=0` on every child it
+starts (`hold::RUSTC_INFO_CACHE_ENV`, applied at the same choke points as the
+capability, plus the nextest lane's config overrides), so brokkr's own cargos
+never read the persistent probe cache at all - they re-probe, a few tens of
+milliseconds per invocation. A poisoned entry encountered *outside* brokkr is
+cured by `CARGO_CACHE_RUSTC_INFO=0 BROKKR_CARGO=1 cargo <...>` - the first
+variable makes cargo actually probe, the second makes the guard admit the
+probe's compile siblings.
+
+### The version handshake
+
+The guard answers `brokkr-rustc-guard --brokkr-guard-info` with a protocol
+number, recognized before any lease or lock access so the answer comes even
+when the lock infrastructure is wedged. brokkr compares it against
+`guard::GUARD_PROTOCOL` at `brokkr guard` status and once per locked command
+after acquisition, and warns - never fails - on a mismatch or a guard that does
+not speak the handshake (an old guard treats the flag as the executable to wrap
+and dies at exec, which the bounded probe reads as stale). The two binaries
+install together, but nothing forces them to stay in step, and a half-upgraded
+pair fails in shapes that read as anything but staleness. The number names
+required *behaviour*, not wire format: bump it whenever admission semantics
+change in a way brokkr depends on.
+
 ### Recursive acquisition is refused
 
 A brokkr command started from *inside* an admitted compilation - a proc macro
@@ -592,8 +647,10 @@ refuse-if-foreign rule. Works with no `brokkr.toml`.
 `scripts/guard-smoke.py` exercises the guard's decision paths against the real
 flock. `scripts/guard-decision-probe.py <guard-binary>` covers the capability
 paths against a scratch `$HOME` - idle, a stale record left by a crash, a
-draining hold, a mismatched capability, no capability, and the `BROKKR_CARGO`
-hatch - and is worth running after any change to `decide()`: it is what caught
+draining hold, a mismatched capability, no capability, the `BROKKR_CARGO`
+hatch, and query admission against a refusing hold (with its
+compile-continuing-print counterexample) - and is worth running after any
+change to `decide()` or `classify()`: it is what caught
 the stale-record refusal described above. The admitted path is covered end to end
 by `brokkr check` compiling anything at all while brokkr holds its own lock; if
 it were broken, no build on the machine would work.

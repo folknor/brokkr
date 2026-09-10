@@ -29,7 +29,7 @@ real = "/usr/bin/true"
 failures = []
 
 
-def run(label, *, auth, hold_lock, env_extra, expect_pass):
+def run(label, *, auth, hold_lock, env_extra, expect_pass, rustc_args=()):
     with tempfile.TemporaryDirectory() as home:
         bd = pathlib.Path(home) / ".brokkr"
         bd.mkdir()
@@ -50,7 +50,9 @@ def run(label, *, auth, hold_lock, env_extra, expect_pass):
             held = open(lock, "a+b")
             fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            r = subprocess.run([guard, real], env=env, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(
+                [guard, real, *rustc_args], env=env, capture_output=True, text=True, timeout=30
+            )
         finally:
             if held:
                 held.close()
@@ -81,6 +83,39 @@ run(
     hold_lock=True,
     env_extra={"BROKKR_HOLD_NONCE": "0" * 32},
     expect_pass=False,
+)
+
+# Compiler-information queries are admitted even against a hold that would
+# refuse a compile: a refused probe is PERSISTED by cargo in
+# target/.rustc_info.json and replayed against correctly-stamped cargos later
+# (the 2026-09-10 piners incident). The same argv with a source file is a
+# compile again.
+run(
+    "hold active, no capability, -vV query",
+    auth="deadbeef",
+    hold_lock=True,
+    env_extra={},
+    expect_pass=True,
+    rustc_args=("-vV",),
+)
+run(
+    "hold active, no capability, cargo target probe",
+    auth="deadbeef",
+    hold_lock=True,
+    env_extra={},
+    expect_pass=True,
+    rustc_args=(
+        "-", "--crate-name", "___", "--print=file-names", "--crate-type", "bin",
+        "--print=sysroot", "--print=cfg", "-Wwarnings",
+    ),
+)
+run(
+    "hold active, no capability, compile-continuing print stays refused",
+    auth="deadbeef",
+    hold_lock=True,
+    env_extra={},
+    expect_pass=False,
+    rustc_args=("lib.rs", "--print=link-args"),
 )
 
 # The human hatch bypasses the protocol, by design.

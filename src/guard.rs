@@ -28,6 +28,18 @@ use crate::output;
 const WRAPPER_KEY: &str = "rustc-wrapper";
 const GUARD_BIN: &str = "brokkr-rustc-guard";
 
+/// The guard protocol this brokkr expects from the enrolled wrapper.
+///
+/// Printed by the guard as `--brokkr-guard-info` (`src/bin/rustc_guard.rs` -
+/// the two sides must be edited together, like `auth_hash`) and compared by
+/// [`warn_if_guard_stale`] at locked-command startup and by `brokkr guard`
+/// status. Bump it whenever the guard's admission behaviour changes in a way
+/// brokkr depends on - the number names required behaviour, not the wire
+/// format, because a guard that parses everything correctly but refuses what
+/// the current brokkr expects admitted is exactly the stale half this exists
+/// to catch.
+const GUARD_PROTOCOL: u32 = 1;
+
 /// `brokkr guard [--install|--remove]`: bare shows status.
 pub fn cmd_guard(install: bool, remove: bool) -> Result<(), DevError> {
     if install && remove {
@@ -55,9 +67,14 @@ fn guard_bin_path() -> Result<PathBuf, DevError> {
     Ok(dir.join(GUARD_BIN))
 }
 
-/// `$CARGO_HOME/config.toml`, honouring the extensionless legacy `config`
-/// when it exists and `config.toml` does not - the same precedence cargo
-/// applies when both are present.
+/// `$CARGO_HOME/config.toml`, honouring the extensionless legacy `config`.
+///
+/// When BOTH files exist cargo reads the extensionless one (with a warning),
+/// so brokkr must edit and inspect that one too - editing `config.toml`
+/// while cargo obeys `config` would report a guard that is not actually
+/// enrolled. The legacy file therefore wins whenever it exists; `config.toml`
+/// is the path only when it is the only candidate (including the
+/// neither-exists case, where a fresh install should create the modern name).
 fn cargo_config_path() -> Result<PathBuf, DevError> {
     let cargo_home = match std::env::var_os("CARGO_HOME") {
         Some(dir) => PathBuf::from(dir),
@@ -69,7 +86,7 @@ fn cargo_config_path() -> Result<PathBuf, DevError> {
     };
     let modern = cargo_home.join("config.toml");
     let legacy = cargo_home.join("config");
-    if !modern.exists() && legacy.exists() {
+    if legacy.exists() {
         return Ok(legacy);
     }
     Ok(modern)
@@ -145,6 +162,94 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
     Ok(())
 }
 
+/// How the enrolled guard answered the `--brokkr-guard-info` handshake.
+enum GuardProbe {
+    /// Answered with the protocol this brokkr expects.
+    Current,
+    /// Answered, but with a different protocol number.
+    Mismatch(u32),
+    /// Did not answer the handshake at all - an old guard treats the flag as
+    /// the executable to wrap and dies at exec, a wedged one times out. Both
+    /// mean the enrolled binary is not the one this brokkr shipped with.
+    Stale(String),
+}
+
+/// Exec the enrolled guard's handshake, bounded so an old guard that
+/// misparses the flag - or one blocked on a draining compile lease - becomes
+/// a distinct warning rather than a hang.
+fn probe_guard(wrapper: &str) -> GuardProbe {
+    let capture = output::run_captured_with_env_and_deadline(
+        wrapper,
+        &["--brokkr-guard-info"],
+        std::path::Path::new("/"),
+        &[],
+        std::time::Duration::from_secs(3),
+        None,
+        false,
+    );
+    let capture = match capture {
+        Ok(c) => c,
+        Err(e) => return GuardProbe::Stale(format!("could not be executed: {e}")),
+    };
+    if capture.killed_on_deadline {
+        return GuardProbe::Stale("did not answer the handshake within 3s".into());
+    }
+    let stdout = String::from_utf8_lossy(&capture.captured.stdout);
+    let Some(first) = stdout.lines().next() else {
+        return GuardProbe::Stale("answered the handshake with no output".into());
+    };
+    let Some(proto) = first
+        .strip_prefix("brokkr-rustc-guard protocol=")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<u32>().ok())
+    else {
+        return GuardProbe::Stale("does not speak the handshake (predates it, or is not the guard)".into());
+    };
+    if proto == GUARD_PROTOCOL {
+        GuardProbe::Current
+    } else {
+        GuardProbe::Mismatch(proto)
+    }
+}
+
+/// The stale-guard warning for the enrolled wrapper, or `None` when the
+/// enrolled guard is current or no brokkr guard is enrolled at all (an
+/// unenrolled or foreign wrapper is `brokkr guard`'s business, not a
+/// per-command warning).
+fn stale_warning() -> Option<String> {
+    let config_path = cargo_config_path().ok()?;
+    let doc = load_doc(&config_path).ok()?;
+    let wrapper = configured_wrapper(&doc)?;
+    if !wrapper.ends_with(GUARD_BIN) {
+        return None;
+    }
+    match probe_guard(&wrapper) {
+        GuardProbe::Current => None,
+        GuardProbe::Mismatch(proto) => Some(format!(
+            "the enrolled rustc guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - \
+             run `brokkr install` in the brokkr repo to update {wrapper}"
+        )),
+        GuardProbe::Stale(why) => Some(format!(
+            "the enrolled rustc guard {wrapper} {why} - it predates this brokkr; \
+             run `brokkr install` in the brokkr repo to update it"
+        )),
+    }
+}
+
+/// Warn (once per process) if the enrolled guard is stale. Called after every
+/// locked-command acquisition: the guard and brokkr install together, but
+/// nothing forces them to, and a half-upgraded pair fails in ways that read
+/// as anything but staleness. Detection at the moment checked, not a
+/// guarantee against replacement afterwards; never fails the run.
+pub fn warn_if_guard_stale() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(warning) = stale_warning() {
+            output::lock_msg(&format!("WARNING: {warning}"));
+        }
+    });
+}
+
 fn status(config_path: &std::path::Path) -> Result<(), DevError> {
     let doc = load_doc(config_path)?;
     match configured_wrapper(&doc) {
@@ -153,6 +258,18 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
             output::lock_msg(&format!("guard installed: build.{WRAPPER_KEY} = \"{w}\" in {}", config_path.display()));
             if !exists {
                 output::lock_msg("WARNING: the configured guard binary does not exist - cargo will fail until `brokkr install` restores it or `brokkr guard --remove` unsets it");
+            } else {
+                match probe_guard(&w) {
+                    GuardProbe::Current => {
+                        output::lock_msg(&format!("guard protocol {GUARD_PROTOCOL}: current"));
+                    }
+                    GuardProbe::Mismatch(proto) => output::lock_msg(&format!(
+                        "WARNING: guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - run `brokkr install` in the brokkr repo"
+                    )),
+                    GuardProbe::Stale(why) => output::lock_msg(&format!(
+                        "WARNING: guard {why} - run `brokkr install` in the brokkr repo"
+                    )),
+                }
             }
         }
         Some(w) => {
