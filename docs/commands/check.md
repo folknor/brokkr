@@ -577,6 +577,19 @@ cured by `CARGO_CACHE_RUSTC_INFO=0 BROKKR_CARGO=1 cargo <...>` - the first
 variable makes cargo actually probe, the second makes the guard admit the
 probe's compile siblings.
 
+### Reserved environment variables
+
+`BROKKR_HOLD_NONCE`, `BROKKR_COMPILE_LEASE` and `CARGO_CACHE_RUSTC_INFO` are
+brokkr's transport, not knobs: never set, unset or override them - not in a
+shell, not in a `[[check]] env` block, and not from a build script. The one
+hole `force` cannot close is a *workspace* crate's own `build.rs` emitting
+`cargo::rustc-env=` for a reserved name - the nextest engine applies the test
+package's build-script env after cargo's `[env]` table, so it would displace
+the forced value for that crate's tests (dependencies can't: the engine applies
+only the test binary's own package's entries). `BROKKR_CARGO=1` is different in
+kind: the deliberate human escape hatch, set per invocation by a person and
+never by tooling.
+
 ### The version handshake
 
 The guard answers `brokkr-rustc-guard --brokkr-guard-info` with a protocol
