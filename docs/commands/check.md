@@ -634,10 +634,15 @@ The nextest lane (`src/check_cmd/nextest_lane.rs`) launches test processes
 through the linked engine's `TestList::new` and `runner.try_execute`, which
 construct their own commands with no `Command::new` for the choke point to
 catch. The capability travels the engine's documented route instead: both call
-sites build their `CargoConfigs` from `hold::cargo_config_overrides`, a forced
-`[env]` entry the engine applies to every process it spawns (the same route
-carries the rustc-info cache disable). This closed what was briefly a known
-gap between the capability landing and the overrides landing.
+sites build their `CargoConfigs` from `hold::cargo_config_overrides`, which
+writes a generated config file (`~/.brokkr/nextest-env.toml`, owner-only,
+rewritten on every call) whose forced `[env]` entries the engine applies to
+every process it spawns (the same route carries the rustc-info cache disable).
+A file rather than CLI `--config` expressions because the engine's CLI parser
+accepts neither shape that can carry `force`: inline tables are rejected as
+not-a-dotted-key, and split dotted keys fail because each argument
+deserializes alone, leaving a `force` with no `value`. This closed what was
+briefly a known gap between the capability landing and the overrides landing.
 
 `brokkr guard` bare shows status (including a warning when the configured
 guard binary is missing); `--install` writes the config line, resolving the

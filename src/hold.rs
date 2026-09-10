@@ -135,25 +135,75 @@ pub fn stamp(cmd: &mut std::process::Command) {
     cmd.env(RUSTC_INFO_CACHE_ENV, "0");
 }
 
-/// The capability as cargo `--config` overrides, for the nextest lane.
+/// The capability as a cargo config *file*, for the nextest lane.
 ///
 /// The lane launches test processes through the linked engine
 /// (`TestList::new`, `runner.try_execute`), which construct their own commands
 /// with no `Command` for [`stamp`] to reach. The engine does honour cargo's
 /// `[env]` table, which it reads through `CargoConfigs`, so the capability
 /// travels the documented route instead: an override the engine applies to every
-/// process it spawns. `force` is set so an inherited value cannot shadow it.
+/// process it spawns. `force` is set so an inherited value cannot shadow it -
+/// a brokkr started inside an admitted compilation carries the *outer* hold's
+/// nonce in its own environment, and without `force` that stale nonce would
+/// shadow the fresh one on every test process. `relative` is pinned `false`
+/// because the engine's merge inherits an *unset* field from lower-precedence
+/// configs even when this entry wins on value: a discovered config marking the
+/// same variable `relative = true` would resolve `"0"` against this file's
+/// directory and hand the child a path instead.
+///
+/// A file rather than CLI `--config` expressions because the engine's CLI
+/// parser accepts neither shape that could carry `force`: an inline table is
+/// rejected outright ("should be a dotted key expression" - the failure that
+/// broke the serial nextest lane in production), and splitting into
+/// `env.NAME.value = ..` / `env.NAME.force = ..` fails too, since each CLI
+/// argument deserializes independently and a document holding only `force` has
+/// no `value` to satisfy the env entry type. A path in the same vec, however,
+/// is loaded as a full config file, where inline tables are legal. The file
+/// lives beside the lock (`~/.brokkr/`, never swept, and this crate's rules
+/// forbid `/tmp`); one fixed name is safe because holds are serialized by the
+/// global flock and `CargoConfigs::new` reads the file eagerly. Rewritten from
+/// scratch on every call - including capability-less ones, so a previous
+/// hold's nonce cannot survive - and kept owner-only, since the published lock
+/// file carries only the nonce's hash and this file would otherwise leak the
+/// real thing to other users.
 ///
 /// Always carries the rustc-info cache disable (see [`RUSTC_INFO_CACHE_ENV`]);
-/// the capability entry joins it when a hold is active.
-pub fn cargo_config_overrides() -> Vec<String> {
-    let mut overrides = vec![format!(
-        "env.{RUSTC_INFO_CACHE_ENV} = {{ value = \"0\", force = true }}"
-    )];
+/// the capability entry joins it when a hold is active. Returns the path to
+/// hand to `CargoConfigs::new`; any write failure propagates, because
+/// returning the path after a failed truncate would load stale contents.
+pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let home = std::env::var("HOME")
+        .map_err(|_| std::io::Error::other("$HOME is not set - cannot place the nextest env config"))?;
+    let dir = std::path::PathBuf::from(home).join(".brokkr");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("nextest-env.toml");
+
+    let mut contents = String::from("[env]\n");
+    contents.push_str(&format!(
+        "{RUSTC_INFO_CACHE_ENV} = {{ value = \"0\", force = true, relative = false }}\n"
+    ));
     if let Some(nonce) = capability() {
-        overrides.push(format!("env.{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true }}"));
+        contents.push_str(&format!(
+            "{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true, relative = false }}\n"
+        ));
     }
-    overrides
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    // `mode` only applies at creation; tighten a pre-existing file too.
+    file.set_permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(
+        0o600,
+    ))?;
+    file.write_all(contents.as_bytes())?;
+
+    Ok(vec![path.to_string_lossy().into_owned()])
 }
 
 /// Whether this process is running inside a compilation the guard admitted.

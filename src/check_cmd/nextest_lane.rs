@@ -166,11 +166,13 @@ fn run_nextest_sweep(
         .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?;
     let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
 
-    // The compilation capability rides in as a cargo `--config env.*` override:
+    // The compilation capability rides in as a generated cargo config file:
     // the engine builds its own child commands, so the spawn choke point cannot
     // reach them, but it does apply cargo's `[env]` table to every process it
     // starts. See `crate::hold::cargo_config_overrides`.
-    let cargo_configs = CargoConfigs::new(crate::hold::cargo_config_overrides())
+    let overrides = crate::hold::cargo_config_overrides()
+        .map_err(|e| DevError::Config(format!("nextest env config unwritable: {e}")))?;
+    let cargo_configs = CargoConfigs::new(overrides)
         .map_err(|e| DevError::Config(format!("cargo config discovery failed: {e}")))?;
 
     // The build is brokkr's: the same compile-shape argv every other lane
@@ -417,11 +419,13 @@ fn nextest_shape_cases(
     let graph = PackageGraph::from_json(&metadata_json)
         .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?;
     let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
-    // The compilation capability rides in as a cargo `--config env.*` override:
+    // The compilation capability rides in as a generated cargo config file:
     // the engine builds its own child commands, so the spawn choke point cannot
     // reach them, but it does apply cargo's `[env]` table to every process it
     // starts. See `crate::hold::cargo_config_overrides`.
-    let cargo_configs = CargoConfigs::new(crate::hold::cargo_config_overrides())
+    let overrides = crate::hold::cargo_config_overrides()
+        .map_err(|e| DevError::Config(format!("nextest env config unwritable: {e}")))?;
+    let cargo_configs = CargoConfigs::new(overrides)
         .map_err(|e| DevError::Config(format!("cargo config discovery failed: {e}")))?;
 
     let mut args: Vec<String> =
