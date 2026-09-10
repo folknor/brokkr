@@ -630,12 +630,14 @@ every caller-supplied env var, so a caller cannot displace it. The boundary is
 every child brokkr starts under a hold, not just the ones named cargo: a prebuilt
 test binary, a script check or a benchmark can all reach cargo later.
 
-**Known gap:** the nextest lane (`src/check_cmd/nextest_lane.rs`) launches test
-processes through the linked engine's `TestList::new` and `runner.try_execute`,
-which construct their own commands with no `Command::new` for the choke point to
-catch. Their cargo *build* is stamped, but a test executed by that lane which
-itself invokes cargo would be refused. Those two call sites need their own
-sanctioned adapters.
+The nextest lane (`src/check_cmd/nextest_lane.rs`) launches test processes
+through the linked engine's `TestList::new` and `runner.try_execute`, which
+construct their own commands with no `Command::new` for the choke point to
+catch. The capability travels the engine's documented route instead: both call
+sites build their `CargoConfigs` from `hold::cargo_config_overrides`, a forced
+`[env]` entry the engine applies to every process it spawns (the same route
+carries the rustc-info cache disable). This closed what was briefly a known
+gap between the capability landing and the overrides landing.
 
 `brokkr guard` bare shows status (including a warning when the configured
 guard binary is missing); `--install` writes the config line, resolving the

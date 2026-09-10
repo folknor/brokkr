@@ -104,6 +104,23 @@ fn main() {
                 "brokkr-rustc-guard: refusing to compile - {why}. `brokkr lock` shows the \
                  holder; BROKKR_CARGO=1 overrides."
             );
+            // A refused invocation carrying a `--print` request is one
+            // `classify` did not recognize as a query - which means cargo may
+            // PERSIST this refusal in target/.rustc_info.json and replay it
+            // later, holder or no holder, hatch or no hatch. Say so in the
+            // message itself, because the message is exactly what gets
+            // replayed: the reader of the cached copy sees no hold and no way
+            // this text should apply, and this line is their explanation.
+            if rest.iter().any(|a| {
+                a.to_str().is_some_and(|s| s == "--print" || s.starts_with("--print="))
+            }) {
+                eprintln!(
+                    "brokkr-rustc-guard: note: cargo may cache this refusal in \
+                     target/.rustc_info.json and replay it after the hold ends; if you are \
+                     reading this with no brokkr running, re-probe with \
+                     CARGO_CACHE_RUSTC_INFO=0 BROKKR_CARGO=1"
+                );
+            }
             std::process::exit(1);
         }
     };
