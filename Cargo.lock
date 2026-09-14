@@ -1299,9 +1299,9 @@ dependencies = [
 
 [[package]]
 name = "iddqd"
-version = "0.4.6"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8450e1521a7518a32addf0b805ffcfbc8f9c558d2ad5769f068f2aeef5a81126"
+checksum = "c9c6a3a37e36cfd4170bf01265cb987a40993369198fb072c1a0041c0cc485cf"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -1650,9 +1650,9 @@ dependencies = [
 
 [[package]]
 name = "nextest-runner"
-version = "0.122.1"
+version = "0.123.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f344d2ec171565920219fbd0ee2c14fded32417300f0fe0e91495eadcc6ad910"
+checksum = "d61cc362284276491914da9e98c0f2765ba3381a981dcb639ae956299871d2b0"
 dependencies = [
  "aho-corasick",
  "anstyle-progress",
@@ -2099,9 +2099,9 @@ dependencies = [
 
 [[package]]
 name = "quick-junit"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eba1124f9c87c1b2f9e9665f0519ca75b09f9a5504e42e72d23cad8da63b52f"
+checksum = "bae23b8e1a59a90f7bf98caa2f4c8c2eedf6df011c6c88ed633e85a87c84526e"
 dependencies = [
  "chrono",
  "indexmap",
