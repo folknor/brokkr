@@ -1234,6 +1234,13 @@ pattern would eat legitimate module tests too. `brokkr test <name>` is
 unaffected - it runs the full `cargo test` default so a deliberately named
 doctest still runs (and within a doc-only sweep it runs `--doc <name>`).
 
+`test_exclude_packages` on a `doc_only` sweep is the supported way to keep a
+package out of the doctest lane (a bin-only crate, say), and it holds under
+`brokkr check -p`: the `-p` intersection drops the excluded package from that
+sweep, and a sweep left with nothing is skipped - `-p <excluded>` never
+becomes `cargo test --doc -p <excluded>`. This is a contract, pinned by
+`cli_package_excluded_from_doc_only_sweep_skips_the_lane`.
+
 ### Parallel test binaries
 
 A `[[check]]` entry carrying `parallel = { budget = N }` runs its test binaries

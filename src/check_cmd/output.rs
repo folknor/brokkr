@@ -2303,6 +2303,24 @@ warning: z [too_many_lines]
     }
 
     #[test]
+    fn cli_package_excluded_from_doc_only_sweep_skips_the_lane() {
+        // A documented contract, not an accident: downstream configs close a
+        // bin-only crate's doctest failure with `test_exclude_packages` on a
+        // `doc_only` sweep, and `check -p <that crate>` must then skip the
+        // doctest lane rather than run `cargo test --doc -p <crate>`.
+        let doctests = ResolvedSweep {
+            doc_only: true,
+            test_exclude_packages: s(&["bin-only"]),
+            ..sweep("doctests")
+        };
+        assert!(cli_package_scope(&doctests, &s(&["bin-only"]), true).is_err());
+        let mixed = s(&["bin-only", "lib"]);
+        let (kept, dropped) = cli_package_scope(&doctests, &mixed, true).unwrap();
+        assert_eq!(kept, vec!["lib"]);
+        assert_eq!(dropped.len(), 1);
+    }
+
+    #[test]
     fn describe_sweep_reports_cli_package_scope() {
         // The nautilus bug shape: an exclude-carrying sweep under CLI `-p`
         // must say `-p x`, not `workspace -2 pkgs` - the shape describes
