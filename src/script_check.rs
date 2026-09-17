@@ -103,10 +103,161 @@ fn last_non_empty_line(text: &str) -> Option<&str> {
     text.lines().rev().find(|l| !l.trim().is_empty())
 }
 
+/// The severity of a rustc-shaped diagnostic block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// An `error:` / `error[CODE]:` block - the actionable class.
+    Error,
+    /// A `warning:` / `warning[CODE]:` block.
+    Warning,
+    /// Everything above the first header: cargo's progress lines, a banner, a
+    /// tool's own preamble. Kept as a block so no captured byte is silently
+    /// dropped from the counts.
+    Other,
+}
+
+/// One rustc-shaped diagnostic: a header line at column zero plus every line
+/// under it up to the next header. `text` retains the original line breaks and
+/// carries no trailing newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub level: Level,
+    pub text: String,
+}
+
+/// Split rustc-shaped output into diagnostic blocks.
+///
+/// Only `error` and `warning` at **column zero** open a block. Two consequences,
+/// both deliberate:
+///
+/// - A column-zero `note:` or `help:` does not open one, so rustc's trailing
+///   notes stay attached to the diagnostic they explain rather than becoming
+///   orphan blocks that outnumber the errors.
+/// - An indented occurrence of the word never opens one, so source context
+///   quoting `error` (or a `--> path/error.rs` arrow) cannot forge a block.
+///
+/// This is a *renderer's* parse, reached only on a failure of an entry that
+/// declared `diagnostics = "rustc"`. It never feeds the pass/fail decision -
+/// that stays [`evaluate`]'s sentinel match - so a misparse costs display
+/// quality and nothing else.
+pub fn rustc_blocks(text: &str) -> Vec<Block> {
+    let mut blocks: Vec<Block> = Vec::new();
+    for line in text.lines() {
+        match header_level(line) {
+            Some(level) => blocks.push(Block {
+                level,
+                text: line.to_owned(),
+            }),
+            None => match blocks.last_mut() {
+                Some(block) => {
+                    block.text.push('\n');
+                    block.text.push_str(line);
+                }
+                // Preamble before any header.
+                None => blocks.push(Block {
+                    level: Level::Other,
+                    text: line.to_owned(),
+                }),
+            },
+        }
+    }
+    blocks
+}
+
+/// The level `line` opens a block at, or `None` when it is a continuation.
+///
+/// Accepts both rustc header spellings - bare (`error: unused imports`) and
+/// coded (`error[E0432]: unresolved import`) - and requires the colon, so a
+/// prose line beginning with the word is not mistaken for a header.
+fn header_level(line: &str) -> Option<Level> {
+    // Column zero is the whole discriminator: rustc indents every continuation.
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    for (word, level) in [("error", Level::Error), ("warning", Level::Warning)] {
+        let Some(rest) = line.strip_prefix(word) else {
+            continue;
+        };
+        if rest.starts_with(':') {
+            return Some(level);
+        }
+        // `error[E0432]:` - the code is bracketed, then the colon.
+        if let Some(after) = rest.strip_prefix('[')
+            && let Some(close) = after.find(']')
+            && after[close + 1..].starts_with(':')
+        {
+            return Some(level);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::evaluate;
+    use super::{evaluate, rustc_blocks, Level};
     use crate::config::{MatchMode, Stream};
+
+    #[test]
+    fn blocks_split_on_column_zero_headers_only() {
+        // The shape the feature was built for: a handful of errors buried in
+        // warnings, each diagnostic several lines deep.
+        let text = "\
+warning: public documentation for `Foo` links to private item `Bar`
+  --> crates/a/src/lib.rs:3:5
+   |
+   = note: this link resolves only for private docs
+error: unused imports: `Mutex` and `cell::RefCell`
+  --> crates/daemon/src/worker_handle/binary.rs:10:5
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+error[E0432]: unresolved import `crate::nope`
+  --> crates/a/src/lib.rs:1:5
+warning: unused variable: `x`
+";
+        let blocks = rustc_blocks(text);
+        let levels: Vec<Level> = blocks.iter().map(|b| b.level).collect();
+        assert_eq!(
+            levels,
+            vec![Level::Warning, Level::Error, Level::Error, Level::Warning]
+        );
+        // The continuation lines ride with their header, not as blocks of
+        // their own - that grouping is what makes the error count meaningful.
+        assert!(blocks[1].text.contains("binary.rs:10:5"));
+        assert!(blocks[1].text.contains("-D unused-imports"));
+        assert_eq!(blocks[3].text, "warning: unused variable: `x`");
+    }
+
+    #[test]
+    fn indented_and_uncolonned_occurrences_are_not_headers() {
+        // Source context quoting the word, a path containing it, and a
+        // column-zero note: none of these may open a block, or the error
+        // count stops meaning "errors".
+        let text = "\
+error: something broke
+  --> src/error_handling.rs:1:1
+   |
+ 1 | let error: u8 = 0;
+   |
+note: the lint level is defined here
+errors are bad prose
+";
+        let blocks = rustc_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].level, Level::Error);
+        assert!(blocks[0].text.contains("errors are bad prose"));
+    }
+
+    #[test]
+    fn preamble_before_any_header_is_kept_as_other() {
+        let text = "Documenting broadarrow v0.1.0\nerror: boom\n";
+        let blocks = rustc_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].level, Level::Other);
+        assert_eq!(blocks[1].level, Level::Error);
+        // Empty input has no blocks at all, so a caller counting errors sees
+        // zero rather than one empty `Other`.
+        assert!(rustc_blocks("").is_empty());
+    }
 
     #[test]
     fn exact_matches_trimmed_full_stream() {

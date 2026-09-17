@@ -435,6 +435,24 @@ pub enum Stage {
     PostTest,
 }
 
+/// The shape a [`ScriptCheck`]'s output is declared to have, which decides how
+/// a failure is rendered. Declared, never sniffed: guessing wrong hides the one
+/// line that mattered, and a bespoke analyser is free to print the word `error`
+/// in prose. See [`crate::script_check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Diagnostics {
+    /// Unstructured output with no parseable levels (the default, and what
+    /// every entry written before this key had). A failure prints the captured
+    /// streams with a head/tail line cap.
+    #[default]
+    Opaque,
+    /// rustc-shaped output: `error:` / `warning:` blocks at column zero, each
+    /// running until the next such line. A failure prints the `error` blocks
+    /// and hides the rest behind `--triage`.
+    Rustc,
+}
+
 /// One `[[script_check]]` entry: run `command` (via `sh -c`) and pass iff its
 /// output matches the `expect` sentinel per `match`/`stream`. A gate for
 /// pre-commit checks that brokkr's native phases can't express. Asserting on a
@@ -458,6 +476,9 @@ pub struct ScriptCheck {
     /// Where in the check pipeline this entry runs. Defaults to `pre-clippy`.
     #[serde(default)]
     pub stage: Stage,
+    /// The output shape a failure is rendered against. Defaults to `opaque`.
+    #[serde(default)]
+    pub diagnostics: Diagnostics,
 }
 
 /// One `[[textlint]]` rule: forbid a regex `pattern` on lines of files matching

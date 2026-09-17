@@ -218,6 +218,7 @@ Examples:
   brokkr clippy --sweep ffi                  # replay the 'ffi' [[check]] entry
   brokkr clippy --sweep ffi --env HIGH_PRECISION=0
   brokkr clippy --triage                     # bulk-triage, sorted by lint
+  brokkr clippy -p mycrate --lib             # lib-only lint surface (cfg(test) dead code)
 
 In depth: `brokkr man clippy`."
     )]
@@ -245,6 +246,15 @@ In depth: `brokkr man clippy`."
         /// its clippy invocation. Conflicts with the ad-hoc target flags.
         #[arg(long, value_name = "NAME", conflicts_with = "package")]
         sweep: Option<String>,
+
+        /// Lint the library target alone (`--lib`) instead of the default
+        /// `--all-targets`. Reproduces the lint surface of a plain `cargo
+        /// build` / `cargo doc`, where an import used only from
+        /// `#[cfg(test)]` code is dead - under `--all-targets` the test
+        /// target keeps it alive and `unused_imports` never fires, so a
+        /// tree the doc build rejects lints clean. Composes with `--sweep`.
+        #[arg(long)]
+        lib: bool,
 
         /// Extra env var KEY=VALUE (repeatable, non-empty KEY). Overrides the
         /// merged `[[check]]` env (ad-hoc) or the entry env (`--sweep`).

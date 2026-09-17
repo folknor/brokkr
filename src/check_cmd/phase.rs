@@ -24,9 +24,9 @@ use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
-    Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig, ManifestConfig,
-    NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow, Stage, TestConfig,
-    TextlintRule,
+    Certifies, CheckEntry, DependencyRule, Diagnostics, GremlinsConfig, HeaderConfig,
+    ManifestConfig, NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow,
+    Stage, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
 use crate::rustflags;
@@ -36,6 +36,7 @@ use crate::output;
 use crate::profile::{self, DeclaredFilter, FilterKind, ResolvedSweep};
 use crate::project::Project;
 use crate::scope;
+use crate::script_check::Level;
 use crate::test_runner::{self, LibtestOutcome};
 
 #[allow(clippy::too_many_arguments)]
@@ -355,7 +356,7 @@ fn run_convention_phases(
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy, a.limit, a.triage)?;
     }
 
     if !skip("dependency_rules") {
@@ -435,7 +436,7 @@ fn run_build_phases(
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreTest, a.limit, a.triage)?;
     }
 
     let mut test_failure: Option<DevError> = None;
@@ -520,7 +521,7 @@ fn run_build_phases(
     // there, a script-check has no partial-run reading - it just lies.
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PostTest, a.limit, a.triage)?;
     }
 
     // Last on purpose: package-mode resolution can compile duplicate variants
@@ -1531,6 +1532,8 @@ fn run_script_checks(
     project_root: &Path,
     checks: &[ScriptCheck],
     stage: Stage,
+    limit: usize,
+    triage: bool,
 ) -> Result<(), DevError> {
     let checks: Vec<&ScriptCheck> = checks.iter().filter(|c| c.stage == stage).collect();
     if checks.is_empty() {
@@ -1563,8 +1566,6 @@ fn run_script_checks(
         ));
     }
 
-    // The full captured output is the diagnostic - never truncated by `--limit`,
-    // since a single script's output is one atomic gate.
     let mut msg = format!("script-check: {} failed\n", failures.len());
     for (check, outcome) in &failures {
         msg.push_str("  ");
@@ -1574,12 +1575,117 @@ fn run_script_checks(
             stream_label(check.stream),
             check.expect
         ));
-        append_captured_stream(&mut msg, "stdout", &outcome.stdout);
-        append_captured_stream(&mut msg, "stderr", &outcome.stderr);
+        append_script_failure(&mut msg, check, outcome, limit, triage);
     }
     output::error(msg.trim_end());
 
     Err(DevError::Build("script-check failed".into()))
+}
+
+/// Render one failing script-check's captured output.
+///
+/// The captured stream IS the diagnostic here - brokkr never saw the command's
+/// internals, only what it printed - so the rendering question is which part of
+/// it to show, not whether to show any. Three paths:
+///
+/// - `--triage`: verbatim and uncapped, the phase's original and only behaviour.
+///   Every narrowing below has this as its escape hatch, which is the point of
+///   reusing the flag the clippy and gremlins phases already answer to rather
+///   than inventing a script-check-specific one.
+/// - `diagnostics = "rustc"` with at least one `error` block: the error blocks
+///   alone, with a trailer counting what was withheld. Measured on the consuming
+///   config (a `cargo doc --workspace` gate): 27 denied `broken-intra-doc-links`
+///   errors against several hundred `private-intra-doc-links` warnings from
+///   every other crate - a 1:20 signal-to-noise ratio, with the signal uniformly
+///   at `error`. Printing the failing level alone fit it in a third of a screen.
+/// - Everything else: the streams with a head/tail line cap, so the sentinel a
+///   `last-line` gate missed stays visible at the bottom.
+///
+/// A `rustc` entry with no error block falls through to the capped view rather
+/// than printing an empty section: a gate can fail because its sentinel never
+/// appeared at all (the command died, or was stubbed), and that failure's
+/// evidence is the output, not a diagnostic level that isn't there.
+fn append_script_failure(
+    msg: &mut String,
+    check: &ScriptCheck,
+    outcome: &crate::script_check::Outcome,
+    limit: usize,
+    triage: bool,
+) {
+    if triage {
+        append_captured_stream(msg, "stdout", &outcome.stdout, None);
+        append_captured_stream(msg, "stderr", &outcome.stderr, None);
+        return;
+    }
+    if check.diagnostics == Diagnostics::Rustc {
+        let stdout = String::from_utf8_lossy(&outcome.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&outcome.stderr).into_owned();
+        let streams = [
+            ("stdout", crate::script_check::rustc_blocks(&stdout)),
+            ("stderr", crate::script_check::rustc_blocks(&stderr)),
+        ];
+        if streams
+            .iter()
+            .any(|(_, blocks)| blocks.iter().any(|b| b.level == Level::Error))
+        {
+            append_rustc_errors(msg, &streams, limit);
+            return;
+        }
+    }
+    append_captured_stream(msg, "stdout", &outcome.stdout, Some(limit));
+    append_captured_stream(msg, "stderr", &outcome.stderr, Some(limit));
+}
+
+/// Append the `error`-level blocks of a rustc-shaped failure, capped at `limit`
+/// blocks across both streams, then one trailer naming everything withheld.
+///
+/// The budget spans the streams rather than resetting per stream: `--limit` is a
+/// reading budget for the phase's output, and a per-stream cap would print
+/// `2 * limit` blocks on a command that splits its diagnostics.
+fn append_rustc_errors(
+    msg: &mut String,
+    streams: &[(&str, Vec<crate::script_check::Block>)],
+    limit: usize,
+) {
+    let mut budget = limit;
+    let mut errors_total = 0usize;
+    let mut errors_shown = 0usize;
+    let mut warnings = 0usize;
+    for (label, blocks) in streams {
+        let errors: Vec<&crate::script_check::Block> =
+            blocks.iter().filter(|b| b.level == Level::Error).collect();
+        warnings += blocks.iter().filter(|b| b.level == Level::Warning).count();
+        errors_total += errors.len();
+        if errors.is_empty() || budget == 0 {
+            continue;
+        }
+        msg.push_str(&format!("    --- {label} (errors) ---\n"));
+        let shown = errors.len().min(budget);
+        for block in errors.iter().take(shown) {
+            for line in block.text.lines() {
+                msg.push_str("    ");
+                msg.push_str(line);
+                msg.push('\n');
+            }
+        }
+        errors_shown += shown;
+        budget -= shown;
+    }
+
+    let mut withheld: Vec<String> = Vec::new();
+    if errors_total > errors_shown {
+        withheld.push(format!("{} more errors", errors_total - errors_shown));
+    }
+    if warnings > 0 {
+        withheld.push(output::count(warnings, "warning"));
+    }
+    if withheld.is_empty() {
+        return;
+    }
+    msg.push_str(&format!(
+        "    {} hidden - --triage for the full output\n",
+        withheld.join(", ")
+    ));
 }
 
 /// The stream(s) a script-check matched against, for its failure line.
@@ -1593,15 +1699,46 @@ fn stream_label(stream: crate::config::Stream) -> &'static str {
 
 /// Append a labelled, indented block of a script-check's captured stream to the
 /// failure message. A no-op for an empty stream.
-fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8]) {
+///
+/// `cap` is `Some(n)` for the default view and `None` under `--triage`. Capping
+/// keeps the first and last `n` lines and elides the middle, rather than
+/// truncating the tail: an opaque check's verdict is typically its LAST line
+/// (that is what `last-line` matches), while a command's fatal error is
+/// typically near its first - a head-only cap would hide whichever of those the
+/// reader came for. Both ends are cheap; the interior is the noise.
+fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8], cap: Option<usize>) {
     if bytes.is_empty() {
         return;
     }
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
     msg.push_str(&format!("    --- {label} ---\n"));
-    for line in String::from_utf8_lossy(bytes).lines() {
+
+    let mut emit = |line: &str| {
         msg.push_str("    ");
         msg.push_str(line);
         msg.push('\n');
+    };
+    // Only elide when doing so actually saves lines - an elision marker
+    // standing in for one hidden line is a net loss and reads as a lie.
+    match cap.filter(|n| lines.len() > *n * 2 + 1) {
+        Some(n) => {
+            for line in &lines[..n] {
+                emit(line);
+            }
+            emit(&format!(
+                "... {} lines hidden - --triage for the full output ...",
+                lines.len() - n * 2
+            ));
+            for line in &lines[lines.len() - n..] {
+                emit(line);
+            }
+        }
+        None => {
+            for line in &lines {
+                emit(line);
+            }
+        }
     }
 }
 
@@ -1738,7 +1875,14 @@ fn clippy_args(sweep: &ResolvedSweep, scope: &[&str], allow: &[String]) -> Vec<S
     let mut args: Vec<String> = vec![
         "clippy".into(),
         "--keep-going".into(),
-        "--all-targets".into(),
+        // `--all-targets` on every gate sweep; `--lib` only under the
+        // investigative `brokkr clippy --lib`, which exists to reproduce the
+        // lint surface of a plain lib build. See `ResolvedSweep::lib_only`.
+        if sweep.lib_only {
+            "--lib".into()
+        } else {
+            "--all-targets".into()
+        },
         "--message-format=json".into(),
     ];
     // A sweep pinned to a profile is linted in it: `cfg(debug_assertions)`
@@ -2163,6 +2307,7 @@ pub(crate) fn cmd_clippy(
     features: &[String],
     no_default_features: bool,
     sweep_name: Option<&str>,
+    lib_only: bool,
     env_overrides: &[(String, String)],
     clippy_allow: &[String],
     clippy_allow_exact: &[SitedAllow],
@@ -2171,7 +2316,7 @@ pub(crate) fn cmd_clippy(
     triage: bool,
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
-    let sweep = build_clippy_sweep(
+    let mut sweep = build_clippy_sweep(
         check_entries,
         packages,
         all_features,
@@ -2180,6 +2325,11 @@ pub(crate) fn cmd_clippy(
         sweep_name,
         env_overrides,
     )?;
+    // Applied after construction rather than inside `build_clippy_sweep`: the
+    // target selector is orthogonal to where the sweep's shape came from, so
+    // `--lib` composes with `--sweep NAME` the same way it does with ad-hoc
+    // `-p`, without the borrowed entry having to know about it.
+    sweep.lib_only = lib_only;
 
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
     // sweep-label tags. `packages: &[]` because ad-hoc `-p` is already in
@@ -3222,6 +3372,172 @@ mod json_summary_tests {
         // The `-p` scope must be visible to consumers - a green that
         // covered one package may not be mistaken for a workspace green.
         assert!(line.contains("\"package\":\"nautilus-betfair\""), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod script_failure_render_tests {
+    use super::append_script_failure;
+    use crate::config::{Diagnostics, MatchMode, ScriptCheck, Stage, Stream};
+    use crate::script_check::Outcome;
+
+    fn check(diagnostics: Diagnostics) -> ScriptCheck {
+        ScriptCheck {
+            name: "rustdoc-links".into(),
+            command: "cargo doc --no-deps --workspace".into(),
+            expect: "Generated".into(),
+            match_mode: MatchMode::Contains,
+            stream: Stream::Both,
+            stage: Stage::PreTest,
+            diagnostics,
+        }
+    }
+
+    fn outcome(stdout: &str, stderr: &str) -> Outcome {
+        Outcome {
+            passed: false,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// The shape of the reported case: a few errors buried in warnings.
+    fn noisy() -> String {
+        let mut s = String::new();
+        for i in 0..40 {
+            s.push_str(&format!(
+                "warning: public documentation for `T{i}` links to private item `P{i}`\n  --> crates/a/src/lib.rs:{i}:5\n   = note: this link resolves only for private docs\n"
+            ));
+        }
+        s.push_str("error: unused imports: `Mutex` and `cell::RefCell`\n  --> crates/daemon/src/worker_handle/binary.rs:10:5\n");
+        s.push_str("error[E0432]: unresolved import `crate::nope`\n  --> crates/a/src/lib.rs:1:5\n");
+        s
+    }
+
+    #[test]
+    fn rustc_shows_errors_and_counts_the_hidden_warnings() {
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Rustc),
+            &outcome("", &noisy()),
+            20,
+            false,
+        );
+        // Both errors, with their continuation lines.
+        assert!(msg.contains("error: unused imports"));
+        assert!(msg.contains("binary.rs:10:5"));
+        assert!(msg.contains("error[E0432]"));
+        // No warning body survives - that is the whole point.
+        assert!(!msg.contains("links to private item"));
+        assert!(msg.contains("40 warnings hidden"));
+        assert!(msg.contains("--triage"));
+        // Only the failing stream gets a section; the empty one is skipped.
+        assert!(msg.contains("--- stderr (errors) ---"));
+        assert!(!msg.contains("stdout"));
+    }
+
+    #[test]
+    fn limit_caps_error_blocks_and_the_trailer_says_so() {
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Rustc),
+            &outcome("", &noisy()),
+            1,
+            false,
+        );
+        assert!(msg.contains("error: unused imports"));
+        assert!(!msg.contains("error[E0432]"));
+        assert!(msg.contains("1 more errors"));
+        assert!(msg.contains("40 warnings"));
+    }
+
+    #[test]
+    fn limit_budget_spans_both_streams() {
+        // Two errors, one per stream, under a budget of one: the second
+        // stream must not get a fresh allowance.
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Rustc),
+            &outcome("error: from stdout\n", "error: from stderr\n"),
+            1,
+            false,
+        );
+        assert!(msg.contains("from stdout"));
+        assert!(!msg.contains("from stderr"));
+        assert!(msg.contains("1 more errors"));
+    }
+
+    #[test]
+    fn triage_prints_everything_verbatim() {
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Rustc),
+            &outcome("", &noisy()),
+            20,
+            true,
+        );
+        assert!(msg.contains("links to private item `P39`"));
+        assert!(msg.contains("error[E0432]"));
+        assert!(!msg.contains("hidden"));
+    }
+
+    #[test]
+    fn rustc_without_an_error_block_falls_back_to_the_capped_view() {
+        // A sentinel that never appeared because the command died early: the
+        // evidence is the output, not a level that isn't there.
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Rustc),
+            &outcome("", "warning: something\nthe tool was killed\n"),
+            20,
+            false,
+        );
+        assert!(msg.contains("--- stderr ---"));
+        assert!(msg.contains("the tool was killed"));
+        assert!(msg.contains("warning: something"));
+    }
+
+    #[test]
+    fn opaque_keeps_both_ends_and_elides_the_middle() {
+        let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Opaque),
+            &outcome(&body, ""),
+            2,
+            false,
+        );
+        // Head and tail both survive: a fatal error is near the first line, an
+        // opaque check's verdict is the last.
+        assert!(msg.contains("line 0"));
+        assert!(msg.contains("line 1"));
+        assert!(msg.contains("line 98"));
+        assert!(msg.contains("line 99"));
+        assert!(!msg.contains("line 50"));
+        assert!(msg.contains("96 lines hidden"));
+    }
+
+    #[test]
+    fn opaque_below_the_cap_is_untouched() {
+        // No elision marker standing in for fewer lines than it occupies.
+        let mut msg = String::new();
+        append_script_failure(
+            &mut msg,
+            &check(Diagnostics::Opaque),
+            &outcome("a\nb\nc\n", ""),
+            2,
+            false,
+        );
+        assert!(!msg.contains("hidden"));
+        for line in ["a", "b", "c"] {
+            assert!(msg.contains(line));
+        }
     }
 }
 

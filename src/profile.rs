@@ -127,6 +127,21 @@ pub struct ResolvedSweep {
     /// warm-up minutes after plain check had converged on the identical
     /// entry (measured on the consuming config).
     pub entry_name: String,
+    /// Lint the library target alone (`--lib`) instead of `--all-targets`.
+    ///
+    /// Set ONLY by the investigative `brokkr clippy --lib`; no `[[check]]` key
+    /// reaches it, and a gate sweep is always `--all-targets`. It exists because
+    /// a whole lint class is invisible under `--all-targets`: an import used
+    /// solely from `#[cfg(test)]` code is live in the test target, so
+    /// `unused_imports` never fires, while the plain `cargo build`/`cargo doc`
+    /// lib build rejects it. Without this flag that class is reproducible only
+    /// by the phase that happened to catch it - which is not a probe.
+    ///
+    /// Deliberately absent from [`ResolvedSweep::build_shape_key`]: the key
+    /// serves clippy dedupe, coverage grouping and `brokkr test` dedupe, all of
+    /// which only ever see gate sweeps, and the one sweep that can carry this
+    /// runs alone under `cmd_clippy` with nothing to dedupe against.
+    pub lib_only: bool,
 }
 
 /// Which half of the filter surface a [`DeclaredFilter`] is, because the two
@@ -384,6 +399,9 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         harness: entry.harness,
         doc_only: entry.doc_only,
         entry_name: entry.name.clone(),
+        // A gate sweep always lints every target; only the investigative
+        // `brokkr clippy --lib` narrows, and it sets this after construction.
+        lib_only: false,
     }
 }
 
@@ -782,6 +800,9 @@ fn build_resolved_sweep(
         harness: entry.harness,
         doc_only: entry.doc_only,
         entry_name: entry.name.clone(),
+        // A gate sweep always lints every target; only the investigative
+        // `brokkr clippy --lib` narrows, and it sets this after construction.
+        lib_only: false,
     }
 }
 

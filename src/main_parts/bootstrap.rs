@@ -515,6 +515,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         raw,
         limit,
         triage,
+        lib,
     } = cli.command
     {
         // Like `check`, `clippy` builds the code tree (cwd), reading `[[check]]`
@@ -537,6 +538,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &features,
             no_default_features,
             sweep.as_deref(),
+            lib,
             &env_overrides,
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),

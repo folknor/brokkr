@@ -45,6 +45,28 @@ brokkr clippy --sweep ffi
 `--sweep` conflicts with the ad-hoc target flags (`-p`, `--all-features`,
 `--features`, `--no-default-features`) - the entry supplies all of them.
 
+## `--lib`
+
+Lints the library target alone instead of the default `--all-targets`. Composes
+with both modes, `--sweep` included: the target selector is orthogonal to where
+the sweep's shape came from.
+
+```
+brokkr clippy -p mycrate --lib
+```
+
+It exists because `--all-targets` hides a whole lint class. An import used
+solely from `#[cfg(test)]` or `#[cfg(feature = "test-support")]` code is *live*
+in the test target, so `unused_imports` never fires - while a plain `cargo build`
+or `cargo doc`, which compiles only the lib, rejects it. Without `--lib` a
+`brokkr clippy --triage` reports **clean** against a tree the doc build refuses,
+and the class is reproducible only through whichever phase happened to catch it.
+That is not a probe.
+
+No `[[check]]` key reaches this. A gate sweep is always `--all-targets`:
+narrowing what a gate lints is how lints stop being caught, and the investigative
+runner is the right place for a deliberately partial view.
+
 ## Environment
 
 `--env KEY=VALUE` (repeatable) sets extra env on the cargo invocation and wins
@@ -79,6 +101,8 @@ Identical to `brokkr check`'s clippy phase. Cargo always runs with
 ```
 cargo clippy --keep-going --all-targets --message-format=json <sel> <feat> -- --cap-lints=warn
 ```
+
+(`--lib` replaces `--all-targets` in that line when passed.)
 
 `--cap-lints=warn` lets a deny-level lint produce its `.rmeta` so the whole graph
 is checked in one pass; because a capped lint no longer makes cargo exit

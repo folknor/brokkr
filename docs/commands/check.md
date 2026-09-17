@@ -767,8 +767,9 @@ point: it catches a check silently stubbed to `exit 0`, because the script must
 prove it ran to completion by emitting the sentinel. The command's exit code is
 therefore ignored; only a spawn failure is a hard error. Every entry runs (no
 fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
-each failure prints the full captured stdout/stderr (the diagnostic, never
-truncated by `--limit`). A clean stage prints a single collapsed line -
+each failure prints its captured stdout/stderr - the diagnostic, rendered
+against the entry's declared `diagnostics` shape and readable under `--limit` /
+`--triage` (below). A clean stage prints a single collapsed line -
 `script-check: ok (21 checks)` - rather than one per entry; the count keeps
 the line falsifiable (a stage that quietly stopped running its checks shows a
 shrinking number) while a passing gate's name carries nothing to act on. A
@@ -788,6 +789,39 @@ formatter conventions - that were previously hand-run before every commit.
 - `stage` = `pre-clippy` (default - here, with the other convention phases),
   `pre-test` (after clippy, before the test phase), or `post-test` (after the
   test phase and the coverage audit). One value per entry; an entry runs once.
+- `diagnostics` = `opaque` (default) or `rustc`. What a **failure** prints, not
+  what passes.
+
+### Reading a failure
+
+The captured stream *is* the diagnostic - brokkr never saw the command's
+internals, only what it printed - so the question is which part of it to show.
+
+| View | Prints |
+| --- | --- |
+| default, `diagnostics = "opaque"` | Both streams, first and last `--limit` lines of each, middle elided |
+| default, `diagnostics = "rustc"` | The `error`-level blocks only, up to `--limit` of them, then a trailer counting hidden errors and warnings |
+| `--triage` | Everything verbatim and uncapped, under either value |
+
+The `opaque` cap keeps both ends rather than truncating the tail: an opaque
+check's verdict is typically its *last* line (that is what `last-line` matches),
+while a command's fatal error is typically near its first, and a head-only cap
+would hide whichever the reader came for.
+
+`rustc` exists because a `cargo doc --workspace` gate is not an opaque analyser -
+it emits standard rustc diagnostics, and treating them as a blob throws away
+structure cargo already provided. Measured on the consuming config: 27 denied
+`broken-intra-doc-links` errors against several hundred `private-intra-doc-links`
+warnings from every other crate, ~12 lines each. A 1:20 signal-to-noise ratio
+with the signal uniformly at `error`; printing the failing level alone fits it in
+a third of a screen. A `rustc` entry that fails with no `error` block falls back
+to the `opaque` view, since a gate can fail because its sentinel never appeared
+at all. Block boundaries and the reason the shape is declared rather than sniffed
+are in `brokkr man config diagnostics`.
+
+The `--limit` budget spans both streams: it is a reading budget for the phase's
+output, and a per-stream cap would print twice it on a command that splits its
+diagnostics across the two.
 
 `post-test` entries are skipped when the test phase failed: it fails fast, so
 its later lanes never ran and there is no partial-run reading for a sentinel

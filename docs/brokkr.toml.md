@@ -437,7 +437,7 @@ fully-resolved rules and have no notion of a preset.
 Run a command and assert its output (the script-check phase) - the escape hatch
 for gates brokkr's native phases can't express (semantic analysers, external
 formatter conventions). Each entry runs `command` via `sh -c` and passes iff the
-captured output matches `expect`; on failure the full captured output is shown.
+captured output matches `expect`; on failure the captured output is shown.
 Matching the sentinel (not the exit code) catches a check stubbed to `exit 0`.
 
 ```toml
@@ -448,6 +448,7 @@ expect  = "All documentation conventions are valid"
 match   = "last-line"   # exact | last-line | contains   (default: last-line)
 stream  = "stdout"      # stdout | stderr | both          (default: stdout)
 stage   = "pre-clippy"  # pre-clippy | pre-test | post-test (default: pre-clippy)
+diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
 ```
 
 - `name` - label shown when the entry **fails** (`beta: stdout did not match
@@ -463,9 +464,45 @@ stage   = "pre-clippy"  # pre-clippy | pre-test | post-test (default: pre-clippy
   non-empty line equals `expect`; the default), or `contains` (substring).
 - `stream` - `stdout` (default), `stderr`, or `both` (concatenated).
 - `stage` - where in the check pipeline the entry runs (below).
+- `diagnostics` - the output shape a **failure** is rendered against (below).
 
 The command's exit code is ignored - only the output match decides. See
 `src/script_check.rs` and `docs/commands/check.md`.
+
+### `diagnostics`
+
+Declares what the command's output looks like, so a failure can be rendered
+down to the part worth reading. It changes nothing about whether the entry
+passes - that is always the `expect` match.
+
+| `diagnostics` | Failure shows |
+| --- | --- |
+| `opaque` (default) | Both captured streams, with the first and last `--limit` lines of each and the middle elided |
+| `rustc` | The `error:` / `error[CODE]:` blocks only, up to `--limit` of them, with a trailer counting the hidden errors and warnings |
+
+`--triage` prints everything verbatim and uncapped under either value - the same
+flag that widens the gremlins and clippy phases, because a script-check failure
+should not need an escape hatch of its own.
+
+Set `rustc` on a command that emits rustc-shaped diagnostics - a `cargo doc`,
+`cargo build` or `cargo rustdoc` gate. The measured case: a
+`cargo doc --no-deps --workspace` entry failing on 27 denied
+`broken-intra-doc-links` errors, interleaved with several hundred
+`private-intra-doc-links` warnings from every other workspace crate. A 1:20
+signal-to-noise ratio, roughly 12 lines per diagnostic, with the signal
+uniformly at `error` - unreadable in full, and a third of a screen once the
+failing level is printed alone.
+
+Only `error` and `warning` at **column zero** open a block; a column-zero
+`note:` does not, so rustc's trailing notes stay attached to the diagnostic they
+explain instead of outnumbering it. Indented source context quoting the word
+cannot forge a block. An entry that declares `rustc` but fails with no `error`
+block falls back to the `opaque` view - a gate can fail because its sentinel
+never appeared at all, and that failure's evidence is the output.
+
+Leave it off for a bespoke analyser: a tool free to print the word `error` in
+prose is exactly what the default is for, which is why the shape is declared
+rather than sniffed.
 
 ### `stage`
 
