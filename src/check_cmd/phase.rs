@@ -215,6 +215,67 @@ pub(crate) fn cmd_check(
     )
 }
 
+/// `check --textlint NAME` / `--script NAME`: run the named `[[textlint]]` rules
+/// and `[[script_check]]` entries and nothing else, for a human iterating on one
+/// failing gate. Every other phase is skipped, script checks run regardless of
+/// their stage, and the run announces itself as a selection - it certifies
+/// nothing, which is why clap refuses it beside `--gate`, a profile, `-p`, and
+/// `--json` (a trailer a machine could read as a verdict).
+///
+/// A name matching no entry is an error listing the known names: a typo that
+/// selected nothing would otherwise print a green run.
+pub(crate) fn cmd_check_selected(
+    project_root: &Path,
+    textlint_rules: &[TextlintRule],
+    script_checks: &[ScriptCheck],
+    textlint_names: &[String],
+    script_names: &[String],
+    limit: usize,
+    triage: bool,
+) -> Result<(), DevError> {
+    let rules = select_named(textlint_rules, textlint_names, |r| &r.name, "[[textlint]]")?;
+    let checks = select_named(script_checks, script_names, |c| &c.name, "[[script_check]]")?;
+    output::run_msg("selected entries only - not a gate; run `brokkr check` before committing");
+
+    let started = std::time::Instant::now();
+    let textlint = run_textlint(project_root, &rules, limit, triage);
+    // Every stage in one pass: the selection names entries, and an entry's stage
+    // only orders it around phases this run does not execute.
+    let scripts = if checks.is_empty() {
+        Ok(())
+    } else {
+        let mut checks = checks;
+        for c in &mut checks {
+            c.stage = Stage::PreClippy;
+        }
+        run_script_checks(project_root, &checks, Stage::PreClippy, limit, triage)
+    };
+    let elapsed = started.elapsed().as_secs_f64();
+    match (textlint, scripts) {
+        (Ok(()), Ok(())) => {
+            output::run_msg(&format!("selection passed ({elapsed:.1}s)"));
+            Ok(())
+        }
+        (Err(e), _) | (Ok(()), Err(e)) => Err(e),
+    }
+}
+
+/// The entries whose name is in `names`, in config order. Each requested name
+/// must match at least one entry.
+fn select_named<T: Clone>(
+    entries: &[T],
+    names: &[String],
+    name_of: impl Fn(&T) -> &String,
+    section: &str,
+) -> Result<Vec<T>, DevError> {
+    if let Some(missing) = names.iter().find(|n| !entries.iter().any(|e| name_of(e) == *n)) {
+        let known: Vec<&str> = entries.iter().map(|e| name_of(e).as_str()).collect();
+        let known = if known.is_empty() { "none defined".to_owned() } else { known.join(", ") };
+        return Err(DevError::Config(format!("no {section} entry named {missing:?} (known: {known})")));
+    }
+    Ok(entries.iter().filter(|e| names.contains(name_of(e))).cloned().collect())
+}
+
 /// Header for the collapsed form: name the profile and its sweep set once,
 /// so the per-sweep lines below can carry only what differs between them.
 /// Printed only when more than one sweep is active.
@@ -3009,6 +3070,38 @@ fn run_test_phase(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod select_named_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::select_named;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn keeps_config_order_and_only_named_entries() {
+        let entries = names(&["a", "b", "c"]);
+        let got = select_named(&entries, &names(&["c", "a"]), |e| e, "[[x]]").unwrap();
+        assert_eq!(got, names(&["a", "c"]));
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_listing_the_known_ones() {
+        let entries = names(&["a", "b"]);
+        let err = select_named(&entries, &names(&["a", "zz"]), |e| e, "[[x]]").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("\"zz\""), "{msg}");
+        assert!(msg.contains("a, b"), "{msg}");
+    }
+
+    #[test]
+    fn no_entries_at_all_says_so() {
+        let err = select_named(&Vec::<String>::new(), &names(&["a"]), |e| e, "[[x]]").unwrap_err();
+        assert!(err.to_string().contains("none defined"));
+    }
 }
 
 #[cfg(test)]

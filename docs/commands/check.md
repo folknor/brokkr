@@ -113,6 +113,29 @@ Output:
   conflicting flags, a certifies violation) emits no summary - resolve-time
   errors are not run verdicts.
 
+## Running one textlint rule or script check
+
+`brokkr check --textlint NAME` and `brokkr check --script NAME` run only the
+named `[[textlint]]` rules and `[[script_check]]` entries - every other phase
+is skipped. Both are repeatable (or comma-separated) and combine. Script checks
+run whatever their `stage`, since stages only place them around phases this
+run skips. `--limit` and `--triage` still apply.
+
+This is for a person iterating on one failing gate, where a full run would
+re-run clippy before reaching it each time. It is never a gate:
+
+- it prints `selected entries only - not a gate` up front;
+- clap refuses it beside `--gate`, `--profile`, `-p`, `--features`,
+  `--no-default-features`, `--force-rust`, `--json`, `--raw`, `--timings`,
+  `--commands`, `--fix-gremlins` and forwarded test args. `--json` is refused
+  because its trailer is a verdict a machine could read as a pass;
+- a name that matches no entry is an error that lists the known names, so a
+  typo cannot print a green run.
+
+It selects what runs for a human, never what runs for a gate. That is also why
+there is no per-entry "`-p` applies to me" key: that would let a narrowed run
+skip a workspace-wide gate.
+
 ## The markdown-only shortcut
 
 In a git repo where **everything uncommitted is markdown**, `check` runs the

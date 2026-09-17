@@ -397,6 +397,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
         fix_gremlins,
         timings,
         commands,
+        textlint_names,
+        script_names,
         args,
     } = cli.command
     {
@@ -473,6 +475,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // another brokkr command is not charged against it. Fires as
         // `brokkr kill --hard` would: SIGKILL every descendant, then exit.
         let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING);
+        if !textlint_names.is_empty() || !script_names.is_empty() {
+            return check_cmd::cmd_check_selected(
+                &project_root,
+                &textlint_rules,
+                &script_checks,
+                &textlint_names,
+                &script_names,
+                limit,
+                triage,
+            );
+        }
         return check_cmd::cmd_check(
             project,
             &project_root,

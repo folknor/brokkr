@@ -23,6 +23,13 @@ pub(crate) struct Cli {
     pub(crate) command: Command,
 }
 
+// What `check --textlint` / `--script` refuse: everything that shapes the build,
+// certifies a run, or runs a phase the selection skips.
+const SELECTION_CONFLICTS: [&str; 12] = [
+    "features", "no_default_features", "package", "profile", "gate", "force_rust",
+    "raw", "json", "fix_gremlins", "timings", "commands", "args",
+];
+
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Run gremlins + clippy + tests
@@ -170,6 +177,22 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         /// reprints its command either way.
         #[arg(long)]
         commands: bool,
+
+        /// Run only the named `[[textlint]]` rule (repeatable, or
+        /// comma-separated), skipping every other phase. For iterating on
+        /// one failing rule - the run is not a gate, so it refuses every
+        /// flag that shapes or certifies one. Combines with `--script`.
+        #[arg(long = "textlint", value_name = "NAME", value_delimiter = ',',
+            conflicts_with_all = SELECTION_CONFLICTS)]
+        textlint_names: Vec<String>,
+
+        /// Run only the named `[[script_check]]` entry (repeatable, or
+        /// comma-separated), whatever its stage, skipping every other phase.
+        /// For iterating on one failing script - not a gate. Combines with
+        /// `--textlint`.
+        #[arg(long = "script", value_name = "NAME", value_delimiter = ',',
+            conflicts_with_all = SELECTION_CONFLICTS)]
+        script_names: Vec<String>,
 
         /// Raw arguments forwarded to the test phase. Tokens before a
         /// literal `--` are passed to `cargo test` (before cargo's own
