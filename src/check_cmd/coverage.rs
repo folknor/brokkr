@@ -173,7 +173,7 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
         .collect();
 
     format!(
-        "quarantine: {} entries, {pairs} pairs - {} (--triage to list)",
+        "quarantine: {} entries, {pairs} pairs - {} (--limit all to list)",
         quarantine.len(),
         breakdown.join(", ")
     )
@@ -272,7 +272,6 @@ fn run_coverage_phase(
     quarantine: &[QuarantineEntry],
     allow_flags: &[String],
     limit: usize,
-    triage: bool,
     commands: bool,
 ) -> CoverageOutcome {
     let (shapes, dead) =
@@ -289,9 +288,9 @@ fn run_coverage_phase(
     // The per-entry pair counts are the countdown the ledger exists for,
     // and the growth signal when a substring starts matching more than it
     // used to - but one line per entry is a page of them on a real ledger.
-    // Rolled up per issue by default, which keeps both signals; `--triage`
+    // Rolled up per issue by default, which keeps both signals; `--limit all`
     // restores the entry-by-entry listing.
-    if triage {
+    if limit == crate::scope::UNLIMITED {
         for (entry, count) in quarantine.iter().zip(&report.per_entry) {
             match (&entry.pattern, &entry.category) {
                 (Some(p), _) => {
@@ -328,15 +327,14 @@ fn run_coverage_phase(
     // reason this phase runs on failing test phases) just as much as the
     // stale report, and returning on the first hid the other.
     if !report.orphans.is_empty() {
-        let cap = if triage { usize::MAX } else { limit };
-        for orphan in report.orphans.iter().take(cap) {
+        for orphan in report.orphans.iter().take(limit) {
             output::error(&format!("orphaned: {orphan} (run nowhere, quarantined nowhere)"));
         }
 
-        if report.orphans.len() > cap {
+        if report.orphans.len() > limit {
             output::error(&format!(
-                "... and {} more (rerun with --triage)",
-                report.orphans.len() - cap
+                "... and {} more (rerun with --limit all)",
+                report.orphans.len() - limit
             ));
         }
         output::error(&format!(

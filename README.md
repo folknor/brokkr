@@ -86,7 +86,7 @@ forbid = ["db", "service-state"]
 
 This rejects direct `app -> db` or `app -> service-state` dependencies before clippy/tests run. `from` and `forbid` each accept either one string or an array of package names; `forbid` can name workspace crates or external crates.
 
-Every diagnostic is an error, except a warning from a dependency outside the workspace. When a phase finds errors, text mode shows only the ones in files with unstaged changes if there are any, otherwise all of them - at most `--limit N` either way (default 20), with a trailer counting the rest (`+2 more in unstaged files, +31 in other files (--triage to see all)`). Use `--triage` to see everything, or `--limit N` to override the cap. `--raw` bypasses the cap.
+Every diagnostic is an error, except a warning from a dependency outside the workspace. When a phase finds errors, text mode lists the ones in files with unstaged changes first, then the rest - at most `--limit N` (default 20), with a trailer counting what was hidden (`+2 more in unstaged files, +31 in other files (--limit all to see all)`). Use `--limit all` to see everything. `--raw` bypasses the cap.
 
 `check` runs clippy and tests against the same list of "active sweeps" - one cargo invocation per sweep, both phases. The sweep list is built from `brokkr.toml`, in priority order:
 

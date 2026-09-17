@@ -59,7 +59,7 @@ It exists because `--all-targets` hides a whole lint class. An import used
 solely from `#[cfg(test)]` or `#[cfg(feature = "test-support")]` code is *live*
 in the test target, so `unused_imports` never fires - while a plain `cargo build`
 or `cargo doc`, which compiles only the lib, rejects it. Without `--lib` a
-`brokkr clippy --triage` reports **clean** against a tree the doc build refuses,
+`brokkr clippy --limit all` reports **clean** against a tree the doc build refuses,
 and the class is reproducible only through whichever phase happened to catch it.
 That is not a probe.
 
@@ -116,11 +116,9 @@ and the run announces the allowed lints up front. `[lints] allow_exact`
 ingestion rather than via `-A`) applies here too. See
 `docs/commands/check.md`.
 
-- default: one line per error - only those in files with unstaged changes if
-  there are any, otherwise all - at most `--limit N` (default 20), with a
-  trailer counting the rest. The same rule as `check`.
-- `--triage`: show everything, sorted by (lint, file, line) so every hit of a
-  rule clumps together for bulk triage.
+- default: one line per error, sorted by (lint, file, line), those in files
+  with unstaged changes first - at most `--limit N` (default 20; `all` or `0`
+  for no cap), with a trailer counting the rest. The same rule as `check`.
 - `--raw`: cargo's terminal-style rendering (full source annotations and help
   suggestions). This is human-rendered text, not machine JSON - there is no
   `--json` mode (it was removed from `check`; `clippy` never had one).

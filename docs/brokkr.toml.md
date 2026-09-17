@@ -480,8 +480,8 @@ passes - that is always the `expect` match.
 | `opaque` (default) | Both captured streams, with the first and last `--limit` lines of each and the middle elided |
 | `rustc` | The `error:` / `error[CODE]:` blocks only, up to `--limit` of them, with a trailer counting the hidden errors and warnings |
 
-`--triage` prints everything verbatim and uncapped under either value - the same
-flag that widens the gremlins and clippy phases, because a script-check failure
+`--limit all` prints everything verbatim and uncapped under either value - the
+same flag that widens the gremlins and clippy phases, because a script-check failure
 should not need an escape hatch of its own.
 
 Set `rustc` on a command that emits rustc-shaped diagnostics - a `cargo doc`,

@@ -66,7 +66,6 @@ pub(crate) fn cmd_check(
     raw: bool,
     json: bool,
     limit: usize,
-    triage: bool,
     fix_gremlins: bool,
     timings: bool,
     commands: bool,
@@ -153,7 +152,6 @@ pub(crate) fn cmd_check(
                 script_checks,
                 dependency_rules,
                 limit,
-                triage,
                 fix_gremlins,
                 commands,
             },
@@ -178,7 +176,6 @@ pub(crate) fn cmd_check(
                 doctests,
                 raw,
                 limit,
-                triage,
                 commands,
                 extra_args,
             },
@@ -193,7 +190,7 @@ pub(crate) fn cmd_check(
     let outcome = run_phases();
 
     if timings {
-        emit_timings(&collected_timings, limit, triage, active_sweeps.len() > 1);
+        emit_timings(&collected_timings, limit, active_sweeps.len() > 1);
     }
 
     let ran_labels = ran_sweep_labels(&active_sweeps, &clippy_ran, &executed);
@@ -233,14 +230,13 @@ pub(crate) fn cmd_check_selected(
     textlint_names: &[String],
     script_names: &[String],
     limit: usize,
-    triage: bool,
 ) -> Result<(), DevError> {
     let rules = select_named(textlint_rules, textlint_names, |r| &r.name, "[[textlint]]")?;
     let checks = select_named(script_checks, script_names, |c| &c.name, "[[script_check]]")?;
     output::run_msg("selected entries only - not a gate; run `brokkr check` before committing");
 
     let started = std::time::Instant::now();
-    let textlint = run_textlint(project_root, &rules, limit, triage);
+    let textlint = run_textlint(project_root, &rules, limit);
     // Every stage in one pass: the selection names entries, and an entry's stage
     // only orders it around phases this run does not execute.
     let scripts = if checks.is_empty() {
@@ -250,7 +246,7 @@ pub(crate) fn cmd_check_selected(
         for c in &mut checks {
             c.stage = Stage::PreClippy;
         }
-        run_script_checks(project_root, &checks, Stage::PreClippy, limit, triage)
+        run_script_checks(project_root, &checks, Stage::PreClippy, limit)
     };
     let elapsed = started.elapsed().as_secs_f64();
     // Both halves always run, so the error names every one that failed - not
@@ -386,7 +382,6 @@ struct ConventionPhaseArgs<'a> {
     script_checks: &'a [ScriptCheck],
     dependency_rules: &'a [DependencyRule],
     limit: usize,
-    triage: bool,
     fix_gremlins: bool,
     commands: bool,
 }
@@ -400,37 +395,37 @@ fn run_convention_phases(
 ) -> Result<(), DevError> {
     if !skip("gremlins") {
         begin_phase(failing_phase, "gremlins");
-        run_gremlins(a.project_root, a.gremlins_cfg, a.limit, a.triage, a.fix_gremlins)?;
+        run_gremlins(a.project_root, a.gremlins_cfg, a.limit, a.fix_gremlins)?;
     }
 
     if !skip("header") {
         begin_phase(failing_phase, "header");
-        run_header(a.project_root, a.header_cfg, a.limit, a.triage)?;
+        run_header(a.project_root, a.header_cfg, a.limit)?;
     }
 
     if !skip("textlint") {
         begin_phase(failing_phase, "textlint");
-        run_textlint(a.project_root, a.textlint_rules, a.limit, a.triage)?;
+        run_textlint(a.project_root, a.textlint_rules, a.limit)?;
     }
 
     if !skip("manifest") {
         begin_phase(failing_phase, "manifest");
-        run_manifest(a.project_root, a.manifest_cfg, a.limit, a.triage)?;
+        run_manifest(a.project_root, a.manifest_cfg, a.limit)?;
     }
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy, a.limit, a.triage)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy, a.limit)?;
     }
 
     if !skip("dependency_rules") {
         begin_phase(failing_phase, "dependency_rules");
-        run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.triage, a.commands)?;
+        run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.commands)?;
     }
 
     if !skip("publish_cycle") {
         begin_phase(failing_phase, "publish_cycle");
-        run_publish_cycle(a.project_root, a.limit, a.triage, a.commands)?;
+        run_publish_cycle(a.project_root, a.limit, a.commands)?;
     }
     Ok(())
 }
@@ -461,7 +456,6 @@ struct BuildPhaseArgs<'a> {
     doctests: bool,
     raw: bool,
     limit: usize,
-    triage: bool,
     commands: bool,
     extra_args: &'a [String],
 }
@@ -488,7 +482,7 @@ fn run_build_phases(
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PreTest, a.limit, a.triage)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreTest, a.limit)?;
     }
 
     let mut test_failure: Option<DevError> = None;
@@ -501,7 +495,7 @@ fn run_build_phases(
             a.active_sweeps,
             a.packages,
             a.raw,
-            a.triage,
+            a.limit == scope::UNLIMITED,
             a.doctests,
             a.commands,
             a.extra_args,
@@ -547,7 +541,6 @@ fn run_diagnostic_phases(
             a.clippy_allow_exact,
             a.raw,
             a.limit,
-            a.triage,
             a.commands,
             ran,
         )?;
@@ -564,7 +557,6 @@ fn run_diagnostic_phases(
             a.clippy_allow_exact,
             a.raw,
             a.limit,
-            a.triage,
             a.commands,
             ran,
         )?;
@@ -599,7 +591,6 @@ fn finish_build_phases(
             executed,
             a.quarantine,
             a.limit,
-            a.triage,
             a.commands,
             &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
             test_failure.as_ref(),
@@ -629,7 +620,7 @@ fn finish_build_phases(
     // there, a script-check has no partial-run reading - it just lies.
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PostTest, a.limit, a.triage)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PostTest, a.limit)?;
     }
 
     // Last on purpose: package-mode resolution can compile duplicate variants
@@ -766,7 +757,6 @@ fn audit_coverage(
     executed: &[bool],
     quarantine: &[QuarantineEntry],
     limit: usize,
-    triage: bool,
     commands: bool,
     allow_flags: &[String],
     test_failure: Option<&DevError>,
@@ -780,7 +770,6 @@ fn audit_coverage(
             quarantine,
             allow_flags,
             limit,
-            triage,
             commands,
         ),
         Some(DevError::Build(msg)) if msg == "tests failed" => {
@@ -794,7 +783,6 @@ fn audit_coverage(
                 quarantine,
                 allow_flags,
                 limit,
-                triage,
                 commands,
             );
 
@@ -1220,7 +1208,7 @@ pub(crate) struct TestTiming {
     pub(crate) elapsed: std::time::Duration,
 }
 
-fn emit_timings(timings: &[TestTiming], limit: usize, triage: bool, multi_sweep: bool) {
+fn emit_timings(timings: &[TestTiming], limit: usize, multi_sweep: bool) {
     if timings.is_empty() {
         output::run_msg("timings: no tests ran");
         return;
@@ -1230,7 +1218,7 @@ fn emit_timings(timings: &[TestTiming], limit: usize, triage: bool, multi_sweep:
     sorted.sort_by_key(|t| std::cmp::Reverse(t.elapsed));
 
     let total = sorted.len();
-    let displayed: &[&TestTiming] = if triage || total <= limit {
+    let displayed: &[&TestTiming] = if total <= limit {
         &sorted
     } else {
         &sorted[..limit]
@@ -1246,7 +1234,7 @@ fn emit_timings(timings: &[TestTiming], limit: usize, triage: bool, multi_sweep:
         }
     }
     if displayed.len() < total {
-        msg.push_str(&format!("  ... {} more (rerun with --triage to show)\n", total - displayed.len()));
+        msg.push_str(&format!("  ... {} more (rerun with --limit all to show)\n", total - displayed.len()));
     }
     output::run_msg(msg.trim_end());
 }
@@ -1399,7 +1387,6 @@ fn run_gremlins(
     project_root: &Path,
     config: Option<&GremlinsConfig>,
     limit: usize,
-    triage: bool,
     fix: bool,
 ) -> Result<(), DevError> {
     // `[gremlins] disable = true` skips the whole phase - both the scan and
@@ -1434,7 +1421,7 @@ fn run_gremlins(
     }
 
     let total = found.len();
-    let (displayed, trailer) = scope_limit(found, project_root, limit, triage, |g| g.path.as_path());
+    let (displayed, trailer) = scope_limit(found, project_root, limit, |g| g.path.as_path());
 
     let mut msg = format!("gremlins: {total} found\n");
     for g in &displayed {
@@ -1452,10 +1439,9 @@ fn run_gremlins(
     Err(DevError::Build("gremlins found".into()))
 }
 
-/// Choose which of a phase's errors to display: under `--triage` all of them
-/// with no trailer, otherwise [`scope::partition`] - the errors in files with
-/// unstaged changes if there are any, else every error, at most `limit` either
-/// way - with the trailer counting the rest. `get_path` maps an error to its
+/// Choose which of a phase's errors to display via [`scope::partition`]: the
+/// errors in files with unstaged changes first, then the rest, at most `limit`,
+/// with the trailer counting what was hidden. `get_path` maps an error to its
 /// file.
 ///
 /// The unstaged set is computed here rather than once in `cmd_check` so the git
@@ -1465,13 +1451,8 @@ fn scope_limit<T>(
     violations: Vec<T>,
     project_root: &Path,
     limit: usize,
-    triage: bool,
     get_path: impl Fn(&T) -> &Path,
 ) -> (Vec<T>, Option<String>) {
-    // In `--triage` mode nothing is capped, so skip the git call entirely.
-    if triage {
-        return (violations, None);
-    }
     let unstaged = scope::unstaged_files(project_root);
     let part = scope::partition(violations, get_path, limit, unstaged.as_ref());
     let trailer = scope::format_trailer(&part);
@@ -1484,7 +1465,6 @@ fn run_header(
     project_root: &Path,
     header_cfg: Option<&HeaderConfig>,
     limit: usize,
-    triage: bool,
 ) -> Result<(), DevError> {
     let Some(cfg) = header_cfg else {
         return Ok(());
@@ -1502,7 +1482,7 @@ fn run_header(
     output::run_msg(&format!("header: require `{expected}`"));
     let total = violations.len();
     let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, triage, |v| v.file.as_path());
+        scope_limit(violations, project_root, limit, |v| v.file.as_path());
     let mut msg = format!("header: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
@@ -1525,7 +1505,6 @@ fn run_textlint(
     project_root: &Path,
     rules: &[TextlintRule],
     limit: usize,
-    triage: bool,
 ) -> Result<(), DevError> {
     if rules.is_empty() {
         return Ok(());
@@ -1549,7 +1528,7 @@ fn run_textlint(
     output::run_msg(&format!("textlint: {}", output::count(rules.len(), "rule")));
     let total = violations.len();
     let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, triage, |v| v.file.as_path());
+        scope_limit(violations, project_root, limit, |v| v.file.as_path());
     let mut msg = format!("textlint: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
@@ -1572,7 +1551,6 @@ fn run_manifest(
     project_root: &Path,
     manifest_cfg: Option<&ManifestConfig>,
     limit: usize,
-    triage: bool,
 ) -> Result<(), DevError> {
     let Some(cfg) = manifest_cfg else {
         return Ok(());
@@ -1588,7 +1566,7 @@ fn run_manifest(
     output::run_msg("manifest: Cargo.toml conventions");
     let total = violations.len();
     let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, triage, |v| v.file.as_path());
+        scope_limit(violations, project_root, limit, |v| v.file.as_path());
     let mut msg = format!("manifest: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
@@ -1616,7 +1594,6 @@ fn run_script_checks(
     checks: &[ScriptCheck],
     stage: Stage,
     limit: usize,
-    triage: bool,
 ) -> Result<(), DevError> {
     let checks: Vec<&ScriptCheck> = checks.iter().filter(|c| c.stage == stage).collect();
     if checks.is_empty() {
@@ -1658,7 +1635,7 @@ fn run_script_checks(
             stream_label(check.stream),
             check.expect
         ));
-        append_script_failure(&mut msg, check, outcome, limit, triage);
+        append_script_failure(&mut msg, check, outcome, limit);
     }
     output::error(msg.trim_end());
 
@@ -1671,10 +1648,10 @@ fn run_script_checks(
 /// internals, only what it printed - so the rendering question is which part of
 /// it to show, not whether to show any. Three paths:
 ///
-/// - `--triage`: verbatim and uncapped, the phase's original and only behaviour.
-///   Every narrowing below has this as its escape hatch, which is the point of
-///   reusing the flag the clippy and gremlins phases already answer to rather
-///   than inventing a script-check-specific one.
+/// - `--limit all`: verbatim and uncapped, the phase's original and only
+///   behaviour. Every narrowing below has this as its escape hatch, which is the
+///   point of reusing the flag the clippy and gremlins phases already answer to
+///   rather than inventing a script-check-specific one.
 /// - `diagnostics = "rustc"` with at least one `error` block: the error blocks
 ///   alone, with a trailer counting what was withheld. Measured on the consuming
 ///   config (a `cargo doc --workspace` gate): 27 denied `broken-intra-doc-links`
@@ -1693,9 +1670,8 @@ fn append_script_failure(
     check: &ScriptCheck,
     outcome: &crate::script_check::Outcome,
     limit: usize,
-    triage: bool,
 ) {
-    if triage {
+    if limit == scope::UNLIMITED {
         append_captured_stream(msg, "stdout", &outcome.stdout, None);
         append_captured_stream(msg, "stderr", &outcome.stderr, None);
         return;
@@ -1766,7 +1742,7 @@ fn append_rustc_errors(
         return;
     }
     msg.push_str(&format!(
-        "    {} hidden - --triage for the full output\n",
+        "    {} hidden - --limit all for the full output\n",
         withheld.join(", ")
     ));
 }
@@ -1783,7 +1759,7 @@ fn stream_label(stream: crate::config::Stream) -> &'static str {
 /// Append a labelled, indented block of a script-check's captured stream to the
 /// failure message. A no-op for an empty stream.
 ///
-/// `cap` is `Some(n)` for the default view and `None` under `--triage`. Capping
+/// `cap` is `Some(n)` for the default view and `None` under `--limit all`. Capping
 /// keeps the first and last `n` lines and elides the middle, rather than
 /// truncating the tail: an opaque check's verdict is typically its LAST line
 /// (that is what `last-line` matches), while a command's fatal error is
@@ -1810,7 +1786,7 @@ fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8], cap: Opti
                 emit(line);
             }
             emit(&format!(
-                "... {} lines hidden - --triage for the full output ...",
+                "... {} lines hidden - --limit all for the full output ...",
                 lines.len() - n * 2
             ));
             for line in &lines[lines.len() - n..] {
@@ -1829,7 +1805,6 @@ fn run_dependency_rules(
     project_root: &Path,
     rules: &[DependencyRule],
     limit: usize,
-    triage: bool,
     commands: bool,
 ) -> Result<(), DevError> {
     if rules.is_empty() {
@@ -1855,7 +1830,7 @@ fn run_dependency_rules(
     }
 
     let total = report.violations.len();
-    let displayed = if triage || total <= limit {
+    let displayed = if total <= limit {
         &report.violations[..]
     } else {
         &report.violations[..limit]
@@ -1868,7 +1843,7 @@ fn run_dependency_rules(
     }
     if displayed.len() < total {
         msg.push_str(&format!(
-            "  +{} more (--triage to see)\n",
+            "  +{} more (--limit all to see)\n",
             total - displayed.len()
         ));
     }
@@ -1898,7 +1873,6 @@ fn run_dependency_rules(
 fn run_publish_cycle(
     project_root: &Path,
     limit: usize,
-    triage: bool,
     commands: bool,
 ) -> Result<(), DevError> {
     if commands {
@@ -1912,7 +1886,7 @@ fn run_publish_cycle(
     }
 
     let total = cycles.len();
-    let displayed = if triage || total <= limit {
+    let displayed = if total <= limit {
         &cycles[..]
     } else {
         &cycles[..limit]
@@ -1930,7 +1904,7 @@ fn run_publish_cycle(
     }
     if displayed.len() < total {
         msg.push_str(&format!(
-            "  +{} more (--triage to see)\n",
+            "  +{} more (--limit all to see)\n",
             total - displayed.len()
         ));
     }
@@ -2124,7 +2098,6 @@ fn run_clippy_phase(
     allow_exact: &[SitedAllow],
     raw: bool,
     limit: usize,
-    triage: bool,
     commands: bool,
     clippy_ran: &mut [bool],
 ) -> Result<(), DevError> {
@@ -2147,7 +2120,7 @@ fn run_clippy_phase(
     let keep = |d: &cargo_json::DiagnosticEvent| {
         !is_dependency_warning(d, members) && !sited_allowed(d, allow_exact)
     };
-    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, raw, limit, triage, multi, commands)
+    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, raw, limit, multi, commands)
 }
 
 /// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
@@ -2167,7 +2140,6 @@ fn run_rustdoc_phase(
     allow_exact: &[SitedAllow],
     raw: bool,
     limit: usize,
-    triage: bool,
     commands: bool,
     ran: &mut [bool],
 ) -> Result<(), DevError> {
@@ -2191,7 +2163,7 @@ fn run_rustdoc_phase(
             && !sited_allowed(d, allow_exact)
     };
     let multi = results.len() > 1;
-    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, raw, limit, triage, multi, commands)
+    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, raw, limit, multi, commands)
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2218,7 +2190,6 @@ fn report_diagnostic_phase(
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
     raw: bool,
     limit: usize,
-    triage: bool,
     multi: bool,
     commands: bool,
 ) -> Result<(), DevError> {
@@ -2251,7 +2222,6 @@ fn report_diagnostic_phase(
             Some(info),
             project_root,
             limit,
-            triage,
             multi,
             keep,
         ));
@@ -2553,7 +2523,6 @@ pub(crate) fn cmd_clippy(
     clippy_allow_exact: &[SitedAllow],
     raw: bool,
     limit: usize,
-    triage: bool,
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
     let mut sweep = build_clippy_sweep(
@@ -2588,7 +2557,6 @@ pub(crate) fn cmd_clippy(
         clippy_allow_exact,
         raw,
         limit,
-        triage,
         true,
         &mut clippy_ran,
     ) {
@@ -2898,7 +2866,6 @@ fn format_clippy_capped_multi(
     info: Option<&build::ProjectInfo>,
     project_root: &Path,
     limit: usize,
-    triage: bool,
     multi: bool,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
 ) -> String {
@@ -2945,13 +2912,12 @@ fn format_clippy_capped_multi(
 
     let total = merged.len();
     let mut refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
-    if triage {
-        // `--triage` is the bulk-triage view: sort so every hit of a single
-        // lint clumps together, by lint code, file, line, column. Cached keys
-        // keep the location parsing to one pass per diagnostic.
-        refs.sort_by_cached_key(|m| clippy_sort_key(m.diag));
-    }
-    let (displayed, trailer) = scope_limit(refs, project_root, limit, triage, |m| {
+    // Sort so every hit of a single lint clumps together, by lint code, file,
+    // line, column; `scope_limit` then moves unstaged files to the front,
+    // keeping this order within each group. Cached keys keep the location
+    // parsing to one pass per diagnostic.
+    refs.sort_by_cached_key(|m| clippy_sort_key(m.diag));
+    let (displayed, trailer) = scope_limit(refs, project_root, limit, |m| {
         m.diag.path().unwrap_or_else(|| Path::new(""))
     });
 
@@ -3089,7 +3055,7 @@ fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Sort key for `--triage` bulk triage: by lint code (so every hit of a rule
+/// Sort key for the diagnostic list: by lint code (so every hit of a rule
 /// clumps together), then file and line for stable in-rule ordering. A bare
 /// `error` header (no code) sorts to the end.
 fn clippy_sort_key(d: &cargo_filter::ClippyDiagnostic) -> (String, String, u64, u64) {
@@ -3169,7 +3135,7 @@ fn run_test_phase(
     sweeps: &[ResolvedSweep],
     packages: &[String],
     raw: bool,
-    triage: bool,
+    roll_call: bool,
     doctests: bool,
     commands: bool,
     extra_args: &[String],
@@ -3276,7 +3242,7 @@ fn run_test_phase(
                 &project_env,
                 &allow_args,
                 raw,
-                triage,
+                roll_call,
                 doctests,
                 commands,
                 timings.as_deref_mut(),
@@ -3401,13 +3367,13 @@ mod scope_limit_tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// `--triage` is the uncapped view: every error, no trailer, and no git call
-    /// (the root here is not a repository, and nothing may consult it).
+    /// `--limit all` is the uncapped view: every error and no trailer, even
+    /// where git cannot be asked.
     #[test]
-    fn triage_shows_everything_without_trailer() {
+    fn unlimited_shows_everything_without_trailer() {
         let violations = vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")];
         let (displayed, trailer) =
-            scope_limit(violations, Path::new("/nonexistent"), 1, true, PathBuf::as_path);
+            scope_limit(violations, Path::new("/nonexistent"), scope::UNLIMITED, PathBuf::as_path);
         assert_eq!(displayed.len(), 2);
         assert!(trailer.is_none());
     }
@@ -3718,7 +3684,6 @@ mod script_failure_render_tests {
             &check(Diagnostics::Rustc),
             &outcome("", &noisy()),
             20,
-            false,
         );
         // Both errors, with their continuation lines.
         assert!(msg.contains("error: unused imports"));
@@ -3727,7 +3692,7 @@ mod script_failure_render_tests {
         // No warning body survives - that is the whole point.
         assert!(!msg.contains("links to private item"));
         assert!(msg.contains("40 warnings hidden"));
-        assert!(msg.contains("--triage"));
+        assert!(msg.contains("--limit all"));
         // Only the failing stream gets a section; the empty one is skipped.
         assert!(msg.contains("--- stderr (errors) ---"));
         assert!(!msg.contains("stdout"));
@@ -3741,7 +3706,6 @@ mod script_failure_render_tests {
             &check(Diagnostics::Rustc),
             &outcome("", &noisy()),
             1,
-            false,
         );
         assert!(msg.contains("error: unused imports"));
         assert!(!msg.contains("error[E0432]"));
@@ -3759,7 +3723,6 @@ mod script_failure_render_tests {
             &check(Diagnostics::Rustc),
             &outcome("error: from stdout\n", "error: from stderr\n"),
             1,
-            false,
         );
         assert!(msg.contains("from stdout"));
         assert!(!msg.contains("from stderr"));
@@ -3767,14 +3730,13 @@ mod script_failure_render_tests {
     }
 
     #[test]
-    fn triage_prints_everything_verbatim() {
+    fn unlimited_prints_everything_verbatim() {
         let mut msg = String::new();
         append_script_failure(
             &mut msg,
             &check(Diagnostics::Rustc),
             &outcome("", &noisy()),
-            20,
-            true,
+            crate::scope::UNLIMITED,
         );
         assert!(msg.contains("links to private item `P39`"));
         assert!(msg.contains("error[E0432]"));
@@ -3791,7 +3753,6 @@ mod script_failure_render_tests {
             &check(Diagnostics::Rustc),
             &outcome("", "warning: something\nthe tool was killed\n"),
             20,
-            false,
         );
         assert!(msg.contains("--- stderr ---"));
         assert!(msg.contains("the tool was killed"));
@@ -3807,7 +3768,6 @@ mod script_failure_render_tests {
             &check(Diagnostics::Opaque),
             &outcome(&body, ""),
             2,
-            false,
         );
         // Head and tail both survive: a fatal error is near the first line, an
         // opaque check's verdict is the last.
@@ -3828,7 +3788,6 @@ mod script_failure_render_tests {
             &check(Diagnostics::Opaque),
             &outcome("a\nb\nc\n", ""),
             2,
-            false,
         );
         assert!(!msg.contains("hidden"));
         for line in ["a", "b", "c"] {

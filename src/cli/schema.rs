@@ -52,18 +52,16 @@ Output (default text mode, no flags):
     not just the first occurrence per rule.
   - Tests: one line per failure on failure, compact summary on pass.
     Never capped - every failing test in every suite is listed, and
-    `--triage` does not change that.
+    `--limit` does not change that.
 
 Which diagnostics are shown (every diagnostic phase):
   1. Everything is an error, except a warning from a dependency outside
      the workspace, which neither fails nor prints.
-  2. If any error is in a file with unstaged changes (git diff, plus
-     untracked files), only those are shown.
-  3. Otherwise every error is shown.
-  4. At most `--limit N` (default 20) either way; a trailer counts the rest.
-  - `--triage` shows everything, sorted by (lint code, file, line)
-    so every hit of a single rule clumps together for bulk triage.
-    The test phase is not affected - it was never capped.
+  2. Errors in files with unstaged changes (git diff, plus untracked
+     files) come first; the rest follow. Diagnostics are sorted by
+     (lint code, file, line) so every hit of a rule clumps together.
+  3. At most `--limit N` (default 20); a trailer counts the rest.
+     `--limit all` (or `0`) shows everything.
 
 Output mode:
   - `--raw`: reconstruct cargo's terminal-style output by concatenating
@@ -72,7 +70,7 @@ Output mode:
 
 Examples:
   brokkr check                                     # gremlins + clippy + all tests
-  brokkr check --triage                            # bulk-triage view, sorted by lint
+  brokkr check --limit all                         # every error, uncapped
   brokkr check --fix-gremlins                      # rewrite banned chars before checking
   brokkr check --raw                               # full terminal-style cargo output
   brokkr check -- --test read_paths                # run one test file
@@ -143,19 +141,12 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         #[arg(long)]
         json: bool,
 
-        /// Maximum errors printed per phase. If any error is in a file with
-        /// unstaged changes, only those are candidates. Ignored with `--raw`
-        /// or `--triage`.
-        #[arg(long, default_value_t = 20)]
+        /// Maximum errors printed per phase (and `--timings` rows); `all` or
+        /// `0` for no cap. Errors in files with unstaged changes are listed
+        /// first. Ignored with `--raw`. Does not affect the test phase: its
+        /// failure list is never capped.
+        #[arg(long, default_value = "20", value_parser = parse_limit, value_name = "N|all")]
         limit: usize,
-
-        /// Show every error (and every `--timings` row), with no cap and no
-        /// unstaged-file focus. Sorted by (lint code, file, line) so every
-        /// hit of a single rule clumps together for bulk triage. Does NOT
-        /// widen the test phase: the failure list is never capped, so a red
-        /// run reports the same failures with or without this flag.
-        #[arg(long)]
-        triage: bool,
 
         /// Before checking, rewrite banned Unicode in tracked source files
         /// with their ASCII equivalents (em/en dash -> `-`, smart quotes ->
@@ -166,7 +157,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
 
         /// After the check is otherwise done, print every test that ran in
         /// descending order by wall-clock time. Capped at `--limit` (or
-        /// uncapped with `--triage`). Build time is excluded - timing
+        /// uncapped with `--limit all`). Build time is excluded - timing
         /// starts when libtest emits the per-test start marker.
         #[arg(long)]
         timings: bool,
@@ -232,7 +223,7 @@ Two modes:
 
 `--env KEY=VALUE` (repeatable) overrides either env source and wins last.
 Output modes match `brokkr check`'s clippy phase: default capped text,
-`--triage` bulk-triage, `--limit N`, `--raw` (cargo's terminal-style rendering).
+`--limit N|all`, `--raw` (cargo's terminal-style rendering).
 Exit 0 iff zero diagnostics; 1 on any lint or build error.
 
 Examples:
@@ -241,7 +232,7 @@ Examples:
   brokkr clippy --features a,b -p mycrate    # a virtual workspace needs -p
   brokkr clippy --sweep ffi                  # replay the 'ffi' [[check]] entry
   brokkr clippy --sweep ffi --env HIGH_PRECISION=0
-  brokkr clippy --triage                     # bulk-triage, sorted by lint
+  brokkr clippy --limit all                  # every diagnostic, uncapped
   brokkr clippy -p mycrate --lib             # lib-only lint surface (cfg(test) dead code)
 
 In depth: `brokkr man clippy`."
@@ -289,13 +280,10 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         raw: bool,
 
-        /// Maximum diagnostics printed. Ignored with `--raw` or `--triage`.
-        #[arg(long, default_value_t = 20)]
+        /// Maximum diagnostics printed; `all` or `0` for no cap. Ignored with
+        /// `--raw`.
+        #[arg(long, default_value = "20", value_parser = parse_limit, value_name = "N|all")]
         limit: usize,
-
-        /// Show every diagnostic, sorted by (level, lint, file, line).
-        #[arg(long)]
-        triage: bool,
     },
     /// Run `cargo fmt`. All arguments are forwarded raw.
     #[command(display_order = 0)]

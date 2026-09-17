@@ -1,9 +1,9 @@
 //! Scope + limit helpers for `brokkr check`'s diagnostic output.
 //!
 //! Every diagnostic a phase reports is an error, and at most `--limit` of them
-//! are shown. Which ones: if any error sits in a file with unstaged changes -
-//! the file being edited right now - only those are candidates; otherwise every
-//! error is. The rest are counted in a trailer, split by where they are.
+//! are shown. Errors in files with unstaged changes - the files being edited
+//! right now - come first, then the rest. What the cap hides is counted in a
+//! trailer, split by where it is.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -137,24 +137,26 @@ fn classify_status(stdout: &[u8]) -> Dirt {
     }
 }
 
+/// `--limit all` (or `0`): no cap.
+pub const UNLIMITED: usize = usize::MAX;
+
 /// Result of partitioning a diagnostic list into displayed vs hidden.
 pub struct Partition<T> {
     pub displayed: Vec<T>,
-    /// Whether the display was narrowed to files with unstaged changes.
-    pub focused: bool,
+    /// Whether any item sat in a file with unstaged changes (and so was
+    /// moved to the front).
+    pub has_unstaged: bool,
     /// Hidden by the cap, in files with unstaged changes.
     pub hidden_unstaged: usize,
-    /// Hidden in every other file: past the cap, or passed over because the
-    /// unstaged files had errors of their own.
+    /// Hidden by the cap, in every other file.
     pub hidden_elsewhere: usize,
 }
 
-/// Choose at most `limit` items to display, in input order.
+/// Choose at most `limit` items to display.
 ///
-/// If any item's path is in `unstaged`, only those items are candidates - an
-/// error in the file being edited is the one to fix first, and errors elsewhere
-/// would only push it off the screen. Otherwise every item is a candidate.
-/// `unstaged = None` (no git) makes every item a candidate.
+/// Items whose path is in `unstaged` come first - an error in the file being
+/// edited is the one to fix first - then every other item; each group keeps
+/// its input order. `unstaged = None` (no git) leaves the order unchanged.
 pub fn partition<T, F>(
     items: Vec<T>,
     get_path: F,
@@ -168,28 +170,26 @@ where
         Some(set) => items.into_iter().partition(|item| set.contains(get_path(item))),
         None => (Vec::new(), items),
     };
-    if in_unstaged.is_empty() {
-        let hidden_elsewhere = elsewhere.len().saturating_sub(limit);
-        let displayed = elsewhere.into_iter().take(limit).collect();
-        return Partition { displayed, focused: false, hidden_unstaged: 0, hidden_elsewhere };
-    }
+    let has_unstaged = !in_unstaged.is_empty();
     let hidden_unstaged = in_unstaged.len().saturating_sub(limit);
-    Partition {
-        displayed: in_unstaged.into_iter().take(limit).collect(),
-        focused: true,
-        hidden_unstaged,
-        hidden_elsewhere: elsewhere.len(),
-    }
+    let remaining = limit.saturating_sub(in_unstaged.len());
+    let hidden_elsewhere = elsewhere.len().saturating_sub(remaining);
+    let displayed = in_unstaged
+        .into_iter()
+        .chain(elsewhere)
+        .take(limit)
+        .collect();
+    Partition { displayed, has_unstaged, hidden_unstaged, hidden_elsewhere }
 }
 
 /// The trailer summarising what [`partition`] hid. `None` when nothing is.
 ///
-/// A focused display says so, because it lists fewer errors than the run has:
-/// `+2 more in unstaged files, +31 in other files`. An unfocused one is a plain
-/// cap: `+31 more`.
+/// When unstaged files had errors the split is named, since those were listed
+/// first: `+2 more in unstaged files, +31 in other files`. Otherwise it is a
+/// plain cap: `+31 more`.
 pub fn format_trailer<T>(part: &Partition<T>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if part.focused {
+    if part.has_unstaged {
         if part.hidden_unstaged > 0 {
             parts.push(format!("+{} more in unstaged files", part.hidden_unstaged));
         }
@@ -202,7 +202,7 @@ pub fn format_trailer<T>(part: &Partition<T>) -> Option<String> {
     if parts.is_empty() {
         return None;
     }
-    Some(format!("{} (--triage to see all)", parts.join(", ")))
+    Some(format!("{} (--limit all to see all)", parts.join(", ")))
 }
 
 #[cfg(test)]
@@ -228,22 +228,35 @@ mod tests {
         let items = vec![item("a"), item("b"), item("c"), item("d")];
         let part = partition(items, |t| t.0.as_path(), 2, Some(&unstaged));
         assert_eq!(shown(&part), vec!["a", "b"]);
-        assert!(!part.focused);
+        assert!(!part.has_unstaged);
         assert_eq!(part.hidden_elsewhere, 2);
-        assert_eq!(format_trailer(&part).unwrap(), "+2 more (--triage to see all)");
+        assert_eq!(format_trailer(&part).unwrap(), "+2 more (--limit all to see all)");
     }
 
-    /// The rule: an error in the file being edited is shown alone, and the
-    /// others are counted, not listed.
+    /// The rule: an error in the file being edited comes first, and the others
+    /// follow it within the cap.
     #[test]
-    fn unstaged_errors_are_shown_alone() {
+    fn unstaged_errors_come_first() {
         let unstaged: HashSet<PathBuf> = ["b", "d"].iter().map(|s| p(s)).collect();
         let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
         let part = partition(items, |t| t.0.as_path(), 20, Some(&unstaged));
-        assert_eq!(shown(&part), vec!["b", "d"]);
-        assert!(part.focused);
-        assert_eq!(part.hidden_elsewhere, 3);
-        assert_eq!(format_trailer(&part).unwrap(), "+3 in other files (--triage to see all)");
+        assert_eq!(shown(&part), vec!["b", "d", "a", "c", "e"]);
+        assert!(part.has_unstaged);
+        assert!(format_trailer(&part).is_none());
+
+        let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
+        let part = partition(items, |t| t.0.as_path(), 3, Some(&unstaged));
+        assert_eq!(shown(&part), vec!["b", "d", "a"]);
+        assert_eq!(format_trailer(&part).unwrap(), "+2 in other files (--limit all to see all)");
+    }
+
+    #[test]
+    fn unlimited_shows_everything() {
+        let unstaged: HashSet<PathBuf> = [p("c")].into_iter().collect();
+        let items = vec![item("a"), item("b"), item("c")];
+        let part = partition(items, |t| t.0.as_path(), UNLIMITED, Some(&unstaged));
+        assert_eq!(shown(&part), vec!["c", "a", "b"]);
+        assert!(format_trailer(&part).is_none());
     }
 
     /// The cap binds the unstaged errors too: no class of error is exempt.
@@ -257,7 +270,7 @@ mod tests {
         assert_eq!(part.hidden_elsewhere, 1);
         assert_eq!(
             format_trailer(&part).unwrap(),
-            "+1 more in unstaged files, +1 in other files (--triage to see all)"
+            "+1 more in unstaged files, +1 in other files (--limit all to see all)"
         );
     }
 

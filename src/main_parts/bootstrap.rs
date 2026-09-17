@@ -393,7 +393,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         raw,
         json,
         limit,
-        triage,
         fix_gremlins,
         timings,
         commands,
@@ -486,7 +485,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &textlint_names,
                 &script_names,
                 limit,
-                triage,
             );
         }
         return check_cmd::cmd_check(
@@ -515,7 +513,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             raw,
             json,
             limit,
-            triage,
             fix_gremlins,
             timings,
             commands,
@@ -531,7 +528,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         env,
         raw,
         limit,
-        triage,
         lib,
     } = cli.command
     {
@@ -561,7 +557,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
             raw,
             limit,
-            triage,
         );
     }
 

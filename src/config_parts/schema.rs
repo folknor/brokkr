@@ -453,7 +453,7 @@ pub enum Diagnostics {
     Opaque,
     /// rustc-shaped output: `error:` / `warning:` blocks at column zero, each
     /// running until the next such line. A failure prints the `error` blocks
-    /// and hides the rest behind `--triage`.
+    /// and hides the rest behind `--limit all`.
     Rustc,
 }
 
