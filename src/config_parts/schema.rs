@@ -609,10 +609,10 @@ pub struct TextlintRule {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RustdocConfig {
-    /// Pass `--document-private-items`. A library documented public-only warns
-    /// on every doc link to a private item (`rustdoc::private_intra_doc_links`);
-    /// documenting private items too is how a codebase whose doc comments are
-    /// written for its own developers says that is intended. Off by default.
+    /// Pass `--document-private-items`, so private items get pages and links to
+    /// them resolve. It does not silence `rustdoc::private_intra_doc_links`,
+    /// which fires either way; allow that lint in `Cargo.toml` instead. Off by
+    /// default.
     #[serde(default)]
     pub document_private_items: bool,
 }

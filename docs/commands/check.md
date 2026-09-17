@@ -1055,7 +1055,9 @@ For the same reason suppression happens at ingestion, not on argv:
 
 - `[lints] allow` drops a diagnostic whose lint code equals an entry exactly
   (`rustdoc::private_intra_doc_links`). A group name matches nothing here,
-  since a diagnostic carries its member lint's code.
+  since a diagnostic carries its member lint's code. Prefer `Cargo.toml`'s
+  `[lints.rustdoc]` for a rustdoc lint: brokkr's list also reaches the test
+  phase's rustflags, and a new entry there costs a full test rebuild.
 - `[lints] allow_exact` drops `lint@path` sites, as for clippy. Its
   stale-entry notice is clippy's alone: a clippy-only site that rustdoc never
   reports is not stale.

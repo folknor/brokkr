@@ -609,14 +609,21 @@ phase is inert.
 document_private_items = true   # optional, default false
 ```
 
-- `document_private_items` passes `--document-private-items`. A library
-  documented public-only warns on every doc link to a private item
-  (`rustdoc::private_intra_doc_links`), and that warning fails the phase. Turn
-  this on when doc comments are written for the crate's own developers, which
-  is also what a binary crate's docs are.
+- `document_private_items` passes `--document-private-items`, so private items
+  get pages and links to them resolve. It does **not** silence
+  `rustdoc::private_intra_doc_links`: rustdoc still warns when a public item's
+  docs link a private one, because that link breaks in a public-only build.
+  Measured on a 14-crate workspace, the flag on: 120 of 158 diagnostics were
+  that lint.
 
-Lints are suppressed through `[lints]`, not here: `allow` by exact lint code,
-`allow_exact` by site. See the phase in `brokkr man check rustdoc`.
+To accept private links, allow the lint in `Cargo.toml`
+(`[lints.rustdoc] private_intra_doc_links = "allow"`, or the
+`[workspace.lints.rustdoc]` form). That is where cargo hands rustdoc its lint
+levels, and it costs nothing elsewhere. brokkr's `[lints] allow` also works - the
+phase drops the lint by exact code - but the same list reaches the test phase's
+rustflags, so adding a rustdoc lint there forces a full test rebuild.
+`allow_exact` suppresses single sites. See the phase in
+`brokkr man check rustdoc`.
 
 ## `[deps]` section
 
