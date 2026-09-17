@@ -418,6 +418,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             textlint_rules,
             script_checks,
             manifest_cfg,
+            rustdoc_cfg,
             clippy_cfg,
             project_root,
             state_root,
@@ -434,6 +435,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 d.config.textlint,
                 d.config.script_checks,
                 d.config.manifest,
+                d.config.rustdoc,
                 d.config.lints,
                 // cargo/git run in the code tree (build_root); brokkr's own
                 // `.brokkr` state anchors to the config dir (project_root).
@@ -463,6 +465,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     None,
                     textlint,
                     script_checks,
+                    None,
                     None,
                     None,
                     cwd.clone(),
@@ -500,6 +503,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &textlint_rules,
             &script_checks,
             manifest_cfg.as_ref(),
+            rustdoc_cfg.as_ref(),
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
             &features,

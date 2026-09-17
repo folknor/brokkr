@@ -106,7 +106,7 @@ Output:
   legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
   when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
   of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
-  `dependency_rules`/`publish_cycle`/`clippy`/`test`/`coverage`), `elapsed_ms`. The object is versioned
+  `dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/`test`/`coverage`/`install_feature`), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must
   tolerate unknown fields, and a bump is reserved for renames or semantic
   changes. A config error before the phases run (bad profile name,
@@ -175,7 +175,7 @@ each phase has its own ceiling on top of that:
 
 | Phase | Ceiling |
 |---|---|
-| `clippy` | 5 min |
+| `clippy`, `rustdoc` | 5 min |
 | `test` | 15 min |
 | `coverage`, `install_feature`, `script_check` | 5 min |
 | every other phase (`gremlins`, `header`, `textlint`, `manifest`, `dependency_rules`, `publish_cycle`) | 2 min |
@@ -842,6 +842,12 @@ to the `opaque` view, since a gate can fail because its sentinel never appeared
 at all. Block boundaries and the reason the shape is declared rather than sniffed
 are in `brokkr man config diagnostics`.
 
+For `cargo doc` specifically, prefer the native [`rustdoc` phase](#rustdoc-phase)
+over a script check: it reads cargo's JSON rather than scraping text, so each
+diagnostic is one line with its lint code, capped and scoped like clippy's.
+`diagnostics = "rustc"` remains for gates that shell out to some other
+rustc-shaped tool.
+
 The `--limit` budget spans both streams: it is a reading budget for the phase's
 output, and a per-stream cap would print twice it on a command that splits its
 diagnostics across the two.
@@ -1015,6 +1021,47 @@ text verbatim); the pass/fail decision and the formatted output do not
 count them. The path half must match the file exactly as clippy reports it
 (relative to the tree cargo compiles in - copy it from the failing
 diagnostic's location).
+
+## `rustdoc` phase
+
+Runs after clippy and before the `pre-test` script checks, only when
+`brokkr.toml` has a `[rustdoc]` table (an empty one is enough). Rustdoc is the
+one compiler pass neither clippy nor the tests run, so without this phase a
+project's `rustdoc::` lints are declared and never evaluated, and a doc link
+broken by a file split rots unseen.
+
+The invocation is `cargo doc --no-deps --keep-going --message-format=json`,
+plus `--document-private-items` when `[rustdoc] document_private_items = true`,
+plus the sweep's selection exactly as clippy builds it: profile, feature
+unification, packages, features, env and isolated target dir. Rustdoc resolves
+`cfg` like the build does, so documenting under any other shape would judge doc
+comments on code that shape never compiles. It runs once per distinct build
+shape, deduped and `-p`-intersected by the same loop clippy uses
+(`run_per_build_shape`), so the two phases cannot disagree about what a sweep
+covers.
+
+Output goes through clippy's parser and formatter: one line per diagnostic in
+the `error[<lint>] <file>:<line>:<col> <message>` form, merged across sweeps, capped at `--limit` with changed files first,
+sorted by lint under `--triage`, and cargo's rendered text under `--raw`.
+
+**Any diagnostic fails the phase, warnings included** - the rule clippy's gate
+applies, and for the same reason. Rustdoc's lints are warn-by-default, so a
+gate that failed only on `error` would pass every broken link unless the
+project also set `-D warnings`. No `-D warnings` is injected: rustdoc takes
+rustc flags only through `RUSTDOCFLAGS`, which would change the doc
+fingerprint and replace a project's own rustdocflags.
+
+For the same reason suppression happens at ingestion, not on argv:
+
+- `[lints] allow` drops a diagnostic whose lint code equals an entry exactly
+  (`rustdoc::private_intra_doc_links`). A group name matches nothing here,
+  since a diagnostic carries its member lint's code.
+- `[lints] allow_exact` drops `lint@path` sites, as for clippy. Its
+  stale-entry notice is clippy's alone: a clippy-only site that rustdoc never
+  reports is not stale.
+
+Skippable as `rustdoc` in a partial profile's `skip_phases`, skipped on a
+markdown-only tree, and 5-minute ceilinged like clippy.
 
 ## `test` phase
 

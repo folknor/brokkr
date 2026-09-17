@@ -6,3 +6,37 @@ default = "brokkr"
 
 [test]
 debug = true
+
+# Rustdoc is the one compiler pass clippy and the tests never run, so a broken
+# intra-doc link in a module header rots unseen. brokkr is a binary crate whose
+# doc comments are written for its own developers, so private items are
+# documented too.
+[rustdoc]
+document_private_items = true
+
+# The document-folder rule from CLAUDE.md: docs may not cite source line
+# numbers, because they drift the moment the file is edited. Cite the file and
+# the symbol instead.
+[[textlint]]
+name = "docs-cite-no-line-numbers"
+pattern = '\b[\w/.-]+\.rs:\d+'
+paths = ["docs/**/*.md"]
+message = "source line numbers drift; cite the file and the symbol instead"
+
+# The one-way dependency direction from CLAUDE.md: `notes/` carries no truth
+# guarantee, so nothing durable may cite it - not a doc, not a code comment,
+# which outlives the note it would point at.
+[[textlint]]
+name = "docs-never-cite-notes"
+pattern = '\bnotes/'
+paths = ["docs/**/*.md"]
+message = "notes/ is transient; durable docs must carry their own context"
+
+# The same rule for code comments. `region = "comment"` because string literals
+# legitimately name `notes/` paths, as test data for the dirt classifier does.
+[[textlint]]
+name = "comments-never-cite-notes"
+pattern = '\bnotes/'
+paths = ["src/**/*.rs"]
+region = "comment"
+message = "notes/ is transient; a code comment must carry its own context"

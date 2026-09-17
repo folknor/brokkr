@@ -1,3 +1,8 @@
+// The doc comments here are clap's `--help` text, rendered verbatim, not rustdoc
+// prose: `[pbfhogg] Sort PBF` is a project tag a user reads, and escaping it as a
+// link would print the backslashes, and `<dataset>` is a placeholder, not HTML.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
+
 include!("cli/schema.rs");
 include!("cli/validation.rs");
 include!("cli/visibility.rs");

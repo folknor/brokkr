@@ -59,7 +59,7 @@ pub struct DiagKey {
 pub type DiagSet = BTreeSet<DiagKey>;
 
 /// The canonical per-probe disposition labels, the unit the gate compares.
-/// `divergent` is gated coarsely; its [`Signature`] is diagnostic detail
+/// `divergent` is gated coarsely; its [`Signature`](diff::Signature) is diagnostic detail
 /// (rendered + stored, never gated) the same way `corpus`'s `count_tier`
 /// stays out of the gate.
 pub const DISPOSITION_LABELS: [&str; 5] = [
@@ -78,7 +78,7 @@ pub fn is_disposition(label: &str) -> bool {
 /// One probe's fully-resolved result for a run: the classified disposition,
 /// the gate verdict against its pin, the raw diagnostic counts, and the TV
 /// anchor relationship. The single unit `cmd` builds, the run store
-/// ([`db`](crate::piners::lint::db)) ingests, and `lint-results` renders.
+/// ([`db`]) ingests, and `lint-results` renders.
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
     pub probe: String,

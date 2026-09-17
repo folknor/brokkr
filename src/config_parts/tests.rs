@@ -38,6 +38,7 @@ mod tests {
             textlint: Vec::new(),
             script_checks: Vec::new(),
             manifest: None,
+            rustdoc: None,
             deps: None,
             lints: None,
             bin: None,

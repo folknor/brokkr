@@ -50,6 +50,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let textlint = parse_textlint(table)?;
     let script_checks = parse_script_checks(table)?;
     let manifest = parse_manifest(table)?;
+    let rustdoc = parse_rustdoc(table)?;
     let deps = parse_deps(table)?;
     let lints = parse_lints(table)?;
     let bin = parse_bin(table)?;
@@ -78,6 +79,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             textlint,
             script_checks,
             manifest,
+            rustdoc,
             deps,
             lints,
             bin,
@@ -165,6 +167,20 @@ fn parse_lints(
         }
     }
     Ok(merged)
+}
+
+/// Parse the optional `[rustdoc]` section. Absent -> `None`.
+fn parse_rustdoc(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<Option<RustdocConfig>, DevError> {
+    let Some(value) = table.get("rustdoc") else {
+        return Ok(None);
+    };
+    value
+        .clone()
+        .try_into()
+        .map(Some)
+        .map_err(|e: toml::de::Error| DevError::Config(format!("[rustdoc]: {e}")))
 }
 
 /// Parse the optional `[manifest]` section. Absent -> `None`.
@@ -637,6 +653,7 @@ fn parse_hosts(
             || key == "textlint_preset"
             || key == "script_check"
             || key == "manifest"
+            || key == "rustdoc"
             || key == "deps"
             || key == "clippy"
             || key == "lints"

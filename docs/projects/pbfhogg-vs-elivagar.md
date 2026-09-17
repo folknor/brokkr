@@ -54,7 +54,7 @@ elivagar's `ElivagarCommand::build_config()` returns one of three kinds
 
 pbfhogg routes **every** bench command through `run_pbfhogg_wallclock` ->
 `run_external_ok`. Timing is brokkr's own best-of-N external wall-clock
-(`elapsed_to_ms(&captured.elapsed)`, `types_run.rs:299`). stdout/stderr are
+(`elapsed_to_ms(&captured.elapsed)` in `types_run.rs`). stdout/stderr are
 captured and dropped; no stderr kv parsing.
 
 elivagar forks by build kind (`run_elivagar_bench`):

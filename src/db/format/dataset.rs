@@ -14,7 +14,7 @@ use std::path::Path;
 /// Short-label resolver for `input_file` values.
 ///
 /// Construct with [`DatasetMatcher::new`] from the list of configured
-/// dataset keys, or [`DatasetMatcher::empty`] when no config is
+/// dataset keys, or `DatasetMatcher::empty` (test-only) when no config is
 /// available (tests, ad-hoc callers). Keys are stored sorted
 /// longest-first so [`short_name`](Self::short_name) does a simple
 /// linear scan and returns on the first prefix match.

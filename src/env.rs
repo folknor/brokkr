@@ -13,7 +13,7 @@ pub struct EnvInfo {
     pub cpu: String,
     /// Physical cores sharing one last-level cache, and logical CPUs overall.
     /// Reported because it is the default in-flight budget for a `parallel`
-    /// [[check]] sweep - a machine-dependent default nobody can audit unless
+    /// `[[check]]` sweep - a machine-dependent default nobody can audit unless
     /// the machine's own number is printed somewhere. `None` when sysfs said
     /// nothing usable.
     pub cache_domain_cores: Option<usize>,

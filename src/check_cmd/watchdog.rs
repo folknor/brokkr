@@ -34,7 +34,7 @@ pub(crate) const WATCHDOG_EXIT_CODE: i32 = 124;
 /// (about 20s warm on the largest consuming workspace).
 fn phase_ceiling(phase: &str) -> std::time::Duration {
     let minutes = match phase {
-        "clippy" => 5,
+        "clippy" | "rustdoc" => 5,
         "test" => 15,
         "coverage" | "install_feature" | "script_check" => 5,
         _ => 2,

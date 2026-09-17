@@ -58,6 +58,10 @@ pub struct DevConfig {
     /// (dependency ordering, ...) run by `brokkr check`. `None` when the
     /// project has no `[manifest]` section. See [`ManifestConfig`].
     pub manifest: Option<ManifestConfig>,
+    /// `[rustdoc]` config: its presence turns on `brokkr check`'s `rustdoc`
+    /// phase. `None` when the project has no `[rustdoc]` section. See
+    /// [`RustdocConfig`].
+    pub rustdoc: Option<RustdocConfig>,
     /// `[[script_check]]` gates: run a command and assert its output matches a
     /// sentinel, for pre-commit checks brokkr's native phases can't express.
     /// Empty when the project defines no `[[script_check]]` entries. See
@@ -597,6 +601,22 @@ pub struct TextlintRule {
     pub require_below: Option<ContextWindow>,
 }
 
+/// `[rustdoc]` section: opt into the `rustdoc` phase of `brokkr check`, which
+/// runs `cargo doc --no-deps --message-format=json` per build shape and fails on
+/// any diagnostic, rendered like clippy's. Rustdoc is the one compiler pass
+/// clippy and the tests never run, so without it a project's rustdoc lints are
+/// declared and never evaluated. An empty table is the whole opt-in.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RustdocConfig {
+    /// Pass `--document-private-items`. A library documented public-only warns
+    /// on every doc link to a private item (`rustdoc::private_intra_doc_links`);
+    /// documenting private items too is how a codebase whose doc comments are
+    /// written for its own developers says that is intended. Off by default.
+    #[serde(default)]
+    pub document_private_items: bool,
+}
+
 /// `[manifest]` section: native structural `Cargo.toml` conventions checked by
 /// `brokkr check` as discrete named toggles, not a rule
 /// DSL. Inert unless at least one check is enabled. Each check reads a manifest
@@ -971,7 +991,7 @@ pub enum Harness {
 ///
 /// `auto` is brokkr's own policy rather than a cargo mode, which is why it is
 /// spelled rather than left as an absent key: it emits no flags in the ordinary
-/// case and lets [`crate::check_cmd::parallel`] promote an eligible
+/// case and lets the parallel lane (`src/check_cmd/parallel.rs`) promote an eligible
 /// whole-workspace fan-out to `workspace`, which is exactly what every sweep did
 /// before this key existed. Absence and `auto` mean the same thing, so a config
 /// rewrite that materializes the default cannot change behaviour.
@@ -1312,7 +1332,7 @@ pub enum Isolation {
 /// anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion, and the `skip_phases`
 /// validator subtracts it from this list - so the two roles no longer let
 /// `skip_phases = ["coverage"]` load clean and announce a no-op.
-pub const PHASE_NAMES: [&str; 11] = [
+pub const PHASE_NAMES: [&str; 12] = [
     "gremlins",
     "header",
     "textlint",
@@ -1321,6 +1341,7 @@ pub const PHASE_NAMES: [&str; 11] = [
     "dependency_rules",
     "publish_cycle",
     "clippy",
+    "rustdoc",
     "test",
     "coverage",
     "install_feature",
@@ -1387,7 +1408,8 @@ pub struct ProfileDef {
     /// Requires `certifies = "partial"` - the claim is what grants the
     /// permission. Valid names are the [`PHASE_NAMES`] identifiers `gremlins`,
     /// `header`, `textlint`, `manifest`, `script_check`,
-    /// `dependency_rules`, `clippy`, `test` minus [`NON_SKIPPABLE_PHASES`] -
+    /// `dependency_rules`, `publish_cycle`, `clippy`, `rustdoc`, `test`,
+    /// `install_feature` minus [`NON_SKIPPABLE_PHASES`] -
     /// `coverage` is not skippable (it runs only under a complete claim). Not
     /// inherited through `extends`.
     pub skip_phases: Option<Vec<String>>,

@@ -514,7 +514,7 @@ fn sweep_selection_args(sweep: &ResolvedSweep, packages: &[&str]) -> Vec<String>
 /// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
 /// `Err(...)` on subprocess spawn failure. `multi` controls whether
 /// the `cargo ... (sweep: <label>)` log line carries the suffix - in
-/// single-sweep mode (legacy `--all-features` path or one [[check]]
+/// single-sweep mode (legacy `--all-features` path or one `[[check]]`
 /// entry) the label noise is unhelpful.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 fn run_one_test_sweep(

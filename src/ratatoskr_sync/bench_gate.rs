@@ -299,8 +299,8 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         // it doesn't cover the build phase). PG-isolating cargo here
         // would orphan it on terminal Ctrl-C; --hard accepts the
         // single-PID kill (cargo reaps its own children on its way
-        // down via SIGCHLD, but rustc workers may briefly orphan -
-        // tracked as a known limit in notes/todo.md).
+        // down via SIGCHLD, but rustc workers may briefly orphan, a
+        // known and accepted limit).
         false,
     )?;
     output::ratatoskr_msg(&format!(
@@ -390,8 +390,8 @@ fn bench_loop(
     // installs its own around the measured window - a nested install
     // would clobber the outer's `Drop` and restore SIG_DFL early.
     // Cooperative SIGTERM during build / between iterations therefore
-    // still falls through to the default terminate action; see notes/todo.md
-    // if we ever extend coverage.
+    // still falls through to the default terminate action. Extending
+    // coverage there would need a guard that composes with the sidecar's.
     let mock = MockServer::spawn_observed(
         mock_binary,
         fixture_path,

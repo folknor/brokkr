@@ -777,7 +777,7 @@ pub fn filter_test_build_failure(stderr: &str) -> String {
 }
 
 /// Extra detail for a `linking with ...` build failure. The one-line
-/// condensation keeps `error: linking with \`clang\` failed` and drops the
+/// condensation keeps `` error: linking with `clang` failed `` and drops the
 /// `= note:` block - which is where the linker put the actual cause. Pull
 /// the undefined-symbol lines back out, and when they carry the
 /// stale-incremental signature - a symbol in the failing crate's own
@@ -1004,7 +1004,7 @@ fn extract_rule_from_notes(block: &[String]) -> Option<String> {
 /// Parse a diagnostic header into (prefix, message).
 ///
 /// `"error[E0308]: mismatched types"` → `("error[E0308]", "mismatched types")`
-/// `"warning: unused variable: \`x\` [unused_variables]"` → `("warning[unused_variables]", "unused variable: \`x\`")`
+/// `` "warning: unused variable: `x` [unused_variables]" `` → `` ("warning[unused_variables]", "unused variable: `x`") ``
 fn parse_header(line: &str) -> (String, String) {
     // error[CODE]: message
     if (line.starts_with("error[") || line.starts_with("warning["))
@@ -1111,7 +1111,7 @@ fn parse_block(block: &[String], is_error: bool) -> ClippyDiagnostic {
     }
 }
 
-/// Parse "N <label>" from a test result line.
+/// Parse `"N <label>"` from a test result line.
 pub(crate) fn parse_count(line: &str, label: &str) -> Option<usize> {
     let idx = line.find(label)?;
     let before = line[..idx].trim_end();

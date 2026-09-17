@@ -176,7 +176,7 @@ enum IsolatedOutcome {
     /// a per-test failure list is the point of running isolated.
     Failed,
     /// Blew its time budget. Distinct from `Failed` because it ends the lane:
-    /// see the loop in [`run`].
+    /// see the loop in [`run_isolated_sweep`].
     TimedOut,
 }
 

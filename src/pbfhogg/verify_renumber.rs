@@ -3,8 +3,7 @@
 //! Cross-validates pbfhogg's renumber output against osmium. Unlike the other
 //! verify subcommands, a small number of diffs is expected and treated as a
 //! PASS: pbfhogg's orphan-reference handling in relation members is a
-//! documented semantic deviation (see pbfhogg `DEVIATIONS.md` /
-//! `notes/renumber-planet-scale.md` section 5b).
+//! documented semantic deviation (see pbfhogg `DEVIATIONS.md`).
 //!
 //! Fail conditions:
 //! - element counts diverge between osmium and pbfhogg outputs

@@ -9,7 +9,7 @@
 //! Deliberately mirrors the `src/db` `ResultsDb` patterns - WAL, per-db
 //! `PRAGMA user_version` migrations ([`migrate`]), single-transaction bulk
 //! insert ([`ingest`]), parameterized queries + formatter-on-rows rendering
-//! ([`query`]/[`format`]) - but is piners-specific and append-only: it never
+//! ([`query`]/[`mod@format`]) - but is piners-specific and append-only: it never
 //! deletes, so it carries no FK-cascade machinery.
 
 pub mod format;

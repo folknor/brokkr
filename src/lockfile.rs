@@ -11,7 +11,7 @@ use crate::error::DevError;
 struct LockState {
     project: String,
     command: String,
-    /// Full brokkr invocation minus argv[0] (e.g. `add-locations-to-ways
+    /// Full brokkr invocation minus `argv[0]` (e.g. `add-locations-to-ways
     /// --dataset europe --bench 3`). Captured at acquire time.
     args: String,
     project_root: String,
@@ -861,7 +861,7 @@ struct Authorized {
 }
 
 /// Build the initial `LockState` for a freshly-acquired lock. Captures the
-/// current brokkr invocation args (argv minus argv[0]) so `brokkr lock`
+/// current brokkr invocation args (argv minus `argv[0]`) so `brokkr lock`
 /// can show exactly what the user typed, plus the identity tokens readers
 /// verify before trusting the PID.
 fn build_state(ctx: &LockContext<'_>) -> LockState {
@@ -1040,7 +1040,7 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Capture `std::env::args()` minus argv[0], shell-quoting any element that
+/// Capture `std::env::args()` minus `argv[0]`, shell-quoting any element that
 /// contains whitespace or a double-quote so the joined string is unambiguous.
 fn current_invocation_args() -> String {
     let args: Vec<String> = std::env::args().skip(1).collect();

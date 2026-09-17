@@ -25,7 +25,7 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
     Certifies, CheckEntry, DependencyRule, Diagnostics, GremlinsConfig, HeaderConfig,
-    ManifestConfig, NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow,
+    ManifestConfig, RustdocConfig, NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow,
     Stage, TestConfig, TextlintRule,
 };
 use crate::dependency_rules;
@@ -54,6 +54,7 @@ pub(crate) fn cmd_check(
     textlint_rules: &[TextlintRule],
     script_checks: &[ScriptCheck],
     manifest_cfg: Option<&ManifestConfig>,
+    rustdoc_cfg: Option<&RustdocConfig>,
     clippy_allow: &[String],
     clippy_allow_exact: &[SitedAllow],
     features: &[String],
@@ -171,6 +172,7 @@ pub(crate) fn cmd_check(
                 clippy_allow,
                 clippy_allow_exact,
                 quarantine,
+                rustdoc_cfg,
                 bin_cfg,
                 certifies,
                 doctests,
@@ -251,13 +253,14 @@ pub(crate) fn cmd_check_selected(
         run_script_checks(project_root, &checks, Stage::PreClippy, limit, triage)
     };
     let elapsed = started.elapsed().as_secs_f64();
-    match (textlint, scripts) {
-        (Ok(()), Ok(())) => {
-            output::run_msg(&format!("selection passed ({elapsed:.1}s)"));
-            Ok(())
-        }
-        (Err(e), _) | (Ok(()), Err(e)) => Err(e),
+    // Both halves always run, so the error names every one that failed - not
+    // whichever came first, which would hide a script failure behind textlint's.
+    let failed: Vec<String> = [textlint, scripts].into_iter().filter_map(Result::err).map(|e| e.to_string()).collect();
+    if failed.is_empty() {
+        output::run_msg(&format!("selection passed ({elapsed:.1}s)"));
+        return Ok(());
     }
+    Err(DevError::Build(failed.join("; ")))
 }
 
 /// The entries whose name is in `names`, in config order. Each requested name
@@ -450,6 +453,8 @@ struct BuildPhaseArgs<'a> {
     /// The `[clippy] allow_exact` sited list, filtered at JSON ingestion.
     clippy_allow_exact: &'a [SitedAllow],
     quarantine: &'a [QuarantineEntry],
+    /// `[rustdoc]`; `None` leaves the rustdoc phase inert.
+    rustdoc_cfg: Option<&'a RustdocConfig>,
     /// `[bin]`, for the install-feature phase's package set and mode.
     bin_cfg: Option<&'a crate::config::BinConfig>,
     certifies: Option<Certifies>,
@@ -479,21 +484,7 @@ fn run_build_phases(
     // messages (phases print their own detail) - an unvoiced refusal reads
     // as `check failed` with no line naming why.
     verify_doc_only_rules(a).inspect_err(|e| output::error(&e.to_string()))?;
-    if !skip("clippy") {
-        begin_phase(failing_phase, "clippy");
-        run_clippy_phase(
-            a.project_root,
-            a.active_sweeps,
-            a.packages,
-            a.clippy_allow,
-            a.clippy_allow_exact,
-            a.raw,
-            a.limit,
-            a.triage,
-            a.commands,
-            clippy_ran,
-        )?;
-    }
+    run_diagnostic_phases(a, skip, failing_phase, clippy_ran)?;
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
@@ -534,7 +525,63 @@ fn run_build_phases(
             output::error(&e.to_string());
         }
     }
+    finish_build_phases(a, skip, failing_phase, executed, coverage_stats, test_failure)
+}
 
+/// The two per-build-shape diagnostic phases: clippy, then rustdoc. Rustdoc
+/// comes second because it reuses clippy's compiled dependencies, and before
+/// the tests because a doc link is cheaper to fail on than a test suite.
+fn run_diagnostic_phases(
+    a: &BuildPhaseArgs<'_>,
+    skip: &dyn Fn(&str) -> bool,
+    failing_phase: &mut Option<&'static str>,
+    ran: &mut [bool],
+) -> Result<(), DevError> {
+    if !skip("clippy") {
+        begin_phase(failing_phase, "clippy");
+        run_clippy_phase(
+            a.project_root,
+            a.active_sweeps,
+            a.packages,
+            a.clippy_allow,
+            a.clippy_allow_exact,
+            a.raw,
+            a.limit,
+            a.triage,
+            a.commands,
+            ran,
+        )?;
+    }
+
+    if !skip("rustdoc") {
+        begin_phase(failing_phase, "rustdoc");
+        run_rustdoc_phase(
+            a.project_root,
+            a.rustdoc_cfg,
+            a.active_sweeps,
+            a.packages,
+            a.clippy_allow,
+            a.clippy_allow_exact,
+            a.raw,
+            a.limit,
+            a.triage,
+            a.commands,
+            ran,
+        )?;
+    }
+    Ok(())
+}
+
+/// Everything after the test phase: the coverage audit under a complete
+/// claim, the test verdict, the post-test script checks and install-feature.
+fn finish_build_phases(
+    a: &BuildPhaseArgs<'_>,
+    skip: &dyn Fn(&str) -> bool,
+    failing_phase: &mut Option<&'static str>,
+    executed: &[bool],
+    coverage_stats: &mut Option<CoverageStats>,
+    test_failure: Option<DevError>,
+) -> Result<(), DevError> {
     // Coverage accounting runs only under a complete claim - it is what the
     // claim buys. It runs on a failing test phase
     // too: the audit needs built binaries, not green tests, and the orphan
@@ -1997,7 +2044,60 @@ fn run_one_clippy(
     commands: bool,
 ) -> Result<SweepResult, DevError> {
     let args = clippy_args(sweep, run_scope, allow);
-    output::run_msg(&sweep_run_line("clippy", sweep, &args, false, commands, run_scope));
+    run_one_diagnostic_cargo("clippy", project_root, sweep, &args, run_scope, meta_target_dir, commands)
+}
+
+/// `cargo doc` argv for one sweep resolution. The selection half is clippy's -
+/// profile, unification, packages, features - because rustdoc resolves `cfg`
+/// exactly as the build does, so documenting a sweep under any other shape
+/// judges doc comments on code that shape never compiles.
+///
+/// No `--cap-lints`, unlike clippy: that flag exists there to finish the graph
+/// past a denied lint, and `--keep-going` already does that for doc. No `-A`
+/// either - rustdoc takes rustc flags only through `RUSTDOCFLAGS`, which would
+/// change the doc fingerprint - so `[lints] allow` is applied at ingestion
+/// instead ([`rustdoc_allowed`]).
+fn doc_args(sweep: &ResolvedSweep, scope: &[&str], cfg: &RustdocConfig) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "doc".into(),
+        "--no-deps".into(),
+        "--keep-going".into(),
+        "--message-format=json".into(),
+    ];
+    if cfg.document_private_items {
+        args.push("--document-private-items".into());
+    }
+    args.extend(sweep_profile_args(sweep));
+    args.extend(sweep.unification_args());
+    if scope.is_empty() {
+        for pkg in &sweep.packages {
+            args.push("-p".into());
+            args.push(pkg.clone());
+        }
+    } else {
+        for pkg in scope {
+            args.push("--package".into());
+            args.push((*pkg).into());
+        }
+    }
+    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args
+}
+
+/// One cargo run whose stdout is a `--message-format=json` diagnostic stream:
+/// the sweep's env, and its isolated target dir when it has one, so the run
+/// reuses the artifacts its test phase builds rather than rebuilding beside
+/// them. `phase` names the run in the log line.
+fn run_one_diagnostic_cargo(
+    phase: &str,
+    project_root: &Path,
+    sweep: &ResolvedSweep,
+    args: &[String],
+    run_scope: &[&str],
+    meta_target_dir: Option<&Path>,
+    commands: bool,
+) -> Result<SweepResult, DevError> {
+    output::run_msg(&sweep_run_line(phase, sweep, args, false, commands, run_scope));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Apply the sweep's env to the clippy build too, so a build-affecting
@@ -2050,6 +2150,128 @@ fn run_clippy_phase(
 
     announce_allows(allow, allow_exact);
 
+    let results = run_per_build_shape("clippy", project_root, sweeps, packages, clippy_ran, |sweep, run_scope, dir| {
+        run_one_clippy(project_root, sweep, run_scope, allow, dir, commands)
+    })?;
+
+    report_stale_sited_allows(&results, allow_exact, packages);
+
+    // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
+    // the pass/fail decision is brokkr's own: any clippy diagnostic is a
+    // failure, whatever its (capped) level. `any_failed` still catches genuine
+    // non-lint compile errors, and the parse-failure case where cargo died
+    // without emitting parseable diagnostics.
+    let keep = |d: &cargo_json::DiagnosticEvent| !sited_allowed(d, allow_exact);
+    report_diagnostic_phase("clippy", &results, project_root, &keep, raw, limit, triage, multi, commands)
+}
+
+/// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
+/// diagnostic, rendered through clippy's formatter. Inert without `[rustdoc]`.
+///
+/// Every surviving diagnostic fails, warnings included, the same rule clippy's
+/// gate applies: a rustdoc warning nobody is made to read is a doc link rotting
+/// in silence, which is the defect class the phase exists for. `[lints] allow`
+/// removes a lint by code, `allow_exact` by site.
+#[allow(clippy::too_many_arguments)]
+fn run_rustdoc_phase(
+    project_root: &Path,
+    cfg: Option<&RustdocConfig>,
+    sweeps: &[ResolvedSweep],
+    packages: &[String],
+    allow: &[String],
+    allow_exact: &[SitedAllow],
+    raw: bool,
+    limit: usize,
+    triage: bool,
+    commands: bool,
+    ran: &mut [bool],
+) -> Result<(), DevError> {
+    let Some(cfg) = cfg else {
+        return Ok(());
+    };
+    let results = run_per_build_shape("rustdoc", project_root, sweeps, packages, ran, |sweep, run_scope, dir| {
+        let args = doc_args(sweep, run_scope, cfg);
+        run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run_scope, dir, commands)
+    })?;
+    let keep = |d: &cargo_json::DiagnosticEvent| !rustdoc_allowed(d, allow) && !sited_allowed(d, allow_exact);
+    report_diagnostic_phase("rustdoc", &results, project_root, &keep, raw, limit, triage, sweeps.len() > 1, commands)
+}
+
+/// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
+/// code cargo reports (`rustdoc::broken_intra_doc_links`); a lint group name
+/// matches nothing here, since diagnostics carry the member lint's code.
+fn rustdoc_allowed(d: &cargo_json::DiagnosticEvent, allow: &[String]) -> bool {
+    d.code.as_deref().is_some_and(|c| allow.iter().any(|a| a == c))
+}
+
+/// Whether an `allow_exact` entry suppresses this diagnostic.
+fn sited_allowed(d: &cargo_json::DiagnosticEvent, allow_exact: &[SitedAllow]) -> bool {
+    allow_exact.iter().any(|s| sited_match(s, d))
+}
+
+/// Decide and report a diagnostic phase from its cargo runs: any failed run
+/// or any diagnostic `keep` admits fails it. Prints the failing commands, then
+/// either `--raw` rendered text or the capped, scoped, cross-sweep summary.
+#[allow(clippy::too_many_arguments)]
+fn report_diagnostic_phase(
+    phase: &str,
+    results: &[SweepResult],
+    project_root: &Path,
+    keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
+    raw: bool,
+    limit: usize,
+    triage: bool,
+    multi: bool,
+    commands: bool,
+) -> Result<(), DevError> {
+    let run_failed = |r: &SweepResult| {
+        !r.success || cargo_json::parse_cargo_diagnostics(&r.stdout).iter().any(keep)
+    };
+    if !results.iter().any(run_failed) {
+        return Ok(());
+    }
+
+    // Collapsed form suppressed the command on the way in; a failing sweep is
+    // exactly where the copy-pasteable line earns its place.
+    if !commands {
+        for r in results.iter().filter(|r| run_failed(r)) {
+            output::error(&format!("failing command: {}", r.command));
+        }
+    }
+
+    if raw {
+        for r in results {
+            if multi {
+                output::error(&format!("[{}]", r.label));
+            }
+            output::error(&raw_clippy_text(r));
+        }
+    } else {
+        output::error(&format_clippy_capped_multi(
+            &format!("cargo {}", if phase == "rustdoc" { "doc" } else { phase }),
+            results,
+            project_root,
+            limit,
+            triage,
+            multi,
+            keep,
+        ));
+    }
+    Err(DevError::Build(format!("{phase} failed")))
+}
+
+/// Run `run_one` once per distinct build shape (and once per package under
+/// package-mode unification), marking `ran[i]` for each sweep that got a cargo
+/// run. The dedupe, the CLI `-p` intersection and the nothing-ran refusal are
+/// shared by every per-shape diagnostic phase, so they cannot drift apart.
+fn run_per_build_shape(
+    phase: &str,
+    project_root: &Path,
+    sweeps: &[ResolvedSweep],
+    packages: &[String],
+    ran: &mut [bool],
+    mut run_one: impl FnMut(&ResolvedSweep, &[&str], Option<&Path>) -> Result<SweepResult, DevError>,
+) -> Result<Vec<SweepResult>, DevError> {
     // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
     // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
     // they must agree on the location, and a workspace can place it off the
@@ -2065,8 +2287,9 @@ fn run_clippy_phase(
         None
     };
 
-    // Clippy is per-build-shape while tests are per-lane: two lanes sharing a `[[check]]` entry must not lint it
-    // twice, so dedupe on the whole build shape.
+    // Diagnostic phases are per-build-shape while tests are per-lane: two lanes
+    // sharing a `[[check]]` entry must not be linted or documented twice, so
+    // dedupe on the whole build shape.
     let mut seen_shapes: std::collections::HashSet<profile::BuildShapeKey> =
         std::collections::HashSet::new();
 
@@ -2079,25 +2302,25 @@ fn run_clippy_phase(
         let (scope, dropped) = match cli_package_scope(sweep, packages, false) {
             Ok(s) => s,
             Err(reason) => {
-                output::run_msg(&format!("clippy {}: skipped ({reason})", sweep.label));
+                output::run_msg(&format!("{phase} {}: skipped ({reason})", sweep.label));
                 continue;
             }
         };
         for note in &dropped {
-            output::run_msg(&format!("clippy {}: {note} (dropped)", sweep.label));
+            output::run_msg(&format!("{phase} {}: {note} (dropped)", sweep.label));
         }
 
         if !seen_shapes.insert(sweep.build_shape_key()) {
             output::run_msg(&format!(
-                "clippy {}: deduped (build shape already checked)",
+                "{phase} {}: deduped (build shape already checked)",
                 sweep.label
             ));
             continue;
         }
         // Past the skip and the dedupe: this sweep gets its own cargo run, so
-        // the `--json` trailer may honestly list it as clippy-checked (S3-33).
-        // `i` indexes `sweeps`, and `clippy_ran` is sized to match, so direct.
-        clippy_ran[i] = true;
+        // the `--json` trailer may honestly list it as checked (S3-33).
+        // `i` indexes `sweeps`, and `ran` is sized to match, so direct.
+        ran[i] = true;
         // Package mode lints one package per cargo run, for the same reason it
         // tests one per run: a batched multi-`-p` clippy resolves a graph that
         // is not any of the graphs the lane actually builds, so its lint
@@ -2108,14 +2331,7 @@ fn run_clippy_phase(
                 Some(pkg) => vec![pkg.as_str()],
                 None => scope.clone(),
             };
-            results.push(run_one_clippy(
-                project_root,
-                sweep,
-                &run_scope,
-                allow,
-                meta_target_dir.as_deref(),
-                commands,
-            )?);
+            results.push(run_one(sweep, &run_scope, meta_target_dir.as_deref())?);
         }
     }
 
@@ -2130,7 +2346,7 @@ fn run_clippy_phase(
         // it rejected - a bare "check failed" sends the reader to the source.
         return Err(DevError::Config(if packages.is_empty() {
             format!(
-                "nothing was clippy-checked: every active sweep ({}) produced no \
+                "nothing reached {phase}: every active sweep ({}) produced no \
                  cargo invocation. A sweep reaches this only with an empty \
                  resolution plan, which is a brokkr bug - please report the \
                  `[[check]]` entries involved.",
@@ -2139,60 +2355,13 @@ fn run_clippy_phase(
         } else {
             format!(
                 "-p {}: every sweep's config rules the selection out ({}); \
-                 nothing was clippy-checked",
+                 nothing reached {phase}",
                 packages.join(" -p "),
                 labels.join(", ")
             )
         }));
     }
-
-    report_stale_sited_allows(&results, allow_exact, packages);
-
-    // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
-    // the pass/fail decision is brokkr's own: any clippy diagnostic is a
-    // failure, whatever its (capped) level. `any_failed` still catches genuine
-    // non-lint compile errors, and the parse-failure case where cargo died
-    // without emitting parseable diagnostics.
-    let any_failed = results.iter().any(|r| !r.success);
-    let any_diag = results.iter().any(|r| {
-        !gated_diags(&r.stdout, allow_exact).is_empty()
-    });
-    let failed = any_failed || any_diag;
-
-    if !failed {
-        // Clean: cap-lints leaves nothing to report when there are no lints.
-        return Ok(());
-    }
-
-    // Collapsed form suppressed the command on the way in; a failing sweep is
-    // exactly where the copy-pasteable line earns its place.
-    if !commands {
-        for r in results.iter().filter(|r| {
-            !r.success || !gated_diags(&r.stdout, allow_exact).is_empty()
-        }) {
-            output::error(&format!("failing command: {}", r.command));
-        }
-    }
-
-    if raw {
-        for r in &results {
-            if multi {
-                output::error(&format!("[{}]", r.label));
-            }
-            output::error(&raw_clippy_text(r));
-        }
-        return Err(DevError::Build("clippy failed".into()));
-    }
-
-    output::error(&format_clippy_capped_multi(
-        &results,
-        project_root,
-        limit,
-        triage,
-        multi,
-        allow_exact,
-    ));
-    Err(DevError::Build("clippy failed".into()))
+    Ok(results)
 }
 
 /// A suppressed lint narrows what "clippy clean" certifies, so the log must
@@ -2344,7 +2513,10 @@ fn sited_match(s: &SitedAllow, d: &cargo_json::DiagnosticEvent) -> bool {
 /// through: unlike `allow`'s `-A`, which a source site's own lint-level
 /// attribute can defeat (the `#[expect]`-sibling interaction in
 /// `docs/commands/check.md`), a diagnostic filtered here is gone from the
-/// pass/fail decision no matter how clippy leveled it.
+/// pass/fail decision no matter how clippy leveled it. The phases apply the
+/// same gate through [`sited_allowed`] inside their `keep` predicate; this
+/// whole-stream form remains for the parser tests.
+#[cfg(test)]
 fn gated_diags(
     stdout: &str,
     allow_exact: &[SitedAllow],
@@ -2667,18 +2839,20 @@ fn sweep_tag(sweeps: &[String], active_sweep_count: usize) -> Option<String> {
 /// raw streams when cargo failed but emitted no compiler-message events
 /// (e.g. cargo itself crashed before reaching the diagnostic phase).
 fn format_clippy_capped_multi(
+    tool: &str,
     results: &[SweepResult],
     project_root: &Path,
     limit: usize,
     triage: bool,
     multi: bool,
-    allow_exact: &[SitedAllow],
+    keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
 ) -> String {
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
         .map(|r| {
-            let parse = parse_clippy_from_json(&r.stdout, !r.success, true, allow_exact);
-            (r.label.clone(), parse)
+            let mut events = cargo_json::parse_cargo_diagnostics(&r.stdout);
+            events.retain(|d| keep(d));
+            (r.label.clone(), clippy_parse_from_events(&events, !r.success, true))
         })
         .collect();
 
@@ -2701,7 +2875,7 @@ fn format_clippy_capped_multi(
     let merged = merge_clippy(&parses);
 
     if merged.is_empty() {
-        return "cargo clippy: no issues".into();
+        return format!("{tool}: no issues");
     }
 
     let total_errors = merged.iter().filter(|m| m.diag.is_error).count();
@@ -2733,11 +2907,11 @@ fn format_clippy_capped_multi(
 
     let header = if multi {
         format!(
-            "cargo clippy: {total_errors} errors, {total_warnings} warnings ({} sweeps)\n",
+            "{tool}: {total_errors} errors, {total_warnings} warnings ({} sweeps)\n",
             results.len()
         )
     } else {
-        format!("cargo clippy: {total_errors} errors, {total_warnings} warnings\n")
+        format!("{tool}: {total_errors} errors, {total_warnings} warnings\n")
     };
 
     let mut out = header;
@@ -2760,20 +2934,32 @@ fn format_clippy_capped_multi(
     out.trim_end().to_string()
 }
 
-/// Parse cargo's `--message-format=json` stdout into a [`ClippyParse`].
+/// Parse cargo's `--message-format=json` stdout into a
+/// [`ClippyParse`](cargo_filter::ClippyParse).
 ///
 /// Walks each compiler-message JSON event and maps it to the formatter
 /// primitive used by `merge_clippy` and `format_one()`. Diagnostics are
 /// ordered errors-first, then warnings (stable within each). When cargo
 /// failed and emitted no compiler-message events, sets `parse_failed` so
 /// callers can fall back to dumping the raw streams.
+#[cfg(test)]
 fn parse_clippy_from_json(
     stdout: &str,
     sweep_failed: bool,
     gate: bool,
     allow_exact: &[SitedAllow],
 ) -> cargo_filter::ClippyParse {
-    let events = gated_diags(stdout, allow_exact);
+    clippy_parse_from_events(&gated_diags(stdout, allow_exact), sweep_failed, gate)
+}
+
+/// Map already-filtered diagnostic events to the formatter primitive, errors
+/// first. `parse_failed` is set when cargo failed and left no event, so callers
+/// can fall back to dumping the raw streams.
+fn clippy_parse_from_events(
+    events: &[cargo_json::DiagnosticEvent],
+    sweep_failed: bool,
+    gate: bool,
+) -> cargo_filter::ClippyParse {
     let mut diagnostics: Vec<cargo_filter::ClippyDiagnostic> = events
         .iter()
         .map(|d| event_to_clippy(d, gate))

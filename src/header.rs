@@ -22,7 +22,7 @@ pub struct HeaderViolation {
     pub file: PathBuf,
 }
 
-/// `file: missing or stale header (expected `<pattern>`)`.
+/// `` file: missing or stale header (expected `<pattern>`) ``.
 pub fn format_one(v: &HeaderViolation, expected: &str) -> String {
     format!("{}: missing or stale header (expected `{expected}`)", v.file.display())
 }

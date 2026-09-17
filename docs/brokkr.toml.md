@@ -152,7 +152,7 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 (deduped). Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
 `gremlins`, `header`, `textlint`, `textlint_preset`, `script_check`,
-`manifest`, `deps`, `disable_toolchain`.
+`manifest`, `rustdoc`, `deps`, `disable_toolchain`.
 
 ## `worktree_keep`
 
@@ -596,6 +596,27 @@ exemption. The dependency-content checks (`sort_dependencies`, cargo-machete,
 `version_align`) apply to every manifest.
 
 See `src/manifest.rs`.
+
+## `[rustdoc]` section
+
+Turns on `brokkr check`'s `rustdoc` phase: `cargo doc --no-deps
+--message-format=json` per build shape, failing on any rustdoc diagnostic and
+rendering it like clippy's. The table's presence is the opt-in; absent, the
+phase is inert.
+
+```toml
+[rustdoc]
+document_private_items = true   # optional, default false
+```
+
+- `document_private_items` passes `--document-private-items`. A library
+  documented public-only warns on every doc link to a private item
+  (`rustdoc::private_intra_doc_links`), and that warning fails the phase. Turn
+  this on when doc comments are written for the crate's own developers, which
+  is also what a binary crate's docs are.
+
+Lints are suppressed through `[lints]`, not here: `allow` by exact lint code,
+`allow_exact` by site. See the phase in `brokkr man check rustdoc`.
 
 ## `[deps]` section
 

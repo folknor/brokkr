@@ -189,7 +189,7 @@ impl Lease {
     /// `None` on any infrastructure failure - the file cannot be opened, the
     /// kernel refuses the lock, `CLOEXEC` cannot be cleared. All three mean
     /// this execution will not participate in the protocol, and the caller
-    /// fails open: see [`allowed`].
+    /// fails open: see [`decide`].
     fn take() -> Option<Self> {
         let path = brokkr_dir()?.join("compile.lock");
         // Created if absent, and never unlinked or replaced by anyone: the

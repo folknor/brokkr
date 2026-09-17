@@ -32,7 +32,7 @@ use crate::output;
 
 /// Emit a one-line hint pointing at `brokkr clean` for sweeping
 /// preserved artefact dirs. Call from any failure path that has just
-/// printed a "FAIL ... (artefacts: <path>)" or "artefacts preserved at
+/// printed a `FAIL ... (artefacts: <path>)` or "artefacts preserved at
 /// ..." message.
 pub fn emit_clean_hint() {
     output::ratatoskr_msg("hint: `brokkr clean` removes preserved artefacts");
